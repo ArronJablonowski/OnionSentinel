@@ -465,7 +465,7 @@ Settings page behavior:
 - Reads `$HOME/n8n-local/config/siem_engineer_system_prompt.md`.
 - Displays the current `SIEM Engineer` prompt in a matching collapsible editor
   below the Incident Responder prompt.
-- Shows the collapsed trigger summary as a planned 2-4 hour cron review after
+- Shows the collapsed trigger summary as a planned 6 hour cron review after
   all eligible alerts are analyzed.
 - Saves through `/api/soc-settings/siem-engineer-prompt`.
 - Reads `$HOME/n8n-local/config/threat_hunter_system_prompt.md`.
@@ -474,7 +474,7 @@ Settings page behavior:
 - Shows the collapsed trigger summary as manual hunt review today, with
   automated hunts still marked future work.
 - Saves through `/api/soc-settings/threat-hunter-prompt`.
-- The SIEM Engineer prompt is for a 2-4 hour engineering review that runs only
+- The SIEM Engineer prompt is for a 6 hour engineering review that runs only
   after all eligible alerts/detections have finished AI analysis. It reviews
   alerts, enrichments, notes, acknowledgments, suppressions, and related context
   before recommending current-rule tuning or new detection creation.

@@ -242,7 +242,7 @@ Save behavior:
 - `build-ai-investigation-prompt.py` also includes the same prompt in each prompt package so analyst-visible prompt artifacts match the actual system message.
 
 The SIEM Engineer prompt is reserved for a periodic engineering review every
-2-4 hours. That review must run only when all eligible alerts/detections have
+6 hours. That review must run only when all eligible alerts/detections have
 finished analysis, and it should recommend current-rule tuning and new
 detection creation separately.
 
@@ -259,7 +259,7 @@ The Settings page shows collapsed trigger summaries for each Cyber Security
 Agent so operators can distinguish live triggers from planned/manual workflows:
 SOC Analyst runs from new eligible alerts through the scheduled AI worker,
 Incident Responder is manual until the IR host integration exists, SIEM Engineer
-is planned for a 2-4 hour cron review after analysis backlog clears, and Threat
+is planned for a 6 hour cron review after analysis backlog clears, and Threat
 Hunter is manual until automated hunts are built.
 
 Manual run using the newest prompt package:

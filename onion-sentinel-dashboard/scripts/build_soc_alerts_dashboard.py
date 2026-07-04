@@ -2820,7 +2820,7 @@ def settings_page_section() -> str:
             <span class="settings-summary-copy">
               <span class="settings-kicker">SIEM engineer prompt</span>
               <strong id="siem-engineer-prompt-title">SIEM Engineer System Prompt</strong>
-              <span class="settings-trigger-line">Planned trigger: cron every 2-4 hours after all eligible alerts are analyzed.</span>
+              <span class="settings-trigger-line">Planned trigger: cron every 6 hours after all eligible alerts are analyzed.</span>
             </span>
           </span>
           <code>{engineer_prompt_path}</code>
@@ -2830,7 +2830,7 @@ def settings_page_section() -> str:
             <p>This prompt guides the SIEM Engineering review that recommends scoped tuning and new detection work after all eligible alerts have finished AI analysis.</p>
           </div>
         </div>
-        <div class="settings-note">Designed cadence: every 2-4 hours, only when the alert analysis backlog is clear. It should review alerts, enrichments, notes, acknowledgments, suppressions, and related detection context before recommending changes.</div>
+        <div class="settings-note">Designed cadence: every 6 hours, only when the alert analysis backlog is clear. It should review alerts, enrichments, notes, acknowledgments, suppressions, and related detection context before recommending changes.</div>
         <label class="prompt-editor-label" for="siem-engineer-prompt">Prompt body</label>
         <textarea id="siem-engineer-prompt" class="prompt-editor" spellcheck="false">{engineer_prompt}</textarea>
         <div class="settings-actions">

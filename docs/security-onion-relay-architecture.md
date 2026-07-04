@@ -498,7 +498,7 @@ dropdown sourced from `ollama ls` through `/api/soc-settings/ollama-models` and 
 The local AI runner reads the model-routing and prompt files before each analysis, so prompt tuning and
 model selection take effect on the next alert analysis without restarting the
 Docker stack or launchd scheduler.
-The SIEM Engineer prompt is for periodic 2-4 hour SIEM engineering review after
+The SIEM Engineer prompt is for periodic 6 hour SIEM engineering review after
 the alert analysis backlog is clear; it recommends current-rule tuning and new
 detection creation separately.
 
