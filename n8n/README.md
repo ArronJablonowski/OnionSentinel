@@ -15,6 +15,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `config/soc_analyst_system_prompt.md` | SOC analyst system prompt used for alert analysis. |
 | `config/siem_engineer_system_prompt.md` | SIEM engineering prompt used for periodic tuning and detection recommendations. |
 | `config/threat_hunter_system_prompt.md` | Threat hunter prompt used for hunt hypothesis and query recommendation work. |
+| `config/incident_responder_system_prompt.md` | Incident responder prompt used for response planning and future host artifact collection guidance. |
 | `config/ai_model_settings.json` | Local/cloud/hybrid AI routing defaults. |
 | `launchd/` | Mac Studio LaunchAgents for stack supervision and AI jobs. |
 

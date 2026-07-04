@@ -214,10 +214,16 @@ Editable Threat Hunter system prompt:
 $HOME/n8n-local/config/threat_hunter_system_prompt.md
 ```
 
+Editable Incident Responder system prompt:
+
+```text
+$HOME/n8n-local/config/incident_responder_system_prompt.md
+```
+
 The SOC Alerts Settings page exposes model routing controls in a collapsed
 `AI Analysis Model Selection` panel plus collapsed editable prompt sections for
-the SOC Analyst, SIEM Engineer, and Threat Hunter roles under `Cyber Security
-Agents`:
+the SOC Analyst, Incident Responder, SIEM Engineer, and Threat Hunter roles
+under `Cyber Security Agents`:
 
 ```text
 http://10.77.7.225:8765/view/b68c5a48b9778061/settings.html
@@ -227,6 +233,7 @@ Save behavior:
 
 - The web UI calls `/api/soc-settings/ai-model` for model routing.
 - The web UI calls `/api/soc-settings/analyst-prompt` for the SOC Analyst system prompt.
+- The web UI calls `/api/soc-settings/incident-responder-prompt` for the Incident Responder system prompt.
 - The web UI calls `/api/soc-settings/siem-engineer-prompt` for the SIEM Engineer system prompt.
 - The web UI calls `/api/soc-settings/threat-hunter-prompt` for the Threat Hunter system prompt.
 - Saving requires a LAN Portal Administration session.
@@ -242,6 +249,11 @@ detection creation separately.
 The Threat Hunter prompt is reserved for senior hunt recommendations. It should
 produce Security Onion, Elastic/Kibana KQL, OQL Security Union Hunt, and OSQuery
 examples only when the supplied alert evidence supports those pivots.
+
+The Incident Responder prompt is reserved for senior response planning and case
+execution guidance. It may recommend external tooling such as custom host
+artifact collection scripts, but direct execution is a TODO until a dedicated
+incident response host is connected, authenticated, logged, and approved.
 
 Manual run using the newest prompt package:
 

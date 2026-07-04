@@ -93,11 +93,13 @@ high/critical Telegram sends because it has no destination chat. Medium and low
 alerts are still intentionally stored without Telegram under the default
 `TELEGRAM_ALERT_LEVELS=critical,high` policy.
 
-The installer also creates editable SOC Analyst, SIEM Engineer, and Threat
-Hunter system prompts plus the AI model routing config only if they are missing:
+The installer also creates editable SOC Analyst, Incident Responder, SIEM
+Engineer, and Threat Hunter system prompts plus the AI model routing config only
+if they are missing:
 
 ```text
 $HOME/n8n-local/config/soc_analyst_system_prompt.md
+$HOME/n8n-local/config/incident_responder_system_prompt.md
 $HOME/n8n-local/config/siem_engineer_system_prompt.md
 $HOME/n8n-local/config/threat_hunter_system_prompt.md
 $HOME/n8n-local/config/ai_model_settings.json

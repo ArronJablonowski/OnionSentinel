@@ -72,6 +72,7 @@ class SocAlertSummaryApiTest(unittest.TestCase):
               triage_level TEXT,
               routing TEXT,
               filter_status TEXT,
+              alert_json TEXT,
               filter_reason TEXT,
               suppression_key TEXT,
               updated_at TEXT NOT NULL
@@ -132,11 +133,11 @@ class SocAlertSummaryApiTest(unittest.TestCase):
               raw_alert_count, total_seen_count, timestamp, rule_name, event_dataset,
               severity, severity_label, source_ip, source_port, destination_ip,
               destination_port, transport_protocol, traffic_direction, triage_score,
-              triage_level, routing, filter_status, updated_at
+              triage_level, routing, filter_status, alert_json, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'suricata.alert', 4, ?, '192.0.2.10',
                     4444, '198.51.100.10', 443, 'tcp', 'outbound', 90, ?,
-                    'analyst-review-immediate', 'accepted', ?)
+                    'analyst-review-immediate', 'accepted', '{}', ?)
             """,
             (
                 group_id,

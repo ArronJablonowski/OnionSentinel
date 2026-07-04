@@ -383,7 +383,7 @@ automations.html    Automations workspace placeholder
 sources.html        Sources workspace placeholder
 threat-hunter.html  Threat Hunter workspace with expandable hunt plans and copyable queries
 siem-tuning.html    Backward-compatible alias for SIEM Engineer
-settings.html       Settings page with AI model routing plus collapsed SOC Analyst, SIEM Engineer, and Threat Hunter prompt editors
+settings.html       Settings page with AI model routing plus collapsed SOC Analyst, Incident Responder, SIEM Engineer, and Threat Hunter prompt editors
 ```
 
 The Flow page is intentionally simple: it gives an analyst a fast visual model
@@ -450,9 +450,17 @@ Settings page behavior:
 - Displays the current `SOC Analyst` prompt in a collapsible editor that is
   collapsed by default.
 - Saves through `/api/soc-settings/analyst-prompt`.
+- Reads `$HOME/n8n-local/config/incident_responder_system_prompt.md`.
+- Displays the current `Incident Responder` prompt in a matching collapsible
+  editor below the SOC Analyst prompt.
+- Saves through `/api/soc-settings/incident-responder-prompt`.
+- The Incident Responder prompt is for senior incident response planning and
+  future external host artifact collection guidance. Direct external tooling is
+  a TODO until a dedicated incident response host is connected, authenticated,
+  logged, and approved.
 - Reads `$HOME/n8n-local/config/siem_engineer_system_prompt.md`.
 - Displays the current `SIEM Engineer` prompt in a matching collapsible editor
-  below the SOC Analyst prompt.
+  below the Incident Responder prompt.
 - Saves through `/api/soc-settings/siem-engineer-prompt`.
 - Reads `$HOME/n8n-local/config/threat_hunter_system_prompt.md`.
 - Displays the current `Threat Hunter` prompt in a matching collapsible editor

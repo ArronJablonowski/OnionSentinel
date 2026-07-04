@@ -47,6 +47,7 @@ DB_BEACON_JSON = HOME / 'n8n-local' / 'alert_store_data' / 'n8n-beacon.json'
 SOC_ANALYST_PROMPT_FILE = HOME / 'n8n-local' / 'config' / 'soc_analyst_system_prompt.md'
 SIEM_ENGINEER_PROMPT_FILE = HOME / 'n8n-local' / 'config' / 'siem_engineer_system_prompt.md'
 THREAT_HUNTER_PROMPT_FILE = HOME / 'n8n-local' / 'config' / 'threat_hunter_system_prompt.md'
+INCIDENT_RESPONDER_PROMPT_FILE = HOME / 'n8n-local' / 'config' / 'incident_responder_system_prompt.md'
 SOC_AI_SETTINGS_FILE = HOME / 'n8n-local' / 'config' / 'ai_model_settings.json'
 ASSET_SOURCE_DIRS = (
     Path(__file__).resolve().parent.parent / 'assets',
@@ -154,6 +155,20 @@ Rules:
 - If evidence is insufficient, propose a data-collection hunt instead of claiming compromise.
 - Include expected benign explanations, escalation criteria, and what evidence would close the hunt."""
 
+DEFAULT_INCIDENT_RESPONDER_PROMPT = """You are a senior cyber security incident responder. Use only the supplied Onion Sentinel evidence unless an enrichment source is explicitly provided.
+
+Your job is to conduct incident response planning and case execution guidance for Security Onion detections, alert timelines, enrichments, analyst notes, acknowledgments, suppressions, AI analysis, and related host/network context. You may recommend external tooling, including custom host artifact collection scripts run from a dedicated incident response host with access to additional hosts, but do not assume that integration is available until it is explicitly configured.
+
+Rules:
+- Return one valid JSON object and no prose outside JSON.
+- Separate confirmed facts, assumptions, hypotheses, impact, containment needs, and evidence gaps.
+- Prioritize responder safety: preserve evidence, avoid destructive actions, and call out actions that could disrupt production systems.
+- Recommend host artifact collection only when justified by the evidence, and specify the exact collection goal, target host, expected artifacts, and privacy/scope limits.
+- Treat acknowledgments and suppressions as analyst workflow signals, not proof that an alert is benign.
+- Do not invent hostnames, usernames, process names, packet contents, malware families, credentials, or business context.
+- If dedicated incident response host access is required, mark the action as pending integration rather than executable.
+- Include escalation criteria, containment options, eradication/recovery considerations, and post-incident tuning or hunt follow-up."""
+
 
 def normalize_iso_display_text(value: object) -> str:
     """Display ISO-like timestamps with two spaces instead of `T`."""
@@ -191,6 +206,17 @@ def load_threat_hunter_prompt() -> str:
     except Exception:
         pass
     return DEFAULT_THREAT_HUNTER_PROMPT
+
+
+def load_incident_responder_prompt() -> str:
+    """Read the editable Incident Responder system prompt for the Settings page."""
+    try:
+        prompt = INCIDENT_RESPONDER_PROMPT_FILE.read_text(encoding='utf-8').strip()
+        if prompt:
+            return prompt
+    except Exception:
+        pass
+    return DEFAULT_INCIDENT_RESPONDER_PROMPT
 
 
 def default_soc_ai_settings() -> dict[str, str]:
@@ -2637,6 +2663,8 @@ def settings_page_section() -> str:
     engineer_prompt_path = html.escape(str(SIEM_ENGINEER_PROMPT_FILE).replace(str(HOME), '~'))
     hunter_prompt = html.escape(load_threat_hunter_prompt())
     hunter_prompt_path = html.escape(str(THREAT_HUNTER_PROMPT_FILE).replace(str(HOME), '~'))
+    incident_prompt = html.escape(load_incident_responder_prompt())
+    incident_prompt_path = html.escape(str(INCIDENT_RESPONDER_PROMPT_FILE).replace(str(HOME), '~'))
     ai_settings = load_soc_ai_settings()
     ai_path = html.escape(str(SOC_AI_SETTINGS_FILE).replace(str(HOME), '~'))
     mode = ai_settings['mode']
@@ -2759,6 +2787,30 @@ def settings_page_section() -> str:
           <span id="soc-analyst-prompt-status" class="settings-save-status" role="status" aria-live="polite"></span>
         </div>
       </details>
+      <details class="settings-panel settings-details" aria-labelledby="incident-responder-prompt-title">
+        <summary>
+          <span class="settings-summary-main">
+            <span class="settings-summary-icon" aria-hidden="true"><img src="assets/settings-incident-responder-prompt.png" alt=""></span>
+            <span class="settings-summary-copy">
+              <span class="settings-kicker">Incident responder prompt</span>
+              <strong id="incident-responder-prompt-title">Incident Responder</strong>
+            </span>
+          </span>
+          <code>{incident_prompt_path}</code>
+        </summary>
+        <div class="settings-panel-top">
+          <div>
+            <p>This prompt guides senior incident response planning, evidence preservation, containment guidance, and future host artifact collection workflows.</p>
+          </div>
+        </div>
+        <div class="settings-note">TODO: connect the dedicated incident response host before allowing this agent to trigger external host artifact collection scripts. Until then, recommendations should mark those actions as pending integration.</div>
+        <label class="prompt-editor-label" for="incident-responder-prompt">Prompt body</label>
+        <textarea id="incident-responder-prompt" class="prompt-editor" spellcheck="false">{incident_prompt}</textarea>
+        <div class="settings-actions">
+          <button id="save-incident-responder-prompt" class="settings-save-button" type="button">Save</button>
+          <span id="incident-responder-prompt-status" class="settings-save-status" role="status" aria-live="polite"></span>
+        </div>
+      </details>
       <details class="settings-panel settings-details" aria-labelledby="siem-engineer-prompt-title">
         <summary>
           <span class="settings-summary-main">
@@ -2834,6 +2886,9 @@ SETTINGS_PAGE_JS = '''
   const hunterEditor = document.querySelector('#threat-hunter-prompt');
   const saveHunterButton = document.querySelector('#save-threat-hunter-prompt');
   const hunterStatus = document.querySelector('#threat-hunter-prompt-status');
+  const incidentEditor = document.querySelector('#incident-responder-prompt');
+  const saveIncidentButton = document.querySelector('#save-incident-responder-prompt');
+  const incidentStatus = document.querySelector('#incident-responder-prompt-status');
   const aiMode = document.querySelector('#ai-analysis-mode');
   const ollamaModel = document.querySelector('#ai-ollama-model');
   const ollamaUrl = document.querySelector('#ai-ollama-url');
@@ -2862,6 +2917,11 @@ SETTINGS_PAGE_JS = '''
     if (!hunterStatus) return;
     hunterStatus.textContent = message;
     hunterStatus.className = `settings-save-status ${kind}`.trim();
+  }
+  function setIncidentStatus(message, kind = '') {
+    if (!incidentStatus) return;
+    incidentStatus.textContent = message;
+    incidentStatus.className = `settings-save-status ${kind}`.trim();
   }
   function currentAiSettings() {
     return {
@@ -2983,6 +3043,18 @@ SETTINGS_PAGE_JS = '''
       setHunterStatus('Could not refresh prompt from the portal API.', 'error');
     }
   }
+  async function refreshIncidentPrompt() {
+    if (!incidentEditor) return;
+    try {
+      const response = await fetch('/api/soc-settings/incident-responder-prompt', {cache: 'no-store'});
+      const data = await response.json();
+      if (data.ok && typeof data.prompt === 'string') {
+        incidentEditor.value = data.prompt.trimEnd();
+      }
+    } catch (_) {
+      setIncidentStatus('Could not refresh prompt from the portal API.', 'error');
+    }
+  }
   async function savePrompt() {
     if (!editor || !saveButton) return;
     const prompt = editor.value.trim();
@@ -3064,10 +3136,38 @@ SETTINGS_PAGE_JS = '''
       saveHunterButton.disabled = false;
     }
   }
+  async function saveIncidentPrompt() {
+    if (!incidentEditor || !saveIncidentButton) return;
+    const prompt = incidentEditor.value.trim();
+    if (!prompt) {
+      setIncidentStatus('Prompt cannot be empty.', 'error');
+      return;
+    }
+    saveIncidentButton.disabled = true;
+    setIncidentStatus('Saving...');
+    try {
+      const response = await fetch('/api/soc-settings/incident-responder-prompt', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({prompt})
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || `Save failed with HTTP ${response.status}`);
+      }
+      setIncidentStatus('Saved. New Incident Responder guidance will use this prompt.', 'ok');
+    } catch (error) {
+      setIncidentStatus(String(error.message || error), 'error');
+    } finally {
+      saveIncidentButton.disabled = false;
+    }
+  }
   saveAiButton?.addEventListener('click', saveAiSettings);
   saveButton?.addEventListener('click', savePrompt);
   saveEngineerButton?.addEventListener('click', saveEngineerPrompt);
   saveHunterButton?.addEventListener('click', saveHunterPrompt);
+  saveIncidentButton?.addEventListener('click', saveIncidentPrompt);
   refreshAiSettings().then(refreshOllamaModels);
   if (ollamaModel) {
     setInterval(refreshOllamaModels, 60000);
@@ -3075,6 +3175,7 @@ SETTINGS_PAGE_JS = '''
   refreshPrompt();
   refreshEngineerPrompt();
   refreshHunterPrompt();
+  refreshIncidentPrompt();
 })();
 </script>
 '''

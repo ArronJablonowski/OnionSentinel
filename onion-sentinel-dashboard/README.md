@@ -27,7 +27,7 @@ This directory contains the Mac Studio LAN Portal backend and the generated SOC 
 - Flow page with data-flow diagram and privacy IP masking.
 - Threat Hunter route with expandable hunt recommendations and copyable KQL/OQL/OSQuery pivots.
 - SIEM Engineer menu route for model-backed tuning and detection recommendations.
-- Settings page for AI model routing plus SOC Analyst, SIEM Engineer, and Threat Hunter system prompts.
+- Settings page for AI model routing plus SOC Analyst, Incident Responder, SIEM Engineer, and Threat Hunter system prompts.
 
 ## Manual Rebuild
 
