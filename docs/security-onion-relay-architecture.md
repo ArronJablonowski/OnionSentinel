@@ -477,17 +477,19 @@ The AI system prompt is an editable runtime setting:
 ```text
 SOC Analyst prompt:  $HOME/n8n-local/config/soc_analyst_system_prompt.md
 SIEM Engineer prompt: $HOME/n8n-local/config/siem_engineer_system_prompt.md
+Threat Hunter prompt: $HOME/n8n-local/config/threat_hunter_system_prompt.md
 Model routing: $HOME/n8n-local/config/ai_model_settings.json
 Settings UI:  http://10.77.7.225:8765/view/b68c5a48b9778061/settings.html
 Analyst Prompt API: /api/soc-settings/analyst-prompt
 Engineer Prompt API: /api/soc-settings/siem-engineer-prompt
+Threat Hunter API: /api/soc-settings/threat-hunter-prompt
 Model API:    /api/soc-settings/ai-model
 Ollama list:  /api/soc-settings/ollama-models
 ```
 
 The portal API saves the prompt and model-routing settings atomically after LAN
-Portal Administration authentication. The Settings page keeps both the `AI Analysis Model Selection` model-routing panel
-and the full `SOC Analyst System Prompt` and `SIEM Engineer System Prompt`
+Portal Administration authentication. The Settings page keeps the `AI Analysis Model Selection` model-routing panel
+and the full `SOC Analyst System Prompt`, `SIEM Engineer System Prompt`, and `Threat Hunter System Prompt`
 sections collapsed by default. The model-routing form is ordered as a focused numbered 1-2-3 workflow:
 Analysis Mode, Ollama Settings, then Cloud Provider Settings. The Ollama model field is a
 dropdown sourced from `ollama ls` through `/api/soc-settings/ollama-models` and refreshes every 60 seconds while the Settings page is open.

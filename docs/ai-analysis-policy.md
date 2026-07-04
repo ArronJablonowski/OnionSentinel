@@ -208,9 +208,16 @@ Editable SIEM Engineer system prompt:
 $HOME/n8n-local/config/siem_engineer_system_prompt.md
 ```
 
+Editable Threat Hunter system prompt:
+
+```text
+$HOME/n8n-local/config/threat_hunter_system_prompt.md
+```
+
 The SOC Alerts Settings page exposes model routing controls in a collapsed
 `AI Analysis Model Selection` panel plus collapsed editable prompt sections for
-the SOC Analyst and SIEM Engineer roles:
+the SOC Analyst, SIEM Engineer, and Threat Hunter roles under `Cyber Security
+Agents`:
 
 ```text
 http://10.77.7.225:8765/view/b68c5a48b9778061/settings.html
@@ -221,6 +228,7 @@ Save behavior:
 - The web UI calls `/api/soc-settings/ai-model` for model routing.
 - The web UI calls `/api/soc-settings/analyst-prompt` for the SOC Analyst system prompt.
 - The web UI calls `/api/soc-settings/siem-engineer-prompt` for the SIEM Engineer system prompt.
+- The web UI calls `/api/soc-settings/threat-hunter-prompt` for the Threat Hunter system prompt.
 - Saving requires a LAN Portal Administration session.
 - The portal writes settings files atomically and rejects empty prompts or prompts larger than 20 KB.
 - The next AI analysis run uses the saved model routing and prompt automatically because `run-local-ai-analysis.py` reads both files immediately before each model request.
@@ -230,6 +238,10 @@ The SIEM Engineer prompt is reserved for a periodic engineering review every
 2-4 hours. That review must run only when all eligible alerts/detections have
 finished analysis, and it should recommend current-rule tuning and new
 detection creation separately.
+
+The Threat Hunter prompt is reserved for senior hunt recommendations. It should
+produce Security Onion, Elastic/Kibana KQL, OQL Security Union Hunt, and OSQuery
+examples only when the supplied alert evidence supports those pivots.
 
 Manual run using the newest prompt package:
 

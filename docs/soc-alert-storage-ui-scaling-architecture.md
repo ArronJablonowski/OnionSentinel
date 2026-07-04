@@ -380,9 +380,10 @@ reports.html        Reports workspace placeholder
 playbooks.html      Playbooks workspace placeholder
 automations.html    Automations workspace placeholder
 sources.html        Sources workspace placeholder
+threat-hunter.html  Threat Hunter workspace with expandable hunt plans and copyable queries
 siem-engineering.html SIEM Engineering tuning and detection recommendation workspace
 siem-tuning.html    Backward-compatible alias for SIEM Engineering
-settings.html       Settings page with AI model routing plus collapsed SOC Analyst and SIEM Engineer prompt editors
+settings.html       Settings page with AI model routing plus collapsed SOC Analyst, SIEM Engineer, and Threat Hunter prompt editors
 ```
 
 The Flow page is intentionally simple: it gives an analyst a fast visual model
@@ -453,6 +454,10 @@ Settings page behavior:
 - Displays the current `SIEM Engineer` prompt in a matching collapsible editor
   below the SOC Analyst prompt.
 - Saves through `/api/soc-settings/siem-engineer-prompt`.
+- Reads `$HOME/n8n-local/config/threat_hunter_system_prompt.md`.
+- Displays the current `Threat Hunter` prompt in a matching collapsible editor
+  below the SIEM Engineer prompt.
+- Saves through `/api/soc-settings/threat-hunter-prompt`.
 - The SIEM Engineer prompt is for a 2-4 hour engineering review that runs only
   after all eligible alerts/detections have finished AI analysis. It reviews
   alerts, enrichments, notes, acknowledgments, suppressions, and related context

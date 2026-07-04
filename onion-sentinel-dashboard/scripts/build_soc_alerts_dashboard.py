@@ -46,6 +46,7 @@ DB_PATH = HOME / 'n8n-local' / 'alert_store_data' / 'alerts.sqlite3'
 DB_BEACON_JSON = HOME / 'n8n-local' / 'alert_store_data' / 'n8n-beacon.json'
 SOC_ANALYST_PROMPT_FILE = HOME / 'n8n-local' / 'config' / 'soc_analyst_system_prompt.md'
 SIEM_ENGINEER_PROMPT_FILE = HOME / 'n8n-local' / 'config' / 'siem_engineer_system_prompt.md'
+THREAT_HUNTER_PROMPT_FILE = HOME / 'n8n-local' / 'config' / 'threat_hunter_system_prompt.md'
 SOC_AI_SETTINGS_FILE = HOME / 'n8n-local' / 'config' / 'ai_model_settings.json'
 ASSET_SOURCE_DIRS = (
     Path(__file__).resolve().parent.parent / 'assets',
@@ -139,6 +140,20 @@ Rules:
 - If evidence is insufficient, recommend data collection instead of tuning.
 - Do not invent hostnames, users, packet contents, tools, malware names, or business context."""
 
+DEFAULT_THREAT_HUNTER_PROMPT = """You are a senior threat hunt analyst. Use only the supplied Onion Sentinel evidence unless an enrichment source is explicitly provided.
+
+You are an expert in Security Onion, Elastic Kibana KQL syntax, OQL Security Union Hunt syntax, and OSQuery syntax. Your job is to turn alert patterns, enrichments, acknowledgments, suppressions, analyst notes, AI analysis, duplicate timelines, and evidence gaps into precise threat-hunting hypotheses and safe hunt plans.
+
+Rules:
+- Return one valid JSON object and no prose outside JSON.
+- Separate facts, assumptions, hypotheses, and required validation.
+- Prefer hunts that an analyst can run quickly in Security Onion, Elastic/Kibana, and host telemetry.
+- Include KQL, OQL, and OSQuery query examples when the available evidence supports them.
+- Scope queries tightly by rule name, source IP, destination IP, destination port, event dataset, time window, and observed pattern.
+- Do not invent hostnames, usernames, process names, packet contents, malware families, or business context.
+- If evidence is insufficient, propose a data-collection hunt instead of claiming compromise.
+- Include expected benign explanations, escalation criteria, and what evidence would close the hunt."""
+
 
 def normalize_iso_display_text(value: object) -> str:
     """Display ISO-like timestamps with two spaces instead of `T`."""
@@ -165,6 +180,17 @@ def load_siem_engineer_prompt() -> str:
     except Exception:
         pass
     return DEFAULT_SIEM_ENGINEER_PROMPT
+
+
+def load_threat_hunter_prompt() -> str:
+    """Read the editable Threat Hunter system prompt for the Settings page."""
+    try:
+        prompt = THREAT_HUNTER_PROMPT_FILE.read_text(encoding='utf-8').strip()
+        if prompt:
+            return prompt
+    except Exception:
+        pass
+    return DEFAULT_THREAT_HUNTER_PROMPT
 
 
 def default_soc_ai_settings() -> dict[str, str]:
@@ -2323,6 +2349,146 @@ def siem_engineering_page_section(reports: list[AlertReport]) -> str:
     </section>'''
 
 
+def query_part(value: str) -> str:
+    cleaned = clean_endpoint_part(value)
+    return '' if cleaned in {'n/a', 'unknown'} else cleaned
+
+
+def kql_string(value: str) -> str:
+    return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def sql_string(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def threat_hunt_queries(report: AlertReport) -> tuple[str, str, str]:
+    rule = query_part(report.rule_name)
+    src = query_part(report.source_ip)
+    dst = query_part(report.destination_ip)
+    port = query_part(report.destination_port)
+    dataset = query_part(report.alert_source)
+    kql_parts = []
+    if rule:
+        kql_parts.append(f'rule.name : {kql_string(rule)}')
+    if dataset:
+        kql_parts.append(f'event.dataset : {kql_string(dataset)}')
+    if src:
+        kql_parts.append(f'source.ip : {kql_string(src)}')
+    if dst:
+        kql_parts.append(f'destination.ip : {kql_string(dst)}')
+    if port:
+        kql_parts.append(f'destination.port : {port}' if port.isdigit() else f'destination.port : {kql_string(port)}')
+    kql = ' and '.join(kql_parts) or f'rule.name : {kql_string(rule or report.title)}'
+    oql_parts = []
+    if rule:
+        oql_parts.append(f'rule.name == {kql_string(rule)}')
+    if dataset:
+        oql_parts.append(f'event.dataset == {kql_string(dataset)}')
+    if src:
+        oql_parts.append(f'source.ip == {kql_string(src)}')
+    if dst:
+        oql_parts.append(f'destination.ip == {kql_string(dst)}')
+    if port:
+        oql_parts.append(f'destination.port == {port}' if port.isdigit() else f'destination.port == {kql_string(port)}')
+    oql = ' AND '.join(oql_parts) or f'rule.name == {kql_string(rule or report.title)}'
+    remote_filters = []
+    if dst:
+        remote_filters.append(f"remote_address = {sql_string(dst)}")
+    if port and port.isdigit():
+        remote_filters.append(f'remote_port = {port}')
+    where = ' AND '.join(remote_filters) if remote_filters else "remote_address != ''"
+    osquery = f"""SELECT
+  pos.pid,
+  p.name,
+  p.path,
+  pos.local_address,
+  pos.local_port,
+  pos.remote_address,
+  pos.remote_port,
+  pos.protocol
+FROM process_open_sockets AS pos
+LEFT JOIN processes AS p ON pos.pid = p.pid
+WHERE {where}
+ORDER BY p.name, pos.remote_address, pos.remote_port;"""
+    return kql, oql, osquery
+
+
+def threat_hunt_row(report: AlertReport, index: int) -> str:
+    kql, oql, osquery = threat_hunt_queries(report)
+    route = f'{report.source_ip} > {report.destination_ip} : {report.destination_port}'
+    hypothesis = ai_summary_for(report)
+    priority = 'Immediate' if report.criticality_rank >= 4 else 'Review'
+    return f'''
+    <tbody class="threat-hunt-group">
+      <tr class="threat-hunt-row" tabindex="0" aria-expanded="false" data-hunt-toggle>
+        <td><span class="severity-label severity-text-{html.escape(criticality_class(report.criticality))}">{html.escape(report.criticality)}</span></td>
+        <td><strong>{html.escape(report.rule_name or report.title)}</strong><code>{html.escape(route)}</code></td>
+        <td><span class="siem-table-pill">{priority}</span></td>
+        <td class="hunt-hypothesis">{html.escape(hypothesis)}</td>
+        <td><b>{report.repeat_count}</b><span>{html.escape(last_seen_iso_for(report))}</span></td>
+      </tr>
+      <tr class="threat-hunt-detail" hidden>
+        <td colspan="5">
+          <section class="hunt-detail-panel">
+            <div class="hunt-detail-copy">
+              <h3>Threat hunt details</h3>
+              <p>Validate whether this detection is isolated noise, repeated reconnaissance, policy-expected traffic, or a pivot point for deeper endpoint and network review.</p>
+              <dl>
+                <div><dt>Observed route</dt><dd>{html.escape(route)}</dd></div>
+                <div><dt>First seen</dt><dd>{html.escape(report.first_seen)}</dd></div>
+                <div><dt>Last seen</dt><dd>{html.escape(last_seen_iso_for(report))}</dd></div>
+                <div><dt>Evidence gap</dt><dd>Confirm endpoint owner, process context, authentication outcome, and whether related destinations appear in the same window.</dd></div>
+              </dl>
+            </div>
+            <div class="hunt-query-grid">
+              {threat_hunt_code_block('Elastic KQL', kql, f'hunt-{index}-kql')}
+              {threat_hunt_code_block('Security Onion OQL', oql, f'hunt-{index}-oql')}
+              {threat_hunt_code_block('OSQuery', osquery, f'hunt-{index}-osquery')}
+            </div>
+          </section>
+        </td>
+      </tr>
+    </tbody>'''
+
+
+def threat_hunt_code_block(title: str, code: str, block_id: str) -> str:
+    return f'''
+    <article class="hunt-code-card">
+      <header><span>{html.escape(title)}</span><button type="button" data-copy-target="{html.escape(block_id)}">Copy</button></header>
+      <pre><code id="{html.escape(block_id)}">{html.escape(code)}</code></pre>
+    </article>'''
+
+
+def threat_hunter_page_section(reports: list[AlertReport]) -> str:
+    candidates = sorted(
+        [report for report in reports if report.filter_status in {'accepted', 'escalated', 'unknown', 'suppressed'}],
+        key=lambda report: (report.criticality_rank, report.repeat_count, last_seen_ts_for(report)),
+        reverse=True,
+    )[:12]
+    rows = ''.join(threat_hunt_row(report, index) for index, report in enumerate(candidates, 1))
+    if not rows:
+        rows = '<tbody><tr class="siem-empty-row"><td colspan="5">No threat hunt candidates are available yet.</td></tr></tbody>'
+    return f'''
+    <section class="view-section active threat-hunter-view" aria-label="Threat Hunter workspace">
+      <section class="threat-hunter-hero">
+        <div>
+          <span class="settings-kicker">Threat Hunter</span>
+          <h2>Proposed threat hunts</h2>
+          <p>Skimmable hunt ideas built from current grouped detections. Open a row to review the hypothesis, validation notes, and query-ready pivots.</p>
+        </div>
+      </section>
+      <section class="siem-table-section" aria-label="Proposed threat hunts">
+        <div class="siem-table-wrap">
+          <table class="siem-engineering-table threat-hunt-table">
+            <thead><tr><th>Severity</th><th>Hunt focus</th><th>Priority</th><th>Hypothesis</th><th>Activity</th></tr></thead>
+            {rows}
+          </table>
+        </div>
+      </section>
+    </section>'''
+
+
 def flow_page_section(reports: list[AlertReport]) -> str:
     local_model = html.escape(current_local_ai_model())
     total_groups = len(reports)
@@ -2450,6 +2616,8 @@ def settings_page_section() -> str:
     prompt_path = html.escape(str(SOC_ANALYST_PROMPT_FILE).replace(str(HOME), '~'))
     engineer_prompt = html.escape(load_siem_engineer_prompt())
     engineer_prompt_path = html.escape(str(SIEM_ENGINEER_PROMPT_FILE).replace(str(HOME), '~'))
+    hunter_prompt = html.escape(load_threat_hunter_prompt())
+    hunter_prompt_path = html.escape(str(THREAT_HUNTER_PROMPT_FILE).replace(str(HOME), '~'))
     ai_settings = load_soc_ai_settings()
     ai_path = html.escape(str(SOC_AI_SETTINGS_FILE).replace(str(HOME), '~'))
     mode = ai_settings['mode']
@@ -2596,6 +2764,29 @@ def settings_page_section() -> str:
           <span id="siem-engineer-prompt-status" class="settings-save-status" role="status" aria-live="polite"></span>
         </div>
       </details>
+      <details class="settings-panel settings-details" aria-labelledby="threat-hunter-prompt-title">
+        <summary>
+          <span class="settings-summary-main">
+            <span class="settings-summary-icon" aria-hidden="true"><img src="assets/metric-visible.png" alt=""></span>
+            <span class="settings-summary-copy">
+              <span class="settings-kicker">Threat hunter prompt</span>
+              <strong id="threat-hunter-prompt-title">Threat Hunter System Prompt</strong>
+            </span>
+          </span>
+          <code>{hunter_prompt_path}</code>
+        </summary>
+        <div class="settings-panel-top">
+          <div>
+            <p>This prompt guides senior threat-hunt recommendations, including Security Onion pivots and query-ready KQL, OQL, and OSQuery hunt plans.</p>
+          </div>
+        </div>
+        <label class="prompt-editor-label" for="threat-hunter-prompt">Prompt body</label>
+        <textarea id="threat-hunter-prompt" class="prompt-editor" spellcheck="false">{hunter_prompt}</textarea>
+        <div class="settings-actions">
+          <button id="save-threat-hunter-prompt" class="settings-save-button" type="button">Save</button>
+          <span id="threat-hunter-prompt-status" class="settings-save-status" role="status" aria-live="polite"></span>
+        </div>
+      </details>
       </section>
     </section>'''
 
@@ -2621,6 +2812,9 @@ SETTINGS_PAGE_JS = '''
   const engineerEditor = document.querySelector('#siem-engineer-prompt');
   const saveEngineerButton = document.querySelector('#save-siem-engineer-prompt');
   const engineerStatus = document.querySelector('#siem-engineer-prompt-status');
+  const hunterEditor = document.querySelector('#threat-hunter-prompt');
+  const saveHunterButton = document.querySelector('#save-threat-hunter-prompt');
+  const hunterStatus = document.querySelector('#threat-hunter-prompt-status');
   const aiMode = document.querySelector('#ai-analysis-mode');
   const ollamaModel = document.querySelector('#ai-ollama-model');
   const ollamaUrl = document.querySelector('#ai-ollama-url');
@@ -2644,6 +2838,11 @@ SETTINGS_PAGE_JS = '''
     if (!engineerStatus) return;
     engineerStatus.textContent = message;
     engineerStatus.className = `settings-save-status ${kind}`.trim();
+  }
+  function setHunterStatus(message, kind = '') {
+    if (!hunterStatus) return;
+    hunterStatus.textContent = message;
+    hunterStatus.className = `settings-save-status ${kind}`.trim();
   }
   function currentAiSettings() {
     return {
@@ -2753,6 +2952,18 @@ SETTINGS_PAGE_JS = '''
       setEngineerStatus('Could not refresh prompt from the portal API.', 'error');
     }
   }
+  async function refreshHunterPrompt() {
+    if (!hunterEditor) return;
+    try {
+      const response = await fetch('/api/soc-settings/threat-hunter-prompt', {cache: 'no-store'});
+      const data = await response.json();
+      if (data.ok && typeof data.prompt === 'string') {
+        hunterEditor.value = data.prompt.trimEnd();
+      }
+    } catch (_) {
+      setHunterStatus('Could not refresh prompt from the portal API.', 'error');
+    }
+  }
   async function savePrompt() {
     if (!editor || !saveButton) return;
     const prompt = editor.value.trim();
@@ -2807,15 +3018,44 @@ SETTINGS_PAGE_JS = '''
       saveEngineerButton.disabled = false;
     }
   }
+  async function saveHunterPrompt() {
+    if (!hunterEditor || !saveHunterButton) return;
+    const prompt = hunterEditor.value.trim();
+    if (!prompt) {
+      setHunterStatus('Prompt cannot be empty.', 'error');
+      return;
+    }
+    saveHunterButton.disabled = true;
+    setHunterStatus('Saving...');
+    try {
+      const response = await fetch('/api/soc-settings/threat-hunter-prompt', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({prompt})
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || `Save failed with HTTP ${response.status}`);
+      }
+      setHunterStatus('Saved. New Threat Hunter recommendations will use this prompt.', 'ok');
+    } catch (error) {
+      setHunterStatus(String(error.message || error), 'error');
+    } finally {
+      saveHunterButton.disabled = false;
+    }
+  }
   saveAiButton?.addEventListener('click', saveAiSettings);
   saveButton?.addEventListener('click', savePrompt);
   saveEngineerButton?.addEventListener('click', saveEngineerPrompt);
+  saveHunterButton?.addEventListener('click', saveHunterPrompt);
   refreshAiSettings().then(refreshOllamaModels);
   if (ollamaModel) {
     setInterval(refreshOllamaModels, 60000);
   }
   refreshPrompt();
   refreshEngineerPrompt();
+  refreshHunterPrompt();
 })();
 </script>
 '''
@@ -2845,6 +3085,62 @@ SIEM_ENGINEERING_CSS = '''
 def inject_siem_engineering_assets(text: str) -> str:
     if SIEM_ENGINEERING_CSS not in text:
         text = text.replace('</head>', SIEM_ENGINEERING_CSS + '</head>', 1)
+    return text
+
+
+THREAT_HUNTER_CSS = '''
+<style>
+.threat-hunter-view{display:grid;gap:16px;padding-top:12px}.threat-hunter-hero{border:1px solid rgba(148,163,184,.12);border-radius:10px;padding:18px;background:#0d1620;box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}.threat-hunter-hero h2{margin:10px 0 7px;color:#f5f9ff;font-size:28px;line-height:1;letter-spacing:-.025em}.threat-hunter-hero p{max-width:82ch;margin:0;color:#9aaabd;font-size:13px;line-height:1.55}.threat-hunt-row{cursor:pointer}.threat-hunt-row[aria-expanded="true"]{background:rgba(34,211,238,.07);box-shadow:inset 3px 0 0 #22d3ee}.threat-hunt-table .hunt-hypothesis{min-width:420px;color:#dce8f7;line-height:1.52}.threat-hunt-table td:last-child b{display:block;color:#f4f8ff;font-size:18px;line-height:1}.threat-hunt-table td:last-child span{display:block;margin-top:7px;color:#91a4ba;font-size:11.5px;line-height:1.35}.threat-hunt-detail td{padding:0;border-bottom:1px solid rgba(34,211,238,.14);background:#08111a}.hunt-detail-panel{display:grid;grid-template-columns:minmax(260px,.42fr) minmax(420px,1fr);gap:16px;padding:16px}.hunt-detail-copy{border:1px solid rgba(148,163,184,.12);border-radius:10px;padding:14px;background:#0d1620}.hunt-detail-copy h3{margin:0 0 8px;color:#f4f8ff;font-size:16px}.hunt-detail-copy p{margin:0 0 12px;color:#9aa8b8;font-size:13px;line-height:1.5}.hunt-detail-copy dl{display:grid;gap:8px;margin:0}.hunt-detail-copy div{border-top:1px solid rgba(148,163,184,.09);padding-top:8px}.hunt-detail-copy dt{color:#8ff4ff;font-size:10.5px;font-weight:950;text-transform:uppercase;letter-spacing:.08em}.hunt-detail-copy dd{margin:4px 0 0;color:#d7e3f1;font-size:12.5px;line-height:1.4;overflow-wrap:anywhere}.hunt-query-grid{display:grid;gap:12px}.hunt-code-card{border:1px solid rgba(148,163,184,.12);border-radius:10px;overflow:hidden;background:#071018}.hunt-code-card header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border-bottom:1px solid rgba(148,163,184,.10);background:#101b26}.hunt-code-card header span{color:#8ff4ff;font-size:11px;font-weight:950;text-transform:uppercase;letter-spacing:.08em}.hunt-code-card button{border:1px solid rgba(34,211,238,.28);border-radius:8px;padding:6px 9px;color:#8ff4ff;background:rgba(34,211,238,.06);font-size:11px;font-weight:900;cursor:pointer}.hunt-code-card button:hover{border-color:rgba(143,244,255,.72);color:#f5fdff}.hunt-code-card pre{margin:0;max-height:260px;overflow:auto;padding:13px;color:#dce9f8;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;white-space:pre}@media(max-width:900px){.hunt-detail-panel{grid-template-columns:1fr}.threat-hunt-table .hunt-hypothesis{min-width:320px}}
+</style>
+'''
+
+
+THREAT_HUNTER_JS = '''
+<script>
+(() => {
+  document.querySelectorAll('[data-hunt-toggle]').forEach(row => {
+    row.addEventListener('click', event => {
+      if (event.target.closest('button')) return;
+      const detail = row.parentElement?.querySelector('.threat-hunt-detail');
+      const expanded = row.getAttribute('aria-expanded') === 'true';
+      row.setAttribute('aria-expanded', String(!expanded));
+      if (detail) detail.hidden = expanded;
+    });
+    row.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      row.click();
+    });
+  });
+  document.querySelectorAll('[data-copy-target]').forEach(button => {
+    button.addEventListener('click', async event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const target = document.getElementById(button.dataset.copyTarget || '');
+      const text = target?.textContent || '';
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        const original = button.textContent;
+        button.textContent = 'Copied';
+        window.setTimeout(() => { button.textContent = original; }, 1200);
+      } catch (_) {
+        button.textContent = 'Copy failed';
+        window.setTimeout(() => { button.textContent = 'Copy'; }, 1200);
+      }
+    });
+  });
+})();
+</script>
+'''
+
+
+def inject_threat_hunter_assets(text: str) -> str:
+    text = inject_siem_engineering_assets(text)
+    if THREAT_HUNTER_CSS not in text:
+        text = text.replace('</head>', THREAT_HUNTER_CSS + '</head>', 1)
+    if THREAT_HUNTER_JS not in text:
+        text = text.replace('</body>', THREAT_HUNTER_JS + '</body>', 1)
     return text
 
 
@@ -3096,6 +3392,9 @@ def render_static_page(shell_html: str, page_key: str, reports: list[AlertReport
     elif page_key == 'siem_engineering':
         rendered = replace_main_page_content(rendered, siem_engineering_page_section(reports))
         rendered = inject_siem_engineering_assets(rendered)
+    elif page_key == 'threat_hunter':
+        rendered = replace_main_page_content(rendered, threat_hunter_page_section(reports))
+        rendered = inject_threat_hunter_assets(rendered)
     else:
         rendered = replace_main_page_content(rendered, placeholder_page_section(page_key))
     return rendered

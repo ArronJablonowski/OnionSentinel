@@ -51,6 +51,7 @@ SOC_ALERT_STATIC_STATUS_FILE = SOC_ALERT_DASHBOARD_DIR / "soc-alerts-status.json
 SOC_ALERT_N8N_BEACON_FILE = SOC_ALERT_DASHBOARD_DIR / "n8n-beacon.json"
 SOC_ANALYST_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system_prompt.md"
 SIEM_ENGINEER_PROMPT_FILE = HOME / "n8n-local" / "config" / "siem_engineer_system_prompt.md"
+THREAT_HUNTER_PROMPT_FILE = HOME / "n8n-local" / "config" / "threat_hunter_system_prompt.md"
 SOC_AI_SETTINGS_FILE = HOME / "n8n-local" / "config" / "ai_model_settings.json"
 SOC_ANALYST_PROMPT_MAX_BYTES = 20000
 SOC_ALERT_API_MAX_LIMIT = 500
@@ -589,6 +590,17 @@ def read_siem_engineer_prompt() -> dict:
     return {"ok": True, "prompt": prompt, "path": str(SIEM_ENGINEER_PROMPT_FILE)}
 
 
+def read_threat_hunter_prompt() -> dict:
+    """Return the current Threat Hunter system prompt shown on the Settings page."""
+    try:
+        prompt = THREAT_HUNTER_PROMPT_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        prompt = ""
+    except Exception as exc:
+        return {"ok": False, "error": f"Could not read Threat Hunter prompt: {exc}", "path": str(THREAT_HUNTER_PROMPT_FILE)}
+    return {"ok": True, "prompt": prompt, "path": str(THREAT_HUNTER_PROMPT_FILE)}
+
+
 def save_prompt_file(prompt: object, path: Path, label: str) -> tuple[bool, dict]:
     """Atomically save an editable SOC settings prompt."""
     normalized = str(prompt or "").replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -618,6 +630,11 @@ def save_soc_analyst_prompt(prompt: object) -> tuple[bool, dict]:
 def save_siem_engineer_prompt(prompt: object) -> tuple[bool, dict]:
     """Atomically save the editable SIEM Engineer system prompt."""
     return save_prompt_file(prompt, SIEM_ENGINEER_PROMPT_FILE, "SIEM Engineer")
+
+
+def save_threat_hunter_prompt(prompt: object) -> tuple[bool, dict]:
+    """Atomically save the editable Threat Hunter system prompt."""
+    return save_prompt_file(prompt, THREAT_HUNTER_PROMPT_FILE, "Threat Hunter")
 
 
 def default_soc_ai_settings() -> dict:
@@ -4352,7 +4369,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith("/ack")):
+        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith("/ack")):
             if parsed.path == "/admin" and not self._admin_authenticated():
                 self.send_response(HTTPStatus.FOUND)
                 self.send_header("Location", "/admin/login")
@@ -4373,7 +4390,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/ai-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and not (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/ack")):
+        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/ai-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and not (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/ack")):
             return self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain; charset=utf-8")
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -4382,7 +4399,7 @@ class PortalHandler(BaseHTTPRequestHandler):
         if length <= 0 or length > 50000:
             if parsed.path == "/api/admin/start-service":
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
-            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/ai-model") or (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/ack")):
+            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/ai-model") or (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/ack")):
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
             if parsed.path.startswith("/api/resource-library/"):
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
@@ -4422,6 +4439,15 @@ class PortalHandler(BaseHTTPRequestHandler):
             if not self._admin_authenticated():
                 return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
             ok, data = save_siem_engineer_prompt(payload.get("prompt", ""))
+            return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if parsed.path == "/api/soc-settings/threat-hunter-prompt":
+            try:
+                payload = json.loads(raw or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            if not self._admin_authenticated():
+                return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
+            ok, data = save_threat_hunter_prompt(payload.get("prompt", ""))
             return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path == "/api/soc-settings/ai-model":
             try:
@@ -4533,6 +4559,9 @@ class PortalHandler(BaseHTTPRequestHandler):
             return self._send(HTTPStatus.OK if data.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/soc-settings/siem-engineer-prompt":
             data = read_siem_engineer_prompt()
+            return self._send(HTTPStatus.OK if data.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if path == "/api/soc-settings/threat-hunter-prompt":
+            data = read_threat_hunter_prompt()
             return self._send(HTTPStatus.OK if data.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/soc-settings/ai-model":
             data = read_soc_ai_settings()
