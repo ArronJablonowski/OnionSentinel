@@ -251,7 +251,10 @@ def ollama_chat(prompt_package: dict[str, Any], args: argparse.Namespace, settin
     url = str(settings.get("ollama_url") or DEFAULT_OLLAMA_URL).rstrip("/") + "/api/chat"
     system = load_system_prompt(args.system_prompt_file)
     user = {
-        "task": "Analyze this Security Onion alert and return JSON matching response_schema exactly.",
+        "task": (
+            "Analyze this Security Onion alert and return JSON matching response_schema exactly. "
+            "Use agent_memory.role_memory and agent_memory.shared_memory when relevant, but prefer current alert evidence if memory conflicts."
+        ),
         "prompt_package": prompt_package,
     }
     body = json.dumps(
@@ -510,6 +513,8 @@ def write_outputs(prompt_path: Path, prompt_package: dict[str, Any], response: d
         "rule_name": alert.get("rule_name"),
         "triage_level": alert.get("triage_level"),
         "system_prompt_file": str(args.system_prompt_file),
+        "agent_memory_file": prompt_package.get("agent_memory_file"),
+        "shared_memory_file": prompt_package.get("shared_memory_file"),
         "response": response,
     }
     json_path.write_text(json.dumps(enriched, indent=2, sort_keys=True) + "\n", encoding="utf-8")

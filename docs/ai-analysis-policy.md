@@ -269,12 +269,15 @@ $HOME/n8n-local/soc-alerts/agent-memory/soc-analyst-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/incident-responder-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/siem-engineer-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/threat-hunter-memory.md
+$HOME/n8n-local/soc-alerts/agent-memory/shared-agent-memory.md
 ```
 
-The Settings page shows each memory path in the collapsed agent row. These files
-are durable Markdown storage for previous findings, known patterns, learned
-information, and future agent workflow writes. Current automation does not yet
-append agent findings to these files automatically.
+The Settings page shows each role memory path plus the shared memory path in
+the collapsed agent row. These files are durable Markdown storage for previous
+findings, known patterns, learned information, and future agent workflow writes.
+SOC Analyst prompt packages include both the SOC Analyst role memory and shared
+memory as bounded model evidence. Current automation does not yet append agent
+findings to these files automatically.
 
 Manual run using the newest prompt package:
 

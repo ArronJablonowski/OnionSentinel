@@ -113,6 +113,7 @@ $HOME/n8n-local/soc-alerts/agent-memory/soc-analyst-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/incident-responder-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/siem-engineer-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/threat-hunter-memory.md
+$HOME/n8n-local/soc-alerts/agent-memory/shared-agent-memory.md
 ```
 
 Do not overwrite these files during normal DR redeploys if they have been tuned

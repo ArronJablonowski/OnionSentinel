@@ -453,6 +453,8 @@ Settings page behavior:
   scheduled AI worker, highest severity and newest first.
 - Shows the collapsed memory path:
   `$HOME/n8n-local/soc-alerts/agent-memory/soc-analyst-memory.md`.
+- Shows the collapsed shared memory path:
+  `$HOME/n8n-local/soc-alerts/agent-memory/shared-agent-memory.md`.
 - Saves through `/api/soc-settings/analyst-prompt`.
 - Reads `$HOME/n8n-local/config/incident_responder_system_prompt.md`.
 - Displays the current `Incident Responder` prompt in a matching collapsible
@@ -461,6 +463,8 @@ Settings page behavior:
   external incident response host collection still marked TODO.
 - Shows the collapsed memory path:
   `$HOME/n8n-local/soc-alerts/agent-memory/incident-responder-memory.md`.
+- Shows the collapsed shared memory path:
+  `$HOME/n8n-local/soc-alerts/agent-memory/shared-agent-memory.md`.
 - Saves through `/api/soc-settings/incident-responder-prompt`.
 - The Incident Responder prompt is for senior incident response planning and
   future external host artifact collection guidance. Direct external tooling is
@@ -473,6 +477,8 @@ Settings page behavior:
   all eligible alerts are analyzed.
 - Shows the collapsed memory path:
   `$HOME/n8n-local/soc-alerts/agent-memory/siem-engineer-memory.md`.
+- Shows the collapsed shared memory path:
+  `$HOME/n8n-local/soc-alerts/agent-memory/shared-agent-memory.md`.
 - Saves through `/api/soc-settings/siem-engineer-prompt`.
 - Reads `$HOME/n8n-local/config/threat_hunter_system_prompt.md`.
 - Displays the current `Threat Hunter` prompt in a matching collapsible editor
@@ -481,10 +487,14 @@ Settings page behavior:
   automated hunts still marked future work.
 - Shows the collapsed memory path:
   `$HOME/n8n-local/soc-alerts/agent-memory/threat-hunter-memory.md`.
+- Shows the collapsed shared memory path:
+  `$HOME/n8n-local/soc-alerts/agent-memory/shared-agent-memory.md`.
 - Saves through `/api/soc-settings/threat-hunter-prompt`.
 - As of this version, no Cyber Security Agent automatically appends to its
   memory file. The files are durable Markdown locations for operator or future
   agent workflow writes.
+- SOC Analyst prompt packages include both the SOC Analyst role memory and the
+  shared Cyber Security Agent memory as bounded evidence for model reasoning.
 - The SIEM Engineer prompt is for a 6 hour engineering review that runs only
   after all eligible alerts/detections have finished AI analysis. It reviews
   alerts, enrichments, notes, acknowledgments, suppressions, and related context

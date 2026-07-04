@@ -55,7 +55,8 @@ for memory_file in \
   soc-analyst-memory.md \
   incident-responder-memory.md \
   siem-engineer-memory.md \
-  threat-hunter-memory.md
+  threat-hunter-memory.md \
+  shared-agent-memory.md
 do
   if [[ ! -f "$STACK_DIR/soc-alerts/agent-memory/$memory_file" ]]; then
     cp "$REPO_DIR/n8n/agent-memory/$memory_file" "$STACK_DIR/soc-alerts/agent-memory/$memory_file"

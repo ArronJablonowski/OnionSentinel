@@ -21,6 +21,9 @@ DEFAULT_DB = HOME / "n8n-local" / "alert_store_data" / "alerts.sqlite3"
 DEFAULT_ROLLUPS = HOME / "n8n-local" / "soc-alerts" / "daily-rollups"
 DEFAULT_OUT = HOME / "n8n-local" / "soc-alerts" / "ai-prompts"
 DEFAULT_SYSTEM_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system_prompt.md"
+DEFAULT_AGENT_MEMORY_DIR = HOME / "n8n-local" / "soc-alerts" / "agent-memory"
+DEFAULT_SOC_ANALYST_MEMORY_FILE = DEFAULT_AGENT_MEMORY_DIR / "soc-analyst-memory.md"
+DEFAULT_SHARED_AGENT_MEMORY_FILE = DEFAULT_AGENT_MEMORY_DIR / "shared-agent-memory.md"
 DEFAULT_SYSTEM_PROMPT = "You are a careful SOC analyst assisting with Security Onion alerts."
 TEST_PREFIXES = ("phase%", "config-%", "internal-test-%", "sqlite-%", "policy-%", "codex-%")
 ESCALATE_LEVELS = {"critical", "high"}
@@ -37,6 +40,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--related-limit", type=int, default=15, help="Maximum related alerts to include")
     parser.add_argument("--rollup-bytes", type=int, default=12000, help="Maximum bytes from latest daily rollup")
     parser.add_argument("--system-prompt-file", type=Path, default=DEFAULT_SYSTEM_PROMPT_FILE, help="Editable SOC Analyst system prompt file")
+    parser.add_argument("--agent-memory-file", type=Path, default=DEFAULT_SOC_ANALYST_MEMORY_FILE, help="SOC Analyst Markdown memory file")
+    parser.add_argument("--shared-memory-file", type=Path, default=DEFAULT_SHARED_AGENT_MEMORY_FILE, help="Shared Cyber Security Agent Markdown memory file")
+    parser.add_argument("--memory-bytes", type=int, default=8000, help="Maximum bytes to include from each agent memory file")
     parser.add_argument("--include-tests", action="store_true", help="Include validation/test alerts")
     parser.add_argument("--stdout", action="store_true", help="Print package JSON instead of writing a file")
     args = parser.parse_args()
@@ -46,6 +52,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--related-limit must be positive")
     if args.rollup_bytes <= 0:
         parser.error("--rollup-bytes must be positive")
+    if args.memory_bytes <= 0:
+        parser.error("--memory-bytes must be positive")
     return args
 
 
@@ -144,6 +152,20 @@ def latest_rollup(rollup_dir: Path, limit_bytes: int) -> dict:
     latest = files[-1]
     data = latest.read_bytes()[:limit_bytes]
     return {"path": str(latest), "content": data.decode("utf-8", errors="replace")}
+
+
+def markdown_memory(path: Path, limit_bytes: int) -> dict:
+    """Load bounded Markdown agent memory as model evidence."""
+    try:
+        data = path.read_bytes()[:limit_bytes]
+    except FileNotFoundError:
+        return {"path": str(path), "exists": False, "content": ""}
+    return {
+        "path": str(path),
+        "exists": True,
+        "content": data.decode("utf-8", errors="replace"),
+        "max_bytes": limit_bytes,
+    }
 
 
 def select_alert(conn: sqlite3.Connection, args: argparse.Namespace) -> sqlite3.Row:
@@ -348,15 +370,27 @@ def model_policy(level: str | None) -> dict:
 def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argparse.Namespace) -> dict:
     rollup = latest_rollup(args.rollup_dir, args.rollup_bytes)
     group_context = grouped_alert_context(conn, selected, args.related_limit, args.include_tests)
+    memory_context = {
+        "role_memory": markdown_memory(args.agent_memory_file, args.memory_bytes),
+        "shared_memory": markdown_memory(args.shared_memory_file, args.memory_bytes),
+        "usage_guidance": (
+            "Use role_memory for SOC Analyst-specific lessons and shared_memory for cross-agent knowledge. "
+            "Treat memory as analyst context, not proof. Prefer current alert evidence when memory conflicts."
+        ),
+    }
     return {
         "package_type": "soc-ai-investigation-prompt",
         "generated_at": utc_now(),
         "analysis_policy": model_policy(selected["triage_level"]),
         "system_prompt_file": str(args.system_prompt_file),
+        "agent_memory_file": str(args.agent_memory_file),
+        "shared_memory_file": str(args.shared_memory_file),
         "instructions": {
             "role": load_system_prompt(args.system_prompt_file),
             "grounding": [
                 "Use only the provided evidence.",
+                "Use agent_memory.role_memory and agent_memory.shared_memory as analyst memory context when relevant.",
+                "If memory conflicts with current alert evidence, prefer the current alert evidence and mention the conflict.",
                 "Use grouped_alert_context.total_observations and raw_alert_rows when judging urgency, repeat behavior, and tuning.",
                 "Do not invent packet contents, hostnames, users, process names, files, commands, or malware family names.",
                 "If evidence is missing, say what is missing.",
@@ -385,6 +419,7 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
         "grouped_alert_context": group_context,
         "related_alerts": related_alerts(conn, selected, args.related_limit, args.include_tests),
         "recent_notifications": notification_context(conn, selected),
+        "agent_memory": memory_context,
         "latest_daily_rollup": rollup,
     }
 

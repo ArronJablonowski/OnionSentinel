@@ -53,6 +53,7 @@ SOC_ANALYST_MEMORY_FILE = AGENT_MEMORY_DIR / 'soc-analyst-memory.md'
 INCIDENT_RESPONDER_MEMORY_FILE = AGENT_MEMORY_DIR / 'incident-responder-memory.md'
 SIEM_ENGINEER_MEMORY_FILE = AGENT_MEMORY_DIR / 'siem-engineer-memory.md'
 THREAT_HUNTER_MEMORY_FILE = AGENT_MEMORY_DIR / 'threat-hunter-memory.md'
+SHARED_AGENT_MEMORY_FILE = AGENT_MEMORY_DIR / 'shared-agent-memory.md'
 SOC_AI_SETTINGS_FILE = HOME / 'n8n-local' / 'config' / 'ai_model_settings.json'
 ASSET_SOURCE_DIRS = (
     Path(__file__).resolve().parent.parent / 'assets',
@@ -2747,6 +2748,7 @@ def settings_page_section() -> str:
     prompt = html.escape(load_soc_analyst_prompt())
     prompt_path = html.escape(display_path(SOC_ANALYST_PROMPT_FILE))
     analyst_memory_path = html.escape(display_path(SOC_ANALYST_MEMORY_FILE))
+    shared_memory_path = html.escape(display_path(SHARED_AGENT_MEMORY_FILE))
     engineer_prompt = html.escape(load_siem_engineer_prompt())
     engineer_prompt_path = html.escape(display_path(SIEM_ENGINEER_PROMPT_FILE))
     engineer_memory_path = html.escape(display_path(SIEM_ENGINEER_MEMORY_FILE))
@@ -2868,6 +2870,7 @@ def settings_page_section() -> str:
           <span class="settings-path-stack" aria-label="SOC Analyst files">
             <span><b>Prompt</b><code>{prompt_path}</code></span>
             <span><b>Memory</b><code>{analyst_memory_path}</code></span>
+            <span><b>Shared</b><code>{shared_memory_path}</code></span>
           </span>
         </summary>
         <div class="settings-panel-top">
@@ -2895,6 +2898,7 @@ def settings_page_section() -> str:
           <span class="settings-path-stack" aria-label="Incident Responder files">
             <span><b>Prompt</b><code>{incident_prompt_path}</code></span>
             <span><b>Memory</b><code>{incident_memory_path}</code></span>
+            <span><b>Shared</b><code>{shared_memory_path}</code></span>
           </span>
         </summary>
         <div class="settings-panel-top">
@@ -2923,6 +2927,7 @@ def settings_page_section() -> str:
           <span class="settings-path-stack" aria-label="SIEM Engineer files">
             <span><b>Prompt</b><code>{engineer_prompt_path}</code></span>
             <span><b>Memory</b><code>{engineer_memory_path}</code></span>
+            <span><b>Shared</b><code>{shared_memory_path}</code></span>
           </span>
         </summary>
         <div class="settings-panel-top">
@@ -2951,6 +2956,7 @@ def settings_page_section() -> str:
           <span class="settings-path-stack" aria-label="Threat Hunter files">
             <span><b>Prompt</b><code>{hunter_prompt_path}</code></span>
             <span><b>Memory</b><code>{hunter_memory_path}</code></span>
+            <span><b>Shared</b><code>{shared_memory_path}</code></span>
           </span>
         </summary>
         <div class="settings-panel-top">

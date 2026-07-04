@@ -515,11 +515,13 @@ $HOME/n8n-local/soc-alerts/agent-memory/soc-analyst-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/incident-responder-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/siem-engineer-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/threat-hunter-memory.md
+$HOME/n8n-local/soc-alerts/agent-memory/shared-agent-memory.md
 ```
 
-They are seeded by the Mac Studio installer only if missing. No agent currently
-appends findings automatically; the files are reserved for operator memory and
-future agent workflow writes.
+They are seeded by the Mac Studio installer only if missing. The SOC Analyst
+AI prompt package reads both its role memory and the shared memory as bounded
+model evidence. No agent currently appends findings automatically; the files
+are reserved for operator memory and future agent workflow writes.
 
 Scheduled analysis is handled by a launchd wrapper:
 
