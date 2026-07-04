@@ -46,6 +46,16 @@ ai-analysis/
 n8n-beacon.json
 soc-alerts-status.json
 
+# n8n runtime exports and live workflow snapshots
+n8n/existing-workflow.json
+n8n/phase*.json
+n8n/workflow-before*.json
+n8n/workflow-after*.json
+n8n/workflow-*multinode*.json
+n8n/security-onion-*.json
+n8n/*.live.json
+n8n/*.macstudio*.json
+
 # Local portal/admin state
 .admin_*
 admin-state/
