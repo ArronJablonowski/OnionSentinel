@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -29,6 +30,7 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.db_path = Path(self.tmp.name) / "alerts.sqlite3"
         self.portal = load_portal()
         self.portal.SOC_ALERT_STORE_DB = self.db_path
+        self.portal.SOC_ALERT_STATUS_FILE = Path(self.tmp.name) / ".soc_alert_status.json"
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(
@@ -109,6 +111,16 @@ class SocAlertSummaryApiTest(unittest.TestCase):
             1,
             1,
         )
+        self.insert_summary(
+            "critical|Suppressed backend detection|192.0.2.30|198.51.100.30|suppressed",
+            "backend-suppressed-alert",
+            "Suppressed backend detection",
+            "critical",
+            "2026-07-03  12:30:00Z",
+            7,
+            7,
+            filter_status="suppressed",
+        )
         self.conn.commit()
 
     def tearDown(self) -> None:
@@ -124,6 +136,10 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         last_seen: str,
         raw_count: int,
         total_count: int,
+        filter_status: str = "accepted",
+        source_ip: str = "192.0.2.10",
+        destination_ip: str = "198.51.100.10",
+        destination_port: int = 443,
     ) -> str:
         group_id = self.portal.soc_alert_group_id(group_key)
         self.conn.execute(
@@ -135,9 +151,9 @@ class SocAlertSummaryApiTest(unittest.TestCase):
               destination_port, transport_protocol, traffic_direction, triage_score,
               triage_level, routing, filter_status, alert_json, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'suricata.alert', 4, ?, '192.0.2.10',
-                    4444, '198.51.100.10', 443, 'tcp', 'outbound', 90, ?,
-                    'analyst-review-immediate', 'accepted', '{}', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'suricata.alert', 4, ?, ?,
+                    4444, ?, ?, 'tcp', 'outbound', 90, ?,
+              'analyst-review-immediate', ?, '{}', ?)
             """,
             (
                 group_id,
@@ -150,7 +166,11 @@ class SocAlertSummaryApiTest(unittest.TestCase):
                 last_seen,
                 rule_name,
                 level,
+                source_ip,
+                destination_ip,
+                destination_port,
                 level,
+                filter_status,
                 last_seen,
             ),
         )
@@ -162,8 +182,53 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["source"], "sqlite-summary")
         self.assertEqual(payload["total_matching"], 2)
+        self.assertEqual(payload["status_counts"]["open"], 2)
+        self.assertEqual(payload["status_counts"]["suppressed"], 1)
+        self.assertEqual(payload["status_counts"]["acknowledged"], 0)
+        self.assertEqual(payload["status_counts"]["total"], 3)
+        self.assertEqual(payload["severity_counts"]["critical"], 1)
+        self.assertEqual(payload["severity_counts"]["high"], 1)
+        self.assertEqual(payload["severity_counts"]["medium"], 0)
+        self.assertEqual(payload["severity_counts"]["low"], 0)
+        self.assertEqual(payload["severity_counts"]["informational"], 0)
+        self.assertEqual(payload["top_endpoints"]["source_ip"], "192.0.2.10")
+        self.assertEqual(payload["top_endpoints"]["destination_ip"], "198.51.100.10")
+        self.assertEqual(payload["top_endpoints"]["destination_port"], "443")
         self.assertEqual(payload["alerts"][0]["representative_alert_id"], "newest-alert")
         self.assertEqual(payload["alerts"][0]["seen_count"], 5)
+        self.assertNotIn("backend-suppressed-alert", [alert["representative_alert_id"] for alert in payload["alerts"]])
+
+    def test_top_endpoint_metrics_use_visible_alert_volume(self) -> None:
+        self.insert_summary(
+            "medium|Noisy visible detection|192.0.2.99|198.51.100.99|accepted",
+            "noisy-visible-alert",
+            "Noisy visible detection",
+            "medium",
+            "2026-07-03  10:00:00Z",
+            1,
+            20,
+            source_ip="192.0.2.99",
+            destination_ip="198.51.100.99",
+            destination_port=8443,
+        )
+        self.conn.commit()
+        status, payload = self.portal.soc_alerts_query_response({"limit": ["2"], "analyst_status": ["open"]})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["total_matching"], 3)
+        self.assertEqual(len(payload["alerts"]), 2)
+        self.assertEqual(payload["top_endpoints"]["source_ip"], "192.0.2.99")
+        self.assertEqual(payload["top_endpoints"]["destination_ip"], "198.51.100.99")
+        self.assertEqual(payload["top_endpoints"]["destination_port"], "8443")
+
+    def test_suppressed_slice_includes_backend_filter_suppressed_groups(self) -> None:
+        status, payload = self.portal.soc_alerts_query_response({"limit": ["10"], "analyst_status": ["suppressed"]})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["source"], "sqlite-summary")
+        self.assertEqual(payload["total_matching"], 1)
+        self.assertEqual(payload["status_counts"]["total"], 3)
+        self.assertEqual(payload["alerts"][0]["representative_alert_id"], "backend-suppressed-alert")
 
     def test_acknowledged_group_is_hidden_from_open_slice(self) -> None:
         newest_group_id = self.portal.soc_alert_group_id(
@@ -180,7 +245,107 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["source"], "sqlite-summary")
         self.assertEqual(payload["total_matching"], 1)
+        self.assertEqual(payload["severity_counts"]["critical"], 0)
+        self.assertEqual(payload["severity_counts"]["high"], 1)
         self.assertEqual(payload["alerts"][0]["representative_alert_id"], "older-alert")
+
+    def test_legacy_bulk_acknowledged_payload_is_read_only(self) -> None:
+        newest_group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        older_group_id = self.portal.soc_alert_group_id(
+            "high|Older detection|192.0.2.20|198.51.100.20|accepted"
+        )
+        self.portal.update_soc_alert_status({
+            "id": newest_group_id,
+            "status": "acknowledged",
+            "repeat_count": 5,
+        })
+
+        ok, payload = self.portal.update_soc_alert_status({"acknowledged": [older_group_id]})
+
+        self.assertTrue(ok)
+        self.assertEqual(payload["statuses"][newest_group_id]["status"], "acknowledged")
+        self.assertNotIn(older_group_id, payload["statuses"])
+
+    def test_acknowledge_without_repeat_count_uses_current_group_count(self) -> None:
+        newest_group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+
+        ok, payload = self.portal.update_soc_alert_status({
+            "id": newest_group_id,
+            "status": "acknowledged",
+        })
+
+        self.assertTrue(ok)
+        self.assertEqual(payload["statuses"][newest_group_id]["status"], "acknowledged")
+        self.assertEqual(payload["statuses"][newest_group_id]["repeat_count"], 5)
+        status, open_payload = self.portal.soc_alerts_query_response({"limit": ["10"], "analyst_status": ["open"]})
+        self.assertEqual(status, 200)
+        self.assertNotIn("newest-alert", [alert["representative_alert_id"] for alert in open_payload["alerts"]])
+
+    def test_many_individual_status_updates_do_not_replace_each_other(self) -> None:
+        group_ids = []
+        for index in range(12):
+            group_id = self.insert_summary(
+                f"medium|Load test {index}|192.0.2.{40 + index}|198.51.100.{40 + index}|accepted",
+                f"load-alert-{index}",
+                f"Load test {index}",
+                "medium",
+                f"2026-07-03  10:{index:02d}:00Z",
+                1,
+                index + 1,
+            )
+            group_ids.append(group_id)
+        self.conn.commit()
+
+        def write_status(item: tuple[int, str]) -> None:
+            index, group_id = item
+            status = "suppressed" if index % 3 == 0 else "acknowledged"
+            self.portal.update_soc_alert_status({
+                "id": group_id,
+                "status": status,
+                "repeat_count": index + 1,
+                "reason": f"load test {index}" if status == "suppressed" else "",
+            })
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(write_status, enumerate(group_ids)))
+
+        statuses = self.portal.load_soc_alert_statuses()
+        self.assertEqual({group_id for group_id in group_ids}, {group_id for group_id in group_ids if group_id in statuses})
+        for index, group_id in enumerate(group_ids):
+            expected_status = "suppressed" if index % 3 == 0 else "acknowledged"
+            self.assertEqual(statuses[group_id]["status"], expected_status)
+            self.assertEqual(statuses[group_id]["repeat_count"], index + 1)
+
+    def test_acknowledged_group_reopens_when_repeat_count_increases(self) -> None:
+        newest_group_key = "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        newest_group_id = self.portal.soc_alert_group_id(newest_group_key)
+        self.portal.update_soc_alert_status({
+            "id": newest_group_id,
+            "status": "acknowledged",
+            "repeat_count": 5,
+        })
+        self.conn.execute(
+            """
+            UPDATE alert_group_summary
+            SET raw_alert_count = 3, total_seen_count = 6
+            WHERE group_id = ?
+            """,
+            (newest_group_id,),
+        )
+        self.conn.commit()
+
+        status, payload = self.portal.soc_alerts_query_response({"limit": ["10"], "analyst_status": ["open"]})
+        status_payload = self.portal.soc_alert_status_response()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["source"], "sqlite-summary")
+        self.assertEqual(payload["total_matching"], 2)
+        self.assertEqual(payload["alerts"][0]["representative_alert_id"], "newest-alert")
+        self.assertNotIn(newest_group_id, status_payload["statuses"])
 
 
 if __name__ == "__main__":

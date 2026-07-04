@@ -239,6 +239,8 @@ Live n8n beacon metric:
 
 ```text
 alert-store writes /data/n8n-beacon.json on every POST /alert webhook request
+relay sends message_type=relay_heartbeat on quiet 5-minute cycles with no new alerts
+alert-store accepts relay_heartbeat as telemetry and does not insert a fake alert row
 alert-store also writes /portal/n8n-beacon.json through the Docker portal mount
 served URL = /view/b68c5a48b9778061/n8n-beacon.json
 SOC Alerts WebUI polls n8n-beacon.json every 3 seconds

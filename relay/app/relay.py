@@ -10,6 +10,7 @@ script.
 """
 import argparse
 import json
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -236,6 +237,34 @@ def save_new_alerts(config: dict, alerts: list[dict]) -> list[Path]:
     return saved_paths
 
 
+def post_json_to_webhook(config: dict, payload_data: dict) -> None:
+    webhook = config.get("webhook", {})
+    url = webhook.get("url")
+    if not url:
+        raise RuntimeError("Webhook is enabled but webhook.url is empty")
+
+    token = webhook.get("token", "")
+    timeout = webhook.get("timeout_seconds", 10)
+    payload = json.dumps(payload_data, sort_keys=True).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "so-alert-relay-dev/0.1",
+    }
+    if token:
+        # Must match the token configured inside the imported n8n workflow.
+        headers["X-Relay-Token"] = token
+
+    req = request.Request(url, data=payload, headers=headers, method="POST")
+    try:
+        with request.urlopen(req, timeout=timeout) as response:
+            if response.status < 200 or response.status >= 300:
+                raise RuntimeError(f"Webhook returned HTTP {response.status}")
+    except HTTPError as exc:
+        raise RuntimeError(f"Webhook returned HTTP {exc.code}: {exc.reason}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Webhook request failed: {exc.reason}") from exc
+
+
 def post_alerts_to_webhook(config: dict, alerts: list[dict]) -> int:
     # One POST per alert keeps delivery failures obvious and lets alert-store
     # return an acknowledgement for each alert.
@@ -243,37 +272,46 @@ def post_alerts_to_webhook(config: dict, alerts: list[dict]) -> int:
     if not webhook.get("enabled"):
         return 0
 
-    url = webhook.get("url")
-    if not url:
-        raise RuntimeError("Webhook is enabled but webhook.url is empty")
-
-    token = webhook.get("token", "")
-    timeout = webhook.get("timeout_seconds", 10)
     posted_count = 0
-
     for alert in alerts:
-        payload = json.dumps(alert, sort_keys=True).encode("utf-8")
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "so-alert-relay-dev/0.1",
-        }
-        if token:
-            # Must match the token configured inside the imported n8n workflow.
-            headers["X-Relay-Token"] = token
-
-        req = request.Request(url, data=payload, headers=headers, method="POST")
-        try:
-            with request.urlopen(req, timeout=timeout) as response:
-                if response.status < 200 or response.status >= 300:
-                    raise RuntimeError(f"Webhook returned HTTP {response.status}")
-        except HTTPError as exc:
-            raise RuntimeError(f"Webhook returned HTTP {exc.code}: {exc.reason}") from exc
-        except URLError as exc:
-            raise RuntimeError(f"Webhook request failed: {exc.reason}") from exc
-
+        post_json_to_webhook(config, alert)
         posted_count += 1
 
     return posted_count
+
+
+def build_relay_heartbeat(
+    batch: dict,
+    alert_count: int,
+    dropped_count: int,
+    filtered_count: int,
+    new_count: int,
+    duplicate_count: int,
+    posted_count: int,
+    first_rule: str,
+) -> dict:
+    return {
+        "message_type": "relay_heartbeat",
+        "source": batch.get("source") or "security-onion",
+        "relay_host": socket.gethostname(),
+        "generated_at": now_utc_iso(),
+        "exported_at": batch.get("exported_at"),
+        "alert_count": alert_count,
+        "dropped_alert_count": dropped_count,
+        "filtered_alert_count": filtered_count,
+        "new_alert_count": new_count,
+        "duplicate_alert_count": duplicate_count,
+        "posted_webhook_alerts": posted_count,
+        "first_rule": first_rule,
+    }
+
+
+def post_relay_heartbeat(config: dict, heartbeat: dict) -> bool:
+    webhook = config.get("webhook", {})
+    if not webhook.get("enabled"):
+        return False
+    post_json_to_webhook(config, heartbeat)
+    return True
 
 
 def main() -> int:
@@ -322,9 +360,22 @@ def main() -> int:
         new_alerts, duplicate_count = filter_unseen_alerts(conn, filtered_alerts)
         saved_alert_paths = save_new_alerts(config, new_alerts)
         posted_count = post_alerts_to_webhook(config, new_alerts)
+        first_rule = all_alerts[0].get("rule_name") if all_alerts else "none"
+        heartbeat_posted = False
+        if not new_alerts:
+            heartbeat = build_relay_heartbeat(
+                batch,
+                alert_count=len(all_alerts),
+                dropped_count=dropped_count,
+                filtered_count=len(filtered_alerts),
+                new_count=len(new_alerts),
+                duplicate_count=duplicate_count,
+                posted_count=posted_count,
+                first_rule=first_rule,
+            )
+            heartbeat_posted = post_relay_heartbeat(config, heartbeat)
         mark_seen(conn, new_alerts)
 
-    first_rule = all_alerts[0].get("rule_name") if all_alerts else "none"
     print(
         json.dumps(
             {
@@ -338,6 +389,7 @@ def main() -> int:
                 "duplicate_alert_count": duplicate_count,
                 "saved_new_alert_files": len(saved_alert_paths),
                 "posted_webhook_alerts": posted_count,
+                "posted_webhook_heartbeat": heartbeat_posted,
                 "first_rule": first_rule,
             },
             sort_keys=True,

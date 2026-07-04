@@ -24,7 +24,7 @@ flowchart LR
 | Directory | Node / Layer | Purpose |
 | --- | --- | --- |
 | `security-onion/` | Security Onion | Restricted alert export wrapper, sudoers drop-in, SSH forced-command template. |
-| `relay/` | Raspberry Pi relay | Pulls Security Onion alerts over restricted SSH and POSTs new alerts to n8n. Includes systemd timer/service and install script. |
+| `relay/` | Raspberry Pi relay | Pulls Security Onion alerts over restricted SSH and POSTs new alerts plus quiet-cycle heartbeats to n8n. Includes systemd timer/service and install script. |
 | `relay/n8n-docker/` | Relay-facing n8n handoff | Notes for the webhook target that the relay posts to. The actual n8n stack lives in `n8n/`. |
 | `n8n/` | Mac Studio Docker n8n + alert-store | Docker Compose, n8n workflow export, alert-store code, local AI scripts, model settings, launchd jobs. |
 | `onion-sentinel-dashboard/` | Mac Studio dashboard | LAN portal backend and SOC dashboard builder/assets. |

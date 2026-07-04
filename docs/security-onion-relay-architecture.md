@@ -697,12 +697,16 @@ sequenceDiagram
   PI->>N8N: POST /webhook/security-onion-alert
   N8N->>N8N: Validate X-Relay-Token and required fields
   N8N->>STORE: POST /alert over Docker network
-  STORE->>STORE: Score with scoring_rules.json
-  STORE->>DB: Insert/update alert and notification state
-  alt high or critical and not duplicate/cooldown
-    STORE->>TG: sendMessage
-  else medium/low/duplicate/cooldown
-    STORE-->>N8N: stored, no Telegram
+  alt relay heartbeat
+    STORE->>STORE: Update n8n-beacon.json only
+  else alert payload
+    STORE->>STORE: Score with scoring_rules.json
+    STORE->>DB: Insert/update alert and notification state
+    alt high or critical and not duplicate/cooldown
+      STORE->>TG: sendMessage
+    else medium/low/duplicate/cooldown
+      STORE-->>N8N: stored, no Telegram
+    end
   end
   N8N-->>PI: JSON result
 ```
@@ -983,7 +987,10 @@ matching AI analysis artifact exists, `Queued` when no analysis artifact exists 
 
 The `Last n8n beacon` metric is intentionally separate from full dashboard
 generation. The Mac Studio alert-store writes an atomic JSON beacon on every
-n8n `/alert` webhook request:
+n8n `/alert` webhook request. Normal alert payloads update the beacon after
+storage. Relay heartbeat payloads update the beacon without writing to SQLite,
+which proves the five-minute Pi relay and n8n path are alive during quiet alert
+periods.
 
 ```text
 Container path: /data/n8n-beacon.json

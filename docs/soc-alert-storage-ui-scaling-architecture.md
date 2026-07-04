@@ -142,9 +142,9 @@ Current SOC Alerts metric row:
 - `Visible / Total`: one combined count card. The visible value changes when
   the analyst filters/searches; the total value remains the full grouped alert
   count for the current dashboard build.
-- `Last n8n beacon`: last observed alert event timestamp from the SQLite-backed alert
-  set, used as the durable proxy for the most recent n8n alert-ingestion
-  trigger until explicit n8n execution telemetry is stored.
+- `Last n8n beacon`: latest alert ingestion or relay heartbeat timestamp from
+  `n8n-beacon.json`. The sidebar health tile is green while that beacon is less
+  than 20 minutes old and red once it becomes stale.
 - `AI:{status}`: current local AI analysis state and queue depth, such as `AI:Idle` or `AI:Analyzing`.
 - `Latest Alert`: newest generated Markdown report timestamp.
 - `Total Size`: total generated Markdown corpus size represented by the
@@ -333,7 +333,9 @@ The stream emits compact `soc-alerts` events containing:
 
 - Shared analyst state counts and status map from SQLite.
 - AI analysis activity and per-group AI status from `soc-alerts-status.json`.
-- `Last n8n beacon` data from `n8n-beacon.json`.
+- `Last n8n beacon` data from `n8n-beacon.json`. Quiet relay cycles send a
+  `relay_heartbeat` payload every 5 minutes when there are no new alerts, so
+  this file still updates during calm periods without creating fake alert rows.
 - Seven-day alert metrics from SQLite.
 
 The dashboard opens this stream with browser `EventSource`. When the payload

@@ -1,12 +1,12 @@
 # Raspberry Pi Relay Node
 
-The relay is intentionally dumb and reliable. It pulls alerts from Security Onion through restricted SSH and POSTs new alerts to the Mac Studio n8n webhook. Filtering, scoring, suppression, AI analysis, reporting, and Telegram notification decisions belong to n8n/alert-store on the Mac Studio.
+The relay is intentionally dumb and reliable. It pulls alerts from Security Onion through restricted SSH and POSTs new alerts to the Mac Studio n8n webhook. If a timer run has no new alerts, it sends a small heartbeat payload instead so Onion Sentinel can prove the relay and n8n path are still alive. Filtering, scoring, suppression, AI analysis, reporting, and Telegram notification decisions belong to n8n/alert-store on the Mac Studio.
 
 ## Files
 
 | File | Destination | Purpose |
 | --- | --- | --- |
-| `app/relay.py` | `/opt/so-alert-relay/app/relay.py` | Pulls alert JSON and posts new alerts. |
+| `app/relay.py` | `/opt/so-alert-relay/app/relay.py` | Pulls alert JSON and posts new alerts or quiet-cycle heartbeats. |
 | `app/relay_health_wrapper.py` | `/opt/so-alert-relay/app/relay_health_wrapper.py` | Adds failure/recovery notification thresholding. |
 | `config/config.example.json` | `/opt/so-alert-relay/app/config.json` | Non-secret relay config. |
 | `config/relay.example.env` | `/etc/so-alert-relay/relay.env` | Secret-bearing env template. Do not commit live copy. |
@@ -50,6 +50,10 @@ sudo systemctl start so-alert-relay.service
 sudo journalctl -u so-alert-relay.service -n 50 --no-pager
 sudo systemctl enable --now so-alert-relay.timer
 ```
+
+Quiet timer cycles should log `posted_webhook_heartbeat: true`. Alert cycles
+should log `posted_webhook_alerts` greater than zero. Either path updates the
+Mac Studio `n8n-beacon.json` used by dashboard health.
 
 ## Firewall Needs
 

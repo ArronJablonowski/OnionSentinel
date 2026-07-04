@@ -220,6 +220,27 @@ curl -sS -X POST http://127.0.0.1:5678/webhook/security-onion-alert \
   --data @/tmp/soc-report-test-alert.json
 ```
 
+The dashboard sidebar health tile depends on `n8n-beacon.json`. During normal
+operation, new alerts and quiet-cycle relay heartbeats both update that file.
+If the tile is red, check the newest beacon timestamp and the Pi timer logs:
+
+```bash
+ssh aj_lobster@10.77.7.225 'cat "$HOME/report_portal/library/Cybersecurity/SOC Alerts/n8n-beacon.json"'
+ssh aj@10.88.8.8 'systemctl list-timers --all so-alert-relay.timer --no-pager; sudo journalctl -u so-alert-relay.service -n 40 --no-pager'
+```
+
+If n8n logs show SQLite I/O errors, validate both SQLite stores before
+troubleshooting the relay:
+
+```bash
+ssh aj_lobster@10.77.7.225 'sqlite3 "$HOME/n8n-local/n8n_data/database.sqlite" "PRAGMA quick_check;"'
+ssh aj_lobster@10.77.7.225 'sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "PRAGMA quick_check;"'
+```
+
+If corruption is isolated to n8n execution history, stop n8n, back up the
+database, recover or clear execution history, verify `PRAGMA quick_check;`,
+then start n8n again. Do not copy the n8n runtime database into Git.
+
 ## 3. Restore Security Onion Wrapper
 
 Copy this repo to Security Onion or clone it there, then run:

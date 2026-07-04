@@ -3502,6 +3502,44 @@ def soc_alert_group_counts(conn: sqlite3.Connection) -> dict[str, int]:
     return {soc_alert_group_id(row["group_key"]): int(row["repeat_count"] or 0) for row in rows}
 
 
+def soc_alert_active_group_ids(conn: sqlite3.Connection, statuses: dict) -> set[str]:
+    """Return grouped detections currently visible in the default active view."""
+    suppressed_or_acknowledged = {
+        group_id for group_id, meta in (statuses or {}).items()
+        if isinstance(meta, dict) and meta.get("status") in {"acknowledged", "suppressed"}
+    }
+    if soc_alert_group_summary_available(conn):
+        try:
+            rows = conn.execute(
+                """
+                SELECT group_id
+                FROM alert_group_summary
+                WHERE lower(coalesce(filter_status, 'accepted')) != 'suppressed'
+                """
+            ).fetchall()
+            return {row["group_id"] for row in rows if row["group_id"] not in suppressed_or_acknowledged}
+        except sqlite3.Error:
+            pass
+    group_expr = soc_alert_group_key_sql()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT {group_expr} AS group_key,
+                   lower(coalesce(filter_status, 'accepted')) AS filter_status
+            FROM alerts
+            GROUP BY group_key, filter_status
+            HAVING filter_status != 'suppressed'
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return set()
+    return {
+        soc_alert_group_id(row["group_key"])
+        for row in rows
+        if soc_alert_group_id(row["group_key"]) not in suppressed_or_acknowledged
+    }
+
+
 def normalize_soc_group_statuses(conn: sqlite3.Connection) -> dict:
     """Load current group state and auto-expire stale acknowledgements.
 
@@ -3553,6 +3591,22 @@ def load_soc_alert_statuses_from_db() -> dict:
         return {}
     finally:
         conn.close()
+
+
+def write_soc_alert_status_json_snapshot(statuses: dict) -> None:
+    SOC_ALERT_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "ok": True,
+        "updated_at": now_iso_utc(),
+        "statuses": statuses,
+    }
+    tmp = SOC_ALERT_STATUS_FILE.with_suffix(SOC_ALERT_STATUS_FILE.suffix + f".{uuid.uuid4().hex}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, SOC_ALERT_STATUS_FILE)
+    try:
+        SOC_ALERT_STATUS_FILE.chmod(0o600)
+    except Exception:
+        pass
 
 
 def save_soc_alert_statuses_to_db(statuses: dict) -> None:
@@ -3624,19 +3678,70 @@ def save_soc_alert_statuses(statuses: dict) -> None:
         if meta and meta["status"] != "open":
             normalized_statuses[str(alert_id)] = meta
     save_soc_alert_statuses_to_db(normalized_statuses)
-    SOC_ALERT_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "ok": True,
-        "updated_at": now_iso_utc(),
-        "statuses": normalized_statuses,
-    }
-    tmp = SOC_ALERT_STATUS_FILE.with_suffix(SOC_ALERT_STATUS_FILE.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, SOC_ALERT_STATUS_FILE)
+    write_soc_alert_status_json_snapshot(normalized_statuses)
+
+
+def current_soc_alert_group_repeat_count(alert_id: str) -> int:
+    if not SOC_ALERT_STORE_DB.exists():
+        return 0
+    conn = sqlite3.connect(SOC_ALERT_STORE_DB, timeout=30)
+    conn.row_factory = sqlite3.Row
     try:
-        SOC_ALERT_STATUS_FILE.chmod(0o600)
+        return int(soc_alert_group_counts(conn).get(alert_id, 0) or 0)
     except Exception:
-        pass
+        return 0
+    finally:
+        conn.close()
+
+
+def write_soc_alert_status(alert_id: str, meta: dict) -> None:
+    """Atomically persist one analyst state change, then refresh the JSON mirror."""
+    if not SOC_ALERT_STORE_DB.parent.exists():
+        return
+    normalized = normalize_soc_alert_status_meta(meta)
+    conn = sqlite3.connect(SOC_ALERT_STORE_DB, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        ensure_soc_alert_status_table(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        if not normalized or normalized["status"] == "open":
+            conn.execute("DELETE FROM analyst_alert_group_state WHERE group_id = ?", (alert_id,))
+        else:
+            group_key = str(meta.get("group_key") or "") if isinstance(meta, dict) else ""
+            updated_by = str(meta.get("updated_by") or "")[:80] if isinstance(meta, dict) else ""
+            conn.execute(
+                """
+                INSERT INTO analyst_alert_group_state (
+                  group_id, group_key, status, repeat_count, reason, updated_at, updated_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(group_id) DO UPDATE SET
+                  group_key = excluded.group_key,
+                  status = excluded.status,
+                  repeat_count = excluded.repeat_count,
+                  reason = excluded.reason,
+                  updated_at = excluded.updated_at,
+                  updated_by = excluded.updated_by
+                """,
+                (
+                    alert_id,
+                    group_key,
+                    normalized["status"],
+                    normalized["repeat_count"],
+                    normalized["reason"],
+                    normalized["updated_at"],
+                    updated_by,
+                ),
+            )
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+    write_soc_alert_status_json_snapshot(load_soc_alert_statuses_from_db())
 
 
 def soc_alert_status_response() -> dict:
@@ -3655,9 +3760,10 @@ def soc_alert_status_response() -> dict:
         conn.row_factory = sqlite3.Row
         try:
             group_counts = soc_alert_group_counts(conn)
+            active_group_ids = soc_alert_active_group_ids(conn, statuses)
         finally:
             conn.close()
-        counts["open"] = max(0, len(group_counts) - counts["acknowledged"] - counts["suppressed"])
+        counts["open"] = len(active_group_ids)
         counts["total"] = len(group_counts)
     except Exception:
         counts["total"] = len(statuses)
@@ -3672,7 +3778,6 @@ def soc_alert_status_response() -> dict:
 
 
 def update_soc_alert_status(payload: dict) -> tuple[bool, dict]:
-    statuses = load_soc_alert_statuses()
     now = now_iso_utc()
 
     def valid_id(value: object) -> str:
@@ -3682,30 +3787,17 @@ def update_soc_alert_status(payload: dict) -> tuple[bool, dict]:
         return valid_soc_alert_store_id(alert_id)
 
     if isinstance(payload.get("statuses"), dict):
-        next_statuses: dict[str, dict] = {}
-        for raw_id, raw_meta in payload.get("statuses", {}).items():
-            alert_id = valid_id(raw_id)
-            meta = normalize_soc_alert_status_meta(raw_meta, now=now)
-            if not alert_id or not meta or meta["status"] == "open":
-                continue
-            next_statuses[alert_id] = meta
-        save_soc_alert_statuses(next_statuses)
+        # Historical dashboard builds used this endpoint to bulk-replace shared
+        # analyst state from browser localStorage. That is unsafe now that
+        # SQLite is the source of truth because an old tab can replay stale
+        # acknowledgements/suppressions. Keep the route compatible, but treat
+        # bulk browser state as read-only.
         return True, soc_alert_status_response()
 
     if isinstance(payload.get("acknowledged"), list):
-        acknowledged = {valid_id(v) for v in payload.get("acknowledged", [])}
-        acknowledged.discard("")
-        for alert_id in list(statuses):
-            if isinstance(statuses.get(alert_id), dict) and statuses[alert_id].get("status") in ("acknowledged", "open"):
-                statuses[alert_id] = {
-                    "status": "acknowledged" if alert_id in acknowledged else "open",
-                    "repeat_count": int(statuses[alert_id].get("repeat_count") or 0),
-                    "reason": str(statuses[alert_id].get("reason") or "")[:140],
-                    "updated_at": now,
-                }
-        for alert_id in acknowledged:
-            statuses[alert_id] = {"status": "acknowledged", "repeat_count": 0, "reason": "", "updated_at": now}
-        save_soc_alert_statuses(statuses)
+        # Legacy dashboard builds sent the entire browser-local acknowledgement
+        # list. Treat it as read-only for the same reason as the statuses map:
+        # old tabs must never replace shared server-side analyst state.
         return True, soc_alert_status_response()
 
     alert_id = valid_id(payload.get("id"))
@@ -3720,12 +3812,15 @@ def update_soc_alert_status(payload: dict) -> tuple[bool, dict]:
         repeat_count = max(0, int(payload.get("repeat_count") or payload.get("acknowledged_count") or 0))
     except (TypeError, ValueError):
         repeat_count = 0
+    if raw_status == "acknowledged" and repeat_count <= 0:
+        repeat_count = current_soc_alert_group_repeat_count(alert_id)
     reason = str(payload.get("reason") or "").strip()[:140]
-    if raw_status == "open":
-        statuses.pop(alert_id, None)
-    else:
-        statuses[alert_id] = {"status": raw_status, "repeat_count": repeat_count, "reason": reason, "updated_at": now}
-    save_soc_alert_statuses(statuses)
+    write_soc_alert_status(alert_id, {
+        "status": raw_status,
+        "repeat_count": repeat_count,
+        "reason": reason,
+        "updated_at": now,
+    })
     return True, soc_alert_status_response()
 
 
@@ -3784,6 +3879,38 @@ def soc_alert_level_names(raw: str) -> list[str]:
         if level in SOC_ALERT_LEVEL_RANK:
             levels.append("informational" if level == "info" else level)
     return sorted(set(levels), key=lambda x: SOC_ALERT_LEVEL_RANK.get(x, 0), reverse=True)
+
+
+def soc_alert_row_level(row: sqlite3.Row) -> str:
+    """Normalize an alert row severity for API-wide visible severity metrics."""
+    level = str(row["triage_level"] or row["severity_label"] or "informational").strip().lower()
+    if level == "info":
+        level = "informational"
+    if level in SOC_ALERT_LEVEL_RANK:
+        return level
+    severity = row["severity"] if "severity" in row.keys() else None
+    if severity == 1:
+        return "high"
+    if severity == 2:
+        return "medium"
+    if severity == 3:
+        return "low"
+    return "informational"
+
+
+def soc_alert_visible_severity_summary(rows: list[sqlite3.Row]) -> dict:
+    """Summarize severity across all filtered/visible grouped alerts, before paging."""
+    counts = {level: 0 for level in ("critical", "high", "medium", "low", "informational")}
+    highest = "none"
+    highest_rank = 0
+    for row in rows:
+        level = soc_alert_row_level(row)
+        counts[level] = counts.get(level, 0) + 1
+        rank = SOC_ALERT_LEVEL_RANK.get(level, 0)
+        if rank > highest_rank:
+            highest = level
+            highest_rank = rank
+    return {"counts": counts, "highest": highest}
 
 
 def soc_alert_limit(raw: object, default: int = 100) -> int:
@@ -3918,6 +4045,61 @@ def soc_alert_group_row_to_api(row: sqlite3.Row, statuses: dict) -> dict:
     }
 
 
+def soc_alert_row_filter_status(row: sqlite3.Row) -> str:
+    return str(row["filter_status"] or "accepted").strip().lower()
+
+
+def soc_alert_row_matches_analyst_status(row: sqlite3.Row, group_id: str, statuses: dict, analyst_status: str) -> bool:
+    current_status = (statuses.get(group_id, {}) or {}).get("status", "open") if isinstance(statuses, dict) else "open"
+    filter_status = soc_alert_row_filter_status(row)
+    if analyst_status in {"open", "new"}:
+        return current_status == "open" and filter_status != "suppressed"
+    if analyst_status == "suppressed":
+        return current_status == "suppressed" or filter_status == "suppressed"
+    if analyst_status == "acknowledged":
+        return current_status == "acknowledged"
+    return True
+
+
+def soc_alert_status_bucket_counts(rows: list[sqlite3.Row], statuses: dict) -> dict[str, int]:
+    counts = {"open": 0, "acknowledged": 0, "suppressed": 0}
+    for row in rows:
+        group_key = row["group_key"] if "group_key" in row.keys() else ""
+        group_id = row["group_id"] if "group_id" in row.keys() and row["group_id"] else soc_alert_group_id(group_key)
+        for status in counts:
+            if soc_alert_row_matches_analyst_status(row, group_id, statuses, status):
+                counts[status] += 1
+    counts["active"] = counts["open"]
+    counts["total"] = counts["open"] + counts["suppressed"] + counts["acknowledged"]
+    return counts
+
+
+def soc_alert_top_endpoint_metrics(rows: list[sqlite3.Row]) -> dict[str, str]:
+    counters: dict[str, dict[str, int]] = {
+        "source_ip": {},
+        "destination_ip": {},
+        "destination_port": {},
+    }
+    for row in rows:
+        weight = max(1, int(row["total_seen_count"] or row["seen_count"] or row["raw_alert_count"] or 1))
+        for field in counters:
+            value = str(row[field] or "").strip()
+            if not value or value.lower() in {"n/a", "na", "unknown", "unknown-source", "unknown-destination", "none", "null", "-"}:
+                continue
+            counters[field][value] = counters[field].get(value, 0) + weight
+
+    def top_value(values: dict[str, int]) -> str:
+        if not values:
+            return "n/a"
+        return sorted(values.items(), key=lambda item: (-item[1], item[0]))[0][0]
+
+    return {
+        "source_ip": top_value(counters["source_ip"]),
+        "destination_ip": top_value(counters["destination_ip"]),
+        "destination_port": top_value(counters["destination_port"]),
+    }
+
+
 def soc_alerts_summary_query_response(query: dict[str, list[str]]) -> tuple[int, dict] | None:
     """Serve grouped alert rows from alert_group_summary when available.
 
@@ -3985,13 +4167,11 @@ def soc_alerts_summary_query_response(query: dict[str, list[str]]) -> tuple[int,
         return soc_alert_api_error(str(e), 503)
 
     statuses = load_soc_alert_statuses()
+    status_bucket_counts = soc_alert_status_bucket_counts(rows, statuses)
     filtered_rows = []
     for row in rows:
         group_id = row["group_id"] or soc_alert_group_id(row["group_key"])
-        current_status = (statuses.get(group_id, {}) or {}).get("status", "open") if isinstance(statuses, dict) else "open"
-        if analyst_status in {"open", "new"} and current_status != "open":
-            continue
-        if analyst_status in {"acknowledged", "suppressed"} and current_status != analyst_status:
+        if not soc_alert_row_matches_analyst_status(row, group_id, statuses, analyst_status):
             continue
         if cursor_seen and cursor_id:
             group_last_seen = row["group_last_seen"] or row["last_seen"] or ""
@@ -3999,6 +4179,8 @@ def soc_alerts_summary_query_response(query: dict[str, list[str]]) -> tuple[int,
                 continue
         filtered_rows.append(row)
 
+    severity_summary = soc_alert_visible_severity_summary(filtered_rows)
+    top_endpoint_metrics = soc_alert_top_endpoint_metrics(filtered_rows)
     total_matching = len(filtered_rows)
     total_pages = max(1, (total_matching + limit - 1) // limit)
     current_page = min(requested_page, total_pages)
@@ -4015,6 +4197,10 @@ def soc_alerts_summary_query_response(query: dict[str, list[str]]) -> tuple[int,
         "db_path": str(SOC_ALERT_STORE_DB),
         "count": len(page_rows),
         "total_matching": total_matching,
+        "status_counts": status_bucket_counts,
+        "severity_counts": severity_summary["counts"],
+        "highest_severity": severity_summary["highest"],
+        "top_endpoints": top_endpoint_metrics,
         "limit": limit,
         "page": current_page,
         "page_size": limit,
@@ -4092,13 +4278,11 @@ def soc_alerts_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
         return soc_alert_api_error(str(e), 503)
 
     statuses = load_soc_alert_statuses()
+    status_bucket_counts = soc_alert_status_bucket_counts(rows, statuses)
     filtered_rows = []
     for row in rows:
         group_id = soc_alert_group_id(row["group_key"])
-        current_status = (statuses.get(group_id, {}) or {}).get("status", "open") if isinstance(statuses, dict) else "open"
-        if analyst_status in {"open", "new"} and current_status != "open":
-            continue
-        if analyst_status in {"acknowledged", "suppressed"} and current_status != analyst_status:
+        if not soc_alert_row_matches_analyst_status(row, group_id, statuses, analyst_status):
             continue
         if cursor_seen and cursor_id:
             group_last_seen = row["group_last_seen"] or row["last_seen"] or ""
@@ -4106,6 +4290,8 @@ def soc_alerts_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
                 continue
         filtered_rows.append(row)
 
+    severity_summary = soc_alert_visible_severity_summary(filtered_rows)
+    top_endpoint_metrics = soc_alert_top_endpoint_metrics(filtered_rows)
     total_matching = len(filtered_rows)
     total_pages = max(1, (total_matching + limit - 1) // limit)
     current_page = min(requested_page, total_pages)
@@ -4122,6 +4308,10 @@ def soc_alerts_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
         "db_path": str(SOC_ALERT_STORE_DB),
         "count": len(page_rows),
         "total_matching": total_matching,
+        "status_counts": status_bucket_counts,
+        "severity_counts": severity_summary["counts"],
+        "highest_severity": severity_summary["highest"],
+        "top_endpoints": top_endpoint_metrics,
         "limit": limit,
         "page": current_page,
         "page_size": limit,

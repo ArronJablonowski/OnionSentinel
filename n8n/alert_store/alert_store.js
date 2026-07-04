@@ -98,8 +98,18 @@ function writeN8nBeacon(stage, alert = {}, result = null, error = null) {
     stage,
     ok: result ? Boolean(result.ok) : !error,
     status: result?.status || (error ? 'error' : 'received'),
+    message_type: alert?.message_type || null,
+    source: alert?.source || null,
+    relay_host: alert?.relay_host || null,
+    exported_at: alert?.exported_at || null,
+    alert_count: Number.isFinite(Number(alert?.alert_count)) ? Number(alert.alert_count) : null,
+    dropped_alert_count: Number.isFinite(Number(alert?.dropped_alert_count)) ? Number(alert.dropped_alert_count) : null,
+    filtered_alert_count: Number.isFinite(Number(alert?.filtered_alert_count)) ? Number(alert.filtered_alert_count) : null,
+    new_alert_count: Number.isFinite(Number(alert?.new_alert_count)) ? Number(alert.new_alert_count) : null,
+    duplicate_alert_count: Number.isFinite(Number(alert?.duplicate_alert_count)) ? Number(alert.duplicate_alert_count) : null,
+    posted_webhook_alerts: Number.isFinite(Number(alert?.posted_webhook_alerts)) ? Number(alert.posted_webhook_alerts) : null,
     alert_id: alert?.alert_id || result?.alert?.alert_id || null,
-    rule_name: alert?.rule_name || result?.alert?.rule_name || null,
+    rule_name: alert?.rule_name || result?.alert?.rule_name || alert?.first_rule || null,
     source_ip: nestedField(alert, 'source.ip') || result?.alert?.source_ip || null,
     destination_ip: nestedField(alert, 'destination.ip') || result?.alert?.destination_ip || null,
     destination_port: integerField(nestedField(alert, 'destination.port')) || result?.alert?.destination_port || null,
@@ -116,6 +126,10 @@ function writeN8nBeacon(stage, alert = {}, result = null, error = null) {
     }
   }
   return payload;
+}
+
+function isRelayHeartbeat(payload) {
+  return payload?.message_type === 'relay_heartbeat';
 }
 
 function nestedField(value, dottedPath) {
@@ -1259,6 +1273,12 @@ async function handleRequest(request, response) {
       // Main ingestion endpoint called by the n8n workflow.
       const alert = await readJsonBody(request);
       writeN8nBeacon('received', alert);
+      if (isRelayHeartbeat(alert)) {
+        const result = {ok: true, status: 'heartbeat', stored: false};
+        const beacon = writeN8nBeacon('heartbeat', alert, result);
+        sendJson(response, 200, {...result, beacon});
+        return;
+      }
       const result = await storeAlert(alert);
       writeN8nBeacon('stored', alert, result);
       sendJson(response, result.ok ? 200 : 400, result);
