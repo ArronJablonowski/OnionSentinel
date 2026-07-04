@@ -328,9 +328,11 @@ for accepted alerts so the local LLM has durable investigation notes to read.
 2026-07-03 status: the Hermes SOC Alerts dashboard builder now reads the
 SQLite `alerts` table as its primary source for metrics and uses the LAN Portal
 API for table rows. The page ships an empty table shell, then fetches grouped
-SQLite alert rows from `/api/soc-alerts` in 75-row cursor pages. Markdown
-detail content remains the local AI/reference corpus, and full rendered detail
-is fetched lazily so initial page load stays small.
+SQLite alert rows from `/api/soc-alerts` in page-numbered slices. The default
+page size is 25 grouped detections, and analysts can choose larger page sizes
+from the rows-per-page selector. Markdown detail content remains the local
+AI/reference corpus, and full rendered detail is fetched lazily so initial page
+load stays small.
 
 2026-07-03 update: lazy detail loading is deployed. The builder writes full
 rendered detail fragments to `SOC Alerts Web/details/<group_id>.html`, the

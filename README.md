@@ -43,6 +43,15 @@ flowchart LR
 6. Configure secrets from examples only on the destination hosts.
 7. Run validation: `operations/verify-stack.zsh`.
 
+## Product And Deployment Contract
+
+Onion Sentinel is treated as a production SOC analyst tool and this repo is the
+sanitized disaster recovery source of truth. Keep runtime changes mirrored back
+into source, templates, docs, and runbooks without copying secrets, databases,
+generated reports, or live alert data. See
+`docs/product-deployment-requirements.md` for the current UI, workflow,
+deployment, AI, notification, and validation requirements.
+
 ## Secret Handling
 
 Never commit these live files:

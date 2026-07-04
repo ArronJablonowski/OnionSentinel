@@ -231,15 +231,16 @@ ships a small empty table shell instead of embedding every grouped alert row in
 the HTML. On load, the browser requests the selected state slice from:
 
 ```text
-GET /api/soc-alerts?analyst_status=open&limit=75
+GET /api/soc-alerts?analyst_status=open&limit=25&page=1
 ```
 
-The `Load more` control appends the next cursor page. Search text, severity,
-last-seen window, `Show acknowledged`, and `Show suppressed` changes trigger a
-fresh server-side query, so the browser no longer downloads every alert and then
-filters locally. Single-group acknowledge/suppress/expose writes still use the
-shared API. Every browser opens `/api/soc-alerts/events` for live updates, with
-slower polling retained as a fallback for multi-analyst convergence.
+The table renders a rows-per-page selector plus Previous, Next, and direct page
+selection. Search text, severity, last-seen window, `Show acknowledged`, and
+`Show suppressed` changes trigger a fresh server-side query, so the browser no
+longer downloads every alert and then filters locally. Single-group
+acknowledge/suppress/expose writes still use the shared API. Every browser
+opens `/api/soc-alerts/events` for live updates, with slower polling retained
+as a fallback for multi-analyst convergence.
 
 Validation on 2026-07-03:
 
@@ -247,10 +248,10 @@ Validation on 2026-07-03:
 live index.html before API table shell: ~15.2 MB
 live index.html after API table shell: 83,779 bytes
 pre-script static table rows: 0
-GET /api/soc-alerts?analyst_status=open&limit=75 -> 75 of 187 grouped detections, next cursor present
-GET /api/soc-alerts?analyst_status=open&limit=75&levels=critical -> 51 of 51
-GET /api/soc-alerts?analyst_status=open&limit=75&since=60m -> 9 of 9
-GET /api/soc-alerts?analyst_status=open&limit=75&q=ssh -> 35 of 35
+GET /api/soc-alerts?analyst_status=open&limit=25&page=1 -> 25 of 187 grouped detections, 8 pages
+GET /api/soc-alerts?analyst_status=open&limit=25&page=1&levels=critical -> first page of matching critical detections
+GET /api/soc-alerts?analyst_status=open&limit=25&page=1&since=60m -> first page of matching recent detections
+GET /api/soc-alerts?analyst_status=open&limit=25&page=1&q=ssh -> first page of matching search results
 GET /api/soc-alerts/events -> Server-Sent Event with AI state, analyst counts, metrics, and n8n beacon
 ```
 
@@ -285,9 +286,9 @@ without making the browser download every Markdown/AI/raw-JSON report upfront.
 Browser validation on 2026-07-03:
 
 ```text
-Initial rows loaded: 75
+Initial rows loaded: 25
 Preloaded full detail sections: 0
-Page status: Showing 75 of 187 grouped detections
+Page status: Showing 1-25 of 187 grouped detections
 Expanded group: 318792740295
 Detail endpoint: /api/soc-alerts/318792740295/detail -> HTTP 200
 Injected detail length: 85,625 HTML characters
@@ -337,15 +338,15 @@ The stream emits compact `soc-alerts` events containing:
 
 The dashboard opens this stream with browser `EventSource`. When the payload
 signature changes, the page updates metric cards immediately and reloads the
-current 75-row API slice after a short debounce. The stream also sends
+current API page slice after a short debounce. The stream also sends
 keepalive comments and recycles periodically so browsers can reconnect cleanly.
 
 Validation on 2026-07-03:
 
 ```text
 SSE connected in browser: yes
-Initial API rows loaded: 75
-Page status: Showing 75 of 187 grouped detections
+Initial API rows loaded: 25
+Page status: Showing 1-25 of 187 grouped detections
 Preloaded full detail sections: 0
 Expanded detail endpoint: /api/soc-alerts/318792740295/detail
 Expanded detail loaded: yes

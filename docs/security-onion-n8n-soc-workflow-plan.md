@@ -1424,11 +1424,12 @@ Initial policy behavior:
 The LAN Portal SOC Alerts page now uses SQLite-first API pagination/search for
 the table body. The static builder still creates the shell, metrics, and local
 Markdown/AI corpus pages, but the browser fetches grouped detections from
-`/api/soc-alerts` in 75-row cursor pages so it does not load all alerts at once.
-Markdown remains the local AI/reference corpus. Full rendered investigation
-reports are also lazy-loaded through `/api/soc-alerts/<group_id>/detail` when a
-row is expanded, so large Markdown/AI/raw-JSON report bodies do not inflate the
-initial page load.
+`/api/soc-alerts` in page-numbered slices so it does not load all alerts at
+once. The default page size is 25 grouped detections, with analyst-selectable
+larger page sizes. Markdown remains the local AI/reference corpus. Full
+rendered investigation reports are also lazy-loaded through
+`/api/soc-alerts/<group_id>/detail` when a row is expanded, so large
+Markdown/AI/raw-JSON report bodies do not inflate the initial page load.
 
 The SOC Alerts page also opens `GET /api/soc-alerts/events` as a Server-Sent
 Events stream. The stream carries the current AI analysis state, per-group AI
