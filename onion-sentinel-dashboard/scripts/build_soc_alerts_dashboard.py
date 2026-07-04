@@ -2190,25 +2190,43 @@ def placeholder_page_section(page_key: str) -> str:
     </section>'''
 
 
-def siem_engineering_recommendation_card(report: AlertReport) -> str:
-    actions = report.recommended_tuning_actions[:3] or ([report.tuning_reason] if report.tuning_reason else ['Review this detection after the SIEM Engineer model run completes.'])
-    action_items = ''.join(f'<li>{html.escape(action)}</li>' for action in actions if action)
+def siem_engineering_tuning_row(report: AlertReport) -> str:
+    action = report.recommended_tuning_actions[0] if report.recommended_tuning_actions else 'Review this detection after the SIEM Engineer model run completes.'
     route = f'{report.source_ip} > {report.destination_ip} : {report.destination_port}'
     return f'''
-    <article class="siem-rec-card">
-      <div class="siem-rec-head">
-        <span class="severity-label severity-text-{html.escape(criticality_class(report.criticality))}">{html.escape(report.criticality)}</span>
-        <code>{html.escape(report.tuning_recommendation or 'review')}</code>
+    <tr>
+      <td><span class="severity-label severity-text-{html.escape(criticality_class(report.criticality))}">{html.escape(report.criticality)}</span></td>
+      <td><strong>{html.escape(report.rule_name or report.title)}</strong><code>{html.escape(route)}</code></td>
+      <td><span class="siem-table-pill">{html.escape(report.tuning_recommendation or 'review')}</span></td>
+      <td class="siem-reason-cell"><p>{html.escape(report.tuning_reason or ai_summary_for(report))}</p><em>{html.escape(action)}</em></td>
+      <td><b>{report.repeat_count}</b><span>{html.escape(report.ai_status_label)}</span></td>
+    </tr>'''
+
+
+def siem_engineering_detection_row(report: AlertReport) -> str:
+    destination = f'{report.destination_ip}:{report.destination_port}'
+    return f'''
+    <tr>
+      <td><span class="severity-label severity-text-{html.escape(criticality_class(report.criticality))}">{html.escape(report.criticality)}</span></td>
+      <td><strong>{html.escape(report.rule_name or report.title)}</strong><code>{html.escape(report.alert_source)}</code></td>
+      <td><span class="siem-table-pill">candidate</span></td>
+      <td class="siem-reason-cell"><p>{html.escape(ai_summary_for(report))}</p><em>Repeated pattern observed against {html.escape(destination)}. Review whether this deserves a new search, threshold, or enrichment-backed detection.</em></td>
+      <td><b>{report.repeat_count}</b><span>{html.escape(last_seen_iso_for(report))}</span></td>
+    </tr>'''
+
+
+def siem_engineering_table(title: str, subtitle: str, rows: str, empty: str) -> str:
+    body = rows or f'<tr class="siem-empty-row"><td colspan="5">{html.escape(empty)}</td></tr>'
+    return f'''
+    <section class="siem-table-section" aria-label="{html.escape(title)}">
+      <div class="siem-table-title"><h3>{html.escape(title)}</h3><p>{html.escape(subtitle)}</p></div>
+      <div class="siem-table-wrap">
+        <table class="siem-engineering-table">
+          <thead><tr><th>Severity</th><th>Detection</th><th>Type</th><th>Reason / recommendation</th><th>Activity</th></tr></thead>
+          <tbody>{body}</tbody>
+        </table>
       </div>
-      <h3>{html.escape(report.rule_name or report.title)}</h3>
-      <p>{html.escape(report.tuning_reason or ai_summary_for(report))}</p>
-      <div class="siem-rec-meta">
-        <span><b>Count</b>{report.repeat_count}</span>
-        <span><b>Route</b>{html.escape(route)}</span>
-        <span><b>AI</b>{html.escape(report.ai_status_label)}</span>
-      </div>
-      <ul>{action_items}</ul>
-    </article>'''
+    </section>'''
 
 
 def siem_engineering_page_section(reports: list[AlertReport]) -> str:
@@ -2227,25 +2245,8 @@ def siem_engineering_page_section(reports: list[AlertReport]) -> str:
         key=lambda report: (report.repeat_count, report.criticality_rank),
         reverse=True,
     )[:4]
-    current_rule_cards = ''.join(siem_engineering_recommendation_card(report) for report in actionable[:6])
-    if not current_rule_cards:
-        current_rule_cards = '<article class="siem-empty-card"><h3>No model-backed tuning recommendations yet</h3><p>Recommendations will appear after alert analysis artifacts include scoped tuning actions.</p></article>'
-    new_rule_cards = ''.join(
-        f'''
-        <article class="siem-rec-card">
-          <div class="siem-rec-head"><span class="siem-pill">Candidate detection</span><code>{html.escape(report.alert_source)}</code></div>
-          <h3>{html.escape(report.rule_name or report.title)}</h3>
-          <p>{html.escape(ai_summary_for(report))}</p>
-          <div class="siem-rec-meta">
-            <span><b>Repeated</b>{report.repeat_count}</span>
-            <span><b>Destination</b>{html.escape(report.destination_ip)}:{html.escape(report.destination_port)}</span>
-            <span><b>Last seen</b>{html.escape(last_seen_iso_for(report))}</span>
-          </div>
-        </article>'''
-        for report in repeated
-    )
-    if not new_rule_cards:
-        new_rule_cards = '<article class="siem-empty-card"><h3>No repeated detection candidates</h3><p>New rule ideas will be suggested here when repeated analyzed patterns need better coverage.</p></article>'
+    current_rule_rows = ''.join(siem_engineering_tuning_row(report) for report in actionable[:10])
+    new_rule_rows = ''.join(siem_engineering_detection_row(report) for report in repeated[:10])
     return f'''
     <section class="view-section active siem-engineering-view" aria-label="SIEM Engineering recommendations">
       <section class="siem-eng-hero">
@@ -2266,16 +2267,8 @@ def siem_engineering_page_section(reports: list[AlertReport]) -> str:
         <article><span>Tuning candidates</span><strong>{len(actionable)}</strong><em>Model-backed current-rule suggestions</em></article>
         <article><span>Detection candidates</span><strong>{len(repeated)}</strong><em>Repeated patterns for new rule review</em></article>
       </section>
-      <section class="siem-eng-grid">
-        <div class="siem-rec-column">
-          <div class="siem-column-title"><span>Current rule tuning</span><p>Scoped suppression, threshold, score, and filtering recommendations for existing detections.</p></div>
-          {current_rule_cards}
-        </div>
-        <div class="siem-rec-column">
-          <div class="siem-column-title"><span>New rule / detection creation</span><p>Patterns that may deserve new Security Onion searches, Sigma-style logic, or enrichment-driven detections.</p></div>
-          {new_rule_cards}
-        </div>
-      </section>
+      {siem_engineering_table('Current rule tuning', 'Scoped suppression, threshold, score, and filtering recommendations for existing detections.', current_rule_rows, 'No model-backed tuning recommendations yet. Recommendations will appear after analyzed artifacts include scoped tuning actions.')}
+      {siem_engineering_table('New rule / detection creation', 'Repeated patterns that may deserve new Security Onion searches, Sigma-style logic, or enrichment-driven detections.', new_rule_rows, 'No repeated detection candidates yet. New rule ideas will appear when analyzed patterns need better coverage.')}
     </section>'''
 
 
@@ -2778,7 +2771,7 @@ def inject_executive_home_assets(text: str) -> str:
 
 SIEM_ENGINEERING_CSS = '''
 <style>
-.siem-engineering-view{display:grid;gap:18px;padding-top:14px}.siem-eng-hero{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;border:1px solid rgba(148,163,184,.14);border-radius:14px;padding:20px;background:linear-gradient(135deg,#0d1620 0%,#101923 58%,#0b131c 100%);box-shadow:0 22px 48px rgba(0,0,0,.24),inset 0 1px 0 rgba(255,255,255,.035)}.siem-eng-hero h2{margin:12px 0 8px;color:#f5f9ff;font-size:32px;line-height:1;letter-spacing:-.035em}.siem-eng-hero p{max-width:76ch;margin:0;color:#9aaabd;font-size:14px;line-height:1.55}.settings-kicker{display:inline-block;color:#8ff4ff;font-size:11px;font-weight:950;text-transform:uppercase;letter-spacing:.13em}.siem-model-card{min-width:260px;border:1px solid rgba(34,211,238,.18);border-radius:12px;padding:14px 16px;background:#071018;text-align:right}.siem-model-card span,.siem-eng-kpis span,.siem-column-title span{display:block;color:#8ff4ff;font-size:11px;font-weight:950;text-transform:uppercase;letter-spacing:.1em}.siem-model-card strong{display:block;margin-top:8px;color:#f3f8ff;font-size:18px}.siem-model-card em{display:block;margin-top:6px;color:#91a4ba;font-size:12px;font-style:normal}.siem-eng-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.siem-eng-kpis article,.siem-rec-column,.siem-rec-card,.siem-empty-card{border:1px solid rgba(148,163,184,.13);border-radius:12px;background:#0d1620;box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}.siem-eng-kpis article{padding:16px}.siem-eng-kpis strong{display:block;margin-top:8px;color:#f7fbff;font-size:24px;line-height:1}.siem-eng-kpis em{display:block;margin-top:7px;color:#9aa8b8;font-size:12px;font-style:normal}.siem-eng-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.siem-rec-column{display:grid;align-content:start;gap:12px;padding:16px}.siem-column-title{padding:2px 2px 6px}.siem-column-title p{margin:7px 0 0;color:#9aa8b8;font-size:13px;line-height:1.45}.siem-rec-card,.siem-empty-card{padding:15px;background:#09131d}.siem-rec-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}.siem-rec-head code,.siem-pill{border:1px solid rgba(34,211,238,.18);border-radius:999px;padding:4px 8px;color:#8ff4ff;background:rgba(34,211,238,.06);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.04em}.siem-rec-card h3,.siem-empty-card h3{margin:0;color:#f4f8ff;font-size:15px;line-height:1.25}.siem-rec-card p,.siem-empty-card p{margin:9px 0 0;color:#aab8ca;font-size:13px;line-height:1.48}.siem-rec-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0}.siem-rec-meta span{min-width:0;border:1px solid rgba(148,163,184,.10);border-radius:9px;padding:7px 8px;color:#cbd8e7;background:rgba(148,163,184,.045);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.siem-rec-meta b{display:block;margin-bottom:3px;color:#8ff4ff;font-size:9px;text-transform:uppercase;letter-spacing:.08em}.siem-rec-card ul{margin:10px 0 0;padding-left:18px;color:#d7e3f1;font-size:12.5px;line-height:1.45}.siem-rec-card li+li{margin-top:6px}@media(max-width:1100px){.siem-eng-hero{display:grid}.siem-model-card{text-align:left}.siem-eng-kpis,.siem-eng-grid{grid-template-columns:1fr}.siem-rec-meta{grid-template-columns:1fr}}
+.siem-engineering-view{display:grid;gap:16px;padding-top:12px}.siem-eng-hero{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;align-items:end;border:1px solid rgba(148,163,184,.12);border-radius:10px;padding:18px;background:#0d1620;box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}.siem-eng-hero h2{margin:10px 0 7px;color:#f5f9ff;font-size:28px;line-height:1;letter-spacing:-.025em}.siem-eng-hero p{max-width:82ch;margin:0;color:#9aaabd;font-size:13px;line-height:1.55}.settings-kicker{display:inline-block;color:#8ff4ff;font-size:11px;font-weight:950;text-transform:uppercase;letter-spacing:.13em}.siem-model-card{min-width:260px;border-left:1px solid rgba(34,211,238,.20);padding-left:18px;text-align:right}.siem-model-card span,.siem-eng-kpis span{display:block;color:#8ff4ff;font-size:10.5px;font-weight:950;text-transform:uppercase;letter-spacing:.1em}.siem-model-card strong{display:block;margin-top:7px;color:#f3f8ff;font-size:17px}.siem-model-card em{display:block;margin-top:5px;color:#91a4ba;font-size:12px;font-style:normal}.siem-eng-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.siem-eng-kpis article{border:1px solid rgba(148,163,184,.11);border-radius:8px;padding:12px 14px;background:#0b141d}.siem-eng-kpis strong{display:block;margin-top:7px;color:#f7fbff;font-size:20px;line-height:1}.siem-eng-kpis em{display:block;margin-top:6px;color:#9aa8b8;font-size:12px;font-style:normal}.siem-table-section{display:grid;gap:10px}.siem-table-title{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;padding:0 2px}.siem-table-title h3{margin:0;color:#f4f8ff;font-size:17px;letter-spacing:-.01em}.siem-table-title p{max-width:76ch;margin:0;color:#91a4ba;font-size:12.5px;line-height:1.45;text-align:right}.siem-table-wrap{overflow:auto;border:1px solid rgba(148,163,184,.12);border-radius:10px;background:#0d1620}.siem-engineering-table{width:100%;min-width:1120px;border-collapse:collapse}.siem-engineering-table th{padding:11px 12px;border-bottom:1px solid rgba(148,163,184,.12);color:#96a6b8;background:#101b26;font-size:10.5px;font-weight:900;text-align:left;text-transform:uppercase;letter-spacing:.08em}.siem-engineering-table td{padding:14px 12px;border-bottom:1px solid rgba(148,163,184,.10);vertical-align:top;color:#d7e3f1;font-size:13px;line-height:1.4}.siem-engineering-table tbody tr{height:112px}.siem-engineering-table tbody tr:hover{background:rgba(34,211,238,.035)}.siem-engineering-table td:nth-child(1){width:116px}.siem-engineering-table td:nth-child(2){width:260px}.siem-engineering-table td:nth-child(3){width:128px}.siem-engineering-table td:nth-child(5){width:150px}.siem-engineering-table strong{display:block;color:#f4f8ff;font-size:13px;line-height:1.28}.siem-engineering-table code{display:block;margin-top:7px;color:#91a4ba;background:transparent;font:11.5px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;white-space:normal;overflow-wrap:anywhere}.siem-table-pill{display:inline-flex;align-items:center;border:1px solid rgba(34,211,238,.18);border-radius:999px;padding:4px 8px;color:#8ff4ff;background:rgba(34,211,238,.045);font-size:10.5px;font-weight:900;text-transform:uppercase;letter-spacing:.04em}.siem-reason-cell{min-width:420px}.siem-reason-cell p{margin:0;color:#dce8f7;font-size:13px;line-height:1.52;overflow-wrap:anywhere}.siem-reason-cell em{display:block;margin-top:8px;color:#9fb0c4;font-size:12.5px;font-style:normal;line-height:1.45;overflow-wrap:anywhere}.siem-engineering-table td:last-child b{display:block;color:#f4f8ff;font-size:18px;line-height:1}.siem-engineering-table td:last-child span{display:block;margin-top:7px;color:#91a4ba;font-size:11.5px;line-height:1.35;overflow-wrap:anywhere}.siem-empty-row td{padding:22px 14px;color:#91a4ba;text-align:center}@media(max-width:1100px){.siem-eng-hero{grid-template-columns:1fr}.siem-model-card{text-align:left;border-left:0;border-top:1px solid rgba(34,211,238,.18);padding:14px 0 0}.siem-eng-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.siem-table-title{display:grid}.siem-table-title p{text-align:left}}@media(max-width:680px){.siem-eng-kpis{grid-template-columns:1fr}}
 </style>
 '''
 
