@@ -2347,6 +2347,77 @@ def siem_engineering_detection_row(report: AlertReport) -> str:
     </tr>'''
 
 
+def siem_engineering_roi_score(report: AlertReport) -> tuple[int, int, int, float]:
+    has_model_tuning = 1 if report.tuning_recommendation and report.tuning_recommendation not in {'none', 'n/a', 'needs_more_data'} else 0
+    repeat_weight = max(report.repeat_count, report.raw_alert_count, report.total_seen_count, 1)
+    return (
+        has_model_tuning,
+        repeat_weight * max(report.criticality_rank, 1),
+        repeat_weight,
+        report.alert_ts,
+    )
+
+
+def siem_engineering_best_roi_section(reports: list[AlertReport]) -> str:
+    candidates = [
+        report for report in reports
+        if report.tuning_recommendation and report.tuning_recommendation not in {'none', 'n/a'}
+    ]
+    if not candidates:
+        candidates = [report for report in reports if report.repeat_count >= 2]
+    if not candidates:
+        return '''
+      <section class="siem-roi-card" aria-label="Best ROI tuning candidate">
+        <div class="siem-roi-head">
+          <span class="settings-kicker">Best ROI tuning candidate</span>
+          <h3>No tuning candidate yet</h3>
+        </div>
+        <div class="siem-roi-grid">
+          <article><span>Why it is priority</span><p>No repeated or model-backed tuning candidate is available in the current alert set.</p></article>
+          <article><span>How to tune</span><p>Let alert analysis complete first, then review repeated detections with specific source, destination, port, rule, and suppression evidence before changing SIEM rules.</p></article>
+          <article><span>Activity</span><p>0 observations ready for ROI ranking.</p></article>
+        </div>
+      </section>'''
+
+    best = max(candidates, key=siem_engineering_roi_score)
+    action = best.recommended_tuning_actions[0] if best.recommended_tuning_actions else (
+        'Run SIEM Engineer review before changing rules; tune only with a scoped condition such as rule name, source, destination, destination port, direction, or time window.'
+    )
+    route = f'{best.source_ip} > {best.destination_ip} : {best.destination_port}'
+    observation_count = max(best.repeat_count, best.raw_alert_count, best.total_seen_count, 1)
+    if best.tuning_recommendation in {'none', 'n/a', 'needs_more_data'}:
+        tuning_type = 'review'
+        why = (
+            f'This is the highest ROI review candidate because it has {observation_count} observations '
+            f'and {best.criticality} severity, but the model has not provided a safe tuning action yet.'
+        )
+    else:
+        tuning_type = best.tuning_recommendation
+        why = best.tuning_reason or (
+            f'This is the highest ROI tuning candidate because it combines {observation_count} observations, '
+            f'{best.criticality} severity, and a model-backed {best.tuning_recommendation} recommendation.'
+        )
+    return f'''
+      <section class="siem-roi-card" aria-label="Best ROI tuning candidate">
+        <div class="siem-roi-head">
+          <div>
+            <span class="settings-kicker">Best ROI tuning candidate</span>
+            <h3>{html.escape(best.rule_name or best.title)}</h3>
+            <code>{html.escape(route)}</code>
+          </div>
+          <div class="siem-roi-rank">
+            <span>#1 ROI</span>
+            <strong class="severity-text-{html.escape(criticality_class(best.criticality))}">{html.escape(best.criticality)}</strong>
+          </div>
+        </div>
+        <div class="siem-roi-grid">
+          <article><span>Why it is priority</span><p>{html.escape(why)}</p></article>
+          <article><span>How to tune</span><p>{html.escape(action)}</p></article>
+          <article><span>Activity</span><p>{html.escape(str(observation_count))} observations · {html.escape(tuning_type)} · {html.escape(best.ai_status_label)}</p></article>
+        </div>
+      </section>'''
+
+
 def siem_engineering_table(title: str, subtitle: str, rows: str, empty: str) -> str:
     body = rows or f'<tr class="siem-empty-row"><td colspan="5">{html.escape(empty)}</td></tr>'
     return f'''
@@ -2395,10 +2466,11 @@ def siem_engineering_page_section(reports: list[AlertReport]) -> str:
       </section>
       <section class="siem-eng-kpis" aria-label="SIEM engineering readiness">
         <article><span>Analysis gate</span><strong>{'Ready' if ready else 'Waiting'}</strong><em>{analyzed}/{len(reports)} detections analyzed</em></article>
-        <article><span>Cadence</span><strong>2-4h</strong><em>Run only after analysis backlog is clear</em></article>
+        <article><span>Cadence</span><strong>6h</strong><em>Run only after analysis backlog is clear</em></article>
         <article><span>Tuning candidates</span><strong>{len(actionable)}</strong><em>Model-backed current-rule suggestions</em></article>
         <article><span>Detection candidates</span><strong>{len(repeated)}</strong><em>Repeated patterns for new rule review</em></article>
       </section>
+      {siem_engineering_best_roi_section(reports)}
       {siem_engineering_table('Current rule tuning', 'Scoped suppression, threshold, score, and filtering recommendations for existing detections.', current_rule_rows, 'No model-backed tuning recommendations yet. Recommendations will appear after analyzed artifacts include scoped tuning actions.')}
       {siem_engineering_table('New rule / detection creation', 'Repeated patterns that may deserve new Security Onion searches, Sigma-style logic, or enrichment-driven detections.', new_rule_rows, 'No repeated detection candidates yet. New rule ideas will appear when analyzed patterns need better coverage.')}
     </section>'''
@@ -3227,7 +3299,7 @@ def inject_executive_home_assets(text: str) -> str:
 
 SIEM_ENGINEERING_CSS = '''
 <style>
-.siem-engineering-view{display:grid;gap:16px;padding-top:12px}.siem-eng-hero{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;align-items:end;border:1px solid rgba(148,163,184,.12);border-radius:10px;padding:18px;background:#0d1620;box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}.siem-eng-hero h2{margin:10px 0 7px;color:#f5f9ff;font-size:28px;line-height:1;letter-spacing:-.025em}.siem-eng-hero p{max-width:82ch;margin:0;color:#9aaabd;font-size:13px;line-height:1.55}.settings-kicker{display:inline-block;color:#8ff4ff;font-size:11px;font-weight:950;text-transform:uppercase;letter-spacing:.13em}.siem-model-card{min-width:260px;border-left:1px solid rgba(34,211,238,.20);padding-left:18px;text-align:right}.siem-model-card span,.siem-eng-kpis span{display:block;color:#8ff4ff;font-size:10.5px;font-weight:950;text-transform:uppercase;letter-spacing:.1em}.siem-model-card strong{display:block;margin-top:7px;color:#f3f8ff;font-size:17px}.siem-model-card em{display:block;margin-top:5px;color:#91a4ba;font-size:12px;font-style:normal}.siem-eng-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.siem-eng-kpis article{border:1px solid rgba(148,163,184,.11);border-radius:8px;padding:12px 14px;background:#0b141d}.siem-eng-kpis strong{display:block;margin-top:7px;color:#f7fbff;font-size:20px;line-height:1}.siem-eng-kpis em{display:block;margin-top:6px;color:#9aa8b8;font-size:12px;font-style:normal}.siem-table-section{display:grid;gap:10px}.siem-table-title{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;padding:0 2px}.siem-table-title h3{margin:0;color:#f4f8ff;font-size:17px;letter-spacing:-.01em}.siem-table-title p{max-width:76ch;margin:0;color:#91a4ba;font-size:12.5px;line-height:1.45;text-align:right}.siem-table-wrap{overflow:auto;border:1px solid rgba(148,163,184,.12);border-radius:10px;background:#0d1620}.siem-engineering-table{width:100%;min-width:1120px;border-collapse:collapse}.siem-engineering-table th{padding:11px 12px;border-bottom:1px solid rgba(148,163,184,.12);color:#96a6b8;background:#101b26;font-size:10.5px;font-weight:900;text-align:left;text-transform:uppercase;letter-spacing:.08em}.siem-engineering-table td{padding:14px 12px;border-bottom:1px solid rgba(148,163,184,.10);vertical-align:top;color:#d7e3f1;font-size:13px;line-height:1.4}.siem-engineering-table tbody tr{height:112px}.siem-engineering-table tbody tr:hover{background:rgba(34,211,238,.035)}.siem-engineering-table td:nth-child(1){width:116px}.siem-engineering-table td:nth-child(2){width:260px}.siem-engineering-table td:nth-child(3){width:128px}.siem-engineering-table td:nth-child(5){width:150px}.siem-engineering-table strong{display:block;color:#f4f8ff;font-size:13px;line-height:1.28}.siem-engineering-table code{display:block;margin-top:7px;color:#91a4ba;background:transparent;font:11.5px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;white-space:normal;overflow-wrap:anywhere}.siem-table-pill{display:inline-flex;align-items:center;border:1px solid rgba(34,211,238,.18);border-radius:999px;padding:4px 8px;color:#8ff4ff;background:rgba(34,211,238,.045);font-size:10.5px;font-weight:900;text-transform:uppercase;letter-spacing:.04em}.siem-reason-cell{min-width:420px}.siem-reason-cell p{margin:0;color:#dce8f7;font-size:13px;line-height:1.52;overflow-wrap:anywhere}.siem-reason-cell em{display:block;margin-top:8px;color:#9fb0c4;font-size:12.5px;font-style:normal;line-height:1.45;overflow-wrap:anywhere}.siem-engineering-table td:last-child b{display:block;color:#f4f8ff;font-size:18px;line-height:1}.siem-engineering-table td:last-child span{display:block;margin-top:7px;color:#91a4ba;font-size:11.5px;line-height:1.35;overflow-wrap:anywhere}.siem-empty-row td{padding:22px 14px;color:#91a4ba;text-align:center}@media(max-width:1100px){.siem-eng-hero{grid-template-columns:1fr}.siem-model-card{text-align:left;border-left:0;border-top:1px solid rgba(34,211,238,.18);padding:14px 0 0}.siem-eng-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.siem-table-title{display:grid}.siem-table-title p{text-align:left}}@media(max-width:680px){.siem-eng-kpis{grid-template-columns:1fr}}
+.siem-engineering-view{display:grid;gap:16px;padding-top:12px}.siem-eng-hero{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;align-items:end;border:1px solid rgba(148,163,184,.12);border-radius:10px;padding:18px;background:#0d1620;box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}.siem-eng-hero h2{margin:10px 0 7px;color:#f5f9ff;font-size:28px;line-height:1;letter-spacing:-.025em}.siem-eng-hero p{max-width:82ch;margin:0;color:#9aaabd;font-size:13px;line-height:1.55}.settings-kicker{display:inline-block;color:#8ff4ff;font-size:11px;font-weight:950;text-transform:uppercase;letter-spacing:.13em}.siem-model-card{min-width:260px;border-left:1px solid rgba(34,211,238,.20);padding-left:18px;text-align:right}.siem-model-card span,.siem-eng-kpis span,.siem-roi-grid span{display:block;color:#8ff4ff;font-size:10.5px;font-weight:950;text-transform:uppercase;letter-spacing:.1em}.siem-model-card strong{display:block;margin-top:7px;color:#f3f8ff;font-size:17px}.siem-model-card em{display:block;margin-top:5px;color:#91a4ba;font-size:12px;font-style:normal}.siem-eng-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.siem-eng-kpis article{border:1px solid rgba(148,163,184,.11);border-radius:8px;padding:12px 14px;background:#0b141d}.siem-eng-kpis strong{display:block;margin-top:7px;color:#f7fbff;font-size:20px;line-height:1}.siem-eng-kpis em{display:block;margin-top:6px;color:#9aa8b8;font-size:12px;font-style:normal}.siem-roi-card{display:grid;gap:14px;border:1px solid rgba(34,211,238,.18);border-radius:10px;padding:16px 18px;background:#0d1620;box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}.siem-roi-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.siem-roi-head h3{margin:8px 0 0;color:#f5f9ff;font-size:20px;line-height:1.18;letter-spacing:-.02em}.siem-roi-head code{display:block;margin-top:7px;color:#91a4ba;background:transparent;font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;white-space:normal;overflow-wrap:anywhere}.siem-roi-rank{min-width:118px;text-align:right}.siem-roi-rank span{display:block;color:#8ff4ff;font-size:10.5px;font-weight:950;text-transform:uppercase;letter-spacing:.1em}.siem-roi-rank strong{display:block;margin-top:7px;font-size:18px;line-height:1;text-transform:capitalize}.siem-roi-grid{display:grid;grid-template-columns:1.2fr 1.2fr .7fr;gap:10px}.siem-roi-grid article{border-top:1px solid rgba(148,163,184,.10);padding-top:12px}.siem-roi-grid p{margin:7px 0 0;color:#dce8f7;font-size:13px;line-height:1.5;overflow-wrap:anywhere}.siem-table-section{display:grid;gap:10px}.siem-table-title{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;padding:0 2px}.siem-table-title h3{margin:0;color:#f4f8ff;font-size:17px;letter-spacing:-.01em}.siem-table-title p{max-width:76ch;margin:0;color:#91a4ba;font-size:12.5px;line-height:1.45;text-align:right}.siem-table-wrap{overflow:auto;border:1px solid rgba(148,163,184,.12);border-radius:10px;background:#0d1620}.siem-engineering-table{width:100%;min-width:1120px;border-collapse:collapse}.siem-engineering-table th{padding:11px 12px;border-bottom:1px solid rgba(148,163,184,.12);color:#96a6b8;background:#101b26;font-size:10.5px;font-weight:900;text-align:left;text-transform:uppercase;letter-spacing:.08em}.siem-engineering-table td{padding:14px 12px;border-bottom:1px solid rgba(148,163,184,.10);vertical-align:top;color:#d7e3f1;font-size:13px;line-height:1.4}.siem-engineering-table tbody tr{height:112px}.siem-engineering-table tbody tr:hover{background:rgba(34,211,238,.035)}.siem-engineering-table td:nth-child(1){width:116px}.siem-engineering-table td:nth-child(2){width:260px}.siem-engineering-table td:nth-child(3){width:128px}.siem-engineering-table td:nth-child(5){width:150px}.siem-engineering-table strong{display:block;color:#f4f8ff;font-size:13px;line-height:1.28}.siem-engineering-table code{display:block;margin-top:7px;color:#91a4ba;background:transparent;font:11.5px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;white-space:normal;overflow-wrap:anywhere}.siem-table-pill{display:inline-flex;align-items:center;border:1px solid rgba(34,211,238,.18);border-radius:999px;padding:4px 8px;color:#8ff4ff;background:rgba(34,211,238,.045);font-size:10.5px;font-weight:900;text-transform:uppercase;letter-spacing:.04em}.siem-reason-cell{min-width:420px}.siem-reason-cell p{margin:0;color:#dce8f7;font-size:13px;line-height:1.52;overflow-wrap:anywhere}.siem-reason-cell em{display:block;margin-top:8px;color:#9fb0c4;font-size:12.5px;font-style:normal;line-height:1.45;overflow-wrap:anywhere}.siem-engineering-table td:last-child b{display:block;color:#f4f8ff;font-size:18px;line-height:1}.siem-engineering-table td:last-child span{display:block;margin-top:7px;color:#91a4ba;font-size:11.5px;line-height:1.35;overflow-wrap:anywhere}.siem-empty-row td{padding:22px 14px;color:#91a4ba;text-align:center}@media(max-width:1100px){.siem-eng-hero{grid-template-columns:1fr}.siem-model-card{text-align:left;border-left:0;border-top:1px solid rgba(34,211,238,.18);padding:14px 0 0}.siem-eng-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.siem-roi-grid{grid-template-columns:1fr}.siem-table-title{display:grid}.siem-table-title p{text-align:left}}@media(max-width:680px){.siem-eng-kpis{grid-template-columns:1fr}.siem-roi-head{display:grid}.siem-roi-rank{text-align:left}}
 </style>
 '''
 
