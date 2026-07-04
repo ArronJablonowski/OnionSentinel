@@ -1,0 +1,9 @@
+{
+  "cloud_command": "",
+  "cloud_model": "",
+  "cloud_provider": "gpt-cli",
+  "hybrid_policy": "cloud_for_critical_high_or_recommended",
+  "mode": "ollama",
+  "ollama_model": "devstral:latest",
+  "ollama_url": "http://127.0.0.1:11434"
+}

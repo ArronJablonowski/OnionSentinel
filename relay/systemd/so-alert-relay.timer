@@ -1,0 +1,16 @@
+[Unit]
+Description=Run Security Onion alert relay every 5 minutes
+
+[Timer]
+# First run after boot gives networking and Docker/n8n a little time to settle.
+OnBootSec=2min
+# Repeat every five minutes after activation and after each service run.
+OnActiveSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+# If the Pi was off during a scheduled run, systemd catches up after boot.
+Persistent=true
+Unit=so-alert-relay.service
+
+[Install]
+WantedBy=timers.target

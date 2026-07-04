@@ -1,0 +1,61 @@
+# Raspberry Pi Relay Node
+
+The relay is intentionally dumb and reliable. It pulls alerts from Security Onion through restricted SSH and POSTs new alerts to the Mac Studio n8n webhook. Filtering, scoring, suppression, AI analysis, reporting, and Telegram notification decisions belong to n8n/alert-store on the Mac Studio.
+
+## Files
+
+| File | Destination | Purpose |
+| --- | --- | --- |
+| `app/relay.py` | `/opt/so-alert-relay/app/relay.py` | Pulls alert JSON and posts new alerts. |
+| `app/relay_health_wrapper.py` | `/opt/so-alert-relay/app/relay_health_wrapper.py` | Adds failure/recovery notification thresholding. |
+| `config/config.example.json` | `/opt/so-alert-relay/app/config.json` | Non-secret relay config. |
+| `config/relay.example.env` | `/etc/so-alert-relay/relay.env` | Secret-bearing env template. Do not commit live copy. |
+| `systemd/so-alert-relay.service` | `/etc/systemd/system/so-alert-relay.service` | One relay execution. |
+| `systemd/so-alert-relay.timer` | `/etc/systemd/system/so-alert-relay.timer` | Runs relay every 5 minutes. |
+| `ssh/99-key-only-admin.conf` | `/etc/ssh/sshd_config.d/99-key-only-admin.conf` | Optional SSH hardening after deployment is confirmed. |
+
+## Install
+
+```bash
+cd /path/to/OnionSentinel
+sudo relay/bin/install-pi-relay.sh
+```
+
+Then install the Security Onion private key:
+
+```bash
+sudo install -o soalert -g soalert -m 0600 /path/to/so-ai-relay_ed25519 /opt/so-alert-relay/keys/so-ai-relay_ed25519
+```
+
+Edit the live env file:
+
+```bash
+sudo nano /etc/so-alert-relay/relay.env
+sudo chmod 0640 /etc/so-alert-relay/relay.env
+sudo chown root:soalert /etc/so-alert-relay/relay.env
+```
+
+Required live values:
+
+- `RELAY_WEBHOOK_URL`
+- `RELAY_WEBHOOK_TOKEN`
+- `TELEGRAM_BOT_TOKEN` for relay health notifications
+- `TELEGRAM_CHAT_ID` for relay health notifications
+
+## Validate
+
+```bash
+sudo -u soalert /usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/so-alert-relay/app/config.json --pull-once
+sudo systemctl start so-alert-relay.service
+sudo journalctl -u so-alert-relay.service -n 50 --no-pager
+sudo systemctl enable --now so-alert-relay.timer
+```
+
+## Firewall Needs
+
+From relay `10.88.8.8`:
+
+- to Security Onion `192.168.1.7:22/tcp`
+- to Mac Studio `10.77.7.225:5678/tcp`
+- to DNS `53/tcp,udp`
+- to `api.telegram.org:443/tcp` if relay health notifications are enabled

@@ -1,0 +1,1 @@
+so-ai-relay ALL=(root) NOPASSWD: /usr/local/sbin/export-recent-alerts

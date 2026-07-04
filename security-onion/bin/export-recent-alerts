@@ -1,0 +1,122 @@
+#!/bin/bash
+set -euo pipefail
+
+# Security Onion forced-command wrapper. The Pi connects as so-ai-relay, but SSH
+# authorized_keys forces this script regardless of the command the client sends.
+LOOKBACK="${SO_ALERT_LOOKBACK:-10m}"
+SIZE="${SO_ALERT_SIZE:-100}"
+MAX_SIZE=500
+
+# Clamp caller-controlled size to prevent accidental heavy Elasticsearch pulls.
+if ! [[ "$SIZE" =~ ^[0-9]+$ ]]; then
+  SIZE=100
+fi
+if (( SIZE > MAX_SIZE )); then
+  SIZE=$MAX_SIZE
+fi
+
+QUERY_FILE=$(mktemp)
+trap 'rm -f "$QUERY_FILE"' EXIT
+
+# Pull the full Security Onion alert document. The Pi forwards this JSON as-is;
+# Mac Studio stores it in SQLite and renders it in each alert detail page. This
+# full-fidelity mode may include packet, payload, PCAP, and HTTP body fields when
+# Security Onion has them available.
+cat > "$QUERY_FILE" <<JSON
+{
+  "size": $SIZE,
+  "sort": [{"@timestamp": {"order": "desc"}}],
+  "_source": true,
+  "query": {
+    "range": {
+      "@timestamp": {
+        "gte": "now-$LOOKBACK"
+      }
+    }
+  }
+}
+JSON
+
+RAW=$(/usr/sbin/so-elasticsearch-query 'logs-suricata.alerts-so,logs-detections.alerts-so/_search?ignore_unavailable=true' -d @"$QUERY_FILE")
+
+# Normalize Security Onion's Elasticsearch response into the compact JSON schema
+# consumed by relay/app/relay.py.
+jq -c --arg exported_at "$(date -u '+%Y-%m-%d  %H:%M:%SZ')" --arg lookback "$LOOKBACK" '
+{
+  source: "security-onion",
+  exported_at: $exported_at,
+  query: {
+    lookback: $lookback,
+    max_alerts: (.hits.hits | length),
+    total: (.hits.total.value // .hits.total // null)
+  },
+  alerts: [
+    .hits.hits[] | ._source as $s | {
+      alert_id: (._index + ":" + ._id),
+      elastic_id: ._id,
+      elastic_index: ._index,
+      timestamp: $s["@timestamp"],
+      message: (($s.message | fromjson? | .alert.signature) // $s.message // $s.rule.name // null),
+      tags: ($s.tags // []),
+      labels: ($s.labels // {}),
+      sensor: ($s.observer.name // null),
+      host: ($s.host.name // null),
+      event_dataset: ($s.event.dataset // null),
+      event_category: ($s.event.category // null),
+      event_module: ($s.event.module // null),
+      severity: ($s.event.severity // $s.rule.severity // null),
+      severity_label: ($s.event.severity_label // null),
+      rule_name: ($s.rule.name // null),
+      rule_id: ($s.rule.uuid // null),
+      rule_category: ($s.rule.category // null),
+      rule_action: ($s.rule.action // null),
+      rule_ruleset: ($s.rule.ruleset // null),
+      rule_reference: ($s.rule.reference // null),
+      rule_metadata: ($s.rule.metadata // {}),
+      source: {
+        ip: ($s.source.ip // null),
+        port: ($s.source.port // null),
+        asn: ($s.source.as.number // null),
+        org: ($s.source.as.organization.name // null),
+        country: ($s.source.geo.country_iso_code // null)
+      },
+      destination: {
+        ip: ($s.destination.ip // null),
+        port: ($s.destination.port // null),
+        asn: ($s.destination.as.number // null),
+        org: ($s.destination.as.organization.name // null),
+        country: ($s.destination.geo.country_iso_code // null)
+      },
+      network: {
+        transport: ($s.network.transport // null),
+        community_id: ($s.network.community_id // null),
+        vlan: ($s.network.vlan.id // null),
+        public_ip: ($s.network.public_ip // []),
+        private_ip: ($s.network.private_ip // [])
+      },
+      observer: {
+        name: ($s.observer.name // null),
+        ingress_interface: ($s.observer.ingress.interface.name // null)
+      },
+      ecs: ($s.ecs // {}),
+      agent: ($s.agent // {}),
+      log: ($s.log // {}),
+      dns: ($s.dns // {}),
+      http: ($s.http // {}),
+      url: ($s.url // {}),
+      tls: ($s.tls // {}),
+      file: ($s.file // {}),
+      process: ($s.process // {}),
+      user: ($s.user // {}),
+      related: ($s.related // {}),
+      threat: ($s.threat // {}),
+      zeek: ($s.zeek // {}),
+      suricata: ($s.suricata // {}),
+      security_onion: {
+        raw_event: $s,
+        enrichment_note: "Full-fidelity Security Onion alert document. Packet, payload, PCAP, and HTTP body fields are retained when present."
+      }
+    }
+  ]
+}
+' <<< "$RAW"

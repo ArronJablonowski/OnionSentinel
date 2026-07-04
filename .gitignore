@@ -1,0 +1,65 @@
+# Onion Sentinel runtime secrets and generated state
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+*secret*
+*secrets*
+*token*
+*tokens*
+*credential*
+*credentials*
+*password*
+*.key
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+*_rsa
+*_ed25519
+authorized_keys.local
+!operations/secret-scan.zsh
+
+# Databases, queues, runtime state
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+n8n_data/
+alert_store_data/
+soc-alerts/
+state/
+batches/
+new-alerts/
+logs/
+run/
+
+# Generated dashboard/report output
+SOC Alerts Web/
+reports/
+daily-rollups/
+ai-prompts/
+ai-analysis/
+n8n-beacon.json
+soc-alerts-status.json
+
+# Local portal/admin state
+.admin_*
+admin-state/
+.admin_sessions.json
+.admin_password.json
+
+# OS/editor/build noise
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+coverage/
+dist/
+build/
+tmp/
+*.log

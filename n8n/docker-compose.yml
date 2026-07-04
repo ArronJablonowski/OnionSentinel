@@ -1,0 +1,46 @@
+services:
+  alert-store:
+    # Uses the n8n image so sqlite3 is already available; alert-store itself is
+    # the Node script mounted at /app/alert_store.js.
+    image: n8nio/n8n:latest
+    container_name: alert-store
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      # The real Telegram token comes from .env, not from this repo.
+      - ALERT_STORE_DB=/data/alerts.sqlite3
+      - ALERT_STORE_BEACON_PATHS=/data/n8n-beacon.json,/portal/n8n-beacon.json
+      - ALERT_STORE_PORT=8787
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - TELEGRAM_ALERT_LEVELS=${TELEGRAM_ALERT_LEVELS:-critical,high}
+      - TELEGRAM_COOLDOWN_SECONDS=${TELEGRAM_COOLDOWN_SECONDS:-900}
+    volumes:
+      # Source code is read-only; SQLite data persists in alert_store_data.
+      - ./alert_store:/app:ro
+      - ./alert_store_data:/data
+      - ${SOC_ALERTS_PORTAL_DIR:-./portal}:/portal
+    entrypoint: ["node", "/app/alert_store.js"]
+
+  n8n:
+    # n8n hosts the webhook workflow and forwards accepted alerts to alert-store
+    # over the Docker-internal service name.
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - TZ=America/Denver
+      # Local HTTP deployment; do not expose this service directly to the Internet.
+      - N8N_SECURE_COOKIE=false
+      # The workflow uses http/url for alert-store and fs/path to render
+      # Obsidian-compatible Markdown reports into /soc-alerts.
+      - NODE_FUNCTION_ALLOW_BUILTIN=http,https,url,fs,path
+    volumes:
+      - ./n8n_data:/home/node/.n8n
+      # Keep Docker's bind mount inside n8n-local. The user-facing
+      # ~/Documents/SOC Alerts path should be a symlink to this directory so
+      # Hermes and Obsidian see the reports without Docker needing a protected
+      # Documents-folder mount.
+      - ./soc-alerts:/soc-alerts

@@ -1,0 +1,62 @@
+#!/bin/bash
+set -euo pipefail
+
+# Run this locally on the Pi after cloning/copying the DR repo there.
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "Run on the Pi with sudo: sudo $0" >&2
+  exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+if ! id soalert >/dev/null 2>&1; then
+  # Dedicated service account owns runtime files but cannot log in.
+  useradd --system --home-dir /opt/so-alert-relay --shell /usr/sbin/nologin soalert
+fi
+
+# Install directories with restrictive permissions. The key and env directories
+# are intentionally not world-readable.
+install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay
+install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay/app
+install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay/keys
+install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay/state
+install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay/state/batches
+install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay/state/new-alerts
+install -o root -g soalert -m 0750 -d /etc/so-alert-relay
+
+install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay.py" /opt/so-alert-relay/app/relay.py
+install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay_health_wrapper.py" /opt/so-alert-relay/app/relay_health_wrapper.py
+install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/config/config.example.json" /opt/so-alert-relay/app/config.json
+
+if [[ ! -f /etc/so-alert-relay/relay.env ]]; then
+  # Do not overwrite live secrets during a repair install.
+  install -o root -g soalert -m 0640 "$REPO_DIR/relay/config/relay.example.env" /etc/so-alert-relay/relay.env
+  echo "Created /etc/so-alert-relay/relay.env from example. Edit it before enabling live forwarding." >&2
+fi
+
+install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-alert-relay.service" /etc/systemd/system/so-alert-relay.service
+install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-alert-relay.timer" /etc/systemd/system/so-alert-relay.timer
+
+systemctl daemon-reload
+# NetworkManager-wait-online may not exist on every OS image; tolerate that.
+systemctl enable NetworkManager-wait-online.service >/dev/null 2>&1 || true
+systemctl enable so-alert-relay.timer
+
+cat <<'MSG'
+
+Pi relay installed.
+
+Required manual steps:
+1. Put the Security Onion private key at /opt/so-alert-relay/keys/so-ai-relay_ed25519.
+2. chown soalert:soalert /opt/so-alert-relay/keys/so-ai-relay_ed25519
+3. chmod 0600 /opt/so-alert-relay/keys/so-ai-relay_ed25519
+4. Edit /etc/so-alert-relay/relay.env and replace placeholder tokens.
+5. Verify /opt/so-alert-relay/app/config.json host/path values.
+
+Test:
+  sudo -u soalert /usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/so-alert-relay/app/config.json --pull-once
+  sudo systemctl start so-alert-relay.service
+  sudo journalctl -u so-alert-relay.service -n 30 --no-pager
+
+MSG
