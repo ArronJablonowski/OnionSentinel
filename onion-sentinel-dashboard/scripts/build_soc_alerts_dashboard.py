@@ -45,6 +45,7 @@ N8N_BEACON_JSON = OUT_DIR / 'n8n-beacon.json'
 DB_PATH = HOME / 'n8n-local' / 'alert_store_data' / 'alerts.sqlite3'
 DB_BEACON_JSON = HOME / 'n8n-local' / 'alert_store_data' / 'n8n-beacon.json'
 SOC_ANALYST_PROMPT_FILE = HOME / 'n8n-local' / 'config' / 'soc_analyst_system_prompt.md'
+SIEM_ENGINEER_PROMPT_FILE = HOME / 'n8n-local' / 'config' / 'siem_engineer_system_prompt.md'
 SOC_AI_SETTINGS_FILE = HOME / 'n8n-local' / 'config' / 'ai_model_settings.json'
 ASSET_SOURCE_DIRS = (
     Path(__file__).resolve().parent.parent / 'assets',
@@ -60,7 +61,7 @@ PAGE_DEFS = [
     ('playbooks', 'playbooks.html', 'Playbooks', 'Response checklists and investigation paths'),
     ('automations', 'automations.html', 'Automations', 'n8n workflow and relay automation status'),
     ('sources', 'sources.html', 'Sources', 'Security Onion, relay, SQLite, and AI data sources'),
-    ('siem_tuning', 'siem-tuning.html', 'SIEM Tuning', 'Filtering, scoring, suppression, and detection tuning workspace'),
+    ('siem_engineering', 'siem-engineering.html', 'SIEM Engineering', 'Tuning recommendations and detection engineering workspace'),
     ('settings', 'settings.html', 'Settings', 'Dashboard and SOC workflow configuration'),
     ('flow', 'flow.html', 'Flow', 'Autonomous SIEM alert enrichment flow map'),
 ]
@@ -90,6 +91,21 @@ Rules:
 - Recommend tuning only when the evidence supports suppression, dropping, score changes, or more data collection.
 - Prefer local/private analysis. Recommend hosted second opinion only when severity, uncertainty, or impact justifies it."""
 
+DEFAULT_SIEM_ENGINEER_PROMPT = """You are a careful SIEM engineer. Use only the supplied Onion Sentinel evidence.
+
+Your job is to review analyzed Security Onion detections, enrichment, analyst notes, acknowledgments, suppressions, duplicate timelines, and AI analysis artifacts, then recommend safe SIEM engineering improvements.
+
+Rules:
+- Return one valid JSON object and no prose outside JSON.
+- Run only after all eligible alerts/detections are already analyzed.
+- Treat acknowledgments and suppressions as analyst signals, not proof that activity is safe.
+- Recommend tuning only when the evidence supports it and the condition is specific enough to avoid hiding unrelated threats.
+- Separate current-rule tuning from new rule or detection creation.
+- Prefer scoped conditions: rule name, source IP, destination IP, destination port, direction, suppression key, threshold, time window, asset role, and known-benign reason.
+- Include validation steps and rollback guidance for every tuning recommendation.
+- If evidence is insufficient, recommend data collection instead of tuning.
+- Do not invent hostnames, users, packet contents, tools, malware names, or business context."""
+
 
 def normalize_iso_display_text(value: object) -> str:
     """Display ISO-like timestamps with two spaces instead of `T`."""
@@ -105,6 +121,17 @@ def load_soc_analyst_prompt() -> str:
     except Exception:
         pass
     return DEFAULT_SOC_ANALYST_PROMPT
+
+
+def load_siem_engineer_prompt() -> str:
+    """Read the editable SIEM Engineer system prompt for the Settings page."""
+    try:
+        prompt = SIEM_ENGINEER_PROMPT_FILE.read_text(encoding='utf-8').strip()
+        if prompt:
+            return prompt
+    except Exception:
+        pass
+    return DEFAULT_SIEM_ENGINEER_PROMPT
 
 
 def default_soc_ai_settings() -> dict[str, str]:
@@ -278,6 +305,9 @@ class AlertReport:
     ai_status_key: str
     ai_status_label: str
     ai_status_detail: str
+    tuning_recommendation: str
+    tuning_reason: str
+    recommended_tuning_actions: list[str]
 
 
 def clean_title_from_markdown(text: str, path: Path) -> str:
@@ -1298,6 +1328,12 @@ def report_from_sqlite_row(row: sqlite3.Row | dict, markdown_by_alert_id: dict[s
     alert_group = row['alert_group_key'] or alert_group_key(row)
     markdown = markdown_by_alert_id.get(row['alert_id'])
     ai_analysis = ai_analysis_for_row(row, ai_analysis_by_alert_id)
+    ai_response = ai_analysis.get('response') if isinstance(ai_analysis, dict) and isinstance(ai_analysis.get('response'), dict) else {}
+    recommended_tuning_actions = [
+        str(action).strip()
+        for action in (ai_response.get('recommended_tuning_actions') if isinstance(ai_response.get('recommended_tuning_actions'), list) else [])
+        if str(action).strip()
+    ]
     ai_status_key, ai_status_label, ai_status_detail = ai_workflow_status_for_row(row, ai_analysis_by_alert_id, ai_prompts_by_alert_id, running_ai_alert_ids)
     ai_details = ai_analysis_report_markdown(ai_analysis)
     ai_response_json = complete_ai_response_json_markdown(ai_analysis)
@@ -1394,6 +1430,9 @@ def report_from_sqlite_row(row: sqlite3.Row | dict, markdown_by_alert_id: dict[s
         ai_status_key=ai_status_key,
         ai_status_label=ai_status_label,
         ai_status_detail=ai_status_detail,
+        tuning_recommendation=str(ai_response.get('tuning_recommendation') or 'none').strip().lower(),
+        tuning_reason=str(ai_response.get('tuning_reason') or '').strip(),
+        recommended_tuning_actions=recommended_tuning_actions,
     )
 
 
@@ -1453,6 +1492,9 @@ def load_markdown_only_reports() -> list[AlertReport]:
                 ai_status_key='not-queued',
                 ai_status_label='Not queued',
                 ai_status_detail='SQLite alert-store is unavailable; AI status cannot be resolved',
+                tuning_recommendation='none',
+                tuning_reason='',
+                recommended_tuning_actions=[],
             ))
     return sorted(reports, key=lambda r: (r.criticality_rank, r.mtime, r.title.lower()), reverse=True)
 
@@ -2115,7 +2157,7 @@ NAV_ICONS = {
     'playbooks': '<svg viewBox="0 0 24 24"><path d="M4 20V11h4v9M10 20V5h4v15M16 20V8h4v12M3 20h18"/></svg>',
     'automations': '<svg viewBox="0 0 24 24"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/><path d="M19.4 15a8 8 0 0 0 .1-1l2-1.5-2-3.5-2.4 1a7.8 7.8 0 0 0-1.7-1L15 6.5h-4L10.6 9a7.8 7.8 0 0 0-1.7 1l-2.4-1-2 3.5 2 1.5a8 8 0 0 0 .1 2l-2 1.5 2 3.5 2.4-1a7.8 7.8 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7.8 7.8 0 0 0 1.7-1l2.4 1 2-3.5-2.2-1.5Z"/></svg>',
     'sources': '<svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>',
-    'siem_tuning': '<svg viewBox="0 0 24 24"><path d="M4 6h7M15 6h5M4 12h4M12 12h8M4 18h10M18 18h2"/><circle cx="13" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="16" cy="18" r="2"/></svg>',
+    'siem_engineering': '<svg viewBox="0 0 24 24"><path d="M4 6h7M15 6h5M4 12h4M12 12h8M4 18h10M18 18h2"/><circle cx="13" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="16" cy="18" r="2"/></svg>',
     'settings': '<svg viewBox="0 0 24 24"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/><path d="M19.4 15a8 8 0 0 0 .1-1l2-1.5-2-3.5-2.4 1a7.8 7.8 0 0 0-1.7-1L15 6.5h-4L10.6 9a7.8 7.8 0 0 0-1.7 1l-2.4-1-2 3.5 2 1.5a8 8 0 0 0 .1 2l-2 1.5 2 3.5 2.4-1a7.8 7.8 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7.8 7.8 0 0 0 1.7-1l2.4 1 2-3.5-2.2-1.5Z"/></svg>',
 }
 
@@ -2145,6 +2187,95 @@ def placeholder_page_section(page_key: str) -> str:
         <p>{subtitle}</p>
         <p>This page now has its own route. Data-backed widgets can be added here without changing the SOC Alerts table page.</p>
       </div>
+    </section>'''
+
+
+def siem_engineering_recommendation_card(report: AlertReport) -> str:
+    actions = report.recommended_tuning_actions[:3] or ([report.tuning_reason] if report.tuning_reason else ['Review this detection after the SIEM Engineer model run completes.'])
+    action_items = ''.join(f'<li>{html.escape(action)}</li>' for action in actions if action)
+    route = f'{report.source_ip} > {report.destination_ip} : {report.destination_port}'
+    return f'''
+    <article class="siem-rec-card">
+      <div class="siem-rec-head">
+        <span class="severity-label severity-text-{html.escape(criticality_class(report.criticality))}">{html.escape(report.criticality)}</span>
+        <code>{html.escape(report.tuning_recommendation or 'review')}</code>
+      </div>
+      <h3>{html.escape(report.rule_name or report.title)}</h3>
+      <p>{html.escape(report.tuning_reason or ai_summary_for(report))}</p>
+      <div class="siem-rec-meta">
+        <span><b>Count</b>{report.repeat_count}</span>
+        <span><b>Route</b>{html.escape(route)}</span>
+        <span><b>AI</b>{html.escape(report.ai_status_label)}</span>
+      </div>
+      <ul>{action_items}</ul>
+    </article>'''
+
+
+def siem_engineering_page_section(reports: list[AlertReport]) -> str:
+    settings = load_soc_ai_settings()
+    mode = settings.get('mode', 'ollama')
+    local_model = settings.get('ollama_model') or current_local_ai_model()
+    cloud_model = settings.get('cloud_model') or settings.get('cloud_provider') or 'not configured'
+    analyzed = sum(1 for report in reports if report.ai_status_key == 'analyzed')
+    ready = bool(reports) and analyzed == len(reports)
+    actionable = [
+        report for report in reports
+        if report.tuning_recommendation and report.tuning_recommendation not in {'none', 'n/a', 'needs_more_data'}
+    ]
+    repeated = sorted(
+        [report for report in reports if report.repeat_count >= 3 and report not in actionable],
+        key=lambda report: (report.repeat_count, report.criticality_rank),
+        reverse=True,
+    )[:4]
+    current_rule_cards = ''.join(siem_engineering_recommendation_card(report) for report in actionable[:6])
+    if not current_rule_cards:
+        current_rule_cards = '<article class="siem-empty-card"><h3>No model-backed tuning recommendations yet</h3><p>Recommendations will appear after alert analysis artifacts include scoped tuning actions.</p></article>'
+    new_rule_cards = ''.join(
+        f'''
+        <article class="siem-rec-card">
+          <div class="siem-rec-head"><span class="siem-pill">Candidate detection</span><code>{html.escape(report.alert_source)}</code></div>
+          <h3>{html.escape(report.rule_name or report.title)}</h3>
+          <p>{html.escape(ai_summary_for(report))}</p>
+          <div class="siem-rec-meta">
+            <span><b>Repeated</b>{report.repeat_count}</span>
+            <span><b>Destination</b>{html.escape(report.destination_ip)}:{html.escape(report.destination_port)}</span>
+            <span><b>Last seen</b>{html.escape(last_seen_iso_for(report))}</span>
+          </div>
+        </article>'''
+        for report in repeated
+    )
+    if not new_rule_cards:
+        new_rule_cards = '<article class="siem-empty-card"><h3>No repeated detection candidates</h3><p>New rule ideas will be suggested here when repeated analyzed patterns need better coverage.</p></article>'
+    return f'''
+    <section class="view-section active siem-engineering-view" aria-label="SIEM Engineering recommendations">
+      <section class="siem-eng-hero">
+        <div>
+          <span class="settings-kicker">SIEM engineering</span>
+          <h2>Model-assisted tuning and detection design</h2>
+          <p>Uses the configured AI analysis model path to turn analyzed alert history, suppressions, acknowledgments, notes, enrichment, and duplicate patterns into safe engineering recommendations.</p>
+        </div>
+        <div class="siem-model-card">
+          <span>Current model route</span>
+          <strong>{html.escape(mode.title())}</strong>
+          <em>Local: {html.escape(local_model)} · Cloud: {html.escape(cloud_model)}</em>
+        </div>
+      </section>
+      <section class="siem-eng-kpis" aria-label="SIEM engineering readiness">
+        <article><span>Analysis gate</span><strong>{'Ready' if ready else 'Waiting'}</strong><em>{analyzed}/{len(reports)} detections analyzed</em></article>
+        <article><span>Cadence</span><strong>2-4h</strong><em>Run only after analysis backlog is clear</em></article>
+        <article><span>Tuning candidates</span><strong>{len(actionable)}</strong><em>Model-backed current-rule suggestions</em></article>
+        <article><span>Detection candidates</span><strong>{len(repeated)}</strong><em>Repeated patterns for new rule review</em></article>
+      </section>
+      <section class="siem-eng-grid">
+        <div class="siem-rec-column">
+          <div class="siem-column-title"><span>Current rule tuning</span><p>Scoped suppression, threshold, score, and filtering recommendations for existing detections.</p></div>
+          {current_rule_cards}
+        </div>
+        <div class="siem-rec-column">
+          <div class="siem-column-title"><span>New rule / detection creation</span><p>Patterns that may deserve new Security Onion searches, Sigma-style logic, or enrichment-driven detections.</p></div>
+          {new_rule_cards}
+        </div>
+      </section>
     </section>'''
 
 
@@ -2273,6 +2404,8 @@ def flow_page_section(reports: list[AlertReport]) -> str:
 def settings_page_section() -> str:
     prompt = html.escape(load_soc_analyst_prompt())
     prompt_path = html.escape(str(SOC_ANALYST_PROMPT_FILE).replace(str(HOME), '~'))
+    engineer_prompt = html.escape(load_siem_engineer_prompt())
+    engineer_prompt_path = html.escape(str(SIEM_ENGINEER_PROMPT_FILE).replace(str(HOME), '~'))
     ai_settings = load_soc_ai_settings()
     ai_path = html.escape(str(SOC_AI_SETTINGS_FILE).replace(str(HOME), '~'))
     mode = ai_settings['mode']
@@ -2384,6 +2517,27 @@ def settings_page_section() -> str:
           <span id="soc-analyst-prompt-status" class="settings-save-status" role="status" aria-live="polite"></span>
         </div>
       </details>
+      <details class="settings-panel settings-details" aria-labelledby="siem-engineer-prompt-title">
+        <summary>
+          <span>
+            <span class="settings-kicker">SIEM engineer prompt</span>
+            <strong id="siem-engineer-prompt-title">SIEM Engineer System Prompt</strong>
+          </span>
+          <code>{engineer_prompt_path}</code>
+        </summary>
+        <div class="settings-panel-top">
+          <div>
+            <p>This prompt guides the SIEM Engineering review that recommends scoped tuning and new detection work after all eligible alerts have finished AI analysis.</p>
+          </div>
+        </div>
+        <div class="settings-note">Designed cadence: every 2-4 hours, only when the alert analysis backlog is clear. It should review alerts, enrichments, notes, acknowledgments, suppressions, and related detection context before recommending changes.</div>
+        <label class="prompt-editor-label" for="siem-engineer-prompt">Prompt body</label>
+        <textarea id="siem-engineer-prompt" class="prompt-editor" spellcheck="false">{engineer_prompt}</textarea>
+        <div class="settings-actions">
+          <button id="save-siem-engineer-prompt" class="settings-save-button" type="button">Save</button>
+          <span id="siem-engineer-prompt-status" class="settings-save-status" role="status" aria-live="polite"></span>
+        </div>
+      </details>
     </section>'''
 
 
@@ -2405,6 +2559,9 @@ SETTINGS_PAGE_JS = '''
   const editor = document.querySelector('#soc-analyst-prompt');
   const saveButton = document.querySelector('#save-soc-analyst-prompt');
   const status = document.querySelector('#soc-analyst-prompt-status');
+  const engineerEditor = document.querySelector('#siem-engineer-prompt');
+  const saveEngineerButton = document.querySelector('#save-siem-engineer-prompt');
+  const engineerStatus = document.querySelector('#siem-engineer-prompt-status');
   const aiMode = document.querySelector('#ai-analysis-mode');
   const ollamaModel = document.querySelector('#ai-ollama-model');
   const ollamaUrl = document.querySelector('#ai-ollama-url');
@@ -2423,6 +2580,11 @@ SETTINGS_PAGE_JS = '''
     if (!aiStatus) return;
     aiStatus.textContent = message;
     aiStatus.className = `settings-save-status ${kind}`.trim();
+  }
+  function setEngineerStatus(message, kind = '') {
+    if (!engineerStatus) return;
+    engineerStatus.textContent = message;
+    engineerStatus.className = `settings-save-status ${kind}`.trim();
   }
   function currentAiSettings() {
     return {
@@ -2520,6 +2682,18 @@ SETTINGS_PAGE_JS = '''
       setStatus('Could not refresh prompt from the portal API.', 'error');
     }
   }
+  async function refreshEngineerPrompt() {
+    if (!engineerEditor) return;
+    try {
+      const response = await fetch('/api/soc-settings/siem-engineer-prompt', {cache: 'no-store'});
+      const data = await response.json();
+      if (data.ok && typeof data.prompt === 'string') {
+        engineerEditor.value = data.prompt.trimEnd();
+      }
+    } catch (_) {
+      setEngineerStatus('Could not refresh prompt from the portal API.', 'error');
+    }
+  }
   async function savePrompt() {
     if (!editor || !saveButton) return;
     const prompt = editor.value.trim();
@@ -2547,13 +2721,42 @@ SETTINGS_PAGE_JS = '''
       saveButton.disabled = false;
     }
   }
+  async function saveEngineerPrompt() {
+    if (!engineerEditor || !saveEngineerButton) return;
+    const prompt = engineerEditor.value.trim();
+    if (!prompt) {
+      setEngineerStatus('Prompt cannot be empty.', 'error');
+      return;
+    }
+    saveEngineerButton.disabled = true;
+    setEngineerStatus('Saving...');
+    try {
+      const response = await fetch('/api/soc-settings/siem-engineer-prompt', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({prompt})
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || `Save failed with HTTP ${response.status}`);
+      }
+      setEngineerStatus('Saved. New SIEM Engineering reviews will use this prompt.', 'ok');
+    } catch (error) {
+      setEngineerStatus(String(error.message || error), 'error');
+    } finally {
+      saveEngineerButton.disabled = false;
+    }
+  }
   saveAiButton?.addEventListener('click', saveAiSettings);
   saveButton?.addEventListener('click', savePrompt);
+  saveEngineerButton?.addEventListener('click', saveEngineerPrompt);
   refreshAiSettings().then(refreshOllamaModels);
   if (ollamaModel) {
     setInterval(refreshOllamaModels, 60000);
   }
   refreshPrompt();
+  refreshEngineerPrompt();
 })();
 </script>
 '''
@@ -2570,6 +2773,19 @@ def inject_settings_assets(text: str) -> str:
 def inject_executive_home_assets(text: str) -> str:
     if EXECUTIVE_HOME_CSS not in text:
         text = text.replace('</head>', EXECUTIVE_HOME_CSS + '</head>', 1)
+    return text
+
+
+SIEM_ENGINEERING_CSS = '''
+<style>
+.siem-engineering-view{display:grid;gap:18px;padding-top:14px}.siem-eng-hero{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;border:1px solid rgba(148,163,184,.14);border-radius:14px;padding:20px;background:linear-gradient(135deg,#0d1620 0%,#101923 58%,#0b131c 100%);box-shadow:0 22px 48px rgba(0,0,0,.24),inset 0 1px 0 rgba(255,255,255,.035)}.siem-eng-hero h2{margin:12px 0 8px;color:#f5f9ff;font-size:32px;line-height:1;letter-spacing:-.035em}.siem-eng-hero p{max-width:76ch;margin:0;color:#9aaabd;font-size:14px;line-height:1.55}.settings-kicker{display:inline-block;color:#8ff4ff;font-size:11px;font-weight:950;text-transform:uppercase;letter-spacing:.13em}.siem-model-card{min-width:260px;border:1px solid rgba(34,211,238,.18);border-radius:12px;padding:14px 16px;background:#071018;text-align:right}.siem-model-card span,.siem-eng-kpis span,.siem-column-title span{display:block;color:#8ff4ff;font-size:11px;font-weight:950;text-transform:uppercase;letter-spacing:.1em}.siem-model-card strong{display:block;margin-top:8px;color:#f3f8ff;font-size:18px}.siem-model-card em{display:block;margin-top:6px;color:#91a4ba;font-size:12px;font-style:normal}.siem-eng-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.siem-eng-kpis article,.siem-rec-column,.siem-rec-card,.siem-empty-card{border:1px solid rgba(148,163,184,.13);border-radius:12px;background:#0d1620;box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}.siem-eng-kpis article{padding:16px}.siem-eng-kpis strong{display:block;margin-top:8px;color:#f7fbff;font-size:24px;line-height:1}.siem-eng-kpis em{display:block;margin-top:7px;color:#9aa8b8;font-size:12px;font-style:normal}.siem-eng-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.siem-rec-column{display:grid;align-content:start;gap:12px;padding:16px}.siem-column-title{padding:2px 2px 6px}.siem-column-title p{margin:7px 0 0;color:#9aa8b8;font-size:13px;line-height:1.45}.siem-rec-card,.siem-empty-card{padding:15px;background:#09131d}.siem-rec-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}.siem-rec-head code,.siem-pill{border:1px solid rgba(34,211,238,.18);border-radius:999px;padding:4px 8px;color:#8ff4ff;background:rgba(34,211,238,.06);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.04em}.siem-rec-card h3,.siem-empty-card h3{margin:0;color:#f4f8ff;font-size:15px;line-height:1.25}.siem-rec-card p,.siem-empty-card p{margin:9px 0 0;color:#aab8ca;font-size:13px;line-height:1.48}.siem-rec-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0}.siem-rec-meta span{min-width:0;border:1px solid rgba(148,163,184,.10);border-radius:9px;padding:7px 8px;color:#cbd8e7;background:rgba(148,163,184,.045);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.siem-rec-meta b{display:block;margin-bottom:3px;color:#8ff4ff;font-size:9px;text-transform:uppercase;letter-spacing:.08em}.siem-rec-card ul{margin:10px 0 0;padding-left:18px;color:#d7e3f1;font-size:12.5px;line-height:1.45}.siem-rec-card li+li{margin-top:6px}@media(max-width:1100px){.siem-eng-hero{display:grid}.siem-model-card{text-align:left}.siem-eng-kpis,.siem-eng-grid{grid-template-columns:1fr}.siem-rec-meta{grid-template-columns:1fr}}
+</style>
+'''
+
+
+def inject_siem_engineering_assets(text: str) -> str:
+    if SIEM_ENGINEERING_CSS not in text:
+        text = text.replace('</head>', SIEM_ENGINEERING_CSS + '</head>', 1)
     return text
 
 
@@ -2817,6 +3033,9 @@ def render_static_page(shell_html: str, page_key: str, reports: list[AlertReport
     elif page_key == 'settings':
         rendered = replace_main_page_content(rendered, settings_page_section())
         rendered = inject_settings_assets(rendered)
+    elif page_key == 'siem_engineering':
+        rendered = replace_main_page_content(rendered, siem_engineering_page_section(reports))
+        rendered = inject_siem_engineering_assets(rendered)
     else:
         rendered = replace_main_page_content(rendered, placeholder_page_section(page_key))
     return rendered
@@ -2835,6 +3054,9 @@ def write_site_pages(reports: list[AlertReport]) -> list[Path]:
     soc_alerts_path = OUT_DIR / 'soc-alerts.html'
     soc_alerts_path.write_text(render_static_page(shell_html, 'alerts', reports), encoding='utf-8')
     written.append(soc_alerts_path)
+    siem_tuning_alias = OUT_DIR / 'siem-tuning.html'
+    siem_tuning_alias.write_text(render_static_page(shell_html, 'siem_engineering', reports), encoding='utf-8')
+    written.append(siem_tuning_alias)
     return written
 
 

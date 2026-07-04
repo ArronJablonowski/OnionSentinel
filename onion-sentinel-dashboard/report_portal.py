@@ -50,6 +50,7 @@ SOC_ALERT_DETAIL_DIR = SOC_ALERT_DASHBOARD_DIR / "details"
 SOC_ALERT_STATIC_STATUS_FILE = SOC_ALERT_DASHBOARD_DIR / "soc-alerts-status.json"
 SOC_ALERT_N8N_BEACON_FILE = SOC_ALERT_DASHBOARD_DIR / "n8n-beacon.json"
 SOC_ANALYST_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system_prompt.md"
+SIEM_ENGINEER_PROMPT_FILE = HOME / "n8n-local" / "config" / "siem_engineer_system_prompt.md"
 SOC_AI_SETTINGS_FILE = HOME / "n8n-local" / "config" / "ai_model_settings.json"
 SOC_ANALYST_PROMPT_MAX_BYTES = 20000
 SOC_ALERT_API_MAX_LIMIT = 500
@@ -577,25 +578,46 @@ def read_soc_analyst_prompt() -> dict:
     return {"ok": True, "prompt": prompt, "path": str(SOC_ANALYST_PROMPT_FILE)}
 
 
-def save_soc_analyst_prompt(prompt: object) -> tuple[bool, dict]:
-    """Atomically save the editable SOC Analyst system prompt."""
+def read_siem_engineer_prompt() -> dict:
+    """Return the current SIEM Engineer system prompt shown on the Settings page."""
+    try:
+        prompt = SIEM_ENGINEER_PROMPT_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        prompt = ""
+    except Exception as exc:
+        return {"ok": False, "error": f"Could not read SIEM Engineer prompt: {exc}", "path": str(SIEM_ENGINEER_PROMPT_FILE)}
+    return {"ok": True, "prompt": prompt, "path": str(SIEM_ENGINEER_PROMPT_FILE)}
+
+
+def save_prompt_file(prompt: object, path: Path, label: str) -> tuple[bool, dict]:
+    """Atomically save an editable SOC settings prompt."""
     normalized = str(prompt or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     if not normalized:
-        return False, {"ok": False, "error": "SOC Analyst prompt cannot be empty.", "path": str(SOC_ANALYST_PROMPT_FILE)}
+        return False, {"ok": False, "error": f"{label} prompt cannot be empty.", "path": str(path)}
     if len(normalized.encode("utf-8")) > SOC_ANALYST_PROMPT_MAX_BYTES:
-        return False, {"ok": False, "error": f"SOC Analyst prompt exceeds {SOC_ANALYST_PROMPT_MAX_BYTES} bytes.", "path": str(SOC_ANALYST_PROMPT_FILE)}
+        return False, {"ok": False, "error": f"{label} prompt exceeds {SOC_ANALYST_PROMPT_MAX_BYTES} bytes.", "path": str(path)}
     try:
-        SOC_ANALYST_PROMPT_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = SOC_ANALYST_PROMPT_FILE.with_suffix(".tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
         tmp.write_text(normalized + "\n", encoding="utf-8")
         try:
             tmp.chmod(0o600)
         except Exception:
             pass
-        tmp.replace(SOC_ANALYST_PROMPT_FILE)
+        tmp.replace(path)
     except Exception as exc:
-        return False, {"ok": False, "error": f"Could not save SOC Analyst prompt: {exc}", "path": str(SOC_ANALYST_PROMPT_FILE)}
-    return True, {"ok": True, "message": "SOC Analyst prompt saved.", "path": str(SOC_ANALYST_PROMPT_FILE), "bytes": len((normalized + "\n").encode("utf-8"))}
+        return False, {"ok": False, "error": f"Could not save {label} prompt: {exc}", "path": str(path)}
+    return True, {"ok": True, "message": f"{label} prompt saved.", "path": str(path), "bytes": len((normalized + "\n").encode("utf-8"))}
+
+
+def save_soc_analyst_prompt(prompt: object) -> tuple[bool, dict]:
+    """Atomically save the editable SOC Analyst system prompt."""
+    return save_prompt_file(prompt, SOC_ANALYST_PROMPT_FILE, "SOC Analyst")
+
+
+def save_siem_engineer_prompt(prompt: object) -> tuple[bool, dict]:
+    """Atomically save the editable SIEM Engineer system prompt."""
+    return save_prompt_file(prompt, SIEM_ENGINEER_PROMPT_FILE, "SIEM Engineer")
 
 
 def default_soc_ai_settings() -> dict:
@@ -4360,7 +4382,7 @@ class PortalHandler(BaseHTTPRequestHandler):
         if length <= 0 or length > 50000:
             if parsed.path == "/api/admin/start-service":
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
-            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/ai-model") or (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/ack")):
+            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/ai-model") or (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/ack")):
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
             if parsed.path.startswith("/api/resource-library/"):
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
@@ -4391,6 +4413,15 @@ class PortalHandler(BaseHTTPRequestHandler):
             if not self._admin_authenticated():
                 return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
             ok, data = save_soc_analyst_prompt(payload.get("prompt", ""))
+            return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if parsed.path == "/api/soc-settings/siem-engineer-prompt":
+            try:
+                payload = json.loads(raw or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            if not self._admin_authenticated():
+                return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
+            ok, data = save_siem_engineer_prompt(payload.get("prompt", ""))
             return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path == "/api/soc-settings/ai-model":
             try:
@@ -4499,6 +4530,9 @@ class PortalHandler(BaseHTTPRequestHandler):
             return self._send(HTTPStatus.OK, json.dumps(soc_alert_status_response(), indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/soc-settings/analyst-prompt":
             data = read_soc_analyst_prompt()
+            return self._send(HTTPStatus.OK if data.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if path == "/api/soc-settings/siem-engineer-prompt":
+            data = read_siem_engineer_prompt()
             return self._send(HTTPStatus.OK if data.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/soc-settings/ai-model":
             data = read_soc_ai_settings()

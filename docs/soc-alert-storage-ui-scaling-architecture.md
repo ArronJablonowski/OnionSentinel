@@ -380,8 +380,9 @@ reports.html        Reports workspace placeholder
 playbooks.html      Playbooks workspace placeholder
 automations.html    Automations workspace placeholder
 sources.html        Sources workspace placeholder
-siem-tuning.html    SIEM tuning workspace placeholder
-settings.html       Settings page with AI model routing and collapsed SOC Analyst system prompt editor
+siem-engineering.html SIEM Engineering tuning and detection recommendation workspace
+siem-tuning.html    Backward-compatible alias for SIEM Engineering
+settings.html       Settings page with AI model routing plus collapsed SOC Analyst and SIEM Engineer prompt editors
 ```
 
 The Flow page is intentionally simple: it gives an analyst a fast visual model
@@ -448,6 +449,14 @@ Settings page behavior:
 - Displays the current `SOC Analyst` prompt in a collapsible editor that is
   collapsed by default.
 - Saves through `/api/soc-settings/analyst-prompt`.
+- Reads `$HOME/n8n-local/config/siem_engineer_system_prompt.md`.
+- Displays the current `SIEM Engineer` prompt in a matching collapsible editor
+  below the SOC Analyst prompt.
+- Saves through `/api/soc-settings/siem-engineer-prompt`.
+- The SIEM Engineer prompt is for a 2-4 hour engineering review that runs only
+  after all eligible alerts/detections have finished AI analysis. It reviews
+  alerts, enrichments, notes, acknowledgments, suppressions, and related context
+  before recommending current-rule tuning or new detection creation.
 - Requires a LAN Portal Administration session for saves.
 - Does not require an n8n or scheduler restart; the AI runner reads the model
   routing and prompt files for each analysis request.

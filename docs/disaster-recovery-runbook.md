@@ -93,11 +93,12 @@ high/critical Telegram sends because it has no destination chat. Medium and low
 alerts are still intentionally stored without Telegram under the default
 `TELEGRAM_ALERT_LEVELS=critical,high` policy.
 
-The installer also creates the editable SOC Analyst system prompt and AI model
-routing config only if they are missing:
+The installer also creates the editable SOC Analyst system prompt, SIEM Engineer
+system prompt, and AI model routing config only if they are missing:
 
 ```text
 $HOME/n8n-local/config/soc_analyst_system_prompt.md
+$HOME/n8n-local/config/siem_engineer_system_prompt.md
 $HOME/n8n-local/config/ai_model_settings.json
 ```
 

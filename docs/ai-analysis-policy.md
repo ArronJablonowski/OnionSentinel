@@ -202,8 +202,15 @@ Editable SOC Analyst system prompt:
 $HOME/n8n-local/config/soc_analyst_system_prompt.md
 ```
 
+Editable SIEM Engineer system prompt:
+
+```text
+$HOME/n8n-local/config/siem_engineer_system_prompt.md
+```
+
 The SOC Alerts Settings page exposes model routing controls in a collapsed
-`AI Analysis Model Selection` panel and a collapsed editable prompt section:
+`AI Analysis Model Selection` panel plus collapsed editable prompt sections for
+the SOC Analyst and SIEM Engineer roles:
 
 ```text
 http://10.77.7.225:8765/view/b68c5a48b9778061/settings.html
@@ -213,10 +220,16 @@ Save behavior:
 
 - The web UI calls `/api/soc-settings/ai-model` for model routing.
 - The web UI calls `/api/soc-settings/analyst-prompt` for the SOC Analyst system prompt.
+- The web UI calls `/api/soc-settings/siem-engineer-prompt` for the SIEM Engineer system prompt.
 - Saving requires a LAN Portal Administration session.
-- The portal writes both settings files atomically and rejects empty prompts or prompts larger than 20 KB.
+- The portal writes settings files atomically and rejects empty prompts or prompts larger than 20 KB.
 - The next AI analysis run uses the saved model routing and prompt automatically because `run-local-ai-analysis.py` reads both files immediately before each model request.
 - `build-ai-investigation-prompt.py` also includes the same prompt in each prompt package so analyst-visible prompt artifacts match the actual system message.
+
+The SIEM Engineer prompt is reserved for a periodic engineering review every
+2-4 hours. That review must run only when all eligible alerts/detections have
+finished analysis, and it should recommend current-rule tuning and new
+detection creation separately.
 
 Manual run using the newest prompt package:
 

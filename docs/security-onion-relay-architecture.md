@@ -475,22 +475,28 @@ $HOME/n8n-local/soc-alerts/ai-analysis
 The AI system prompt is an editable runtime setting:
 
 ```text
-Prompt file: $HOME/n8n-local/config/soc_analyst_system_prompt.md
+SOC Analyst prompt:  $HOME/n8n-local/config/soc_analyst_system_prompt.md
+SIEM Engineer prompt: $HOME/n8n-local/config/siem_engineer_system_prompt.md
 Model routing: $HOME/n8n-local/config/ai_model_settings.json
 Settings UI:  http://10.77.7.225:8765/view/b68c5a48b9778061/settings.html
-Save API:     /api/soc-settings/analyst-prompt
+Analyst Prompt API: /api/soc-settings/analyst-prompt
+Engineer Prompt API: /api/soc-settings/siem-engineer-prompt
 Model API:    /api/soc-settings/ai-model
 Ollama list:  /api/soc-settings/ollama-models
 ```
 
 The portal API saves the prompt and model-routing settings atomically after LAN
 Portal Administration authentication. The Settings page keeps both the `AI Analysis Model Selection` model-routing panel
-and the full `SOC Analyst System Prompt` section collapsed by default. The model-routing form is ordered as a focused numbered 1-2-3 workflow:
+and the full `SOC Analyst System Prompt` and `SIEM Engineer System Prompt`
+sections collapsed by default. The model-routing form is ordered as a focused numbered 1-2-3 workflow:
 Analysis Mode, Ollama Settings, then Cloud Provider Settings. The Ollama model field is a
 dropdown sourced from `ollama ls` through `/api/soc-settings/ollama-models` and refreshes every 60 seconds while the Settings page is open.
 The local AI runner reads both files before each analysis, so prompt tuning and
 model selection take effect on the next alert analysis without restarting the
 Docker stack or launchd scheduler.
+The SIEM Engineer prompt is for periodic 2-4 hour SIEM engineering review after
+the alert analysis backlog is clear; it recommends current-rule tuning and new
+detection creation separately.
 
 Scheduled analysis is handled by a launchd wrapper:
 
@@ -962,10 +968,11 @@ latest alert if no live alert-store beacon exists.
 The portal now generates one static HTML file per left-navigation item.
 `index.html` is the default SOC Alerts table page, `home.html` is the executive
 KPI/chart overview, `flow.html` is the dedicated data-flow route with a simple
-ocean-wave line icon, `siem-tuning.html` is the SIEM tuning workspace route with
-a code-native slider/tuning line icon, and `soc-alerts.html` is kept as a
-direct SOC Alerts bookmark. Other left-nav routes currently render their own
-placeholder pages until their data-backed widgets are implemented.
+ocean-wave line icon, `siem-engineering.html` is the SIEM Engineering workspace
+for tuning and new detection recommendations, `siem-tuning.html` is kept as a
+backward-compatible alias, and `soc-alerts.html` is kept as a direct SOC Alerts
+bookmark. Other left-nav routes currently render their own placeholder pages
+until their data-backed widgets are implemented.
 
 Data sensitivity warning:
 

@@ -13,6 +13,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `alert_store/config/scoring_rules.json` | Tunable local filtering/scoring policy. |
 | `bin/` | Local AI prompt, analysis, scheduler, rollup, and stack management scripts. |
 | `config/soc_analyst_system_prompt.md` | SOC analyst system prompt used for alert analysis. |
+| `config/siem_engineer_system_prompt.md` | SIEM engineering prompt used for periodic tuning and detection recommendations. |
 | `config/ai_model_settings.json` | Local/cloud/hybrid AI routing defaults. |
 | `launchd/` | Mac Studio LaunchAgents for stack supervision and AI jobs. |
 

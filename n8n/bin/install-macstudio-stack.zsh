@@ -38,6 +38,9 @@ if [[ ! -f "$STACK_DIR/config/soc_analyst_system_prompt.md" && -f "$STACK_DIR/co
 elif [[ ! -f "$STACK_DIR/config/soc_analyst_system_prompt.md" ]]; then
   cp "$REPO_DIR/n8n/config/soc_analyst_system_prompt.md" "$STACK_DIR/config/soc_analyst_system_prompt.md"
 fi
+if [[ ! -f "$STACK_DIR/config/siem_engineer_system_prompt.md" ]]; then
+  cp "$REPO_DIR/n8n/config/siem_engineer_system_prompt.md" "$STACK_DIR/config/siem_engineer_system_prompt.md"
+fi
 if [[ ! -f "$STACK_DIR/config/ai_model_settings.json" ]]; then
   cp "$REPO_DIR/n8n/config/ai_model_settings.json" "$STACK_DIR/config/ai_model_settings.json"
   chmod 0600 "$STACK_DIR/config/ai_model_settings.json"
