@@ -255,6 +255,13 @@ execution guidance. It may recommend external tooling such as custom host
 artifact collection scripts, but direct execution is a TODO until a dedicated
 incident response host is connected, authenticated, logged, and approved.
 
+The Settings page shows collapsed trigger summaries for each Cyber Security
+Agent so operators can distinguish live triggers from planned/manual workflows:
+SOC Analyst runs from new eligible alerts through the scheduled AI worker,
+Incident Responder is manual until the IR host integration exists, SIEM Engineer
+is planned for a 2-4 hour cron review after analysis backlog clears, and Threat
+Hunter is manual until automated hunts are built.
+
 Manual run using the newest prompt package:
 
 ```bash

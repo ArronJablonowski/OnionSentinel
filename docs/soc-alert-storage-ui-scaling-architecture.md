@@ -449,10 +449,14 @@ Settings page behavior:
 - Reads `$HOME/n8n-local/config/soc_analyst_system_prompt.md`.
 - Displays the current `SOC Analyst` prompt in a collapsible editor that is
   collapsed by default.
+- Shows the collapsed trigger summary as new eligible alerts processed by the
+  scheduled AI worker, highest severity and newest first.
 - Saves through `/api/soc-settings/analyst-prompt`.
 - Reads `$HOME/n8n-local/config/incident_responder_system_prompt.md`.
 - Displays the current `Incident Responder` prompt in a matching collapsible
   editor below the SOC Analyst prompt.
+- Shows the collapsed trigger summary as manual incident workflow now, with
+  external incident response host collection still marked TODO.
 - Saves through `/api/soc-settings/incident-responder-prompt`.
 - The Incident Responder prompt is for senior incident response planning and
   future external host artifact collection guidance. Direct external tooling is
@@ -461,10 +465,14 @@ Settings page behavior:
 - Reads `$HOME/n8n-local/config/siem_engineer_system_prompt.md`.
 - Displays the current `SIEM Engineer` prompt in a matching collapsible editor
   below the Incident Responder prompt.
+- Shows the collapsed trigger summary as a planned 2-4 hour cron review after
+  all eligible alerts are analyzed.
 - Saves through `/api/soc-settings/siem-engineer-prompt`.
 - Reads `$HOME/n8n-local/config/threat_hunter_system_prompt.md`.
 - Displays the current `Threat Hunter` prompt in a matching collapsible editor
   below the SIEM Engineer prompt.
+- Shows the collapsed trigger summary as manual hunt review today, with
+  automated hunts still marked future work.
 - Saves through `/api/soc-settings/threat-hunter-prompt`.
 - The SIEM Engineer prompt is for a 2-4 hour engineering review that runs only
   after all eligible alerts/detections have finished AI analysis. It reviews
