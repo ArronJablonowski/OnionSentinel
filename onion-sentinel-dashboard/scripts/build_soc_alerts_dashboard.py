@@ -2767,7 +2767,7 @@ def settings_page_section() -> str:
       <details class="settings-panel settings-details" aria-labelledby="threat-hunter-prompt-title">
         <summary>
           <span class="settings-summary-main">
-            <span class="settings-summary-icon" aria-hidden="true"><img src="assets/metric-visible.png" alt=""></span>
+            <span class="settings-summary-icon" aria-hidden="true"><img src="assets/settings-threat-hunter-prompt.png" alt=""></span>
             <span class="settings-summary-copy">
               <span class="settings-kicker">Threat hunter prompt</span>
               <strong id="threat-hunter-prompt-title">Threat Hunter System Prompt</strong>
