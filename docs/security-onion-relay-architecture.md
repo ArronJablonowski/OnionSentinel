@@ -507,6 +507,20 @@ future external host artifact collection guidance. Direct execution against a
 dedicated incident response host remains a TODO until that host integration is
 configured, authenticated, logged, and approved.
 
+Cyber Security Agent Markdown memory files live under the local SOC corpus and
+are shown in the collapsed Settings rows:
+
+```text
+$HOME/n8n-local/soc-alerts/agent-memory/soc-analyst-memory.md
+$HOME/n8n-local/soc-alerts/agent-memory/incident-responder-memory.md
+$HOME/n8n-local/soc-alerts/agent-memory/siem-engineer-memory.md
+$HOME/n8n-local/soc-alerts/agent-memory/threat-hunter-memory.md
+```
+
+They are seeded by the Mac Studio installer only if missing. No agent currently
+appends findings automatically; the files are reserved for operator memory and
+future agent workflow writes.
+
 Scheduled analysis is handled by a launchd wrapper:
 
 ```text

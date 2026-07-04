@@ -13,7 +13,7 @@ LAUNCHD_DIR="${HOME}/Library/LaunchAgents"
 HERMES_SCRIPT_DIR="${HOME}/.hermes/scripts"
 PORTAL_DIR="${HOME}/report_portal"
 
-mkdir -p "$STACK_DIR/alert_store/config" "$STACK_DIR/bin" "$STACK_DIR/config" "$STACK_DIR/logs" "$STACK_DIR/alert_store_data" "$STACK_DIR/n8n_data" "$STACK_DIR/soc-alerts"
+mkdir -p "$STACK_DIR/alert_store/config" "$STACK_DIR/bin" "$STACK_DIR/config" "$STACK_DIR/logs" "$STACK_DIR/alert_store_data" "$STACK_DIR/n8n_data" "$STACK_DIR/soc-alerts" "$STACK_DIR/soc-alerts/agent-memory"
 
 # n8n writes reports to ./soc-alerts inside the compose project. Hermes and
 # Obsidian expect the friendlier Documents path, so expose the same directory
@@ -51,6 +51,16 @@ if [[ ! -f "$STACK_DIR/config/ai_model_settings.json" ]]; then
   cp "$REPO_DIR/n8n/config/ai_model_settings.json" "$STACK_DIR/config/ai_model_settings.json"
   chmod 0600 "$STACK_DIR/config/ai_model_settings.json"
 fi
+for memory_file in \
+  soc-analyst-memory.md \
+  incident-responder-memory.md \
+  siem-engineer-memory.md \
+  threat-hunter-memory.md
+do
+  if [[ ! -f "$STACK_DIR/soc-alerts/agent-memory/$memory_file" ]]; then
+    cp "$REPO_DIR/n8n/agent-memory/$memory_file" "$STACK_DIR/soc-alerts/agent-memory/$memory_file"
+  fi
+done
 cp "$REPO_DIR/n8n/bin/ensure-n8n-stack.zsh" "$STACK_DIR/bin/ensure-n8n-stack.zsh"
 cp "$REPO_DIR/n8n/bin/monitor-n8n-stack.zsh" "$STACK_DIR/bin/monitor-n8n-stack.zsh"
 cp "$REPO_DIR/n8n/bin/build-ai-investigation-prompt.py" "$STACK_DIR/bin/build-ai-investigation-prompt.py"

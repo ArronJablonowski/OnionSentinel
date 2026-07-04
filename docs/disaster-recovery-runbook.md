@@ -105,8 +105,18 @@ $HOME/n8n-local/config/threat_hunter_system_prompt.md
 $HOME/n8n-local/config/ai_model_settings.json
 ```
 
+The installer also seeds editable Cyber Security Agent Markdown memory files
+only if they are missing:
+
+```text
+$HOME/n8n-local/soc-alerts/agent-memory/soc-analyst-memory.md
+$HOME/n8n-local/soc-alerts/agent-memory/incident-responder-memory.md
+$HOME/n8n-local/soc-alerts/agent-memory/siem-engineer-memory.md
+$HOME/n8n-local/soc-alerts/agent-memory/threat-hunter-memory.md
+```
+
 Do not overwrite these files during normal DR redeploys if they have been tuned
-in production. The prompts and model routing can be edited from:
+or populated in production. The prompts and model routing can be edited from:
 
 ```text
 http://10.77.7.225:8765/view/b68c5a48b9778061/settings.html

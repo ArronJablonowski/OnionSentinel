@@ -451,12 +451,16 @@ Settings page behavior:
   collapsed by default.
 - Shows the collapsed trigger summary as new eligible alerts processed by the
   scheduled AI worker, highest severity and newest first.
+- Shows the collapsed memory path:
+  `$HOME/n8n-local/soc-alerts/agent-memory/soc-analyst-memory.md`.
 - Saves through `/api/soc-settings/analyst-prompt`.
 - Reads `$HOME/n8n-local/config/incident_responder_system_prompt.md`.
 - Displays the current `Incident Responder` prompt in a matching collapsible
   editor below the SOC Analyst prompt.
 - Shows the collapsed trigger summary as manual incident workflow now, with
   external incident response host collection still marked TODO.
+- Shows the collapsed memory path:
+  `$HOME/n8n-local/soc-alerts/agent-memory/incident-responder-memory.md`.
 - Saves through `/api/soc-settings/incident-responder-prompt`.
 - The Incident Responder prompt is for senior incident response planning and
   future external host artifact collection guidance. Direct external tooling is
@@ -467,13 +471,20 @@ Settings page behavior:
   below the Incident Responder prompt.
 - Shows the collapsed trigger summary as a planned 6 hour cron review after
   all eligible alerts are analyzed.
+- Shows the collapsed memory path:
+  `$HOME/n8n-local/soc-alerts/agent-memory/siem-engineer-memory.md`.
 - Saves through `/api/soc-settings/siem-engineer-prompt`.
 - Reads `$HOME/n8n-local/config/threat_hunter_system_prompt.md`.
 - Displays the current `Threat Hunter` prompt in a matching collapsible editor
   below the SIEM Engineer prompt.
 - Shows the collapsed trigger summary as manual hunt review today, with
   automated hunts still marked future work.
+- Shows the collapsed memory path:
+  `$HOME/n8n-local/soc-alerts/agent-memory/threat-hunter-memory.md`.
 - Saves through `/api/soc-settings/threat-hunter-prompt`.
+- As of this version, no Cyber Security Agent automatically appends to its
+  memory file. The files are durable Markdown locations for operator or future
+  agent workflow writes.
 - The SIEM Engineer prompt is for a 6 hour engineering review that runs only
   after all eligible alerts/detections have finished AI analysis. It reviews
   alerts, enrichments, notes, acknowledgments, suppressions, and related context

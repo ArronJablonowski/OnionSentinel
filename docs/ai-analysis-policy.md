@@ -262,6 +262,20 @@ Incident Responder is manual until the IR host integration exists, SIEM Engineer
 is planned for a 6 hour cron review after analysis backlog clears, and Threat
 Hunter is manual until automated hunts are built.
 
+Cyber Security Agent Markdown memory files:
+
+```text
+$HOME/n8n-local/soc-alerts/agent-memory/soc-analyst-memory.md
+$HOME/n8n-local/soc-alerts/agent-memory/incident-responder-memory.md
+$HOME/n8n-local/soc-alerts/agent-memory/siem-engineer-memory.md
+$HOME/n8n-local/soc-alerts/agent-memory/threat-hunter-memory.md
+```
+
+The Settings page shows each memory path in the collapsed agent row. These files
+are durable Markdown storage for previous findings, known patterns, learned
+information, and future agent workflow writes. Current automation does not yet
+append agent findings to these files automatically.
+
 Manual run using the newest prompt package:
 
 ```bash
