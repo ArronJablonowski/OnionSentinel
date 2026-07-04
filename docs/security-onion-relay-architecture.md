@@ -996,7 +996,8 @@ KPI/chart overview, `flow.html` is the dedicated data-flow route with a simple
 ocean-wave line icon, `siem-engineering.html` is the SIEM Engineer workspace
 for tuning and new detection recommendations, including a compact top ROI
 tuning candidate ranked from model-backed tuning output, repeated observations,
-and severity. `siem-tuning.html` is kept as a backward-compatible alias, and
+and severity. `cyber-threat-intel.html` is the Cyber Threat Intel workspace
+placeholder. `siem-tuning.html` is kept as a backward-compatible alias, and
 `soc-alerts.html` is kept as a direct SOC Alerts bookmark. Other left-nav
 routes currently render their own placeholder pages until their data-backed
 widgets are implemented.

@@ -26,6 +26,7 @@ This directory contains the Mac Studio LAN Portal backend and the generated SOC 
 - Live `Latest Alert`, `Last n8n beacon`, AI activity, and SOC count metrics.
 - Flow page with data-flow diagram and privacy IP masking.
 - Threat Hunter route with expandable hunt recommendations and copyable KQL/OQL/OSQuery pivots.
+- Cyber Threat Intel route for future intelligence briefs, indicators, and enrichment context.
 - SIEM Engineer menu route for model-backed tuning, detection recommendations, and a top ROI tuning candidate summary.
 - Settings page for AI model routing plus SOC Analyst, Incident Responder, SIEM Engineer, and Threat Hunter system prompts.
 
