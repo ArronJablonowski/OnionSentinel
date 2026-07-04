@@ -571,6 +571,15 @@ def summarize_markdown(text: str, max_len: int = 220) -> str:
     return (summary[:max_len - 1] + '…') if len(summary) > max_len else (summary or 'No summary text available yet.')
 
 
+def compact_text(text: str, max_len: int = 150) -> str:
+    text = normalize_iso_display_text(re.sub(r'\s+', ' ', str(text or '')).strip())
+    if not text:
+        return ''
+    sentence = re.split(r'(?<=[.!?])\s+', text, maxsplit=1)[0].strip()
+    clipped = sentence if sentence else text
+    return (clipped[:max_len - 1].rstrip() + '…') if len(clipped) > max_len else clipped
+
+
 def inline_markdown(text: str) -> str:
     # Minimal Markdown rendering keeps this script dependency-free on macOS.
     # It is intentionally small; complex Markdown should stay readable as text.
@@ -2330,7 +2339,7 @@ def siem_engineering_tuning_row(report: AlertReport) -> str:
       <td><span class="severity-label severity-text-{html.escape(criticality_class(report.criticality))}">{html.escape(report.criticality)}</span></td>
       <td><strong>{html.escape(report.rule_name or report.title)}</strong><code>{html.escape(route)}</code></td>
       <td><span class="siem-table-pill">{html.escape(report.tuning_recommendation or 'review')}</span></td>
-      <td class="siem-reason-cell"><p>{html.escape(report.tuning_reason or ai_summary_for(report))}</p><em>{html.escape(action)}</em></td>
+      <td class="siem-reason-cell"><p>{html.escape(compact_text(report.tuning_reason or ai_summary_for(report), 135))}</p><em>{html.escape(compact_text(action, 135))}</em></td>
       <td><b>{report.repeat_count}</b><span>{html.escape(report.ai_status_label)}</span></td>
     </tr>'''
 
@@ -2342,7 +2351,7 @@ def siem_engineering_detection_row(report: AlertReport) -> str:
       <td><span class="severity-label severity-text-{html.escape(criticality_class(report.criticality))}">{html.escape(report.criticality)}</span></td>
       <td><strong>{html.escape(report.rule_name or report.title)}</strong><code>{html.escape(report.alert_source)}</code></td>
       <td><span class="siem-table-pill">candidate</span></td>
-      <td class="siem-reason-cell"><p>{html.escape(ai_summary_for(report))}</p><em>Repeated pattern observed against {html.escape(destination)}. Review whether this deserves a new search, threshold, or enrichment-backed detection.</em></td>
+      <td class="siem-reason-cell"><p>{html.escape(compact_text(ai_summary_for(report), 135))}</p><em>Repeated target: {html.escape(destination)}</em></td>
       <td><b>{report.repeat_count}</b><span>{html.escape(last_seen_iso_for(report))}</span></td>
     </tr>'''
 
@@ -2369,14 +2378,10 @@ def siem_engineering_best_roi_section(reports: list[AlertReport]) -> str:
         return '''
       <section class="siem-roi-card" aria-label="Best ROI tuning candidate">
         <div class="siem-roi-head">
-          <span class="settings-kicker">Best ROI tuning candidate</span>
-          <h3>No tuning candidate yet</h3>
+          <span class="settings-kicker">#1 ROI tune</span>
+          <h3>No candidate yet</h3>
         </div>
-        <div class="siem-roi-grid">
-          <article><span>Why it is priority</span><p>No repeated or model-backed tuning candidate is available in the current alert set.</p></article>
-          <article><span>How to tune</span><p>Let alert analysis complete first, then review repeated detections with specific source, destination, port, rule, and suppression evidence before changing SIEM rules.</p></article>
-          <article><span>Activity</span><p>0 observations ready for ROI ranking.</p></article>
-        </div>
+        <table class="siem-roi-table"><tbody><tr><th>Why</th><td>No repeated or model-backed candidate.</td></tr><tr><th>Tune</th><td>Wait for analysis, then tune only scoped rule/source/destination/port evidence.</td></tr><tr><th>Activity</th><td>0 observations</td></tr></tbody></table>
       </section>'''
 
     best = max(candidates, key=siem_engineering_roi_score)
@@ -2401,7 +2406,7 @@ def siem_engineering_best_roi_section(reports: list[AlertReport]) -> str:
       <section class="siem-roi-card" aria-label="Best ROI tuning candidate">
         <div class="siem-roi-head">
           <div>
-            <span class="settings-kicker">Best ROI tuning candidate</span>
+            <span class="settings-kicker">#1 ROI tune</span>
             <h3>{html.escape(best.rule_name or best.title)}</h3>
             <code>{html.escape(route)}</code>
           </div>
@@ -2410,11 +2415,11 @@ def siem_engineering_best_roi_section(reports: list[AlertReport]) -> str:
             <strong class="severity-text-{html.escape(criticality_class(best.criticality))}">{html.escape(best.criticality)}</strong>
           </div>
         </div>
-        <div class="siem-roi-grid">
-          <article><span>Why it is priority</span><p>{html.escape(why)}</p></article>
-          <article><span>How to tune</span><p>{html.escape(action)}</p></article>
-          <article><span>Activity</span><p>{html.escape(str(observation_count))} observations · {html.escape(tuning_type)} · {html.escape(best.ai_status_label)}</p></article>
-        </div>
+        <table class="siem-roi-table"><tbody>
+          <tr><th>Why</th><td>{html.escape(compact_text(why, 180))}</td></tr>
+          <tr><th>Tune</th><td>{html.escape(compact_text(action, 180))}</td></tr>
+          <tr><th>Activity</th><td>{html.escape(str(observation_count))} observations · {html.escape(tuning_type)} · {html.escape(best.ai_status_label)}</td></tr>
+        </tbody></table>
       </section>'''
 
 
@@ -2422,10 +2427,10 @@ def siem_engineering_table(title: str, subtitle: str, rows: str, empty: str) -> 
     body = rows or f'<tr class="siem-empty-row"><td colspan="5">{html.escape(empty)}</td></tr>'
     return f'''
     <section class="siem-table-section" aria-label="{html.escape(title)}">
-      <div class="siem-table-title"><h3>{html.escape(title)}</h3><p>{html.escape(subtitle)}</p></div>
+      <div class="siem-table-title"><h3>{html.escape(title)}</h3></div>
       <div class="siem-table-wrap">
         <table class="siem-engineering-table">
-          <thead><tr><th>Severity</th><th>Detection</th><th>Type</th><th>Reason / recommendation</th><th>Activity</th></tr></thead>
+          <thead><tr><th>Severity</th><th>Detection</th><th>Type</th><th>Why / tune</th><th>Seen</th></tr></thead>
           <tbody>{body}</tbody>
         </table>
       </div>
@@ -2455,24 +2460,24 @@ def siem_engineering_page_section(reports: list[AlertReport]) -> str:
       <section class="siem-eng-hero">
         <div>
           <span class="settings-kicker">SIEM engineering</span>
-          <h2>Model-assisted tuning and detection design</h2>
-          <p>Uses the configured AI analysis model path to turn analyzed alert history, suppressions, acknowledgments, notes, enrichment, and duplicate patterns into safe engineering recommendations.</p>
+          <h2>SIEM Engineer</h2>
+          <p>Prioritized tuning and detection work.</p>
         </div>
         <div class="siem-model-card">
-          <span>Current model route</span>
+          <span>Model route</span>
           <strong>{html.escape(mode.title())}</strong>
           <em>Local: {html.escape(local_model)} · Cloud: {html.escape(cloud_model)}</em>
         </div>
       </section>
       <section class="siem-eng-kpis" aria-label="SIEM engineering readiness">
-        <article><span>Analysis gate</span><strong>{'Ready' if ready else 'Waiting'}</strong><em>{analyzed}/{len(reports)} detections analyzed</em></article>
-        <article><span>Cadence</span><strong>6h</strong><em>Run only after analysis backlog is clear</em></article>
-        <article><span>Tuning candidates</span><strong>{len(actionable)}</strong><em>Model-backed current-rule suggestions</em></article>
-        <article><span>Detection candidates</span><strong>{len(repeated)}</strong><em>Repeated patterns for new rule review</em></article>
+        <article><span>Gate</span><strong>{'Ready' if ready else 'Waiting'}</strong><em>{analyzed}/{len(reports)} analyzed</em></article>
+        <article><span>Cadence</span><strong>6h</strong><em>after backlog clears</em></article>
+        <article><span>Tuning</span><strong>{len(actionable)}</strong><em>current-rule ideas</em></article>
+        <article><span>Detections</span><strong>{len(repeated)}</strong><em>new-rule ideas</em></article>
       </section>
       {siem_engineering_best_roi_section(reports)}
-      {siem_engineering_table('Current rule tuning', 'Scoped suppression, threshold, score, and filtering recommendations for existing detections.', current_rule_rows, 'No model-backed tuning recommendations yet. Recommendations will appear after analyzed artifacts include scoped tuning actions.')}
-      {siem_engineering_table('New rule / detection creation', 'Repeated patterns that may deserve new Security Onion searches, Sigma-style logic, or enrichment-driven detections.', new_rule_rows, 'No repeated detection candidates yet. New rule ideas will appear when analyzed patterns need better coverage.')}
+      {siem_engineering_table('Current rule tuning', '', current_rule_rows, 'No model-backed tuning recommendations yet.')}
+      {siem_engineering_table('New detections', '', new_rule_rows, 'No repeated detection candidates yet.')}
     </section>'''
 
 
@@ -3299,7 +3304,7 @@ def inject_executive_home_assets(text: str) -> str:
 
 SIEM_ENGINEERING_CSS = '''
 <style>
-.siem-engineering-view{display:grid;gap:16px;padding-top:12px}.siem-eng-hero{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;align-items:end;border:1px solid rgba(148,163,184,.12);border-radius:10px;padding:18px;background:#0d1620;box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}.siem-eng-hero h2{margin:10px 0 7px;color:#f5f9ff;font-size:28px;line-height:1;letter-spacing:-.025em}.siem-eng-hero p{max-width:82ch;margin:0;color:#9aaabd;font-size:13px;line-height:1.55}.settings-kicker{display:inline-block;color:#8ff4ff;font-size:11px;font-weight:950;text-transform:uppercase;letter-spacing:.13em}.siem-model-card{min-width:260px;border-left:1px solid rgba(34,211,238,.20);padding-left:18px;text-align:right}.siem-model-card span,.siem-eng-kpis span,.siem-roi-grid span{display:block;color:#8ff4ff;font-size:10.5px;font-weight:950;text-transform:uppercase;letter-spacing:.1em}.siem-model-card strong{display:block;margin-top:7px;color:#f3f8ff;font-size:17px}.siem-model-card em{display:block;margin-top:5px;color:#91a4ba;font-size:12px;font-style:normal}.siem-eng-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.siem-eng-kpis article{border:1px solid rgba(148,163,184,.11);border-radius:8px;padding:12px 14px;background:#0b141d}.siem-eng-kpis strong{display:block;margin-top:7px;color:#f7fbff;font-size:20px;line-height:1}.siem-eng-kpis em{display:block;margin-top:6px;color:#9aa8b8;font-size:12px;font-style:normal}.siem-roi-card{display:grid;gap:14px;border:1px solid rgba(34,211,238,.18);border-radius:10px;padding:16px 18px;background:#0d1620;box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}.siem-roi-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.siem-roi-head h3{margin:8px 0 0;color:#f5f9ff;font-size:20px;line-height:1.18;letter-spacing:-.02em}.siem-roi-head code{display:block;margin-top:7px;color:#91a4ba;background:transparent;font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;white-space:normal;overflow-wrap:anywhere}.siem-roi-rank{min-width:118px;text-align:right}.siem-roi-rank span{display:block;color:#8ff4ff;font-size:10.5px;font-weight:950;text-transform:uppercase;letter-spacing:.1em}.siem-roi-rank strong{display:block;margin-top:7px;font-size:18px;line-height:1;text-transform:capitalize}.siem-roi-grid{display:grid;grid-template-columns:1.2fr 1.2fr .7fr;gap:10px}.siem-roi-grid article{border-top:1px solid rgba(148,163,184,.10);padding-top:12px}.siem-roi-grid p{margin:7px 0 0;color:#dce8f7;font-size:13px;line-height:1.5;overflow-wrap:anywhere}.siem-table-section{display:grid;gap:10px}.siem-table-title{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;padding:0 2px}.siem-table-title h3{margin:0;color:#f4f8ff;font-size:17px;letter-spacing:-.01em}.siem-table-title p{max-width:76ch;margin:0;color:#91a4ba;font-size:12.5px;line-height:1.45;text-align:right}.siem-table-wrap{overflow:auto;border:1px solid rgba(148,163,184,.12);border-radius:10px;background:#0d1620}.siem-engineering-table{width:100%;min-width:1120px;border-collapse:collapse}.siem-engineering-table th{padding:11px 12px;border-bottom:1px solid rgba(148,163,184,.12);color:#96a6b8;background:#101b26;font-size:10.5px;font-weight:900;text-align:left;text-transform:uppercase;letter-spacing:.08em}.siem-engineering-table td{padding:14px 12px;border-bottom:1px solid rgba(148,163,184,.10);vertical-align:top;color:#d7e3f1;font-size:13px;line-height:1.4}.siem-engineering-table tbody tr{height:112px}.siem-engineering-table tbody tr:hover{background:rgba(34,211,238,.035)}.siem-engineering-table td:nth-child(1){width:116px}.siem-engineering-table td:nth-child(2){width:260px}.siem-engineering-table td:nth-child(3){width:128px}.siem-engineering-table td:nth-child(5){width:150px}.siem-engineering-table strong{display:block;color:#f4f8ff;font-size:13px;line-height:1.28}.siem-engineering-table code{display:block;margin-top:7px;color:#91a4ba;background:transparent;font:11.5px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;white-space:normal;overflow-wrap:anywhere}.siem-table-pill{display:inline-flex;align-items:center;border:1px solid rgba(34,211,238,.18);border-radius:999px;padding:4px 8px;color:#8ff4ff;background:rgba(34,211,238,.045);font-size:10.5px;font-weight:900;text-transform:uppercase;letter-spacing:.04em}.siem-reason-cell{min-width:420px}.siem-reason-cell p{margin:0;color:#dce8f7;font-size:13px;line-height:1.52;overflow-wrap:anywhere}.siem-reason-cell em{display:block;margin-top:8px;color:#9fb0c4;font-size:12.5px;font-style:normal;line-height:1.45;overflow-wrap:anywhere}.siem-engineering-table td:last-child b{display:block;color:#f4f8ff;font-size:18px;line-height:1}.siem-engineering-table td:last-child span{display:block;margin-top:7px;color:#91a4ba;font-size:11.5px;line-height:1.35;overflow-wrap:anywhere}.siem-empty-row td{padding:22px 14px;color:#91a4ba;text-align:center}@media(max-width:1100px){.siem-eng-hero{grid-template-columns:1fr}.siem-model-card{text-align:left;border-left:0;border-top:1px solid rgba(34,211,238,.18);padding:14px 0 0}.siem-eng-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.siem-roi-grid{grid-template-columns:1fr}.siem-table-title{display:grid}.siem-table-title p{text-align:left}}@media(max-width:680px){.siem-eng-kpis{grid-template-columns:1fr}.siem-roi-head{display:grid}.siem-roi-rank{text-align:left}}
+.siem-engineering-view{display:grid;gap:14px;padding-top:8px}.siem-eng-hero{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;align-items:end;border-bottom:1px solid rgba(148,163,184,.12);padding:4px 0 16px}.siem-eng-hero h2{margin:8px 0 5px;color:#f5f9ff;font-size:26px;line-height:1;letter-spacing:-.02em}.siem-eng-hero p{margin:0;color:#9aaabd;font-size:13px;line-height:1.4}.settings-kicker{display:inline-block;color:#8ff4ff;font-size:10.5px;font-weight:950;text-transform:uppercase;letter-spacing:.13em}.siem-model-card{min-width:250px;text-align:right}.siem-model-card span,.siem-eng-kpis span{display:block;color:#8ff4ff;font-size:10px;font-weight:950;text-transform:uppercase;letter-spacing:.1em}.siem-model-card strong{display:block;margin-top:6px;color:#f3f8ff;font-size:16px}.siem-model-card em{display:block;margin-top:4px;color:#91a4ba;font-size:12px;font-style:normal}.siem-eng-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.siem-eng-kpis article{border:1px solid rgba(148,163,184,.10);border-radius:8px;padding:10px 12px;background:#0b141d}.siem-eng-kpis strong{display:block;margin-top:6px;color:#f7fbff;font-size:18px;line-height:1}.siem-eng-kpis em{display:block;margin-top:5px;color:#91a4ba;font-size:11.5px;font-style:normal}.siem-roi-card{display:grid;gap:12px;border:1px solid rgba(34,211,238,.16);border-radius:8px;padding:14px;background:#0d1620}.siem-roi-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}.siem-roi-head h3{margin:6px 0 0;color:#f5f9ff;font-size:18px;line-height:1.2;letter-spacing:-.01em}.siem-roi-head code{display:block;margin-top:6px;color:#91a4ba;background:transparent;font:11.5px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;white-space:normal;overflow-wrap:anywhere}.siem-roi-rank{min-width:94px;text-align:right}.siem-roi-rank span{display:block;color:#8ff4ff;font-size:10px;font-weight:950;text-transform:uppercase;letter-spacing:.1em}.siem-roi-rank strong{display:block;margin-top:6px;font-size:17px;line-height:1;text-transform:capitalize}.siem-roi-table{width:100%;border-collapse:collapse}.siem-roi-table th{width:84px;padding:9px 10px 9px 0;border-top:1px solid rgba(148,163,184,.10);color:#8ff4ff;font-size:10px;font-weight:950;text-align:left;text-transform:uppercase;letter-spacing:.1em;vertical-align:top}.siem-roi-table td{padding:9px 0;border-top:1px solid rgba(148,163,184,.10);color:#dce8f7;font-size:13px;line-height:1.42;vertical-align:top;overflow-wrap:anywhere}.siem-table-section{display:grid;gap:8px}.siem-table-title{padding:0 2px}.siem-table-title h3{margin:0;color:#f4f8ff;font-size:16px;letter-spacing:-.01em}.siem-table-title p{display:none}.siem-table-wrap{overflow:auto;border:1px solid rgba(148,163,184,.11);border-radius:8px;background:#0d1620}.siem-engineering-table{width:100%;min-width:1040px;border-collapse:collapse}.siem-engineering-table th{padding:9px 11px;border-bottom:1px solid rgba(148,163,184,.12);color:#96a6b8;background:#101b26;font-size:10px;font-weight:900;text-align:left;text-transform:uppercase;letter-spacing:.08em}.siem-engineering-table td{padding:11px;border-bottom:1px solid rgba(148,163,184,.09);vertical-align:top;color:#d7e3f1;font-size:12.5px;line-height:1.36}.siem-engineering-table tbody tr{height:86px}.siem-engineering-table tbody tr:hover{background:rgba(34,211,238,.03)}.siem-engineering-table td:nth-child(1){width:108px}.siem-engineering-table td:nth-child(2){width:260px}.siem-engineering-table td:nth-child(3){width:116px}.siem-engineering-table td:nth-child(5){width:116px}.siem-engineering-table strong{display:block;color:#f4f8ff;font-size:12.5px;line-height:1.25}.siem-engineering-table code{display:block;margin-top:6px;color:#91a4ba;background:transparent;font:11px/1.3 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;white-space:normal;overflow-wrap:anywhere}.siem-table-pill{display:inline-flex;align-items:center;border:1px solid rgba(34,211,238,.16);border-radius:999px;padding:3px 7px;color:#8ff4ff;background:rgba(34,211,238,.035);font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.04em}.siem-reason-cell{min-width:380px}.siem-reason-cell p{margin:0;color:#dce8f7;font-size:12.5px;line-height:1.42;overflow-wrap:anywhere}.siem-reason-cell em{display:block;margin-top:5px;color:#9fb0c4;font-size:12px;font-style:normal;line-height:1.35;overflow-wrap:anywhere}.siem-engineering-table td:last-child b{display:block;color:#f4f8ff;font-size:17px;line-height:1}.siem-engineering-table td:last-child span{display:block;margin-top:5px;color:#91a4ba;font-size:11px;line-height:1.3;overflow-wrap:anywhere}.siem-empty-row td{padding:18px 12px;color:#91a4ba;text-align:center}@media(max-width:1100px){.siem-eng-hero{grid-template-columns:1fr}.siem-model-card{text-align:left}.siem-eng-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.siem-table-title{display:grid}}@media(max-width:680px){.siem-eng-kpis{grid-template-columns:1fr}.siem-roi-head{display:grid}.siem-roi-rank{text-align:left}.siem-roi-table th{width:70px}}
 </style>
 '''
 
