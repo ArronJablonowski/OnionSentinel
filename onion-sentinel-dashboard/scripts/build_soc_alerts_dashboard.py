@@ -2628,7 +2628,7 @@ def settings_page_section() -> str:
       <details class="settings-panel settings-details settings-model-details" aria-labelledby="soc-ai-model-title">
         <summary>
           <span class="settings-summary-main">
-            <span class="settings-summary-icon" aria-hidden="true"><img src="assets/metric-latest.png" alt=""></span>
+            <span class="settings-summary-icon" aria-hidden="true"><img src="assets/settings-ai-model-routing.png" alt=""></span>
             <span class="settings-summary-copy">
               <span class="settings-kicker">AI model routing</span>
               <strong id="soc-ai-model-title">AI Analysis Model Selection</strong>
