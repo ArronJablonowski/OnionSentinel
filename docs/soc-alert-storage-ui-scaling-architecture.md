@@ -522,8 +522,9 @@ page, the badge mirrors the table's current visible row count, not the raw
 SQLite row count. The same client-side `applyFilter()` pass that updates the
 `Visible / Total` metric also updates the nav badge, so search text,
 acknowledged/suppressed visibility toggles, severity filtering, and last-seen
-time-window filtering all change the badge.
-immediately.
+time-window filtering all change the badge immediately. The badge color follows
+the highest severity among currently visible open alerts, using the same
+Critical, High, Medium, Low, or Informational colors shown in the table.
 
 ## Duplicate Alert Grouping
 
