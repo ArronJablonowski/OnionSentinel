@@ -1,6 +1,6 @@
 # Shared Cyber Security Agent Memory
 
-Purpose: durable Markdown memory shared across SOC Analyst, Incident Responder, SIEM Engineer, and Threat Hunter workflows.
+Purpose: durable Markdown memory shared across SOC Analyst, Incident Responder, SIEM Engineer, Threat Hunter, and Cyber Threat Intel workflows.
 
 ## Operating Notes
 

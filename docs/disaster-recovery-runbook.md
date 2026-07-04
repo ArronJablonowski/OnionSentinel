@@ -94,13 +94,14 @@ alerts are still intentionally stored without Telegram under the default
 `TELEGRAM_ALERT_LEVELS=critical,high` policy.
 
 The installer also creates editable SOC Analyst, Incident Responder, SIEM
-Engineer, and Threat Hunter system prompts plus the AI model routing config only
-if they are missing:
+Engineer, Cyber Threat Intel Analyst, and Threat Hunter system prompts plus the
+AI model routing config only if they are missing:
 
 ```text
 $HOME/n8n-local/config/soc_analyst_system_prompt.md
 $HOME/n8n-local/config/incident_responder_system_prompt.md
 $HOME/n8n-local/config/siem_engineer_system_prompt.md
+$HOME/n8n-local/config/cyber_threat_intel_system_prompt.md
 $HOME/n8n-local/config/threat_hunter_system_prompt.md
 $HOME/n8n-local/config/ai_model_settings.json
 ```
@@ -112,6 +113,7 @@ only if they are missing:
 $HOME/n8n-local/soc-alerts/agent-memory/soc-analyst-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/incident-responder-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/siem-engineer-memory.md
+$HOME/n8n-local/soc-alerts/agent-memory/cyber-threat-intel-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/threat-hunter-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/shared-agent-memory.md
 ```

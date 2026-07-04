@@ -44,6 +44,9 @@ fi
 if [[ ! -f "$STACK_DIR/config/threat_hunter_system_prompt.md" ]]; then
   cp "$REPO_DIR/n8n/config/threat_hunter_system_prompt.md" "$STACK_DIR/config/threat_hunter_system_prompt.md"
 fi
+if [[ ! -f "$STACK_DIR/config/cyber_threat_intel_system_prompt.md" ]]; then
+  cp "$REPO_DIR/n8n/config/cyber_threat_intel_system_prompt.md" "$STACK_DIR/config/cyber_threat_intel_system_prompt.md"
+fi
 if [[ ! -f "$STACK_DIR/config/incident_responder_system_prompt.md" ]]; then
   cp "$REPO_DIR/n8n/config/incident_responder_system_prompt.md" "$STACK_DIR/config/incident_responder_system_prompt.md"
 fi
@@ -56,6 +59,7 @@ for memory_file in \
   incident-responder-memory.md \
   siem-engineer-memory.md \
   threat-hunter-memory.md \
+  cyber-threat-intel-memory.md \
   shared-agent-memory.md
 do
   if [[ ! -f "$STACK_DIR/soc-alerts/agent-memory/$memory_file" ]]; then

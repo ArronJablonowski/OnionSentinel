@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Cyber Threat Intel">
+  <defs>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="2.6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <g fill="none" stroke="#67e8f9" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)">
+    <circle cx="64" cy="64" r="34" stroke-width="3.5"/>
+    <ellipse cx="64" cy="64" rx="15" ry="34" stroke-width="2"/>
+    <path d="M30 64h68M64 30v68" stroke-width="2"/>
+    <path d="M37 48c15 7 39 7 54 0M37 80c15-7 39-7 54 0" stroke-width="2"/>
+    <path d="M42 42l44 17M42 86l44-17M42 42v44M86 59v10" stroke-width="2.5" opacity=".8"/>
+    <circle cx="42" cy="42" r="5.5" fill="#071018" stroke-width="3"/>
+    <circle cx="42" cy="86" r="5.5" fill="#071018" stroke-width="3"/>
+    <circle cx="86" cy="59" r="5.5" fill="#071018" stroke-width="3"/>
+    <circle cx="86" cy="69" r="5.5" fill="#071018" stroke-width="3"/>
+  </g>
+  <g fill="none" stroke="#e0faff" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M64 50l14 14-14 14-14-14z" stroke-width="2.5"/>
+    <path d="M57 64h14M64 57v14" stroke-width="2.5"/>
+  </g>
+</svg>

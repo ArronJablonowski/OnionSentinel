@@ -48,11 +48,13 @@ DB_BEACON_JSON = HOME / 'n8n-local' / 'alert_store_data' / 'n8n-beacon.json'
 SOC_ANALYST_PROMPT_FILE = HOME / 'n8n-local' / 'config' / 'soc_analyst_system_prompt.md'
 SIEM_ENGINEER_PROMPT_FILE = HOME / 'n8n-local' / 'config' / 'siem_engineer_system_prompt.md'
 THREAT_HUNTER_PROMPT_FILE = HOME / 'n8n-local' / 'config' / 'threat_hunter_system_prompt.md'
+CYBER_THREAT_INTEL_PROMPT_FILE = HOME / 'n8n-local' / 'config' / 'cyber_threat_intel_system_prompt.md'
 INCIDENT_RESPONDER_PROMPT_FILE = HOME / 'n8n-local' / 'config' / 'incident_responder_system_prompt.md'
 SOC_ANALYST_MEMORY_FILE = AGENT_MEMORY_DIR / 'soc-analyst-memory.md'
 INCIDENT_RESPONDER_MEMORY_FILE = AGENT_MEMORY_DIR / 'incident-responder-memory.md'
 SIEM_ENGINEER_MEMORY_FILE = AGENT_MEMORY_DIR / 'siem-engineer-memory.md'
 THREAT_HUNTER_MEMORY_FILE = AGENT_MEMORY_DIR / 'threat-hunter-memory.md'
+CYBER_THREAT_INTEL_MEMORY_FILE = AGENT_MEMORY_DIR / 'cyber-threat-intel-memory.md'
 SHARED_AGENT_MEMORY_FILE = AGENT_MEMORY_DIR / 'shared-agent-memory.md'
 SOC_AI_SETTINGS_FILE = HOME / 'n8n-local' / 'config' / 'ai_model_settings.json'
 ASSET_SOURCE_DIRS = (
@@ -162,6 +164,20 @@ Rules:
 - If evidence is insufficient, propose a data-collection hunt instead of claiming compromise.
 - Include expected benign explanations, escalation criteria, and what evidence would close the hunt."""
 
+DEFAULT_CYBER_THREAT_INTEL_PROMPT = """You are a senior cyber threat intelligence analyst. Use only the supplied Onion Sentinel evidence unless an enrichment source is explicitly provided.
+
+Your job is to turn Security Onion detections, alert timelines, enrichments, analyst notes, acknowledgments, suppressions, AI analysis, and related hunt/engineering context into concise threat intelligence useful to SOC analysts, incident responders, threat hunters, and SIEM engineers.
+
+Rules:
+- Return one valid JSON object and no prose outside JSON.
+- Separate observed facts, analytic judgments, confidence, assumptions, and intelligence gaps.
+- Use Cyber Threat Intel memory and shared Cyber Security Agent memory when supplied, but treat memory as context, not proof.
+- Identify relevant indicators, behaviors, infrastructure patterns, ATT&CK-style tactics/techniques when evidence supports them, and likely benign explanations.
+- Recommend enrichment pivots such as reputation, ASN, passive DNS, WHOIS/RDAP, certificate, JA3/JA4, URL/domain, malware sandbox, and internal asset context, but do not claim results that were not supplied.
+- Produce analyst-ready intelligence briefs with source limits, confidence, watchlist ideas, and follow-up questions.
+- Do not invent hostnames, users, packet contents, malware families, threat actor names, geolocation, attribution, or business context.
+- If evidence is insufficient, say what additional enrichment would improve the assessment."""
+
 DEFAULT_INCIDENT_RESPONDER_PROMPT = """You are a senior cyber security incident responder. Use only the supplied Onion Sentinel evidence unless an enrichment source is explicitly provided.
 
 Your job is to conduct incident response planning and case execution guidance for Security Onion detections, alert timelines, enrichments, analyst notes, acknowledgments, suppressions, AI analysis, and related host/network context. You may recommend external tooling, including custom host artifact collection scripts run from a dedicated incident response host with access to additional hosts, but do not assume that integration is available until it is explicitly configured.
@@ -213,6 +229,17 @@ def load_threat_hunter_prompt() -> str:
     except Exception:
         pass
     return DEFAULT_THREAT_HUNTER_PROMPT
+
+
+def load_cyber_threat_intel_prompt() -> str:
+    """Read the editable Cyber Threat Intel Analyst system prompt for the Settings page."""
+    try:
+        prompt = CYBER_THREAT_INTEL_PROMPT_FILE.read_text(encoding='utf-8').strip()
+        if prompt:
+            return prompt
+    except Exception:
+        pass
+    return DEFAULT_CYBER_THREAT_INTEL_PROMPT
 
 
 def load_incident_responder_prompt() -> str:
@@ -2757,6 +2784,9 @@ def settings_page_section() -> str:
     hunter_prompt = html.escape(load_threat_hunter_prompt())
     hunter_prompt_path = html.escape(display_path(THREAT_HUNTER_PROMPT_FILE))
     hunter_memory_path = html.escape(display_path(THREAT_HUNTER_MEMORY_FILE))
+    intel_prompt = html.escape(load_cyber_threat_intel_prompt())
+    intel_prompt_path = html.escape(display_path(CYBER_THREAT_INTEL_PROMPT_FILE))
+    intel_memory_path = html.escape(display_path(CYBER_THREAT_INTEL_MEMORY_FILE))
     incident_prompt = html.escape(load_incident_responder_prompt())
     incident_prompt_path = html.escape(display_path(INCIDENT_RESPONDER_PROMPT_FILE))
     incident_memory_path = html.escape(display_path(INCIDENT_RESPONDER_MEMORY_FILE))
@@ -2945,6 +2975,34 @@ def settings_page_section() -> str:
           <span id="siem-engineer-prompt-status" class="settings-save-status" role="status" aria-live="polite"></span>
         </div>
       </details>
+      <details class="settings-panel settings-details" aria-labelledby="cyber-threat-intel-prompt-title">
+        <summary>
+          <span class="settings-summary-main">
+            <span class="settings-summary-icon" aria-hidden="true"><img src="assets/settings-cyber-threat-intel-prompt.svg" alt=""></span>
+            <span class="settings-summary-copy">
+              <span class="settings-kicker">Cyber threat intel prompt</span>
+              <strong id="cyber-threat-intel-prompt-title">Cyber Threat Intel Analyst</strong>
+              <span class="settings-trigger-line">Trigger: manual intel review from alerts, enrichments, hunts, and engineering context; scheduled briefs are future work.</span>
+            </span>
+          </span>
+          <span class="settings-path-stack" aria-label="Cyber Threat Intel Analyst files">
+            <span><b>Prompt</b><code>{intel_prompt_path}</code></span>
+            <span><b>Memory</b><code>{intel_memory_path}</code></span>
+            <span><b>Shared</b><code>{shared_memory_path}</code></span>
+          </span>
+        </summary>
+        <div class="settings-panel-top">
+          <div>
+            <p>This prompt guides intelligence briefs, indicator review, enrichment pivots, confidence scoring, and cross-agent context for SOC decisions.</p>
+          </div>
+        </div>
+        <label class="prompt-editor-label" for="cyber-threat-intel-prompt">Prompt body</label>
+        <textarea id="cyber-threat-intel-prompt" class="prompt-editor" spellcheck="false">{intel_prompt}</textarea>
+        <div class="settings-actions">
+          <button id="save-cyber-threat-intel-prompt" class="settings-save-button" type="button">Save</button>
+          <span id="cyber-threat-intel-prompt-status" class="settings-save-status" role="status" aria-live="polite"></span>
+        </div>
+      </details>
       <details class="settings-panel settings-details" aria-labelledby="threat-hunter-prompt-title">
         <summary>
           <span class="settings-summary-main">
@@ -3001,6 +3059,9 @@ SETTINGS_PAGE_JS = '''
   const hunterEditor = document.querySelector('#threat-hunter-prompt');
   const saveHunterButton = document.querySelector('#save-threat-hunter-prompt');
   const hunterStatus = document.querySelector('#threat-hunter-prompt-status');
+  const intelEditor = document.querySelector('#cyber-threat-intel-prompt');
+  const saveIntelButton = document.querySelector('#save-cyber-threat-intel-prompt');
+  const intelStatus = document.querySelector('#cyber-threat-intel-prompt-status');
   const incidentEditor = document.querySelector('#incident-responder-prompt');
   const saveIncidentButton = document.querySelector('#save-incident-responder-prompt');
   const incidentStatus = document.querySelector('#incident-responder-prompt-status');
@@ -3032,6 +3093,11 @@ SETTINGS_PAGE_JS = '''
     if (!hunterStatus) return;
     hunterStatus.textContent = message;
     hunterStatus.className = `settings-save-status ${kind}`.trim();
+  }
+  function setIntelStatus(message, kind = '') {
+    if (!intelStatus) return;
+    intelStatus.textContent = message;
+    intelStatus.className = `settings-save-status ${kind}`.trim();
   }
   function setIncidentStatus(message, kind = '') {
     if (!incidentStatus) return;
@@ -3158,6 +3224,18 @@ SETTINGS_PAGE_JS = '''
       setHunterStatus('Could not refresh prompt from the portal API.', 'error');
     }
   }
+  async function refreshIntelPrompt() {
+    if (!intelEditor) return;
+    try {
+      const response = await fetch('/api/soc-settings/cyber-threat-intel-prompt', {cache: 'no-store'});
+      const data = await response.json();
+      if (data.ok && typeof data.prompt === 'string') {
+        intelEditor.value = data.prompt.trimEnd();
+      }
+    } catch (_) {
+      setIntelStatus('Could not refresh prompt from the portal API.', 'error');
+    }
+  }
   async function refreshIncidentPrompt() {
     if (!incidentEditor) return;
     try {
@@ -3251,6 +3329,33 @@ SETTINGS_PAGE_JS = '''
       saveHunterButton.disabled = false;
     }
   }
+  async function saveIntelPrompt() {
+    if (!intelEditor || !saveIntelButton) return;
+    const prompt = intelEditor.value.trim();
+    if (!prompt) {
+      setIntelStatus('Prompt cannot be empty.', 'error');
+      return;
+    }
+    saveIntelButton.disabled = true;
+    setIntelStatus('Saving...');
+    try {
+      const response = await fetch('/api/soc-settings/cyber-threat-intel-prompt', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({prompt})
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || `Save failed with HTTP ${response.status}`);
+      }
+      setIntelStatus('Saved. New Cyber Threat Intel briefs will use this prompt.', 'ok');
+    } catch (error) {
+      setIntelStatus(String(error.message || error), 'error');
+    } finally {
+      saveIntelButton.disabled = false;
+    }
+  }
   async function saveIncidentPrompt() {
     if (!incidentEditor || !saveIncidentButton) return;
     const prompt = incidentEditor.value.trim();
@@ -3282,6 +3387,7 @@ SETTINGS_PAGE_JS = '''
   saveButton?.addEventListener('click', savePrompt);
   saveEngineerButton?.addEventListener('click', saveEngineerPrompt);
   saveHunterButton?.addEventListener('click', saveHunterPrompt);
+  saveIntelButton?.addEventListener('click', saveIntelPrompt);
   saveIncidentButton?.addEventListener('click', saveIncidentPrompt);
   refreshAiSettings().then(refreshOllamaModels);
   if (ollamaModel) {
@@ -3290,6 +3396,7 @@ SETTINGS_PAGE_JS = '''
   refreshPrompt();
   refreshEngineerPrompt();
   refreshHunterPrompt();
+  refreshIntelPrompt();
   refreshIncidentPrompt();
 })();
 </script>

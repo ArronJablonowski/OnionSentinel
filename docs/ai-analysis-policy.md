@@ -214,6 +214,12 @@ Editable Threat Hunter system prompt:
 $HOME/n8n-local/config/threat_hunter_system_prompt.md
 ```
 
+Editable Cyber Threat Intel Analyst system prompt:
+
+```text
+$HOME/n8n-local/config/cyber_threat_intel_system_prompt.md
+```
+
 Editable Incident Responder system prompt:
 
 ```text
@@ -222,8 +228,8 @@ $HOME/n8n-local/config/incident_responder_system_prompt.md
 
 The SOC Alerts Settings page exposes model routing controls in a collapsed
 `AI Analysis Model Selection` panel plus collapsed editable prompt sections for
-the SOC Analyst, Incident Responder, SIEM Engineer, and Threat Hunter roles
-under `Cyber Security Agents`:
+the SOC Analyst, Incident Responder, SIEM Engineer, Cyber Threat Intel Analyst,
+and Threat Hunter roles under `Cyber Security Agents`:
 
 ```text
 http://10.77.7.225:8765/view/b68c5a48b9778061/settings.html
@@ -235,6 +241,7 @@ Save behavior:
 - The web UI calls `/api/soc-settings/analyst-prompt` for the SOC Analyst system prompt.
 - The web UI calls `/api/soc-settings/incident-responder-prompt` for the Incident Responder system prompt.
 - The web UI calls `/api/soc-settings/siem-engineer-prompt` for the SIEM Engineer system prompt.
+- The web UI calls `/api/soc-settings/cyber-threat-intel-prompt` for the Cyber Threat Intel Analyst system prompt.
 - The web UI calls `/api/soc-settings/threat-hunter-prompt` for the Threat Hunter system prompt.
 - Saving requires a LAN Portal Administration session.
 - The portal writes settings files atomically and rejects empty prompts or prompts larger than 20 KB.
@@ -250,6 +257,12 @@ The Threat Hunter prompt is reserved for senior hunt recommendations. It should
 produce Security Onion, Elastic/Kibana KQL, OQL Security Union Hunt, and OSQuery
 examples only when the supplied alert evidence supports those pivots.
 
+The Cyber Threat Intel Analyst prompt is reserved for concise intelligence
+briefs, indicator review, enrichment pivot recommendations, confidence scoring,
+watchlist ideas, and cross-agent context. It must not invent attribution,
+geolocation, malware names, reputation, or enrichment results that were not
+supplied.
+
 The Incident Responder prompt is reserved for senior response planning and case
 execution guidance. It may recommend external tooling such as custom host
 artifact collection scripts, but direct execution is a TODO until a dedicated
@@ -259,8 +272,9 @@ The Settings page shows collapsed trigger summaries for each Cyber Security
 Agent so operators can distinguish live triggers from planned/manual workflows:
 SOC Analyst runs from new eligible alerts through the scheduled AI worker,
 Incident Responder is manual until the IR host integration exists, SIEM Engineer
-is planned for a 6 hour cron review after analysis backlog clears, and Threat
-Hunter is manual until automated hunts are built.
+is planned for a 6 hour cron review after analysis backlog clears, Cyber Threat
+Intel is manual until scheduled intelligence briefs are built, and Threat Hunter
+is manual until automated hunts are built.
 
 Cyber Security Agent Markdown memory files:
 
@@ -268,6 +282,7 @@ Cyber Security Agent Markdown memory files:
 $HOME/n8n-local/soc-alerts/agent-memory/soc-analyst-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/incident-responder-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/siem-engineer-memory.md
+$HOME/n8n-local/soc-alerts/agent-memory/cyber-threat-intel-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/threat-hunter-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/shared-agent-memory.md
 ```

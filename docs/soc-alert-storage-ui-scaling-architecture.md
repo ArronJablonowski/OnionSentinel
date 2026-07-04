@@ -384,7 +384,7 @@ automations.html    Automations workspace placeholder
 sources.html        Sources workspace placeholder
 threat-hunter.html  Threat Hunter workspace with expandable hunt plans and copyable queries
 siem-tuning.html    Backward-compatible alias for SIEM Engineer
-settings.html       Settings page with AI model routing plus collapsed SOC Analyst, Incident Responder, SIEM Engineer, and Threat Hunter prompt editors
+settings.html       Settings page with AI model routing plus collapsed SOC Analyst, Incident Responder, SIEM Engineer, Cyber Threat Intel Analyst, and Threat Hunter prompt editors
 ```
 
 The Flow page is intentionally simple: it gives an analyst a fast visual model
@@ -481,6 +481,16 @@ Settings page behavior:
 - Shows the collapsed shared memory path:
   `$HOME/n8n-local/soc-alerts/agent-memory/shared-agent-memory.md`.
 - Saves through `/api/soc-settings/siem-engineer-prompt`.
+- Reads `$HOME/n8n-local/config/cyber_threat_intel_system_prompt.md`.
+- Displays the current `Cyber Threat Intel Analyst` prompt in a matching
+  collapsible editor under `Cyber Security Agents`.
+- Shows the collapsed trigger summary as manual intelligence review today, with
+  scheduled intelligence briefs still marked future work.
+- Shows the collapsed memory path:
+  `$HOME/n8n-local/soc-alerts/agent-memory/cyber-threat-intel-memory.md`.
+- Shows the collapsed shared memory path:
+  `$HOME/n8n-local/soc-alerts/agent-memory/shared-agent-memory.md`.
+- Saves through `/api/soc-settings/cyber-threat-intel-prompt`.
 - Reads `$HOME/n8n-local/config/threat_hunter_system_prompt.md`.
 - Displays the current `Threat Hunter` prompt in a matching collapsible editor
   below the SIEM Engineer prompt.
