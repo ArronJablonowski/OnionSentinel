@@ -375,7 +375,7 @@ index.html          SOC Alerts default page
 soc-alerts.html     Direct SOC Alerts bookmark
 home.html           Executive KPI and chart overview
 flow.html           Data-flow overview via Flow nav item
-investigations.html Investigation workspace placeholder
+investigations.html Incident Responder workspace placeholder
 reports.html        Reports workspace placeholder
 playbooks.html      Playbooks workspace placeholder
 automations.html    Automations workspace placeholder

@@ -57,8 +57,8 @@ MARKDOWN_SOURCES = (SOURCE_DIR, ALT_SOURCE_DIR)
 PAGE_DEFS = [
     ('home', 'home.html', 'Home', 'Executive SOC metrics and trends'),
     ('alerts', 'index.html', 'SOC Alerts', 'AI-powered triage and investigation'),
+    ('investigations', 'investigations.html', 'Incident Responder', 'Incident response case work and analyst follow-up'),
     ('threat_hunter', 'threat-hunter.html', 'Threat Hunter', 'Hunting workspace for suspicious patterns, pivots, and investigation leads'),
-    ('investigations', 'investigations.html', 'Investigations', 'Case work and analyst follow-up'),
     ('reports', 'reports.html', 'Reports', 'Markdown reports and daily rollups'),
     ('playbooks', 'playbooks.html', 'Playbooks', 'Response checklists and investigation paths'),
     ('automations', 'automations.html', 'Automations', 'n8n workflow and relay automation status'),
