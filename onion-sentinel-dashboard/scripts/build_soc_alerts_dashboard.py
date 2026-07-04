@@ -56,6 +56,7 @@ MARKDOWN_SOURCES = (SOURCE_DIR, ALT_SOURCE_DIR)
 PAGE_DEFS = [
     ('home', 'home.html', 'Home', 'Executive SOC metrics and trends'),
     ('alerts', 'index.html', 'SOC Alerts', 'AI-powered triage and investigation'),
+    ('threat_hunter', 'threat-hunter.html', 'Threat Hunter', 'Hunting workspace for suspicious patterns, pivots, and investigation leads'),
     ('investigations', 'investigations.html', 'Investigations', 'Case work and analyst follow-up'),
     ('reports', 'reports.html', 'Reports', 'Markdown reports and daily rollups'),
     ('playbooks', 'playbooks.html', 'Playbooks', 'Response checklists and investigation paths'),
@@ -2152,6 +2153,7 @@ NAV_ICONS = {
     'home': '<svg viewBox="0 0 24 24"><path d="M3.5 11.5 12 4l8.5 7.5"/><path d="M6 10.5V20h12v-9.5"/><path d="M10 20v-5h4v5"/></svg>',
     'flow': '<svg viewBox="0 0 24 24"><path d="M3 7.5c1.7 1.4 3.4 1.4 5.1 0s3.4-1.4 5.1 0 3.4 1.4 5.1 0c.9-.7 1.8-1.1 2.7-1.1"/><path d="M3 12.5c1.7 1.4 3.4 1.4 5.1 0s3.4-1.4 5.1 0 3.4 1.4 5.1 0c.9-.7 1.8-1.1 2.7-1.1"/><path d="M3 17.5c1.7 1.4 3.4 1.4 5.1 0s3.4-1.4 5.1 0 3.4 1.4 5.1 0c.9-.7 1.8-1.1 2.7-1.1"/></svg>',
     'alerts': '<svg viewBox="0 0 24 24"><circle cx="6" cy="7" r="1.6"/><circle cx="6" cy="12" r="1.6"/><circle cx="6" cy="17" r="1.6"/><path d="M10 7h10M10 12h10M10 17h10"/></svg>',
+    'threat_hunter': '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="5.5"/><path d="M11 7.5v7M7.5 11h7"/><path d="m15.2 15.2 4.3 4.3"/><path d="M11 3.5v2M11 16.5v2M3.5 11h2M16.5 11h2"/></svg>',
     'investigations': '<svg viewBox="0 0 24 24"><path d="M8 5H6.5A2.5 2.5 0 0 0 4 7.5v11A2.5 2.5 0 0 0 6.5 21h11a2.5 2.5 0 0 0 2.5-2.5v-11A2.5 2.5 0 0 0 17.5 5H16"/><path d="M9 3h6v4H9z"/><path d="M8 12h8M8 16h6"/></svg>',
     'reports': '<svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><path d="M10.5 7.6 6.5 16.4M13.5 7.6l4 8.8M8 19h8"/></svg>',
     'playbooks': '<svg viewBox="0 0 24 24"><path d="M4 20V11h4v9M10 20V5h4v15M16 20V8h4v12M3 20h18"/></svg>',
