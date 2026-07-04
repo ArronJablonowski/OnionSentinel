@@ -380,6 +380,7 @@ reports.html        Reports workspace placeholder
 playbooks.html      Playbooks workspace placeholder
 automations.html    Automations workspace placeholder
 sources.html        Sources workspace placeholder
+siem-tuning.html    SIEM tuning workspace placeholder
 settings.html       Settings page with AI model routing and collapsed SOC Analyst system prompt editor
 ```
 

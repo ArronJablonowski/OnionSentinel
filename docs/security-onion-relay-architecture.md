@@ -962,9 +962,10 @@ latest alert if no live alert-store beacon exists.
 The portal now generates one static HTML file per left-navigation item.
 `index.html` is the default SOC Alerts table page, `home.html` is the executive
 KPI/chart overview, `flow.html` is the dedicated data-flow route with a simple
-ocean-wave line icon, and `soc-alerts.html` is kept as a direct SOC Alerts
-bookmark. Other left-nav routes currently render their own placeholder pages
-until their data-backed widgets are implemented.
+ocean-wave line icon, `siem-tuning.html` is the SIEM tuning workspace route with
+a code-native slider/tuning line icon, and `soc-alerts.html` is kept as a
+direct SOC Alerts bookmark. Other left-nav routes currently render their own
+placeholder pages until their data-backed widgets are implemented.
 
 Data sensitivity warning:
 

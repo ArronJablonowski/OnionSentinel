@@ -25,6 +25,7 @@ This directory contains the Mac Studio LAN Portal backend and the generated SOC 
 - Lazy-loaded Detailed Alert Reports.
 - Live `Latest Alert`, `Last n8n beacon`, AI activity, and SOC count metrics.
 - Flow page with data-flow diagram and privacy IP masking.
+- SIEM Tuning menu route with a matching code-native sidebar icon.
 - Settings page for AI model routing and SOC analyst system prompt.
 
 ## Manual Rebuild

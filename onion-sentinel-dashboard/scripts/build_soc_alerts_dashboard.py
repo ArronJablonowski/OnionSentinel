@@ -60,6 +60,7 @@ PAGE_DEFS = [
     ('playbooks', 'playbooks.html', 'Playbooks', 'Response checklists and investigation paths'),
     ('automations', 'automations.html', 'Automations', 'n8n workflow and relay automation status'),
     ('sources', 'sources.html', 'Sources', 'Security Onion, relay, SQLite, and AI data sources'),
+    ('siem_tuning', 'siem-tuning.html', 'SIEM Tuning', 'Filtering, scoring, suppression, and detection tuning workspace'),
     ('settings', 'settings.html', 'Settings', 'Dashboard and SOC workflow configuration'),
     ('flow', 'flow.html', 'Flow', 'Autonomous SIEM alert enrichment flow map'),
 ]
@@ -2111,6 +2112,7 @@ NAV_ICONS = {
     'playbooks': '<svg viewBox="0 0 24 24"><path d="M4 20V11h4v9M10 20V5h4v15M16 20V8h4v12M3 20h18"/></svg>',
     'automations': '<svg viewBox="0 0 24 24"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/><path d="M19.4 15a8 8 0 0 0 .1-1l2-1.5-2-3.5-2.4 1a7.8 7.8 0 0 0-1.7-1L15 6.5h-4L10.6 9a7.8 7.8 0 0 0-1.7 1l-2.4-1-2 3.5 2 1.5a8 8 0 0 0 .1 2l-2 1.5 2 3.5 2.4-1a7.8 7.8 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7.8 7.8 0 0 0 1.7-1l2.4 1 2-3.5-2.2-1.5Z"/></svg>',
     'sources': '<svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>',
+    'siem_tuning': '<svg viewBox="0 0 24 24"><path d="M4 6h7M15 6h5M4 12h4M12 12h8M4 18h10M18 18h2"/><circle cx="13" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="16" cy="18" r="2"/></svg>',
     'settings': '<svg viewBox="0 0 24 24"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/><path d="M19.4 15a8 8 0 0 0 .1-1l2-1.5-2-3.5-2.4 1a7.8 7.8 0 0 0-1.7-1L15 6.5h-4L10.6 9a7.8 7.8 0 0 0-1.7 1l-2.4-1-2 3.5 2 1.5a8 8 0 0 0 .1 2l-2 1.5 2 3.5 2.4-1a7.8 7.8 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7.8 7.8 0 0 0 1.7-1l2.4 1 2-3.5-2.2-1.5Z"/></svg>',
 }
 
