@@ -376,13 +376,13 @@ soc-alerts.html     Direct SOC Alerts bookmark
 home.html           Executive KPI and chart overview
 flow.html           Data-flow overview via Flow nav item
 investigations.html Incident Responder workspace placeholder
+siem-engineering.html SIEM Engineer tuning and detection recommendation workspace
 reports.html        Reports workspace placeholder
 playbooks.html      Playbooks workspace placeholder
 automations.html    Automations workspace placeholder
 sources.html        Sources workspace placeholder
 threat-hunter.html  Threat Hunter workspace with expandable hunt plans and copyable queries
-siem-engineering.html SIEM Engineering tuning and detection recommendation workspace
-siem-tuning.html    Backward-compatible alias for SIEM Engineering
+siem-tuning.html    Backward-compatible alias for SIEM Engineer
 settings.html       Settings page with AI model routing plus collapsed SOC Analyst, SIEM Engineer, and Threat Hunter prompt editors
 ```
 

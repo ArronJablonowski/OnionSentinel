@@ -58,12 +58,12 @@ PAGE_DEFS = [
     ('home', 'home.html', 'Home', 'Executive SOC metrics and trends'),
     ('alerts', 'index.html', 'SOC Alerts', 'AI-powered triage and investigation'),
     ('investigations', 'investigations.html', 'Incident Responder', 'Incident response case work and analyst follow-up'),
+    ('siem_engineering', 'siem-engineering.html', 'SIEM Engineer', 'Tuning recommendations and detection engineering workspace'),
     ('threat_hunter', 'threat-hunter.html', 'Threat Hunter', 'Hunting workspace for suspicious patterns, pivots, and investigation leads'),
     ('reports', 'reports.html', 'Reports', 'Markdown reports and daily rollups'),
     ('playbooks', 'playbooks.html', 'Playbooks', 'Response checklists and investigation paths'),
     ('automations', 'automations.html', 'Automations', 'n8n workflow and relay automation status'),
     ('sources', 'sources.html', 'Sources', 'Security Onion, relay, SQLite, and AI data sources'),
-    ('siem_engineering', 'siem-engineering.html', 'SIEM Engineering', 'Tuning recommendations and detection engineering workspace'),
     ('settings', 'settings.html', 'Settings', 'Dashboard and SOC workflow configuration'),
     ('flow', 'flow.html', 'Flow', 'Autonomous SIEM alert enrichment flow map'),
 ]
