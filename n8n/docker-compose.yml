@@ -36,6 +36,7 @@ services:
       - ENRICHMENT_TIMEOUT_MS=${ENRICHMENT_TIMEOUT_MS:-5000}
       - VIRUSTOTAL_MINIMUM_LEVEL=${VIRUSTOTAL_MINIMUM_LEVEL:-high}
       - URLSCAN_SUBMIT_ENABLED=${URLSCAN_SUBMIT_ENABLED:-false}
+      - ALERT_STORE_MAX_REQUEST_BYTES=${ALERT_STORE_MAX_REQUEST_BYTES:-5242880}
     volumes:
       # Source code is read-only; SQLite data persists in alert_store_data.
       - ./alert_store:/app:ro

@@ -311,6 +311,13 @@ Use `"status": "open"` to expose/unacknowledge a group and
 acknowledgements when the grouped detection count increases, making the alert
 visible again for analysts. Suppressed groups remain hidden until exposed.
 
+Status writes are row-scoped and run inside an immediate SQLite transaction.
+The portal must never delete and rewrite the full
+`analyst_alert_group_state` table from browser state because stale tabs and
+concurrent analysts could otherwise erase each other's acknowledgements or
+suppressions. Legacy bulk browser payloads are treated as read-only compatibility
+requests; supported UI writes update only the selected grouped detection.
+
 The SOC Alerts table now uses phase-one paginated API rendering. The builder
 ships a small empty table shell instead of embedding every grouped alert row in
 the HTML. On load, the browser requests the selected state slice from:

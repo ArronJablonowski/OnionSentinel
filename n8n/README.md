@@ -98,6 +98,15 @@ Enrichment behavior knobs:
 - `VIRUSTOTAL_MINIMUM_LEVEL=high`
 - `URLSCAN_SUBMIT_ENABLED=false`
 
+Alert-store ingestion safety knob:
+
+- `ALERT_STORE_MAX_REQUEST_BYTES=5242880`
+
+`ALERT_STORE_MAX_REQUEST_BYTES` caps each `/alert` and `/enrich` POST body
+before Node buffers it in memory. Keep it high enough for full-fidelity Security
+Onion alert JSON, but low enough that a malformed relay/n8n request cannot
+consume unbounded memory during a spike.
+
 The n8n workflow includes a dedicated `Enrich Alert` node between relay
 validation and alert-store persistence. That node calls alert-store
 `POST /enrich`; alert-store extracts only public indicators, redacts URL query

@@ -352,6 +352,32 @@ class SocAlertSummaryApiTest(unittest.TestCase):
             self.assertEqual(statuses[group_id]["status"], expected_status)
             self.assertEqual(statuses[group_id]["repeat_count"], index + 1)
 
+    def test_bulk_status_persistence_merges_without_deleting_other_groups(self) -> None:
+        newest_group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        older_group_id = self.portal.soc_alert_group_id(
+            "high|Older detection|192.0.2.20|198.51.100.20|accepted"
+        )
+        self.portal.write_soc_alert_status(newest_group_id, {
+            "status": "acknowledged",
+            "repeat_count": 5,
+            "updated_at": "2026-07-03  12:00:00Z",
+        })
+
+        self.portal.save_soc_alert_statuses_to_db({
+            older_group_id: {
+                "status": "suppressed",
+                "repeat_count": 1,
+                "reason": "unit test suppression",
+                "updated_at": "2026-07-03  12:01:00Z",
+            }
+        })
+
+        statuses = self.portal.load_soc_alert_statuses()
+        self.assertEqual(statuses[newest_group_id]["status"], "acknowledged")
+        self.assertEqual(statuses[older_group_id]["status"], "suppressed")
+
     def test_acknowledged_group_reopens_when_repeat_count_increases(self) -> None:
         newest_group_key = "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
         newest_group_id = self.portal.soc_alert_group_id(newest_group_key)

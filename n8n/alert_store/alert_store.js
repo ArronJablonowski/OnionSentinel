@@ -32,6 +32,7 @@ const host = process.env.ALERT_STORE_HOST || '0.0.0.0';
 const port = Number(process.env.ALERT_STORE_PORT || 8787);
 const telegramBotToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const telegramChatId = (process.env.TELEGRAM_CHAT_ID || '').trim();
+const maxRequestBytes = Math.max(1024, Number(process.env.ALERT_STORE_MAX_REQUEST_BYTES || 5 * 1024 * 1024));
 const telegramAlertLevels = new Set(
   (process.env.TELEGRAM_ALERT_LEVELS || 'critical,high')
     .split(',')
@@ -2171,8 +2172,20 @@ function readJsonBody(request) {
   // partial batch inserts that are harder to reason about.
   return new Promise((resolve, reject) => {
     const chunks = [];
-    request.on('data', (chunk) => chunks.push(chunk));
+    let bytes = 0;
+    let rejected = false;
+    request.on('data', (chunk) => {
+      if (rejected) return;
+      bytes += chunk.length;
+      if (bytes > maxRequestBytes) {
+        rejected = true;
+        request.destroy(new Error(`payload exceeds ${maxRequestBytes} byte limit`));
+        return;
+      }
+      chunks.push(chunk);
+    });
     request.on('end', () => {
+      if (rejected) return;
       try {
         const body = Buffer.concat(chunks).toString('utf8');
         const parsed = JSON.parse(body || '{}');

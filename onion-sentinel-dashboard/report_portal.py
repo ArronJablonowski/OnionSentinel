@@ -3847,13 +3847,13 @@ def save_soc_alert_statuses_to_db(statuses: dict) -> None:
     conn.row_factory = sqlite3.Row
     try:
         ensure_soc_alert_status_table(conn)
-        conn.execute("BEGIN")
-        conn.execute("DELETE FROM analyst_alert_group_state")
+        conn.execute("BEGIN IMMEDIATE")
         for alert_id, raw_meta in statuses.items():
             meta = normalize_soc_alert_status_meta(raw_meta)
-            if not meta or meta["status"] == "open":
-                continue
             group_id = str(alert_id)
+            if not meta or meta["status"] == "open":
+                conn.execute("DELETE FROM analyst_alert_group_state WHERE group_id = ?", (group_id,))
+                continue
             group_key = str(raw_meta.get("group_key") or "") if isinstance(raw_meta, dict) else ""
             conn.execute(
                 """
