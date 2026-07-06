@@ -49,6 +49,7 @@ SOC_ALERT_DASHBOARD_DIR = HOME / "report_portal" / "library" / "Cybersecurity" /
 SOC_ALERT_DETAIL_DIR = SOC_ALERT_DASHBOARD_DIR / "details"
 SOC_ALERT_STATIC_STATUS_FILE = SOC_ALERT_DASHBOARD_DIR / "soc-alerts-status.json"
 SOC_ALERT_N8N_BEACON_FILE = SOC_ALERT_DASHBOARD_DIR / "n8n-beacon.json"
+SOC_ALERT_N8N_BEACON_HISTORY_FILE = SOC_ALERT_DASHBOARD_DIR / "n8n-beacon-history.json"
 SOC_ANALYST_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system_prompt.md"
 SIEM_ENGINEER_PROMPT_FILE = HOME / "n8n-local" / "config" / "siem_engineer_system_prompt.md"
 THREAT_HUNTER_PROMPT_FILE = HOME / "n8n-local" / "config" / "threat_hunter_system_prompt.md"
@@ -66,6 +67,8 @@ SOC_ALERT_LEVEL_RANK = {
     "info": 1,
     "unknown": 0,
 }
+SOC_ALERT_AI_ELIGIBLE_FILTER_STATUSES = {"accepted", "escalated", "unknown", "suppressed"}
+SOC_ALERT_TEST_PREFIXES = ("phase", "config-", "internal-test-", "sqlite-", "policy-", "codex-")
 HERMES_DR_BACKUP_DIR = HOME / "Hermes_DR_Backups"
 HERMES_DR_REMOTE_DEST = "aj_lab@10.77.7.222"
 HERMES_DR_REMOTE_DIR = "/Users/aj_lab/Hermes_DR_Backups"
@@ -200,6 +203,153 @@ def format_timestamp_text(value: object, *, fallback: str = "unknown time") -> s
     except Exception:
         text = str(value).strip()
         return ISO_DATE_TIME_SEPARATOR_RE.sub(r"\1  ", text) if text else fallback
+
+
+def _safe_read_json(path: Path, fallback: object) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return fallback
+
+
+def _beacon_timestamp(beacon: dict[str, object]) -> dt.datetime | None:
+    for key in ("generated_at", "history_recorded_at", "last_seen", "timestamp", "exported_at"):
+        value = beacon.get(key)
+        if not value:
+            continue
+        try:
+            parsed = parse_iso_timestamp(value)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt.timezone.utc)
+            return parsed.astimezone(dt.timezone.utc)
+        except Exception:
+            continue
+    return None
+
+
+def _beacon_http_status(beacon: dict[str, object]) -> object:
+    previous = beacon.get("relay_previous_failure")
+    if isinstance(previous, dict) and previous.get("http_status") not in (None, ""):
+        return previous.get("http_status")
+    status = beacon.get("status")
+    if isinstance(status, int):
+        return status
+    if isinstance(status, str) and re.fullmatch(r"\d{3}", status.strip()):
+        return int(status)
+    return None
+
+
+def _beacon_successful(beacon: dict[str, object]) -> bool:
+    if beacon.get("ok") is False:
+        return False
+    if beacon.get("error"):
+        return False
+    status = str(beacon.get("status") or "").lower()
+    if status in {"error", "failed", "transient_failed", "still_failed"}:
+        return False
+    return True
+
+
+def _freshest_existing_path(paths: list[Path]) -> Path | None:
+    existing = [path for path in paths if path.exists()]
+    if not existing:
+        return None
+    return max(existing, key=lambda path: path.stat().st_mtime)
+
+
+def n8n_beacon_history_response(query: dict[str, list[str]]) -> dict[str, object]:
+    try:
+        hours = max(1, min(168, int((query.get("hours") or ["24"])[0])))
+    except ValueError:
+        hours = 24
+    now = dt.datetime.now(dt.timezone.utc)
+    cutoff = now - dt.timedelta(hours=hours)
+    history_path = _freshest_existing_path([
+        SOC_ALERT_N8N_BEACON_HISTORY_FILE,
+        HOME / "SOC Alerts Web" / "n8n-beacon-history.json",
+        HOME / "n8n-local" / "alert_store_data" / "n8n-beacon-history.json",
+    ])
+    raw_history = _safe_read_json(history_path, []) if history_path else []
+    history = raw_history if isinstance(raw_history, list) else []
+    latest_path = _freshest_existing_path([
+        SOC_ALERT_N8N_BEACON_FILE,
+        HOME / "SOC Alerts Web" / "n8n-beacon.json",
+        HOME / "n8n-local" / "alert_store_data" / "n8n-beacon.json",
+    ])
+    if not history and latest_path:
+        latest = _safe_read_json(latest_path, {})
+        if isinstance(latest, dict):
+            history = [latest]
+
+    entries: list[dict[str, object]] = []
+    for raw in history:
+        if not isinstance(raw, dict):
+            continue
+        timestamp = _beacon_timestamp(raw)
+        if not timestamp or timestamp < cutoff:
+            continue
+        previous = raw.get("relay_previous_failure") if isinstance(raw.get("relay_previous_failure"), dict) else None
+        successful = _beacon_successful(raw) and not previous
+        entries.append({
+            "timestamp": format_iso_timestamp(timestamp.astimezone(), timespec="milliseconds"),
+            "timestamp_utc": format_iso_timestamp(timestamp, timespec="milliseconds", utc_z=True),
+            "successful": successful,
+            "stage": raw.get("stage") or "unknown",
+            "status": raw.get("status") or "unknown",
+            "message_type": raw.get("message_type") or "",
+            "relay_host": raw.get("relay_host") or "",
+            "alert_count": raw.get("alert_count"),
+            "posted_webhook_alerts": raw.get("posted_webhook_alerts"),
+            "rule_name": raw.get("rule_name") or raw.get("first_rule") or "",
+            "http_status": _beacon_http_status(raw),
+            "error": raw.get("error") or (previous or {}).get("summary") or "",
+            "previous_failure": previous,
+        })
+    entries.sort(key=lambda item: str(item.get("timestamp_utc") or ""))
+
+    successful_entries = [entry for entry in entries if entry.get("successful")]
+    gaps: list[dict[str, object]] = []
+    previous_success: dict[str, object] | None = None
+    for entry in successful_entries:
+        current_ts = _beacon_timestamp({"generated_at": entry.get("timestamp_utc")})
+        previous_ts = _beacon_timestamp({"generated_at": previous_success.get("timestamp_utc")}) if previous_success else None
+        if previous_ts and current_ts:
+            minutes = (current_ts - previous_ts).total_seconds() / 60
+            if minutes > 10:
+                gaps.append({
+                    "start": previous_success.get("timestamp"),
+                    "end": entry.get("timestamp"),
+                    "minutes": round(minutes, 1),
+                    "status": "closed",
+                })
+        previous_success = entry
+    if previous_success:
+        last_success_ts = _beacon_timestamp({"generated_at": previous_success.get("timestamp_utc")})
+        if last_success_ts:
+            minutes = (now - last_success_ts).total_seconds() / 60
+            if minutes > 10:
+                gaps.append({
+                    "start": previous_success.get("timestamp"),
+                    "end": format_iso_timestamp(now.astimezone(), timespec="milliseconds"),
+                    "minutes": round(minutes, 1),
+                    "status": "open",
+                })
+
+    return {
+        "ok": True,
+        "window_hours": hours,
+        "generated_at": now_iso_local(),
+        "history_source": str(history_path) if history_path else None,
+        "entries": entries,
+        "gaps": gaps,
+        "summary": {
+            "total": len(entries),
+            "successful": len(successful_entries),
+            "unsuccessful": len(entries) - len(successful_entries),
+            "gap_count": len(gaps),
+            "latest": entries[-1] if entries else None,
+        },
+    }
 
 
 def ensure_admin_token() -> str:
@@ -3451,6 +3601,87 @@ def soc_alert_group_key_sql() -> str:
     """
 
 
+def soc_alert_public_enrichment_status(enrichment_json: object) -> dict:
+    try:
+        record = json.loads(enrichment_json or "{}") if isinstance(enrichment_json, str) else (enrichment_json or {})
+    except Exception:
+        record = {}
+    external_intel = record.get("external_intel") if isinstance(record, dict) else {}
+    if not isinstance(external_intel, dict):
+        return {
+            "enrichment_status_key": "none",
+            "enrichment_status_label": "None",
+            "enrichment_status_detail": "No public enrichment data recorded for this alert group",
+            "enrichment_record_count": 0,
+            "enrichment_skip_count": 0,
+            "enrichment_error_count": 0,
+        }
+
+    records = external_intel.get("records") if isinstance(external_intel.get("records"), list) else []
+    skipped = external_intel.get("skipped") if isinstance(external_intel.get("skipped"), list) else []
+    errors = external_intel.get("errors") if isinstance(external_intel.get("errors"), list) else []
+    indicators = external_intel.get("indicators") if isinstance(external_intel.get("indicators"), dict) else {}
+    indicator_count = sum(
+        len(indicators.get(key) or [])
+        for key in ("public_ips", "domains", "urls", "hashes", "cves")
+        if isinstance(indicators.get(key), list)
+    )
+
+    if records:
+        detail = f"{len(records)} enrichment record(s), {len(skipped)} skipped source(s), {len(errors)} error(s)"
+        key, label = "enriched", "Enriched"
+    elif errors:
+        detail = f"{len(errors)} enrichment error(s), {len(skipped)} skipped source(s)"
+        key, label = "error", "Error"
+    elif skipped:
+        detail = f"Indicators found, but {len(skipped)} source(s) skipped or unavailable"
+        key, label = "checked", "Checked"
+    elif indicator_count:
+        detail = f"{indicator_count} public indicator(s) found with no completed enrichment records yet"
+        key, label = "pending", "Pending"
+    else:
+        detail = "No public indicators were recorded for enrichment"
+        key, label = "none", "None"
+    return {
+        "enrichment_status_key": key,
+        "enrichment_status_label": label,
+        "enrichment_status_detail": detail,
+        "enrichment_record_count": len(records),
+        "enrichment_skip_count": len(skipped),
+        "enrichment_error_count": len(errors),
+    }
+
+
+def soc_alert_group_enrichment_json(conn: sqlite3.Connection, group_key: object) -> str:
+    if not group_key:
+        return ""
+    group_expr = soc_alert_group_key_sql()
+    try:
+        row = conn.execute(
+            f"""
+            SELECT enrichment_json
+            FROM alerts
+            WHERE {group_expr} = ?
+              AND enrichment_json IS NOT NULL
+              AND TRIM(enrichment_json) != ''
+            ORDER BY
+              CASE
+                WHEN COALESCE(json_array_length(json_extract(enrichment_json, '$.external_intel.records')), 0) > 0 THEN 0
+                WHEN COALESCE(json_array_length(json_extract(enrichment_json, '$.external_intel.errors')), 0) > 0 THEN 1
+                WHEN COALESCE(json_array_length(json_extract(enrichment_json, '$.external_intel.skipped')), 0) > 0 THEN 2
+                ELSE 3
+              END,
+              replace(replace(COALESCE(last_seen, timestamp, first_seen), 'T', ' '), 'Z', '') DESC,
+              alert_id DESC
+            LIMIT 1
+            """,
+            (group_key,),
+        ).fetchone()
+    except sqlite3.Error:
+        return ""
+    return str(row["enrichment_json"] or "") if row else ""
+
+
 def sqlite_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     try:
         row = conn.execute(
@@ -3938,6 +4169,7 @@ SOC_ALERT_SORT_SQL = {
     "destination_ip": "lower(coalesce(destination_ip, ''))",
     "destination_port": "CAST(COALESCE(destination_port, '') AS INTEGER)",
     "ai": "'not-queued'",
+    "enrichment": "'none'",
     "log_source": "lower(coalesce(event_dataset, ''))",
     "size": "COALESCE(payload_size_bytes, 0)",
     "risk": "COALESCE(triage_score, 0)",
@@ -4003,16 +4235,56 @@ def soc_alert_row_to_api(row: sqlite3.Row, include_payload: bool = False) -> dic
     return data
 
 
-def soc_alert_group_row_to_api(row: sqlite3.Row, statuses: dict) -> dict:
+def soc_alert_static_ai_reports() -> dict:
+    data = read_soc_alert_json_file(SOC_ALERT_STATIC_STATUS_FILE)
+    reports = data.get("reports") if isinstance(data, dict) else {}
+    return reports if isinstance(reports, dict) else {}
+
+
+def soc_alert_group_ai_status(row: sqlite3.Row, group_id: str, ai_reports: dict | None = None) -> dict:
+    reports = ai_reports if isinstance(ai_reports, dict) else soc_alert_static_ai_reports()
+    status = reports.get(group_id)
+    if isinstance(status, dict):
+        return {
+            "ai_status_key": str(status.get("ai_status_key") or "queued"),
+            "ai_status_label": str(status.get("ai_status_label") or "Queued"),
+            "ai_status_detail": str(status.get("ai_status_detail") or ""),
+        }
+
+    alert_id = str(row["alert_id"] or "") if "alert_id" in row.keys() else ""
+    if alert_id and alert_id.startswith(SOC_ALERT_TEST_PREFIXES):
+        return {
+            "ai_status_key": "not-queued",
+            "ai_status_label": "Skipped",
+            "ai_status_detail": "Test/validation alert is intentionally excluded from automatic local AI analysis",
+        }
+
+    filter_status = str(row["filter_status"] or "accepted").strip().lower() if "filter_status" in row.keys() else "accepted"
+    if filter_status not in SOC_ALERT_AI_ELIGIBLE_FILTER_STATUSES:
+        return {
+            "ai_status_key": "not-queued",
+            "ai_status_label": "Skipped",
+            "ai_status_detail": f"Filter status {filter_status or 'blank'} is not eligible for automatic local AI analysis",
+        }
+
+    return {
+        "ai_status_key": "queued",
+        "ai_status_label": "Queued",
+        "ai_status_detail": "Queued for the scheduled local AI analysis worker",
+    }
+
+
+def soc_alert_group_row_to_api(row: sqlite3.Row, statuses: dict, ai_reports: dict | None = None) -> dict:
     group_key = row["group_key"]
     group_id = soc_alert_group_id(group_key)
     local_status = statuses.get(group_id, {}) if isinstance(statuses, dict) else {}
+    enrichment_json = row.get("enrichment_json") if isinstance(row, dict) else (row["enrichment_json"] if "enrichment_json" in row.keys() else "")
     repeat_count = max(
         int(row["raw_alert_count"] or 0),
         int(row["total_seen_count"] or 0),
         int(row["seen_count"] or 0),
     )
-    return {
+    data = {
         "group_id": group_id,
         "group_key": group_key,
         "representative_alert_id": row["alert_id"],
@@ -4043,6 +4315,9 @@ def soc_alert_group_row_to_api(row: sqlite3.Row, statuses: dict) -> dict:
         "analyst_status_updated_at": local_status.get("updated_at") if isinstance(local_status, dict) else None,
         "analyst_status_updated_by": local_status.get("updated_by", "") if isinstance(local_status, dict) else "",
     }
+    data.update(soc_alert_group_ai_status(row, group_id, ai_reports))
+    data.update(soc_alert_public_enrichment_status(enrichment_json))
+    return data
 
 
 def soc_alert_row_filter_status(row: sqlite3.Row) -> str:
@@ -4186,10 +4461,22 @@ def soc_alerts_summary_query_response(query: dict[str, list[str]]) -> tuple[int,
     current_page = min(requested_page, total_pages)
     offset = (current_page - 1) * limit
     page_rows = filtered_rows[offset:offset + limit]
+    if page_rows:
+        try:
+            with soc_alert_db_connect() as conn:
+                enriched_page_rows = []
+                for row in page_rows:
+                    item = dict(row)
+                    item["enrichment_json"] = soc_alert_group_enrichment_json(conn, item.get("group_key"))
+                    enriched_page_rows.append(item)
+                page_rows = enriched_page_rows
+        except Exception:
+            page_rows = [dict(row) for row in page_rows]
     next_cursor = None
     if len(filtered_rows) > offset + limit and page_rows:
         tail = page_rows[-1]
         next_cursor = f"{tail['group_last_seen'] or tail['last_seen']}|{tail['group_id'] or soc_alert_group_id(tail['group_key'])}"
+    ai_reports = soc_alert_static_ai_reports()
     return 200, {
         "ok": True,
         "source": "sqlite-summary",
@@ -4208,7 +4495,7 @@ def soc_alerts_summary_query_response(query: dict[str, list[str]]) -> tuple[int,
         "sort": sort_key,
         "direction": sort_direction,
         "next_cursor": next_cursor,
-        "alerts": [soc_alert_group_row_to_api(row, statuses) for row in page_rows],
+        "alerts": [soc_alert_group_row_to_api(row, statuses, ai_reports) for row in page_rows],
     }
 
 
@@ -4251,7 +4538,7 @@ def soc_alerts_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
                  event_dataset, severity, severity_label, source_ip, source_port,
                  destination_ip, destination_port, transport_protocol,
                  traffic_direction, triage_score, triage_level, routing, filter_status,
-                 filter_reason, suppression_key, alert_json,
+                 filter_reason, suppression_key, alert_json, enrichment_json,
                  LENGTH(COALESCE(alert_json, '')) AS payload_size_bytes,
                  {group_expr} AS group_key,
                  COUNT(*) OVER (PARTITION BY {group_expr}) AS raw_alert_count,
@@ -4297,10 +4584,22 @@ def soc_alerts_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
     current_page = min(requested_page, total_pages)
     offset = (current_page - 1) * limit
     page_rows = filtered_rows[offset:offset + limit]
+    if page_rows:
+        try:
+            with soc_alert_db_connect() as conn:
+                enriched_page_rows = []
+                for row in page_rows:
+                    item = dict(row)
+                    item["enrichment_json"] = item.get("enrichment_json") or soc_alert_group_enrichment_json(conn, item.get("group_key"))
+                    enriched_page_rows.append(item)
+                page_rows = enriched_page_rows
+        except Exception:
+            page_rows = [dict(row) for row in page_rows]
     next_cursor = None
     if len(filtered_rows) > offset + limit and page_rows:
         tail = page_rows[-1]
         next_cursor = f"{tail['group_last_seen'] or tail['last_seen']}|{soc_alert_group_id(tail['group_key'])}"
+    ai_reports = soc_alert_static_ai_reports()
     return 200, {
         "ok": True,
         "source": "sqlite",
@@ -4319,7 +4618,7 @@ def soc_alerts_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
         "sort": sort_key,
         "direction": sort_direction,
         "next_cursor": next_cursor,
-        "alerts": [soc_alert_group_row_to_api(row, statuses) for row in page_rows],
+        "alerts": [soc_alert_group_row_to_api(row, statuses, ai_reports) for row in page_rows],
     }
 
 
@@ -4593,7 +4892,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/cyber-threat-intel-prompt", "/api/soc-settings/incident-responder-prompt", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith("/ack")):
+        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/cyber-threat-intel-prompt", "/api/soc-settings/incident-responder-prompt", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith("/ack")):
             if parsed.path == "/admin" and not self._admin_authenticated():
                 self.send_response(HTTPStatus.FOUND)
                 self.send_header("Location", "/admin/login")
@@ -4791,6 +5090,9 @@ class PortalHandler(BaseHTTPRequestHandler):
             return self._send(HTTPStatus.OK, json.dumps(defang_admin_service_json(admin_service_statuses()), indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/resource-library/favorites":
             data = {"ok": True, "favorites": resource_favorites()}
+            return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if path == "/api/system-health/beacons":
+            data = n8n_beacon_history_response(query)
             return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/soc-alerts/events":
             return self._send_soc_alert_events()

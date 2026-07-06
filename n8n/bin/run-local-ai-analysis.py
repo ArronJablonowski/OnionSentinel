@@ -99,8 +99,8 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("T", "  ").replace("+00:00", "Z")
+def project_now() -> str:
+    return dt.datetime.now().astimezone().replace(microsecond=0).isoformat().replace("T", "  ")
 
 
 def filename_timestamp(value: str) -> str:
@@ -129,6 +129,7 @@ def generate_prompt(args: argparse.Namespace) -> Path:
     if not builder.exists():
         raise SystemExit(f"prompt builder not found: {builder}")
     cmd = [
+        sys.executable,
         str(builder),
         "--levels",
         args.levels,
@@ -496,7 +497,7 @@ def render_markdown(prompt_package: dict[str, Any], response: dict[str, Any], ge
 
 
 def write_outputs(prompt_path: Path, prompt_package: dict[str, Any], response: dict[str, Any], args: argparse.Namespace) -> tuple[Path, Path]:
-    generated_at = utc_now()
+    generated_at = project_now()
     alert = prompt_package.get("alert", {})
     alert_id = safe_filename(alert.get("alert_id"))
     stamp = filename_timestamp(generated_at)

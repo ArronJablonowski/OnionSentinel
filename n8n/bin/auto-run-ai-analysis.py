@@ -96,8 +96,8 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("T", "  ").replace("+00:00", "Z")
+def project_now() -> str:
+    return dt.datetime.now().astimezone().replace(microsecond=0).isoformat().replace("T", "  ")
 
 
 def rows(conn: sqlite3.Connection, sql: str, params: Iterable[object] = ()) -> list[sqlite3.Row]:
@@ -177,7 +177,7 @@ def select_next_alert(
     levels = [level.strip().lower() for level in args.levels.split(",") if level.strip()]
     if not levels:
         raise SystemExit("--levels must contain at least one level")
-    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=args.hours)).replace(microsecond=0).isoformat().replace("T", "  ").replace("+00:00", "Z")
+    since = (dt.datetime.now().astimezone() - dt.timedelta(hours=args.hours)).replace(microsecond=0).isoformat().replace("T", "  ")
     newest_alert_time = alert_time_sql()
     group_key_expr = alert_group_key_sql()
     filter_sql = ""
@@ -261,6 +261,7 @@ def run_command(cmd: list[str]) -> subprocess.CompletedProcess[str]:
 def build_prompt(alert_id: str, args: argparse.Namespace) -> Path:
     builder = Path(__file__).with_name("build-ai-investigation-prompt.py")
     cmd = [
+        sys.executable,
         str(builder),
         "--alert-id",
         alert_id,
@@ -285,6 +286,7 @@ def build_prompt(alert_id: str, args: argparse.Namespace) -> Path:
 def analysis_command(prompt_path: Path, args: argparse.Namespace) -> list[str]:
     runner = Path(__file__).with_name("run-local-ai-analysis.py")
     cmd = [
+        sys.executable,
         str(runner),
         "--prompt-package",
         str(prompt_path),
@@ -355,7 +357,7 @@ def copy_soc_dashboard_fallback() -> None:
 def main() -> int:
     args = parse_args()
     if not args.db.exists():
-        print(f"{utc_now()} SQLite DB not found: {args.db}", file=sys.stderr)
+        print(f"{project_now()} SQLite DB not found: {args.db}", file=sys.stderr)
         return 2
 
     args.lock_file.parent.mkdir(parents=True, exist_ok=True)
@@ -363,7 +365,7 @@ def main() -> int:
         try:
             fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            print(f"{utc_now()} another AI analysis run is already active")
+            print(f"{project_now()} another AI analysis run is already active")
             return 0
 
         args.prompt_dir.mkdir(parents=True, exist_ok=True)
@@ -373,7 +375,7 @@ def main() -> int:
         while args.max_per_run == 0 or analyzed_count < args.max_per_run:
             # Re-query before every selection so newly arrived higher-severity
             # alerts take priority over any lower-severity backlog.
-            print(f"{utc_now()} checking highest-priority unanalyzed alert queue", flush=True)
+            print(f"{project_now()} checking highest-priority unanalyzed alert queue", flush=True)
             conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
             try:
@@ -383,7 +385,7 @@ def main() -> int:
 
             if not selected:
                 if analyzed_count == 0:
-                    print(f"{utc_now()} no eligible unanalyzed alert found")
+                    print(f"{project_now()} no eligible unanalyzed alert found")
                 break
 
             alert_id = selected["alert_id"]
@@ -416,7 +418,7 @@ def main() -> int:
             analyzed_count += 1
 
         if analyzed_count:
-            print(f"{utc_now()} analyzed {analyzed_count} unique alert group(s)")
+            print(f"{project_now()} analyzed {analyzed_count} unique alert group(s)")
         refresh_portal(args)
         return 0
 

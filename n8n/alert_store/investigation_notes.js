@@ -8,12 +8,17 @@ const sqlite3 = require('/usr/local/lib/node_modules/n8n/node_modules/.pnpm/sqli
 
 const dbPath = process.env.ALERT_STORE_DB || '/data/alerts.sqlite3';
 
-function isoNowUtc() {
-  return isoNowUtcFromDate(new Date());
+function projectNow() {
+  return projectTimestampFromDate(new Date());
 }
 
-function isoNowUtcFromDate(value) {
-  return value.toISOString().replace(/\.\d{3}Z$/, 'Z').replace('T', '  ');
+function projectTimestampFromDate(value) {
+  const pad = (part, length = 2) => String(part).padStart(length, '0');
+  const offsetMinutes = -value.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const absolute = Math.abs(offsetMinutes);
+  const offset = `${sign}${pad(Math.floor(absolute / 60))}:${pad(absolute % 60)}`;
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}  ${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}${offset}`;
 }
 
 function parseArgs(argv) {
@@ -191,7 +196,7 @@ function renderNote(row) {
   const lines = [];
   lines.push(`# ${title}`);
   lines.push('');
-  lines.push(`Generated: ${isoNowUtc()}`);
+  lines.push(`Generated: ${projectNow()}`);
   lines.push(`Alert ID: \`${codeValue(row.alert_id)}\``);
   lines.push('');
   lines.push('## Status');
@@ -270,7 +275,7 @@ async function loadRows(options) {
       clauses.push('alert_id = ?');
       params.push(options.alertId);
     } else {
-      const since = isoNowUtcFromDate(new Date(Date.now() - options.hours * 60 * 60 * 1000));
+      const since = projectTimestampFromDate(new Date(Date.now() - options.hours * 60 * 60 * 1000));
       clauses.push("replace(replace(last_seen, 'T', ' '), 'Z', '') >= replace(replace(?, 'T', ' '), 'Z', '')");
       params.push(since);
       clauses.push(`triage_level IN (${options.levels.map(() => '?').join(', ')})`);
@@ -340,7 +345,7 @@ async function main() {
 
   if (options.format === 'json') {
     console.log(JSON.stringify({
-      generated_at: isoNowUtc(),
+      generated_at: projectNow(),
       database: path.basename(dbPath),
       count: notes.length,
       notes,
@@ -349,7 +354,7 @@ async function main() {
   }
 
   if (!notes.length) {
-    console.log(`# Security Onion Investigation Notes\n\nGenerated: ${isoNowUtc()}\n\n_No matching alerts._`);
+    console.log(`# Security Onion Investigation Notes\n\nGenerated: ${projectNow()}\n\n_No matching alerts._`);
     return;
   }
 

@@ -10,8 +10,13 @@ const sqlite3 = require('/usr/local/lib/node_modules/n8n/node_modules/.pnpm/sqli
 
 const dbPath = process.env.ALERT_STORE_DB || '/data/alerts.sqlite3';
 
-function isoUtc(value = new Date()) {
-  return value.toISOString().replace(/\.\d{3}Z$/, 'Z').replace('T', '  ');
+function projectTimestamp(value = new Date()) {
+  const pad = (part, length = 2) => String(part).padStart(length, '0');
+  const offsetMinutes = -value.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const absolute = Math.abs(offsetMinutes);
+  const offset = `${sign}${pad(Math.floor(absolute / 60))}:${pad(absolute % 60)}`;
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}  ${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}${offset}`;
 }
 
 function parseArgs(argv) {
@@ -94,7 +99,7 @@ function closeDb(db) {
 function whereClause(options) {
   // Test alerts are excluded by default so validation traffic does not pollute
   // normal operational reports.
-  const since = isoUtc(new Date(Date.now() - options.hours * 60 * 60 * 1000));
+  const since = projectTimestamp(new Date(Date.now() - options.hours * 60 * 60 * 1000));
   const clauses = ["replace(replace(last_seen, 'T', ' '), 'Z', '') >= replace(replace(?, 'T', ' '), 'Z', '')"];
   const params = [since];
   if (!options.includeTests) {
@@ -256,7 +261,7 @@ async function buildReport(options) {
     );
 
     return {
-      generated_at: isoUtc(),
+      generated_at: projectTimestamp(),
       database: path.basename(dbPath),
       lookback_hours: options.hours,
       since,

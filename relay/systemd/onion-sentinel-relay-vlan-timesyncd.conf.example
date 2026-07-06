@@ -1,0 +1,9 @@
+[Time]
+# Prefer the relay VLAN firewall or local NTP service.
+# Copy this file to:
+#   /etc/systemd/timesyncd.conf.d/onion-sentinel-relay-vlan.conf
+# Then replace the placeholder with the VLAN-local NTP server.
+NTP=__RELAY_VLAN_NTP_SERVER__
+FallbackNTP=0.debian.pool.ntp.org 1.debian.pool.ntp.org
+PollIntervalMinSec=32
+PollIntervalMaxSec=300

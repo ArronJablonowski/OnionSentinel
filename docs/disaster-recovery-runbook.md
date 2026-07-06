@@ -29,11 +29,20 @@ admin Mac or admin network -> 10.88.8.8 TCP/22
 10.88.8.8 -> 192.168.1.7 TCP/22
 10.88.8.8 -> 10.77.7.225 TCP/5678
 10.88.8.8 -> DNS TCP/UDP 53
-10.88.8.8 -> NTP UDP/123
+10.88.8.8 -> NTP UDP/123, preferably to the VLAN-local firewall/NTP service
+temporary: 10.88.8.8 -> Internet UDP/123 until VLAN-local NTP is ready
 10.88.8.8 -> api.telegram.org TCP/443
 ```
 
 Keep broad Internet access disabled except during update windows.
+
+After restoring the relay, pin `systemd-timesyncd` to the VLAN-local NTP
+service using `relay/systemd/onion-sentinel-relay-vlan-timesyncd.conf.example`.
+If the VLAN-local NTP service is not ready, use
+`relay/systemd/onion-sentinel-relay-internet-timesyncd.conf.example` as a
+temporary drop-in and allow only `10.88.8.8` to reach Internet UDP/123.
+Confirm `timedatectl status` reports `System clock synchronized: yes` and
+`timedatectl timesync-status` shows `Packet count` greater than `0`.
 
 ## 2. Restore Mac Studio n8n
 
@@ -226,8 +235,15 @@ If the tile is red, check the newest beacon timestamp and the Pi timer logs:
 
 ```bash
 ssh aj_lobster@10.77.7.225 'cat "$HOME/report_portal/library/Cybersecurity/SOC Alerts/n8n-beacon.json"'
+ssh aj_lobster@10.77.7.225 'curl -fsS "http://127.0.0.1:8765/api/system-health/beacons?hours=24"'
 ssh aj@10.88.8.8 'systemctl list-timers --all so-alert-relay.timer --no-pager; sudo journalctl -u so-alert-relay.service -n 40 --no-pager'
 ```
+
+The System Health page at `/view/b68c5a48b9778061/system-health.html` uses
+`n8n-beacon-history.json` to show the last 24 hours of relay/n8n beacon events,
+unsuccessful recovery-marked events, and gaps longer than 10 minutes between
+successful beacons. The history file is generated beside `n8n-beacon.json` and
+is runtime telemetry; do not commit it.
 
 If n8n logs show SQLite I/O errors, validate both SQLite stores before
 troubleshooting the relay:

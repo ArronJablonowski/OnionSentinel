@@ -8,7 +8,7 @@ This directory contains the Mac Studio LAN Portal backend and the generated SOC 
 | --- | --- |
 | `report_portal.py` | Serves the LAN Portal and SOC alert APIs. |
 | `scripts/build_soc_alerts_dashboard.py` | Builds the static dashboard pages from SQLite/report artifacts. |
-| `assets/` | Onion Sentinel, metric, privacy, and brand assets used by the dashboard. |
+| `assets/` | Onion Sentinel, metric, privacy, brand, and dashboard CSS assets used by the dashboard. |
 
 ## Runtime Locations
 
@@ -29,6 +29,12 @@ This directory contains the Mac Studio LAN Portal backend and the generated SOC 
 - Cyber Threat Intel route for future intelligence briefs, indicators, and enrichment context.
 - SIEM Engineer menu route for model-backed tuning, detection recommendations, and a top ROI tuning candidate summary.
 - Settings page for AI model routing plus SOC Analyst, Incident Responder, SIEM Engineer, Cyber Threat Intel Analyst, and Threat Hunter system prompts.
+
+## Maintenance Notes
+
+- Keep high-churn SOC metric-card styling in `assets/dashboard-metrics.css`.
+- Keep SOC metric-card markup in the named render helpers inside `scripts/build_soc_alerts_dashboard.py`.
+- Avoid adding new metric-card HTML directly into the large page template string.
 
 ## Manual Rebuild
 

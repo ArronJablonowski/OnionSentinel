@@ -24,6 +24,10 @@ const beaconPaths = (process.env.ALERT_STORE_BEACON_PATHS || '/data/n8n-beacon.j
   .split(',')
   .map((value) => value.trim())
   .filter(Boolean);
+const beaconHistoryPaths = (process.env.ALERT_STORE_BEACON_HISTORY_PATHS || '')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
 const host = process.env.ALERT_STORE_HOST || '0.0.0.0';
 const port = Number(process.env.ALERT_STORE_PORT || 8787);
 const telegramBotToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
@@ -35,6 +39,32 @@ const telegramAlertLevels = new Set(
     .filter(Boolean),
 );
 const telegramCooldownSeconds = Number(process.env.TELEGRAM_COOLDOWN_SECONDS || 900);
+const enrichmentCacheDefaultTtlSeconds = Number(process.env.ENRICHMENT_CACHE_TTL_SECONDS || 86400);
+const vulnerabilityCacheDefaultTtlSeconds = Number(process.env.ENRICHMENT_VULN_CACHE_TTL_SECONDS || 86400);
+const enrichmentTimeoutMs = Number(process.env.ENRICHMENT_TIMEOUT_MS || 5000);
+const virustotalMinimumLevel = String(process.env.VIRUSTOTAL_MINIMUM_LEVEL || 'high').toLowerCase();
+const urlscanSubmitEnabled = ['1', 'true', 'yes'].includes(String(process.env.URLSCAN_SUBMIT_ENABLED || '').toLowerCase());
+
+const enrichmentSecrets = {
+  abuseipdb: (process.env.ABUSEIPDB_API_KEY || '').trim(),
+  greynoise: (process.env.GREYNOISE_API_KEY || '').trim(),
+  otx: (process.env.OTX_API_KEY || '').trim(),
+  urlhaus: (process.env.URLHAUS_AUTH_KEY || '').trim(),
+  virustotal: (process.env.VIRUSTOTAL_API_KEY || '').trim(),
+  urlscan: (process.env.URLSCAN_API_KEY || '').trim(),
+  googleSafeBrowsing: (process.env.GOOGLE_SAFE_BROWSING_API_KEY || '').trim(),
+  phishtank: (process.env.PHISHTANK_API_KEY || '').trim(),
+  malwarebazaar: (process.env.MALWAREBAZAAR_AUTH_KEY || '').trim(),
+  threatfox: (process.env.THREATFOX_AUTH_KEY || '').trim(),
+  shodan: (process.env.SHODAN_API_KEY || '').trim(),
+  censysId: (process.env.CENSYS_API_ID || '').trim(),
+  censysSecret: (process.env.CENSYS_API_SECRET || '').trim(),
+  censysToken: (process.env.CENSYS_API_TOKEN || '').trim(),
+  censysOrganizationId: (process.env.CENSYS_ORGANIZATION_ID || '').trim(),
+  nvd: (process.env.NVD_API_KEY || '').trim(),
+};
+
+const severityRank = {informational: 0, info: 0, low: 1, medium: 2, high: 3, critical: 4};
 
 function loadScoringRules() {
   // Fallbacks keep ingestion alive if scoring_rules.json is missing or invalid.
@@ -70,16 +100,58 @@ function loadScoringRules() {
 }
 
 const scoringRules = loadScoringRules();
+const isoTimestampPattern = /\b\d{4}-\d{2}-\d{2}(?:T|\s+)\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b/g;
+
+function projectOffset(date) {
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const absolute = Math.abs(offsetMinutes);
+  const hours = String(Math.floor(absolute / 60)).padStart(2, '0');
+  const minutes = String(absolute % 60).padStart(2, '0');
+  return `${sign}${hours}:${minutes}`;
+}
+
+function formatProjectTimestamp(date) {
+  const pad = (value, length = 2) => String(value).padStart(length, '0');
+  const milliseconds = date.getMilliseconds();
+  const fractional = milliseconds ? `.${pad(milliseconds, 3)}` : '';
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}  ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}${fractional}${projectOffset(date)}`;
+}
+
+function parseProjectTimestamp(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  const parseable = text.replace(/(\d{4}-\d{2}-\d{2})(?:T|\s+)(?=\d{2}:\d{2}:\d{2})/, '$1T');
+  const hasOffset = /(?:Z|[+-]\d{2}:?\d{2})$/.test(parseable);
+  const parsed = new Date(hasOffset ? parseable : `${parseable}Z`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
 
 function nowUtc() {
-  return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z').replace('T', '  ');
+  return formatProjectTimestamp(new Date());
 }
 
 function normalizeTimestampValue(value) {
-  // Keep project-visible timestamps consistent while leaving raw alert JSON
-  // untouched for evidence. Accept historical T/single-space/two-space values.
+  // Keep project-visible timestamps consistent. Accept historical
+  // UTC/local ISO strings and store local ISO 8601 with a two-space separator.
   if (value === null || value === undefined || value === '') return null;
-  return String(value).replace(/(\d{4}-\d{2}-\d{2})(?:T|\s+)(?=\d{2}:\d{2}:\d{2})/g, '$1  ');
+  return String(value).trim().replace(isoTimestampPattern, (match) => {
+    const parsed = parseProjectTimestamp(match);
+    return parsed ? formatProjectTimestamp(parsed) : match.replace(/(\d{4}-\d{2}-\d{2})(?:T|\s+)(?=\d{2}:\d{2}:\d{2})/g, '$1  ');
+  });
+}
+
+function normalizeJsonTimestamps(value) {
+  if (typeof value === 'string') return normalizeTimestampValue(value);
+  if (Array.isArray(value)) return value.map((item) => normalizeJsonTimestamps(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, normalizeJsonTimestamps(item)]));
+  }
+  return value;
+}
+
+function jsonText(value) {
+  return JSON.stringify(normalizeJsonTimestamps(value ?? null));
 }
 
 function writeJsonAtomic(filePath, payload) {
@@ -90,6 +162,46 @@ function writeJsonAtomic(filePath, payload) {
   fs.mkdirSync(directory, {recursive: true});
   fs.writeFileSync(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
   fs.renameSync(tmpPath, filePath);
+}
+
+function n8nBeaconHistoryPaths() {
+  const paths = new Set(beaconHistoryPaths);
+  for (const filePath of beaconPaths) {
+    paths.add(path.join(path.dirname(filePath), 'n8n-beacon-history.json'));
+  }
+  return [...paths];
+}
+
+function appendN8nBeaconHistory(payload) {
+  const generatedAt = parseProjectTimestamp(payload?.generated_at);
+  const cutoff = Date.now() - (72 * 60 * 60 * 1000);
+  const entry = {
+    ...payload,
+    history_recorded_at: nowUtc(),
+  };
+  for (const filePath of n8nBeaconHistoryPaths()) {
+    try {
+      let history = [];
+      try {
+        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8') || '[]');
+        history = Array.isArray(parsed) ? parsed : [];
+      } catch (_) {
+        history = [];
+      }
+      history = history
+        .filter((item) => {
+          const itemDate = parseProjectTimestamp(item?.generated_at || item?.history_recorded_at);
+          return itemDate && itemDate.getTime() >= cutoff;
+        })
+        .slice(-1000);
+      if (generatedAt || entry.history_recorded_at) {
+        history.push(entry);
+      }
+      writeJsonAtomic(filePath, history);
+    } catch (writeError) {
+      console.error(`Unable to write n8n beacon history ${filePath}: ${writeError.message}`);
+    }
+  }
 }
 
 function writeN8nBeacon(stage, alert = {}, result = null, error = null) {
@@ -117,6 +229,7 @@ function writeN8nBeacon(stage, alert = {}, result = null, error = null) {
     filter_status: result?.filter?.status || result?.alert?.filter_status || null,
     notification_status: result?.notification?.status || null,
     error: error ? String(error.message || error) : null,
+    relay_previous_failure: alert?.relay_previous_failure || null,
   };
   for (const filePath of beaconPaths) {
     try {
@@ -125,11 +238,14 @@ function writeN8nBeacon(stage, alert = {}, result = null, error = null) {
       console.error(`Unable to write n8n beacon ${filePath}: ${writeError.message}`);
     }
   }
+  if (stage !== 'received') {
+    appendN8nBeaconHistory(payload);
+  }
   return payload;
 }
 
 function isRelayHeartbeat(payload) {
-  return payload?.message_type === 'relay_heartbeat';
+  return ['relay_heartbeat', 'relay_health_recovery'].includes(payload?.message_type);
 }
 
 function nestedField(value, dottedPath) {
@@ -147,10 +263,6 @@ function integerField(value) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) return null;
   return parsed;
-}
-
-function jsonText(value) {
-  return JSON.stringify(value ?? null);
 }
 
 function enrichmentRecord(alert) {
@@ -176,7 +288,797 @@ function enrichmentRecord(alert) {
     zeek: alert.zeek ?? {},
     suricata: alert.suricata ?? {},
     security_onion: alert.security_onion ?? {},
+    external_intel: alert.enrichment?.external_intel ?? {},
   };
+}
+
+function secondsToMs(seconds) {
+  return Math.max(0, Number(seconds || 0) * 1000);
+}
+
+function epochMs(value = new Date()) {
+  return value instanceof Date ? value.getTime() : new Date(value).getTime();
+}
+
+function isoFromMs(value) {
+  return formatProjectTimestamp(new Date(value));
+}
+
+function isProbablyPlaceholderSecret(value) {
+  if (!value) return true;
+  const text = String(value).trim().toLowerCase();
+  return !text || text.includes('replace') || text.includes('placeholder') || text.includes('your-') || text.includes('changeme');
+}
+
+function isConfiguredSecret(value) {
+  return !isProbablyPlaceholderSecret(value);
+}
+
+function publicHostname(value) {
+  if (!value || typeof value !== 'string') return null;
+  const hostname = value.trim().toLowerCase().replace(/\.$/, '');
+  if (!hostname || hostname === 'localhost') return null;
+  if (!hostname.includes('.')) return null;
+  if (/\.local$|\.lan$|\.home$|\.internal$|\.corp$/.test(hostname)) return null;
+  if (/^(tls\.sni|h2\.http|suricata\.alert|document\.packet|ds-logs-suricata\.alerts)$/.test(hostname)) return null;
+  if (/^\d+\.json$/.test(hostname)) return null;
+  if (parseIpv4(hostname)) return isPrivateIpv4(hostname) ? null : hostname;
+  return hostname;
+}
+
+function redactUrlForPublicLookup(value) {
+  if (!value || typeof value !== 'string') return null;
+  try {
+    const parsed = new URL(value);
+    const hostname = publicHostname(parsed.hostname);
+    if (!hostname) return null;
+    parsed.username = '';
+    parsed.password = '';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function collectStrings(value, results = []) {
+  if (typeof value === 'string') {
+    results.push(value);
+    return results;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectStrings(item, results);
+    return results;
+  }
+  if (value && typeof value === 'object') {
+    for (const item of Object.values(value)) collectStrings(item, results);
+  }
+  return results;
+}
+
+function collectValuesByKey(value, keyMatcher, results = []) {
+  if (Array.isArray(value)) {
+    for (const item of value) collectValuesByKey(item, keyMatcher, results);
+    return results;
+  }
+  if (!value || typeof value !== 'object') return results;
+  for (const [key, item] of Object.entries(value)) {
+    if (keyMatcher(String(key))) results.push(item);
+    collectValuesByKey(item, keyMatcher, results);
+  }
+  return results;
+}
+
+function extractUrlsFromText(value) {
+  const urls = [];
+  for (const text of collectStrings(value)) {
+    for (const match of text.match(/\bhttps?:\/\/[^\s<>"'`]+/gi) || []) {
+      const cleaned = match.replace(/[),.;\]]+$/, '');
+      const redacted = redactUrlForPublicLookup(cleaned);
+      if (redacted) urls.push(redacted);
+    }
+  }
+  return urls;
+}
+
+function extractIpv4sFromText(value) {
+  const ips = [];
+  for (const text of collectStrings(value)) {
+    for (const match of text.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || []) {
+      if (parseIpv4(match) && !isPrivateIpv4(match)) ips.push(match);
+    }
+  }
+  return ips;
+}
+
+function extractDomainsFromText(value) {
+  const domains = [];
+  for (const text of collectStrings(value)) {
+    const normalizedText = text.replace(/\s+\./g, '.').replace(/\.\s+/g, '.');
+    for (const match of normalizedText.match(/\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b/gi) || []) {
+      const normalized = publicHostname(match);
+      if (normalized) domains.push(normalized);
+    }
+  }
+  return domains;
+}
+
+function domainTextCandidateFields(alert) {
+  return [
+    alert.message,
+    alert.rule_name,
+    nestedField(alert, 'rule.name'),
+    nestedField(alert, 'event.reason'),
+    nestedField(alert, 'suricata.eve.alert.signature'),
+    nestedField(alert, 'security_onion.raw_event.alert.signature'),
+  ];
+}
+
+function domainCandidateFields(alert) {
+  return [
+    nestedField(alert, 'url.domain'),
+    nestedField(alert, 'dns.question.name'),
+    nestedField(alert, 'dns.question.registered_domain'),
+    nestedField(alert, 'dns.question.top_level_domain'),
+    nestedField(alert, 'dns.answers.data'),
+    nestedField(alert, 'dns.answers.name'),
+    nestedField(alert, 'tls.client.server_name'),
+    nestedField(alert, 'tls.server.x509.subject.common_name'),
+    nestedField(alert, 'tls.server.x509.issuer.common_name'),
+    nestedField(alert, 'http.request.referrer'),
+    nestedField(alert, 'http.request.headers.host'),
+    nestedField(alert, 'http.response.headers.location'),
+    nestedField(alert, 'suricata.eve.dns.rrname'),
+    nestedField(alert, 'suricata.eve.dns.query'),
+    nestedField(alert, 'suricata.eve.dns.answers.rrname'),
+    nestedField(alert, 'suricata.eve.dns.answers.rdata'),
+    nestedField(alert, 'suricata.eve.tls.sni'),
+    nestedField(alert, 'suricata.eve.http.hostname'),
+    nestedField(alert, 'security_onion.raw_event.dns.rrname'),
+    nestedField(alert, 'security_onion.raw_event.dns.query'),
+    nestedField(alert, 'security_onion.raw_event.dns.answers.rrname'),
+    nestedField(alert, 'security_onion.raw_event.dns.answers.rdata'),
+    nestedField(alert, 'security_onion.raw_event.tls.sni'),
+    nestedField(alert, 'security_onion.raw_event.http.hostname'),
+    ...(alert.related?.hosts || []),
+    ...extractDomainsFromText(domainTextCandidateFields(alert)),
+  ];
+}
+
+function urlCandidateFields(alert) {
+  return [
+    alert.url?.full,
+    alert.url?.original,
+    nestedField(alert, 'http.request.referrer'),
+    nestedField(alert, 'http.response.headers.location'),
+    nestedField(alert, 'suricata.eve.http.url'),
+    nestedField(alert, 'suricata.eve.http.http_refer'),
+    nestedField(alert, 'security_onion.raw_event.url.full'),
+    nestedField(alert, 'security_onion.raw_event.url.original'),
+    nestedField(alert, 'security_onion.raw_event.http.url'),
+    nestedField(alert, 'security_onion.raw_event.http.http_refer'),
+  ];
+}
+
+function extractCvesFromText(value) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value || {});
+  return [...new Set((text.match(/CVE-\d{4}-\d{4,7}/gi) || []).map((cve) => cve.toUpperCase()))];
+}
+
+function extractHashesFromText(value) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value || {});
+  const hashes = [];
+  for (const match of text.match(/\b[a-fA-F0-9]{32}\b|\b[a-fA-F0-9]{40}\b|\b[a-fA-F0-9]{64}\b/g) || []) {
+    const length = match.length;
+    hashes.push({type: length === 32 ? 'md5' : length === 40 ? 'sha1' : 'sha256', value: match.toLowerCase()});
+  }
+  return [...new Map(hashes.map((item) => [`${item.type}:${item.value}`, item])).values()];
+}
+
+function extractAlertIndicators(alert) {
+  // Never mine prior enrichment provider responses for new indicators. The
+  // enrichment stage should submit only evidence from the original detection,
+  // not URLs/IPs/domains found inside third-party API raw_response payloads.
+  const evidenceAlert = {...(alert || {})};
+  delete evidenceAlert.enrichment;
+  const indicators = {
+    public_ips: [],
+    domains: [],
+    urls: [],
+    hashes: [],
+    cves: [],
+  };
+  for (const ip of [
+    nestedField(alert, 'source.ip'),
+    nestedField(alert, 'destination.ip'),
+    nestedField(alert, 'client.ip'),
+    nestedField(alert, 'server.ip'),
+    nestedField(alert, 'host.ip'),
+    ...(alert.related?.ip || []),
+    ...collectValuesByKey(evidenceAlert, (key) => /(^|_|\.)ip$/i.test(key)),
+    ...extractIpv4sFromText(evidenceAlert),
+  ]) {
+    if (typeof ip === 'string' && parseIpv4(ip) && !isPrivateIpv4(ip)) indicators.public_ips.push(ip);
+    if (Array.isArray(ip)) {
+      for (const item of ip) {
+        if (typeof item === 'string' && parseIpv4(item) && !isPrivateIpv4(item)) indicators.public_ips.push(item);
+      }
+    }
+  }
+  for (const hostname of domainCandidateFields(evidenceAlert)) {
+    const values = Array.isArray(hostname) ? hostname : [hostname];
+    for (const value of values) {
+      const normalized = publicHostname(value);
+      if (normalized) indicators.domains.push(normalized);
+    }
+  }
+  for (const candidate of urlCandidateFields(evidenceAlert)) {
+    const values = Array.isArray(candidate) ? candidate : [candidate];
+    for (const value of values) {
+      const redacted = redactUrlForPublicLookup(value);
+      if (redacted) indicators.urls.push(redacted);
+      try {
+        const parsed = new URL(String(value));
+        const hostname = publicHostname(parsed.hostname);
+        if (hostname) indicators.domains.push(hostname);
+      } catch {
+        // Non-URL strings are handled by the domain field extraction above.
+      }
+    }
+  }
+  indicators.hashes = extractHashesFromText(evidenceAlert);
+  indicators.cves = extractCvesFromText(evidenceAlert);
+  for (const key of Object.keys(indicators)) {
+    indicators[key] = [...new Set(indicators[key].map((item) => typeof item === 'string' ? item : JSON.stringify(item)))]
+      .map((item) => {
+        try { return item.startsWith('{') ? JSON.parse(item) : item; } catch { return item; }
+      });
+  }
+  return indicators;
+}
+
+function hasUsableExternalIntel(alert) {
+  const externalIntel = alert?.enrichment?.external_intel;
+  if (!externalIntel || typeof externalIntel !== 'object') return false;
+  return (
+    Array.isArray(externalIntel.records) && externalIntel.records.length > 0
+  ) || (
+    Array.isArray(externalIntel.skipped) && externalIntel.skipped.length > 0
+  ) || (
+    Array.isArray(externalIntel.errors) && externalIntel.errors.length > 0
+  );
+}
+
+function requestJson({method = 'GET', url, headers = {}, body = null, timeoutMs = enrichmentTimeoutMs}) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const client = parsed.protocol === 'https:' ? require('https') : http;
+    const payload = body === null || body === undefined ? null : (typeof body === 'string' ? body : JSON.stringify(body));
+    const req = client.request(
+      {
+        hostname: parsed.hostname,
+        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+        path: `${parsed.pathname}${parsed.search}`,
+        method,
+        headers: {
+          Accept: 'application/json',
+          ...(payload ? {'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload)} : {}),
+          ...headers,
+        },
+        timeout: timeoutMs,
+      },
+      (res) => {
+        let responseBody = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => responseBody += chunk);
+        res.on('end', () => {
+          let parsedBody = null;
+          try {
+            parsedBody = responseBody ? JSON.parse(responseBody) : null;
+          } catch {
+            parsedBody = {raw: responseBody.slice(0, 2000)};
+          }
+          resolve({statusCode: res.statusCode, headers: res.headers, body: parsedBody});
+        });
+      },
+    );
+    req.on('timeout', () => req.destroy(new Error(`request timed out: ${parsed.hostname}`)));
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+function normalizedEnrichmentRecord(source, indicator, indicatorType, verdict, confidence, tags, rawResponse, firstSeen = null, lastSeen = null) {
+  return {
+    source,
+    indicator,
+    indicator_type: indicatorType,
+    verdict,
+    confidence,
+    tags: Array.isArray(tags) ? tags.filter(Boolean).slice(0, 20) : [],
+    first_seen: normalizeTimestampValue(firstSeen),
+    last_seen: normalizeTimestampValue(lastSeen),
+    raw_response: rawResponse ?? null,
+    cached_at: nowUtc(),
+  };
+}
+
+function verdictFromStats(stats = {}) {
+  const malicious = Number(stats.malicious || 0);
+  const suspicious = Number(stats.suspicious || 0);
+  const harmless = Number(stats.harmless || 0);
+  if (malicious > 0) return {verdict: 'malicious', confidence: Math.min(100, 70 + malicious * 5)};
+  if (suspicious > 0) return {verdict: 'suspicious', confidence: Math.min(95, 50 + suspicious * 10)};
+  if (harmless > 0) return {verdict: 'benign', confidence: 60};
+  return {verdict: 'unknown', confidence: 0};
+}
+
+function sourceLimitNote(source) {
+  const notes = {
+    abuseipdb: 'Free AbuseIPDB accounts are commonly limited to 1,000 checks/day.',
+    greynoise: 'GreyNoise Community lookups are low-volume; cache aggressively.',
+    shodan_internetdb: 'Shodan InternetDB is keyless, free for non-commercial use, and updated weekly.',
+    otx: 'OTX authenticated API limits depend on account tier; 429 responses are cached as skips.',
+    urlhaus: 'URLhaus community API uses an abuse.ch Auth-Key and fair-use expectations.',
+    virustotal: 'VirusTotal Public API is throttled here to 4 requests/minute and used only for high/critical by default.',
+    urlscan: 'urlscan.io quotas vary by account and action; URL submissions are disabled unless explicitly enabled.',
+    google_safe_browsing: 'Google Safe Browsing uses API-key quota; public URLs are redacted before lookup.',
+    phishtank: 'PhishTank publishes rate-limit headers and returns over-limit responses when exceeded.',
+    malwarebazaar: 'MalwareBazaar hash lookups use an abuse.ch Auth-Key; file downloads are not performed.',
+    threatfox: 'ThreatFox IOC lookups use an abuse.ch Auth-Key.',
+    shodan: 'Shodan host API uses account quota; InternetDB runs separately without a key.',
+    censys: 'Censys API quotas depend on account tier; IP lookups are throttled conservatively.',
+    cisa_kev: 'CISA KEV is a public JSON catalog and is cached longer than alert IOC lookups.',
+    epss: 'FIRST EPSS CVE lookups are public and cached longer than alert IOC lookups.',
+    nvd: 'NVD allows 5 requests/30s without a key or 50 requests/30s with a key; this workflow throttles more conservatively.',
+  };
+  return notes[source] || null;
+}
+
+function sourceConfigured(source) {
+  switch (source) {
+    case 'abuseipdb': return isConfiguredSecret(enrichmentSecrets.abuseipdb);
+    case 'greynoise': return isConfiguredSecret(enrichmentSecrets.greynoise);
+    case 'otx': return isConfiguredSecret(enrichmentSecrets.otx);
+    case 'urlhaus': return isConfiguredSecret(enrichmentSecrets.urlhaus);
+    case 'virustotal': return isConfiguredSecret(enrichmentSecrets.virustotal);
+    case 'urlscan': return isConfiguredSecret(enrichmentSecrets.urlscan);
+    case 'google_safe_browsing': return isConfiguredSecret(enrichmentSecrets.googleSafeBrowsing);
+    case 'phishtank': return isConfiguredSecret(enrichmentSecrets.phishtank);
+    case 'malwarebazaar': return isConfiguredSecret(enrichmentSecrets.malwarebazaar);
+    case 'threatfox': return isConfiguredSecret(enrichmentSecrets.threatfox);
+    case 'shodan': return isConfiguredSecret(enrichmentSecrets.shodan);
+    case 'censys':
+      return isConfiguredSecret(enrichmentSecrets.censysToken) ||
+        (isConfiguredSecret(enrichmentSecrets.censysId) && isConfiguredSecret(enrichmentSecrets.censysSecret));
+    case 'shodan_internetdb':
+    case 'cisa_kev':
+    case 'epss':
+    case 'nvd':
+      return true;
+    default:
+      return false;
+  }
+}
+
+function sourceRateLimitMs(source) {
+  const limits = {
+    abuseipdb: 1000,
+    greynoise: 2000,
+    shodan_internetdb: 1000,
+    otx: 500,
+    urlhaus: 1000,
+    virustotal: 15000,
+    urlscan: 2000,
+    google_safe_browsing: 1000,
+    phishtank: 2000,
+    malwarebazaar: 1000,
+    threatfox: 1000,
+    shodan: 1200,
+    censys: 2500,
+    cisa_kev: 60000,
+    epss: 3000,
+    nvd: isConfiguredSecret(enrichmentSecrets.nvd) ? 1000 : 7000,
+  };
+  return limits[source] || 1000;
+}
+
+function sourceTtlSeconds(source) {
+  return ['cisa_kev', 'epss', 'nvd'].includes(source) ? vulnerabilityCacheDefaultTtlSeconds : enrichmentCacheDefaultTtlSeconds;
+}
+
+function cacheKey(source, indicatorType, indicator) {
+  return crypto.createHash('sha256').update(`${source}|${indicatorType}|${indicator}`).digest('hex');
+}
+
+async function readEnrichmentCache(source, indicatorType, indicator) {
+  const row = await get('SELECT * FROM enrichment_cache WHERE cache_key = ? AND expires_at > ?', [cacheKey(source, indicatorType, indicator), nowUtc()]);
+  if (!row) return null;
+  return {
+    source: row.source,
+    indicator: row.indicator,
+    indicator_type: row.indicator_type,
+    verdict: row.verdict || 'unknown',
+    confidence: row.confidence ?? 0,
+    tags: JSON.parse(row.tags_json || '[]'),
+    first_seen: row.first_seen || null,
+    last_seen: row.last_seen || null,
+    raw_response: JSON.parse(row.raw_response_json || 'null'),
+    cached_at: row.cached_at,
+  };
+}
+
+async function writeEnrichmentCache(record, ttlSeconds) {
+  const now = nowUtc();
+  const expiresAt = isoFromMs(epochMs() + secondsToMs(ttlSeconds)).replace('T', '  ');
+  await run(
+    `
+      INSERT INTO enrichment_cache (
+        cache_key, source, indicator, indicator_type, verdict, confidence, tags_json,
+        first_seen, last_seen, raw_response_json, cached_at, expires_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(cache_key) DO UPDATE SET
+        verdict = excluded.verdict,
+        confidence = excluded.confidence,
+        tags_json = excluded.tags_json,
+        first_seen = excluded.first_seen,
+        last_seen = excluded.last_seen,
+        raw_response_json = excluded.raw_response_json,
+        cached_at = excluded.cached_at,
+        expires_at = excluded.expires_at
+    `,
+    [
+      cacheKey(record.source, record.indicator_type, record.indicator),
+      record.source,
+      record.indicator,
+      record.indicator_type,
+      record.verdict,
+      record.confidence,
+      jsonText(record.tags || []),
+      record.first_seen || null,
+      record.last_seen || null,
+      jsonText(record.raw_response ?? null),
+      now,
+      expiresAt,
+    ],
+  );
+  return {...record, cached_at: now};
+}
+
+async function waitForRateLimit(source) {
+  const minimumMs = sourceRateLimitMs(source);
+  const row = await get('SELECT last_request_at FROM enrichment_rate_limit WHERE source = ?', [source]);
+  if (row?.last_request_at) {
+    const elapsed = epochMs() - epochMs(String(row.last_request_at).replace('  ', 'T'));
+    const waitMs = minimumMs - elapsed;
+    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+  await run(
+    'INSERT INTO enrichment_rate_limit (source, last_request_at) VALUES (?, ?) ON CONFLICT(source) DO UPDATE SET last_request_at = excluded.last_request_at',
+    [source, nowUtc()],
+  );
+}
+
+async function cachedLookup(source, indicatorType, indicator, lookup) {
+  const cached = await readEnrichmentCache(source, indicatorType, indicator);
+  if (cached) return {record: cached, cached: true};
+  await waitForRateLimit(source);
+  const record = await lookup();
+  const saved = await writeEnrichmentCache(record, sourceTtlSeconds(source));
+  return {record: saved, cached: false};
+}
+
+async function lookupAbuseIpdb(ip) {
+  const response = await requestJson({
+    url: `https://api.abuseipdb.com/api/v2/check?ipAddress=${encodeURIComponent(ip)}&maxAgeInDays=90&verbose`,
+    headers: {Key: enrichmentSecrets.abuseipdb},
+  });
+  const data = response.body?.data || {};
+  const score = Number(data.abuseConfidenceScore || 0);
+  const verdict = score >= 75 ? 'malicious' : score >= 25 ? 'suspicious' : score > 0 ? 'unknown' : 'benign';
+  return normalizedEnrichmentRecord('abuseipdb', ip, 'ip', verdict, score, [data.usageType, data.isp, data.countryCode], response.body, null, data.lastReportedAt || null);
+}
+
+async function lookupGreynoise(ip) {
+  const response = await requestJson({
+    url: `https://api.greynoise.io/v3/community/${encodeURIComponent(ip)}`,
+    headers: {'key': enrichmentSecrets.greynoise},
+  });
+  const body = response.body || {};
+  const classification = String(body.classification || '').toLowerCase();
+  const verdict = classification === 'malicious' ? 'malicious' : classification === 'benign' ? 'noise/scanner' : body.noise ? 'noise/scanner' : 'unknown';
+  return normalizedEnrichmentRecord('greynoise', ip, 'ip', verdict, body.noise ? 80 : 30, [body.classification, body.name, body.link ? 'greynoise-link' : null], body, null, body.last_seen || null);
+}
+
+async function lookupShodanInternetDb(ip) {
+  const response = await requestJson({url: `https://internetdb.shodan.io/${encodeURIComponent(ip)}`});
+  const body = response.statusCode === 404 ? {status: 'not_found'} : response.body || {};
+  const cves = Array.isArray(body.vulns) ? body.vulns : Object.keys(body.vulns || {});
+  const verdict = cves.length ? 'suspicious' : Array.isArray(body.ports) && body.ports.length ? 'unknown' : 'benign';
+  return normalizedEnrichmentRecord('shodan_internetdb', ip, 'ip', verdict, cves.length ? 65 : 30, [...(body.tags || []), ...cves.slice(0, 5)], body);
+}
+
+async function lookupOtx(indicatorType, indicator) {
+  const typeMap = {ip: 'IPv4', domain: 'domain', url: 'url', hash: 'file'};
+  const otxType = typeMap[indicatorType];
+  const response = await requestJson({
+    url: `https://otx.alienvault.com/api/v1/indicators/${otxType}/${encodeURIComponent(indicator)}/general`,
+    headers: {'X-OTX-API-KEY': enrichmentSecrets.otx},
+  });
+  const pulses = response.body?.pulse_info?.count || 0;
+  const verdict = pulses > 0 ? 'suspicious' : 'unknown';
+  return normalizedEnrichmentRecord('otx', indicator, indicatorType, verdict, pulses > 0 ? 55 : 0, [`pulses:${pulses}`], response.body);
+}
+
+async function lookupUrlhaus(urlValue) {
+  const body = `url=${encodeURIComponent(urlValue)}`;
+  const response = await requestJson({
+    method: 'POST',
+    url: 'https://urlhaus-api.abuse.ch/v1/url/',
+    headers: {'Auth-Key': enrichmentSecrets.urlhaus, 'Content-Type': 'application/x-www-form-urlencoded'},
+    body,
+  });
+  const queryStatus = response.body?.query_status;
+  const verdict = queryStatus === 'ok' ? 'malicious' : 'unknown';
+  return normalizedEnrichmentRecord('urlhaus', urlValue, 'url', verdict, queryStatus === 'ok' ? 85 : 0, [response.body?.threat, response.body?.url_status], response.body, response.body?.date_added || null, response.body?.last_online || null);
+}
+
+async function lookupVirusTotal(indicatorType, indicator) {
+  const pathMap = {
+    ip: `ip_addresses/${encodeURIComponent(indicator)}`,
+    domain: `domains/${encodeURIComponent(indicator)}`,
+    hash: `files/${encodeURIComponent(indicator)}`,
+    url: `urls/${Buffer.from(indicator).toString('base64url')}`,
+  };
+  const response = await requestJson({
+    url: `https://www.virustotal.com/api/v3/${pathMap[indicatorType]}`,
+    headers: {'x-apikey': enrichmentSecrets.virustotal},
+  });
+  const attrs = response.body?.data?.attributes || {};
+  const stats = attrs.last_analysis_stats || attrs.last_http_response_content_sha256 ? attrs.last_analysis_stats : {};
+  const verdict = verdictFromStats(stats);
+  return normalizedEnrichmentRecord('virustotal', indicator, indicatorType, verdict.verdict, verdict.confidence, Object.keys(stats).map((key) => `${key}:${stats[key]}`), response.body, null, attrs.last_analysis_date ? isoFromMs(Number(attrs.last_analysis_date) * 1000) : null);
+}
+
+async function lookupUrlscan(indicatorType, indicator) {
+  const query = indicatorType === 'domain' ? `domain:${indicator}` : indicator;
+  const response = await requestJson({
+    url: `https://urlscan.io/api/v1/search/?q=${encodeURIComponent(query)}&size=10`,
+    headers: {'API-Key': enrichmentSecrets.urlscan},
+  });
+  const results = response.body?.results || [];
+  const malicious = results.some((item) => item.verdicts?.overall?.malicious || item.verdicts?.engines?.malicious);
+  return normalizedEnrichmentRecord('urlscan', indicator, indicatorType, malicious ? 'malicious' : results.length ? 'unknown' : 'unknown', malicious ? 75 : 15, [`results:${results.length}`], response.body);
+}
+
+async function lookupGoogleSafeBrowsing(urlValue) {
+  const response = await requestJson({
+    method: 'POST',
+    url: `https://safebrowsing.googleapis.com/v4/threatMatches:find?key=${encodeURIComponent(enrichmentSecrets.googleSafeBrowsing)}`,
+    body: {
+      client: {clientId: 'onion-sentinel', clientVersion: '1.0'},
+      threatInfo: {
+        threatTypes: ['MALWARE', 'SOCIAL_ENGINEERING', 'UNWANTED_SOFTWARE', 'POTENTIALLY_HARMFUL_APPLICATION'],
+        platformTypes: ['ANY_PLATFORM'],
+        threatEntryTypes: ['URL'],
+        threatEntries: [{url: urlValue}],
+      },
+    },
+  });
+  const matches = response.body?.matches || [];
+  return normalizedEnrichmentRecord('google_safe_browsing', urlValue, 'url', matches.length ? 'malicious' : 'benign', matches.length ? 90 : 65, matches.map((item) => item.threatType), response.body);
+}
+
+async function lookupPhishTank(urlValue) {
+  const body = `url=${encodeURIComponent(urlValue)}&format=json&app_key=${encodeURIComponent(enrichmentSecrets.phishtank)}`;
+  const response = await requestJson({
+    method: 'POST',
+    url: 'https://checkurl.phishtank.com/checkurl/',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'OnionSentinel/1.0'},
+    body,
+  });
+  const result = response.body?.results || {};
+  const phishing = Boolean(result.in_database && result.valid);
+  return normalizedEnrichmentRecord('phishtank', urlValue, 'url', phishing ? 'malicious' : 'unknown', phishing ? 85 : 0, [result.verified ? 'verified' : null], response.body);
+}
+
+async function lookupMalwareBazaar(hash) {
+  const body = `query=get_info&hash=${encodeURIComponent(hash)}`;
+  const response = await requestJson({
+    method: 'POST',
+    url: 'https://mb-api.abuse.ch/api/v1/',
+    headers: {'Auth-Key': enrichmentSecrets.malwarebazaar, 'Content-Type': 'application/x-www-form-urlencoded'},
+    body,
+  });
+  const found = response.body?.query_status === 'ok';
+  const first = Array.isArray(response.body?.data) ? response.body.data[0] : {};
+  return normalizedEnrichmentRecord('malwarebazaar', hash, 'hash', found ? 'malicious' : 'unknown', found ? 85 : 0, [first?.signature, first?.file_type, first?.tags?.slice?.(0, 5)?.join(',')], response.body, first?.first_seen || null, first?.last_seen || null);
+}
+
+async function lookupThreatFox(indicatorType, indicator) {
+  const response = await requestJson({
+    method: 'POST',
+    url: 'https://threatfox-api.abuse.ch/api/v1/',
+    headers: {'Auth-Key': enrichmentSecrets.threatfox},
+    body: {query: 'search_ioc', search_term: indicator},
+  });
+  const found = response.body?.query_status === 'ok';
+  const first = Array.isArray(response.body?.data) ? response.body.data[0] : {};
+  return normalizedEnrichmentRecord('threatfox', indicator, indicatorType, found ? 'malicious' : 'unknown', found ? 80 : 0, [first?.malware, first?.ioc_type, first?.threat_type], response.body, first?.first_seen || null, first?.last_seen || null);
+}
+
+async function lookupShodan(ip) {
+  const response = await requestJson({url: `https://api.shodan.io/shodan/host/${encodeURIComponent(ip)}?key=${encodeURIComponent(enrichmentSecrets.shodan)}`});
+  const body = response.body || {};
+  const vulns = Array.isArray(body.vulns) ? body.vulns : Object.keys(body.vulns || {});
+  return normalizedEnrichmentRecord('shodan', ip, 'ip', vulns.length ? 'suspicious' : 'unknown', vulns.length ? 70 : 25, [...(body.tags || []), ...vulns.slice(0, 5)], body, null, body.last_update || null);
+}
+
+async function lookupCensys(ip) {
+  if (isConfiguredSecret(enrichmentSecrets.censysToken)) {
+    const headers = {
+      Authorization: `Bearer ${enrichmentSecrets.censysToken}`,
+      Accept: 'application/vnd.censys.api.v3.host.v1+json',
+    };
+    if (isConfiguredSecret(enrichmentSecrets.censysOrganizationId)) {
+      headers['X-Organization-ID'] = enrichmentSecrets.censysOrganizationId;
+    }
+    const response = await requestJson({url: `https://api.platform.censys.io/v3/global/asset/host/${encodeURIComponent(ip)}`, headers});
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw new Error(`Censys Platform API returned HTTP ${response.statusCode}`);
+    }
+    const body = response.body || {};
+    const services = body.result?.services || body.resource?.services || body.host?.services || [];
+    const tags = services.map((service) => service.service_name || service.port || service.transport_protocol).filter(Boolean).slice(0, 10);
+    return normalizedEnrichmentRecord('censys', ip, 'ip', services.length ? 'unknown' : 'benign', services.length ? 35 : 55, tags, body);
+  }
+  const auth = Buffer.from(`${enrichmentSecrets.censysId}:${enrichmentSecrets.censysSecret}`).toString('base64');
+  const headers = {Authorization: `Basic ${auth}`};
+  const response = await requestJson({url: `https://search.censys.io/api/v2/hosts/${encodeURIComponent(ip)}`, headers});
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw new Error(`Censys Search API returned HTTP ${response.statusCode}`);
+  }
+  const body = response.body || {};
+  const services = body.result?.services || [];
+  const tags = services.map((service) => service.service_name).filter(Boolean).slice(0, 10);
+  return normalizedEnrichmentRecord('censys', ip, 'ip', services.length ? 'unknown' : 'benign', services.length ? 35 : 55, tags, body);
+}
+
+async function lookupCisaKev(cve) {
+  const response = await requestJson({url: 'https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json'});
+  const vuln = (response.body?.vulnerabilities || []).find((item) => String(item.cveID || '').toUpperCase() === cve);
+  return normalizedEnrichmentRecord('cisa_kev', cve, 'cve', vuln ? 'malicious' : 'unknown', vuln ? 90 : 0, [vuln?.vendorProject, vuln?.product, vuln?.knownRansomwareCampaignUse], vuln || {found: false});
+}
+
+async function lookupEpss(cve) {
+  const response = await requestJson({url: `https://api.first.org/data/v1/epss?cve=${encodeURIComponent(cve)}`});
+  const item = Array.isArray(response.body?.data) ? response.body.data[0] : null;
+  const epss = Number(item?.epss || 0);
+  return normalizedEnrichmentRecord('epss', cve, 'cve', epss >= 0.7 ? 'suspicious' : 'unknown', Math.round(epss * 100), [`percentile:${item?.percentile || 'n/a'}`], response.body);
+}
+
+async function lookupNvd(cve) {
+  const headers = isConfiguredSecret(enrichmentSecrets.nvd) ? {apiKey: enrichmentSecrets.nvd} : {};
+  const response = await requestJson({url: `https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=${encodeURIComponent(cve)}`, headers});
+  const vuln = Array.isArray(response.body?.vulnerabilities) ? response.body.vulnerabilities[0]?.cve : null;
+  const metrics = vuln?.metrics || {};
+  const score = metrics.cvssMetricV31?.[0]?.cvssData?.baseScore || metrics.cvssMetricV30?.[0]?.cvssData?.baseScore || metrics.cvssMetricV2?.[0]?.cvssData?.baseScore || 0;
+  return normalizedEnrichmentRecord('nvd', cve, 'cve', Number(score) >= 9 ? 'suspicious' : 'unknown', Math.round(Number(score) * 10), [`cvss:${score || 'n/a'}`], response.body, vuln?.published || null, vuln?.lastModified || null);
+}
+
+function shouldUseVirusTotal(alert) {
+  const level = String(alert.triage?.level || alert.severity_label || '').toLowerCase();
+  return (severityRank[level] ?? 0) >= (severityRank[virustotalMinimumLevel] ?? severityRank.high);
+}
+
+async function runEnrichmentLookup(source, indicatorType, indicator, lookup, summary) {
+  if (!sourceConfigured(source)) {
+    summary.skipped.push({source, indicator, indicator_type: indicatorType, reason: 'missing_api_key', limit_note: sourceLimitNote(source)});
+    return;
+  }
+  try {
+    const result = await cachedLookup(source, indicatorType, indicator, lookup);
+    summary.records.push(result.record);
+    summary.sources[source] = {status: result.cached ? 'cached' : 'queried', limit_note: sourceLimitNote(source)};
+  } catch (error) {
+    summary.errors.push({source, indicator, indicator_type: indicatorType, reason: error.message, limit_note: sourceLimitNote(source)});
+  }
+}
+
+async function enrichAlert(alert) {
+  if (!alert || typeof alert !== 'object' || isRelayHeartbeat(alert)) {
+    return {
+      ok: true,
+      status: isRelayHeartbeat(alert) ? 'heartbeat_skipped' : 'invalid_skipped',
+      alert,
+      enrichment: {records: [], skipped: [], errors: [], indicators: {}, sources: {}},
+    };
+  }
+  const indicators = extractAlertIndicators(alert);
+  const summary = {
+    generated_at: nowUtc(),
+    cache_ttl_seconds: enrichmentCacheDefaultTtlSeconds,
+    vulnerability_cache_ttl_seconds: vulnerabilityCacheDefaultTtlSeconds,
+    indicators,
+    sources: {},
+    records: [],
+    skipped: [],
+    errors: [],
+    privacy: {
+      submitted_private_ips: false,
+      submitted_internal_urls: false,
+      url_query_strings_redacted: true,
+      urlscan_submit_enabled: urlscanSubmitEnabled,
+    },
+  };
+
+  for (const ip of indicators.public_ips.slice(0, 4)) {
+    await runEnrichmentLookup('abuseipdb', 'ip', ip, () => lookupAbuseIpdb(ip), summary);
+    await runEnrichmentLookup('greynoise', 'ip', ip, () => lookupGreynoise(ip), summary);
+    await runEnrichmentLookup('shodan_internetdb', 'ip', ip, () => lookupShodanInternetDb(ip), summary);
+    await runEnrichmentLookup('otx', 'ip', ip, () => lookupOtx('ip', ip), summary);
+    await runEnrichmentLookup('shodan', 'ip', ip, () => lookupShodan(ip), summary);
+    await runEnrichmentLookup('censys', 'ip', ip, () => lookupCensys(ip), summary);
+  }
+
+  for (const domain of indicators.domains.slice(0, 4)) {
+    await runEnrichmentLookup('otx', 'domain', domain, () => lookupOtx('domain', domain), summary);
+    await runEnrichmentLookup('urlscan', 'domain', domain, () => lookupUrlscan('domain', domain), summary);
+    await runEnrichmentLookup('threatfox', 'domain', domain, () => lookupThreatFox('domain', domain), summary);
+    if (shouldUseVirusTotal(alert)) {
+      await runEnrichmentLookup('virustotal', 'domain', domain, () => lookupVirusTotal('domain', domain), summary);
+    } else {
+      summary.skipped.push({source: 'virustotal', indicator: domain, indicator_type: 'domain', reason: `below_${virustotalMinimumLevel}_severity`, limit_note: sourceLimitNote('virustotal')});
+    }
+  }
+
+  for (const urlValue of indicators.urls.slice(0, 3)) {
+    await runEnrichmentLookup('urlhaus', 'url', urlValue, () => lookupUrlhaus(urlValue), summary);
+    await runEnrichmentLookup('urlscan', 'url', urlValue, () => lookupUrlscan('url', urlValue), summary);
+    await runEnrichmentLookup('google_safe_browsing', 'url', urlValue, () => lookupGoogleSafeBrowsing(urlValue), summary);
+    await runEnrichmentLookup('phishtank', 'url', urlValue, () => lookupPhishTank(urlValue), summary);
+    await runEnrichmentLookup('otx', 'url', urlValue, () => lookupOtx('url', urlValue), summary);
+    if (shouldUseVirusTotal(alert)) {
+      await runEnrichmentLookup('virustotal', 'url', urlValue, () => lookupVirusTotal('url', urlValue), summary);
+    } else {
+      summary.skipped.push({source: 'virustotal', indicator: urlValue, indicator_type: 'url', reason: `below_${virustotalMinimumLevel}_severity`, limit_note: sourceLimitNote('virustotal')});
+    }
+  }
+
+  for (const hash of indicators.hashes.slice(0, 4)) {
+    await runEnrichmentLookup('malwarebazaar', 'hash', hash.value, () => lookupMalwareBazaar(hash.value), summary);
+    await runEnrichmentLookup('otx', 'hash', hash.value, () => lookupOtx('hash', hash.value), summary);
+    await runEnrichmentLookup('threatfox', 'hash', hash.value, () => lookupThreatFox('hash', hash.value), summary);
+    if (shouldUseVirusTotal(alert)) {
+      await runEnrichmentLookup('virustotal', 'hash', hash.value, () => lookupVirusTotal('hash', hash.value), summary);
+    } else {
+      summary.skipped.push({source: 'virustotal', indicator: hash.value, indicator_type: 'hash', reason: `below_${virustotalMinimumLevel}_severity`, limit_note: sourceLimitNote('virustotal')});
+    }
+  }
+
+  for (const cve of indicators.cves.slice(0, 6)) {
+    await runEnrichmentLookup('cisa_kev', 'cve', cve, () => lookupCisaKev(cve), summary);
+    await runEnrichmentLookup('epss', 'cve', cve, () => lookupEpss(cve), summary);
+    await runEnrichmentLookup('nvd', 'cve', cve, () => lookupNvd(cve), summary);
+  }
+
+  const enrichedAlert = {
+    ...alert,
+    enrichment: {
+      ...(alert.enrichment || {}),
+      external_intel: {
+        ...summary,
+        verdict_counts: summary.records.reduce((counts, record) => {
+          counts[record.verdict] = (counts[record.verdict] || 0) + 1;
+          return counts;
+        }, {}),
+      },
+    },
+  };
+  return {ok: true, status: 'enriched', alert: enrichedAlert, enrichment: enrichedAlert.enrichment.external_intel};
 }
 
 function parseIpv4(ip) {
@@ -524,6 +1426,30 @@ async function initDb() {
       escalation_threshold INTEGER NOT NULL
     )
   `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS enrichment_cache (
+      cache_key TEXT PRIMARY KEY,
+      source TEXT NOT NULL,
+      indicator TEXT NOT NULL,
+      indicator_type TEXT NOT NULL,
+      verdict TEXT,
+      confidence INTEGER,
+      tags_json TEXT,
+      first_seen TEXT,
+      last_seen TEXT,
+      raw_response_json TEXT,
+      cached_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_enrichment_cache_expires_at ON enrichment_cache(expires_at)');
+  await run('CREATE INDEX IF NOT EXISTS idx_enrichment_cache_indicator ON enrichment_cache(indicator)');
+  await run(`
+    CREATE TABLE IF NOT EXISTS enrichment_rate_limit (
+      source TEXT PRIMARY KEY,
+      last_request_at TEXT NOT NULL
+    )
+  `);
   await rebuildAlertGroupSummaries();
 }
 
@@ -682,10 +1608,19 @@ async function rebuildAlertGroupSummaries() {
 async function storeAlert(rawAlert) {
   // Store indexed summary fields for reports plus the full scored JSON for
   // investigation-note generation.
-  const alert = {
+  let alert = {
     ...rawAlert,
     triage: scoreAlert(rawAlert),
   };
+  if (!hasUsableExternalIntel(alert)) {
+    const enrichmentResult = await enrichAlert(alert);
+    if (enrichmentResult.ok && enrichmentResult.alert) {
+      alert = {
+        ...enrichmentResult.alert,
+        triage: alert.triage,
+      };
+    }
+  }
   const alertId = alert.alert_id;
   if (!alertId) {
     return {ok: false, status: 'rejected', reason: 'missing alert_id'};
@@ -747,7 +1682,7 @@ async function storeAlert(rawAlert) {
     $suppression_key: null,
     $raw_event_json: jsonText(nestedField(alert, 'security_onion.raw_event')),
     $enrichment_json: jsonText(enrichmentRecord(alert)),
-    $alert_json: JSON.stringify(alert),
+    $alert_json: jsonText(alert),
   };
 
   const insert = await run(
@@ -859,7 +1794,7 @@ async function storeAlert(rawAlert) {
         $suppression_key: suppression.key || null,
         $raw_event_json: jsonText(nestedField(alert, 'security_onion.raw_event')),
         $enrichment_json: jsonText(enrichmentRecord(alert)),
-        $alert_json: JSON.stringify(alert),
+        $alert_json: jsonText(alert),
         $alert_id: alertId,
       },
     );
@@ -1013,7 +1948,7 @@ async function rescoreAlerts() {
           $routing: alert.triage.routing,
           $raw_event_json: jsonText(nestedField(alert, 'security_onion.raw_event')),
           $enrichment_json: jsonText(enrichmentRecord(alert)),
-          $alert_json: JSON.stringify(alert),
+          $alert_json: jsonText(alert),
           $alert_id: row.alert_id,
         },
       );
@@ -1281,6 +2216,16 @@ async function handleRequest(request, response) {
       }
       const result = await storeAlert(alert);
       writeN8nBeacon('stored', alert, result);
+      sendJson(response, result.ok ? 200 : 400, result);
+      return;
+    }
+    if (request.method === 'POST' && request.url === '/enrich') {
+      // n8n calls this as a dedicated enrichment stage before /alert storage.
+      // Public lookups are skipped unless their key is configured, except
+      // intentionally keyless public sources such as Shodan InternetDB, KEV,
+      // EPSS, and NVD without a key.
+      const alert = await readJsonBody(request);
+      const result = await enrichAlert(alert);
       sendJson(response, result.ok ? 200 : 400, result);
       return;
     }

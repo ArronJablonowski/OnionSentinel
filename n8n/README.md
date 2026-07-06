@@ -7,7 +7,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | Path | Purpose |
 | --- | --- |
 | `docker-compose.yml` | Runs n8n and alert-store containers. |
-| `.env.example` | Placeholder Telegram settings. Copy to runtime `.env`; never commit live `.env`. |
+| `.env.example` | Placeholder Telegram and enrichment settings. Copy to runtime `.env`; never commit live `.env`. |
 | `workflows/security-onion-configurable-scoring.workflow.json` | n8n workflow export. |
 | `alert_store/` | SQLite-backed alert scoring, suppression, notification, and report logic. |
 | `alert_store/config/scoring_rules.json` | Tunable local filtering/scoring policy. |
@@ -38,6 +38,20 @@ The installer creates or updates:
 
 It does not overwrite an existing `$HOME/n8n-local/.env`.
 
+## Timestamp Format
+
+Onion Sentinel records and displays project timestamps in the operator's local
+timezone with an explicit UTC offset. Use ISO 8601 with the `T` separator
+replaced by two spaces, for example:
+
+```text
+2026-07-05  21:34:40-06:00
+```
+
+Incoming UTC values from Security Onion, enrichment APIs, or older workflow
+exports are normalized to this local-offset format before they are stored in
+SQLite, generated reports, status JSON, and dashboard output.
+
 ## Configure Secrets
 
 ```bash
@@ -52,6 +66,68 @@ Set:
 - `TELEGRAM_ALERT_LEVELS=critical,high`
 
 Configure the relay token inside the imported n8n workflow validation node by replacing `REPLACE_WITH_RELAY_TOKEN`.
+
+Optional enrichment keys are also set in `$HOME/n8n-local/.env`. Blank or
+placeholder values are treated as disabled, so a source can be enabled or
+rotated by editing `.env` and restarting `alert-store`.
+
+| Source | Environment variable | Notes |
+| --- | --- | --- |
+| AbuseIPDB | `ABUSEIPDB_API_KEY` | IP reputation; free accounts are commonly limited to 1,000 checks/day. |
+| GreyNoise | `GREYNOISE_API_KEY` | Internet scanner/noise context; cache aggressively. |
+| Shodan InternetDB | none | Keyless public IP exposure context; throttled locally. |
+| OTX | `OTX_API_KEY` | IP/domain/URL/hash pulse context. |
+| URLhaus | `URLHAUS_AUTH_KEY` | Malware URL lookups; URLs are redacted before submission. |
+| VirusTotal | `VIRUSTOTAL_API_KEY` | High/critical only by default; throttled to 4 requests/minute. |
+| urlscan.io | `URLSCAN_API_KEY` | Search-only by default; active URL submission remains disabled unless `URLSCAN_SUBMIT_ENABLED=true`. |
+| Google Safe Browsing | `GOOGLE_SAFE_BROWSING_API_KEY` | Public redacted URL checks. |
+| PhishTank | `PHISHTANK_API_KEY` | Public redacted URL phishing checks. |
+| MalwareBazaar | `MALWAREBAZAAR_AUTH_KEY` | Hash lookups only; no file downloads. |
+| ThreatFox | `THREATFOX_AUTH_KEY` | IOC lookups for domains, hashes, and C2 indicators. |
+| Shodan | `SHODAN_API_KEY` | Authenticated host API; separate from keyless InternetDB. |
+| Censys | `CENSYS_API_TOKEN` or `CENSYS_API_ID` + `CENSYS_API_SECRET` | Authenticated exposed-service IP context. Personal Access Tokens use the Censys Platform API; set optional `CENSYS_ORGANIZATION_ID` when your account requires an organization header. |
+| CISA KEV | none | Public CVE catalog; cached with vulnerability TTL. |
+| EPSS | none | Public CVE exploit probability; cached with vulnerability TTL. |
+| NVD | `NVD_API_KEY` optional | CVE metadata; key raises NVD's allowed request rate. |
+
+Enrichment behavior knobs:
+
+- `ENRICHMENT_CACHE_TTL_SECONDS=86400`
+- `ENRICHMENT_VULN_CACHE_TTL_SECONDS=86400`
+- `ENRICHMENT_TIMEOUT_MS=5000`
+- `VIRUSTOTAL_MINIMUM_LEVEL=high`
+- `URLSCAN_SUBMIT_ENABLED=false`
+
+The n8n workflow includes a dedicated `Enrich Alert` node between relay
+validation and alert-store persistence. That node calls alert-store
+`POST /enrich`; alert-store extracts only public indicators, redacts URL query
+strings and credentials, skips private IPs/internal hostnames, checks configured
+sources, writes normalized records into `alerts.enrichment_json`, and caches
+results in SQLite.
+
+Indicator extraction covers public IPv4s, domains, full URLs/URIs, file hashes,
+and CVEs from common ECS, Suricata, and Security Onion raw-event shapes. Local
+DNS traffic is still enriched when the queried DNS name is public; the local
+source host and local resolver IP are skipped, but fields such as
+`dns.question.name`, Suricata `dns.rrname`/`dns.query`, TLS SNI, HTTP host,
+URL fields, and related host fields can produce public domain/URL lookups.
+Existing enrichment provider responses are intentionally ignored during
+extraction so refresh jobs do not submit indicators found only inside previous
+third-party `raw_response` payloads.
+
+To retroactively enrich rows stored before the dedicated enrichment stage, run
+the backfill utility from inside the alert-store container. Start with a dry run
+or small limit, confirm SQLite integrity, then run larger batches:
+
+```bash
+cd $HOME/n8n-local
+/usr/local/bin/docker compose exec -T -e BACKFILL_DRY_RUN=1 -e BACKFILL_LIMIT=25 alert-store node /app/bin/backfill-public-enrichment.js
+/usr/local/bin/docker compose exec -T -e BACKFILL_LIMIT=250 alert-store node /app/bin/backfill-public-enrichment.js
+sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "PRAGMA quick_check;"
+```
+
+The backfill uses the same `/enrich` endpoint, API-key gating, cache, privacy
+filters, and rate-limit handling as live workflow ingestion.
 
 ## Validate
 

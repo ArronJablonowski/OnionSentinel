@@ -57,8 +57,8 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("T", "  ").replace("+00:00", "Z")
+def project_now() -> str:
+    return dt.datetime.now().astimezone().replace(microsecond=0).isoformat().replace("T", "  ")
 
 
 def filename_timestamp(value: str) -> str:
@@ -178,7 +178,7 @@ def select_alert(conn: sqlite3.Connection, args: argparse.Namespace) -> sqlite3.
     levels = [level.strip().lower() for level in args.levels.split(",") if level.strip()]
     if not levels:
         raise SystemExit("--levels must contain at least one level")
-    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=args.hours)).replace(microsecond=0).isoformat().replace("T", "  ").replace("+00:00", "Z")
+    since = (dt.datetime.now().astimezone() - dt.timedelta(hours=args.hours)).replace(microsecond=0).isoformat().replace("T", "  ")
     filter_sql = ""
     filter_params: list[object] = []
     if not args.include_tests:
@@ -380,7 +380,7 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
     }
     return {
         "package_type": "soc-ai-investigation-prompt",
-        "generated_at": utc_now(),
+        "generated_at": project_now(),
         "analysis_policy": model_policy(selected["triage_level"]),
         "system_prompt_file": str(args.system_prompt_file),
         "agent_memory_file": str(args.agent_memory_file),
@@ -442,7 +442,7 @@ def main() -> int:
         return 0
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = filename_timestamp(utc_now())
+    stamp = filename_timestamp(project_now())
     alert_id = safe_filename(str(package["alert"]["alert_id"]))
     out_path = args.out_dir / f"{stamp}-{alert_id}-ai-prompt.json"
     out_path.write_text(output + "\n", encoding="utf-8")

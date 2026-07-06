@@ -92,6 +92,87 @@ in JSON:
 These columns are additive derived fields. `alert_json`, `raw_event_json`, and
 `enrichment_json` remain the evidence source of truth.
 
+As of 2026-07-05, `enrichment_json` also carries public enrichment records
+created by the dedicated n8n `Enrich Alert` node. The node calls alert-store
+`POST /enrich` before the normal `/alert` persistence call. Alert-store owns
+the API key checks, privacy filtering, rate limits, SQLite cache, and normalized
+output, so the n8n workflow stays easy to inspect while the state remains
+durable.
+
+Rows stored before the enrichment stage can be repaired with
+`n8n/bin/backfill-public-enrichment.js`. Run it inside the alert-store
+container so it can reach both `/data/alerts.sqlite3` and
+`http://127.0.0.1:8787/enrich`. The backfill intentionally reuses the live
+`/enrich` endpoint instead of duplicating provider logic, which keeps privacy
+filters, API-key gating, SQLite cache behavior, and rate limits consistent
+between old and new detections.
+
+The extractor submits public indicators even when the network path itself is
+local-only. For example, a private host querying a private DNS resolver for a
+public domain should enrich the public queried domain while skipping the private
+source/resolver IPs. Supported sources include common ECS URL/DNS/TLS/HTTP
+fields, Suricata DNS/TLS/HTTP fields, Security Onion raw-event DNS/TLS/HTTP
+fields, related hosts/IPs, hashes, and CVEs. Existing enrichment output is
+excluded from refresh extraction so provider `raw_response` data does not become
+new submission input.
+
+Normalized public enrichment records use this shape:
+
+```json
+{
+  "source": "abuseipdb",
+  "indicator": "198.51.100.10",
+  "indicator_type": "ip",
+  "verdict": "suspicious",
+  "confidence": 55,
+  "tags": ["scanner"],
+  "first_seen": null,
+  "last_seen": "2026-07-04  18:00:00-06:00",
+  "raw_response": {},
+  "cached_at": "2026-07-05  06:00:00-06:00"
+}
+```
+
+Verdict buckets are:
+
+- `malicious`
+- `suspicious`
+- `benign`
+- `noise/scanner`
+- `unknown`
+
+Public enrichment sources:
+
+| Source | Key behavior | Local rate/caching behavior |
+| --- | --- | --- |
+| AbuseIPDB | Requires `ABUSEIPDB_API_KEY` | Cached by indicator; free accounts are commonly limited to 1,000 checks/day. |
+| GreyNoise | Requires `GREYNOISE_API_KEY` | Cached by IP; low-volume community usage is throttled. |
+| Shodan InternetDB | No key | Cached by IP; keyless non-commercial exposure context. |
+| OTX | Requires `OTX_API_KEY` | Cached by IP/domain/URL/hash. |
+| URLhaus | Requires `URLHAUS_AUTH_KEY` | Cached by redacted public URL. |
+| VirusTotal | Requires `VIRUSTOTAL_API_KEY` | High/critical only by default; throttled to 4 requests/minute. |
+| urlscan.io | Requires `URLSCAN_API_KEY` | Search-only by default; URL submission disabled unless explicitly enabled. |
+| Google Safe Browsing | Requires `GOOGLE_SAFE_BROWSING_API_KEY` | Cached by redacted public URL. |
+| PhishTank | Requires `PHISHTANK_API_KEY` | Cached by redacted public URL. |
+| MalwareBazaar | Requires `MALWAREBAZAAR_AUTH_KEY` | Hash lookups only; no file downloads. |
+| ThreatFox | Requires `THREATFOX_AUTH_KEY` | Cached IOC lookups. |
+| Shodan | Requires `SHODAN_API_KEY` | Authenticated host API; separate from InternetDB. |
+| Censys | Requires `CENSYS_API_TOKEN` or `CENSYS_API_ID` and `CENSYS_API_SECRET` | Authenticated exposed-service IP context. Personal Access Tokens use bearer auth. |
+| CISA KEV | No key | CVE catalog cached with vulnerability TTL. |
+| EPSS | No key | CVE exploit probability cached with vulnerability TTL. |
+| NVD | Optional `NVD_API_KEY` | CVE metadata; key raises NVD request quota. |
+
+Privacy rules for public enrichment:
+
+- Do not submit private IP addresses.
+- Do not submit internal-only hostnames such as `.local`, `.lan`, `.home`,
+  `.internal`, or `.corp`.
+- Redact URL usernames, passwords, query strings, and fragments before lookup.
+- Keep urlscan.io active submissions disabled unless an operator explicitly
+  enables `URLSCAN_SUBMIT_ENABLED=true`.
+- Record skipped sources and rate-limit notes in the enrichment bundle so alert
+  details can explain missing context.
+
 Add an FTS table later for fast free-text search:
 
 ```sql
@@ -139,9 +220,9 @@ accepted-alert report and local-LLM corpus.
 
 Current SOC Alerts metric row:
 
-- `Visible / Total`: one combined count card. The visible value changes when
-  the analyst filters/searches; the total value remains the full grouped alert
-  count for the current dashboard build.
+- `Active Alerts by Severity`: active alert counts by Critical, High, Medium,
+  Low, and Informational. Active means not suppressed and not hidden by an
+  acknowledgement whose repeat count has not increased.
 - `Last n8n beacon`: latest alert ingestion or relay heartbeat timestamp from
   `n8n-beacon.json`. The sidebar health tile is green while that beacon is less
   than 20 minutes old and red once it becomes stale.
@@ -149,6 +230,10 @@ Current SOC Alerts metric row:
 - `Latest Alert`: newest generated Markdown report timestamp.
 - `Total Size`: total generated Markdown corpus size represented by the
   current dashboard build.
+- `System Health`: dedicated page backed by
+  `/api/system-health/beacons?hours=24`, showing n8n beacon history,
+  unsuccessful recovery-marked events, and gaps longer than 10 minutes between
+  successful beacons.
 
 Live UI state:
 
@@ -391,50 +476,47 @@ settings.html       Settings page with AI model routing plus collapsed SOC Analy
 
 The Flow page is intentionally simple: it gives an analyst a fast visual model
 of the deployed data flow before they move into other SOC pages. The current
-diagram shows Security Onion, Raspberry Pi Relay, Docker, n8n Workflow, Mac
-Studio AI Lab, Ollama, AI Reports, SQLite, Telegram, and Onion Sentinel as
-distinct stages.
-The Ollama node displays the current local model name used by alert analysis,
-currently `devstral:latest`, and shows the AI findings path into the AI Reports
-node. The AI Reports node counts `*-local-ai-analysis.md` and
+diagram is an ordered operational map:
+
+```text
+Security Onion -> Raspberry Pi Relay -> Docker -> n8n Workflow
+n8n Workflow -> alert-store /enrich
+alert-store /enrich -> configured public enrichment services
+alert-store -> SQLite alert_json, enrichment_json, raw_event_json
+SQLite + Mac Studio AI Lab + Ollama + AI Reports + Telegram -> Onion Sentinel
+```
+
+The enrichment lane is part of the diagram because n8n now calls alert-store's
+dedicated `/enrich` endpoint before alert storage. alert-store owns API-key
+gating, privacy checks, SQLite caching, source-specific rate limits, and
+normalization into the `enrichment.external_intel` bundle. The Flow page lists
+the supported enrichment sources as service tiles: AbuseIPDB, GreyNoise, Shodan
+InternetDB, OTX, URLhaus, VirusTotal, urlscan.io, Google Safe Browsing,
+PhishTank, MalwareBazaar, ThreatFox, Shodan, Censys, CISA KEV, EPSS, and NVD.
+Tiles use locally bundled provider favicon/logo assets where available. Censys
+uses a local styled fallback badge when the official site blocks anonymous asset
+retrieval.
+
+The Ollama node displays the current local model name used by alert analysis.
+The AI Reports node counts `*-local-ai-analysis.md` and
 `*-local-ai-analysis.json` artifacts from
-`$HOME/n8n-local/soc-alerts/ai-analysis`, uses same-size paired
-logo badges with Obsidian's official purple mark and the `{JSON}` vector logo,
-and renders compact text-only format metric pills so analysts can see the
-human-readable and machine-readable corpus sizes at a glance. The JSON vector
-keeps its official shape but gets a small CSS brightness lift so it remains
-legible against the dark Flow card background. SQLite and
-Telegram are rendered as full nodes with bundled brand marks so analysts can
-quickly distinguish operational storage from mobile notification. The SQLite
-node now uses the same compact metric-pill treatment as AI Reports, showing
-grouped detections and total observations from the alert-store database. The
-Telegram node uses the same metric style for mobile notification counts and
-reads actual Critical and High send totals from `notification_log.sent_count`
-where `channel = 'telegram'`.
+`$HOME/n8n-local/soc-alerts/ai-analysis`, using same-size paired logo badges
+with Obsidian's official purple mark and the `{JSON}` vector logo. SQLite and
+Telegram are rendered as full nodes with bundled brand marks. SQLite shows
+grouped detections and total observations from the alert-store database.
+Telegram reads actual Critical and High send totals from
+`notification_log.sent_count` where `channel = 'telegram'`.
+
 Onion Sentinel is rendered as the analyst-facing dashboard endpoint using
-`onion-sentinel-dashboard/assets/onion-sentinel-logo.png`; the diagram shows both SQLite
-and AI Reports feeding directly into that dashboard node through two animated
-downward arrows. The Onion Sentinel node spans both the AI Reports and SQLite
-columns so it reads as the shared dashboard destination for report context and
-database-backed alert state. Its logo is intentionally larger than the standard
-node logos so the analyst-facing endpoint stands out. The node also exposes a
-compact metric strip for the current grouped detection count, total repeated observations, AI analysis
-coverage percentage, and critical/high group count so the diagram carries useful
-state without turning into a full dashboard table. The metric-node card heights
-and footer padding are sized so labels such as `Findings + actions`, `Fast
-dashboard store`, and `Mobile notification` stay inside the cards. The diagram wraps into
-equal-card rows so all node cards remain the same size and connector labels do
-not clip at desktop widths. Every connector segment has a faster animated packet
-marker so flow visibly continues across the full route, not only through the
-first row. The Flow hero summary uses a thin pulsing cyan divider instead of
-summary chips, matching the connector line style without adding an arrow.
-Connector labels have padded opaque chips so wording does not sit on top of the
-arrows or animated packets. Horizontal connector labels sit above and centered over each arrow segment, with enough clearance that they never intersect the animated arrow path; vertical connector labels sit to the side of the animated stem. Brand SVGs are bundled under
-`onion-sentinel-dashboard/assets/brand/` and copied into the served portal during each
-dashboard rebuild so the page does not depend on external image hosts. The Flow
-page also ships `privacy-eye-button.png`, a generated eye-style privacy control
-in the upper-right of the hero card. Node IP addresses are masked as `xxx.xxx.xxx.xxx` by default and
-are revealed only when the analyst clicks that control.
+`onion-sentinel-dashboard/assets/onion-sentinel-logo.png`. Its compact metric
+strip carries grouped detection count, total repeated observations, AI analysis
+coverage percentage, and critical/high group count without turning the Flow page
+into a table. The diagram uses responsive lanes instead of absolute-positioned
+connector geometry so source order, enrichment services, storage, analysis, and
+notification outputs remain readable on mobile, tablet, laptop, desktop, and
+wide desktop displays. Node IP addresses are masked as `xxx.xxx.xxx.xxx` by
+default and are revealed only when the analyst clicks the upper-right privacy
+control.
 
 Settings page behavior:
 
@@ -519,11 +601,12 @@ Settings page behavior:
 Current Flow page model:
 
 ```text
-Security Onion -> Raspberry Pi relay -> Docker -> n8n Workflow -> Mac Studio AI Lab
-Mac Studio AI Lab -> Ollama devstral:latest -> AI Reports
-Mac Studio AI Lab -> SQLite grouped detection store
-AI Reports + SQLite -> Onion Sentinel dashboard
-n8n Workflow -> Telegram high/critical notifications
+Security Onion -> Raspberry Pi relay -> Docker -> n8n Workflow
+n8n Workflow -> alert-store /enrich -> public enrichment services
+alert-store /enrich -> alert-store /alert -> SQLite grouped detection store
+SQLite -> Mac Studio AI Lab -> Ollama current local model -> AI Reports
+SQLite + AI Reports -> Onion Sentinel dashboard
+SQLite/n8n notification policy -> Telegram high/critical notifications
 ```
 
 The implementation lives in:
@@ -537,22 +620,20 @@ The generated page should contain:
 ```text
 data-view="overview"
 flow-product-hero
+flow-lane
+flow-enrichment-band
+enrichment-service-grid
+enrichment-service
 flow-system-node
 flow-dot-horizontal
-flow-dot-vertical
-node-ollama
-node-sqlite
-node-telegram
-node-onion-sentinel
 flow-format-metrics
 flow-node-metrics
-flow-dashboard-bus
-flow-dashboard-branch
 Ollama logo
 Obsidian logo
 JSON logo
 SQLite logo
 Telegram logo
+provider enrichment logo tiles
 Onion Sentinel logo
 Markdown
 JSON
@@ -664,13 +745,13 @@ AI status aligned to the latest event while `Count` represents the whole
 grouped detection.
 
 The alert table column formerly labeled `Modified` now displays `Last Seen`.
-The generated HTML stores the grouped row's newest `last_seen` timestamp as
-UTC, not the Markdown file modification time. At render time, browser
-JavaScript converts that UTC value into the viewer's local timezone while
-keeping ISO 8601 format with an explicit offset, such as
-`2026-07-02  11:58:49-06:00`. Mobile newest-first sorting uses the same grouped
-`last_seen` value so table order, mobile cards, and the pinned row all reflect
-the latest alert event.
+Onion Sentinel stores and displays project timestamps as local ISO 8601 with
+the `T` separator replaced by two spaces and an explicit UTC offset, such as
+`2026-07-05  21:34:40-06:00`. Incoming Security Onion UTC values such as
+`2026-07-06T03:34:40Z` are normalized to the operator timezone before they are
+written to SQLite, reports, status JSON, and dashboard output. Mobile
+newest-first sorting uses the same grouped `last_seen` value so table order,
+mobile cards, and the pinned row all reflect the latest alert event.
 
 The table also includes a `Log Source` column immediately after `Last Seen`.
 For SQLite-backed rows this comes from `alerts.event_dataset`, which currently
@@ -682,11 +763,12 @@ Row details should still allow the analyst to inspect representative alert
 content, first seen, last seen, total raw records, total seen count, filter
 status, and suppression key. Grouped rows with more than one member render a
 `Duplicate Alert Timeline` section in the Detailed Alert Report. The timeline
-plots repeated alert members on a time rail and the table lists every member row
-chronologically by alert firing timestamp, seen count, source IP, destination
-IP, destination port, and short alert ID. Markdown reports remain optional
-detail content: some grouped suppressed rows may have no Markdown report by
-design.
+plots repeated alert members on a time rail. The detail table expands counted
+observations so the number of table rows matches the grouped alert `Count`,
+then paginates those observations at 25 rows per page by default. Each
+observation row shows firing timestamp, source IP, destination IP, destination
+port, and short alert ID. Markdown reports remain optional detail content: some
+grouped suppressed rows may have no Markdown report by design.
 
 As of 2026-07-02, row details also render `Enriched Alert Details` from SQLite
 `alerts.alert_json`. The Security Onion exporter adds selected ECS/Security
@@ -887,7 +969,7 @@ The SOC Alerts toolbar includes a compact `Last Seen` time-window filter and a `
 
 Expanded **Detailed Alert Report** panels are constrained to the visible table viewport, not the full horizontally scrollable table width. Long report text, JSON, code blocks, IDs, URLs, and table cells wrap inside the visible panel with a small right-side gutter so analyst text does not run to the screen edge.
 
-The **Latest Alert** metric is live-driven from `/api/soc-alerts/metrics`, using the SQLite `latest_seen` value and converting it to the analyst browser's local ISO-style timestamp. It updates from Server-Sent Events when available and falls back to periodic metrics polling while the page remains open.
+The **Latest Alert** metric is live-driven from `/api/soc-alerts/metrics`, using the SQLite `latest_seen` value in local-offset project timestamp format. It updates from Server-Sent Events when available and falls back to periodic metrics polling while the page remains open.
 
 The table headers now drive server-side sorting through allowlisted
 `sort=<field>&direction=<asc|desc>` API parameters. Database-backed sort fields

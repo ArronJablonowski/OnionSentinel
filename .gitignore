@@ -44,6 +44,7 @@ daily-rollups/
 ai-prompts/
 ai-analysis/
 n8n-beacon.json
+n8n-beacon-history.json
 soc-alerts-status.json
 
 # n8n runtime exports and live workflow snapshots

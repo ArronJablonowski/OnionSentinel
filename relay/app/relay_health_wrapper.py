@@ -27,6 +27,8 @@ RELAY_COMMAND = os.environ.get(
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 HOST_LABEL = os.environ.get("RELAY_HOST_LABEL", "Raspberry Pi SOC relay")
+RELAY_WEBHOOK_URL = os.environ.get("RELAY_WEBHOOK_URL", "").strip()
+RELAY_WEBHOOK_TOKEN = os.environ.get("RELAY_WEBHOOK_TOKEN", "").strip()
 
 
 def env_int(name: str, default: int) -> int:
@@ -86,6 +88,35 @@ def send_telegram(message: str) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
+    try:
+        with request.urlopen(req, timeout=10) as response:
+            return {"ok": 200 <= response.status < 300, "status": response.status}
+    except HTTPError as exc:
+        return {"ok": False, "status": exc.code, "error": exc.reason}
+    except URLError as exc:
+        return {"ok": False, "status": "url_error", "error": str(exc.reason)}
+    except Exception as exc:
+        return {"ok": False, "status": "error", "error": str(exc)}
+
+
+def parse_http_status(text: str) -> int | None:
+    import re
+
+    match = re.search(r"HTTP(?: Error| returned HTTP)?\s+([0-9]{3})", text or "")
+    return int(match.group(1)) if match else None
+
+
+def send_relay_health_event(event: dict) -> dict:
+    if not RELAY_WEBHOOK_URL:
+        return {"ok": False, "status": "disabled"}
+    payload = json.dumps(event, sort_keys=True).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "so-alert-relay-health/0.1",
+    }
+    if RELAY_WEBHOOK_TOKEN:
+        headers["X-Relay-Token"] = RELAY_WEBHOOK_TOKEN
+    req = request.Request(RELAY_WEBHOOK_URL, data=payload, headers=headers, method="POST")
     try:
         with request.urlopen(req, timeout=10) as response:
             return {"ok": 200 <= response.status < 300, "status": response.status}
@@ -157,7 +188,14 @@ def main() -> int:
 
     if result.returncode == 0:
         # If the previous run failed, this successful run is recovery-worthy.
-        recovered = state.get("status") == "failed" and state.get("failure_notification_sent")
+        previous_failure = {
+            "failed_at": state.get("last_failure"),
+            "summary": state.get("last_summary"),
+            "returncode": state.get("last_returncode"),
+            "consecutive_failures": int(state.get("consecutive_failures") or 0),
+            "http_status": state.get("last_http_status") or parse_http_status(str(state.get("last_summary") or "")),
+        } if state.get("status") == "failed" else None
+        recovered = bool(previous_failure and state.get("failure_notification_sent"))
         state.update({
             "status": "ok",
             "last_success": now_iso(),
@@ -167,6 +205,17 @@ def main() -> int:
             "failure_notification_sent": False,
         })
         save_state(state)
+        if previous_failure:
+            recovery_event = {
+                "message_type": "relay_health_recovery",
+                "source": "security-onion",
+                "relay_host": HOST_LABEL,
+                "generated_at": state["last_success"],
+                "status": "recovered",
+                "relay_previous_failure": previous_failure,
+            }
+            notice = send_relay_health_event(recovery_event)
+            print(json.dumps({"health_event_status": notice}, sort_keys=True))
         if recovered:
             notice = send_telegram(f"[RECOVERY] {HOST_LABEL} recovered at {state['last_success']}\n{summary}")
             print(json.dumps({"health_status": "recovered", "notification": notice}, sort_keys=True))
@@ -187,6 +236,7 @@ def main() -> int:
         "last_returncode": result.returncode,
         "last_started_at": started_at,
         "consecutive_failures": consecutive_failures,
+        "last_http_status": parse_http_status(summary + "\n" + result.stderr),
     })
     save_state(state)
 

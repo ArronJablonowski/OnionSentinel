@@ -27,8 +27,8 @@ TEST_PREFIXES = (
 )
 
 
-def utc_now() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+def project_now() -> dt.datetime:
+    return dt.datetime.now().astimezone().replace(microsecond=0)
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,7 +48,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def iso(value: dt.datetime) -> str:
-    return value.isoformat().replace("T", "  ").replace("+00:00", "Z")
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=dt.timezone.utc)
+    return value.astimezone().isoformat().replace("T", "  ")
 
 
 def md(value: object) -> str:
@@ -72,7 +74,7 @@ def short_id(alert_id: object) -> str:
 
 
 def where_clause(since: str, include_tests: bool) -> tuple[str, list[object]]:
-    clauses = ["replace(replace(last_seen, 'T', ' '), 'Z', '') >= replace(replace(?, 'T', ' '), 'Z', '')"]
+    clauses = ["substr(replace(last_seen, 'T', ' '), 1, 19) >= substr(replace(?, 'T', ' '), 1, 19)"]
     params: list[object] = [since]
     if not include_tests:
         for pattern in TEST_PREFIXES:
@@ -394,9 +396,8 @@ def main() -> int:
     args = parse_args()
     if not args.db.exists():
         raise SystemExit(f"SQLite DB not found: {args.db}")
-    now = utc_now()
-    # Use the Mac's local calendar day for filenames. Keep generated_at/window
-    # timestamps in UTC so they line up with Security Onion and SQLite rows.
+    now = project_now()
+    # Use the Mac's local calendar day and local-offset project timestamps.
     report_date = args.date or dt.datetime.now().astimezone().date().isoformat()
     since = iso(now - dt.timedelta(hours=args.hours))
     args.out_dir.mkdir(parents=True, exist_ok=True)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sqlite3
 import sys
 import tempfile
@@ -31,6 +32,7 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.portal = load_portal()
         self.portal.SOC_ALERT_STORE_DB = self.db_path
         self.portal.SOC_ALERT_STATUS_FILE = Path(self.tmp.name) / ".soc_alert_status.json"
+        self.portal.SOC_ALERT_STATIC_STATUS_FILE = Path(self.tmp.name) / "soc-alerts-status.json"
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(
@@ -196,7 +198,37 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["top_endpoints"]["destination_port"], "443")
         self.assertEqual(payload["alerts"][0]["representative_alert_id"], "newest-alert")
         self.assertEqual(payload["alerts"][0]["seen_count"], 5)
+        self.assertEqual(payload["alerts"][0]["ai_status_key"], "queued")
+        self.assertEqual(payload["alerts"][0]["ai_status_label"], "Queued")
         self.assertNotIn("backend-suppressed-alert", [alert["representative_alert_id"] for alert in payload["alerts"]])
+
+    def test_alert_list_uses_static_ai_status_when_available(self) -> None:
+        newest_group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        self.portal.SOC_ALERT_STATIC_STATUS_FILE.write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "reports": {
+                        newest_group_id: {
+                            "ai_status_key": "analyzed",
+                            "ai_status_label": "Analyzed",
+                            "ai_status_detail": "unit test analysis artifact",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        status, payload = self.portal.soc_alerts_query_response({"limit": ["10"], "analyst_status": ["open"]})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["alerts"][0]["representative_alert_id"], "newest-alert")
+        self.assertEqual(payload["alerts"][0]["ai_status_key"], "analyzed")
+        self.assertEqual(payload["alerts"][0]["ai_status_label"], "Analyzed")
+        self.assertEqual(payload["alerts"][0]["ai_status_detail"], "unit test analysis artifact")
 
     def test_top_endpoint_metrics_use_visible_alert_volume(self) -> None:
         self.insert_summary(

@@ -1,0 +1,305 @@
+/*
+  SOC Alerts metric-card overrides.
+
+  Keep high-churn metric layout polish here instead of editing the generated
+  dashboard's large embedded CSS string.
+*/
+
+.metrics > .metric-card {
+  position: relative !important;
+  isolation: isolate;
+  --metric-flow-y: 46px;
+}
+
+.metrics > .metric-card::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  left: 14px;
+  right: 18px;
+  top: var(--metric-flow-y);
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(34, 211, 238, .16), rgba(143, 244, 255, .82), rgba(34, 211, 238, .16));
+  box-shadow: 0 0 10px rgba(34, 211, 238, .16);
+  pointer-events: none;
+}
+
+.metrics > .metric-card > * {
+  position: relative;
+  z-index: 1;
+}
+
+.severity-summary-card,
+.alert-status-card,
+.latest-network-card {
+  align-items: flex-start !important;
+  justify-content: center !important;
+  gap: 0 !important;
+  padding: 14px !important;
+  overflow: hidden !important;
+}
+
+.severity-summary-card .metric-icon,
+.alert-status-card .metric-icon,
+.latest-network-card .metric-icon,
+.latest-network-card .metric-extra {
+  display: none !important;
+}
+
+.severity-summary-main,
+.alert-status-main,
+.latest-network-main {
+  width: min(100%, 252px) !important;
+  flex: 0 1 252px !important;
+  min-width: 0 !important;
+}
+
+.severity-summary-main strong,
+.alert-status-main strong,
+.latest-network-main strong {
+  display: block !important;
+  font-size: 18px !important;
+  line-height: 1.1 !important;
+  letter-spacing: -.02em !important;
+  text-align: left !important;
+  white-space: nowrap !important;
+}
+
+.severity-card-counts,
+.alert-status-metrics {
+  display: grid !important;
+  grid-template-columns: 70px 132px !important;
+  justify-content: start !important;
+  align-items: baseline !important;
+  gap: 8px 14px !important;
+  margin: 28px 0 0 !important;
+}
+
+.severity-card-counts .sev-chip,
+.alert-status-metrics .api-table-metric {
+  display: inline-flex !important;
+  align-items: baseline !important;
+  gap: 5px !important;
+  min-width: 0 !important;
+  width: auto !important;
+  justify-content: flex-start !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+  color: #9fb0c4 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  line-height: 1 !important;
+  white-space: nowrap !important;
+}
+
+.severity-card-counts .sev-chip b,
+.alert-status-metrics .api-table-metric b {
+  font-size: 15px !important;
+  font-weight: 850 !important;
+  line-height: 1 !important;
+  letter-spacing: 0 !important;
+}
+
+.severity-card-counts .sev-zero b {
+  color: var(--cyan) !important;
+}
+
+.alert-status-metrics {
+  grid-template-columns: 70px minmax(0, 1fr) !important;
+  gap: 9px 18px !important;
+}
+
+.alert-status-metrics .api-table-metric.acknowledged,
+.alert-status-metrics .api-table-metric.suppressed {
+  grid-column: 1 / -1 !important;
+}
+
+.alert-status-metrics .api-table-metric b {
+  color: #8ff4ff !important;
+}
+
+.alert-status-metrics .api-table-metric.total b {
+  color: #eef8ff !important;
+}
+
+.alert-status-metrics .api-table-metric.acknowledged b {
+  color: #f6c76d !important;
+}
+
+.alert-status-metrics .api-table-metric.suppressed b {
+  color: #fb7185 !important;
+}
+
+.ai-activity-card {
+  display: grid !important;
+  grid-template-columns: 72px minmax(0, 1fr);
+  grid-template-rows: auto auto auto;
+  align-items: flex-start !important;
+  justify-content: stretch !important;
+  padding: 14px !important;
+  overflow: hidden !important;
+}
+
+.ai-activity-icon {
+  grid-column: 1;
+  grid-row: 2;
+  margin-top: 12px !important;
+  transform: translateY(10px);
+}
+
+.ai-activity-main {
+  min-width: 0 !important;
+  flex: 1 1 auto !important;
+  display: contents !important;
+}
+
+#ai-activity-label {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+
+#ai-activity-detail {
+  grid-column: 2;
+  grid-row: 2;
+  margin-top: 24px !important;
+}
+
+.ai-activity-counts {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  display: grid;
+  grid-template-columns: repeat(3, max-content);
+  justify-content: start;
+  justify-items: start;
+  gap: 5px 10px;
+  align-items: baseline;
+  width: 100%;
+  margin-top: 0;
+  padding-top: 6px;
+}
+
+.ai-activity-counts span {
+  display: inline-flex !important;
+  align-items: baseline;
+  gap: 4px;
+  margin: 0 !important;
+  color: #9fb0c4 !important;
+  font-size: 11px !important;
+  line-height: 1 !important;
+  white-space: nowrap;
+}
+
+.ai-activity-counts b {
+  color: #8ff4ff;
+  font-size: 15px;
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.system-health-metric-card {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto 1fr;
+  align-items: flex-start !important;
+  justify-content: stretch !important;
+  padding: 14px !important;
+  overflow: hidden !important;
+}
+
+.system-health-metric-heading {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  display: block !important;
+  color: #f3f8ff !important;
+  font-size: 18px !important;
+  line-height: 1.1 !important;
+  letter-spacing: -.02em !important;
+  text-align: left !important;
+  white-space: nowrap !important;
+}
+
+.system-health-metric-main {
+  grid-column: 1;
+  grid-row: 2;
+  align-self: end;
+  display: grid !important;
+  gap: 9px;
+  min-width: 0 !important;
+  margin-top: 30px;
+}
+
+.system-health-metric-main span {
+  display: block !important;
+  color: #9fb0c4 !important;
+  font-size: 12px !important;
+  line-height: 1.18 !important;
+  margin: 0 !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.system-health-metric-main b {
+  color: #8ff4ff !important;
+  font-size: 12px !important;
+  font-weight: 850 !important;
+}
+
+.latest-network-metrics {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  gap: 9px !important;
+  margin: 30px 0 0 !important;
+}
+
+.latest-network-metric {
+  display: flex !important;
+  grid-template-columns: none !important;
+  align-items: baseline !important;
+  gap: 6px !important;
+  min-width: 0 !important;
+  color: #9fb0c4 !important;
+  font-size: 12px !important;
+  font-weight: 850 !important;
+  line-height: 1 !important;
+  white-space: nowrap !important;
+}
+
+.latest-network-metric span {
+  flex: 0 0 auto !important;
+  color: #9fb0c4 !important;
+  font-size: 11px !important;
+  line-height: 1 !important;
+}
+
+.latest-network-metric b {
+  display: inline-block !important;
+  width: auto !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  color: #eef8ff !important;
+  font: 700 13px/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace !important;
+  letter-spacing: 0 !important;
+  white-space: nowrap !important;
+}
+
+@media (max-width: 700px) {
+  .ai-activity-counts {
+    grid-template-columns: repeat(3, minmax(0, max-content));
+    gap: 5px 8px;
+  }
+
+  .ai-activity-counts span {
+    font-size: 10.5px !important;
+  }
+
+  .ai-activity-counts b {
+    font-size: 14px;
+  }
+}

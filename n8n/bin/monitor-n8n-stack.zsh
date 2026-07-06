@@ -62,7 +62,7 @@ write_status() {
   local detail="$2"
   # Write JSON so humans and scripts can inspect the last known state.
   /usr/bin/python3 - "$STATE_FILE" "$health_status" "$detail" <<'PY'
-from datetime import datetime, timezone
+from datetime import datetime
 import json
 import sys
 
@@ -71,7 +71,7 @@ json.dump(
     {
         "status": status,
         "detail": detail,
-        "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("T", "  ").replace("+00:00", "Z"),
+        "updated_at": datetime.now().astimezone().replace(microsecond=0).isoformat().replace("T", "  "),
     },
     open(path, "w"),
     indent=2,
