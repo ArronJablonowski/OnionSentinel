@@ -107,6 +107,36 @@ before Node buffers it in memory. Keep it high enough for full-fidelity Security
 Onion alert JSON, but low enough that a malformed relay/n8n request cannot
 consume unbounded memory during a spike.
 
+PCAP request broker safety knobs:
+
+- `PCAP_REQUEST_DEFAULT_WINDOW_SECONDS=120`
+- `PCAP_REQUEST_MAX_WINDOW_SECONDS=300`
+
+Alert-store exposes a request-only broker for packet-capture evidence:
+
+```text
+POST /pcap/request
+GET /pcap/requests?status=pending&limit=25
+```
+
+`POST /pcap/request` validates and queues a bounded request in SQLite. It never
+contacts Security Onion and never runs shell commands. The request must include
+a reason and enough tuple/timing information to identify the flow, or an
+existing `alert_id`/`group_id` that alert-store can resolve from SQLite. The
+relay/Security Onion fulfillment path is intentionally separate and should use
+a dedicated forced-command SSH wrapper with its own time-window and size limits.
+
+Example request body:
+
+```json
+{
+  "group_id": "example-group-id",
+  "requested_by": "soc-analyst",
+  "reason": "Packet headers would confirm whether this repeated TLS alert is one flow or many short sessions.",
+  "max_window_seconds": 120
+}
+```
+
 The n8n workflow includes a dedicated `Enrich Alert` node between relay
 validation and alert-store persistence. That node calls alert-store
 `POST /enrich`; alert-store extracts only public indicators, redacts URL query

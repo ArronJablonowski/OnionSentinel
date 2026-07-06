@@ -125,6 +125,12 @@ no forwarding/no pty restrictions, and sudoers limited to the alert export
 wrapper. Full-fidelity export should retain packet, payload, PCAP, HTTP body,
 and raw event fields when Security Onion provides them.
 
+SOC Analyst packet-capture needs must go through a brokered request path, not
+direct AI access to Security Onion. Alert-store may queue bounded PCAP requests
+in SQLite, but fulfillment must be performed by the relay/Security Onion
+forced-command path with strict validation, small time windows, output size
+limits, audit metadata, and runtime-only artifact storage.
+
 ## Notification Requirements
 
 High and critical alerts should go to Telegram. Notifications should dedupe and

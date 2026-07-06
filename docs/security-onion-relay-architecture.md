@@ -932,6 +932,50 @@ Denied:
 The AI/n8n environment does not query Security Onion directly. It receives
 full-fidelity alert data from the relay path.
 
+## PCAP Evidence Request Broker
+
+Planned/partial implementation: alert-store can queue bounded PCAP evidence
+requests in SQLite, but packet-capture fulfillment remains intentionally
+separate from AI analysis and alert ingestion.
+
+Design contract:
+
+```text
+SOC Analyst / analyst UI
+  -> alert-store POST /pcap/request
+  -> SQLite pcap_requests table
+  -> Raspberry Pi relay polls pending requests
+  -> Security Onion dedicated forced-command wrapper exports bounded PCAP
+  -> relay returns artifact metadata to Mac Studio
+  -> dashboard/local AI use metadata and analyst-approved packet summaries
+```
+
+The SOC Analyst may recommend or queue a PCAP request when packet evidence
+would materially reduce uncertainty, but it must not receive direct shell,
+SSH, sudo, or Security Onion API access. Requests must include a short reason
+and either an existing `alert_id`/`group_id` or the exact flow tuple and
+timestamps needed to reconstruct the smallest useful capture window.
+
+Alert-store request broker:
+
+```text
+POST /pcap/request
+GET /pcap/requests?status=pending&limit=25
+```
+
+Safety controls:
+
+- Alert-store only validates and queues requests; it never exports PCAP.
+- Request windows are clamped by `PCAP_REQUEST_MAX_WINDOW_SECONDS`.
+- Requests store tuple fields, timestamps, optional `network.community_id`,
+  requester, reason, and audit timestamps.
+- Fulfillment must use a separate Security Onion forced-command SSH key or a
+  carefully extended forced-command wrapper. Do not reuse an unrestricted shell.
+- Security Onion-side fulfillment must enforce time-window, tuple,
+  file-size, output-path, and cleanup limits before any PCAP is returned.
+- PCAP artifacts are runtime-only evidence. Never commit `.pcap`, `.pcapng`,
+  packet payloads, or generated packet artifacts to Git.
+
 ## Alert Detail Enrichment
 
 As of 2026-07-02, the Security Onion export wrapper enriches each alert before

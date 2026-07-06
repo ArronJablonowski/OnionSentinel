@@ -45,6 +45,11 @@ const vulnerabilityCacheDefaultTtlSeconds = Number(process.env.ENRICHMENT_VULN_C
 const enrichmentTimeoutMs = Number(process.env.ENRICHMENT_TIMEOUT_MS || 5000);
 const virustotalMinimumLevel = String(process.env.VIRUSTOTAL_MINIMUM_LEVEL || 'high').toLowerCase();
 const urlscanSubmitEnabled = ['1', 'true', 'yes'].includes(String(process.env.URLSCAN_SUBMIT_ENABLED || '').toLowerCase());
+const pcapRequestMaxWindowSeconds = Math.max(30, Number(process.env.PCAP_REQUEST_MAX_WINDOW_SECONDS || 300));
+const pcapRequestDefaultWindowSeconds = Math.min(
+  pcapRequestMaxWindowSeconds,
+  Math.max(30, Number(process.env.PCAP_REQUEST_DEFAULT_WINDOW_SECONDS || 120)),
+);
 
 const enrichmentSecrets = {
   abuseipdb: (process.env.ABUSEIPDB_API_KEY || '').trim(),
@@ -1310,6 +1315,15 @@ function get(sql, params = []) {
   });
 }
 
+function all(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (error, rows) => {
+      if (error) reject(error);
+      else resolve(rows);
+    });
+  });
+}
+
 async function initDb() {
   // Schema upgrades are additive. ensureColumn keeps existing SQLite DBs usable
   // after new triage fields are introduced.
@@ -1451,6 +1465,38 @@ async function initDb() {
       last_request_at TEXT NOT NULL
     )
   `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS pcap_requests (
+      request_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      alert_id TEXT,
+      group_id TEXT,
+      group_key TEXT,
+      first_seen TEXT,
+      last_seen TEXT,
+      source_ip TEXT,
+      source_port INTEGER,
+      destination_ip TEXT,
+      destination_port INTEGER,
+      network_protocol TEXT,
+      transport_protocol TEXT,
+      community_id TEXT,
+      requested_by TEXT,
+      reason TEXT NOT NULL,
+      max_window_seconds INTEGER NOT NULL,
+      relay_host TEXT,
+      artifact_path TEXT,
+      artifact_sha256 TEXT,
+      artifact_size_bytes INTEGER,
+      error TEXT,
+      request_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_status_created ON pcap_requests(status, created_at)');
+  await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_alert_id ON pcap_requests(alert_id)');
+  await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_group_id ON pcap_requests(group_id)');
   await rebuildAlertGroupSummaries();
 }
 
@@ -2167,6 +2213,199 @@ async function maybeNotifyTelegram(alert, storedAlert, inserted, now, suppressio
   return {channel: 'telegram', status: 'sent', triage_level: triageLevel};
 }
 
+function safeString(value, maxLength = 240) {
+  return String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, maxLength);
+}
+
+function parseJsonObject(value) {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function pcapRequestId(seed) {
+  return crypto.createHash('sha256').update(JSON.stringify(seed)).digest('hex').slice(0, 16);
+}
+
+function pcapCandidateFromRow(row) {
+  if (!row) return {};
+  const alertJson = parseJsonObject(row.alert_json);
+  const rawEventJson = parseJsonObject(row.raw_event_json);
+  return {
+    alert_id: row.alert_id || row.representative_alert_id || null,
+    group_id: row.group_id || null,
+    group_key: row.group_key || null,
+    first_seen: row.first_seen || row.timestamp || null,
+    last_seen: row.last_seen || row.timestamp || null,
+    source_ip: row.source_ip || nestedField(alertJson, 'source.ip') || nestedField(rawEventJson, 'source.ip') || null,
+    source_port: integerField(row.source_port ?? nestedField(alertJson, 'source.port') ?? nestedField(rawEventJson, 'source.port')),
+    destination_ip: row.destination_ip || nestedField(alertJson, 'destination.ip') || nestedField(rawEventJson, 'destination.ip') || null,
+    destination_port: integerField(row.destination_port ?? nestedField(alertJson, 'destination.port') ?? nestedField(rawEventJson, 'destination.port')),
+    network_protocol: row.network_protocol || nestedField(alertJson, 'network.protocol') || nestedField(rawEventJson, 'network.protocol') || null,
+    transport_protocol: row.transport_protocol || nestedField(alertJson, 'network.transport') || nestedField(rawEventJson, 'network.transport') || null,
+    community_id: nestedField(alertJson, 'network.community_id') || nestedField(rawEventJson, 'network.community_id') || null,
+  };
+}
+
+async function pcapCandidateFromPayload(payload) {
+  if (payload.alert_id) {
+    const row = await get('SELECT * FROM alerts WHERE alert_id = ?', [String(payload.alert_id)]);
+    if (row) return pcapCandidateFromRow(row);
+  }
+  if (payload.group_id) {
+    const row = await get('SELECT * FROM alert_group_summary WHERE group_id = ?', [String(payload.group_id)]);
+    if (row) return pcapCandidateFromRow(row);
+  }
+  return {};
+}
+
+function normalizePcapRequest(payload, candidate = {}) {
+  const merged = {...candidate, ...(payload || {})};
+  const reason = safeString(merged.reason, 240);
+  if (!reason) throw new Error('pcap request reason is required');
+  const sourceIp = safeString(merged.source_ip, 64);
+  const destinationIp = safeString(merged.destination_ip, 64);
+  if (!sourceIp || !destinationIp) throw new Error('pcap request requires source_ip and destination_ip');
+  const destinationPort = integerField(merged.destination_port);
+  const sourcePort = integerField(merged.source_port);
+  const firstSeen = normalizeTimestampValue(merged.first_seen || merged.timestamp || merged.last_seen);
+  const lastSeen = normalizeTimestampValue(merged.last_seen || merged.timestamp || merged.first_seen);
+  if (!firstSeen || !lastSeen) throw new Error('pcap request requires first_seen and last_seen timestamps');
+  const requestedWindow = Number(merged.max_window_seconds || pcapRequestDefaultWindowSeconds);
+  const maxWindowSeconds = Math.min(
+    pcapRequestMaxWindowSeconds,
+    Math.max(30, Number.isFinite(requestedWindow) ? Math.round(requestedWindow) : pcapRequestDefaultWindowSeconds),
+  );
+  const request = {
+    alert_id: safeString(merged.alert_id, 512) || null,
+    group_id: safeString(merged.group_id, 64) || null,
+    group_key: safeString(merged.group_key, 512) || null,
+    first_seen: firstSeen,
+    last_seen: lastSeen,
+    source_ip: sourceIp,
+    source_port: sourcePort,
+    destination_ip: destinationIp,
+    destination_port: destinationPort,
+    network_protocol: safeString(merged.network_protocol, 32) || null,
+    transport_protocol: safeString(merged.transport_protocol, 32).toLowerCase() || null,
+    community_id: safeString(merged.community_id, 128) || null,
+    requested_by: safeString(merged.requested_by || 'soc-analyst', 80),
+    reason,
+    max_window_seconds: maxWindowSeconds,
+  };
+  request.request_id = pcapRequestId({
+    alert_id: request.alert_id,
+    group_id: request.group_id,
+    first_seen: request.first_seen,
+    last_seen: request.last_seen,
+    source_ip: request.source_ip,
+    source_port: request.source_port,
+    destination_ip: request.destination_ip,
+    destination_port: request.destination_port,
+    community_id: request.community_id,
+    reason: request.reason,
+  });
+  return request;
+}
+
+function pcapRequestFromRow(row) {
+  return {
+    request_id: row.request_id,
+    status: row.status,
+    alert_id: row.alert_id,
+    group_id: row.group_id,
+    group_key: row.group_key,
+    first_seen: row.first_seen,
+    last_seen: row.last_seen,
+    source_ip: row.source_ip,
+    source_port: row.source_port,
+    destination_ip: row.destination_ip,
+    destination_port: row.destination_port,
+    network_protocol: row.network_protocol,
+    transport_protocol: row.transport_protocol,
+    community_id: row.community_id,
+    requested_by: row.requested_by,
+    reason: row.reason,
+    max_window_seconds: row.max_window_seconds,
+    relay_host: row.relay_host,
+    artifact_path: row.artifact_path,
+    artifact_sha256: row.artifact_sha256,
+    artifact_size_bytes: row.artifact_size_bytes,
+    error: row.error,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+async function createPcapRequest(payload) {
+  const candidate = await pcapCandidateFromPayload(payload);
+  const normalized = normalizePcapRequest(payload, candidate);
+  const now = nowUtc();
+  await run(
+    `
+      INSERT INTO pcap_requests (
+        request_id, status, alert_id, group_id, group_key, first_seen, last_seen,
+        source_ip, source_port, destination_ip, destination_port, network_protocol,
+        transport_protocol, community_id, requested_by, reason, max_window_seconds,
+        request_json, created_at, updated_at
+      )
+      VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(request_id) DO UPDATE SET
+        reason = excluded.reason,
+        requested_by = excluded.requested_by,
+        max_window_seconds = excluded.max_window_seconds,
+        request_json = excluded.request_json,
+        updated_at = excluded.updated_at
+    `,
+    [
+      normalized.request_id,
+      normalized.alert_id,
+      normalized.group_id,
+      normalized.group_key,
+      normalized.first_seen,
+      normalized.last_seen,
+      normalized.source_ip,
+      normalized.source_port,
+      normalized.destination_ip,
+      normalized.destination_port,
+      normalized.network_protocol,
+      normalized.transport_protocol,
+      normalized.community_id,
+      normalized.requested_by,
+      normalized.reason,
+      normalized.max_window_seconds,
+      jsonText(normalized),
+      now,
+      now,
+    ],
+  );
+  const row = await get('SELECT * FROM pcap_requests WHERE request_id = ?', [normalized.request_id]);
+  return {
+    ok: true,
+    status: row.status,
+    request: pcapRequestFromRow(row),
+    execution: {
+      enabled: false,
+      reason: 'PCAP fulfillment is intentionally brokered by the relay/Security Onion forced-command path, not by alert-store.',
+    },
+  };
+}
+
+async function listPcapRequests(query = new URLSearchParams()) {
+  const allowed = new Set(['pending', 'claimed', 'fulfilled', 'failed', 'rejected']);
+  const requestedStatus = safeString(query.get('status'), 32).toLowerCase();
+  const status = allowed.has(requestedStatus) ? requestedStatus : '';
+  const limit = Math.min(100, Math.max(1, Number(query.get('limit') || 25) || 25));
+  const rows = status
+    ? await all('SELECT * FROM pcap_requests WHERE status = ? ORDER BY created_at ASC LIMIT ?', [status, limit])
+    : await all('SELECT * FROM pcap_requests ORDER BY created_at DESC LIMIT ?', [limit]);
+  return {ok: true, status: status || 'all', requests: rows.map(pcapRequestFromRow)};
+}
+
 function readJsonBody(request) {
   // n8n should POST one alert object per request. Arrays are rejected to avoid
   // partial batch inserts that are harder to reason about.
@@ -2212,6 +2451,7 @@ function sendJson(response, code, payload) {
 
 async function handleRequest(request, response) {
   try {
+    const parsedUrl = new URL(request.url, 'http://alert-store.local');
     if (request.method === 'GET' && request.url === '/health') {
       // Used by the Mac Studio monitor LaunchAgent.
       sendJson(response, 200, {ok: true, status: 'healthy'});
@@ -2240,6 +2480,21 @@ async function handleRequest(request, response) {
       const alert = await readJsonBody(request);
       const result = await enrichAlert(alert);
       sendJson(response, result.ok ? 200 : 400, result);
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/pcap/request') {
+      // Queues a bounded PCAP evidence request. This endpoint never shells out
+      // or contacts Security Onion; relay-side fulfillment will use its own
+      // forced-command SSH path with additional Security Onion validation.
+      const payload = await readJsonBody(request);
+      const result = await createPcapRequest(payload);
+      sendJson(response, 200, result);
+      return;
+    }
+    if (request.method === 'GET' && parsedUrl.pathname === '/pcap/requests') {
+      // Intended for relay polling and operator diagnostics.
+      const result = await listPcapRequests(parsedUrl.searchParams);
+      sendJson(response, 200, result);
       return;
     }
     if (request.method === 'POST' && request.url === '/rescore') {

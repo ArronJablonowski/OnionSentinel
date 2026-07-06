@@ -47,6 +47,7 @@ Make `recommended_next_steps` concrete and ordered for a human analyst. Prefer a
 - Review duplicate timeline and determine whether the pattern is a burst, scheduled service, repeated scan, or ongoing behavior.
 - Validate whether the activity came from known admin testing, vulnerability scanning, relay polling, monitoring, updates, or lab workflows.
 - If endpoint context is available, recommend checking processes, users, persistence, network connections, and recent changes. If endpoint context is not available, say so as an evidence gap.
+- When packet evidence would materially change the assessment, recommend a bounded PCAP request rather than assuming packet contents. Include the reason, exact source/destination tuple, community ID when present, and the smallest useful time window. The PCAP broker is request-only from the SOC Analyst perspective; do not claim the capture was retrieved unless supplied evidence includes a fulfilled artifact.
 
 ## Tuning Guidance
 
