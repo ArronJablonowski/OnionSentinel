@@ -10,6 +10,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BUILDER_PATH = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "build_soc_alerts_dashboard.py"
+SCRIPT_DIR = REPO_ROOT / "onion-sentinel-dashboard" / "scripts"
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import dashboard_metric_components
 
 
 def load_builder():
@@ -67,6 +72,12 @@ class DashboardMetricComponentTest(unittest.TestCase):
             "top-api-destination-port",
         ):
             self.assertIn(f'id="{element_id}"', combined)
+
+    def test_system_health_metric_escapes_runtime_text(self) -> None:
+        html = dashboard_metric_components.render_size_metric("1.0 MB", '2026-07-06  13:00:00-06:00 <latest>')
+
+        self.assertIn("SOC Reports:</b> 1.0 MB", html)
+        self.assertIn("Last Alert:</b> 2026-07-06  13:00:00-06:00 &lt;latest&gt;", html)
 
 
 if __name__ == "__main__":
