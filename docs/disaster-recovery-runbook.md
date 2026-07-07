@@ -253,6 +253,19 @@ ssh aj_lobster@10.77.7.225 'sqlite3 "$HOME/n8n-local/n8n_data/database.sqlite" "
 ssh aj_lobster@10.77.7.225 'sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "PRAGMA quick_check;"'
 ```
 
+Alert-store SQLite maintenance:
+
+```bash
+ssh aj_lobster@10.77.7.225 'launchctl print gui/$(id -u)/com.arron.soc.alert-store-maintenance | grep -E "state =|last exit code|run interval|path ="'
+ssh aj_lobster@10.77.7.225 '$HOME/n8n-local/bin/maintain-alert-store-sqlite.zsh'
+ssh aj_lobster@10.77.7.225 'tail -80 "$HOME/n8n-local/logs/alert-store-sqlite-maintenance.log"'
+ssh aj_lobster@10.77.7.225 'ls -lh "$HOME/n8n-local/alert_store_backups" | tail'
+```
+
+The maintenance job creates verified SQLite backups and recovered candidates
+when corruption is detected. It does not replace the live DB unless
+`ALERT_STORE_AUTO_RECOVER=1` is explicitly set for that run.
+
 If corruption is isolated to n8n execution history, stop n8n, back up the
 database, recover or clear execution history, verify `PRAGMA quick_check;`,
 then start n8n again. Do not copy the n8n runtime database into Git.

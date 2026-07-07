@@ -30,6 +30,12 @@ echo
 ssh "$MAC_HOST" 'cd $HOME/n8n-local && /usr/local/bin/docker compose ps'
 
 echo
+echo "== Mac Studio alert-store SQLite =="
+# Confirms the alert-store DB is readable and the maintenance LaunchAgent exists.
+ssh "$MAC_HOST" 'sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "PRAGMA quick_check; SELECT COUNT(*) FROM alerts; SELECT COUNT(*) FROM alert_group_summary;"'
+ssh "$MAC_HOST" 'launchctl print gui/$(id -u)/com.arron.soc.alert-store-maintenance | grep -E "state =|last exit code|run interval|path ="'
+
+echo
 echo "== Pi relay recent logs =="
 # Recent relay logs show counts for pulled/dropped/new/posted alerts.
 ssh "$PI_HOST" 'sudo journalctl -u so-alert-relay.service -n 20 --no-pager'

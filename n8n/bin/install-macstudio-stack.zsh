@@ -68,6 +68,7 @@ do
 done
 cp "$REPO_DIR/n8n/bin/ensure-n8n-stack.zsh" "$STACK_DIR/bin/ensure-n8n-stack.zsh"
 cp "$REPO_DIR/n8n/bin/monitor-n8n-stack.zsh" "$STACK_DIR/bin/monitor-n8n-stack.zsh"
+cp "$REPO_DIR/n8n/bin/maintain-alert-store-sqlite.zsh" "$STACK_DIR/bin/maintain-alert-store-sqlite.zsh"
 cp "$REPO_DIR/n8n/bin/build-ai-investigation-prompt.py" "$STACK_DIR/bin/build-ai-investigation-prompt.py"
 cp "$REPO_DIR/n8n/bin/run-local-ai-analysis.py" "$STACK_DIR/bin/run-local-ai-analysis.py"
 cp "$REPO_DIR/n8n/bin/auto-run-ai-analysis.py" "$STACK_DIR/bin/auto-run-ai-analysis.py"
@@ -80,6 +81,7 @@ chmod +x "$STACK_DIR/bin/"*.py
 # SQLite-backed SOC dashboard generator too.
 mkdir -p "$HERMES_SCRIPT_DIR"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py" "$HERMES_SCRIPT_DIR/build_soc_alerts_dashboard.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_metric_components.py" "$HERMES_SCRIPT_DIR/dashboard_metric_components.py"
 chmod +x "$HERMES_SCRIPT_DIR/build_soc_alerts_dashboard.py"
 mkdir -p "$PORTAL_DIR"
 cp "$REPO_DIR/onion-sentinel-dashboard/report_portal.py" "$PORTAL_DIR/report_portal.py"
@@ -103,6 +105,7 @@ mkdir -p "$LAUNCHD_DIR"
 for plist in \
   com.arron.n8n.ensure-stack.plist \
   com.arron.n8n.monitor-stack.plist \
+  com.arron.soc.alert-store-maintenance.plist \
   com.arron.soc.ai-analysis.plist \
   com.arron.soc.daily-rollup.plist
 do
@@ -119,10 +122,12 @@ done
 # Reload LaunchAgents so Docker/n8n are monitored after future reboots.
 launchctl unload "$LAUNCHD_DIR/com.arron.n8n.ensure-stack.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.n8n.monitor-stack.plist" >/dev/null 2>&1 || true
+launchctl unload "$LAUNCHD_DIR/com.arron.soc.alert-store-maintenance.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.ai-analysis.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist" >/dev/null 2>&1 || true
 launchctl load "$LAUNCHD_DIR/com.arron.n8n.ensure-stack.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.n8n.monitor-stack.plist"
+launchctl load "$LAUNCHD_DIR/com.arron.soc.alert-store-maintenance.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.ai-analysis.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist"
 

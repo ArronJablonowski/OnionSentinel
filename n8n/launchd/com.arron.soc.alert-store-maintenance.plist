@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.arron.soc.alert-store-maintenance</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>__HOME__/n8n-local/bin/maintain-alert-store-sqlite.zsh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__/n8n-local</string>
+
+  <key>StartInterval</key>
+  <integer>3600</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/n8n-local/logs/alert-store-maintenance.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__HOME__/n8n-local/logs/alert-store-maintenance.err.log</string>
+</dict>
+</plist>

@@ -1285,6 +1285,13 @@ function scoreAlert(alert) {
 
 fs.mkdirSync(path.dirname(dbPath), {recursive: true});
 const db = new sqlite3.Database(dbPath);
+db.configure('busyTimeout', Number(process.env.ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS || 10000));
+const sqliteJournalMode = String(process.env.ALERT_STORE_SQLITE_JOURNAL_MODE || 'DELETE').toUpperCase();
+const sqliteSynchronous = String(process.env.ALERT_STORE_SQLITE_SYNCHRONOUS || 'NORMAL').toUpperCase();
+const sqliteTempStore = String(process.env.ALERT_STORE_SQLITE_TEMP_STORE || 'DEFAULT').toUpperCase();
+const allowedJournalModes = new Set(['DELETE', 'TRUNCATE', 'PERSIST', 'MEMORY', 'WAL', 'OFF']);
+const allowedSynchronousModes = new Set(['OFF', 'NORMAL', 'FULL', 'EXTRA']);
+const allowedTempStoreModes = new Set(['DEFAULT', 'FILE', 'MEMORY']);
 const alertGroupKeySql = `
   COALESCE(
     NULLIF(suppression_key, ''),
@@ -1327,6 +1334,12 @@ function all(sql, params = []) {
 async function initDb() {
   // Schema upgrades are additive. ensureColumn keeps existing SQLite DBs usable
   // after new triage fields are introduced.
+  const journalMode = allowedJournalModes.has(sqliteJournalMode) ? sqliteJournalMode : 'DELETE';
+  const synchronousMode = allowedSynchronousModes.has(sqliteSynchronous) ? sqliteSynchronous : 'NORMAL';
+  const tempStoreMode = allowedTempStoreModes.has(sqliteTempStore) ? sqliteTempStore : 'DEFAULT';
+  await run(`PRAGMA journal_mode = ${journalMode}`);
+  await run(`PRAGMA synchronous = ${synchronousMode}`);
+  await run(`PRAGMA temp_store = ${tempStoreMode}`);
   await run(`
     CREATE TABLE IF NOT EXISTS alerts (
       alert_id TEXT PRIMARY KEY,

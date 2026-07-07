@@ -259,6 +259,23 @@ cd $HOME/n8n-local
 
 The Mac Studio monitor LaunchAgent also runs at login and every 5 minutes. It checks Docker, the `n8n` container, the `alert-store` container, n8n `/healthz`, and alert-store `/health`. It sends Telegram on first failure and on recovery.
 
+The alert-store SQLite maintenance LaunchAgent runs hourly:
+
+```text
+com.arron.soc.alert-store-maintenance
+$HOME/n8n-local/bin/maintain-alert-store-sqlite.zsh
+```
+
+It runs `PRAGMA quick_check`, writes verified `.backup` copies under
+`$HOME/n8n-local/alert_store_backups`, prunes old verified backups, and creates
+`.recover` candidates when corruption is detected. It does not automatically
+replace the live DB unless `ALERT_STORE_AUTO_RECOVER=1` is deliberately set for
+that maintenance run. Alert-store itself opens SQLite with a busy timeout and
+explicit journal settings to reduce write-contention failures during ingestion,
+enrichment, dashboard polling, and maintenance. The default journal mode is
+`DELETE` for Docker Desktop bind-mount compatibility; only use `WAL` after
+validating the target runtime filesystem.
+
 The n8n workflow also writes one Obsidian-compatible Markdown file for every
 newly accepted alert. Duplicate and suppressed alerts are still tracked by
 alert-store but do not create repeated Markdown reports.

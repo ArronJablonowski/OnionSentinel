@@ -12,6 +12,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `alert_store/` | SQLite-backed alert scoring, suppression, notification, and report logic. |
 | `alert_store/config/scoring_rules.json` | Tunable local filtering/scoring policy. |
 | `bin/` | Local AI prompt, analysis, scheduler, rollup, and stack management scripts. |
+| `bin/maintain-alert-store-sqlite.zsh` | Hourly SQLite `quick_check`, verified backup, and recovery-candidate maintenance. |
 | `config/soc_analyst_system_prompt.md` | SOC analyst system prompt used for alert analysis. |
 | `config/siem_engineer_system_prompt.md` | SIEM engineering prompt used for periodic tuning and detection recommendations. |
 | `config/threat_hunter_system_prompt.md` | Threat hunter prompt used for hunt hypothesis and query recommendation work. |
@@ -101,11 +102,47 @@ Enrichment behavior knobs:
 Alert-store ingestion safety knob:
 
 - `ALERT_STORE_MAX_REQUEST_BYTES=5242880`
+- `ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS=10000`
+- `ALERT_STORE_SQLITE_JOURNAL_MODE=DELETE`
+- `ALERT_STORE_SQLITE_SYNCHRONOUS=NORMAL`
+- `ALERT_STORE_SQLITE_TEMP_STORE=DEFAULT`
 
 `ALERT_STORE_MAX_REQUEST_BYTES` caps each `/alert` and `/enrich` POST body
 before Node buffers it in memory. Keep it high enough for full-fidelity Security
 Onion alert JSON, but low enough that a malformed relay/n8n request cannot
 consume unbounded memory during a spike.
+
+The SQLite knobs give short write-contention windows time to clear and keep the
+journal behavior explicit. The default `DELETE` journal mode is conservative for
+Docker Desktop bind mounts. Do not switch to `WAL` unless it has been validated
+on the target runtime filesystem.
+
+## SQLite Durability Maintenance
+
+The Mac Studio installer deploys `com.arron.soc.alert-store-maintenance`, which
+runs hourly and executes:
+
+```text
+$HOME/n8n-local/bin/maintain-alert-store-sqlite.zsh
+```
+
+The maintenance job:
+
+- runs `PRAGMA quick_check` against the live alert-store DB;
+- creates a verified SQLite `.backup` copy under
+  `$HOME/n8n-local/alert_store_backups`;
+- keeps the newest 48 verified backups by default;
+- if corruption is detected, preserves the malformed DB and writes a recovered
+  candidate with SQLite `.recover`;
+- does not swap a recovered DB into production unless
+  `ALERT_STORE_AUTO_RECOVER=1` is explicitly set for that run.
+
+Manual run:
+
+```bash
+$HOME/n8n-local/bin/maintain-alert-store-sqlite.zsh
+tail -80 "$HOME/n8n-local/logs/alert-store-sqlite-maintenance.log"
+```
 
 PCAP request broker safety knobs:
 

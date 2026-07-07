@@ -120,6 +120,13 @@ alert-id retry dedupe, local evidence/state files, health notifications, and
 webhook transport. Filtering, scoring, suppression, routing, notification
 decisions, and dashboard state belong in n8n, alert-store, and SQLite.
 
+The alert-store SQLite database must be treated as an operational source of
+truth. Runtime must include recurring `PRAGMA quick_check` validation,
+verified SQLite backups, recoverable corruption artifacts, and documented
+manual recovery. Alert-store should tolerate short write-contention windows
+with an explicit SQLite busy timeout and conservative, runtime-validated
+journal settings.
+
 Security Onion access must remain restricted through a forced-command SSH key,
 no forwarding/no pty restrictions, and sudoers limited to the alert export
 wrapper. Full-fidelity export should retain packet, payload, PCAP, HTTP body,
