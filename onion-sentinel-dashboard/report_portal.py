@@ -175,6 +175,22 @@ class CronJobSummary:
     sort_key: str
 
 
+@dataclass(frozen=True)
+class SocAlertQuerySnapshot:
+    statuses: dict
+    status_counts: dict[str, int]
+    severity_counts: dict[str, int]
+    highest_severity: str
+    top_endpoints: dict[str, str]
+    filtered_rows: list[sqlite3.Row]
+    page_rows: list[sqlite3.Row | dict]
+    total_matching: int
+    total_pages: int
+    current_page: int
+    offset: int
+    next_cursor: str | None
+
+
 def format_iso_timestamp(value: dt.datetime, *, timespec: str = "seconds", utc_z: bool = False) -> str:
     """Render project timestamps as ISO 8601 with the T separator replaced by two spaces."""
     if value.tzinfo is None:
@@ -4473,6 +4489,130 @@ def soc_alert_top_endpoint_metrics(rows: list[sqlite3.Row]) -> dict[str, str]:
     return soc_alert_api.top_endpoint_metrics(rows)
 
 
+def soc_alert_group_id_for_query_row(row: sqlite3.Row | dict) -> str:
+    keys = row.keys()
+    if "group_id" in keys and row["group_id"]:
+        return str(row["group_id"])
+    return soc_alert_group_id(row["group_key"])
+
+
+def soc_alert_filter_group_rows(
+    rows: list[sqlite3.Row],
+    statuses: dict,
+    analyst_status: str,
+    cursor_seen: str,
+    cursor_id: str,
+) -> list[sqlite3.Row]:
+    filtered_rows: list[sqlite3.Row] = []
+    for row in rows:
+        group_id = soc_alert_group_id_for_query_row(row)
+        if not soc_alert_row_matches_analyst_status(row, group_id, statuses, analyst_status):
+            continue
+        if cursor_seen and cursor_id:
+            group_last_seen = row["group_last_seen"] or row["last_seen"] or ""
+            if not (group_last_seen < cursor_seen or (group_last_seen == cursor_seen and group_id < cursor_id)):
+                continue
+        filtered_rows.append(row)
+    return filtered_rows
+
+
+def soc_alert_enriched_page_rows(page_rows: list[sqlite3.Row]) -> list[sqlite3.Row | dict]:
+    if not page_rows:
+        return []
+    try:
+        with soc_alert_db_connect() as conn:
+            enriched_page_rows = []
+            for row in page_rows:
+                item = dict(row)
+                item["enrichment_json"] = item.get("enrichment_json") or soc_alert_group_enrichment_json(conn, item.get("group_key"))
+                enriched_page_rows.append(item)
+            return enriched_page_rows
+    except Exception:
+        return [dict(row) for row in page_rows]
+
+
+def soc_alert_group_next_cursor(filtered_rows: list[sqlite3.Row], page_rows: list[sqlite3.Row | dict], offset: int, limit: int) -> str | None:
+    if len(filtered_rows) <= offset + limit or not page_rows:
+        return None
+    tail = page_rows[-1]
+    group_id = soc_alert_group_id_for_query_row(tail)
+    return f"{tail['group_last_seen'] or tail['last_seen']}|{group_id}"
+
+
+def soc_alert_group_query_snapshot(
+    rows: list[sqlite3.Row],
+    *,
+    analyst_status: str,
+    cursor_seen: str,
+    cursor_id: str,
+    limit: int,
+    requested_page: int,
+) -> SocAlertQuerySnapshot:
+    statuses = load_soc_alert_statuses()
+    status_counts = soc_alert_status_bucket_counts(rows, statuses)
+    filtered_rows = soc_alert_filter_group_rows(rows, statuses, analyst_status, cursor_seen, cursor_id)
+    severity_summary = soc_alert_visible_severity_summary(filtered_rows)
+    total_matching = len(filtered_rows)
+    total_pages = max(1, (total_matching + limit - 1) // limit)
+    current_page = min(requested_page, total_pages)
+    offset = (current_page - 1) * limit
+    page_rows = soc_alert_enriched_page_rows(filtered_rows[offset:offset + limit])
+    return SocAlertQuerySnapshot(
+        statuses=statuses,
+        status_counts=status_counts,
+        severity_counts=severity_summary["counts"],
+        highest_severity=severity_summary["highest"],
+        top_endpoints=soc_alert_top_endpoint_metrics(filtered_rows),
+        filtered_rows=filtered_rows,
+        page_rows=page_rows,
+        total_matching=total_matching,
+        total_pages=total_pages,
+        current_page=current_page,
+        offset=offset,
+        next_cursor=soc_alert_group_next_cursor(filtered_rows, page_rows, offset, limit),
+    )
+
+
+def soc_alert_group_query_payload(
+    *,
+    source: str,
+    snapshot: SocAlertQuerySnapshot,
+    limit: int,
+    sort_key: str,
+    sort_direction: str,
+) -> dict:
+    ai_reports = soc_alert_static_ai_reports()
+    pcap_analysis = soc_alert_pcap_analysis_index()
+    try:
+        with soc_alert_db_connect() as conn:
+            pcap_requests = soc_alert_pcap_request_statuses(conn, snapshot.page_rows)
+    except Exception:
+        pcap_requests = {}
+    return {
+        "ok": True,
+        "source": source,
+        "mode": "grouped",
+        "db_path": str(SOC_ALERT_STORE_DB),
+        "count": len(snapshot.page_rows),
+        "total_matching": snapshot.total_matching,
+        "status_counts": snapshot.status_counts,
+        "severity_counts": snapshot.severity_counts,
+        "highest_severity": snapshot.highest_severity,
+        "top_endpoints": snapshot.top_endpoints,
+        "limit": limit,
+        "page": snapshot.current_page,
+        "page_size": limit,
+        "total_pages": snapshot.total_pages,
+        "sort": sort_key,
+        "direction": sort_direction,
+        "next_cursor": snapshot.next_cursor,
+        "alerts": [
+            soc_alert_group_row_to_api(row, snapshot.statuses, ai_reports, pcap_analysis, pcap_requests)
+            for row in snapshot.page_rows
+        ],
+    }
+
+
 def soc_alerts_summary_query_response(query: dict[str, list[str]]) -> tuple[int, dict] | None:
     """Serve grouped alert rows from alert_group_summary when available.
 
@@ -4539,68 +4679,21 @@ def soc_alerts_summary_query_response(query: dict[str, list[str]]) -> tuple[int,
     except Exception as e:
         return soc_alert_api_error(str(e), 503)
 
-    statuses = load_soc_alert_statuses()
-    status_bucket_counts = soc_alert_status_bucket_counts(rows, statuses)
-    filtered_rows = []
-    for row in rows:
-        group_id = row["group_id"] or soc_alert_group_id(row["group_key"])
-        if not soc_alert_row_matches_analyst_status(row, group_id, statuses, analyst_status):
-            continue
-        if cursor_seen and cursor_id:
-            group_last_seen = row["group_last_seen"] or row["last_seen"] or ""
-            if not (group_last_seen < cursor_seen or (group_last_seen == cursor_seen and group_id < cursor_id)):
-                continue
-        filtered_rows.append(row)
-
-    severity_summary = soc_alert_visible_severity_summary(filtered_rows)
-    top_endpoint_metrics = soc_alert_top_endpoint_metrics(filtered_rows)
-    total_matching = len(filtered_rows)
-    total_pages = max(1, (total_matching + limit - 1) // limit)
-    current_page = min(requested_page, total_pages)
-    offset = (current_page - 1) * limit
-    page_rows = filtered_rows[offset:offset + limit]
-    if page_rows:
-        try:
-            with soc_alert_db_connect() as conn:
-                enriched_page_rows = []
-                for row in page_rows:
-                    item = dict(row)
-                    item["enrichment_json"] = soc_alert_group_enrichment_json(conn, item.get("group_key"))
-                    enriched_page_rows.append(item)
-                page_rows = enriched_page_rows
-        except Exception:
-            page_rows = [dict(row) for row in page_rows]
-    next_cursor = None
-    if len(filtered_rows) > offset + limit and page_rows:
-        tail = page_rows[-1]
-        next_cursor = f"{tail['group_last_seen'] or tail['last_seen']}|{tail['group_id'] or soc_alert_group_id(tail['group_key'])}"
-    ai_reports = soc_alert_static_ai_reports()
-    pcap_analysis = soc_alert_pcap_analysis_index()
-    try:
-        with soc_alert_db_connect() as conn:
-            pcap_requests = soc_alert_pcap_request_statuses(conn, page_rows)
-    except Exception:
-        pcap_requests = {}
-    return 200, {
-        "ok": True,
-        "source": "sqlite-summary",
-        "mode": "grouped",
-        "db_path": str(SOC_ALERT_STORE_DB),
-        "count": len(page_rows),
-        "total_matching": total_matching,
-        "status_counts": status_bucket_counts,
-        "severity_counts": severity_summary["counts"],
-        "highest_severity": severity_summary["highest"],
-        "top_endpoints": top_endpoint_metrics,
-        "limit": limit,
-        "page": current_page,
-        "page_size": limit,
-        "total_pages": total_pages,
-        "sort": sort_key,
-        "direction": sort_direction,
-        "next_cursor": next_cursor,
-        "alerts": [soc_alert_group_row_to_api(row, statuses, ai_reports, pcap_analysis, pcap_requests) for row in page_rows],
-    }
+    snapshot = soc_alert_group_query_snapshot(
+        rows,
+        analyst_status=analyst_status,
+        cursor_seen=cursor_seen,
+        cursor_id=cursor_id,
+        limit=limit,
+        requested_page=requested_page,
+    )
+    return 200, soc_alert_group_query_payload(
+        source="sqlite-summary",
+        snapshot=snapshot,
+        limit=limit,
+        sort_key=sort_key,
+        sort_direction=sort_direction,
+    )
 
 
 def soc_alerts_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
@@ -4668,68 +4761,21 @@ def soc_alerts_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
     except Exception as e:
         return soc_alert_api_error(str(e), 503)
 
-    statuses = load_soc_alert_statuses()
-    status_bucket_counts = soc_alert_status_bucket_counts(rows, statuses)
-    filtered_rows = []
-    for row in rows:
-        group_id = soc_alert_group_id(row["group_key"])
-        if not soc_alert_row_matches_analyst_status(row, group_id, statuses, analyst_status):
-            continue
-        if cursor_seen and cursor_id:
-            group_last_seen = row["group_last_seen"] or row["last_seen"] or ""
-            if not (group_last_seen < cursor_seen or (group_last_seen == cursor_seen and group_id < cursor_id)):
-                continue
-        filtered_rows.append(row)
-
-    severity_summary = soc_alert_visible_severity_summary(filtered_rows)
-    top_endpoint_metrics = soc_alert_top_endpoint_metrics(filtered_rows)
-    total_matching = len(filtered_rows)
-    total_pages = max(1, (total_matching + limit - 1) // limit)
-    current_page = min(requested_page, total_pages)
-    offset = (current_page - 1) * limit
-    page_rows = filtered_rows[offset:offset + limit]
-    if page_rows:
-        try:
-            with soc_alert_db_connect() as conn:
-                enriched_page_rows = []
-                for row in page_rows:
-                    item = dict(row)
-                    item["enrichment_json"] = item.get("enrichment_json") or soc_alert_group_enrichment_json(conn, item.get("group_key"))
-                    enriched_page_rows.append(item)
-                page_rows = enriched_page_rows
-        except Exception:
-            page_rows = [dict(row) for row in page_rows]
-    next_cursor = None
-    if len(filtered_rows) > offset + limit and page_rows:
-        tail = page_rows[-1]
-        next_cursor = f"{tail['group_last_seen'] or tail['last_seen']}|{soc_alert_group_id(tail['group_key'])}"
-    ai_reports = soc_alert_static_ai_reports()
-    pcap_analysis = soc_alert_pcap_analysis_index()
-    try:
-        with soc_alert_db_connect() as conn:
-            pcap_requests = soc_alert_pcap_request_statuses(conn, page_rows)
-    except Exception:
-        pcap_requests = {}
-    return 200, {
-        "ok": True,
-        "source": "sqlite",
-        "mode": "grouped",
-        "db_path": str(SOC_ALERT_STORE_DB),
-        "count": len(page_rows),
-        "total_matching": total_matching,
-        "status_counts": status_bucket_counts,
-        "severity_counts": severity_summary["counts"],
-        "highest_severity": severity_summary["highest"],
-        "top_endpoints": top_endpoint_metrics,
-        "limit": limit,
-        "page": current_page,
-        "page_size": limit,
-        "total_pages": total_pages,
-        "sort": sort_key,
-        "direction": sort_direction,
-        "next_cursor": next_cursor,
-        "alerts": [soc_alert_group_row_to_api(row, statuses, ai_reports, pcap_analysis, pcap_requests) for row in page_rows],
-    }
+    snapshot = soc_alert_group_query_snapshot(
+        rows,
+        analyst_status=analyst_status,
+        cursor_seen=cursor_seen,
+        cursor_id=cursor_id,
+        limit=limit,
+        requested_page=requested_page,
+    )
+    return 200, soc_alert_group_query_payload(
+        source="sqlite",
+        snapshot=snapshot,
+        limit=limit,
+        sort_key=sort_key,
+        sort_direction=sort_direction,
+    )
 
 
 def soc_alert_detail_fragment_response(group_id: str) -> tuple[int, dict]:
