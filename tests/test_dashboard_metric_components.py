@@ -77,7 +77,7 @@ class DashboardMetricComponentTest(unittest.TestCase):
         html = dashboard_metric_components.render_size_metric("1.0 MB", '2026-07-06  13:00:00-06:00 <latest>')
 
         self.assertIn("SOC Reports:</b> 1.0 MB", html)
-        self.assertIn("Last Alert:</b> 2026-07-06  13:00:00-06:00 &lt;latest&gt;", html)
+        self.assertIn("Last Alert:</b> 2026-07-06&nbsp;&nbsp;13:00:00-06:00 &lt;latest&gt;", html)
 
 
 if __name__ == "__main__":

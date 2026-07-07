@@ -235,11 +235,11 @@
 .system-health-metric-main {
   grid-column: 1;
   grid-row: 3;
-  align-self: end;
+  align-self: start;
   display: grid !important;
   gap: 8px;
   min-width: 0 !important;
-  margin-top: 12px;
+  margin-top: 30px;
 }
 
 .system-health-metric-main span {

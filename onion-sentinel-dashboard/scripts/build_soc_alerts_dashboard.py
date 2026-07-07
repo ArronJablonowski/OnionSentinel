@@ -2065,6 +2065,17 @@ def last_seen_iso_for(report: AlertReport) -> str:
     return iso_local_time(last_seen_ts_for(report))
 
 
+def compact_minute_timestamp(value: str) -> str:
+    """Render a timestamp as `YYYY-MM-DD  HH:MM-06:00` for compact metric cards."""
+    parsed = parse_iso_datetime(value)
+    text = format_project_timestamp(parsed) if parsed else str(value or '')
+    match = re.search(r'(\d{4}-\d{2}-\d{2})(?:T|\s+)(\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?', text)
+    if not match:
+        return text
+    date, minute, offset = match.groups()
+    return f'{date}  {minute}{offset or ""}'
+
+
 
 def ai_summary_for(report: AlertReport) -> str:
     title = report.title.lower()
@@ -2403,7 +2414,7 @@ def build_html(reports: list[AlertReport]) -> str:
         f'<span class="metric-detail-row"><b>Size</b><span>{human_size(latest.size)}</span></span>'
     ) if latest else '<span class="metric-detail-row"><b>Source</b><span>—</span></span>'
     latest_alert = max(reports, key=last_seen_ts_for) if reports else None
-    latest_alert_text = last_seen_iso_for(latest_alert) if latest_alert else 'No alerts yet'
+    latest_alert_text = compact_minute_timestamp(last_seen_iso_for(latest_alert)) if latest_alert else 'No alerts yet'
     ai_state = ai_activity_state(reports)
     soc_metrics_html = ''.join(
         [
