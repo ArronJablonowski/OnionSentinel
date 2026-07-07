@@ -795,11 +795,21 @@ The Detailed Alert Report also includes local AI analysis context:
 
 New local AI outputs include `Alert Frequency Assessment` and `Recommended Tuning Actions`. These are grounded in grouped alert Count, total observations, duplicate timeline, first seen, and last seen from SQLite.
 
+PCAP-derived AI evidence is stored outside SQLite as runtime-only artifacts.
+`pcap_requests` in SQLite tracks request, claim, fulfillment, and artifact
+metadata. The Mac Studio worker
+`$HOME/n8n-local/bin/process-pcap-evidence.py` reads fulfilled requests, looks
+for copied captures in `$HOME/n8n-local/pcap-evidence/artifacts/<request_id>/`,
+runs Zeek and TShark, and writes bounded JSON/Markdown summaries to
+`$HOME/n8n-local/soc-alerts/pcap-analysis`. Prompt packages include matching
+summaries under `pcap_evidence`; raw PCAP bytes never enter the prompt package
+or the Git repo.
+
 
 | Section | Source | Behavior |
 | --- | --- | --- |
 | `AI Model Used` | `$HOME/n8n-local/soc-alerts/ai-analysis/*-local-ai-analysis.json` | Shows analysis status, model path, model name, generation time, prompt package, and analysis artifact path |
-| `AI Analysis Output` | Same JSON artifact `response` object | Shows summary, likely meaning, severity reasoning, false-positive possibilities, recommended next steps, evidence used, evidence gaps, tuning recommendation, escalation fields, and complete AI response JSON |
+| `AI Analysis Output` | Same JSON artifact `response` object | Shows summary, likely meaning, severity reasoning, PCAP analysis findings, false-positive possibilities, recommended next steps, evidence used, evidence gaps, tuning recommendation, escalation fields, and complete AI response JSON |
 
 When the artifact `analysis_type` is `local-ai`, the dashboard displays the
 model path as `Ollama local` so the UI clearly shows that the analysis ran via

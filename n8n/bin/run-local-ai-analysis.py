@@ -40,6 +40,7 @@ REQUIRED_KEYS = {
     "likely_meaning",
     "severity_reasoning",
     "alert_frequency_assessment",
+    "pcap_analysis_findings",
     "false_positive_possibilities",
     "recommended_next_steps",
     "evidence_used",
@@ -53,6 +54,7 @@ REQUIRED_KEYS = {
 }
 DEFAULT_RESPONSE_VALUES = {
     "alert_frequency_assessment": "The local model did not explicitly assess alert frequency.",
+    "pcap_analysis_findings": [],
     "false_positive_possibilities": [],
     "recommended_next_steps": ["Review the raw alert, related alerts, and endpoint/network context."],
     "evidence_used": [],
@@ -66,6 +68,7 @@ DEFAULT_RESPONSE_VALUES = {
 }
 LIST_KEYS = {
     "false_positive_possibilities",
+    "pcap_analysis_findings",
     "recommended_next_steps",
     "evidence_used",
     "evidence_gaps",
@@ -254,7 +257,8 @@ def ollama_chat(prompt_package: dict[str, Any], args: argparse.Namespace, settin
     user = {
         "task": (
             "Analyze this Security Onion alert and return JSON matching response_schema exactly. "
-            "Use agent_memory.role_memory and agent_memory.shared_memory when relevant, but prefer current alert evidence if memory conflicts."
+            "Use parsed pcap_evidence when present. Use agent_memory.role_memory and agent_memory.shared_memory when relevant, "
+            "but prefer current alert evidence if memory conflicts."
         ),
         "prompt_package": prompt_package,
     }
@@ -460,6 +464,10 @@ def render_markdown(prompt_package: dict[str, Any], response: dict[str, Any], ge
         "## Alert Frequency Assessment",
         "",
         response["alert_frequency_assessment"],
+        "",
+        "## PCAP Analysis Findings",
+        "",
+        markdown_list(response["pcap_analysis_findings"]),
         "",
         "## False Positive Possibilities",
         "",

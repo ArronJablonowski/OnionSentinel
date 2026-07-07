@@ -31,6 +31,8 @@ authorized_keys.local
 n8n_data/
 alert_store_data/
 soc-alerts/
+pcap-evidence/
+pcap-analysis/
 state/
 batches/
 new-alerts/
@@ -43,6 +45,9 @@ reports/
 daily-rollups/
 ai-prompts/
 ai-analysis/
+*.pcap
+*.pcapng
+*.cap
 n8n-beacon.json
 n8n-beacon-history.json
 soc-alerts-status.json

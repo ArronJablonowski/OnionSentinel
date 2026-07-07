@@ -13,7 +13,7 @@ LAUNCHD_DIR="${HOME}/Library/LaunchAgents"
 HERMES_SCRIPT_DIR="${HOME}/.hermes/scripts"
 PORTAL_DIR="${HOME}/report_portal"
 
-mkdir -p "$STACK_DIR/alert_store/config" "$STACK_DIR/bin" "$STACK_DIR/config" "$STACK_DIR/logs" "$STACK_DIR/alert_store_data" "$STACK_DIR/n8n_data" "$STACK_DIR/soc-alerts" "$STACK_DIR/soc-alerts/agent-memory"
+mkdir -p "$STACK_DIR/alert_store/config" "$STACK_DIR/bin" "$STACK_DIR/config" "$STACK_DIR/logs" "$STACK_DIR/alert_store_data" "$STACK_DIR/n8n_data" "$STACK_DIR/soc-alerts" "$STACK_DIR/soc-alerts/agent-memory" "$STACK_DIR/soc-alerts/pcap-analysis" "$STACK_DIR/pcap-evidence/artifacts"
 
 # n8n writes reports to ./soc-alerts inside the compose project. Hermes and
 # Obsidian expect the friendlier Documents path, so expose the same directory
@@ -72,6 +72,7 @@ cp "$REPO_DIR/n8n/bin/maintain-alert-store-sqlite.zsh" "$STACK_DIR/bin/maintain-
 cp "$REPO_DIR/n8n/bin/build-ai-investigation-prompt.py" "$STACK_DIR/bin/build-ai-investigation-prompt.py"
 cp "$REPO_DIR/n8n/bin/run-local-ai-analysis.py" "$STACK_DIR/bin/run-local-ai-analysis.py"
 cp "$REPO_DIR/n8n/bin/auto-run-ai-analysis.py" "$STACK_DIR/bin/auto-run-ai-analysis.py"
+cp "$REPO_DIR/n8n/bin/process-pcap-evidence.py" "$STACK_DIR/bin/process-pcap-evidence.py"
 cp "$REPO_DIR/n8n/bin/sync-soc-alerts-portal.py" "$STACK_DIR/bin/sync-soc-alerts-portal.py"
 cp "$REPO_DIR/n8n/bin/write-daily-soc-rollup.py" "$STACK_DIR/bin/write-daily-soc-rollup.py"
 chmod +x "$STACK_DIR/bin/"*.zsh
@@ -108,6 +109,7 @@ for plist in \
   com.arron.n8n.ensure-stack.plist \
   com.arron.n8n.monitor-stack.plist \
   com.arron.soc.alert-store-maintenance.plist \
+  com.arron.soc.pcap-analysis.plist \
   com.arron.soc.ai-analysis.plist \
   com.arron.soc.daily-rollup.plist
 do
@@ -125,11 +127,13 @@ done
 launchctl unload "$LAUNCHD_DIR/com.arron.n8n.ensure-stack.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.n8n.monitor-stack.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.alert-store-maintenance.plist" >/dev/null 2>&1 || true
+launchctl unload "$LAUNCHD_DIR/com.arron.soc.pcap-analysis.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.ai-analysis.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist" >/dev/null 2>&1 || true
 launchctl load "$LAUNCHD_DIR/com.arron.n8n.ensure-stack.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.n8n.monitor-stack.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.alert-store-maintenance.plist"
+launchctl load "$LAUNCHD_DIR/com.arron.soc.pcap-analysis.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.ai-analysis.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist"
 

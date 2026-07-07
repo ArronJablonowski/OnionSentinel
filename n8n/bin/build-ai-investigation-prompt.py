@@ -22,6 +22,7 @@ DEFAULT_ROLLUPS = HOME / "n8n-local" / "soc-alerts" / "daily-rollups"
 DEFAULT_OUT = HOME / "n8n-local" / "soc-alerts" / "ai-prompts"
 DEFAULT_SYSTEM_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system_prompt.md"
 DEFAULT_AGENT_MEMORY_DIR = HOME / "n8n-local" / "soc-alerts" / "agent-memory"
+DEFAULT_PCAP_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "pcap-analysis"
 DEFAULT_SOC_ANALYST_MEMORY_FILE = DEFAULT_AGENT_MEMORY_DIR / "soc-analyst-memory.md"
 DEFAULT_SHARED_AGENT_MEMORY_FILE = DEFAULT_AGENT_MEMORY_DIR / "shared-agent-memory.md"
 DEFAULT_SYSTEM_PROMPT = "You are a careful SOC analyst assisting with Security Onion alerts."
@@ -42,7 +43,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--system-prompt-file", type=Path, default=DEFAULT_SYSTEM_PROMPT_FILE, help="Editable SOC Analyst system prompt file")
     parser.add_argument("--agent-memory-file", type=Path, default=DEFAULT_SOC_ANALYST_MEMORY_FILE, help="SOC Analyst Markdown memory file")
     parser.add_argument("--shared-memory-file", type=Path, default=DEFAULT_SHARED_AGENT_MEMORY_FILE, help="Shared Cyber Security Agent Markdown memory file")
+    parser.add_argument("--pcap-analysis-dir", type=Path, default=DEFAULT_PCAP_ANALYSIS_DIR, help="Parsed Zeek/TShark PCAP evidence directory")
     parser.add_argument("--memory-bytes", type=int, default=8000, help="Maximum bytes to include from each agent memory file")
+    parser.add_argument("--pcap-analysis-limit", type=int, default=3, help="Maximum parsed PCAP evidence artifacts to include")
     parser.add_argument("--include-tests", action="store_true", help="Include validation/test alerts")
     parser.add_argument("--stdout", action="store_true", help="Print package JSON instead of writing a file")
     args = parser.parse_args()
@@ -54,6 +57,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--rollup-bytes must be positive")
     if args.memory_bytes <= 0:
         parser.error("--memory-bytes must be positive")
+    if args.pcap_analysis_limit <= 0:
+        parser.error("--pcap-analysis-limit must be positive")
     return args
 
 
@@ -165,6 +170,106 @@ def markdown_memory(path: Path, limit_bytes: int) -> dict:
         "exists": True,
         "content": data.decode("utf-8", errors="replace"),
         "max_bytes": limit_bytes,
+    }
+
+
+def compact_pcap_analysis(record: dict) -> dict:
+    """Keep PCAP evidence prompt-safe by including summaries, not packet bodies."""
+    zeek = record.get("zeek") if isinstance(record.get("zeek"), dict) else {}
+    tshark = record.get("tshark") if isinstance(record.get("tshark"), dict) else {}
+    request = record.get("request") if isinstance(record.get("request"), dict) else {}
+    return {
+        "analysis_artifact": record.get("_analysis_path"),
+        "generated_at": record.get("generated_at"),
+        "request_id": request.get("request_id"),
+        "alert_id": request.get("alert_id"),
+        "group_id": request.get("group_id"),
+        "artifact_state": record.get("artifact_state"),
+        "pcap_files": [
+            {
+                "name": item.get("name"),
+                "size_bytes": item.get("size_bytes"),
+                "sha256": item.get("sha256"),
+            }
+            for item in (record.get("pcap_files") if isinstance(record.get("pcap_files"), list) else [])[:5]
+            if isinstance(item, dict)
+        ],
+        "tool_paths": record.get("tool_paths") if isinstance(record.get("tool_paths"), dict) else {},
+        "zeek": {
+            "available": bool(zeek.get("available")),
+            "reason": zeek.get("reason"),
+            "record_counts": zeek.get("record_counts") if isinstance(zeek.get("record_counts"), dict) else {},
+            "top_connections": zeek.get("top_connections") if isinstance(zeek.get("top_connections"), list) else [],
+            "dns_queries": zeek.get("dns_queries") if isinstance(zeek.get("dns_queries"), list) else [],
+            "tls_sni": zeek.get("tls_sni") if isinstance(zeek.get("tls_sni"), list) else [],
+            "http_hosts": zeek.get("http_hosts") if isinstance(zeek.get("http_hosts"), list) else [],
+            "notices": zeek.get("notices") if isinstance(zeek.get("notices"), list) else [],
+            "weird": zeek.get("weird") if isinstance(zeek.get("weird"), list) else [],
+        },
+        "tshark": {
+            "available": bool(tshark.get("available")),
+            "reason": tshark.get("reason"),
+            "samples": [
+                {
+                    "pcap": Path(str(sample.get("pcap") or "capture")).name,
+                    "protocol_hierarchy": str(sample.get("protocol_hierarchy") or "")[:4000],
+                    "conversations": str(sample.get("conversations") or "")[:4000],
+                    "field_sample_tsv": str(sample.get("field_sample_tsv") or "")[:4000],
+                }
+                for sample in (tshark.get("samples") if isinstance(tshark.get("samples"), list) else [])[:2]
+                if isinstance(sample, dict)
+            ],
+        },
+    }
+
+
+def pcap_request_context(conn: sqlite3.Connection, selected: sqlite3.Row) -> list[dict]:
+    try:
+        found = rows(
+            conn,
+            """
+            SELECT *
+            FROM pcap_requests
+            WHERE alert_id = ?
+            ORDER BY created_at DESC
+            LIMIT 10
+            """,
+            [selected["alert_id"]],
+        )
+    except sqlite3.Error:
+        return []
+    return [dict(item) for item in found]
+
+
+def pcap_evidence_context(conn: sqlite3.Connection, selected: sqlite3.Row, analysis_dir: Path, limit: int) -> dict:
+    requests = pcap_request_context(conn, selected)
+    request_ids = {str(item.get("request_id") or "") for item in requests}
+    alert_id = str(selected["alert_id"])
+    evidence = []
+    if analysis_dir.exists():
+        for path in sorted(analysis_dir.glob("*-pcap-analysis.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(record, dict):
+                continue
+            request = record.get("request") if isinstance(record.get("request"), dict) else {}
+            if request.get("alert_id") != alert_id and request.get("request_id") not in request_ids:
+                continue
+            record["_analysis_path"] = str(path)
+            evidence.append(compact_pcap_analysis(record))
+            if len(evidence) >= limit:
+                break
+    return {
+        "pcap_requests": requests,
+        "parsed_evidence": evidence,
+        "analysis_dir": str(analysis_dir),
+        "usage_guidance": (
+            "Use parsed_evidence when present. Zeek is the primary structured network evidence; "
+            "TShark corroborates packet-level conversations and protocol hierarchy. If parsed_evidence is empty, "
+            "treat PCAP as unavailable and list it as an evidence gap instead of inferring packet contents."
+        ),
     }
 
 
@@ -378,6 +483,7 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             "Treat memory as analyst context, not proof. Prefer current alert evidence when memory conflicts."
         ),
     }
+    pcap_context = pcap_evidence_context(conn, selected, args.pcap_analysis_dir, args.pcap_analysis_limit)
     return {
         "package_type": "soc-ai-investigation-prompt",
         "generated_at": project_now(),
@@ -390,6 +496,7 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             "grounding": [
                 "Use only the provided evidence.",
                 "Use agent_memory.role_memory and agent_memory.shared_memory as analyst memory context when relevant.",
+                "Use pcap_evidence.parsed_evidence when present; prefer Zeek summaries for flows/protocols and TShark summaries for packet-level corroboration.",
                 "If memory conflicts with current alert evidence, prefer the current alert evidence and mention the conflict.",
                 "Use grouped_alert_context.total_observations and raw_alert_rows when judging urgency, repeat behavior, and tuning.",
                 "Do not invent packet contents, hostnames, users, process names, files, commands, or malware family names.",
@@ -404,6 +511,7 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             "likely_meaning": "string",
             "severity_reasoning": "string",
             "alert_frequency_assessment": "string",
+            "pcap_analysis_findings": ["string"],
             "false_positive_possibilities": ["string"],
             "recommended_next_steps": ["string"],
             "evidence_used": ["string"],
@@ -417,6 +525,7 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
         },
         "alert": compact_alert(selected),
         "grouped_alert_context": group_context,
+        "pcap_evidence": pcap_context,
         "related_alerts": related_alerts(conn, selected, args.related_limit, args.include_tests),
         "recent_notifications": notification_context(conn, selected),
         "agent_memory": memory_context,

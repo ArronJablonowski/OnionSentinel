@@ -993,7 +993,9 @@ SOC Analyst / analyst UI
   -> Raspberry Pi relay polls pending requests
   -> Security Onion dedicated forced-command wrapper exports bounded PCAP
   -> relay returns artifact metadata to Mac Studio
-  -> dashboard/local AI use metadata and analyst-approved packet summaries
+  -> copied runtime artifact lands in Mac Studio pcap-evidence/artifacts
+  -> Mac Studio Zeek/TShark worker writes bounded packet summaries
+  -> dashboard/local AI use parsed summaries, not raw PCAP bytes
 ```
 
 The SOC Analyst may recommend or queue a PCAP request when packet evidence
@@ -1020,7 +1022,12 @@ Safety controls:
 - Security Onion-side fulfillment must enforce time-window, tuple,
   file-size, output-path, and cleanup limits before any PCAP is returned.
 - PCAP artifacts are runtime-only evidence. Never commit `.pcap`, `.pcapng`,
-  packet payloads, or generated packet artifacts to Git.
+  packet payloads, generated packet artifacts, or `soc-alerts/pcap-analysis`
+  output to Git.
+- Zeek/zeek-cut and TShark live on the Mac Studio with Ollama. Zeek is the
+  primary parser for structured connection, DNS, TLS, HTTP, notice, and weird
+  logs; TShark provides protocol hierarchy, conversation, and bounded packet
+  field corroboration for the local model.
 
 ## Alert Detail Enrichment
 

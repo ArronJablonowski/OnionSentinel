@@ -86,6 +86,34 @@ n8n copy only; keep the repo export placeholder-based. The relay should point
 The n8n proxy keeps alert-store private to Docker while exposing only the
 relay-safe PCAP broker operations to the relay VLAN.
 
+Parsed PCAP evidence is handled on the Mac Studio, not inside Security Onion,
+the Pi relay, or Git. Install Zeek/zeek-cut and TShark on the Mac Studio and
+ensure `zeek`, `zeek-cut`, and `tshark` are on `PATH` for LaunchAgents, or set
+`ZEEK_BIN`, `ZEEK_CUT_BIN`, and `TSHARK_BIN` in the runtime environment. The
+Mac-side worker is:
+
+```bash
+/opt/homebrew/bin/brew install zeek wireshark
+```
+
+```text
+$HOME/n8n-local/bin/process-pcap-evidence.py
+```
+
+Runtime-only paths:
+
+```text
+$HOME/n8n-local/pcap-evidence/artifacts
+$HOME/n8n-local/soc-alerts/pcap-analysis
+```
+
+The worker reads fulfilled `pcap_requests`, looks for the copied artifact under
+`pcap-evidence/artifacts/<request_id>/`, runs Zeek first for structured network
+logs, runs TShark for protocol hierarchy/conversation corroboration, and writes
+bounded JSON/Markdown summaries for the SOC Analyst prompt builder. Raw PCAPs,
+extracted captures, and generated PCAP analysis artifacts must remain out of
+Git.
+
 Optional enrichment keys are also set in `$HOME/n8n-local/.env`. Blank or
 placeholder values are treated as disabled, so a source can be enabled or
 rotated by editing `.env` and restarting `alert-store`.
@@ -178,6 +206,18 @@ validates, claims, and records fulfillment metadata through:
 Alert-store never connects directly to Security Onion and never shells out for
 packet capture. Fulfillment is brokered through the relay and the restricted
 Security Onion wrapper.
+
+Once a fulfilled capture is copied to the Mac Studio runtime evidence directory,
+`process-pcap-evidence.py` converts it into LLM-safe artifacts:
+
+```bash
+$HOME/n8n-local/bin/process-pcap-evidence.py --request-id <request_id>
+```
+
+The local AI prompt builder automatically includes matching parsed PCAP evidence
+from `$HOME/n8n-local/soc-alerts/pcap-analysis` when analyzing the alert. If the
+broker metadata exists but the artifact has not been copied to the Mac yet, the
+prompt records that as an evidence gap rather than inventing packet contents.
 
 Alert-store exposes a request-only broker for packet-capture evidence:
 

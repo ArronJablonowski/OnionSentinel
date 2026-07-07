@@ -79,6 +79,12 @@ Prompt package output:
 $HOME/n8n-local/soc-alerts/ai-prompts
 ```
 
+Parsed PCAP evidence output:
+
+```text
+$HOME/n8n-local/soc-alerts/pcap-analysis
+```
+
 Manual run:
 
 ```bash
@@ -88,6 +94,13 @@ ssh <mac_user>@10.77.7.225 \
 
 The script does not call an LLM. It creates a bounded JSON evidence package
 that can be passed to Hermes, Ollama, or a hosted model.
+
+If matching PCAP analysis artifacts exist, the prompt package includes a compact
+`pcap_evidence` block. The PCAP parser runs on the Mac Studio with Zeek and
+TShark, never inside the LLM runner. Zeek is treated as the primary structured
+source for conversations, DNS, TLS, HTTP, notices, and weird logs. TShark is
+used as corroborating packet-level context for protocol hierarchy, conversations,
+and bounded packet-field samples.
 
 ## Prompt Package Inputs
 
@@ -101,6 +114,7 @@ As of 2026-07-02, prompt packages also include `grouped_alert_context` with the 
 - Related alerts from SQLite.
 - Recent Telegram notification context.
 - Latest daily SOC rollup excerpt.
+- Parsed PCAP evidence summaries when available.
 - Local-first/hosted-escalation policy.
 - Strict JSON response schema.
 
@@ -113,6 +127,7 @@ The model must return valid JSON with these fields:
   "summary": "string",
   "likely_meaning": "string",
   "severity_reasoning": "string",
+  "pcap_analysis_findings": ["string"],
   "alert_frequency_assessment": "string",
   "false_positive_possibilities": ["string"],
   "recommended_next_steps": ["string"],

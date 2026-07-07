@@ -10,11 +10,15 @@ This repository is designed to be safe for a private GitHub repo. It contains so
 flowchart LR
   SO["Security Onion\n192.168.1.7"] -->|restricted SSH export| PI["Raspberry Pi Relay\n10.88.8.8"]
   PI -->|webhook POST| N8N["n8n + alert-store\nMac Studio 10.77.7.225"]
-  N8N --> DB["SQLite alert store"]
+  N8N --> ENRICH["Public enrichment + PCAP broker metadata"]
+  ENRICH --> DB["SQLite alert store"]
   N8N --> MD["Markdown + JSON reports"]
   N8N --> TG["Telegram high/critical alerts"]
   DB --> UI["Onion Sentinel Dashboard"]
   MD --> UI
+  SO -->|bounded PCAP export on request| PI
+  PI -->|fulfilled metadata + copied runtime artifact| PCAP["Mac Studio Zeek/TShark PCAP evidence"]
+  PCAP --> LLM
   DB --> LLM["Ollama / selected AI model"]
   LLM --> MD
 ```

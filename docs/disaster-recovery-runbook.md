@@ -172,6 +172,26 @@ The workflow writes one Obsidian-compatible Markdown report for each newly
 accepted alert. Duplicate alerts return `report_written=false` and do not
 create repeated files.
 
+Install Mac Studio packet-analysis tooling before expecting PCAP evidence in AI
+reports. Zeek/zeek-cut provide structured network logs; TShark provides
+protocol hierarchy and packet-field corroboration. The restore script copies the
+worker and creates runtime-only directories:
+
+```bash
+/opt/homebrew/bin/brew install zeek wireshark
+```
+
+```text
+$HOME/n8n-local/bin/process-pcap-evidence.py
+$HOME/n8n-local/pcap-evidence/artifacts
+$HOME/n8n-local/soc-alerts/pcap-analysis
+$HOME/Library/LaunchAgents/com.arron.soc.pcap-analysis.plist
+```
+
+Set `ZEEK_BIN`, `ZEEK_CUT_BIN`, or `TSHARK_BIN` only if the tools are not on
+the LaunchAgent `PATH`. Do not copy PCAP files or generated PCAP analysis
+artifacts into the Git repo.
+
 Alert filtering and suppression are controlled on Mac Studio in:
 
 ```text
@@ -324,6 +344,23 @@ For PCAP fulfillment, install a separate forced-command public key using
 
 It accepts a bounded JSON request on stdin and writes runtime-only artifacts to
 `/nsm/pcapout/onion-sentinel`.
+
+Fulfilled PCAP broker metadata is not enough for LLM analysis by itself. The
+capture artifact must be copied to the Mac Studio under:
+
+```text
+$HOME/n8n-local/pcap-evidence/artifacts/<request_id>/
+```
+
+The Mac Studio parser then runs:
+
+```bash
+$HOME/n8n-local/bin/process-pcap-evidence.py --request-id <request_id>
+```
+
+and writes bounded Zeek/TShark summaries to
+`$HOME/n8n-local/soc-alerts/pcap-analysis`. The SOC Analyst prompt builder
+automatically includes those summaries for matching alerts.
 
 ## 4. Restore Pi Relay
 

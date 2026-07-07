@@ -104,6 +104,11 @@ to the broker. Packet artifacts stay on Security Onion under
 Use a separate broker token from the alert ingestion token and store it only in
 the live relay config and live n8n workflow.
 
+The relay does not parse packet captures or call LLMs. After a fulfilled capture
+is copied into the Mac Studio runtime evidence directory, the Mac Studio
+`process-pcap-evidence.py` worker runs Zeek and TShark and writes bounded
+summaries for the SOC Analyst prompt package.
+
 ## Firewall Needs
 
 From relay `10.88.8.8`:
