@@ -162,6 +162,60 @@ class RelayPcapBrokerTest(unittest.TestCase):
         self.assertEqual(calls[2][2]["artifact_base64"], "ZmFrZS1wY2FwLXRhcg==")
         self.assertTrue(calls[3][2]["artifact_ingested"])
 
+    def test_artifact_upload_failure_records_fulfillment_metadata(self) -> None:
+        request = {"request_id": "pcap-unit-test", "source_ip": "192.0.2.10", "destination_ip": "198.51.100.10"}
+        completions: list[dict] = []
+
+        def fake_broker(config, method, path, payload_data=None):
+            if path.startswith("/pcap-requests"):
+                return {"ok": True, "requests": [request]}
+            if path == "/pcap-claim":
+                return {"ok": True, "claimed": True, "request": request}
+            if path == "/pcap-artifact":
+                raise RuntimeError("artifact endpoint unavailable")
+            if path == "/pcap-complete":
+                completions.append(payload_data)
+                return {"ok": True, "status": payload_data["status"], "request": payload_data}
+            raise AssertionError(f"unexpected broker call: {method} {path}")
+
+        config = {
+            "pcap_broker": {
+                "enabled": True,
+                "limit": 1,
+                "requests_method": "POST",
+                "upload_artifact": True,
+                "paths": {
+                    "requests": "/pcap-requests",
+                    "claim": "/pcap-claim",
+                    "complete": "/pcap-complete",
+                    "artifact": "/pcap-artifact",
+                },
+            }
+        }
+        with mock.patch.object(self.relay, "broker_request", side_effect=fake_broker):
+            with mock.patch.object(
+                self.relay,
+                "run_ssh_pcap_export",
+                return_value={
+                    "artifact_path": "/nsm/pcapout/onion-sentinel/pcap-unit-test.tar",
+                    "artifact_sha256": "a" * 64,
+                    "artifact_size_bytes": 12,
+                    "artifact_base64": "ZmFrZS1wY2FwLXRhcg==",
+                },
+            ):
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    result = self.relay.process_pcap_requests(config)
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(result["fulfilled"], 1)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(result["artifact_upload_failed"], 1)
+        self.assertEqual(completions[0]["status"], "fulfilled")
+        self.assertFalse(completions[0]["artifact_ingested"])
+        self.assertIn("artifact endpoint unavailable", completions[0]["artifact_ingest_error"])
+        self.assertIn("pcap_artifact_upload_failed", stderr.getvalue())
+
     def test_completion_failure_does_not_abort_remaining_pcap_requests(self) -> None:
         requests = [
             {"request_id": "pcap-unit-test-1", "source_ip": "192.0.2.10", "destination_ip": "198.51.100.10"},

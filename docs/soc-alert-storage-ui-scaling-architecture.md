@@ -812,6 +812,10 @@ immediately; relay polling, Security Onion export, n8n artifact ingestion, and
 Mac Studio parsing remain separate services. The PCAP table column uses
 `Analyzed`, `Queued`, `Parsing`, `No Packets`, `Failed`, or `None` so packet
 evidence state is visible without opening each Detailed Alert Report.
+When parsed evidence exists, the Detailed Alert Report adds a `Parsed PCAP
+Evidence` section after public enrichment. That section renders bounded Zeek
+summaries and TShark corroboration only; raw packet captures stay in runtime
+artifact storage and are not copied into dashboard HTML, prompts, or Git.
 
 Alert-store keeps `alert_group_summary` current on every accepted alert. The
 raw `alerts` table includes an expression index that matches the group-key

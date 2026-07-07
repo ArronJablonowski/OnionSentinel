@@ -489,6 +489,7 @@ def process_pcap_requests(config: dict) -> dict:
     fulfilled = 0
     failed = 0
     completion_failed = 0
+    artifact_upload_failed = 0
     for pcap_request in pending.get("requests", []):
         request_id = pcap_request.get("request_id")
         claim = broker_request(
@@ -504,7 +505,24 @@ def process_pcap_requests(config: dict) -> dict:
             if broker.get("upload_artifact", True):
                 export_request["inline_artifact_base64"] = True
             result = run_ssh_pcap_export(config, export_request)
-            upload = upload_pcap_artifact(config, claim["request"], result)
+            upload = None
+            upload_error = ""
+            try:
+                upload = upload_pcap_artifact(config, claim["request"], result)
+            except Exception as exc:
+                artifact_upload_failed += 1
+                upload_error = str(exc)[:500]
+                print(
+                    json.dumps(
+                        {
+                            "event": "pcap_artifact_upload_failed",
+                            "request_id": request_id,
+                            "error": upload_error,
+                        },
+                        sort_keys=True,
+                    ),
+                    file=sys.stderr,
+                )
             if complete_pcap_request(
                 config,
                 request_id,
@@ -514,6 +532,7 @@ def process_pcap_requests(config: dict) -> dict:
                     "artifact_sha256": result.get("artifact_sha256"),
                     "artifact_size_bytes": result.get("artifact_size_bytes"),
                     "artifact_ingested": bool(upload and upload.get("ok")),
+                    "artifact_ingest_error": upload_error,
                 },
             ):
                 fulfilled += 1
@@ -531,6 +550,7 @@ def process_pcap_requests(config: dict) -> dict:
         "fulfilled": fulfilled,
         "failed": failed,
         "completion_failed": completion_failed,
+        "artifact_upload_failed": artifact_upload_failed,
     }
 
 

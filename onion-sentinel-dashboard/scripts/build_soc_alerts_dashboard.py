@@ -44,6 +44,7 @@ from dashboard_metric_components import (  # noqa: E402
     render_latest_network_metric,
     render_size_metric as render_size_metric_card,
 )
+from dashboard_pcap_components import render_pcap_evidence_markdown  # noqa: E402
 
 HOME = Path.home()
 SOURCE_DIR = HOME / 'Documents' / 'SOC Alerts'
@@ -1697,9 +1698,16 @@ def directory_size_bytes(path: Path) -> int:
     return total
 
 
-def pcap_analysis_index() -> dict[str, set[str]]:
+def pcap_analysis_index() -> dict[str, object]:
     """Index parsed PCAP evidence once per dashboard build for fast row lookups."""
-    index = {'request_ids': set(), 'alert_ids': set(), 'group_ids': set()}
+    index = {
+        'request_ids': set(),
+        'alert_ids': set(),
+        'group_ids': set(),
+        'records_by_request_id': {},
+        'records_by_alert_id': {},
+        'records_by_group_id': {},
+    }
     if not PCAP_ANALYSIS_DIR.exists():
         return index
     for path in PCAP_ANALYSIS_DIR.glob('*-pcap-analysis.json'):
@@ -1709,11 +1717,17 @@ def pcap_analysis_index() -> dict[str, set[str]]:
             continue
         if not isinstance(record, dict):
             continue
+        record['_analysis_path'] = str(path)
         request = record.get('request') if isinstance(record.get('request'), dict) else {}
-        for key, bucket in (('request_id', 'request_ids'), ('alert_id', 'alert_ids'), ('group_id', 'group_ids')):
+        for key, bucket, record_bucket in (
+            ('request_id', 'request_ids', 'records_by_request_id'),
+            ('alert_id', 'alert_ids', 'records_by_alert_id'),
+            ('group_id', 'group_ids', 'records_by_group_id'),
+        ):
             value = str(request.get(key) or '').strip()
             if value:
                 index[bucket].add(value)
+                index[record_bucket].setdefault(value, record)
     return index
 
 
@@ -1751,7 +1765,7 @@ def pcap_request_status_for_row(row: sqlite3.Row | dict) -> dict:
     }
 
 
-def pcap_status_for_row(row: sqlite3.Row | dict, index: dict[str, set[str]] | None = None) -> tuple[str, str, str]:
+def pcap_status_for_row(row: sqlite3.Row | dict, index: dict[str, object] | None = None) -> tuple[str, str, str]:
     """Return a compact PCAP analysis status for the alert table."""
     pcap_index = index or pcap_analysis_index()
     group_id = hashlib.sha1((row['alert_group_key'] or alert_group_key(row)).encode('utf-8')).hexdigest()[:12]
@@ -1771,12 +1785,43 @@ def pcap_status_for_row(row: sqlite3.Row | dict, index: dict[str, set[str]] | No
     return ('none', 'None', 'No parsed PCAP analysis is available for this detection group')
 
 
-def sqlite_report_markdown(row: sqlite3.Row | dict, raw: dict, ai_analysis: dict | None) -> str:
+def pcap_analysis_for_row(row: sqlite3.Row | dict, index: dict[str, object] | None = None) -> dict | None:
+    """Return the newest parsed PCAP evidence artifact for this grouped alert."""
+    pcap_index = index or pcap_analysis_index()
+    group_id = hashlib.sha1((row['alert_group_key'] or alert_group_key(row)).encode('utf-8')).hexdigest()[:12]
+    alert_id = str(row['alert_id'] or '').strip()
+    for bucket, key in (
+        ('records_by_group_id', group_id),
+        ('records_by_alert_id', alert_id),
+    ):
+        records = pcap_index.get(bucket) if isinstance(pcap_index.get(bucket), dict) else {}
+        record = records.get(key)
+        if isinstance(record, dict):
+            return record
+    request_record = pcap_request_status_for_row(row)
+    request_id = str(request_record.get('request_id') or '').strip()
+    records = pcap_index.get('records_by_request_id') if isinstance(pcap_index.get('records_by_request_id'), dict) else {}
+    record = records.get(request_id)
+    return record if isinstance(record, dict) else None
+
+
+def sqlite_report_markdown(
+    row: sqlite3.Row | dict,
+    raw: dict,
+    ai_analysis: dict | None,
+    pcap_status: tuple[str, str, str] | None = None,
+    pcap_analysis: dict | None = None,
+) -> str:
     # Render a DB-only alert detail for suppressed/dropped/duplicate rows.
     alert_json = json.dumps(raw or {'alert_json': row['alert_json']}, indent=2, sort_keys=True)
     status = row['filter_status'] or 'stored'
     enriched_details = alert_detail_markdown(raw)
     public_enrichment = public_enrichment_markdown(raw, row_value(row, 'enrichment_json'))
+    pcap_details = render_pcap_evidence_markdown(
+        pcap_status or ('none', 'None', 'No parsed PCAP analysis is available'),
+        pcap_analysis,
+        normalize_iso_display_text((pcap_analysis or {}).get('generated_at') or ''),
+    )
     ai_details = ai_analysis_report_markdown(ai_analysis)
     bottom_evidence = bottom_evidence_markdown(raw, alert_json)
     ai_response_json = complete_ai_response_json_markdown(ai_analysis)
@@ -1823,6 +1868,8 @@ def sqlite_report_markdown(row: sqlite3.Row | dict, raw: dict, ai_analysis: dict
         '',
         public_enrichment,
         '',
+        pcap_details,
+        '',
         enriched_details,
         '',
         '## Analyst Notes',
@@ -1865,7 +1912,14 @@ def report_from_sqlite_row(
     ]
     ai_status_key, ai_status_label, ai_status_detail = ai_workflow_status_for_row(row, ai_analysis_by_alert_id, ai_prompts_by_alert_id, running_ai_alert_ids)
     enrichment_status_key, enrichment_status_label, enrichment_status_detail, enrichment_record_count, enrichment_skip_count, enrichment_error_count = public_enrichment_status(row['enrichment_json'])
-    pcap_status_key, pcap_status_label, pcap_status_detail = pcap_status_for_row(row, pcap_index)
+    pcap_status = pcap_status_for_row(row, pcap_index)
+    pcap_status_key, pcap_status_label, pcap_status_detail = pcap_status
+    pcap_analysis = pcap_analysis_for_row(row, pcap_index)
+    pcap_details = render_pcap_evidence_markdown(
+        pcap_status,
+        pcap_analysis,
+        normalize_iso_display_text((pcap_analysis or {}).get('generated_at') or ''),
+    )
     ai_details = ai_analysis_report_markdown(ai_analysis)
     ai_response_json = complete_ai_response_json_markdown(ai_analysis)
     timeline_html = alert_seen_timeline_html(row)
@@ -1884,6 +1938,8 @@ def report_from_sqlite_row(
         public_enrichment = public_enrichment_markdown(raw, row['enrichment_json'])
         if public_enrichment and '## Public Enrichment' not in text:
             text = f'{text.rstrip()}\n\n{public_enrichment}\n'
+        if pcap_details and '## Parsed PCAP Evidence' not in text:
+            text = f'{text.rstrip()}\n\n{pcap_details}\n'
         if enriched_details and '## Enriched Alert Details' not in text:
             text = f'{text.rstrip()}\n\n{enriched_details}\n'
         text = f'{text.rstrip()}\n\n{bottom_evidence_markdown(raw, row["alert_json"])}'
@@ -1906,7 +1962,7 @@ def report_from_sqlite_row(
         row_for_markdown['seen_count'] = repeat_count
         row_for_markdown['raw_alert_count'] = raw_alert_count
         row_for_markdown['member_timeline'] = row.get('member_timeline') if isinstance(row, dict) else []
-        text = sqlite_report_markdown(row_for_markdown, raw, ai_analysis)
+        text = sqlite_report_markdown(row_for_markdown, raw, ai_analysis, pcap_status, pcap_analysis)
         text = normalize_iso_display_text(text)
         rendered_html = markdown_to_html(text)
         if timeline_html:

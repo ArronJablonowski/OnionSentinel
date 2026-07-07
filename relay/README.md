@@ -106,6 +106,13 @@ evidence directory. Packet artifacts remain runtime evidence, not repo content.
 Use a separate broker token from the alert ingestion token and store it only in
 the live relay config and live n8n workflow.
 
+PCAP export and artifact upload are tracked separately. If Security Onion
+returns bounded capture metadata but the `/pcap-artifact` upload is temporarily
+unavailable, the relay logs `pcap_artifact_upload_failed`, reports
+`artifact_ingested=false` with the completion payload, and continues processing
+other requests. Alert relay delivery and PCAP broker delivery are also isolated
+by the health wrapper so one path does not mask the other.
+
 The relay does not parse packet captures or call LLMs. After a fulfilled capture
 is ingested into the Mac Studio runtime evidence directory, the Mac Studio
 `process-pcap-evidence.py` worker runs Zeek and TShark and writes bounded

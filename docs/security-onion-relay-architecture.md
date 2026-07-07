@@ -1049,6 +1049,12 @@ Safety controls:
 - Artifact ingestion must go through n8n/alert-store instead of broad Mac Studio
   SSH into Security Onion. Alert-store writes only to the configured runtime
   artifact directory after verifying request id, artifact size, and SHA256.
+- Relay fulfillment treats Security Onion export and artifact upload as
+  separate outcomes. If export succeeds but `/pcap-artifact` upload fails, the
+  relay still reports the request as fulfilled with `artifact_ingested=false`,
+  logs `pcap_artifact_upload_failed`, and continues processing later requests.
+  This prevents a transient n8n/artifact-ingest issue from hiding the fact that
+  Security Onion produced bounded capture metadata.
 - Valid negative fulfillment is surfaced distinctly. A failed request whose
   broker error indicates no matching packets is displayed as `No Packets` in
   the dashboard so analysts can distinguish capture absence from transport or
