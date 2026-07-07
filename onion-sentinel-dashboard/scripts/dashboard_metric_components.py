@@ -106,7 +106,7 @@ def render_latest_network_metric(latest_extra_html: str) -> str:
     )
 
 
-def render_size_metric(total_size_text: str, latest_alert_text: str) -> str:
+def render_size_metric(total_size_text: str, latest_alert_text: str, pcap_ingest_size_text: str = "0 B") -> str:
     """Render the compact System Health card shown in the SOC Alerts metrics row."""
     latest_alert_html = html.escape(latest_alert_text).replace("  ", "&nbsp;&nbsp;", 1)
     return (
@@ -114,6 +114,7 @@ def render_size_metric(total_size_text: str, latest_alert_text: str) -> str:
         '<strong class="system-health-metric-heading">System Health</strong>'
         '<div class="metric-main system-health-metric-main">'
         f'<span><b>SOC Reports:</b> {html.escape(total_size_text)}</span>'
+        f'<span><b>PCAP Ingest:</b> <span id="pcap-ingest-size">{html.escape(pcap_ingest_size_text)}</span></span>'
         f'<span><b>Last Alert:</b> {latest_alert_html}</span>'
         '</div>'
         '</div>'

@@ -74,9 +74,14 @@ class DashboardMetricComponentTest(unittest.TestCase):
             self.assertIn(f'id="{element_id}"', combined)
 
     def test_system_health_metric_escapes_runtime_text(self) -> None:
-        html = dashboard_metric_components.render_size_metric("1.0 MB", '2026-07-06  13:00:00-06:00 <latest>')
+        html = dashboard_metric_components.render_size_metric(
+            "1.0 MB",
+            '2026-07-06  13:00:00-06:00 <latest>',
+            "512 KB",
+        )
 
         self.assertIn("SOC Reports:</b> 1.0 MB", html)
+        self.assertIn('id="pcap-ingest-size">512 KB</span>', html)
         self.assertIn("Last Alert:</b> 2026-07-06&nbsp;&nbsp;13:00:00-06:00 &lt;latest&gt;", html)
 
 

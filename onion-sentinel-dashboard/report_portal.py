@@ -56,6 +56,8 @@ SOC_ALERT_DETAIL_DIR = SOC_ALERT_DASHBOARD_DIR / "details"
 SOC_ALERT_STATIC_STATUS_FILE = SOC_ALERT_DASHBOARD_DIR / "soc-alerts-status.json"
 SOC_ALERT_N8N_BEACON_FILE = SOC_ALERT_DASHBOARD_DIR / "n8n-beacon.json"
 SOC_ALERT_N8N_BEACON_HISTORY_FILE = SOC_ALERT_DASHBOARD_DIR / "n8n-beacon-history.json"
+SOC_ALERT_PCAP_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "pcap-analysis"
+SOC_ALERT_PCAP_ARTIFACT_DIR = HOME / "n8n-local" / "pcap-evidence" / "artifacts"
 SOC_ANALYST_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system_prompt.md"
 SIEM_ENGINEER_PROMPT_FILE = HOME / "n8n-local" / "config" / "siem_engineer_system_prompt.md"
 THREAT_HUNTER_PROMPT_FILE = HOME / "n8n-local" / "config" / "threat_hunter_system_prompt.md"
@@ -3688,6 +3690,115 @@ def soc_alert_group_enrichment_json(conn: sqlite3.Connection, group_key: object)
     return str(row["enrichment_json"] or "") if row else ""
 
 
+def directory_size_bytes(path: Path) -> int:
+    """Return total bytes for a runtime evidence directory without following symlinks."""
+    if not path.exists():
+        return 0
+    total = 0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file() and not item.is_symlink():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def soc_alert_pcap_analysis_index() -> dict[str, set[str]]:
+    """Index parsed Zeek/TShark artifacts once per API response."""
+    index = {"request_ids": set(), "alert_ids": set(), "group_ids": set()}
+    if not SOC_ALERT_PCAP_ANALYSIS_DIR.exists():
+        return index
+    for path in SOC_ALERT_PCAP_ANALYSIS_DIR.glob("*-pcap-analysis.json"):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(record, dict):
+            continue
+        request = record.get("request") if isinstance(record.get("request"), dict) else {}
+        for key, bucket in (("request_id", "request_ids"), ("alert_id", "alert_ids"), ("group_id", "group_ids")):
+            value = str(request.get(key) or "").strip()
+            if value:
+                index[bucket].add(value)
+    return index
+
+
+def soc_alert_pcap_request_statuses(conn: sqlite3.Connection, rows: list[sqlite3.Row | dict]) -> dict[str, str]:
+    """Return newest broker status keyed by group id and alert id for page rows."""
+    if not sqlite_table_exists(conn, "pcap_requests"):
+        return {}
+    def row_value(row: sqlite3.Row | dict, key: str, default: str = "") -> str:
+        if isinstance(row, dict):
+            return str(row.get(key, default) or "")
+        return str(row[key] or "") if key in row.keys() else str(default or "")
+
+    group_ids = {
+        (row_value(row, "group_id") or soc_alert_group_id(row_value(row, "group_key"))).strip()
+        for row in rows
+        if row_value(row, "group_id") or row_value(row, "group_key")
+    }
+    alert_ids = {
+        row_value(row, "alert_id").strip()
+        for row in rows
+        if row_value(row, "alert_id").strip()
+    }
+    terms = sorted(group_ids | alert_ids)
+    if not terms:
+        return {}
+    placeholders = ",".join("?" for _ in terms)
+    try:
+        found = conn.execute(
+            f"""
+            SELECT request_id, alert_id, group_id, status
+            FROM pcap_requests
+            WHERE group_id IN ({placeholders}) OR alert_id IN ({placeholders}) OR request_id IN ({placeholders})
+            ORDER BY COALESCE(completed_at, updated_at, created_at) DESC
+            """,
+            [*terms, *terms, *terms],
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    statuses: dict[str, str] = {}
+    for item in found:
+        status = str(item["status"] or "").strip().lower()
+        for key in ("group_id", "alert_id", "request_id"):
+            value = str(item[key] or "").strip()
+            if value and value not in statuses:
+                statuses[value] = status
+    return statuses
+
+
+def soc_alert_pcap_status(group_id: str, alert_id: str, analysis_index: dict[str, set[str]], request_statuses: dict[str, str]) -> dict:
+    """Return the compact PCAP table status for one grouped alert."""
+    group_id = str(group_id or "").strip()
+    alert_id = str(alert_id or "").strip()
+    if group_id in analysis_index.get("group_ids", set()) or alert_id in analysis_index.get("alert_ids", set()):
+        return {
+            "pcap_status_key": "analyzed",
+            "pcap_status_label": "Analyzed",
+            "pcap_status_detail": "Parsed Zeek/TShark PCAP analysis is available for this detection group",
+        }
+    request_status = request_statuses.get(group_id) or request_statuses.get(alert_id) or ""
+    if request_status in {"pending", "claimed", "fulfilled"}:
+        return {
+            "pcap_status_key": "queued",
+            "pcap_status_label": "Queued" if request_status in {"pending", "claimed"} else "Parsing",
+            "pcap_status_detail": f"PCAP request is {request_status}; parsed analysis is not available yet",
+        }
+    if request_status == "failed":
+        return {
+            "pcap_status_key": "error",
+            "pcap_status_label": "Failed",
+            "pcap_status_detail": "PCAP request failed before parsed analysis was produced",
+        }
+    return {
+        "pcap_status_key": "none",
+        "pcap_status_label": "None",
+        "pcap_status_detail": "No parsed PCAP analysis is available for this detection group",
+    }
+
+
 def sqlite_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     try:
         row = conn.execute(
@@ -4176,6 +4287,7 @@ SOC_ALERT_SORT_SQL = {
     "destination_port": "CAST(COALESCE(destination_port, '') AS INTEGER)",
     "ai": "'not-queued'",
     "enrichment": "'none'",
+    "pcap": "'none'",
     "log_source": "lower(coalesce(event_dataset, ''))",
     "size": "COALESCE(payload_size_bytes, 0)",
     "risk": "COALESCE(triage_score, 0)",
@@ -4280,7 +4392,13 @@ def soc_alert_group_ai_status(row: sqlite3.Row, group_id: str, ai_reports: dict 
     }
 
 
-def soc_alert_group_row_to_api(row: sqlite3.Row, statuses: dict, ai_reports: dict | None = None) -> dict:
+def soc_alert_group_row_to_api(
+    row: sqlite3.Row | dict,
+    statuses: dict,
+    ai_reports: dict | None = None,
+    pcap_analysis: dict[str, set[str]] | None = None,
+    pcap_requests: dict[str, str] | None = None,
+) -> dict:
     group_key = row["group_key"]
     group_id = soc_alert_group_id(group_key)
     local_status = statuses.get(group_id, {}) if isinstance(statuses, dict) else {}
@@ -4323,6 +4441,7 @@ def soc_alert_group_row_to_api(row: sqlite3.Row, statuses: dict, ai_reports: dic
     }
     data.update(soc_alert_group_ai_status(row, group_id, ai_reports))
     data.update(soc_alert_public_enrichment_status(enrichment_json))
+    data.update(soc_alert_pcap_status(group_id, row["alert_id"], pcap_analysis or {}, pcap_requests or {}))
     return data
 
 
@@ -4456,6 +4575,12 @@ def soc_alerts_summary_query_response(query: dict[str, list[str]]) -> tuple[int,
         tail = page_rows[-1]
         next_cursor = f"{tail['group_last_seen'] or tail['last_seen']}|{tail['group_id'] or soc_alert_group_id(tail['group_key'])}"
     ai_reports = soc_alert_static_ai_reports()
+    pcap_analysis = soc_alert_pcap_analysis_index()
+    try:
+        with soc_alert_db_connect() as conn:
+            pcap_requests = soc_alert_pcap_request_statuses(conn, page_rows)
+    except Exception:
+        pcap_requests = {}
     return 200, {
         "ok": True,
         "source": "sqlite-summary",
@@ -4474,7 +4599,7 @@ def soc_alerts_summary_query_response(query: dict[str, list[str]]) -> tuple[int,
         "sort": sort_key,
         "direction": sort_direction,
         "next_cursor": next_cursor,
-        "alerts": [soc_alert_group_row_to_api(row, statuses, ai_reports) for row in page_rows],
+        "alerts": [soc_alert_group_row_to_api(row, statuses, ai_reports, pcap_analysis, pcap_requests) for row in page_rows],
     }
 
 
@@ -4579,6 +4704,12 @@ def soc_alerts_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
         tail = page_rows[-1]
         next_cursor = f"{tail['group_last_seen'] or tail['last_seen']}|{soc_alert_group_id(tail['group_key'])}"
     ai_reports = soc_alert_static_ai_reports()
+    pcap_analysis = soc_alert_pcap_analysis_index()
+    try:
+        with soc_alert_db_connect() as conn:
+            pcap_requests = soc_alert_pcap_request_statuses(conn, page_rows)
+    except Exception:
+        pcap_requests = {}
     return 200, {
         "ok": True,
         "source": "sqlite",
@@ -4597,7 +4728,7 @@ def soc_alerts_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
         "sort": sort_key,
         "direction": sort_direction,
         "next_cursor": next_cursor,
-        "alerts": [soc_alert_group_row_to_api(row, statuses, ai_reports) for row in page_rows],
+        "alerts": [soc_alert_group_row_to_api(row, statuses, ai_reports, pcap_analysis, pcap_requests) for row in page_rows],
     }
 
 
@@ -4702,6 +4833,7 @@ def soc_alert_metrics_response(query: dict[str, list[str]]) -> tuple[int, dict]:
         "total": total,
         "grouped_total": len(grouped_rows),
         "grouped_observations": grouped_observations,
+        "pcap_ingest_size_bytes": directory_size_bytes(SOC_ALERT_PCAP_ARTIFACT_DIR),
         "latest_seen": latest,
         "by_filter_status": by_filter,
         "by_analyst_status": by_analyst_status,

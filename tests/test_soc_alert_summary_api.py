@@ -33,6 +33,8 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.portal.SOC_ALERT_STORE_DB = self.db_path
         self.portal.SOC_ALERT_STATUS_FILE = Path(self.tmp.name) / ".soc_alert_status.json"
         self.portal.SOC_ALERT_STATIC_STATUS_FILE = Path(self.tmp.name) / "soc-alerts-status.json"
+        self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR = Path(self.tmp.name) / "pcap-analysis"
+        self.portal.SOC_ALERT_PCAP_ARTIFACT_DIR = Path(self.tmp.name) / "pcap-artifacts"
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(
@@ -200,7 +202,26 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["alerts"][0]["seen_count"], 5)
         self.assertEqual(payload["alerts"][0]["ai_status_key"], "queued")
         self.assertEqual(payload["alerts"][0]["ai_status_label"], "Queued")
+        self.assertEqual(payload["alerts"][0]["pcap_status_key"], "none")
+        self.assertEqual(payload["alerts"][0]["pcap_status_label"], "None")
         self.assertNotIn("backend-suppressed-alert", [alert["representative_alert_id"] for alert in payload["alerts"]])
+
+    def test_alert_list_marks_groups_with_parsed_pcap_analysis(self) -> None:
+        newest_group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR.mkdir()
+        (self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR / "unit-pcap-analysis.json").write_text(
+            json.dumps({"request": {"group_id": newest_group_id, "alert_id": "newest-alert"}}),
+            encoding="utf-8",
+        )
+
+        status, payload = self.portal.soc_alerts_query_response({"limit": ["10"], "analyst_status": ["open"]})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["alerts"][0]["representative_alert_id"], "newest-alert")
+        self.assertEqual(payload["alerts"][0]["pcap_status_key"], "analyzed")
+        self.assertEqual(payload["alerts"][0]["pcap_status_label"], "Analyzed")
 
     def test_alert_list_uses_static_ai_status_when_available(self) -> None:
         newest_group_id = self.portal.soc_alert_group_id(
@@ -263,6 +284,8 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["alerts"][0]["representative_alert_id"], "backend-suppressed-alert")
 
     def test_metrics_count_backend_suppressed_groups_like_alert_table(self) -> None:
+        self.portal.SOC_ALERT_PCAP_ARTIFACT_DIR.mkdir()
+        (self.portal.SOC_ALERT_PCAP_ARTIFACT_DIR / "sample.pcap").write_bytes(b"pcap-data")
         status, payload = self.portal.soc_alert_metrics_response({"since": [""]})
 
         self.assertEqual(status, 200)
@@ -273,6 +296,7 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["by_analyst_status"]["suppressed"], 1)
         self.assertEqual(payload["by_analyst_status"]["acknowledged"], 0)
         self.assertEqual(payload["by_analyst_status"]["total"], 3)
+        self.assertEqual(payload["pcap_ingest_size_bytes"], len(b"pcap-data"))
 
     def test_event_snapshot_uses_consistent_status_and_metrics_counts(self) -> None:
         payload = self.portal.soc_alert_events_snapshot()

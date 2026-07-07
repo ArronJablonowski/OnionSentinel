@@ -23,9 +23,10 @@ This directory contains the Mac Studio LAN Portal backend and the generated SOC 
 ## Dashboard Features
 
 - API-backed paginated SOC Alerts table.
+- SOC Alerts table includes compact AI, enrichment, and PCAP analysis status columns.
 - Shared SQLite analyst state for open, acknowledged, and suppressed grouped detections.
 - Lazy-loaded Detailed Alert Reports.
-- Live `Latest Alert`, `Last n8n beacon`, AI activity, and SOC count metrics.
+- Live System Health, PCAP ingest size, AI activity, and SOC count metrics.
 - Flow page with data-flow diagram and privacy IP masking.
 - Threat Hunter route with expandable hunt recommendations and copyable KQL/OQL/OSQuery pivots.
 - Cyber Threat Intel route for future intelligence briefs, indicators, and enrichment context.
