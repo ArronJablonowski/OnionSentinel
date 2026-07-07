@@ -144,17 +144,29 @@ Import:
 
 ```text
 n8n/workflows/security-onion-configurable-scoring.workflow.json
+n8n/workflows/onion-sentinel-pcap-broker.workflow.json
 ```
 
 Replace:
 
 ```text
 REPLACE_WITH_RELAY_TOKEN
+REPLACE_WITH_PCAP_BROKER_TOKEN
 ```
 
-with the same token that will be placed in `/etc/so-alert-relay/relay.env` on the Pi.
+Use one token for alert ingestion and a separate token for PCAP broker access.
+The alert ingestion token must match `/etc/so-alert-relay/relay.env` on the Pi.
+The PCAP broker token must match the `pcap_broker.token` value rendered into
+`/opt/so-alert-relay/app/config.json` on the Pi.
 
-Activate the workflow.
+Activate both workflows. The PCAP broker workflow exposes relay-safe n8n proxy
+routes and keeps alert-store reachable only on the Docker network:
+
+```text
+POST /webhook/pcap-requests
+POST /webhook/pcap-claim
+POST /webhook/pcap-complete
+```
 
 The workflow writes one Obsidian-compatible Markdown report for each newly
 accepted alert. Duplicate alerts return `report_written=false` and do not
@@ -354,9 +366,28 @@ Test pull-only:
 sudo -u soalert /usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/so-alert-relay/app/config.json --pull-once
 ```
 
-PCAP fulfillment remains disabled until the n8n broker/proxy URL is configured
-in `/opt/so-alert-relay/app/config.json`. When enabled, it uses a separate
-Security Onion forced-command key and this relay mode:
+PCAP fulfillment remains disabled until the n8n broker/proxy URL, separate
+broker token, and path map are configured in
+`/opt/so-alert-relay/app/config.json`. The default n8n proxy configuration is:
+
+```json
+"pcap_broker": {
+  "enabled": true,
+  "url": "http://10.77.7.225:5678/webhook",
+  "token": "REPLACE_WITH_PCAP_BROKER_TOKEN",
+  "requests_method": "POST",
+  "paths": {
+    "requests": "/pcap-requests",
+    "claim": "/pcap-claim",
+    "complete": "/pcap-complete"
+  },
+  "timeout_seconds": 20,
+  "limit": 3
+}
+```
+
+When enabled, it uses a separate Security Onion forced-command key and this
+relay mode:
 
 ```bash
 sudo -u soalert /usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/so-alert-relay/app/config.json --process-pcap-requests

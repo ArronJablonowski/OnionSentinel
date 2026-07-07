@@ -85,7 +85,14 @@ PCAP fulfillment is disabled by default in `config/config.example.json`:
 
 ```json
 "pcap_broker": {
-  "enabled": false
+  "enabled": false,
+  "url": "http://10.77.7.225:5678/webhook",
+  "requests_method": "POST",
+  "paths": {
+    "requests": "/pcap-requests",
+    "claim": "/pcap-claim",
+    "complete": "/pcap-complete"
+  }
 }
 ```
 
@@ -94,6 +101,8 @@ requests, claims one request at a time, sends the bounded JSON request to the
 Security Onion forced-command PCAP key, and reports only artifact metadata back
 to the broker. Packet artifacts stay on Security Onion under
 `/nsm/pcapout/onion-sentinel`; they are runtime evidence, not repo content.
+Use a separate broker token from the alert ingestion token and store it only in
+the live relay config and live n8n workflow.
 
 ## Firewall Needs
 

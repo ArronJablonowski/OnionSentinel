@@ -8,7 +8,8 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | --- | --- |
 | `docker-compose.yml` | Runs n8n and alert-store containers. |
 | `.env.example` | Placeholder Telegram and enrichment settings. Copy to runtime `.env`; never commit live `.env`. |
-| `workflows/security-onion-configurable-scoring.workflow.json` | n8n workflow export. |
+| `workflows/security-onion-configurable-scoring.workflow.json` | n8n alert intake workflow export. |
+| `workflows/onion-sentinel-pcap-broker.workflow.json` | n8n PCAP broker proxy workflow export. |
 | `alert_store/` | SQLite-backed alert scoring, suppression, notification, and report logic. |
 | `alert_store/config/scoring_rules.json` | Tunable local filtering/scoring policy. |
 | `bin/` | Local AI prompt, analysis, scheduler, rollup, and stack management scripts. |
@@ -67,6 +68,23 @@ Set:
 - `TELEGRAM_ALERT_LEVELS=critical,high`
 
 Configure the relay token inside the imported n8n workflow validation node by replacing `REPLACE_WITH_RELAY_TOKEN`.
+
+Import `workflows/onion-sentinel-pcap-broker.workflow.json` when PCAP request
+fulfillment is enabled. Replace `REPLACE_WITH_PCAP_BROKER_TOKEN` in the live
+n8n copy only; keep the repo export placeholder-based. The relay should point
+`pcap_broker.url` at `http://10.77.7.225:5678/webhook`, use
+`requests_method: "POST"`, and map:
+
+```json
+{
+  "requests": "/pcap-requests",
+  "claim": "/pcap-claim",
+  "complete": "/pcap-complete"
+}
+```
+
+The n8n proxy keeps alert-store private to Docker while exposing only the
+relay-safe PCAP broker operations to the relay VLAN.
 
 Optional enrichment keys are also set in `$HOME/n8n-local/.env`. Blank or
 placeholder values are treated as disabled, so a source can be enabled or

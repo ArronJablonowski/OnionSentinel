@@ -26,12 +26,18 @@
     "retry_max_backoff_seconds": 10
   },
   "pcap_broker": {
-    "_comment": "Disabled until n8n exposes a relay-safe broker/proxy endpoint for alert-store PCAP requests.",
+    "_comment": "Disabled until the n8n PCAP broker proxy workflow is imported, tokenized, active, and reachable from the relay VLAN.",
     "enabled": false,
-    "url": "",
+    "url": "http://10.77.7.225:5678/webhook",
     "token": "",
+    "requests_method": "POST",
     "timeout_seconds": 20,
-    "limit": 3
+    "limit": 3,
+    "paths": {
+      "requests": "/pcap-requests",
+      "claim": "/pcap-claim",
+      "complete": "/pcap-complete"
+    }
   },
   "filters": {
     "_comment": "Leave Pi-side rule filtering empty. Rule drops, suppression, routing, and reporting are owned by Mac Studio alert-store/n8n.",

@@ -1,0 +1,143 @@
+{
+  "name": "Onion Sentinel PCAP Broker Proxy",
+  "description": "Relay-safe n8n proxy for alert-store PCAP broker endpoints. Uses a separate placeholder token from the alert ingestion webhook.",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pcap-requests",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "2a373562-1ad7-4880-b6bb-1810bc6f7550",
+      "name": "PCAP Requests Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "onion-sentinel-pcap-requests"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Relay-safe PCAP broker proxy. Keep alert-store private to Docker; only n8n is reachable from the relay VLAN.\nconst http = require('http');\nconst {URLSearchParams} = require('url');\nconst expectedToken = 'REPLACE_WITH_PCAP_BROKER_TOKEN';\nconst headers = $json.headers || {};\nconst token = headers['x-relay-token'] || headers['X-Relay-Token'];\nif (token !== expectedToken) {\n  return [{json: {ok: false, status: 'rejected', reason: 'invalid or missing X-Relay-Token'}}];\n}\nconst query = $json.query || {};\nconst body = $json.body || {};\nconst params = new URLSearchParams();\nfor (const [key, value] of Object.entries(query)) {\n  if (Array.isArray(value)) value.forEach(item => params.append(key, item));\n  else if (value !== undefined && value !== null && value !== '') params.set(key, value);\n}\nconst path = `/pcap/requests` + (params.toString() ? `?${params.toString()}` : '');\nfunction requestAlertStore() {\n  return new Promise((resolve, reject) => {\n    const data = `GET` === 'GET' ? null : JSON.stringify(body || {});\n    const req = http.request({\n      hostname: 'alert-store',\n      port: 8787,\n      path,\n      method: `GET`,\n      headers: data ? {'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data)} : {},\n      timeout: 20000,\n    }, res => {\n      let responseBody = '';\n      res.setEncoding('utf8');\n      res.on('data', chunk => responseBody += chunk);\n      res.on('end', () => resolve({statusCode: res.statusCode, body: responseBody}));\n    });\n    req.on('timeout', () => req.destroy(new Error('alert-store pcap broker timed out')));\n    req.on('error', reject);\n    if (data) req.write(data);\n    req.end();\n  });\n}\ntry {\n  const response = await requestAlertStore();\n  let payload;\n  try { payload = JSON.parse(response.body || '{}'); }\n  catch (error) { throw new Error(`alert-store returned non-JSON: ${response.body.slice(0, 200)}`); }\n  return [{json: {...payload, proxy_status_code: response.statusCode}}];\n} catch (error) {\n  return [{json: {ok: false, status: 'error', reason: String(error.message || error).slice(0, 240)}}];\n}\n"
+      },
+      "id": "01edf72e-7623-41e1-993e-de02d26ccdad",
+      "name": "List Pending PCAP Requests",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pcap-claim",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "80d54993-8b57-47e0-84aa-9022eef0afa2",
+      "name": "PCAP Claim Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        220
+      ],
+      "webhookId": "onion-sentinel-pcap-claim"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Relay-safe PCAP broker proxy. Keep alert-store private to Docker; only n8n is reachable from the relay VLAN.\nconst http = require('http');\nconst {URLSearchParams} = require('url');\nconst expectedToken = 'REPLACE_WITH_PCAP_BROKER_TOKEN';\nconst headers = $json.headers || {};\nconst token = headers['x-relay-token'] || headers['X-Relay-Token'];\nif (token !== expectedToken) {\n  return [{json: {ok: false, status: 'rejected', reason: 'invalid or missing X-Relay-Token'}}];\n}\nconst query = $json.query || {};\nconst body = $json.body || {};\nconst params = new URLSearchParams();\nfor (const [key, value] of Object.entries(query)) {\n  if (Array.isArray(value)) value.forEach(item => params.append(key, item));\n  else if (value !== undefined && value !== null && value !== '') params.set(key, value);\n}\nconst path = `/pcap/claim` + (params.toString() ? `?${params.toString()}` : '');\nfunction requestAlertStore() {\n  return new Promise((resolve, reject) => {\n    const data = `POST` === 'GET' ? null : JSON.stringify(body || {});\n    const req = http.request({\n      hostname: 'alert-store',\n      port: 8787,\n      path,\n      method: `POST`,\n      headers: data ? {'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data)} : {},\n      timeout: 20000,\n    }, res => {\n      let responseBody = '';\n      res.setEncoding('utf8');\n      res.on('data', chunk => responseBody += chunk);\n      res.on('end', () => resolve({statusCode: res.statusCode, body: responseBody}));\n    });\n    req.on('timeout', () => req.destroy(new Error('alert-store pcap broker timed out')));\n    req.on('error', reject);\n    if (data) req.write(data);\n    req.end();\n  });\n}\ntry {\n  const response = await requestAlertStore();\n  let payload;\n  try { payload = JSON.parse(response.body || '{}'); }\n  catch (error) { throw new Error(`alert-store returned non-JSON: ${response.body.slice(0, 200)}`); }\n  return [{json: {...payload, proxy_status_code: response.statusCode}}];\n} catch (error) {\n  return [{json: {ok: false, status: 'error', reason: String(error.message || error).slice(0, 240)}}];\n}\n"
+      },
+      "id": "4949242e-9dbc-458c-8024-9295b9e38d79",
+      "name": "Claim PCAP Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pcap-complete",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "2a86704b-6deb-4a4e-884f-57311107e627",
+      "name": "PCAP Complete Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        440
+      ],
+      "webhookId": "onion-sentinel-pcap-complete"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Relay-safe PCAP broker proxy. Keep alert-store private to Docker; only n8n is reachable from the relay VLAN.\nconst http = require('http');\nconst {URLSearchParams} = require('url');\nconst expectedToken = 'REPLACE_WITH_PCAP_BROKER_TOKEN';\nconst headers = $json.headers || {};\nconst token = headers['x-relay-token'] || headers['X-Relay-Token'];\nif (token !== expectedToken) {\n  return [{json: {ok: false, status: 'rejected', reason: 'invalid or missing X-Relay-Token'}}];\n}\nconst query = $json.query || {};\nconst body = $json.body || {};\nconst params = new URLSearchParams();\nfor (const [key, value] of Object.entries(query)) {\n  if (Array.isArray(value)) value.forEach(item => params.append(key, item));\n  else if (value !== undefined && value !== null && value !== '') params.set(key, value);\n}\nconst path = `/pcap/complete` + (params.toString() ? `?${params.toString()}` : '');\nfunction requestAlertStore() {\n  return new Promise((resolve, reject) => {\n    const data = `POST` === 'GET' ? null : JSON.stringify(body || {});\n    const req = http.request({\n      hostname: 'alert-store',\n      port: 8787,\n      path,\n      method: `POST`,\n      headers: data ? {'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data)} : {},\n      timeout: 20000,\n    }, res => {\n      let responseBody = '';\n      res.setEncoding('utf8');\n      res.on('data', chunk => responseBody += chunk);\n      res.on('end', () => resolve({statusCode: res.statusCode, body: responseBody}));\n    });\n    req.on('timeout', () => req.destroy(new Error('alert-store pcap broker timed out')));\n    req.on('error', reject);\n    if (data) req.write(data);\n    req.end();\n  });\n}\ntry {\n  const response = await requestAlertStore();\n  let payload;\n  try { payload = JSON.parse(response.body || '{}'); }\n  catch (error) { throw new Error(`alert-store returned non-JSON: ${response.body.slice(0, 200)}`); }\n  return [{json: {...payload, proxy_status_code: response.statusCode}}];\n} catch (error) {\n  return [{json: {ok: false, status: 'error', reason: String(error.message || error).slice(0, 240)}}];\n}\n"
+      },
+      "id": "a7308855-98f2-432c-afd2-e48a32408966",
+      "name": "Complete PCAP Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        440
+      ]
+    }
+  ],
+  "connections": {
+    "PCAP Requests Webhook": {
+      "main": [
+        [
+          {
+            "node": "List Pending PCAP Requests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PCAP Claim Webhook": {
+      "main": [
+        [
+          {
+            "node": "Claim PCAP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PCAP Complete Webhook": {
+      "main": [
+        [
+          {
+            "node": "Complete PCAP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [],
+  "createdAt": "2026-07-07T00:00:00.000Z",
+  "updatedAt": "2026-07-07T00:00:00.000Z",
+  "id": "onionSentinelPcapBroker",
+  "versionId": "e7ffac53-3c35-4017-9f1d-84b5ecd70b67",
+  "isArchived": false
+}

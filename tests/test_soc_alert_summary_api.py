@@ -262,6 +262,28 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["status_counts"]["total"], 3)
         self.assertEqual(payload["alerts"][0]["representative_alert_id"], "backend-suppressed-alert")
 
+    def test_metrics_count_backend_suppressed_groups_like_alert_table(self) -> None:
+        status, payload = self.portal.soc_alert_metrics_response({"since": [""]})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["source"], "sqlite-summary")
+        self.assertEqual(payload["grouped_total"], 3)
+        self.assertEqual(payload["by_analyst_status"]["open"], 2)
+        self.assertEqual(payload["by_analyst_status"]["active"], 2)
+        self.assertEqual(payload["by_analyst_status"]["suppressed"], 1)
+        self.assertEqual(payload["by_analyst_status"]["acknowledged"], 0)
+        self.assertEqual(payload["by_analyst_status"]["total"], 3)
+
+    def test_event_snapshot_uses_consistent_status_and_metrics_counts(self) -> None:
+        payload = self.portal.soc_alert_events_snapshot()
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["counts"]["open"], 2)
+        self.assertEqual(payload["counts"]["suppressed"], 0)
+        self.assertEqual(payload["metrics"]["by_analyst_status"]["open"], 2)
+        self.assertEqual(payload["metrics"]["by_analyst_status"]["suppressed"], 1)
+        self.assertEqual(payload["metrics"]["by_analyst_status"]["total"], payload["counts"]["total"])
+
     def test_acknowledged_group_is_hidden_from_open_slice(self) -> None:
         newest_group_id = self.portal.soc_alert_group_id(
             "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"

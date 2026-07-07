@@ -86,6 +86,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_metric_components.py" "
 chmod +x "$HERMES_SCRIPT_DIR/build_soc_alerts_dashboard.py"
 mkdir -p "$PORTAL_DIR"
 cp "$REPO_DIR/onion-sentinel-dashboard/report_portal.py" "$PORTAL_DIR/report_portal.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/soc_alert_api.py" "$PORTAL_DIR/soc_alert_api.py"
 chmod +x "$PORTAL_DIR/report_portal.py"
 
 if [[ ! -f "$STACK_DIR/.env" ]]; then

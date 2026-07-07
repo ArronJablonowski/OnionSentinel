@@ -302,6 +302,20 @@ Workflow ID: j237Tnda0cPniG1e
 Repo export: n8n/workflows/security-onion-configurable-scoring.workflow.json
 ```
 
+PCAP broker proxy workflow:
+
+```text
+Onion Sentinel PCAP Broker Proxy
+Workflow ID: onionSentinelPcapBroker
+Repo export: n8n/workflows/onion-sentinel-pcap-broker.workflow.json
+Production webhook paths: /pcap-requests, /pcap-claim, /pcap-complete
+```
+
+The PCAP proxy uses a separate `REPLACE_WITH_PCAP_BROKER_TOKEN` placeholder in
+Git. The live token is stored only in the Mac Studio n8n workflow/runtime config
+and the relay `pcap_broker.token` field. The relay calls n8n over TCP/5678; n8n
+then calls alert-store over the Docker-internal `alert-store:8787` service name.
+
 The workflow is split into separate operational nodes so filtering behavior is
 easy to inspect and tune:
 

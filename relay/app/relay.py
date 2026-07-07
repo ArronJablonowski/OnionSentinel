@@ -414,12 +414,23 @@ def broker_request(config: dict, method: str, path: str, payload_data: dict | No
     return parsed
 
 
+def broker_path(config: dict, name: str, default_path: str) -> str:
+    paths = config.get("pcap_broker", {}).get("paths", {})
+    path = paths.get(name, default_path) if isinstance(paths, dict) else default_path
+    return "/" + str(path or default_path).lstrip("/")
+
+
 def process_pcap_requests(config: dict) -> dict:
     broker = config.get("pcap_broker", {})
     if not broker.get("enabled"):
         return {"ok": True, "enabled": False, "processed": 0}
     limit = max(1, min(10, int(broker.get("limit", 3) or 3)))
-    pending = broker_request(config, "GET", f"/pcap/requests?status=pending&limit={limit}")
+    pending_path = f"{broker_path(config, 'requests', '/pcap/requests')}?status=pending&limit={limit}"
+    requests_method = str(broker.get("requests_method") or "GET").strip().upper()
+    if requests_method not in {"GET", "POST"}:
+        requests_method = "GET"
+    pending_payload = {"status": "pending", "limit": limit} if requests_method == "POST" else None
+    pending = broker_request(config, requests_method, pending_path, pending_payload)
     processed = 0
     fulfilled = 0
     failed = 0
@@ -428,7 +439,7 @@ def process_pcap_requests(config: dict) -> dict:
         claim = broker_request(
             config,
             "POST",
-            "/pcap/claim",
+            broker_path(config, "claim", "/pcap/claim"),
             {"request_id": request_id, "relay_host": socket.gethostname()},
         )
         if not claim.get("claimed"):
@@ -438,7 +449,7 @@ def process_pcap_requests(config: dict) -> dict:
             broker_request(
                 config,
                 "POST",
-                "/pcap/complete",
+                broker_path(config, "complete", "/pcap/complete"),
                 {
                     "request_id": request_id,
                     "status": "fulfilled",
@@ -453,7 +464,7 @@ def process_pcap_requests(config: dict) -> dict:
             broker_request(
                 config,
                 "POST",
-                "/pcap/complete",
+                broker_path(config, "complete", "/pcap/complete"),
                 {
                     "request_id": request_id,
                     "status": "failed",

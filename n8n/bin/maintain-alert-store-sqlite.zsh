@@ -77,6 +77,8 @@ recover_candidate() {
     rm -f "$DB_PATH-wal" "$DB_PATH-shm"
     (cd "$STACK_DIR" && /usr/local/bin/docker compose up -d alert-store >/dev/null)
     log "auto_recover_swap_complete"
+    log "maintenance_complete recovered_db=$recovered"
+    exit 0
   else
     log "AUTO_RECOVER disabled; leaving live DB unchanged"
     exit 2

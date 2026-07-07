@@ -39,7 +39,7 @@ class RelayPcapBrokerTest(unittest.TestCase):
 
         def fake_broker(config, method, path, payload_data=None):
             calls.append((method, path, payload_data))
-            if method == "GET":
+            if path.startswith("/pcap/requests"):
                 return {"ok": True, "requests": [request]}
             if path == "/pcap/claim":
                 return {"ok": True, "claimed": True, "request": request}
@@ -64,6 +64,51 @@ class RelayPcapBrokerTest(unittest.TestCase):
         export.assert_called_once()
         self.assertEqual(calls[-1][1], "/pcap/complete")
         self.assertEqual(calls[-1][2]["status"], "fulfilled")
+
+    def test_broker_paths_can_match_n8n_webhook_routes(self) -> None:
+        request = {"request_id": "pcap-unit-test", "source_ip": "192.0.2.10", "destination_ip": "198.51.100.10"}
+        calls: list[tuple[str, str, dict | None]] = []
+
+        def fake_broker(config, method, path, payload_data=None):
+            calls.append((method, path, payload_data))
+            if path.startswith("/pcap-requests"):
+                return {"ok": True, "requests": [request]}
+            if path == "/pcap-claim":
+                return {"ok": True, "claimed": True, "request": request}
+            if path == "/pcap-complete":
+                return {"ok": True, "status": payload_data["status"], "request": payload_data}
+            raise AssertionError(f"unexpected broker call: {method} {path}")
+
+        config = {
+            "pcap_broker": {
+                "enabled": True,
+                "limit": 1,
+                "requests_method": "POST",
+                "paths": {
+                    "requests": "/pcap-requests",
+                    "claim": "/pcap-claim",
+                    "complete": "/pcap-complete",
+                },
+            }
+        }
+        with mock.patch.object(self.relay, "broker_request", side_effect=fake_broker):
+            with mock.patch.object(
+                self.relay,
+                "run_ssh_pcap_export",
+                return_value={
+                    "artifact_path": "/nsm/pcapout/onion-sentinel/pcap-unit-test.tar",
+                    "artifact_sha256": "a" * 64,
+                    "artifact_size_bytes": 1024,
+                },
+            ):
+                result = self.relay.process_pcap_requests(config)
+
+        self.assertEqual(result["fulfilled"], 1)
+        self.assertEqual(calls[0][0], "POST")
+        self.assertEqual(calls[0][1], "/pcap-requests?status=pending&limit=1")
+        self.assertEqual(calls[0][2], {"status": "pending", "limit": 1})
+        self.assertEqual(calls[1][1], "/pcap-claim")
+        self.assertEqual(calls[2][1], "/pcap-complete")
 
 
 if __name__ == "__main__":

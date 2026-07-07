@@ -27,6 +27,12 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+PORTAL_SOURCE_DIR = Path(__file__).resolve().parent
+if str(PORTAL_SOURCE_DIR) not in sys.path:
+    sys.path.insert(0, str(PORTAL_SOURCE_DIR))
+
+import soc_alert_api
+
 HOME = Path.home()
 DEFAULT_PORT = 8765
 DEFAULT_HOST = "0.0.0.0"
@@ -4337,42 +4343,15 @@ def soc_alert_row_matches_analyst_status(row: sqlite3.Row, group_id: str, status
 
 
 def soc_alert_status_bucket_counts(rows: list[sqlite3.Row], statuses: dict) -> dict[str, int]:
-    counts = {"open": 0, "acknowledged": 0, "suppressed": 0}
-    for row in rows:
+    def group_id_for_row(row: sqlite3.Row) -> str:
         group_key = row["group_key"] if "group_key" in row.keys() else ""
-        group_id = row["group_id"] if "group_id" in row.keys() and row["group_id"] else soc_alert_group_id(group_key)
-        for status in counts:
-            if soc_alert_row_matches_analyst_status(row, group_id, statuses, status):
-                counts[status] += 1
-    counts["active"] = counts["open"]
-    counts["total"] = counts["open"] + counts["suppressed"] + counts["acknowledged"]
-    return counts
+        return row["group_id"] if "group_id" in row.keys() and row["group_id"] else soc_alert_group_id(group_key)
+
+    return soc_alert_api.status_bucket_counts(rows, statuses, group_id_for_row)
 
 
 def soc_alert_top_endpoint_metrics(rows: list[sqlite3.Row]) -> dict[str, str]:
-    counters: dict[str, dict[str, int]] = {
-        "source_ip": {},
-        "destination_ip": {},
-        "destination_port": {},
-    }
-    for row in rows:
-        weight = max(1, int(row["total_seen_count"] or row["seen_count"] or row["raw_alert_count"] or 1))
-        for field in counters:
-            value = str(row[field] or "").strip()
-            if not value or value.lower() in {"n/a", "na", "unknown", "unknown-source", "unknown-destination", "none", "null", "-"}:
-                continue
-            counters[field][value] = counters[field].get(value, 0) + weight
-
-    def top_value(values: dict[str, int]) -> str:
-        if not values:
-            return "n/a"
-        return sorted(values.items(), key=lambda item: (-item[1], item[0]))[0][0]
-
-    return {
-        "source_ip": top_value(counters["source_ip"]),
-        "destination_ip": top_value(counters["destination_ip"]),
-        "destination_port": top_value(counters["destination_port"]),
-    }
+    return soc_alert_api.top_endpoint_metrics(rows)
 
 
 def soc_alerts_summary_query_response(query: dict[str, list[str]]) -> tuple[int, dict] | None:
@@ -4683,7 +4662,8 @@ def soc_alert_metrics_response(query: dict[str, list[str]]) -> tuple[int, dict]:
                 summary_where = " where last_seen >= ?" if since else ""
                 grouped_rows = conn.execute(
                     f"""
-                    SELECT group_id, group_key, raw_alert_count, total_seen_count, last_seen
+                    SELECT group_id, group_key, raw_alert_count, total_seen_count,
+                           last_seen, filter_status
                     FROM alert_group_summary
                     {summary_where}
                     """,
@@ -4695,10 +4675,11 @@ def soc_alert_metrics_response(query: dict[str, list[str]]) -> tuple[int, dict]:
                     SELECT {group_expr} AS group_key,
                            COUNT(*) AS raw_alert_count,
                            COALESCE(SUM(MAX(1, COALESCE(seen_count, 1))), 0) AS total_seen_count,
-                           MAX(last_seen) AS last_seen
+                           MAX(last_seen) AS last_seen,
+                           COALESCE(NULLIF(filter_status, ''), 'accepted') AS filter_status
                     FROM alerts
                     {where}
-                    GROUP BY group_key
+                    GROUP BY group_key, filter_status
                     """,
                     args,
                 ).fetchall()
@@ -4709,14 +4690,9 @@ def soc_alert_metrics_response(query: dict[str, list[str]]) -> tuple[int, dict]:
     except Exception as e:
         return soc_alert_api_error(str(e), 503)
     statuses = load_soc_alert_statuses()
-    by_analyst_status = {"open": 0, "acknowledged": 0, "suppressed": 0}
+    by_analyst_status = soc_alert_status_bucket_counts(grouped_rows, statuses)
     grouped_observations = 0
     for row in grouped_rows:
-        group_id = soc_alert_group_id(row["group_key"])
-        status = (statuses.get(group_id, {}) or {}).get("status", "open") if isinstance(statuses, dict) else "open"
-        if status not in by_analyst_status:
-            status = "open"
-        by_analyst_status[status] += 1
         grouped_observations += max(int(row["raw_alert_count"] or 0), int(row["total_seen_count"] or 0))
     return 200, {
         "ok": True,
