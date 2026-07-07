@@ -523,9 +523,9 @@ launchd argument: `--max-per-run 0`, where zero means unlimited queue drain
 - The local AI runner repairs minor response schema drift, such as missing
   `tuning_reason`, with explicit safe defaults so a single imperfect local model
   response does not block later alerts.
-- If `sync_report_portal.py` fails because an unrelated Hermes dashboard
-  builder cannot access its source directory, the AI trigger still copies
-  `~/SOC Alerts Web` directly to the SOC Alerts portal library path.
+- The scheduled AI trigger uses `~/n8n-local/bin/sync-soc-alerts-portal.py`
+  to copy only `~/SOC Alerts Web` into the SOC Alerts portal library path, so
+  unrelated Hermes dashboard builders cannot block SOC dashboard refresh.
 
 Validation:
 

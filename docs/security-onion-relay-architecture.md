@@ -342,7 +342,7 @@ The Hermes portal builder reads the Markdown folder and publishes the LAN view:
 ```text
 Source: $HOME/Documents/SOC Alerts
 Builder: $HOME/.hermes/scripts/build_soc_alerts_dashboard.py
-Sync: $HOME/.hermes/scripts/sync_report_portal.py
+Sync: $HOME/n8n-local/bin/sync-soc-alerts-portal.py
 Portal: http://10.77.7.225:8765/view/b68c5a48b9778061/
 ```
 
@@ -455,7 +455,7 @@ Validation command after redeploy:
 
 ```bash
 python3 $HOME/.hermes/scripts/build_soc_alerts_dashboard.py
-python3 $HOME/.hermes/scripts/sync_report_portal.py
+python3 $HOME/n8n-local/bin/sync-soc-alerts-portal.py
 ```
 
 Then confirm the served HTML contains `data-view="overview"` and the
@@ -610,10 +610,11 @@ and missed runs, while the lock file still prevents overlapping Ollama jobs.
 The local AI runner also records repaired schema drift in the JSON artifact, so
 missing non-critical fields such as `tuning_reason` do not block later alerts.
 
-If the general Hermes portal sync fails because an unrelated dashboard builder
-cannot access its source directory, the AI trigger falls back to copying only
+The AI trigger uses the Onion Sentinel-owned
+`$HOME/n8n-local/bin/sync-soc-alerts-portal.py` helper to copy only
 `$HOME/SOC Alerts Web` into
-`$HOME/report_portal/library/Cybersecurity/SOC Alerts`.
+`$HOME/report_portal/library/Cybersecurity/SOC Alerts`. This keeps scheduled
+SOC alert analysis independent from unrelated local Hermes dashboard builders.
 
 This keeps the Raspberry Pi as a simple transport layer. AI scheduling, prompt
 construction, model execution, artifact storage, and UI refresh all live on the

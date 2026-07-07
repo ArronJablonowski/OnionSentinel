@@ -130,7 +130,7 @@ immediately.
 
 ```bash
 python3 "$HOME/.hermes/scripts/build_soc_alerts_dashboard.py"
-python3 "$HOME/.hermes/scripts/sync_report_portal.py"
+python3 "$HOME/n8n-local/bin/sync-soc-alerts-portal.py"
 ```
 
 ## Drop Rule Example
