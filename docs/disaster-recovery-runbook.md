@@ -299,9 +299,52 @@ The maintenance job creates verified SQLite backups and recovered candidates
 when corruption is detected. It does not replace the live DB unless
 `ALERT_STORE_AUTO_RECOVER=1` is explicitly set for that run.
 
+If `quick_check` reports index-only damage such as `wrong # of entries in
+index ...`, or page cleanup issues that still allow reads, use a short
+alert-store maintenance window. Keep all backups in the Mac Studio runtime
+tree and never copy them into Git:
+
+```bash
+ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose stop alert-store'
+ssh aj_lobster@10.77.7.225 'ts=$(date +%Y%m%dT%H%M%S%z); cp -p "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "$HOME/n8n-local/alert_store_backups/alerts.sqlite3.pre-index-repair-$ts.bak"'
+ssh aj_lobster@10.77.7.225 'sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "REINDEX;"'
+ssh aj_lobster@10.77.7.225 'ts=$(date +%Y%m%dT%H%M%S%z); out="$HOME/n8n-local/alert_store_data/alerts.repaired-$ts.sqlite3"; rm -f "$out"; sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "VACUUM INTO '\''$out'\'';"; sqlite3 "$out" "PRAGMA integrity_check;"; mv "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "$HOME/n8n-local/alert_store_data/alerts.sqlite3.pre-vacuum-replace-$ts.bak"; mv "$out" "$HOME/n8n-local/alert_store_data/alerts.sqlite3"; chmod 0644 "$HOME/n8n-local/alert_store_data/alerts.sqlite3"'
+ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose up -d alert-store'
+ssh aj_lobster@10.77.7.225 'sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "PRAGMA quick_check;"'
+```
+
+After the container is healthy, run one relay service cycle and confirm the
+journal reports `alert_relay=ok pcap_broker=ok`.
+
 If corruption is isolated to n8n execution history, stop n8n, back up the
 database, recover or clear execution history, verify `PRAGMA quick_check;`,
 then start n8n again. Do not copy the n8n runtime database into Git.
+
+For high-volume relay webhooks, the repo compose template keeps bounded n8n
+execution history in PostgreSQL and prunes old rows. Earlier SQLite-only
+deployments used reduced execution persistence to limit write pressure, but the
+PostgreSQL-backed deployment should keep successful and failed execution status
+available for operational debugging.
+
+If n8n continues to produce `SQLITE_IOERR` or `SQLITE_CORRUPT` during webhook
+bursts after this tuning, migrate n8n from SQLite to PostgreSQL. The repo
+compose template includes a PostgreSQL service for n8n metadata/execution state
+only. Keep alert-store SQLite separate; it remains the operational alert
+database.
+
+SQLite-to-PostgreSQL migration outline:
+
+```bash
+ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && ts=$(date +%Y%m%dT%H%M%S%z) && mkdir -p "n8n_data/migration-exports/$ts/entities" && /usr/local/bin/docker compose stop n8n && /usr/local/bin/docker compose run --rm --entrypoint n8n n8n export:entities --outputDir="/home/node/.n8n/migration-exports/$ts/entities" && printf "%s\n" "$ts" > n8n_data/migration-exports/latest-postgres-migration.txt'
+ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose stop n8n'
+ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose up -d postgres'
+ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose run --rm --entrypoint n8n n8n import:entities --inputDir="/home/node/.n8n/migration-exports/<timestamp>/entities" --truncateTables'
+ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose up -d n8n'
+```
+
+Use a runtime-only `N8N_POSTGRES_PASSWORD` in `$HOME/n8n-local/.env`. Do not
+commit the migration export, PostgreSQL data directory, n8n runtime DB, or any
+credential export.
 
 ## 3. Restore Security Onion Wrapper
 

@@ -1,4 +1,23 @@
 services:
+  postgres:
+    # n8n's internal runtime DB needs higher write concurrency than SQLite can
+    # reliably provide under relay webhook bursts. This database is for n8n
+    # metadata/execution state only; alert-store remains the SOC alert source.
+    image: postgres:16-alpine
+    container_name: n8n-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${N8N_POSTGRES_DB:-n8n}
+      - POSTGRES_USER=${N8N_POSTGRES_USER:-n8n}
+      - POSTGRES_PASSWORD=${N8N_POSTGRES_PASSWORD:-replace-with-n8n-postgres-password}
+    volumes:
+      - ./n8n_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${N8N_POSTGRES_USER:-n8n} -d ${N8N_POSTGRES_DB:-n8n}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   alert-store:
     # Uses the n8n image so sqlite3 is already available; alert-store itself is
     # the Node script mounted at /app/alert_store.js.
@@ -60,10 +79,30 @@ services:
     restart: unless-stopped
     ports:
       - "5678:5678"
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       - TZ=America/Denver
       # Local HTTP deployment; do not expose this service directly to the Internet.
       - N8N_SECURE_COOKIE=false
+      # n8n internal metadata and execution history use PostgreSQL for reliable
+      # webhook concurrency. This is separate from alert-store's SQLite DB.
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${N8N_POSTGRES_DB:-n8n}
+      - DB_POSTGRESDB_USER=${N8N_POSTGRES_USER:-n8n}
+      - DB_POSTGRESDB_PASSWORD=${N8N_POSTGRES_PASSWORD:-replace-with-n8n-postgres-password}
+      # Keep bounded execution history in Postgres for operational debugging.
+      # The row-count cap prevents unbounded growth during alert bursts.
+      - EXECUTIONS_DATA_SAVE_ON_SUCCESS=${EXECUTIONS_DATA_SAVE_ON_SUCCESS:-all}
+      - EXECUTIONS_DATA_SAVE_ON_ERROR=${EXECUTIONS_DATA_SAVE_ON_ERROR:-all}
+      - EXECUTIONS_DATA_SAVE_ON_PROGRESS=${EXECUTIONS_DATA_SAVE_ON_PROGRESS:-false}
+      - EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS=${EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS:-false}
+      - EXECUTIONS_DATA_PRUNE=${EXECUTIONS_DATA_PRUNE:-true}
+      - EXECUTIONS_DATA_MAX_AGE=${EXECUTIONS_DATA_MAX_AGE:-168}
+      - EXECUTIONS_DATA_PRUNE_MAX_COUNT=${EXECUTIONS_DATA_PRUNE_MAX_COUNT:-5000}
       # The workflow uses http/url for alert-store and fs/path to render
       # Obsidian-compatible Markdown reports into /soc-alerts.
       - NODE_FUNCTION_ALLOW_BUILTIN=http,https,url,fs,path

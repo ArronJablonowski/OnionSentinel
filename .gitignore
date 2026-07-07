@@ -29,6 +29,8 @@ authorized_keys.local
 *.db
 *.db-*
 n8n_data/
+n8n_postgres_data/
+n8n_migration_exports/
 alert_store_data/
 soc-alerts/
 pcap-evidence/
