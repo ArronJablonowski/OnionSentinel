@@ -2419,6 +2419,76 @@ async function listPcapRequests(query = new URLSearchParams()) {
   return {ok: true, status: status || 'all', requests: rows.map(pcapRequestFromRow)};
 }
 
+async function claimPcapRequest(payload) {
+  const requestId = safeString(payload?.request_id, 64);
+  if (!requestId) throw new Error('request_id is required');
+  const relayHost = safeString(payload?.relay_host || 'relay', 120);
+  const now = nowUtc();
+  const existing = await get('SELECT * FROM pcap_requests WHERE request_id = ?', [requestId]);
+  if (!existing) throw new Error('pcap request not found');
+  if (existing.status && !['pending', 'claimed'].includes(existing.status)) {
+    return {ok: true, claimed: false, status: existing.status, request: pcapRequestFromRow(existing)};
+  }
+  await run(
+    `
+      UPDATE pcap_requests
+      SET status = 'claimed',
+          relay_host = ?,
+          error = NULL,
+          updated_at = ?
+      WHERE request_id = ?
+        AND status IN ('pending', 'claimed')
+    `,
+    [relayHost, now, requestId],
+  );
+  const row = await get('SELECT * FROM pcap_requests WHERE request_id = ?', [requestId]);
+  return {ok: true, claimed: row.status === 'claimed', status: row.status, request: pcapRequestFromRow(row)};
+}
+
+async function completePcapRequest(payload) {
+  const requestId = safeString(payload?.request_id, 64);
+  if (!requestId) throw new Error('request_id is required');
+  const requestedStatus = safeString(payload?.status, 32).toLowerCase();
+  if (!['fulfilled', 'failed', 'rejected'].includes(requestedStatus)) {
+    throw new Error('status must be fulfilled, failed, or rejected');
+  }
+  const now = nowUtc();
+  const artifactPath = safeString(payload?.artifact_path, 1024) || null;
+  const artifactSha256 = safeString(payload?.artifact_sha256, 128) || null;
+  const artifactSizeBytes = integerField(payload?.artifact_size_bytes);
+  const relayHost = safeString(payload?.relay_host, 120) || null;
+  const error = safeString(payload?.error, 500) || null;
+  if (requestedStatus === 'fulfilled' && (!artifactPath || !artifactSha256 || !artifactSizeBytes)) {
+    throw new Error('fulfilled pcap request requires artifact_path, artifact_sha256, and artifact_size_bytes');
+  }
+  await run(
+    `
+      UPDATE pcap_requests
+      SET status = ?,
+          relay_host = COALESCE(?, relay_host),
+          artifact_path = ?,
+          artifact_sha256 = ?,
+          artifact_size_bytes = ?,
+          error = ?,
+          updated_at = ?
+      WHERE request_id = ?
+    `,
+    [
+      requestedStatus,
+      relayHost,
+      artifactPath,
+      artifactSha256,
+      artifactSizeBytes,
+      requestedStatus === 'fulfilled' ? null : error,
+      now,
+      requestId,
+    ],
+  );
+  const row = await get('SELECT * FROM pcap_requests WHERE request_id = ?', [requestId]);
+  if (!row) throw new Error('pcap request not found');
+  return {ok: true, status: row.status, request: pcapRequestFromRow(row)};
+}
+
 function readJsonBody(request) {
   // n8n should POST one alert object per request. Arrays are rejected to avoid
   // partial batch inserts that are harder to reason about.
@@ -2507,6 +2577,21 @@ async function handleRequest(request, response) {
     if (request.method === 'GET' && parsedUrl.pathname === '/pcap/requests') {
       // Intended for relay polling and operator diagnostics.
       const result = await listPcapRequests(parsedUrl.searchParams);
+      sendJson(response, 200, result);
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/pcap/claim') {
+      // Relay claims a pending request before contacting Security Onion.
+      const payload = await readJsonBody(request);
+      const result = await claimPcapRequest(payload);
+      sendJson(response, 200, result);
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/pcap/complete') {
+      // Relay reports fulfillment metadata only. Packet artifacts stay on the
+      // controlled runtime path and are never committed to the DR repo.
+      const payload = await readJsonBody(request);
+      const result = await completePcapRequest(payload);
       sendJson(response, 200, result);
       return;
     }

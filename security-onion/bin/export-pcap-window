@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Bounded PCAP extraction wrapper for Onion Sentinel.
+
+Reads one JSON request from stdin, validates network tuple and time bounds, and
+writes a tar artifact containing tcpdump-filtered pcap parts under
+/nsm/pcapout/onion-sentinel. The wrapper prints metadata JSON only; packet
+contents never go to stdout/stderr.
+"""
+from __future__ import annotations
+
+import hashlib
+import ipaddress
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+
+PCAP_ROOT = Path(os.environ.get("ONION_SENTINEL_PCAP_ROOT", "/nsm/suripcap"))
+OUTPUT_ROOT = Path(os.environ.get("ONION_SENTINEL_PCAP_OUTPUT_ROOT", "/nsm/pcapout/onion-sentinel"))
+MAX_WINDOW_SECONDS = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_WINDOW_SECONDS", "300"))
+MAX_LOOKBACK_HOURS = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_LOOKBACK_HOURS", "24"))
+MAX_CANDIDATE_FILES = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_CANDIDATE_FILES", "80"))
+
+
+def fail(reason: str, code: int = 1) -> None:
+    print(json.dumps({"ok": False, "status": "failed", "error": reason}, sort_keys=True))
+    raise SystemExit(code)
+
+
+def clean_token(value: object, max_len: int = 200) -> str:
+    return str(value or "").strip()[:max_len]
+
+
+def parse_time(value: object) -> datetime:
+    raw = clean_token(value, 80).replace("  ", "T")
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        fail(f"invalid timestamp: {value}")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def parse_port(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        fail(f"invalid port: {value}")
+    if port < 1 or port > 65535:
+        fail(f"port out of range: {port}")
+    return port
+
+
+def safe_request_id(value: object) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", clean_token(value, 80)).strip("._")
+    return cleaned or datetime.now(timezone.utc).strftime("pcap-%Y%m%dT%H%M%SZ")
+
+
+def bpf_for_request(req: dict) -> str:
+    src = str(ipaddress.ip_address(clean_token(req.get("source_ip"), 64)))
+    dst = str(ipaddress.ip_address(clean_token(req.get("destination_ip"), 64)))
+    src_port = parse_port(req.get("source_port"))
+    dst_port = parse_port(req.get("destination_port"))
+    parts = [f"host {src}", f"host {dst}"]
+    if src_port:
+        parts.append(f"port {src_port}")
+    if dst_port:
+        parts.append(f"port {dst_port}")
+    return " and ".join(parts)
+
+
+def candidate_files(start: datetime, end: datetime) -> list[Path]:
+    now = datetime.now(timezone.utc)
+    lookback_seconds = max(3600, min(MAX_LOOKBACK_HOURS * 3600, int((now - start).total_seconds()) + 3600))
+    find_cmd = [
+        "find",
+        str(PCAP_ROOT),
+        "-type",
+        "f",
+        "-name",
+        "so-pcap.*",
+        "-mmin",
+        f"-{max(1, lookback_seconds // 60)}",
+        "-printf",
+        "%T@ %p\n",
+    ]
+    result = subprocess.run(find_cmd, check=False, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        fail("failed to enumerate pcap files")
+    files: list[Path] = []
+    for line in result.stdout.splitlines():
+        try:
+            _, path = line.split(" ", 1)
+        except ValueError:
+            continue
+        files.append(Path(path))
+    return files[-MAX_CANDIDATE_FILES:]
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def main() -> int:
+    try:
+        req = json.loads(sys.stdin.read() or "{}")
+    except json.JSONDecodeError as exc:
+        fail(f"invalid JSON: {exc}")
+    if not isinstance(req, dict):
+        fail("request must be a JSON object")
+
+    request_id = safe_request_id(req.get("request_id"))
+    first_seen = parse_time(req.get("first_seen"))
+    last_seen = parse_time(req.get("last_seen"))
+    requested_window = parse_port(req.get("max_window_seconds")) or 120
+    window_seconds = max(30, min(MAX_WINDOW_SECONDS, requested_window))
+    duration = max(0, int((last_seen - first_seen).total_seconds()))
+    if duration > window_seconds:
+        start = last_seen - timedelta(seconds=window_seconds)
+        end = last_seen
+    else:
+        pad = max(0, (window_seconds - duration) // 2)
+        start = first_seen - timedelta(seconds=pad)
+        end = last_seen + timedelta(seconds=pad)
+
+    bpf = bpf_for_request(req)
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    work_dir = OUTPUT_ROOT / request_id
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    work_dir.mkdir(mode=0o750)
+
+    part_paths: list[Path] = []
+    for index, pcap in enumerate(candidate_files(start, end), start=1):
+        part = work_dir / f"part-{index:03d}.pcap"
+        cmd = ["tcpdump", "-r", str(pcap), "-w", str(part), bpf]
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=60)
+        if result.returncode not in (0, 1):
+            continue
+        if part.exists() and part.stat().st_size > 24:
+            part_paths.append(part)
+        elif part.exists():
+            part.unlink()
+
+    if not part_paths:
+        fail("no matching packets found", code=2)
+
+    artifact = OUTPUT_ROOT / f"{request_id}.tar"
+    with tarfile.open(artifact, "w") as tar:
+        for part in part_paths:
+            tar.add(part, arcname=part.name)
+
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "status": "fulfilled",
+                "request_id": request_id,
+                "artifact_path": str(artifact),
+                "artifact_sha256": sha256_file(artifact),
+                "artifact_size_bytes": artifact.stat().st_size,
+                "part_count": len(part_paths),
+                "window_start": start.strftime("%Y-%m-%d  %H:%M:%S%z"),
+                "window_end": end.strftime("%Y-%m-%d  %H:%M:%S%z"),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

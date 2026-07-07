@@ -303,6 +303,16 @@ Test locally:
 sudo -u so-ai-relay sudo -n /usr/local/sbin/export-recent-alerts | jq '.alerts | length'
 ```
 
+For PCAP fulfillment, install a separate forced-command public key using
+`security-onion/ssh/authorized_keys.pcap.example`. The associated wrapper is:
+
+```text
+/usr/local/sbin/export-pcap-window
+```
+
+It accepts a bounded JSON request on stdin and writes runtime-only artifacts to
+`/nsm/pcapout/onion-sentinel`.
+
 ## 4. Restore Pi Relay
 
 On the Pi:
@@ -342,6 +352,14 @@ Test pull-only:
 
 ```bash
 sudo -u soalert /usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/so-alert-relay/app/config.json --pull-once
+```
+
+PCAP fulfillment remains disabled until the n8n broker/proxy URL is configured
+in `/opt/so-alert-relay/app/config.json`. When enabled, it uses a separate
+Security Onion forced-command key and this relay mode:
+
+```bash
+sudo -u soalert /usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/so-alert-relay/app/config.json --process-pcap-requests
 ```
 
 Test service:

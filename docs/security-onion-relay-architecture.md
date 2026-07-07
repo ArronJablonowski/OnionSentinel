@@ -124,6 +124,7 @@ flowchart LR
 | Secret env | `/etc/so-alert-relay/relay.env` |
 | SSH hardening | `/etc/ssh/sshd_config.d/99-key-only-admin.conf` |
 | Security Onion key | `/opt/so-alert-relay/keys/so-ai-relay_ed25519` |
+| Security Onion PCAP key | `/opt/so-alert-relay/keys/so-ai-relay-pcap_ed25519` |
 | State DB | `/opt/so-alert-relay/state/seen.sqlite3` |
 | Raw batches | `/opt/so-alert-relay/state/batches` |
 | New alert files | `/opt/so-alert-relay/state/new-alerts` |
@@ -140,6 +141,14 @@ Webhook delivery uses bounded retry/backoff for transient downstream failures:
 HTTP `408`, `409`, `425`, `429`, and `5xx` are retried; client/auth failures are
 not. Each alert is marked seen immediately after its own successful POST so a
 partial outage resumes with the remaining unposted alerts on the next timer run.
+
+PCAP fulfillment is brokered separately from alert polling. Alert-store owns the
+request queue and exposes pending/claim/complete state. The relay should poll a
+relay-safe n8n broker/proxy endpoint, claim pending requests, and use a separate
+Security Onion forced-command key that can run only
+`/usr/local/sbin/export-pcap-window`. The wrapper validates the request JSON,
+uses bounded time windows, and writes artifacts under
+`/nsm/pcapout/onion-sentinel`.
 
 The systemd service calls `relay_health_wrapper.py`. The wrapper runs the relay, records health state, sends a Telegram notification on first failure, suppresses repeated failure spam, and sends a recovery notification once the relay succeeds again.
 

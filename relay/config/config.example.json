@@ -3,7 +3,8 @@
     "_comment": "Restricted SSH target. The server-side authorized_keys entry forces /usr/local/sbin/export-recent-alerts.",
     "host": "192.168.1.7",
     "ssh_user": "so-ai-relay",
-    "ssh_key": "/opt/so-alert-relay/keys/so-ai-relay_ed25519"
+    "ssh_key": "/opt/so-alert-relay/keys/so-ai-relay_ed25519",
+    "pcap_ssh_key": "/opt/so-alert-relay/keys/so-ai-relay-pcap_ed25519"
   },
   "relay": {
     "_comment": "Runtime state paths on the Pi. These contain alert state and should not be committed.",
@@ -11,7 +12,8 @@
     "batch_dir": "/opt/so-alert-relay/state/batches",
     "alerts_dir": "/opt/so-alert-relay/state/new-alerts",
     "db_path": "/opt/so-alert-relay/state/seen.sqlite3",
-    "ssh_timeout_seconds": 45
+    "ssh_timeout_seconds": 45,
+    "pcap_timeout_seconds": 180
   },
   "webhook": {
     "_comment": "Normally enabled at runtime by relay_health_wrapper.py using /etc/so-alert-relay/relay.env.",
@@ -22,6 +24,14 @@
     "retry_attempts": 3,
     "retry_backoff_seconds": 1.5,
     "retry_max_backoff_seconds": 10
+  },
+  "pcap_broker": {
+    "_comment": "Disabled until n8n exposes a relay-safe broker/proxy endpoint for alert-store PCAP requests.",
+    "enabled": false,
+    "url": "",
+    "token": "",
+    "timeout_seconds": 20,
+    "limit": 3
   },
   "filters": {
     "_comment": "Leave Pi-side rule filtering empty. Rule drops, suppression, routing, and reporting are owned by Mac Studio alert-store/n8n.",

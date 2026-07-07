@@ -97,6 +97,46 @@ def run_ssh_pull(config: dict) -> dict:
         raise RuntimeError(f"SSH pull returned invalid JSON: {exc}; preview={preview!r}") from exc
 
 
+def run_ssh_pcap_export(config: dict, pcap_request: dict) -> dict:
+    # PCAP export uses a separate forced-command key when configured. The
+    # request JSON is sent over stdin; the Security Onion wrapper validates it
+    # again before touching any pcap files.
+    so = config["security_onion"]
+    relay = config["relay"]
+    key_path = resolve_path(so.get("pcap_ssh_key") or so["ssh_key"])
+    target = f"{so['ssh_user']}@{so['host']}"
+    command = [
+        "ssh",
+        "-i",
+        str(key_path),
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ConnectTimeout={relay.get('ssh_timeout_seconds', 20)}",
+        "-T",
+        target,
+        "pcap",
+    ]
+    result = subprocess.run(
+        command,
+        input=json.dumps(pcap_request, sort_keys=True),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=relay.get("pcap_timeout_seconds", 180),
+    )
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        preview = result.stdout[:500]
+        raise RuntimeError(f"PCAP export returned invalid JSON: {exc}; preview={preview!r}") from exc
+    if result.returncode != 0 or not payload.get("ok"):
+        raise RuntimeError(payload.get("error") or result.stderr.strip() or f"PCAP export failed with exit code {result.returncode}")
+    return payload
+
+
 def save_batch(config: dict, batch: dict) -> Path:
     # Save raw batches before filtering. This is useful when n8n is down or a
     # filter unexpectedly removes an alert you want to inspect.
@@ -334,6 +374,98 @@ def post_json_to_webhook(config: dict, payload_data: dict) -> None:
             time.sleep(sleep_seconds)
 
 
+def broker_headers(config: dict) -> dict:
+    token = config.get("pcap_broker", {}).get("token", "")
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "so-alert-relay-dev/0.1",
+    }
+    if token:
+        headers["X-Relay-Token"] = token
+    return headers
+
+
+def broker_request(config: dict, method: str, path: str, payload_data: dict | None = None) -> dict:
+    broker = config.get("pcap_broker", {})
+    base_url = str(broker.get("url") or "").rstrip("/")
+    if not base_url:
+        raise RuntimeError("pcap_broker.url is empty")
+    timeout = broker.get("timeout_seconds", 20)
+    data = None if payload_data is None else json.dumps(payload_data, sort_keys=True).encode("utf-8")
+    req = request.Request(
+        f"{base_url}{path}",
+        data=data,
+        headers=broker_headers(config),
+        method=method,
+    )
+    try:
+        with request.urlopen(req, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+    except HTTPError as exc:
+        raise RuntimeError(f"PCAP broker returned HTTP {exc.code}: {exc.reason}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"PCAP broker request failed: {exc.reason}") from exc
+    try:
+        parsed = json.loads(body or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"PCAP broker returned invalid JSON: {exc}") from exc
+    if not parsed.get("ok"):
+        raise RuntimeError(parsed.get("reason") or parsed.get("error") or "PCAP broker rejected request")
+    return parsed
+
+
+def process_pcap_requests(config: dict) -> dict:
+    broker = config.get("pcap_broker", {})
+    if not broker.get("enabled"):
+        return {"ok": True, "enabled": False, "processed": 0}
+    limit = max(1, min(10, int(broker.get("limit", 3) or 3)))
+    pending = broker_request(config, "GET", f"/pcap/requests?status=pending&limit={limit}")
+    processed = 0
+    fulfilled = 0
+    failed = 0
+    for pcap_request in pending.get("requests", []):
+        request_id = pcap_request.get("request_id")
+        claim = broker_request(
+            config,
+            "POST",
+            "/pcap/claim",
+            {"request_id": request_id, "relay_host": socket.gethostname()},
+        )
+        if not claim.get("claimed"):
+            continue
+        try:
+            result = run_ssh_pcap_export(config, claim["request"])
+            broker_request(
+                config,
+                "POST",
+                "/pcap/complete",
+                {
+                    "request_id": request_id,
+                    "status": "fulfilled",
+                    "relay_host": socket.gethostname(),
+                    "artifact_path": result.get("artifact_path"),
+                    "artifact_sha256": result.get("artifact_sha256"),
+                    "artifact_size_bytes": result.get("artifact_size_bytes"),
+                },
+            )
+            fulfilled += 1
+        except Exception as exc:
+            broker_request(
+                config,
+                "POST",
+                "/pcap/complete",
+                {
+                    "request_id": request_id,
+                    "status": "failed",
+                    "relay_host": socket.gethostname(),
+                    "error": str(exc)[:500],
+                },
+            )
+            failed += 1
+        processed += 1
+    return {"ok": True, "enabled": True, "processed": processed, "fulfilled": fulfilled, "failed": failed}
+
+
 def post_alerts_to_webhook(
     config: dict,
     alerts: list[dict],
@@ -406,6 +538,11 @@ def main() -> int:
         help="Pull one alert batch and save it locally",
     )
     parser.add_argument(
+        "--process-pcap-requests",
+        action="store_true",
+        help="Poll the configured PCAP broker and fulfill pending requests",
+    )
+    parser.add_argument(
         "--webhook-url",
         help="Enable webhook forwarding for this run and POST new alerts to this URL",
     )
@@ -416,10 +553,14 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not args.pull_once:
-        parser.error("Only --pull-once is implemented in this step")
-
     config = load_config(Path(args.config).resolve())
+    if args.process_pcap_requests:
+        print(json.dumps(process_pcap_requests(config), sort_keys=True))
+        return 0
+
+    if not args.pull_once:
+        parser.error("Choose --pull-once or --process-pcap-requests")
+
     if args.webhook_url:
         # systemd injects live secrets through relay.env; pull-only debugging can
         # still run with webhook disabled in config.json.

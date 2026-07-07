@@ -7,8 +7,10 @@ This directory contains the Security Onion-side pieces for Onion Sentinel.
 | File | Destination | Purpose |
 | --- | --- | --- |
 | `bin/export-recent-alerts` | `/usr/local/sbin/export-recent-alerts` | Restricted wrapper that exports recent alerts as JSON. |
+| `bin/export-pcap-window` | `/usr/local/sbin/export-pcap-window` | Restricted wrapper that exports bounded PCAP artifacts from validated JSON requests. |
 | `sudoers/90-so-ai-relay-export` | `/etc/sudoers.d/90-so-ai-relay-export` | Allows only the wrapper to run passwordless for `so-ai-relay`. |
 | `ssh/authorized_keys.example` | `/home/so-ai-relay/.ssh/authorized_keys` | Forced-command SSH template restricted to the relay source IP. |
+| `ssh/authorized_keys.pcap.example` | `/home/so-ai-relay/.ssh/authorized_keys` | Separate forced-command SSH template for PCAP fulfillment. |
 | `bin/install-security-onion-wrapper.sh` | run with `sudo` on Security Onion | Installs wrapper, sudoers, and service account scaffolding. |
 
 ## Install
@@ -29,6 +31,11 @@ sudo chmod 0600 /home/so-ai-relay/.ssh/authorized_keys
 ```
 
 Replace `REPLACE_WITH_PUBLIC_KEY` with the Raspberry Pi relay public key. Keep the `from="10.88.8.8"` restriction unless the relay address changes.
+
+PCAP fulfillment should use a separate key entry based on
+`security-onion/ssh/authorized_keys.pcap.example`. The wrapper reads a bounded
+JSON request from stdin and writes artifacts only under
+`/nsm/pcapout/onion-sentinel`.
 
 ## Validate
 

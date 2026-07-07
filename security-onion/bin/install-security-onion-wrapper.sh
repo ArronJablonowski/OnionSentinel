@@ -11,6 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/export-recent-alerts" /usr/local/sbin/export-recent-alerts
+install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/export-pcap-window" /usr/local/sbin/export-pcap-window
 install -o root -g root -m 0440 "$REPO_DIR/security-onion/sudoers/90-so-ai-relay-export" /etc/sudoers.d/90-so-ai-relay-export
 # Always validate sudoers before relying on passwordless wrapper execution.
 visudo -cf /etc/sudoers.d/90-so-ai-relay-export

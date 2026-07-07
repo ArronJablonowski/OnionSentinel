@@ -27,6 +27,13 @@ Then install the Security Onion private key:
 sudo install -o soalert -g soalert -m 0600 /path/to/so-ai-relay_ed25519 /opt/so-alert-relay/keys/so-ai-relay_ed25519
 ```
 
+If PCAP fulfillment is enabled later, install a separate forced-command key for
+that path:
+
+```bash
+sudo install -o soalert -g soalert -m 0600 /path/to/so-ai-relay-pcap_ed25519 /opt/so-alert-relay/keys/so-ai-relay-pcap_ed25519
+```
+
 Edit the live env file:
 
 ```bash
@@ -71,6 +78,22 @@ errors such as `400`, `401`, and `403` fail immediately because another retry
 would repeat the same bad request. Each alert is marked seen only after its own
 successful POST, so a partial-batch failure resumes with the remaining unposted
 alerts on the next timer run.
+
+## PCAP Broker
+
+PCAP fulfillment is disabled by default in `config/config.example.json`:
+
+```json
+"pcap_broker": {
+  "enabled": false
+}
+```
+
+When enabled, the relay polls a relay-safe n8n broker/proxy endpoint for pending
+requests, claims one request at a time, sends the bounded JSON request to the
+Security Onion forced-command PCAP key, and reports only artifact metadata back
+to the broker. Packet artifacts stay on Security Onion under
+`/nsm/pcapout/onion-sentinel`; they are runtime evidence, not repo content.
 
 ## Firewall Needs
 

@@ -149,6 +149,18 @@ PCAP request broker safety knobs:
 - `PCAP_REQUEST_DEFAULT_WINDOW_SECONDS=120`
 - `PCAP_REQUEST_MAX_WINDOW_SECONDS=300`
 
+PCAP request state is stored in alert-store SQLite. Alert-store queues,
+validates, claims, and records fulfillment metadata through:
+
+- `POST /pcap/request`
+- `GET /pcap/requests?status=pending`
+- `POST /pcap/claim`
+- `POST /pcap/complete`
+
+Alert-store never connects directly to Security Onion and never shells out for
+packet capture. Fulfillment is brokered through the relay and the restricted
+Security Onion wrapper.
+
 Alert-store exposes a request-only broker for packet-capture evidence:
 
 ```text
