@@ -366,6 +366,7 @@ def n8n_beacon_history_response(query: dict[str, list[str]]) -> dict[str, object
         "history_source": str(history_path) if history_path else None,
         "entries": entries,
         "gaps": gaps,
+        "pcap": pcap_workflow_health_response(),
         "summary": {
             "total": len(entries),
             "successful": len(successful_entries),
@@ -374,6 +375,72 @@ def n8n_beacon_history_response(query: dict[str, list[str]]) -> dict[str, object
             "latest": entries[-1] if entries else None,
         },
     }
+
+
+def pcap_workflow_health_response() -> dict[str, object]:
+    """Return compact PCAP broker/parser health for the System Health page."""
+    summary: dict[str, object] = {
+        "available": False,
+        "request_counts": {"pending": 0, "claimed": 0, "fulfilled": 0, "failed": 0, "total": 0},
+        "no_packet_failures": 0,
+        "latest_request": None,
+        "analysis_count": 0,
+        "latest_analysis": None,
+        "artifact_size_bytes": directory_size_bytes(SOC_ALERT_PCAP_ARTIFACT_DIR),
+    }
+    try:
+        if SOC_ALERT_STORE_DB.exists():
+            with soc_alert_db_connect() as conn:
+                if sqlite_table_exists(conn, "pcap_requests"):
+                    counts = {
+                        str(row["status"] or "unknown").lower(): int(row["count"] or 0)
+                        for row in conn.execute("SELECT status, COUNT(*) AS count FROM pcap_requests GROUP BY status")
+                    }
+                    total = sum(counts.values())
+                    summary["request_counts"] = {
+                        "pending": counts.get("pending", 0),
+                        "claimed": counts.get("claimed", 0),
+                        "fulfilled": counts.get("fulfilled", 0),
+                        "failed": counts.get("failed", 0),
+                        "total": total,
+                    }
+                    no_packets = conn.execute(
+                        "SELECT COUNT(*) AS count FROM pcap_requests WHERE status = 'failed' AND lower(coalesce(error, '')) LIKE '%no matching packets%'"
+                    ).fetchone()
+                    summary["no_packet_failures"] = int(no_packets["count"] or 0) if no_packets else 0
+                    latest = conn.execute(
+                        """
+                        SELECT request_id, status, error, group_id, updated_at, completed_at
+                        FROM pcap_requests
+                        ORDER BY COALESCE(completed_at, updated_at, created_at) DESC
+                        LIMIT 1
+                        """
+                    ).fetchone()
+                    if latest:
+                        summary["latest_request"] = {
+                            "request_id": latest["request_id"],
+                            "status": latest["status"],
+                            "error": latest["error"] or "",
+                            "group_id": latest["group_id"] or "",
+                            "updated_at": latest["completed_at"] or latest["updated_at"] or "",
+                        }
+                    summary["available"] = True
+    except Exception as exc:
+        summary["error"] = str(exc)[:240]
+
+    latest_analysis: Path | None = None
+    if SOC_ALERT_PCAP_ANALYSIS_DIR.exists():
+        analysis_files = [path for path in SOC_ALERT_PCAP_ANALYSIS_DIR.glob("*-pcap-analysis.json") if path.is_file()]
+        summary["analysis_count"] = len(analysis_files)
+        if analysis_files:
+            latest_analysis = max(analysis_files, key=lambda path: path.stat().st_mtime)
+    if latest_analysis:
+        summary["latest_analysis"] = {
+            "name": latest_analysis.name,
+            "updated_at": format_iso_timestamp(dt.datetime.fromtimestamp(latest_analysis.stat().st_mtime, dt.timezone.utc).astimezone(), timespec="seconds"),
+            "size_bytes": latest_analysis.stat().st_size,
+        }
+    return summary
 
 
 def ensure_admin_token() -> str:
@@ -3720,6 +3787,16 @@ def directory_size_bytes(path: Path) -> int:
     return total
 
 
+def soc_alert_has_parsed_pcap(record: dict) -> bool:
+    """Return true only for parser artifacts that actually include captures."""
+    pcap_files = record.get("pcap_files") if isinstance(record.get("pcap_files"), list) else []
+    if not pcap_files:
+        return False
+    zeek = record.get("zeek") if isinstance(record.get("zeek"), dict) else {}
+    tshark = record.get("tshark") if isinstance(record.get("tshark"), dict) else {}
+    return bool(zeek.get("available") or tshark.get("available"))
+
+
 def soc_alert_pcap_analysis_index() -> dict[str, set[str]]:
     """Index parsed Zeek/TShark artifacts once per API response."""
     index = {"request_ids": set(), "alert_ids": set(), "group_ids": set()}
@@ -3731,6 +3808,8 @@ def soc_alert_pcap_analysis_index() -> dict[str, set[str]]:
         except Exception:
             continue
         if not isinstance(record, dict):
+            continue
+        if not soc_alert_has_parsed_pcap(record):
             continue
         request = record.get("request") if isinstance(record.get("request"), dict) else {}
         for key, bucket in (("request_id", "request_ids"), ("alert_id", "alert_ids"), ("group_id", "group_ids")):

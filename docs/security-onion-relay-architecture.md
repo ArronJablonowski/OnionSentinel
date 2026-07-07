@@ -1039,6 +1039,9 @@ Safety controls:
 
 - Alert-store only validates and queues requests; it never exports PCAP.
 - Request windows are clamped by `PCAP_REQUEST_MAX_WINDOW_SECONDS`.
+- Artifact uploads are capped by `PCAP_ARTIFACT_MAX_BYTES` after base64 decode.
+  Keep the alert-store request-body cap higher than this value because relay
+  artifact upload is JSON/base64 today.
 - Requests store tuple fields, timestamps, optional `network.community_id`,
   requester, reason, and audit timestamps. `created_at`, `claimed_at`,
   `completed_at`, and `updated_at` are the canonical request lifecycle fields.
@@ -1062,6 +1065,9 @@ Safety controls:
 - PCAP artifacts are runtime-only evidence. Never commit `.pcap`, `.pcapng`,
   packet payloads, generated packet artifacts, or `soc-alerts/pcap-analysis`
   output to Git.
+- Roadmap: increase supported PCAP size by replacing JSON/base64 artifact
+  upload with chunked or direct authenticated transfer, while retaining bounded
+  Zeek/TShark summaries for LLM input.
 - Zeek/zeek-cut and TShark live on the Mac Studio with Ollama. Zeek is the
   primary parser for structured connection, DNS, TLS, HTTP, notice, and weird
   logs; TShark provides protocol hierarchy, conversation, and bounded packet

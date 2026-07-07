@@ -199,6 +199,18 @@ PCAP request broker safety knobs:
 
 - `PCAP_REQUEST_DEFAULT_WINDOW_SECONDS=120`
 - `PCAP_REQUEST_MAX_WINDOW_SECONDS=300`
+- `PCAP_ARTIFACT_MAX_BYTES=7340032`
+
+`PCAP_REQUEST_MAX_WINDOW_SECONDS` caps the requested packet window before any
+Security Onion export occurs. `PCAP_ARTIFACT_MAX_BYTES` caps the decoded
+runtime-only artifact accepted by alert-store from the relay. Keep
+`ALERT_STORE_MAX_REQUEST_BYTES` larger than `PCAP_ARTIFACT_MAX_BYTES` because
+relay artifact upload is JSON/base64 today.
+
+Roadmap: support larger PCAP pulls by moving artifacts to chunked upload or
+direct authenticated object/file transfer, then parse with the same Zeek-first,
+TShark-corroboration worker. Do not raise the JSON body limit as the long-term
+scaling path.
 
 PCAP request state is stored in alert-store SQLite. Alert-store queues,
 validates, claims, and records fulfillment metadata through:

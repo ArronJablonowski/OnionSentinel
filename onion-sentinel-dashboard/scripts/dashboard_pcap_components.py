@@ -12,6 +12,49 @@ from pathlib import Path
 from typing import Any
 
 
+def has_parsed_pcap(record: dict[str, Any]) -> bool:
+    """Return true only when a parser artifact contains real capture evidence."""
+    pcap_files = record.get("pcap_files") if isinstance(record.get("pcap_files"), list) else []
+    if not pcap_files:
+        return False
+    zeek = record.get("zeek") if isinstance(record.get("zeek"), dict) else {}
+    tshark = record.get("tshark") if isinstance(record.get("tshark"), dict) else {}
+    return bool(zeek.get("available") or tshark.get("available"))
+
+
+def build_pcap_analysis_index(analysis_dir: Path) -> dict[str, object]:
+    """Index valid parsed PCAP evidence once for fast dashboard row lookups."""
+    index = {
+        "request_ids": set(),
+        "alert_ids": set(),
+        "group_ids": set(),
+        "records_by_request_id": {},
+        "records_by_alert_id": {},
+        "records_by_group_id": {},
+    }
+    if not analysis_dir.exists():
+        return index
+    for path in analysis_dir.glob("*-pcap-analysis.json"):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(record, dict) or not has_parsed_pcap(record):
+            continue
+        record["_analysis_path"] = str(path)
+        request = record.get("request") if isinstance(record.get("request"), dict) else {}
+        for key, bucket, record_bucket in (
+            ("request_id", "request_ids", "records_by_request_id"),
+            ("alert_id", "alert_ids", "records_by_alert_id"),
+            ("group_id", "group_ids", "records_by_group_id"),
+        ):
+            value = str(request.get(key) or "").strip()
+            if value:
+                index[bucket].add(value)
+                index[record_bucket].setdefault(value, record)
+    return index
+
+
 def _cell(value: object, max_len: int = 420) -> str:
     """Return a compact Markdown table cell without allowing table breaks."""
     text = "n/a" if value is None else str(value)

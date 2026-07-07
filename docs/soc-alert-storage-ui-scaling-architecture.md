@@ -816,6 +816,12 @@ When parsed evidence exists, the Detailed Alert Report adds a `Parsed PCAP
 Evidence` section after public enrichment. That section renders bounded Zeek
 summaries and TShark corroboration only; raw packet captures stay in runtime
 artifact storage and are not copied into dashboard HTML, prompts, or Git.
+Current guardrails keep PCAP pulls intentionally small: dashboard and
+alert-store request windows are clamped to 30-300 seconds, with 120 seconds as
+the default, and alert-store rejects decoded PCAP artifacts larger than
+`PCAP_ARTIFACT_MAX_BYTES` before writing runtime evidence. Larger captures are a
+roadmap item and should use chunked or direct authenticated transfer rather than
+raising JSON POST body limits.
 
 Alert-store keeps `alert_group_summary` current on every accepted alert. The
 raw `alerts` table includes an expression index that matches the group-key

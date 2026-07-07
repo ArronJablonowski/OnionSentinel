@@ -241,7 +241,14 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         )
         self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR.mkdir()
         (self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR / "unit-pcap-analysis.json").write_text(
-            json.dumps({"request": {"group_id": newest_group_id, "alert_id": "newest-alert"}}),
+            json.dumps(
+                {
+                    "request": {"group_id": newest_group_id, "alert_id": "newest-alert"},
+                    "pcap_files": [{"name": "unit.pcap", "size_bytes": 128}],
+                    "zeek": {"available": True},
+                    "tshark": {"available": False},
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -302,6 +309,19 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.conn.execute(
             "UPDATE pcap_requests SET status = 'failed', error = 'no matching packets found for requested window', completed_at = updated_at WHERE group_id = ?",
             (newest_group_id,),
+        )
+        self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR.mkdir()
+        (self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR / "empty-pcap-analysis.json").write_text(
+            json.dumps(
+                {
+                    "request": {"group_id": newest_group_id, "alert_id": "newest-alert"},
+                    "pcap_files": [],
+                    "artifact_state": "artifact-not-copied-to-mac",
+                    "zeek": {"available": False},
+                    "tshark": {"available": False},
+                }
+            ),
+            encoding="utf-8",
         )
         self.conn.commit()
 
@@ -386,6 +406,39 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["by_analyst_status"]["acknowledged"], 0)
         self.assertEqual(payload["by_analyst_status"]["total"], 3)
         self.assertEqual(payload["pcap_ingest_size_bytes"], len(b"pcap-data"))
+
+    def test_system_health_includes_pcap_workflow_counts(self) -> None:
+        self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR.mkdir()
+        (self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR / "unit-pcap-analysis.json").write_text(
+            json.dumps({"request": {"request_id": "unit"}, "pcap_files": []}),
+            encoding="utf-8",
+        )
+        self.conn.execute(
+            """
+            INSERT INTO pcap_requests (
+              request_id, status, group_id, reason, max_window_seconds,
+              request_json, created_at, updated_at, completed_at, error
+            )
+            VALUES (
+              'pcap-health-test', 'failed', ?, 'unit test', 120,
+              '{}', '2026-07-03  12:00:00Z', '2026-07-03  12:01:00Z',
+              '2026-07-03  12:01:00Z', 'no matching packets found'
+            )
+            """,
+            (
+                self.portal.soc_alert_group_id(
+                    "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+                ),
+            ),
+        )
+        self.conn.commit()
+
+        payload = self.portal.n8n_beacon_history_response({"hours": ["24"]})
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["pcap"]["request_counts"]["failed"], 1)
+        self.assertEqual(payload["pcap"]["no_packet_failures"], 1)
+        self.assertEqual(payload["pcap"]["analysis_count"], 1)
 
     def test_event_snapshot_uses_consistent_status_and_metrics_counts(self) -> None:
         payload = self.portal.soc_alert_events_snapshot()

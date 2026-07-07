@@ -34,6 +34,10 @@ const telegramBotToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const telegramChatId = (process.env.TELEGRAM_CHAT_ID || '').trim();
 const maxRequestBytes = Math.max(1024, Number(process.env.ALERT_STORE_MAX_REQUEST_BYTES || 5 * 1024 * 1024));
 const pcapArtifactDir = process.env.PCAP_ARTIFACT_DIR || '/pcap-artifacts';
+const pcapArtifactMaxBytes = Math.max(
+  1024,
+  Number(process.env.PCAP_ARTIFACT_MAX_BYTES || Math.floor(maxRequestBytes * 0.7)),
+);
 const telegramAlertLevels = new Set(
   (process.env.TELEGRAM_ALERT_LEVELS || 'critical,high')
     .split(',')
@@ -2547,11 +2551,17 @@ async function ingestPcapArtifact(payload) {
   if (!artifactSha256 || !artifactSizeBytes || !artifactBase64) {
     throw new Error('artifact upload requires artifact_sha256, artifact_size_bytes, and artifact_base64');
   }
+  if (artifactSizeBytes > pcapArtifactMaxBytes) {
+    throw new Error(`artifact_size_bytes exceeds ${pcapArtifactMaxBytes} byte PCAP artifact limit`);
+  }
   if (!/^[a-f0-9]{64}$/.test(artifactSha256)) throw new Error('artifact_sha256 must be a hex sha256 digest');
   if (!/^[A-Za-z0-9+/=\r\n ]+$/.test(artifactBase64)) throw new Error('artifact_base64 contains invalid characters');
   const artifactBytes = Buffer.from(artifactBase64.replace(/\s+/g, ''), 'base64');
   if (artifactBytes.length !== artifactSizeBytes) {
     throw new Error('artifact_size_bytes does not match decoded artifact length');
+  }
+  if (artifactBytes.length > pcapArtifactMaxBytes) {
+    throw new Error(`decoded PCAP artifact exceeds ${pcapArtifactMaxBytes} byte limit`);
   }
   const digest = crypto.createHash('sha256').update(artifactBytes).digest('hex');
   if (digest !== artifactSha256) throw new Error('artifact sha256 mismatch');

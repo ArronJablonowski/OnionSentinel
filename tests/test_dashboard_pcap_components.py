@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -86,6 +87,23 @@ class DashboardPcapComponentsTests(unittest.TestCase):
 
         self.assertIn("... truncated ...", html)
         self.assertLess(len(html), 14000)
+
+    def test_index_ignores_empty_no_packet_parser_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "empty-pcap-analysis.json").write_text(
+                '{"request":{"group_id":"empty"},"pcap_files":[],"zeek":{"available":false}}',
+                encoding="utf-8",
+            )
+            (root / "valid-pcap-analysis.json").write_text(
+                '{"request":{"group_id":"valid"},"pcap_files":[{"name":"unit.pcap"}],"zeek":{"available":true}}',
+                encoding="utf-8",
+            )
+
+            index = self.components.build_pcap_analysis_index(root)
+
+        self.assertNotIn("empty", index["group_ids"])
+        self.assertIn("valid", index["group_ids"])
 
 
 if __name__ == "__main__":
