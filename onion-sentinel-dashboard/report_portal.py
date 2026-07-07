@@ -383,6 +383,8 @@ def pcap_workflow_health_response() -> dict[str, object]:
         "available": False,
         "request_counts": {"pending": 0, "claimed": 0, "fulfilled": 0, "failed": 0, "total": 0},
         "no_packet_failures": 0,
+        "warning_count": 0,
+        "warnings": [],
         "latest_request": None,
         "analysis_count": 0,
         "latest_analysis": None,
@@ -408,6 +410,32 @@ def pcap_workflow_health_response() -> dict[str, object]:
                         "SELECT COUNT(*) AS count FROM pcap_requests WHERE status = 'failed' AND lower(coalesce(error, '')) LIKE '%no matching packets%'"
                     ).fetchone()
                     summary["no_packet_failures"] = int(no_packets["count"] or 0) if no_packets else 0
+                    failed_count = int(summary["request_counts"].get("failed", 0)) if isinstance(summary["request_counts"], dict) else 0
+                    unexpected_failures = max(0, failed_count - int(summary["no_packet_failures"] or 0))
+                    stale_cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=20)
+                    stale_rows = conn.execute(
+                        """
+                        SELECT status, updated_at, created_at
+                        FROM pcap_requests
+                        WHERE status IN ('pending', 'claimed')
+                        """
+                    ).fetchall()
+                    stale_counts: dict[str, int] = {}
+                    for row in stale_rows:
+                        try:
+                            updated_at = parse_iso_timestamp(row["updated_at"] or row["created_at"])
+                        except Exception:
+                            continue
+                        if updated_at.astimezone(dt.timezone.utc) < stale_cutoff:
+                            status = str(row["status"] or "unknown")
+                            stale_counts[status] = stale_counts.get(status, 0) + 1
+                    warnings: list[str] = []
+                    for status, count in sorted(stale_counts.items()):
+                        warnings.append(f"{count} {status} PCAP request(s) older than 20 minutes")
+                    if unexpected_failures:
+                        warnings.append(f"{unexpected_failures} PCAP request failure(s) need review")
+                    summary["warnings"] = warnings
+                    summary["warning_count"] = len(warnings)
                     latest = conn.execute(
                         """
                         SELECT request_id, status, error, group_id, updated_at, completed_at

@@ -212,6 +212,30 @@ Set `ZEEK_BIN`, `ZEEK_CUT_BIN`, or `TSHARK_BIN` only if the tools are not on
 the LaunchAgent `PATH`. Do not copy PCAP files or generated PCAP analysis
 artifacts into the Git repo.
 
+The Mac Studio also includes a conservative retention helper for runtime-only
+packet evidence:
+
+```bash
+python3 $HOME/n8n-local/bin/maintain-pcap-evidence.py
+python3 $HOME/n8n-local/bin/maintain-pcap-evidence.py --apply
+```
+
+Dry-run is the default. Raw PCAP artifacts default to 14 days, while derived
+PCAP analysis JSON/Markdown defaults to 30 days. The helper refuses cleanup
+paths outside `$HOME/n8n-local` so a bad argument cannot erase an operator
+directory.
+
+System Health includes compact PCAP broker/parser health. `No Packets` PCAP
+failures are expected negative evidence and are counted separately. Stale
+pending/claimed requests older than 20 minutes and non-no-packet failures are
+reported as PCAP warnings. If `pcap-analysis.err.log` shows an old traceback
+but `launchctl` reports `last exit code = 0`, run the worker directly before
+assuming the schedule is broken:
+
+```bash
+python3 $HOME/n8n-local/bin/process-pcap-evidence.py --limit 1 --stdout
+```
+
 Alert filtering and suppression are controlled on Mac Studio in:
 
 ```text

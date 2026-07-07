@@ -823,6 +823,17 @@ the default, and alert-store rejects decoded PCAP artifacts larger than
 roadmap item and should use chunked or direct authenticated transfer rather than
 raising JSON POST body limits.
 
+System Health exposes the PCAP workflow as first-class operational state:
+request counts, latest request, parser output count, runtime artifact size, and
+warnings for stale pending/claimed work or unexpected failures. Normal
+`No Packets` results are tracked separately so packet absence does not look like
+a transport or parser failure.
+
+Runtime retention is handled on the Mac Studio with
+`$HOME/n8n-local/bin/maintain-pcap-evidence.py`. It defaults to dry-run, keeps
+raw artifacts for 14 days, keeps derived PCAP JSON/Markdown for 30 days, and
+refuses cleanup targets outside `$HOME/n8n-local`.
+
 Alert-store keeps `alert_group_summary` current on every accepted alert. The
 raw `alerts` table includes an expression index that matches the group-key
 calculation, which keeps per-alert summary refreshes bounded as full alert JSON

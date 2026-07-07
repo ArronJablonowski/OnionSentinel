@@ -1062,6 +1062,14 @@ Safety controls:
   broker error indicates no matching packets is displayed as `No Packets` in
   the dashboard so analysts can distinguish capture absence from transport or
   parser failures.
+- System Health exposes the PCAP workflow separately from n8n beacons. It
+  reports request counts, latest request state, parser output count, runtime
+  artifact size, and warnings for stale pending/claimed requests older than 20
+  minutes or failed requests that are not normal no-packet outcomes.
+- Mac Studio cleanup is handled by
+  `$HOME/n8n-local/bin/maintain-pcap-evidence.py`, which defaults to dry-run,
+  keeps raw PCAP artifacts for 14 days, keeps derived PCAP analysis for 30
+  days, and refuses cleanup paths outside `$HOME/n8n-local`.
 - PCAP artifacts are runtime-only evidence. Never commit `.pcap`, `.pcapng`,
   packet payloads, generated packet artifacts, or `soc-alerts/pcap-analysis`
   output to Git.

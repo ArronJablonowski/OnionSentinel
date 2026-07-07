@@ -439,6 +439,38 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["pcap"]["request_counts"]["failed"], 1)
         self.assertEqual(payload["pcap"]["no_packet_failures"], 1)
         self.assertEqual(payload["pcap"]["analysis_count"], 1)
+        self.assertEqual(payload["pcap"]["warning_count"], 0)
+
+    def test_system_health_warns_on_stale_or_unexpected_pcap_work(self) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO pcap_requests (
+              request_id, status, group_id, reason, max_window_seconds,
+              request_json, created_at, updated_at, completed_at, error
+            )
+            VALUES
+              ('pcap-stale-pending', 'pending', ?, 'unit test', 120, '{}',
+               '2026-07-03  12:00:00Z', '2026-07-03  12:00:00Z', NULL, NULL),
+              ('pcap-unexpected-failure', 'failed', ?, 'unit test', 120, '{}',
+               '2026-07-03  12:00:00Z', '2026-07-03  12:01:00Z',
+               '2026-07-03  12:01:00Z', 'artifact upload failed')
+            """,
+            (
+                self.portal.soc_alert_group_id(
+                    "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+                ),
+                self.portal.soc_alert_group_id(
+                    "medium|Older detection|192.0.2.20|198.51.100.20|accepted"
+                ),
+            ),
+        )
+        self.conn.commit()
+
+        payload = self.portal.n8n_beacon_history_response({"hours": ["24"]})
+
+        self.assertEqual(payload["pcap"]["warning_count"], 2)
+        self.assertTrue(any("pending PCAP request" in item for item in payload["pcap"]["warnings"]))
+        self.assertTrue(any("failure(s) need review" in item for item in payload["pcap"]["warnings"]))
 
     def test_event_snapshot_uses_consistent_status_and_metrics_counts(self) -> None:
         payload = self.portal.soc_alert_events_snapshot()

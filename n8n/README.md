@@ -119,6 +119,10 @@ and writes bounded JSON/Markdown summaries for the SOC Analyst prompt builder.
 Raw PCAPs, extracted captures, and generated PCAP analysis artifacts must remain
 out of Git.
 
+Use `n8n/bin/maintain-pcap-evidence.py` for runtime retention. It defaults to
+dry-run, keeps raw PCAP artifacts for 14 days, keeps derived analysis for 30
+days, and refuses cleanup paths outside `$HOME/n8n-local`.
+
 Optional enrichment keys are also set in `$HOME/n8n-local/.env`. Blank or
 placeholder values are treated as disabled, so a source can be enabled or
 rotated by editing `.env` and restarting `alert-store`.

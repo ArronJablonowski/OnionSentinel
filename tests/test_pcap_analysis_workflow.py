@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -61,6 +62,55 @@ class PcapAnalysisWorkflowTest(unittest.TestCase):
         self.assertFalse(analysis["tshark"]["available"])
         self.assertTrue((self.root / "pcap-analysis" / "pcap-unit-test-pcap-analysis.json").exists())
         self.assertTrue((self.root / "pcap-analysis" / "pcap-unit-test-pcap-analysis.md").exists())
+
+    def test_worker_positive_path_uses_generated_runtime_pcap_fixture(self) -> None:
+        pcap_path = self.root / "benign-dns.pcap"
+        pcap_path.write_bytes(
+            b"\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+            b"\xff\xff\x00\x00\x01\x00\x00\x00"
+        )
+        args = type(
+            "Args",
+            (),
+            {
+                "artifact_dir": self.root / "artifacts",
+                "out_dir": self.root / "pcap-analysis",
+            },
+        )()
+        request = {
+            "request_id": "benign-dns",
+            "alert_id": "alert-1",
+            "group_id": "group-1",
+            "artifact_path": str(pcap_path),
+            "status": "manual",
+        }
+
+        with (
+            mock.patch.object(
+                self.worker,
+                "run_zeek",
+                return_value={
+                    "available": True,
+                    "record_counts": {"conn": 1, "dns": 1},
+                    "top_connections": [{"count": 1, "id.orig_h": "192.0.2.10", "id.resp_h": "198.51.100.10"}],
+                    "dns_queries": [{"count": 1, "query": "example.test"}],
+                },
+            ),
+            mock.patch.object(
+                self.worker,
+                "run_tshark",
+                return_value={
+                    "available": True,
+                    "samples": [{"pcap": str(pcap_path), "protocol_hierarchy": "frame\nip\nudp\ndns", "conversations": "UDP Conversations"}],
+                },
+            ),
+        ):
+            analysis = self.worker.process_one(request, args, pcap_path)
+
+        self.assertEqual(analysis["artifact_state"], "direct")
+        self.assertEqual(analysis["pcap_files"][0]["name"], "benign-dns.pcap")
+        self.assertEqual(analysis["zeek"]["record_counts"]["dns"], 1)
+        self.assertIn("UDP Conversations", (self.root / "pcap-analysis" / "benign-dns-pcap-analysis.md").read_text(encoding="utf-8"))
 
     def test_prompt_package_includes_compact_pcap_evidence(self) -> None:
         analysis_dir = self.root / "pcap-analysis"
