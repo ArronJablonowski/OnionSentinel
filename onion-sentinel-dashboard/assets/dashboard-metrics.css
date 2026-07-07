@@ -136,8 +136,8 @@
 
 .ai-activity-card {
   display: grid !important;
-  grid-template-columns: 72px minmax(0, 1fr);
-  grid-template-rows: auto auto auto;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto 1fr;
   align-items: flex-start !important;
   justify-content: stretch !important;
   padding: 14px !important;
@@ -163,9 +163,18 @@
 }
 
 #ai-activity-detail {
-  grid-column: 2;
+  grid-column: 1;
   grid-row: 2;
-  margin-top: 24px !important;
+  align-self: start;
+  justify-self: start;
+  max-width: 100%;
+  margin-top: 30px !important;
+  color: #9fb0c4 !important;
+  font-size: 12px !important;
+  line-height: 1.22 !important;
+  text-align: left !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .ai-activity-counts {
@@ -178,8 +187,9 @@
   gap: 5px 10px;
   align-items: baseline;
   width: 100%;
-  margin-top: 0;
-  padding-top: 6px;
+  align-self: end;
+  margin-top: 10px;
+  padding-top: 0;
 }
 
 .ai-activity-counts span {
@@ -203,7 +213,7 @@
 .system-health-metric-card {
   display: grid !important;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto auto 1fr;
   align-items: flex-start !important;
   justify-content: stretch !important;
   padding: 14px !important;
@@ -224,12 +234,12 @@
 
 .system-health-metric-main {
   grid-column: 1;
-  grid-row: 2;
+  grid-row: 3;
   align-self: end;
   display: grid !important;
-  gap: 9px;
+  gap: 8px;
   min-width: 0 !important;
-  margin-top: 30px;
+  margin-top: 12px;
 }
 
 .system-health-metric-main span {
