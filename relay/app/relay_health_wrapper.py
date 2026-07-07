@@ -24,6 +24,10 @@ RELAY_COMMAND = os.environ.get(
     "RELAY_COMMAND",
     '/usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/so-alert-relay/app/config.json --pull-once --webhook-url "$RELAY_WEBHOOK_URL" --webhook-token "$RELAY_WEBHOOK_TOKEN"',
 )
+RELAY_PCAP_COMMAND = os.environ.get(
+    "RELAY_PCAP_COMMAND",
+    '/usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/so-alert-relay/app/config.json --process-pcap-requests',
+)
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 HOST_LABEL = os.environ.get("RELAY_HOST_LABEL", "Raspberry Pi SOC relay")
@@ -137,6 +141,8 @@ def summarize_output(stdout: str, stderr: str) -> str:
         if line.startswith("{") and line.endswith("}"):
             try:
                 payload = json.loads(line)
+                if "alert_count" not in payload:
+                    continue
                 details.append(
                     "alerts={alert_count} dropped={dropped_alert_count} new={new_alert_count} posted={posted_webhook_alerts}".format(
                         alert_count=payload.get("alert_count", "unknown"),
@@ -153,17 +159,34 @@ def summarize_output(stdout: str, stderr: str) -> str:
     return "; ".join(details) or "no relay output summary"
 
 
-def run_relay() -> subprocess.CompletedProcess:
+def run_shell_command(command: str, timeout: int = 120) -> subprocess.CompletedProcess:
     # shell=True is used here because the default command intentionally expands
     # environment variables from /etc/so-alert-relay/relay.env.
     return subprocess.run(
-        RELAY_COMMAND,
+        command,
         shell=True,
         executable="/bin/bash",
         check=False,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=timeout,
+    )
+
+
+def run_relay() -> subprocess.CompletedProcess:
+    return run_shell_command(RELAY_COMMAND, timeout=120)
+
+
+def run_pcap_broker() -> subprocess.CompletedProcess:
+    return run_shell_command(RELAY_PCAP_COMMAND, timeout=180)
+
+
+def combine_results(primary: subprocess.CompletedProcess, secondary: subprocess.CompletedProcess) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(
+        primary.args,
+        secondary.returncode,
+        (primary.stdout or "") + (secondary.stdout or ""),
+        (primary.stderr or "") + (secondary.stderr or ""),
     )
 
 
@@ -185,6 +208,20 @@ def main() -> int:
     print(result.stdout, end="")
     if result.stderr:
         print(result.stderr, end="", file=sys.stderr)
+
+    if result.returncode == 0:
+        try:
+            pcap_result = run_pcap_broker()
+        except Exception as exc:
+            pcap_result = subprocess.CompletedProcess(RELAY_PCAP_COMMAND, 1, "", str(exc))
+        print(pcap_result.stdout, end="")
+        if pcap_result.stderr:
+            print(pcap_result.stderr, end="", file=sys.stderr)
+        if pcap_result.returncode != 0:
+            result = combine_results(result, pcap_result)
+            summary = summarize_output(result.stdout, result.stderr)
+        else:
+            summary = summarize_output(result.stdout + pcap_result.stdout, result.stderr + pcap_result.stderr)
 
     if result.returncode == 0:
         # If the previous run failed, this successful run is recovery-worthy.

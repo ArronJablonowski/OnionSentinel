@@ -97,6 +97,18 @@ def run_ssh_pull(config: dict) -> dict:
         raise RuntimeError(f"SSH pull returned invalid JSON: {exc}; preview={preview!r}") from exc
 
 
+def parse_last_json_object(text: str) -> dict:
+    """Return the last JSON object line from command output that may contain banners."""
+    for line in reversed((text or "").splitlines()):
+        candidate = line.strip()
+        if not (candidate.startswith("{") and candidate.endswith("}")):
+            continue
+        parsed = json.loads(candidate)
+        if isinstance(parsed, dict):
+            return parsed
+    raise json.JSONDecodeError("no JSON object found", text or "", 0)
+
+
 def run_ssh_pcap_export(config: dict, pcap_request: dict) -> dict:
     # PCAP export uses a separate forced-command key when configured. The
     # request JSON is sent over stdin; the Security Onion wrapper validates it
@@ -128,7 +140,7 @@ def run_ssh_pcap_export(config: dict, pcap_request: dict) -> dict:
         timeout=relay.get("pcap_timeout_seconds", 180),
     )
     try:
-        payload = json.loads(result.stdout or "{}")
+        payload = parse_last_json_object(result.stdout)
     except json.JSONDecodeError as exc:
         preview = result.stdout[:500]
         raise RuntimeError(f"PCAP export returned invalid JSON: {exc}; preview={preview!r}") from exc

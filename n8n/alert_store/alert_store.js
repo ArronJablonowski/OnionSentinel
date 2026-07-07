@@ -271,6 +271,13 @@ function integerField(value) {
   return parsed;
 }
 
+function nonNegativeIntegerField(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) return null;
+  return parsed;
+}
+
 function enrichmentRecord(alert) {
   // alert_json remains the complete source of truth. This companion JSON column
   // keeps the investigation/enrichment bundle easy to query without pulling the
@@ -2455,7 +2462,7 @@ async function completePcapRequest(payload) {
   const now = nowUtc();
   const artifactPath = safeString(payload?.artifact_path, 1024) || null;
   const artifactSha256 = safeString(payload?.artifact_sha256, 128) || null;
-  const artifactSizeBytes = integerField(payload?.artifact_size_bytes);
+  const artifactSizeBytes = nonNegativeIntegerField(payload?.artifact_size_bytes);
   const relayHost = safeString(payload?.relay_host, 120) || null;
   const error = safeString(payload?.error, 500) || null;
   if (requestedStatus === 'fulfilled' && (!artifactPath || !artifactSha256 || !artifactSizeBytes)) {

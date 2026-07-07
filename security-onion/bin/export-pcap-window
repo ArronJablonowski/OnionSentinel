@@ -73,7 +73,11 @@ def bpf_for_request(req: dict) -> str:
     src_port = parse_port(req.get("source_port"))
     dst_port = parse_port(req.get("destination_port"))
     parts = [f"host {src}", f"host {dst}"]
-    if src_port:
+    # Source ports are usually ephemeral and can make brokered PCAP retrieval too
+    # brittle when a grouped alert uses a representative row. Keep destination
+    # service port as the default discriminator; require_source_port is available
+    # for rare cases where the operator intentionally wants a single flow.
+    if src_port and req.get("require_source_port"):
         parts.append(f"port {src_port}")
     if dst_port:
         parts.append(f"port {dst_port}")

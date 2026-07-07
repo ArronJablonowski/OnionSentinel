@@ -44,6 +44,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alert-id", help="Alert id to attach when --pcap is used")
     parser.add_argument("--group-id", help="Group id to attach when --pcap is used")
     parser.add_argument("--limit", type=int, default=5, help="Maximum fulfilled requests to process per run")
+    parser.add_argument("--fetch-remote", action="store_true", help="Fetch fulfilled Security Onion artifacts before parsing")
+    parser.add_argument("--ssh-target", default=os.environ.get("PCAP_ARTIFACT_SSH_TARGET", ""), help="SSH target used with --fetch-remote, for example user@security-onion")
+    parser.add_argument("--ssh-bin", default=os.environ.get("PCAP_ARTIFACT_SSH_BIN", "ssh"), help="SSH executable for artifact fetch")
     parser.add_argument("--overwrite", action="store_true", help="Rebuild existing analysis artifacts")
     parser.add_argument("--stdout", action="store_true", help="Print JSON summaries after processing")
     args = parser.parse_args()
@@ -172,6 +175,41 @@ def candidate_artifact_paths(request: dict[str, Any], artifact_dir: Path) -> lis
     return list(dict.fromkeys(candidates))
 
 
+def local_artifact_path(request: dict[str, Any], artifact_dir: Path) -> Path:
+    request_id = safe_filename(request.get("request_id"))
+    remote_name = Path(str(request.get("artifact_path") or "capture.pcap")).name
+    return artifact_dir / request_id / remote_name
+
+
+def fetch_remote_artifact(request: dict[str, Any], artifact_dir: Path, ssh_target: str, ssh_bin: str = "ssh") -> dict[str, Any]:
+    artifact_path = str(request.get("artifact_path") or "")
+    expected_sha256 = str(request.get("artifact_sha256") or "")
+    expected_size = request.get("artifact_size_bytes")
+    if not artifact_path or not ssh_target:
+        return {"ok": False, "reason": "remote fetch not configured"}
+    if not artifact_path.startswith("/nsm/pcapout/onion-sentinel/"):
+        return {"ok": False, "reason": "remote artifact path is outside the Onion Sentinel PCAP output directory"}
+
+    destination = local_artifact_path(request, artifact_dir)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = destination.with_suffix(destination.suffix + ".tmp")
+    command = [ssh_bin, "-o", "BatchMode=yes", "-T", ssh_target, "sudo", "-n", "cat", artifact_path]
+    with temp_path.open("wb") as handle:
+        proc = subprocess.run(command, stdout=handle, stderr=subprocess.PIPE, timeout=180)
+    if proc.returncode != 0:
+        temp_path.unlink(missing_ok=True)
+        return {"ok": False, "reason": proc.stderr.decode("utf-8", errors="replace")[:240] or f"ssh exited {proc.returncode}"}
+    if expected_size not in (None, "") and temp_path.stat().st_size != int(expected_size):
+        temp_path.unlink(missing_ok=True)
+        return {"ok": False, "reason": "downloaded artifact size did not match broker metadata"}
+    if expected_sha256 and sha256_file(temp_path) != expected_sha256:
+        temp_path.unlink(missing_ok=True)
+        return {"ok": False, "reason": "downloaded artifact sha256 did not match broker metadata"}
+    temp_path.replace(destination)
+    destination.chmod(0o600)
+    return {"ok": True, "path": str(destination)}
+
+
 def safe_extract_tar(path: Path, destination: Path) -> None:
     with tarfile.open(path) as archive:
         for member in archive.getmembers():
@@ -181,10 +219,19 @@ def safe_extract_tar(path: Path, destination: Path) -> None:
         archive.extractall(destination)
 
 
-def materialize_pcap_files(request: dict[str, Any], artifact_dir: Path, work_dir: Path, direct_pcap: Path | None = None) -> tuple[list[Path], str]:
+def materialize_pcap_files(request: dict[str, Any], args: argparse.Namespace, work_dir: Path, direct_pcap: Path | None = None) -> tuple[list[Path], str]:
     if direct_pcap:
         return [direct_pcap], "direct"
-    for candidate in candidate_artifact_paths(request, artifact_dir):
+    if getattr(args, "fetch_remote", False) and not any(path.exists() for path in candidate_artifact_paths(request, args.artifact_dir)):
+        fetched = fetch_remote_artifact(
+            request,
+            args.artifact_dir,
+            getattr(args, "ssh_target", ""),
+            getattr(args, "ssh_bin", "ssh"),
+        )
+        if not fetched.get("ok"):
+            return [], f"artifact-fetch-failed: {fetched.get('reason')}"
+    for candidate in candidate_artifact_paths(request, args.artifact_dir):
         if not candidate.exists():
             continue
         if candidate.suffix.lower() in PCAP_SUFFIXES:
@@ -409,7 +456,7 @@ def process_one(request: dict[str, Any], args: argparse.Namespace, direct_pcap: 
     request_id = safe_filename(request.get("request_id") or (direct_pcap.stem if direct_pcap else "pcap"))
     with tempfile.TemporaryDirectory(prefix="onion-sentinel-pcap-") as temp_name:
         work_dir = Path(temp_name)
-        pcap_files, artifact_state = materialize_pcap_files(request, args.artifact_dir, work_dir, direct_pcap)
+        pcap_files, artifact_state = materialize_pcap_files(request, args, work_dir, direct_pcap)
         pcap_meta = [
             {
                 "path": str(path),

@@ -110,6 +110,34 @@ class RelayPcapBrokerTest(unittest.TestCase):
         self.assertEqual(calls[1][1], "/pcap-claim")
         self.assertEqual(calls[2][1], "/pcap-complete")
 
+    def test_pcap_export_parses_json_after_login_banner(self) -> None:
+        config = {
+            "security_onion": {
+                "ssh_user": "so-ai-relay",
+                "host": "security-onion.example.test",
+                "pcap_ssh_key": "/tmp/pcap-key",
+                "ssh_key": "/tmp/regular-key",
+            },
+            "relay": {"ssh_timeout_seconds": 5, "pcap_timeout_seconds": 10},
+        }
+        stdout = "\n".join(
+            [
+                "##########################################",
+                "###   UNAUTHORIZED ACCESS PROHIBITED   ###",
+                "##########################################",
+                '{"ok": true, "artifact_path": "/nsm/pcapout/onion-sentinel/test.tar", "artifact_sha256": "'
+                + ("a" * 64)
+                + '", "artifact_size_bytes": 4096}',
+            ]
+        )
+        completed = self.relay.subprocess.CompletedProcess(["ssh"], 0, stdout, "")
+
+        with mock.patch.object(self.relay.subprocess, "run", return_value=completed):
+            result = self.relay.run_ssh_pcap_export(config, {"request_id": "pcap-unit-test"})
+
+        self.assertEqual(result["artifact_path"], "/nsm/pcapout/onion-sentinel/test.tar")
+        self.assertEqual(result["artifact_size_bytes"], 4096)
+
 
 if __name__ == "__main__":
     unittest.main()
