@@ -14,6 +14,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from re import sub
@@ -22,6 +23,15 @@ from urllib.error import HTTPError, URLError
 
 
 APP_DIR = Path(__file__).resolve().parent
+
+
+class WebhookPostError(RuntimeError):
+    """Webhook delivery failure with enough context to decide retry behavior."""
+
+    def __init__(self, message: str, *, retryable: bool, status_code: int | None = None):
+        super().__init__(message)
+        self.retryable = retryable
+        self.status_code = status_code
 
 
 def now_utc_iso() -> str:
@@ -237,7 +247,27 @@ def save_new_alerts(config: dict, alerts: list[dict]) -> list[Path]:
     return saved_paths
 
 
-def post_json_to_webhook(config: dict, payload_data: dict) -> None:
+def webhook_int(webhook: dict, key: str, default: int) -> int:
+    try:
+        value = int(webhook.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return max(value, 0)
+
+
+def webhook_float(webhook: dict, key: str, default: float) -> float:
+    try:
+        value = float(webhook.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return max(value, 0.0)
+
+
+def is_retryable_http_status(status_code: int) -> bool:
+    return status_code in {408, 409, 425, 429} or status_code >= 500
+
+
+def post_json_to_webhook_once(config: dict, payload_data: dict) -> None:
     webhook = config.get("webhook", {})
     url = webhook.get("url")
     if not url:
@@ -258,16 +288,61 @@ def post_json_to_webhook(config: dict, payload_data: dict) -> None:
     try:
         with request.urlopen(req, timeout=timeout) as response:
             if response.status < 200 or response.status >= 300:
-                raise RuntimeError(f"Webhook returned HTTP {response.status}")
+                raise WebhookPostError(
+                    f"Webhook returned HTTP {response.status}",
+                    retryable=is_retryable_http_status(response.status),
+                    status_code=response.status,
+                )
     except HTTPError as exc:
-        raise RuntimeError(f"Webhook returned HTTP {exc.code}: {exc.reason}") from exc
+        raise WebhookPostError(
+            f"Webhook returned HTTP {exc.code}: {exc.reason}",
+            retryable=is_retryable_http_status(exc.code),
+            status_code=exc.code,
+        ) from exc
     except URLError as exc:
-        raise RuntimeError(f"Webhook request failed: {exc.reason}") from exc
+        raise WebhookPostError(f"Webhook request failed: {exc.reason}", retryable=True) from exc
 
 
-def post_alerts_to_webhook(config: dict, alerts: list[dict]) -> int:
+def post_json_to_webhook(config: dict, payload_data: dict) -> None:
+    webhook = config.get("webhook", {})
+    attempts = max(webhook_int(webhook, "retry_attempts", 3), 1)
+    backoff_seconds = webhook_float(webhook, "retry_backoff_seconds", 1.5)
+    max_backoff_seconds = webhook_float(webhook, "retry_max_backoff_seconds", 10.0)
+
+    for attempt in range(1, attempts + 1):
+        try:
+            post_json_to_webhook_once(config, payload_data)
+            return
+        except WebhookPostError as exc:
+            if not exc.retryable or attempt >= attempts:
+                raise RuntimeError(str(exc)) from exc
+            sleep_seconds = min(backoff_seconds * (2 ** (attempt - 1)), max_backoff_seconds)
+            print(
+                json.dumps(
+                    {
+                        "event": "webhook_retry",
+                        "attempt": attempt,
+                        "max_attempts": attempts,
+                        "sleep_seconds": sleep_seconds,
+                        "status_code": exc.status_code,
+                        "error": str(exc),
+                    },
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
+            time.sleep(sleep_seconds)
+
+
+def post_alerts_to_webhook(
+    config: dict,
+    alerts: list[dict],
+    conn: sqlite3.Connection | None = None,
+) -> int:
     # One POST per alert keeps delivery failures obvious and lets alert-store
-    # return an acknowledgement for each alert.
+    # return an acknowledgement for each alert. When conn is provided, each
+    # alert is marked seen immediately after a successful POST, so a later
+    # delivery failure resumes with only the unposted remainder next timer run.
     webhook = config.get("webhook", {})
     if not webhook.get("enabled"):
         return 0
@@ -276,6 +351,8 @@ def post_alerts_to_webhook(config: dict, alerts: list[dict]) -> int:
     for alert in alerts:
         post_json_to_webhook(config, alert)
         posted_count += 1
+        if conn is not None:
+            mark_seen(conn, [alert])
 
     return posted_count
 
@@ -359,7 +436,8 @@ def main() -> int:
         # Important order: filter -> dedupe -> save/post -> mark seen.
         new_alerts, duplicate_count = filter_unseen_alerts(conn, filtered_alerts)
         saved_alert_paths = save_new_alerts(config, new_alerts)
-        posted_count = post_alerts_to_webhook(config, new_alerts)
+        webhook_enabled = bool(config.get("webhook", {}).get("enabled"))
+        posted_count = post_alerts_to_webhook(config, new_alerts, conn if webhook_enabled else None)
         first_rule = all_alerts[0].get("rule_name") if all_alerts else "none"
         heartbeat_posted = False
         if not new_alerts:
@@ -374,7 +452,8 @@ def main() -> int:
                 first_rule=first_rule,
             )
             heartbeat_posted = post_relay_heartbeat(config, heartbeat)
-        mark_seen(conn, new_alerts)
+        if not webhook_enabled:
+            mark_seen(conn, new_alerts)
 
     print(
         json.dumps(

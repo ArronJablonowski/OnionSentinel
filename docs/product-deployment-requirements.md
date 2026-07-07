@@ -119,6 +119,9 @@ Keep the Raspberry Pi relay dumb and reliable: restricted SSH pull, exact
 alert-id retry dedupe, local evidence/state files, health notifications, and
 webhook transport. Filtering, scoring, suppression, routing, notification
 decisions, and dashboard state belong in n8n, alert-store, and SQLite.
+Webhook transport must retry transient downstream errors with bounded backoff
+and preserve partial-batch progress by marking each alert delivered only after
+that alert receives a successful webhook response.
 
 The alert-store SQLite database must be treated as an operational source of
 truth. Runtime must include recurring `PRAGMA quick_check` validation,

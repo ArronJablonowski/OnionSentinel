@@ -136,6 +136,11 @@ n8n. Normal rule filtering is intentionally not done on the Pi. The live Pi
 config keeps `filters.drop_alerts` empty so tuning can move with the Mac Studio
 workflow if the forwarding method changes later.
 
+Webhook delivery uses bounded retry/backoff for transient downstream failures:
+HTTP `408`, `409`, `425`, `429`, and `5xx` are retried; client/auth failures are
+not. Each alert is marked seen immediately after its own successful POST so a
+partial outage resumes with the remaining unposted alerts on the next timer run.
+
 The systemd service calls `relay_health_wrapper.py`. The wrapper runs the relay, records health state, sends a Telegram notification on first failure, suppresses repeated failure spam, and sends a recovery notification once the relay succeeds again.
 
 Current timer:

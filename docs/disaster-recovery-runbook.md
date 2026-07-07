@@ -364,6 +364,20 @@ The Pi still deduplicates exact alert IDs locally to avoid retry storms, but
 drop rules, suppression windows, routing, reports, and notifications belong to
 Mac Studio alert-store/n8n.
 
+Webhook retry defaults live in `/opt/so-alert-relay/app/config.json`:
+
+```json
+"retry_attempts": 3,
+"retry_backoff_seconds": 1.5,
+"retry_max_backoff_seconds": 10
+```
+
+The relay retries transient webhook failures (`408`, `409`, `425`, `429`, and
+`5xx`) with bounded exponential backoff. It does not retry client/auth errors
+such as `400`, `401`, or `403`. Alerts are marked seen immediately after their
+own successful POST, so a partial outage resumes with unposted alerts rather
+than replaying the whole batch.
+
 ## 5. Harden Pi SSH
 
 Apply this only after confirming at least one admin public key exists in:

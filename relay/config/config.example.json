@@ -18,7 +18,10 @@
     "enabled": false,
     "url": "",
     "token": "",
-    "timeout_seconds": 10
+    "timeout_seconds": 10,
+    "retry_attempts": 3,
+    "retry_backoff_seconds": 1.5,
+    "retry_max_backoff_seconds": 10
   },
   "filters": {
     "_comment": "Leave Pi-side rule filtering empty. Rule drops, suppression, routing, and reporting are owned by Mac Studio alert-store/n8n.",

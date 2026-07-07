@@ -55,6 +55,23 @@ Quiet timer cycles should log `posted_webhook_heartbeat: true`. Alert cycles
 should log `posted_webhook_alerts` greater than zero. Either path updates the
 Mac Studio `n8n-beacon.json` used by dashboard health.
 
+## Webhook Retry Behavior
+
+The relay retries transient webhook failures before giving the timer run back to
+systemd. Defaults live in `config/config.example.json`:
+
+```json
+"retry_attempts": 3,
+"retry_backoff_seconds": 1.5,
+"retry_max_backoff_seconds": 10
+```
+
+HTTP `408`, `409`, `425`, `429`, and `5xx` responses are retried. Client/auth
+errors such as `400`, `401`, and `403` fail immediately because another retry
+would repeat the same bad request. Each alert is marked seen only after its own
+successful POST, so a partial-batch failure resumes with the remaining unposted
+alerts on the next timer run.
+
 ## Firewall Needs
 
 From relay `10.88.8.8`:
