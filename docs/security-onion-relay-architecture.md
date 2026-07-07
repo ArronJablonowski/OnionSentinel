@@ -150,7 +150,15 @@ Security Onion forced-command key that can run only
 uses bounded time windows, and writes artifacts under
 `/nsm/pcapout/onion-sentinel`.
 
-The systemd service calls `relay_health_wrapper.py`. The wrapper runs the relay, records health state, sends a Telegram notification on first failure, suppresses repeated failure spam, and sends a recovery notification once the relay succeeds again.
+The systemd service calls `relay_health_wrapper.py`. The wrapper runs alert
+delivery and PCAP broker processing as independent sub-steps, records combined
+health state, sends a Telegram notification on first failure, suppresses
+repeated failure spam, and sends a recovery notification once both sub-steps
+succeed again. If alert delivery fails, PCAP broker processing is still
+attempted. If PCAP broker processing fails, alert delivery is still attempted.
+The wrapper exits nonzero when either sub-step fails so degraded service remains
+visible in systemd, journald, Telegram health state, and the dashboard health
+history.
 
 Current timer:
 

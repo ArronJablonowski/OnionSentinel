@@ -182,12 +182,20 @@ def run_pcap_broker() -> subprocess.CompletedProcess:
 
 
 def combine_results(primary: subprocess.CompletedProcess, secondary: subprocess.CompletedProcess) -> subprocess.CompletedProcess:
+    returncode = primary.returncode or secondary.returncode
     return subprocess.CompletedProcess(
         primary.args,
-        secondary.returncode,
+        returncode,
         (primary.stdout or "") + (secondary.stdout or ""),
         (primary.stderr or "") + (secondary.stderr or ""),
     )
+
+
+def component_summary(relay_result: subprocess.CompletedProcess, pcap_result: subprocess.CompletedProcess) -> str:
+    """Summarize both relay paths so one failure does not obscure the other."""
+    relay_status = "ok" if relay_result.returncode == 0 else f"failed({relay_result.returncode})"
+    pcap_status = "ok" if pcap_result.returncode == 0 else f"failed({pcap_result.returncode})"
+    return f"alert_relay={relay_status} pcap_broker={pcap_status}"
 
 
 def main() -> int:
@@ -203,25 +211,22 @@ def main() -> int:
         result = run_relay()
     except Exception as exc:
         result = subprocess.CompletedProcess(RELAY_COMMAND, 1, "", str(exc))
+    relay_result = result
 
-    summary = summarize_output(result.stdout, result.stderr)
     print(result.stdout, end="")
     if result.stderr:
         print(result.stderr, end="", file=sys.stderr)
 
-    if result.returncode == 0:
-        try:
-            pcap_result = run_pcap_broker()
-        except Exception as exc:
-            pcap_result = subprocess.CompletedProcess(RELAY_PCAP_COMMAND, 1, "", str(exc))
-        print(pcap_result.stdout, end="")
-        if pcap_result.stderr:
-            print(pcap_result.stderr, end="", file=sys.stderr)
-        if pcap_result.returncode != 0:
-            result = combine_results(result, pcap_result)
-            summary = summarize_output(result.stdout, result.stderr)
-        else:
-            summary = summarize_output(result.stdout + pcap_result.stdout, result.stderr + pcap_result.stderr)
+    try:
+        pcap_result = run_pcap_broker()
+    except Exception as exc:
+        pcap_result = subprocess.CompletedProcess(RELAY_PCAP_COMMAND, 1, "", str(exc))
+    print(pcap_result.stdout, end="")
+    if pcap_result.stderr:
+        print(pcap_result.stderr, end="", file=sys.stderr)
+
+    result = combine_results(relay_result, pcap_result)
+    summary = f"{component_summary(relay_result, pcap_result)}; {summarize_output(result.stdout, result.stderr)}"
 
     if result.returncode == 0:
         # If the previous run failed, this successful run is recovery-worthy.

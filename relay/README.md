@@ -111,6 +111,12 @@ is ingested into the Mac Studio runtime evidence directory, the Mac Studio
 `process-pcap-evidence.py` worker runs Zeek and TShark and writes bounded
 summaries for the SOC Analyst prompt package.
 
+`relay_health_wrapper.py` runs alert delivery and PCAP fulfillment as separate
+sub-steps on every timer cycle. A downstream alert webhook failure must not
+skip PCAP broker processing, and a PCAP broker failure must not block normal
+alert delivery. The wrapper exits nonzero if either sub-step fails so systemd,
+journald, and relay health state still show degraded service.
+
 ## Firewall Needs
 
 From relay `10.88.8.8`:

@@ -141,6 +141,18 @@ in SQLite, but fulfillment must be performed by the relay/Security Onion
 forced-command path with strict validation, small time windows, output size
 limits, audit metadata, and runtime-only artifact storage.
 
+Alert delivery and PCAP fulfillment must remain failure-isolated. The relay
+timer should attempt both subpaths every cycle and report component status for
+each path. A failed alert webhook POST must not skip PCAP broker processing, and
+a PCAP broker error must not block normal alert delivery.
+
+Future roadmap: increase supported PCAP pull size with a chunked or streamed
+artifact transport instead of a single inline base64 webhook body. That work
+should include explicit n8n/alert-store request limits, per-request and
+per-day quotas, disk cleanup, checksum validation for every chunk, retry-safe
+resume, and denial-of-service controls before raising production capture
+windows or byte limits.
+
 ## Notification Requirements
 
 High and critical alerts should go to Telegram. Notifications should dedupe and
