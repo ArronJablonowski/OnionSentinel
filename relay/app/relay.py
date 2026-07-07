@@ -426,6 +426,21 @@ def broker_request(config: dict, method: str, path: str, payload_data: dict | No
     return parsed
 
 
+def upload_pcap_artifact(config: dict, pcap_request: dict, export_result: dict) -> dict | None:
+    artifact_base64 = export_result.get("artifact_base64")
+    if not artifact_base64:
+        return None
+    payload = {
+        "request_id": pcap_request.get("request_id"),
+        "relay_host": socket.gethostname(),
+        "artifact_path": export_result.get("artifact_path"),
+        "artifact_sha256": export_result.get("artifact_sha256"),
+        "artifact_size_bytes": export_result.get("artifact_size_bytes"),
+        "artifact_base64": artifact_base64,
+    }
+    return broker_request(config, "POST", broker_path(config, "artifact", "/pcap-artifact"), payload)
+
+
 def broker_path(config: dict, name: str, default_path: str) -> str:
     paths = config.get("pcap_broker", {}).get("paths", {})
     path = paths.get(name, default_path) if isinstance(paths, dict) else default_path
@@ -457,7 +472,11 @@ def process_pcap_requests(config: dict) -> dict:
         if not claim.get("claimed"):
             continue
         try:
-            result = run_ssh_pcap_export(config, claim["request"])
+            export_request = dict(claim["request"])
+            if broker.get("upload_artifact", True):
+                export_request["inline_artifact_base64"] = True
+            result = run_ssh_pcap_export(config, export_request)
+            upload = upload_pcap_artifact(config, claim["request"], result)
             broker_request(
                 config,
                 "POST",
@@ -469,6 +488,7 @@ def process_pcap_requests(config: dict) -> dict:
                     "artifact_path": result.get("artifact_path"),
                     "artifact_sha256": result.get("artifact_sha256"),
                     "artifact_size_bytes": result.get("artifact_size_bytes"),
+                    "artifact_ingested": bool(upload and upload.get("ok")),
                 },
             )
             fulfilled += 1

@@ -91,21 +91,23 @@ PCAP fulfillment is disabled by default in `config/config.example.json`:
   "paths": {
     "requests": "/pcap-requests",
     "claim": "/pcap-claim",
-    "complete": "/pcap-complete"
+    "complete": "/pcap-complete",
+    "artifact": "/pcap-artifact"
   }
 }
 ```
 
 When enabled, the relay polls a relay-safe n8n broker/proxy endpoint for pending
 requests, claims one request at a time, sends the bounded JSON request to the
-Security Onion forced-command PCAP key, and reports only artifact metadata back
-to the broker. Packet artifacts stay on Security Onion under
-`/nsm/pcapout/onion-sentinel`; they are runtime evidence, not repo content.
+Security Onion forced-command PCAP key, and uploads the bounded artifact back
+through n8n. Alert-store verifies the request id, Security Onion output path,
+decoded size, and SHA256 before storing the artifact in the Mac Studio runtime
+evidence directory. Packet artifacts remain runtime evidence, not repo content.
 Use a separate broker token from the alert ingestion token and store it only in
 the live relay config and live n8n workflow.
 
 The relay does not parse packet captures or call LLMs. After a fulfilled capture
-is copied into the Mac Studio runtime evidence directory, the Mac Studio
+is ingested into the Mac Studio runtime evidence directory, the Mac Studio
 `process-pcap-evidence.py` worker runs Zeek and TShark and writes bounded
 summaries for the SOC Analyst prompt package.
 

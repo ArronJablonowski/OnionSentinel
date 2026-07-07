@@ -33,6 +33,7 @@ const port = Number(process.env.ALERT_STORE_PORT || 8787);
 const telegramBotToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const telegramChatId = (process.env.TELEGRAM_CHAT_ID || '').trim();
 const maxRequestBytes = Math.max(1024, Number(process.env.ALERT_STORE_MAX_REQUEST_BYTES || 5 * 1024 * 1024));
+const pcapArtifactDir = process.env.PCAP_ARTIFACT_DIR || '/pcap-artifacts';
 const telegramAlertLevels = new Set(
   (process.env.TELEGRAM_ALERT_LEVELS || 'critical,high')
     .split(',')
@@ -2237,6 +2238,13 @@ function safeString(value, maxLength = 240) {
   return String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, maxLength);
 }
 
+function safeFileToken(value, fallback = 'artifact') {
+  const cleaned = safeString(value, 180)
+    .replace(/[^A-Za-z0-9_.-]+/g, '-')
+    .replace(/^[.-]+|[.-]+$/g, '');
+  return cleaned || fallback;
+}
+
 function parseJsonObject(value) {
   if (!value) return {};
   try {
@@ -2496,6 +2504,54 @@ async function completePcapRequest(payload) {
   return {ok: true, status: row.status, request: pcapRequestFromRow(row)};
 }
 
+async function ingestPcapArtifact(payload) {
+  const requestId = safeString(payload?.request_id, 64);
+  if (!requestId) throw new Error('request_id is required');
+  const row = await get('SELECT * FROM pcap_requests WHERE request_id = ?', [requestId]);
+  if (!row) throw new Error('pcap request not found');
+  if (!['claimed', 'fulfilled'].includes(String(row.status || '').toLowerCase())) {
+    throw new Error(`pcap request must be claimed or fulfilled before artifact upload; current status is ${row.status}`);
+  }
+  const artifactPath = safeString(payload?.artifact_path || row.artifact_path, 1024);
+  if (!artifactPath.startsWith('/nsm/pcapout/onion-sentinel/')) {
+    throw new Error('artifact_path is outside the allowed Security Onion PCAP output directory');
+  }
+  const artifactSha256 = safeString(payload?.artifact_sha256 || row.artifact_sha256, 128).toLowerCase();
+  const artifactSizeBytes = nonNegativeIntegerField(payload?.artifact_size_bytes ?? row.artifact_size_bytes);
+  const artifactBase64 = safeString(payload?.artifact_base64, maxRequestBytes);
+  if (!artifactSha256 || !artifactSizeBytes || !artifactBase64) {
+    throw new Error('artifact upload requires artifact_sha256, artifact_size_bytes, and artifact_base64');
+  }
+  if (!/^[a-f0-9]{64}$/.test(artifactSha256)) throw new Error('artifact_sha256 must be a hex sha256 digest');
+  if (!/^[A-Za-z0-9+/=\r\n ]+$/.test(artifactBase64)) throw new Error('artifact_base64 contains invalid characters');
+  const artifactBytes = Buffer.from(artifactBase64.replace(/\s+/g, ''), 'base64');
+  if (artifactBytes.length !== artifactSizeBytes) {
+    throw new Error('artifact_size_bytes does not match decoded artifact length');
+  }
+  const digest = crypto.createHash('sha256').update(artifactBytes).digest('hex');
+  if (digest !== artifactSha256) throw new Error('artifact sha256 mismatch');
+
+  const requestDir = path.join(pcapArtifactDir, safeFileToken(requestId, 'pcap-request'));
+  const fileName = safeFileToken(path.basename(artifactPath), `${safeFileToken(requestId)}.tar`);
+  const destination = path.join(requestDir, fileName);
+  const artifactRoot = path.resolve(pcapArtifactDir);
+  if (!path.resolve(destination).startsWith(`${artifactRoot}${path.sep}`)) {
+    throw new Error('resolved artifact destination escaped artifact directory');
+  }
+  await fs.promises.mkdir(requestDir, {recursive: true, mode: 0o700});
+  const tempPath = `${destination}.tmp-${process.pid}`;
+  await fs.promises.writeFile(tempPath, artifactBytes, {mode: 0o600});
+  await fs.promises.rename(tempPath, destination);
+  return {
+    ok: true,
+    status: 'artifact_stored',
+    request_id: requestId,
+    artifact_file: destination,
+    artifact_size_bytes: artifactBytes.length,
+    artifact_sha256: digest,
+  };
+}
+
 function readJsonBody(request) {
   // n8n should POST one alert object per request. Arrays are rejected to avoid
   // partial batch inserts that are harder to reason about.
@@ -2599,6 +2655,14 @@ async function handleRequest(request, response) {
       // controlled runtime path and are never committed to the DR repo.
       const payload = await readJsonBody(request);
       const result = await completePcapRequest(payload);
+      sendJson(response, 200, result);
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/pcap/artifact') {
+      // Relay uploads bounded PCAP artifacts through n8n. Store runtime-only
+      // evidence after validating size and sha256 against broker metadata.
+      const payload = await readJsonBody(request);
+      const result = await ingestPcapArtifact(payload);
       sendJson(response, 200, result);
       return;
     }

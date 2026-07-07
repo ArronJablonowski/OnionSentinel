@@ -110,6 +110,56 @@ class RelayPcapBrokerTest(unittest.TestCase):
         self.assertEqual(calls[1][1], "/pcap-claim")
         self.assertEqual(calls[2][1], "/pcap-complete")
 
+    def test_relay_uploads_inline_artifact_before_completion(self) -> None:
+        request = {"request_id": "pcap-unit-test", "source_ip": "192.0.2.10", "destination_ip": "198.51.100.10"}
+        calls: list[tuple[str, str, dict | None]] = []
+
+        def fake_broker(config, method, path, payload_data=None):
+            calls.append((method, path, payload_data))
+            if path.startswith("/pcap-requests"):
+                return {"ok": True, "requests": [request]}
+            if path == "/pcap-claim":
+                return {"ok": True, "claimed": True, "request": request}
+            if path == "/pcap-artifact":
+                return {"ok": True, "status": "artifact_stored"}
+            if path == "/pcap-complete":
+                return {"ok": True, "status": payload_data["status"], "request": payload_data}
+            raise AssertionError(f"unexpected broker call: {method} {path}")
+
+        config = {
+            "pcap_broker": {
+                "enabled": True,
+                "limit": 1,
+                "requests_method": "POST",
+                "upload_artifact": True,
+                "paths": {
+                    "requests": "/pcap-requests",
+                    "claim": "/pcap-claim",
+                    "complete": "/pcap-complete",
+                    "artifact": "/pcap-artifact",
+                },
+            }
+        }
+        with mock.patch.object(self.relay, "broker_request", side_effect=fake_broker):
+            with mock.patch.object(
+                self.relay,
+                "run_ssh_pcap_export",
+                return_value={
+                    "artifact_path": "/nsm/pcapout/onion-sentinel/pcap-unit-test.tar",
+                    "artifact_sha256": "a" * 64,
+                    "artifact_size_bytes": 12,
+                    "artifact_base64": "ZmFrZS1wY2FwLXRhcg==",
+                },
+            ) as export:
+                result = self.relay.process_pcap_requests(config)
+
+        export.assert_called_once()
+        self.assertTrue(export.call_args.args[1]["inline_artifact_base64"])
+        self.assertEqual(result["fulfilled"], 1)
+        self.assertEqual([call[1] for call in calls], ["/pcap-requests?status=pending&limit=1", "/pcap-claim", "/pcap-artifact", "/pcap-complete"])
+        self.assertEqual(calls[2][2]["artifact_base64"], "ZmFrZS1wY2FwLXRhcg==")
+        self.assertTrue(calls[3][2]["artifact_ingested"])
+
     def test_pcap_export_parses_json_after_login_banner(self) -> None:
         config = {
             "security_onion": {

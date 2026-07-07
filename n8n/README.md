@@ -79,7 +79,8 @@ n8n copy only; keep the repo export placeholder-based. The relay should point
 {
   "requests": "/pcap-requests",
   "claim": "/pcap-claim",
-  "complete": "/pcap-complete"
+  "complete": "/pcap-complete",
+  "artifact": "/pcap-artifact"
 }
 ```
 
@@ -107,12 +108,16 @@ $HOME/n8n-local/pcap-evidence/artifacts
 $HOME/n8n-local/soc-alerts/pcap-analysis
 ```
 
-The worker reads fulfilled `pcap_requests`, looks for the copied artifact under
-`pcap-evidence/artifacts/<request_id>/`, runs Zeek first for structured network
-logs, runs TShark for protocol hierarchy/conversation corroboration, and writes
-bounded JSON/Markdown summaries for the SOC Analyst prompt builder. Raw PCAPs,
-extracted captures, and generated PCAP analysis artifacts must remain out of
-Git.
+The preferred artifact path is n8n-mediated ingestion: the relay asks Security
+Onion for a bounded export, uploads the capped base64 tar to
+`POST /webhook/pcap-artifact`, and alert-store verifies request id, size, and
+SHA256 before writing the runtime-only tar under
+`pcap-evidence/artifacts/<request_id>/`. The worker reads fulfilled
+`pcap_requests`, extracts the local artifact, runs Zeek first for structured
+network logs, runs TShark for protocol hierarchy/conversation corroboration,
+and writes bounded JSON/Markdown summaries for the SOC Analyst prompt builder.
+Raw PCAPs, extracted captures, and generated PCAP analysis artifacts must remain
+out of Git.
 
 Optional enrichment keys are also set in `$HOME/n8n-local/.env`. Blank or
 placeholder values are treated as disabled, so a source can be enabled or

@@ -36,7 +36,8 @@ services:
       - ENRICHMENT_TIMEOUT_MS=${ENRICHMENT_TIMEOUT_MS:-5000}
       - VIRUSTOTAL_MINIMUM_LEVEL=${VIRUSTOTAL_MINIMUM_LEVEL:-high}
       - URLSCAN_SUBMIT_ENABLED=${URLSCAN_SUBMIT_ENABLED:-false}
-      - ALERT_STORE_MAX_REQUEST_BYTES=${ALERT_STORE_MAX_REQUEST_BYTES:-5242880}
+      - ALERT_STORE_MAX_REQUEST_BYTES=${ALERT_STORE_MAX_REQUEST_BYTES:-10485760}
+      - PCAP_ARTIFACT_DIR=/pcap-artifacts
       - ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS=${ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS:-10000}
       - ALERT_STORE_SQLITE_JOURNAL_MODE=${ALERT_STORE_SQLITE_JOURNAL_MODE:-DELETE}
       - ALERT_STORE_SQLITE_SYNCHRONOUS=${ALERT_STORE_SQLITE_SYNCHRONOUS:-NORMAL}
@@ -47,6 +48,7 @@ services:
       # Source code is read-only; SQLite data persists in alert_store_data.
       - ./alert_store:/app:ro
       - ./alert_store_data:/data
+      - ./pcap-evidence/artifacts:/pcap-artifacts
       - ${SOC_ALERTS_PORTAL_DIR:-./portal}:/portal
     entrypoint: ["node", "/app/alert_store.js"]
 

@@ -31,12 +31,14 @@
     "url": "http://10.77.7.225:5678/webhook",
     "token": "",
     "requests_method": "POST",
+    "upload_artifact": true,
     "timeout_seconds": 20,
     "limit": 3,
     "paths": {
       "requests": "/pcap-requests",
       "claim": "/pcap-claim",
-      "complete": "/pcap-complete"
+      "complete": "/pcap-complete",
+      "artifact": "/pcap-artifact"
     }
   },
   "filters": {

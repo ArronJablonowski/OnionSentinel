@@ -9,6 +9,7 @@ contents never go to stdout/stderr.
 from __future__ import annotations
 
 import hashlib
+import base64
 import ipaddress
 import json
 import os
@@ -26,6 +27,7 @@ OUTPUT_ROOT = Path(os.environ.get("ONION_SENTINEL_PCAP_OUTPUT_ROOT", "/nsm/pcapo
 MAX_WINDOW_SECONDS = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_WINDOW_SECONDS", "300"))
 MAX_LOOKBACK_HOURS = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_LOOKBACK_HOURS", "24"))
 MAX_CANDIDATE_FILES = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_CANDIDATE_FILES", "80"))
+MAX_INLINE_ARTIFACT_BYTES = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_INLINE_ARTIFACT_BYTES", str(5 * 1024 * 1024)))
 
 
 def fail(reason: str, code: int = 1) -> None:
@@ -169,22 +171,23 @@ def main() -> int:
         for part in part_paths:
             tar.add(part, arcname=part.name)
 
-    print(
-        json.dumps(
-            {
-                "ok": True,
-                "status": "fulfilled",
-                "request_id": request_id,
-                "artifact_path": str(artifact),
-                "artifact_sha256": sha256_file(artifact),
-                "artifact_size_bytes": artifact.stat().st_size,
-                "part_count": len(part_paths),
-                "window_start": start.strftime("%Y-%m-%d  %H:%M:%S%z"),
-                "window_end": end.strftime("%Y-%m-%d  %H:%M:%S%z"),
-            },
-            sort_keys=True,
-        )
-    )
+    artifact_size = artifact.stat().st_size
+    payload = {
+        "ok": True,
+        "status": "fulfilled",
+        "request_id": request_id,
+        "artifact_path": str(artifact),
+        "artifact_sha256": sha256_file(artifact),
+        "artifact_size_bytes": artifact_size,
+        "part_count": len(part_paths),
+        "window_start": start.strftime("%Y-%m-%d  %H:%M:%S%z"),
+        "window_end": end.strftime("%Y-%m-%d  %H:%M:%S%z"),
+    }
+    if req.get("inline_artifact_base64"):
+        if artifact_size > MAX_INLINE_ARTIFACT_BYTES:
+            fail(f"artifact exceeds inline transfer limit: {artifact_size} > {MAX_INLINE_ARTIFACT_BYTES}")
+        payload["artifact_base64"] = base64.b64encode(artifact.read_bytes()).decode("ascii")
+    print(json.dumps(payload, sort_keys=True))
     return 0
 
 

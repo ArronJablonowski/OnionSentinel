@@ -166,6 +166,7 @@ routes and keeps alert-store reachable only on the Docker network:
 POST /webhook/pcap-requests
 POST /webhook/pcap-claim
 POST /webhook/pcap-complete
+POST /webhook/pcap-artifact
 ```
 
 The workflow writes one Obsidian-compatible Markdown report for each newly
@@ -346,7 +347,15 @@ It accepts a bounded JSON request on stdin and writes runtime-only artifacts to
 `/nsm/pcapout/onion-sentinel`.
 
 Fulfilled PCAP broker metadata is not enough for LLM analysis by itself. The
-capture artifact must be copied to the Mac Studio under:
+preferred path is the n8n artifact ingestion route:
+
+```text
+POST /webhook/pcap-artifact
+```
+
+The relay requests a bounded inline artifact from the Security Onion
+forced-command wrapper, uploads it through n8n, and alert-store validates the
+request id, size, and SHA256 before writing the runtime-only tar under:
 
 ```text
 $HOME/n8n-local/pcap-evidence/artifacts/<request_id>/
@@ -416,8 +425,10 @@ broker token, and path map are configured in
   "paths": {
     "requests": "/pcap-requests",
     "claim": "/pcap-claim",
-    "complete": "/pcap-complete"
+    "complete": "/pcap-complete",
+    "artifact": "/pcap-artifact"
   },
+  "upload_artifact": true,
   "timeout_seconds": 20,
   "limit": 3
 }

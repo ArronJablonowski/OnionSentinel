@@ -308,7 +308,7 @@ PCAP broker proxy workflow:
 Onion Sentinel PCAP Broker Proxy
 Workflow ID: onionSentinelPcapBroker
 Repo export: n8n/workflows/onion-sentinel-pcap-broker.workflow.json
-Production webhook paths: /pcap-requests, /pcap-claim, /pcap-complete
+Production webhook paths: /pcap-requests, /pcap-claim, /pcap-complete, /pcap-artifact
 ```
 
 The PCAP proxy uses a separate `REPLACE_WITH_PCAP_BROKER_TOKEN` placeholder in
@@ -980,9 +980,9 @@ full-fidelity alert data from the relay path.
 
 ## PCAP Evidence Request Broker
 
-Planned/partial implementation: alert-store can queue bounded PCAP evidence
-requests in SQLite, but packet-capture fulfillment remains intentionally
-separate from AI analysis and alert ingestion.
+Alert-store queues bounded PCAP evidence requests in SQLite, while
+packet-capture fulfillment remains intentionally separate from AI analysis and
+alert ingestion.
 
 Design contract:
 
@@ -992,8 +992,8 @@ SOC Analyst / analyst UI
   -> SQLite pcap_requests table
   -> Raspberry Pi relay polls pending requests
   -> Security Onion dedicated forced-command wrapper exports bounded PCAP
-  -> relay returns artifact metadata to Mac Studio
-  -> copied runtime artifact lands in Mac Studio pcap-evidence/artifacts
+  -> relay uploads bounded artifact through n8n /pcap-artifact
+  -> alert-store validates hash/size and writes Mac Studio pcap-evidence/artifacts
   -> Mac Studio Zeek/TShark worker writes bounded packet summaries
   -> dashboard/local AI use parsed summaries, not raw PCAP bytes
 ```
@@ -1009,6 +1009,7 @@ Alert-store request broker:
 ```text
 POST /pcap/request
 GET /pcap/requests?status=pending&limit=25
+POST /pcap/artifact
 ```
 
 Safety controls:
@@ -1021,6 +1022,9 @@ Safety controls:
   carefully extended forced-command wrapper. Do not reuse an unrestricted shell.
 - Security Onion-side fulfillment must enforce time-window, tuple,
   file-size, output-path, and cleanup limits before any PCAP is returned.
+- Artifact ingestion must go through n8n/alert-store instead of broad Mac Studio
+  SSH into Security Onion. Alert-store writes only to the configured runtime
+  artifact directory after verifying request id, artifact size, and SHA256.
 - PCAP artifacts are runtime-only evidence. Never commit `.pcap`, `.pcapng`,
   packet payloads, generated packet artifacts, or `soc-alerts/pcap-analysis`
   output to Git.
