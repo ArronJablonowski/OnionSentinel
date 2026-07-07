@@ -26,6 +26,7 @@ HOME = Path.home()
 DEFAULT_DB = HOME / "n8n-local" / "alert_store_data" / "alerts.sqlite3"
 DEFAULT_PROMPT_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-prompts"
 DEFAULT_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-analysis"
+DEFAULT_PCAP_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "pcap-analysis"
 DEFAULT_LOCK = HOME / "n8n-local" / "run" / "ai-analysis.lock"
 DEFAULT_PORTAL_BUILDER = HOME / ".hermes" / "scripts" / "build_soc_alerts_dashboard.py"
 DEFAULT_PORTAL_SYNC = HOME / "n8n-local" / "bin" / "sync-soc-alerts-portal.py"
@@ -74,6 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="Path to alert-store SQLite DB")
     parser.add_argument("--prompt-dir", type=Path, default=DEFAULT_PROMPT_DIR, help="Prompt package directory")
     parser.add_argument("--analysis-dir", type=Path, default=DEFAULT_ANALYSIS_DIR, help="AI analysis output directory")
+    parser.add_argument("--pcap-analysis-dir", type=Path, default=DEFAULT_PCAP_ANALYSIS_DIR, help="Parsed PCAP evidence directory")
     parser.add_argument("--lock-file", type=Path, default=DEFAULT_LOCK, help="Non-overlap lock file")
     parser.add_argument("--levels", default=DEFAULT_LEVELS, help="Comma-separated triage levels to analyze")
     parser.add_argument("--hours", type=int, default=87600, help="Lookback window for eligible alerts")
@@ -113,10 +115,10 @@ def test_filter_sql() -> tuple[str, list[object]]:
     return " AND ".join(clauses), params
 
 
-def analyzed_alert_ids(analysis_dir: Path) -> set[str]:
-    analyzed: set[str] = set()
+def latest_analysis_mtimes(analysis_dir: Path) -> dict[str, float]:
+    latest: dict[str, float] = {}
     if not analysis_dir.exists():
-        return analyzed
+        return latest
     for path in analysis_dir.glob("*-local-ai-analysis.json"):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -124,8 +126,37 @@ def analyzed_alert_ids(analysis_dir: Path) -> set[str]:
             continue
         alert_id = str(data.get("alert_id") or "").strip()
         if alert_id:
-            analyzed.add(alert_id)
-    return analyzed
+            latest[alert_id] = max(latest.get(alert_id, 0), path.stat().st_mtime)
+    return latest
+
+
+def latest_pcap_analysis_mtimes(pcap_analysis_dir: Path) -> dict[str, float]:
+    latest: dict[str, float] = {}
+    if not pcap_analysis_dir.exists():
+        return latest
+    for path in pcap_analysis_dir.glob("*-pcap-analysis.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        request = data.get("request") if isinstance(data.get("request"), dict) else {}
+        alert_id = str(request.get("alert_id") or data.get("alert_id") or "").strip()
+        if alert_id:
+            latest[alert_id] = max(latest.get(alert_id, 0), path.stat().st_mtime)
+    return latest
+
+
+def analyzed_alert_ids(analysis_dir: Path, pcap_analysis_dir: Path | None = None) -> set[str]:
+    """Return analyzed alert ids, excluding AI artifacts stale versus PCAP evidence."""
+    ai_mtimes = latest_analysis_mtimes(analysis_dir)
+    if not pcap_analysis_dir:
+        return set(ai_mtimes)
+    pcap_mtimes = latest_pcap_analysis_mtimes(pcap_analysis_dir)
+    return {
+        alert_id
+        for alert_id, ai_mtime in ai_mtimes.items()
+        if pcap_mtimes.get(alert_id, 0) <= ai_mtime
+    }
 
 
 def alert_group_key(row: sqlite3.Row) -> str:
@@ -379,7 +410,12 @@ def main() -> int:
             conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
             try:
-                selected = select_next_alert(conn, args, analyzed_alert_ids(args.analysis_dir), selected_groups)
+                selected = select_next_alert(
+                    conn,
+                    args,
+                    analyzed_alert_ids(args.analysis_dir, args.pcap_analysis_dir),
+                    selected_groups,
+                )
             finally:
                 conn.close()
 

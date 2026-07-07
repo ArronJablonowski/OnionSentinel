@@ -1005,6 +1005,7 @@ Design contract:
 ```text
 SOC Analyst / analyst UI
   -> alert-store POST /pcap/request
+  -> dashboard portal POST /api/soc-alerts/<group_id>/pcap when manually requested
   -> SQLite pcap_requests table
   -> Raspberry Pi relay polls pending requests
   -> Security Onion dedicated forced-command wrapper exports bounded PCAP
@@ -1019,6 +1020,12 @@ would materially reduce uncertainty, but it must not receive direct shell,
 SSH, sudo, or Security Onion API access. Requests must include a short reason
 and either an existing `alert_id`/`group_id` or the exact flow tuple and
 timestamps needed to reconstruct the smallest useful capture window.
+
+The dashboard request button is intentionally only a queueing surface. It
+normalizes the selected grouped alert, clamps the window, records a deterministic
+request id, and marks failed requests pending again when an analyst retries. It
+does not SSH to Security Onion, touch capture files, or block the normal alert
+relay path.
 
 Alert-store request broker:
 
@@ -1042,6 +1049,10 @@ Safety controls:
 - Artifact ingestion must go through n8n/alert-store instead of broad Mac Studio
   SSH into Security Onion. Alert-store writes only to the configured runtime
   artifact directory after verifying request id, artifact size, and SHA256.
+- Valid negative fulfillment is surfaced distinctly. A failed request whose
+  broker error indicates no matching packets is displayed as `No Packets` in
+  the dashboard so analysts can distinguish capture absence from transport or
+  parser failures.
 - PCAP artifacts are runtime-only evidence. Never commit `.pcap`, `.pcapng`,
   packet payloads, generated packet artifacts, or `soc-alerts/pcap-analysis`
   output to Git.

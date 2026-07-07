@@ -95,6 +95,35 @@ class SocAlertSummaryApiTest(unittest.TestCase):
               ttl_seconds INTEGER NOT NULL,
               escalation_threshold INTEGER NOT NULL
             );
+            CREATE TABLE pcap_requests (
+              request_id TEXT PRIMARY KEY,
+              status TEXT NOT NULL,
+              alert_id TEXT,
+              group_id TEXT,
+              group_key TEXT,
+              first_seen TEXT,
+              last_seen TEXT,
+              source_ip TEXT,
+              source_port INTEGER,
+              destination_ip TEXT,
+              destination_port INTEGER,
+              network_protocol TEXT,
+              transport_protocol TEXT,
+              community_id TEXT,
+              requested_by TEXT,
+              reason TEXT NOT NULL,
+              max_window_seconds INTEGER NOT NULL,
+              relay_host TEXT,
+              artifact_path TEXT,
+              artifact_sha256 TEXT,
+              artifact_size_bytes INTEGER,
+              error TEXT,
+              request_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              claimed_at TEXT,
+              completed_at TEXT,
+              updated_at TEXT NOT NULL
+            );
             """
         )
         self.insert_summary(
@@ -222,6 +251,66 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["alerts"][0]["representative_alert_id"], "newest-alert")
         self.assertEqual(payload["alerts"][0]["pcap_status_key"], "analyzed")
         self.assertEqual(payload["alerts"][0]["pcap_status_label"], "Analyzed")
+
+    def test_pcap_request_endpoint_queues_group_for_broker(self) -> None:
+        newest_group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+
+        status, payload = self.portal.soc_alert_pcap_request_response(
+            newest_group_id,
+            {"reason": "unit test analyst request", "requested_by": "unit-test"},
+        )
+
+        self.assertEqual(status, 202)
+        self.assertTrue(payload["ok"])
+        row = self.conn.execute("SELECT * FROM pcap_requests WHERE group_id = ?", (newest_group_id,)).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(row["reason"], "unit test analyst request")
+        self.assertEqual(row["requested_by"], "unit-test")
+        self.assertEqual(row["source_ip"], "192.0.2.10")
+        self.assertEqual(row["destination_ip"], "198.51.100.10")
+
+    def test_pcap_request_endpoint_requeues_failed_request(self) -> None:
+        newest_group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        status, first = self.portal.soc_alert_pcap_request_response(newest_group_id, {"reason": "first request"})
+        self.assertEqual(status, 202)
+        request_id = first["request"]["request_id"]
+        self.conn.execute(
+            "UPDATE pcap_requests SET status = 'failed', error = 'no matching packets found', completed_at = updated_at WHERE request_id = ?",
+            (request_id,),
+        )
+        self.conn.commit()
+
+        status, payload = self.portal.soc_alert_pcap_request_response(newest_group_id, {"reason": "first request"})
+
+        self.assertEqual(status, 202)
+        row = self.conn.execute("SELECT * FROM pcap_requests WHERE request_id = ?", (request_id,)).fetchone()
+        self.assertEqual(payload["request"]["request_id"], request_id)
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(row["reason"], "first request")
+        self.assertIsNone(row["error"])
+
+    def test_alert_list_marks_no_matching_packets_pcap_status(self) -> None:
+        newest_group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        self.portal.soc_alert_pcap_request_response(newest_group_id, {"reason": "unit test no packets"})
+        self.conn.execute(
+            "UPDATE pcap_requests SET status = 'failed', error = 'no matching packets found for requested window', completed_at = updated_at WHERE group_id = ?",
+            (newest_group_id,),
+        )
+        self.conn.commit()
+
+        status, payload = self.portal.soc_alerts_query_response({"limit": ["10"], "analyst_status": ["open"]})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["alerts"][0]["representative_alert_id"], "newest-alert")
+        self.assertEqual(payload["alerts"][0]["pcap_status_key"], "no-packets")
+        self.assertEqual(payload["alerts"][0]["pcap_status_label"], "No Packets")
 
     def test_alert_list_uses_static_ai_status_when_available(self) -> None:
         newest_group_id = self.portal.soc_alert_group_id(

@@ -201,6 +201,13 @@ The `pcap_requests` table uses `created_at`, `claimed_at`, `completed_at`, and
 alert-store once after copying the current source so the additive schema
 migration creates any missing lifecycle columns.
 
+The dashboard can also queue packet evidence from the SOC Alerts table. The
+`PCAP` row action calls the portal API, which writes or requeues a bounded
+`pcap_requests` row and immediately returns `Queued` to the UI. The relay and
+Security Onion wrapper still own capture fulfillment, so a dashboard/API
+failure does not stop normal alert relay ingestion, and a relay/PCAP failure
+does not stop analyst status changes or alert storage.
+
 Set `ZEEK_BIN`, `ZEEK_CUT_BIN`, or `TSHARK_BIN` only if the tools are not on
 the LaunchAgent `PATH`. Do not copy PCAP files or generated PCAP analysis
 artifacts into the Git repo.
@@ -425,6 +432,11 @@ $HOME/n8n-local/bin/process-pcap-evidence.py --request-id <request_id>
 and writes bounded Zeek/TShark summaries to
 `$HOME/n8n-local/soc-alerts/pcap-analysis`. The SOC Analyst prompt builder
 automatically includes those summaries for matching alerts.
+
+If Security Onion returns a valid negative result, such as no packets matching
+the requested flow/window, the dashboard shows `No Packets` instead of a
+generic failure. Operators should treat that as useful evidence about capture
+coverage or tuple/window selection, not as a broken broker.
 
 ## 4. Restore Pi Relay
 

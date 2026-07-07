@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -141,6 +143,32 @@ class AiSchedulerPriorityTest(unittest.TestCase):
 
         self.assertEqual(first["alert_id"], "critical-dup-new")
         self.assertEqual(second["alert_id"], "critical-other")
+
+    def test_newer_pcap_evidence_marks_existing_ai_analysis_stale(self) -> None:
+        self.insert_alert("medium-with-pcap", "medium", "2026-07-03  00:50:00Z", 90)
+        self.conn.commit()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            analysis_dir = root / "ai-analysis"
+            pcap_dir = root / "pcap-analysis"
+            analysis_dir.mkdir()
+            pcap_dir.mkdir()
+            ai_path = analysis_dir / "old-local-ai-analysis.json"
+            pcap_path = pcap_dir / "new-pcap-analysis.json"
+            ai_path.write_text(json.dumps({"alert_id": "medium-with-pcap"}), encoding="utf-8")
+            pcap_path.write_text(
+                json.dumps({"request": {"alert_id": "medium-with-pcap"}}),
+                encoding="utf-8",
+            )
+            os.utime(ai_path, (100, 100))
+            os.utime(pcap_path, (200, 200))
+
+            analyzed = self.scheduler.analyzed_alert_ids(analysis_dir, pcap_dir)
+            selected = self.scheduler.select_next_alert(self.conn, self.args, analyzed, set())
+
+        self.assertNotIn("medium-with-pcap", analyzed)
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["alert_id"], "medium-with-pcap")
 
 
 if __name__ == "__main__":

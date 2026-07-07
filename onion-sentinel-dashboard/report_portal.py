@@ -3740,7 +3740,7 @@ def soc_alert_pcap_analysis_index() -> dict[str, set[str]]:
     return index
 
 
-def soc_alert_pcap_request_statuses(conn: sqlite3.Connection, rows: list[sqlite3.Row | dict]) -> dict[str, str]:
+def soc_alert_pcap_request_statuses(conn: sqlite3.Connection, rows: list[sqlite3.Row | dict]) -> dict[str, dict]:
     """Return newest broker status keyed by group id and alert id for page rows."""
     if not sqlite_table_exists(conn, "pcap_requests"):
         return {}
@@ -3766,7 +3766,7 @@ def soc_alert_pcap_request_statuses(conn: sqlite3.Connection, rows: list[sqlite3
     try:
         found = conn.execute(
             f"""
-            SELECT request_id, alert_id, group_id, status
+            SELECT request_id, alert_id, group_id, status, error, updated_at, completed_at
             FROM pcap_requests
             WHERE group_id IN ({placeholders}) OR alert_id IN ({placeholders}) OR request_id IN ({placeholders})
             ORDER BY COALESCE(completed_at, updated_at, created_at) DESC
@@ -3775,17 +3775,22 @@ def soc_alert_pcap_request_statuses(conn: sqlite3.Connection, rows: list[sqlite3
         ).fetchall()
     except sqlite3.Error:
         return {}
-    statuses: dict[str, str] = {}
+    statuses: dict[str, dict] = {}
     for item in found:
-        status = str(item["status"] or "").strip().lower()
+        record = {
+            "request_id": str(item["request_id"] or "").strip(),
+            "status": str(item["status"] or "").strip().lower(),
+            "error": str(item["error"] or "").strip(),
+            "updated_at": str(item["completed_at"] or item["updated_at"] or "").strip(),
+        }
         for key in ("group_id", "alert_id", "request_id"):
             value = str(item[key] or "").strip()
             if value and value not in statuses:
-                statuses[value] = status
+                statuses[value] = record
     return statuses
 
 
-def soc_alert_pcap_status(group_id: str, alert_id: str, analysis_index: dict[str, set[str]], request_statuses: dict[str, str]) -> dict:
+def soc_alert_pcap_status(group_id: str, alert_id: str, analysis_index: dict[str, set[str]], request_statuses: dict[str, dict]) -> dict:
     """Return the compact PCAP table status for one grouped alert."""
     group_id = str(group_id or "").strip()
     alert_id = str(alert_id or "").strip()
@@ -3795,7 +3800,8 @@ def soc_alert_pcap_status(group_id: str, alert_id: str, analysis_index: dict[str
             "pcap_status_label": "Analyzed",
             "pcap_status_detail": "Parsed Zeek/TShark PCAP analysis is available for this detection group",
         }
-    request_status = request_statuses.get(group_id) or request_statuses.get(alert_id) or ""
+    request_record = request_statuses.get(group_id) or request_statuses.get(alert_id) or {}
+    request_status = str(request_record.get("status") or "").strip().lower() if isinstance(request_record, dict) else str(request_record or "").strip().lower()
     if request_status in {"pending", "claimed", "fulfilled"}:
         return {
             "pcap_status_key": "queued",
@@ -3803,10 +3809,17 @@ def soc_alert_pcap_status(group_id: str, alert_id: str, analysis_index: dict[str
             "pcap_status_detail": f"PCAP request is {request_status}; parsed analysis is not available yet",
         }
     if request_status == "failed":
+        error = str(request_record.get("error") or "").strip() if isinstance(request_record, dict) else ""
+        if "no matching packets" in error.lower():
+            return {
+                "pcap_status_key": "no-packets",
+                "pcap_status_label": "No Packets",
+                "pcap_status_detail": "Security Onion found no matching packets for the requested flow/window",
+            }
         return {
             "pcap_status_key": "error",
             "pcap_status_label": "Failed",
-            "pcap_status_detail": "PCAP request failed before parsed analysis was produced",
+            "pcap_status_detail": (error[:180] if error else "PCAP request failed before parsed analysis was produced"),
         }
     return {
         "pcap_status_key": "none",
@@ -3824,6 +3837,194 @@ def sqlite_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     except sqlite3.Error:
         return False
     return bool(row)
+
+
+def sqlite_table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    except sqlite3.Error:
+        return set()
+    return {str(row[1]) for row in rows}
+
+
+def bounded_int(value: object, default: int, low: int, high: int) -> int:
+    try:
+        number = int(round(float(value)))
+    except (TypeError, ValueError):
+        number = default
+    return max(low, min(high, number))
+
+
+def pcap_request_id(seed: dict) -> str:
+    raw = json.dumps(seed, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def normalize_pcap_timestamp(value: object) -> str:
+    if not value:
+        return ""
+    try:
+        return format_iso_timestamp(parse_iso_timestamp(value), utc_z=True)
+    except Exception:
+        return ""
+
+
+def pcap_request_candidate_from_group(conn: sqlite3.Connection, group_id: str) -> dict:
+    if not sqlite_table_exists(conn, "alert_group_summary"):
+        return {}
+    columns = sqlite_table_columns(conn, "alert_group_summary")
+    network_protocol_sql = "network_protocol" if "network_protocol" in columns else "NULL AS network_protocol"
+    row = conn.execute(
+        f"""
+        SELECT group_id, group_key, representative_alert_id, first_seen, last_seen,
+               timestamp, source_ip, source_port, destination_ip, destination_port,
+               {network_protocol_sql}, transport_protocol
+        FROM alert_group_summary
+        WHERE group_id = ?
+        """,
+        (group_id,),
+    ).fetchone()
+    if not row:
+        return {}
+    return {
+        "alert_id": row["representative_alert_id"],
+        "group_id": row["group_id"],
+        "group_key": row["group_key"],
+        "first_seen": row["first_seen"] or row["timestamp"],
+        "last_seen": row["last_seen"] or row["timestamp"],
+        "source_ip": row["source_ip"],
+        "source_port": row["source_port"],
+        "destination_ip": row["destination_ip"],
+        "destination_port": row["destination_port"],
+        "network_protocol": row["network_protocol"],
+        "transport_protocol": row["transport_protocol"],
+        "community_id": None,
+    }
+
+
+def normalize_pcap_request(payload: dict, candidate: dict) -> tuple[dict | None, str]:
+    merged = {**candidate, **(payload or {})}
+    reason = str(merged.get("reason") or "SOC analyst requested PCAP evidence").strip()[:240]
+    source_ip = str(merged.get("source_ip") or "").strip()[:64]
+    destination_ip = str(merged.get("destination_ip") or "").strip()[:64]
+    first_seen = normalize_pcap_timestamp(merged.get("first_seen") or merged.get("timestamp") or merged.get("last_seen"))
+    last_seen = normalize_pcap_timestamp(merged.get("last_seen") or merged.get("timestamp") or merged.get("first_seen"))
+    if not source_ip or not destination_ip:
+        return None, "PCAP request requires source and destination IPs"
+    if not first_seen or not last_seen:
+        return None, "PCAP request requires first_seen and last_seen timestamps"
+
+    request = {
+        "alert_id": str(merged.get("alert_id") or "").strip()[:512] or None,
+        "group_id": str(merged.get("group_id") or "").strip()[:64] or None,
+        "group_key": str(merged.get("group_key") or "").strip()[:512] or None,
+        "first_seen": first_seen,
+        "last_seen": last_seen,
+        "source_ip": source_ip,
+        "source_port": bounded_int(merged.get("source_port"), 0, 0, 65535) or None,
+        "destination_ip": destination_ip,
+        "destination_port": bounded_int(merged.get("destination_port"), 0, 0, 65535) or None,
+        "network_protocol": str(merged.get("network_protocol") or "").strip()[:32] or None,
+        "transport_protocol": str(merged.get("transport_protocol") or "").strip().lower()[:32] or None,
+        "community_id": str(merged.get("community_id") or "").strip()[:128] or None,
+        "requested_by": str(merged.get("requested_by") or "dashboard").strip()[:80] or "dashboard",
+        "reason": reason,
+        "max_window_seconds": bounded_int(merged.get("max_window_seconds"), 120, 30, 300),
+    }
+    request["request_id"] = pcap_request_id({
+        "alert_id": request["alert_id"],
+        "group_id": request["group_id"],
+        "first_seen": request["first_seen"],
+        "last_seen": request["last_seen"],
+        "source_ip": request["source_ip"],
+        "source_port": request["source_port"],
+        "destination_ip": request["destination_ip"],
+        "destination_port": request["destination_port"],
+        "community_id": request["community_id"],
+        "reason": request["reason"],
+    })
+    return request, ""
+
+
+def insert_pcap_request(conn: sqlite3.Connection, request: dict) -> sqlite3.Row:
+    columns = sqlite_table_columns(conn, "pcap_requests")
+    if not columns:
+        raise sqlite3.Error("pcap_requests table is unavailable")
+    now = now_iso_utc()
+    values = {
+        "request_id": request["request_id"],
+        "status": "pending",
+        "alert_id": request["alert_id"],
+        "group_id": request["group_id"],
+        "group_key": request["group_key"],
+        "first_seen": request["first_seen"],
+        "last_seen": request["last_seen"],
+        "source_ip": request["source_ip"],
+        "source_port": request["source_port"],
+        "destination_ip": request["destination_ip"],
+        "destination_port": request["destination_port"],
+        "network_protocol": request["network_protocol"],
+        "transport_protocol": request["transport_protocol"],
+        "community_id": request["community_id"],
+        "requested_by": request["requested_by"],
+        "reason": request["reason"],
+        "max_window_seconds": request["max_window_seconds"],
+        "request_json": json.dumps(request, separators=(",", ":"), sort_keys=True),
+        "created_at": now,
+        "updated_at": now,
+        "claimed_at": None,
+        "completed_at": None,
+        "error": None,
+        "artifact_path": None,
+        "artifact_sha256": None,
+        "artifact_size_bytes": None,
+    }
+    insert_columns = [column for column in values if column in columns]
+    placeholders = ", ".join("?" for _ in insert_columns)
+    update_columns = [
+        column for column in (
+            "status", "reason", "requested_by", "max_window_seconds", "request_json",
+            "updated_at", "claimed_at", "completed_at", "error", "artifact_path",
+            "artifact_sha256", "artifact_size_bytes",
+        )
+        if column in columns
+    ]
+    updates = ", ".join(f"{column} = excluded.{column}" for column in update_columns)
+    conn.execute(
+        f"""
+        INSERT INTO pcap_requests ({", ".join(insert_columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(request_id) DO UPDATE SET {updates}
+        """,
+        [values[column] for column in insert_columns],
+    )
+    return conn.execute("SELECT * FROM pcap_requests WHERE request_id = ?", (request["request_id"],)).fetchone()
+
+
+def soc_alert_pcap_request_response(group_id: str, payload: dict) -> tuple[int, dict]:
+    group_id = str(group_id or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{12}", group_id):
+        return soc_alert_api_error("Invalid SOC alert group id")
+    try:
+        with soc_alert_db_write_connect() as conn:
+            if not sqlite_table_exists(conn, "pcap_requests"):
+                return soc_alert_api_error("PCAP broker queue is unavailable", 503)
+            candidate = pcap_request_candidate_from_group(conn, group_id)
+            if not candidate:
+                return soc_alert_api_error("SOC alert group not found", 404)
+            request, error = normalize_pcap_request(payload, {**candidate, "group_id": group_id})
+            if not request:
+                return soc_alert_api_error(error)
+            row = insert_pcap_request(conn, request)
+    except Exception as exc:
+        return soc_alert_api_error(str(exc), 503)
+    return 202, {
+        "ok": True,
+        "status": row["status"] if row else "pending",
+        "pcap_status_key": "queued",
+        "pcap_status_label": "Queued",
+        "request": {key: row[key] for key in row.keys()} if row else request,
+    }
 
 
 def soc_alert_group_summary_available(conn: sqlite3.Connection) -> bool:
@@ -4214,6 +4415,22 @@ def soc_alert_db_connect():
         conn.close()
 
 
+@contextmanager
+def soc_alert_db_write_connect():
+    if not SOC_ALERT_STORE_DB.exists():
+        raise FileNotFoundError(f"SOC alert store DB not found: {SOC_ALERT_STORE_DB}")
+    conn = sqlite3.connect(SOC_ALERT_STORE_DB, timeout=5)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def parse_soc_alert_since(value: str) -> str:
     raw = str(value or "").strip().lower()
     if not raw:
@@ -4413,7 +4630,7 @@ def soc_alert_group_row_to_api(
     statuses: dict,
     ai_reports: dict | None = None,
     pcap_analysis: dict[str, set[str]] | None = None,
-    pcap_requests: dict[str, str] | None = None,
+    pcap_requests: dict[str, dict] | None = None,
 ) -> dict:
     group_key = row["group_key"]
     group_id = soc_alert_group_id(group_key)
@@ -5067,7 +5284,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/cyber-threat-intel-prompt", "/api/soc-settings/incident-responder-prompt", "/api/soc-settings/ai-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and not (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/ack")):
+        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/cyber-threat-intel-prompt", "/api/soc-settings/incident-responder-prompt", "/api/soc-settings/ai-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and not (parsed.path.startswith("/api/soc-alerts/") and (parsed.path.endswith("/ack") or parsed.path.endswith("/pcap"))):
             return self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain; charset=utf-8")
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -5076,7 +5293,7 @@ class PortalHandler(BaseHTTPRequestHandler):
         if length <= 0 or length > 50000:
             if parsed.path == "/api/admin/start-service":
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
-            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/cyber-threat-intel-prompt", "/api/soc-settings/incident-responder-prompt", "/api/soc-settings/ai-model") or (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/ack")):
+            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/cyber-threat-intel-prompt", "/api/soc-settings/incident-responder-prompt", "/api/soc-settings/ai-model") or (parsed.path.startswith("/api/soc-alerts/") and (parsed.path.endswith("/ack") or parsed.path.endswith("/pcap"))):
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
             if parsed.path.startswith("/api/resource-library/"):
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
@@ -5091,6 +5308,14 @@ class PortalHandler(BaseHTTPRequestHandler):
                 payload = {}
             encoded_id = parsed.path[len("/api/soc-alerts/"):-len("/ack")].strip("/")
             status, data = ack_soc_alert_store_id(unquote(encoded_id), payload)
+            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/pcap"):
+            try:
+                payload = json.loads(raw or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            encoded_id = parsed.path[len("/api/soc-alerts/"):-len("/pcap")].strip("/")
+            status, data = soc_alert_pcap_request_response(unquote(encoded_id), payload)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path == "/api/soc-alerts/status":
             try:

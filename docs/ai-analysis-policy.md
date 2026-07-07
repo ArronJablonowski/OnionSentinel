@@ -102,6 +102,13 @@ source for conversations, DNS, TLS, HTTP, notices, and weird logs. TShark is
 used as corroborating packet-level context for protocol hierarchy, conversations,
 and bounded packet-field samples.
 
+When a parsed PCAP evidence artifact is newer than the matching local AI
+analysis artifact, the scheduled AI runner treats that analysis as stale. The
+alert group becomes eligible for another local Ollama run so the Detailed Alert
+Report can include packet-informed findings. Negative broker states, such as
+`No Packets`, are shown in the dashboard but do not by themselves force
+reanalysis because there is no parsed packet summary to reason over.
+
 ## Prompt Package Inputs
 
 The prompt package includes:
@@ -403,6 +410,9 @@ Default behavior:
 - Skip alert IDs that look like test/validation events.
 - Skip grouped detections that already have a matching
   `*-local-ai-analysis.json` artifact for any member alert.
+- Requeue a grouped detection for analysis when matching
+  `$HOME/n8n-local/soc-alerts/pcap-analysis/*-pcap-analysis.json` evidence is
+  newer than the latest local AI artifact.
 - Hold `$HOME/n8n-local/run/ai-analysis.lock` so two Ollama jobs do
   not overlap.
 - Rebuild and sync the SOC dashboard once while analysis is active and again

@@ -806,6 +806,13 @@ runs Zeek and TShark, and writes bounded JSON/Markdown summaries to
 summaries under `pcap_evidence`; raw PCAP bytes never enter the prompt package
 or the Git repo.
 
+Analysts can queue PCAP evidence from the SOC Alerts table through the dashboard
+portal API. The portal writes a bounded `pcap_requests` row and returns
+immediately; relay polling, Security Onion export, n8n artifact ingestion, and
+Mac Studio parsing remain separate services. The PCAP table column uses
+`Analyzed`, `Queued`, `Parsing`, `No Packets`, `Failed`, or `None` so packet
+evidence state is visible without opening each Detailed Alert Report.
+
 Alert-store keeps `alert_group_summary` current on every accepted alert. The
 raw `alerts` table includes an expression index that matches the group-key
 calculation, which keeps per-alert summary refreshes bounded as full alert JSON
