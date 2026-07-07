@@ -1399,6 +1399,21 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_alerts_source_port ON alerts(source_port)');
   await run('CREATE INDEX IF NOT EXISTS idx_alerts_destination_port ON alerts(destination_port)');
   await run('CREATE INDEX IF NOT EXISTS idx_alerts_transport_protocol ON alerts(transport_protocol)');
+  // Group summary refreshes run on every stored alert. Keep the expression
+  // index in lockstep with alertGroupKeySql so inserts avoid table scans as
+  // alert_json and enrichment_json grow.
+  await run(`
+    CREATE INDEX IF NOT EXISTS idx_alerts_group_key_expr ON alerts(
+      COALESCE(
+        NULLIF(suppression_key, ''),
+        COALESCE(triage_level, 'unknown-level') || '|' ||
+        COALESCE(rule_name, 'unknown-rule') || '|' ||
+        COALESCE(source_ip, 'unknown-source') || '|' ||
+        COALESCE(destination_ip, 'unknown-destination') || '|' ||
+        COALESCE(filter_status, 'accepted')
+      )
+    )
+  `);
   await run(`
     CREATE TABLE IF NOT EXISTS alert_group_summary (
       group_id TEXT PRIMARY KEY,
@@ -1512,10 +1527,15 @@ async function initDb() {
       error TEXT,
       request_json TEXT NOT NULL,
       created_at TEXT NOT NULL,
+      claimed_at TEXT,
+      completed_at TEXT,
       updated_at TEXT NOT NULL
     )
   `);
+  await ensureColumn('pcap_requests', 'claimed_at', 'TEXT');
+  await ensureColumn('pcap_requests', 'completed_at', 'TEXT');
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_status_created ON pcap_requests(status, created_at)');
+  await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_completed_at ON pcap_requests(completed_at)');
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_alert_id ON pcap_requests(alert_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_group_id ON pcap_requests(group_id)');
   await rebuildAlertGroupSummaries();
@@ -2365,6 +2385,8 @@ function pcapRequestFromRow(row) {
     artifact_size_bytes: row.artifact_size_bytes,
     error: row.error,
     created_at: row.created_at,
+    claimed_at: row.claimed_at,
+    completed_at: row.completed_at,
     updated_at: row.updated_at,
   };
 }
@@ -2450,11 +2472,12 @@ async function claimPcapRequest(payload) {
       SET status = 'claimed',
           relay_host = ?,
           error = NULL,
+          claimed_at = COALESCE(claimed_at, ?),
           updated_at = ?
       WHERE request_id = ?
         AND status IN ('pending', 'claimed')
     `,
-    [relayHost, now, requestId],
+    [relayHost, now, now, requestId],
   );
   const row = await get('SELECT * FROM pcap_requests WHERE request_id = ?', [requestId]);
   return {ok: true, claimed: row.status === 'claimed', status: row.status, request: pcapRequestFromRow(row)};
@@ -2485,6 +2508,7 @@ async function completePcapRequest(payload) {
           artifact_sha256 = ?,
           artifact_size_bytes = ?,
           error = ?,
+          completed_at = ?,
           updated_at = ?
       WHERE request_id = ?
     `,
@@ -2495,6 +2519,7 @@ async function completePcapRequest(payload) {
       artifactSha256,
       artifactSizeBytes,
       requestedStatus === 'fulfilled' ? null : error,
+      now,
       now,
       requestId,
     ],

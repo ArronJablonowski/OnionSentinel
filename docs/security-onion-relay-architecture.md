@@ -342,6 +342,14 @@ CVEs; skips private IPs/internal hostnames; honors configured API keys; caches
 responses in SQLite; and records skipped/rate-limited source notes in the alert
 detail bundle.
 
+The enrichment stage is best-effort by design. If `/enrich` fails or times out,
+the workflow marks the alert with an `external_intel.errors` record and still
+passes it to `Store Score And Filter Alert`. That store node uses a 30 second
+alert-store timeout and does not let a failed enrichment retry trigger surprise
+public API work inside the storage path. Alert-store also maintains an indexed
+group-key expression for `alert_group_summary` refreshes so high-volume inserts
+do not degrade into avoidable table scans as JSON evidence grows.
+
 Report path:
 
 ```text
@@ -1025,7 +1033,8 @@ Safety controls:
 - Alert-store only validates and queues requests; it never exports PCAP.
 - Request windows are clamped by `PCAP_REQUEST_MAX_WINDOW_SECONDS`.
 - Requests store tuple fields, timestamps, optional `network.community_id`,
-  requester, reason, and audit timestamps.
+  requester, reason, and audit timestamps. `created_at`, `claimed_at`,
+  `completed_at`, and `updated_at` are the canonical request lifecycle fields.
 - Fulfillment must use a separate Security Onion forced-command SSH key or a
   carefully extended forced-command wrapper. Do not reuse an unrestricted shell.
 - Security Onion-side fulfillment must enforce time-window, tuple,

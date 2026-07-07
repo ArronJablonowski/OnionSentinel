@@ -173,6 +173,13 @@ The workflow writes one Obsidian-compatible Markdown report for each newly
 accepted alert. Duplicate alerts return `report_written=false` and do not
 create repeated files.
 
+The alert intake workflow intentionally treats public enrichment as best-effort.
+If the dedicated `Enrich Alert` node cannot reach alert-store or an upstream
+provider stalls, it marks the alert with an `external_intel.errors` record and
+continues to storage. `Store Score And Filter Alert` uses a 30 second
+alert-store timeout. Do not reduce that timeout below normal `/alert` write
+latency plus burst headroom.
+
 Install Mac Studio packet-analysis tooling before expecting PCAP evidence in AI
 reports. Zeek/zeek-cut provide structured network logs; TShark provides
 protocol hierarchy and packet-field corroboration. The restore script copies the
@@ -188,6 +195,11 @@ $HOME/n8n-local/pcap-evidence/artifacts
 $HOME/n8n-local/soc-alerts/pcap-analysis
 $HOME/Library/LaunchAgents/com.arron.soc.pcap-analysis.plist
 ```
+
+The `pcap_requests` table uses `created_at`, `claimed_at`, `completed_at`, and
+`updated_at` to track broker lifecycle. If a restored database is older, restart
+alert-store once after copying the current source so the additive schema
+migration creates any missing lifecycle columns.
 
 Set `ZEEK_BIN`, `ZEEK_CUT_BIN`, or `TSHARK_BIN` only if the tools are not on
 the LaunchAgent `PATH`. Do not copy PCAP files or generated PCAP analysis

@@ -797,13 +797,19 @@ New local AI outputs include `Alert Frequency Assessment` and `Recommended Tunin
 
 PCAP-derived AI evidence is stored outside SQLite as runtime-only artifacts.
 `pcap_requests` in SQLite tracks request, claim, fulfillment, and artifact
-metadata. The Mac Studio worker
+metadata, including `created_at`, `claimed_at`, `completed_at`, and
+`updated_at` lifecycle timestamps. The Mac Studio worker
 `$HOME/n8n-local/bin/process-pcap-evidence.py` reads fulfilled requests, looks
 for copied captures in `$HOME/n8n-local/pcap-evidence/artifacts/<request_id>/`,
 runs Zeek and TShark, and writes bounded JSON/Markdown summaries to
 `$HOME/n8n-local/soc-alerts/pcap-analysis`. Prompt packages include matching
 summaries under `pcap_evidence`; raw PCAP bytes never enter the prompt package
 or the Git repo.
+
+Alert-store keeps `alert_group_summary` current on every accepted alert. The
+raw `alerts` table includes an expression index that matches the group-key
+calculation, which keeps per-alert summary refreshes bounded as full alert JSON
+and enrichment JSON grow.
 
 
 | Section | Source | Behavior |
