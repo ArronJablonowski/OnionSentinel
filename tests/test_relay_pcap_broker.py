@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
+import io
 import sys
 import unittest
 from pathlib import Path
@@ -159,6 +161,79 @@ class RelayPcapBrokerTest(unittest.TestCase):
         self.assertEqual([call[1] for call in calls], ["/pcap-requests?status=pending&limit=1", "/pcap-claim", "/pcap-artifact", "/pcap-complete"])
         self.assertEqual(calls[2][2]["artifact_base64"], "ZmFrZS1wY2FwLXRhcg==")
         self.assertTrue(calls[3][2]["artifact_ingested"])
+
+    def test_completion_failure_does_not_abort_remaining_pcap_requests(self) -> None:
+        requests = [
+            {"request_id": "pcap-unit-test-1", "source_ip": "192.0.2.10", "destination_ip": "198.51.100.10"},
+            {"request_id": "pcap-unit-test-2", "source_ip": "192.0.2.11", "destination_ip": "198.51.100.11"},
+        ]
+        calls: list[tuple[str, str, dict | None]] = []
+
+        def fake_broker(config, method, path, payload_data=None):
+            calls.append((method, path, payload_data))
+            if path.startswith("/pcap/requests"):
+                return {"ok": True, "requests": requests}
+            if path == "/pcap/claim":
+                request_id = payload_data["request_id"]
+                return {"ok": True, "claimed": True, "request": next(item for item in requests if item["request_id"] == request_id)}
+            if path == "/pcap/complete" and payload_data["request_id"] == "pcap-unit-test-1":
+                raise RuntimeError("completion endpoint unavailable")
+            if path == "/pcap/complete":
+                return {"ok": True, "status": payload_data["status"], "request": payload_data}
+            raise AssertionError(f"unexpected broker call: {method} {path}")
+
+        with mock.patch.object(self.relay, "broker_request", side_effect=fake_broker):
+            with mock.patch.object(
+                self.relay,
+                "run_ssh_pcap_export",
+                return_value={
+                    "artifact_path": "/nsm/pcapout/onion-sentinel/pcap-unit-test.tar",
+                    "artifact_sha256": "a" * 64,
+                    "artifact_size_bytes": 1024,
+                },
+            ):
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    result = self.relay.process_pcap_requests({"pcap_broker": {"enabled": True, "limit": 2}})
+
+        self.assertEqual(result["processed"], 2)
+        self.assertEqual(result["fulfilled"], 1)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(result["completion_failed"], 1)
+        self.assertIn("pcap_complete_failed", stderr.getvalue())
+        self.assertEqual([call[2]["request_id"] for call in calls if call[1] == "/pcap/claim"], ["pcap-unit-test-1", "pcap-unit-test-2"])
+
+    def test_failed_export_completion_failure_is_counted_and_loop_continues(self) -> None:
+        requests = [
+            {"request_id": "pcap-unit-test-1", "source_ip": "192.0.2.10", "destination_ip": "198.51.100.10"},
+            {"request_id": "pcap-unit-test-2", "source_ip": "192.0.2.11", "destination_ip": "198.51.100.11"},
+        ]
+
+        def fake_broker(config, method, path, payload_data=None):
+            if path.startswith("/pcap/requests"):
+                return {"ok": True, "requests": requests}
+            if path == "/pcap/claim":
+                request_id = payload_data["request_id"]
+                return {"ok": True, "claimed": True, "request": next(item for item in requests if item["request_id"] == request_id)}
+            if path == "/pcap/complete" and payload_data["request_id"] == "pcap-unit-test-1":
+                raise RuntimeError("completion endpoint unavailable")
+            if path == "/pcap/complete":
+                return {"ok": True, "status": payload_data["status"], "request": payload_data}
+            raise AssertionError(f"unexpected broker call: {method} {path}")
+
+        export_results = [RuntimeError("pcap export failed"), {"artifact_path": "/tmp/pcap.tar", "artifact_sha256": "b" * 64, "artifact_size_bytes": 32}]
+
+        with mock.patch.object(self.relay, "broker_request", side_effect=fake_broker):
+            with mock.patch.object(self.relay, "run_ssh_pcap_export", side_effect=export_results):
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    result = self.relay.process_pcap_requests({"pcap_broker": {"enabled": True, "limit": 2}})
+
+        self.assertEqual(result["processed"], 2)
+        self.assertEqual(result["fulfilled"], 1)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(result["completion_failed"], 1)
+        self.assertIn("pcap_complete_failed", stderr.getvalue())
 
     def test_pcap_export_parses_json_after_login_banner(self) -> None:
         config = {

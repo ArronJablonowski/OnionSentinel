@@ -447,6 +447,33 @@ def broker_path(config: dict, name: str, default_path: str) -> str:
     return "/" + str(path or default_path).lstrip("/")
 
 
+def complete_pcap_request(config: dict, request_id: str, status: str, payload: dict) -> bool:
+    try:
+        broker_request(
+            config,
+            "POST",
+            broker_path(config, "complete", "/pcap/complete"),
+            {"request_id": request_id, "status": status, "relay_host": socket.gethostname(), **payload},
+        )
+        return True
+    except Exception as exc:
+        # Completion callbacks are bookkeeping. Losing one should be loud in
+        # journald but should not stop the relay from servicing other requests.
+        print(
+            json.dumps(
+                {
+                    "event": "pcap_complete_failed",
+                    "request_id": request_id,
+                    "status": status,
+                    "error": str(exc)[:500],
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return False
+
+
 def process_pcap_requests(config: dict) -> dict:
     broker = config.get("pcap_broker", {})
     if not broker.get("enabled"):
@@ -461,6 +488,7 @@ def process_pcap_requests(config: dict) -> dict:
     processed = 0
     fulfilled = 0
     failed = 0
+    completion_failed = 0
     for pcap_request in pending.get("requests", []):
         request_id = pcap_request.get("request_id")
         claim = broker_request(
@@ -477,36 +505,33 @@ def process_pcap_requests(config: dict) -> dict:
                 export_request["inline_artifact_base64"] = True
             result = run_ssh_pcap_export(config, export_request)
             upload = upload_pcap_artifact(config, claim["request"], result)
-            broker_request(
+            if complete_pcap_request(
                 config,
-                "POST",
-                broker_path(config, "complete", "/pcap/complete"),
+                request_id,
+                "fulfilled",
                 {
-                    "request_id": request_id,
-                    "status": "fulfilled",
-                    "relay_host": socket.gethostname(),
                     "artifact_path": result.get("artifact_path"),
                     "artifact_sha256": result.get("artifact_sha256"),
                     "artifact_size_bytes": result.get("artifact_size_bytes"),
                     "artifact_ingested": bool(upload and upload.get("ok")),
                 },
-            )
-            fulfilled += 1
+            ):
+                fulfilled += 1
+            else:
+                completion_failed += 1
         except Exception as exc:
-            broker_request(
-                config,
-                "POST",
-                broker_path(config, "complete", "/pcap/complete"),
-                {
-                    "request_id": request_id,
-                    "status": "failed",
-                    "relay_host": socket.gethostname(),
-                    "error": str(exc)[:500],
-                },
-            )
+            if not complete_pcap_request(config, request_id, "failed", {"error": str(exc)[:500]}):
+                completion_failed += 1
             failed += 1
         processed += 1
-    return {"ok": True, "enabled": True, "processed": processed, "fulfilled": fulfilled, "failed": failed}
+    return {
+        "ok": True,
+        "enabled": True,
+        "processed": processed,
+        "fulfilled": fulfilled,
+        "failed": failed,
+        "completion_failed": completion_failed,
+    }
 
 
 def post_alerts_to_webhook(
