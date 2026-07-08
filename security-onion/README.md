@@ -37,6 +37,14 @@ PCAP fulfillment should use a separate key entry based on
 JSON request from stdin and writes artifacts only under
 `/nsm/pcapout/onion-sentinel`.
 
+`export-pcap-window` searches Security Onion PCAP files by modification time
+and evaluates the newest bounded candidate set first. This keeps short,
+recent detection windows from missing packets when `/nsm/suripcap` contains
+older captures mixed with current files. The wrapper defaults to using the
+destination service port as the BPF port discriminator; request JSON may set
+`require_source_port: true` for controlled validation or rare cases where an
+ephemeral source port is the only safe discriminator.
+
 ## Validate
 
 ```bash

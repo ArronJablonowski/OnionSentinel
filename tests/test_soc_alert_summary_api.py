@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import datetime as dt
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -266,7 +267,7 @@ class SocAlertSummaryApiTest(unittest.TestCase):
 
         status, payload = self.portal.soc_alert_pcap_request_response(
             newest_group_id,
-            {"reason": "unit test analyst request", "requested_by": "unit-test"},
+            {"reason": "unit test analyst request", "requested_by": "unit-test", "require_source_port": True},
         )
 
         self.assertEqual(status, 202)
@@ -278,6 +279,7 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(row["requested_by"], "unit-test")
         self.assertEqual(row["source_ip"], "192.0.2.10")
         self.assertEqual(row["destination_ip"], "198.51.100.10")
+        self.assertTrue(json.loads(row["request_json"])["require_source_port"])
 
     def test_pcap_request_endpoint_requeues_failed_request(self) -> None:
         newest_group_id = self.portal.soc_alert_group_id(
@@ -444,6 +446,14 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["pcap"]["recent_requests"][0]["status"], "failed")
 
     def test_system_health_warns_on_stale_or_unexpected_pcap_work(self) -> None:
+        fresh_failure_at = self.portal.format_iso_timestamp(
+            dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=30),
+            timespec="seconds",
+        )
+        old_failure_at = self.portal.format_iso_timestamp(
+            dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3),
+            timespec="seconds",
+        )
         self.conn.execute(
             """
             INSERT INTO pcap_requests (
@@ -454,8 +464,11 @@ class SocAlertSummaryApiTest(unittest.TestCase):
               ('pcap-stale-pending', 'pending', ?, 'unit test', 120, '{}',
                '2026-07-03  12:00:00Z', '2026-07-03  12:00:00Z', NULL, NULL),
               ('pcap-unexpected-failure', 'failed', ?, 'unit test', 120, '{}',
-               '2026-07-03  12:00:00Z', '2026-07-03  12:01:00Z',
-               '2026-07-03  12:01:00Z', 'artifact upload failed')
+               ?, ?, ?, 'artifact upload failed'),
+              ('pcap-old-unexpected-failure', 'failed', ?, 'unit test', 120, '{}',
+               ?, ?, ?, 'old artifact upload failed'),
+              ('pcap-legacy-invalid-json', 'failed', ?, 'unit test', 120, '{}',
+               ?, ?, ?, 'PCAP export returned invalid JSON: no JSON object found: line 1 column 1 (char 0); preview=''''')
             """,
             (
                 self.portal.soc_alert_group_id(
@@ -464,6 +477,21 @@ class SocAlertSummaryApiTest(unittest.TestCase):
                 self.portal.soc_alert_group_id(
                     "medium|Older detection|192.0.2.20|198.51.100.20|accepted"
                 ),
+                fresh_failure_at,
+                fresh_failure_at,
+                fresh_failure_at,
+                self.portal.soc_alert_group_id(
+                    "low|Old failure|192.0.2.30|198.51.100.30|accepted"
+                ),
+                old_failure_at,
+                old_failure_at,
+                old_failure_at,
+                self.portal.soc_alert_group_id(
+                    "medium|Legacy invalid JSON|192.0.2.40|198.51.100.40|accepted"
+                ),
+                fresh_failure_at,
+                fresh_failure_at,
+                fresh_failure_at,
             ),
         )
         self.conn.commit()
@@ -472,7 +500,7 @@ class SocAlertSummaryApiTest(unittest.TestCase):
 
         self.assertEqual(payload["pcap"]["warning_count"], 2)
         self.assertTrue(any("pending PCAP request" in item for item in payload["pcap"]["warnings"]))
-        self.assertTrue(any("failure(s) need review" in item for item in payload["pcap"]["warnings"]))
+        self.assertTrue(any("1 PCAP request failure(s) need review" in item for item in payload["pcap"]["warnings"]))
 
     def test_event_snapshot_uses_consistent_status_and_metrics_counts(self) -> None:
         payload = self.portal.soc_alert_events_snapshot()

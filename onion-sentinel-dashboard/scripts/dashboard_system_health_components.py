@@ -150,6 +150,7 @@ SYSTEM_HEALTH_JS = '''
           <div><b>Fulfilled</b><span>${esc(counts.fulfilled || 0)}</span></div>
           <div><b>Failed</b><span>${esc(counts.failed || 0)}</span></div>
           <div><b>No Packets</b><span>${esc(pcap?.no_packet_failures || 0)}</span></div>
+          <div><b>Oversize</b><span>${esc(pcap?.oversize_failures || 0)}</span></div>
           <div><b>Artifact Size</b><span>${esc(bytes(pcap?.artifact_size_bytes || 0))}</span></div>
           <div><b>Latest Request</b><span>${esc(latestRequest.request_id || 'n/a')} · ${esc(latestRequest.status || 'n/a')}</span></div>
           <div><b>Latest Request Time</b><span>${esc(latestRequest.updated_at ? fmt(latestRequest.updated_at) : 'n/a')}</span></div>

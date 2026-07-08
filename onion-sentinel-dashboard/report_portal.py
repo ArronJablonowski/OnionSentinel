@@ -383,6 +383,7 @@ def pcap_workflow_health_response() -> dict[str, object]:
         "available": False,
         "request_counts": {"pending": 0, "claimed": 0, "fulfilled": 0, "failed": 0, "total": 0},
         "no_packet_failures": 0,
+        "oversize_failures": 0,
         "warning_count": 0,
         "warnings": [],
         "recent_requests": [],
@@ -411,8 +412,30 @@ def pcap_workflow_health_response() -> dict[str, object]:
                         "SELECT COUNT(*) AS count FROM pcap_requests WHERE status = 'failed' AND lower(coalesce(error, '')) LIKE '%no matching packets%'"
                     ).fetchone()
                     summary["no_packet_failures"] = int(no_packets["count"] or 0) if no_packets else 0
-                    failed_count = int(summary["request_counts"].get("failed", 0)) if isinstance(summary["request_counts"], dict) else 0
-                    unexpected_failures = max(0, failed_count - int(summary["no_packet_failures"] or 0))
+                    oversize = conn.execute(
+                        "SELECT COUNT(*) AS count FROM pcap_requests WHERE status = 'failed' AND lower(coalesce(error, '')) LIKE '%artifact exceeds inline transfer limit%'"
+                    ).fetchone()
+                    summary["oversize_failures"] = int(oversize["count"] or 0) if oversize else 0
+                    unexpected_failure_rows = conn.execute(
+                        """
+                        SELECT error, completed_at, updated_at, created_at
+                        FROM pcap_requests
+                        WHERE status = 'failed'
+                          AND lower(coalesce(error, '')) NOT LIKE '%no matching packets%'
+                          AND lower(coalesce(error, '')) NOT LIKE '%artifact exceeds inline transfer limit%'
+                          AND lower(coalesce(error, '')) NOT LIKE '%invalid json:%preview=''''%'
+                        """
+                    ).fetchall()
+                    failure_cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=24)
+                    unexpected_failure_count = 0
+                    for row in unexpected_failure_rows:
+                        try:
+                            failure_at = parse_iso_timestamp(row["completed_at"] or row["updated_at"] or row["created_at"])
+                        except Exception:
+                            unexpected_failure_count += 1
+                            continue
+                        if failure_at.astimezone(dt.timezone.utc) >= failure_cutoff:
+                            unexpected_failure_count += 1
                     stale_cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=20)
                     stale_rows = conn.execute(
                         """
@@ -433,8 +456,8 @@ def pcap_workflow_health_response() -> dict[str, object]:
                     warnings: list[str] = []
                     for status, count in sorted(stale_counts.items()):
                         warnings.append(f"{count} {status} PCAP request(s) older than 20 minutes")
-                    if unexpected_failures:
-                        warnings.append(f"{unexpected_failures} PCAP request failure(s) need review")
+                    if unexpected_failure_count:
+                        warnings.append(f"{unexpected_failure_count} PCAP request failure(s) need review")
                     summary["warnings"] = warnings
                     summary["warning_count"] = len(warnings)
                     latest = conn.execute(
@@ -4057,6 +4080,7 @@ def normalize_pcap_request(payload: dict, candidate: dict) -> tuple[dict | None,
         "requested_by": str(merged.get("requested_by") or "dashboard").strip()[:80] or "dashboard",
         "reason": reason,
         "max_window_seconds": bounded_int(merged.get("max_window_seconds"), 120, 30, 300),
+        "require_source_port": bool(merged.get("require_source_port")),
     }
     request["request_id"] = pcap_request_id({
         "alert_id": request["alert_id"],

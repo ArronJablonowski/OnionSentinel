@@ -36,6 +36,13 @@ ssh "$MAC_HOST" 'sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "PRAG
 ssh "$MAC_HOST" 'launchctl print gui/$(id -u)/com.arron.soc.alert-store-maintenance | grep -E "state =|last exit code|run interval|path ="'
 
 echo
+echo "== Mac Studio PCAP broker and parser =="
+# PCAP evidence is optional, but when enabled it should not degrade alert relay.
+ssh "$MAC_HOST" 'curl -fsS "http://127.0.0.1:8765/api/system-health/beacons?hours=24" | python3 -c '"'"'import json,sys; data=json.load(sys.stdin); p=data.get("pcap",{}); counts=p.get("request_counts",{}); print("pcap_warning_count="+str(p.get("warning_count"))); print("pcap_pending="+str(counts.get("pending",0))); print("pcap_claimed="+str(counts.get("claimed",0))); print("pcap_fulfilled="+str(counts.get("fulfilled",0))); print("pcap_failed="+str(counts.get("failed",0))); print("pcap_no_packet_failures="+str(p.get("no_packet_failures"))); print("pcap_oversize_failures="+str(p.get("oversize_failures"))); raise SystemExit(0 if int(p.get("warning_count") or 0)==0 else 1)'"'"''
+ssh "$MAC_HOST" 'launchctl print gui/$(id -u)/com.arron.soc.pcap-analysis | grep -E "state =|last exit code|run interval|path ="'
+ssh "$MAC_HOST" 'launchctl print gui/$(id -u)/com.arron.soc.pcap-retention | grep -E "state =|last exit code|run interval|path ="'
+
+echo
 echo "== Pi relay recent logs =="
 # Recent relay logs show counts for pulled/dropped/new/posted alerts.
 ssh "$PI_HOST" 'sudo journalctl -u so-alert-relay.service -n 20 --no-pager'

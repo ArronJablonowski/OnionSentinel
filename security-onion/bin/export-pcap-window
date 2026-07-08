@@ -104,14 +104,16 @@ def candidate_files(start: datetime, end: datetime) -> list[Path]:
     result = subprocess.run(find_cmd, check=False, capture_output=True, text=True, timeout=30)
     if result.returncode != 0:
         fail("failed to enumerate pcap files")
-    files: list[Path] = []
+    files: list[tuple[float, Path]] = []
     for line in result.stdout.splitlines():
         try:
-            _, path = line.split(" ", 1)
-        except ValueError:
+            raw_mtime, path = line.split(" ", 1)
+            mtime = float(raw_mtime)
+        except (TypeError, ValueError):
             continue
-        files.append(Path(path))
-    return files[-MAX_CANDIDATE_FILES:]
+        files.append((mtime, Path(path)))
+    files.sort(key=lambda item: item[0])
+    return [path for _, path in files[-MAX_CANDIDATE_FILES:]]
 
 
 def sha256_file(path: Path) -> str:

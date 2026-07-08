@@ -221,6 +221,22 @@ direct authenticated object/file transfer, then parse with the same Zeek-first,
 TShark-corroboration worker. Do not raise the JSON body limit as the long-term
 scaling path.
 
+System Health separates PCAP broker conditions into operational warnings and
+diagnostic counters. Stale pending/claimed requests and unexpected failures
+raise `warning_count`; valid negative evidence (`no matching packets found`),
+legacy empty-output wrapper failures, and inline artifact oversize failures are
+counted separately. Oversize failures are a signal to use a narrower capture
+window today and to prioritize chunked/direct artifact transfer on the roadmap,
+not a sign that alert ingestion or analyst state is broken.
+
+If the live n8n PCAP broker workflow is edited through a database restore or
+manual import, confirm the active workflow version contains the same node
+parameters as `workflows/onion-sentinel-pcap-broker.workflow.json`. A stale
+active workflow history row can make `/pcap-requests` ignore its requested
+`status=pending` filter even when the workflow entity looks correct. Re-save
+and activate the workflow in n8n, or restore the active workflow history from
+the current workflow entity during a controlled maintenance window.
+
 PCAP request state is stored in alert-store SQLite. Alert-store queues,
 validates, claims, and records fulfillment metadata through:
 

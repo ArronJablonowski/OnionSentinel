@@ -658,11 +658,21 @@ primary table. On non-alert pages, the sidebar badge for this nav item mirrors
 the grouped alert count from `soc-alerts-status.json`. On the SOC Alerts table
 page, the badge mirrors the table's current visible row count, not the raw
 SQLite row count. The same client-side `applyFilter()` pass that updates the
-`Visible / Total` metric also updates the nav badge, so search text,
+`Active` metric also updates the nav badge, so search text,
 acknowledged/suppressed visibility toggles, severity filtering, and last-seen
 time-window filtering all change the badge immediately. The badge color follows
 the highest severity among currently visible open alerts, using the same
 Critical, High, Medium, Low, or Informational colors shown in the table.
+
+PCAP evidence is intentionally request/broker based rather than coupled to
+normal alert ingest. The dashboard and alert-store may queue a bounded PCAP
+request, the Pi relay claims pending requests through n8n, Security Onion
+exports only a bounded artifact through its forced-command wrapper, and the Mac
+Studio stores/parses the artifact as runtime evidence. No-packet results and
+inline oversize artifacts are useful broker outcomes and are counted separately
+from active System Health warnings. Larger PCAP support should be implemented
+as chunked upload or direct authenticated artifact transfer, keeping Zeek-first
+and TShark-corroborated parsing on the Mac Studio.
 
 ## Duplicate Alert Grouping
 

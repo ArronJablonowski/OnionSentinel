@@ -243,6 +243,13 @@ assuming the schedule is broken:
 python3 $HOME/n8n-local/bin/process-pcap-evidence.py --limit 1 --stdout
 ```
 
+Oversize PCAP requests are counted separately from active warnings. They mean
+the capture matched packets but exceeded the current inline JSON/base64 ingest
+limit. Use a narrower window or more precise tuple for the immediate request;
+keep larger PCAP support on the roadmap as chunked upload or direct
+authenticated artifact transfer. Do not solve this by blindly raising the
+Node.js request body limit.
+
 Alert filtering and suppression are controlled on Mac Studio in:
 
 ```text
@@ -468,6 +475,13 @@ If Security Onion returns a valid negative result, such as no packets matching
 the requested flow/window, the dashboard shows `No Packets` instead of a
 generic failure. Operators should treat that as useful evidence about capture
 coverage or tuple/window selection, not as a broken broker.
+
+`export-pcap-window` evaluates Security Onion capture files newest-first before
+applying its candidate limit. If recent matching packets exist but no packets
+are returned, confirm the installed wrapper matches this repo before widening
+the requested time window. The wrapper uses destination port by default for BPF
+flow filtering. Use `require_source_port: true` only for controlled validation
+or rare cases where the source port is intentionally the discriminator.
 
 ## 4. Restore Pi Relay
 

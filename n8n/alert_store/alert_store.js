@@ -2348,6 +2348,7 @@ function normalizePcapRequest(payload, candidate = {}) {
     requested_by: safeString(merged.requested_by || 'soc-analyst', 80),
     reason,
     max_window_seconds: maxWindowSeconds,
+    require_source_port: Boolean(merged.require_source_port),
   };
   request.request_id = pcapRequestId({
     alert_id: request.alert_id,
@@ -2365,6 +2366,7 @@ function normalizePcapRequest(payload, candidate = {}) {
 }
 
 function pcapRequestFromRow(row) {
+  const requestJson = parseJsonObject(row.request_json);
   return {
     request_id: row.request_id,
     status: row.status,
@@ -2383,6 +2385,7 @@ function pcapRequestFromRow(row) {
     requested_by: row.requested_by,
     reason: row.reason,
     max_window_seconds: row.max_window_seconds,
+    require_source_port: Boolean(requestJson.require_source_port),
     relay_host: row.relay_host,
     artifact_path: row.artifact_path,
     artifact_sha256: row.artifact_sha256,
