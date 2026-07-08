@@ -209,12 +209,19 @@ PCAP request broker safety knobs:
 - `PCAP_REQUEST_DEFAULT_WINDOW_SECONDS=120`
 - `PCAP_REQUEST_MAX_WINDOW_SECONDS=300`
 - `PCAP_ARTIFACT_MAX_BYTES=7340032`
+- `PCAP_AUTO_REQUEST_LEVELS=critical,high`
 
 `PCAP_REQUEST_MAX_WINDOW_SECONDS` caps the requested packet window before any
 Security Onion export occurs. `PCAP_ARTIFACT_MAX_BYTES` caps the decoded
 runtime-only artifact accepted by alert-store from the relay. Keep
 `ALERT_STORE_MAX_REQUEST_BYTES` larger than `PCAP_ARTIFACT_MAX_BYTES` because
 relay artifact upload is JSON/base64 today.
+
+`PCAP_AUTO_REQUEST_LEVELS` controls server-side automatic PCAP request
+creation during `/alert` ingest. The production default queues PCAP evidence
+for newly stored Critical and High alerts only. Set it to an empty value during
+maintenance to disable auto-queueing without changing dashboard/manual request
+behavior.
 
 Roadmap: support larger PCAP pulls by moving artifacts to chunked upload or
 direct authenticated object/file transfer, then parse with the same Zeek-first,

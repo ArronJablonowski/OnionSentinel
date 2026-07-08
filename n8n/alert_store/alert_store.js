@@ -55,6 +55,12 @@ const pcapRequestDefaultWindowSeconds = Math.min(
   pcapRequestMaxWindowSeconds,
   Math.max(30, Number(process.env.PCAP_REQUEST_DEFAULT_WINDOW_SECONDS || 120)),
 );
+const autoPcapLevels = new Set(
+  (process.env.PCAP_AUTO_REQUEST_LEVELS || 'critical,high')
+    .split(',')
+    .map((level) => level.trim().toLowerCase())
+    .filter(Boolean),
+);
 
 const enrichmentSecrets = {
   abuseipdb: (process.env.ABUSEIPDB_API_KEY || '').trim(),
@@ -1910,6 +1916,7 @@ async function storeAlert(rawAlert) {
     await refreshAlertGroupSummary(previousGroupKey);
   }
   await refreshAlertGroupSummary(nextGroupKey);
+  const pcap = await maybeQueueAutomaticPcapRequest(alert, row, inserted, suppression);
 
   return {
     ok: true,
@@ -1918,6 +1925,7 @@ async function storeAlert(rawAlert) {
     alert: row,
     triage: alert.triage,
     filter: suppression,
+    pcap,
     notification: await maybeNotifyTelegram(alert, row, inserted, timestamp, suppression),
   };
 }
@@ -2450,6 +2458,37 @@ async function createPcapRequest(payload) {
       reason: 'PCAP fulfillment is intentionally brokered by the relay/Security Onion forced-command path, not by alert-store.',
     },
   };
+}
+
+async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppression) {
+  if (!inserted || autoPcapLevels.size === 0) return {status: 'skipped_policy'};
+  if (!storedRow || ['suppressed', 'dropped'].includes(String(storedRow.filter_status || '').toLowerCase())) {
+    return {status: 'skipped_filter'};
+  }
+  if (suppression?.status === 'suppressed') return {status: 'skipped_suppression'};
+
+  const level = String(nestedField(alert, 'triage.level') || storedRow.triage_level || '').toLowerCase();
+  if (!autoPcapLevels.has(level)) return {status: 'skipped_level', triage_level: level};
+
+  try {
+    const groupKey = alertGroupKeyFromRow(storedRow);
+    const groupId = alertGroupId(groupKey);
+    const result = await createPcapRequest({
+      group_id: groupId,
+      alert_id: storedRow.alert_id,
+      requested_by: 'alert-store-auto-pcap',
+      reason: `Automatic PCAP request for ${level} alert`,
+      max_window_seconds: pcapRequestDefaultWindowSeconds,
+    });
+    return {
+      status: result.request?.status || 'pending',
+      request_id: result.request?.request_id || null,
+      group_id: groupId,
+      triage_level: level,
+    };
+  } catch (error) {
+    return {status: 'failed', reason: error.message, triage_level: level};
+  }
 }
 
 async function listPcapRequests(query = new URLSearchParams()) {

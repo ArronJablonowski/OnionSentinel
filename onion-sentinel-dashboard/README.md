@@ -27,6 +27,8 @@ This directory contains the Mac Studio LAN Portal backend and the generated SOC 
 - API-backed paginated SOC Alerts table.
 - SOC Alerts table includes compact AI, enrichment, and PCAP analysis status columns.
 - Shared SQLite analyst state for open, acknowledged, and suppressed grouped detections.
+- Mobile SOC Alerts uses full-width expandable alert pills and a top collapsed
+  navigation drawer opened from the logo/hamburger control.
 - Lazy-loaded Detailed Alert Reports.
 - Live System Health, PCAP ingest size, AI activity, and SOC count metrics.
 - Flow page with data-flow diagram and privacy IP masking.

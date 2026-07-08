@@ -208,6 +208,11 @@ Security Onion wrapper still own capture fulfillment, so a dashboard/API
 failure does not stop normal alert relay ingestion, and a relay/PCAP failure
 does not stop analyst status changes or alert storage.
 
+Alert-store also auto-queues PCAP requests for newly stored Critical and High
+alerts by default through `PCAP_AUTO_REQUEST_LEVELS=critical,high`. This is
+server-side ingest policy, not dashboard JavaScript. Set the variable to an
+empty value during maintenance if operators need manual-only PCAP requests.
+
 Set `ZEEK_BIN`, `ZEEK_CUT_BIN`, or `TSHARK_BIN` only if the tools are not on
 the LaunchAgent `PATH`. Do not copy PCAP files or generated PCAP analysis
 artifacts into the Git repo.

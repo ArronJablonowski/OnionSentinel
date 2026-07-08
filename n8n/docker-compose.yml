@@ -64,6 +64,7 @@ services:
       - ALERT_STORE_SQLITE_TEMP_STORE=${ALERT_STORE_SQLITE_TEMP_STORE:-DEFAULT}
       - PCAP_REQUEST_DEFAULT_WINDOW_SECONDS=${PCAP_REQUEST_DEFAULT_WINDOW_SECONDS:-120}
       - PCAP_REQUEST_MAX_WINDOW_SECONDS=${PCAP_REQUEST_MAX_WINDOW_SECONDS:-300}
+      - PCAP_AUTO_REQUEST_LEVELS=${PCAP_AUTO_REQUEST_LEVELS:-critical,high}
     volumes:
       # Source code is read-only; SQLite data persists in alert_store_data.
       - ./alert_store:/app:ro

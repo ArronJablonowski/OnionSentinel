@@ -44,6 +44,8 @@ SOC Alerts table requirements:
 - Count appears left of Severity and is centered.
 - Log Source appears right of AI and has enough width to avoid ugly wrapping.
 - Project timestamps use ISO 8601 style with `T` replaced by two spaces.
+- Mobile SOC Alerts defaults to a collapsed top navigation drawer and renders
+  active alerts as full-width expandable pills.
 
 Analyst workflow requirements:
 
@@ -140,6 +142,11 @@ direct AI access to Security Onion. Alert-store may queue bounded PCAP requests
 in SQLite, but fulfillment must be performed by the relay/Security Onion
 forced-command path with strict validation, small time windows, output size
 limits, audit metadata, and runtime-only artifact storage.
+
+Alert-store should automatically queue PCAP requests for newly stored Critical
+and High alerts. The default policy is `PCAP_AUTO_REQUEST_LEVELS=critical,high`;
+operators may set it empty during maintenance for manual-only packet evidence
+requests.
 
 Alert delivery and PCAP fulfillment must remain failure-isolated. The relay
 timer should attempt both subpaths every cycle and report component status for
