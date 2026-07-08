@@ -88,6 +88,9 @@ PCAP fulfillment is disabled by default in `config/config.example.json`:
   "enabled": false,
   "url": "http://10.77.7.225:5678/webhook",
   "requests_method": "POST",
+  "upload_artifact": true,
+  "artifact_upload_mode": "inline",
+  "artifact_chunk_size_bytes": 524288,
   "paths": {
     "requests": "/pcap-requests",
     "claim": "/pcap-claim",
@@ -105,6 +108,13 @@ decoded size, and SHA256 before storing the artifact in the Mac Studio runtime
 evidence directory. Packet artifacts remain runtime evidence, not repo content.
 Use a separate broker token from the alert ingestion token and store it only in
 the live relay config and live n8n workflow.
+
+The safe default artifact upload mode is `inline`, which preserves compatibility
+with the original single `/pcap-artifact` n8n proxy. After importing the updated
+PCAP broker workflow, operators may set `artifact_upload_mode` to `chunked`.
+Chunked mode still uses the same n8n webhook, but each request carries one
+bounded chunk; alert-store verifies each chunk hash, reassembles only after all
+chunks arrive, and then verifies the full artifact SHA256.
 
 The relay defensively filters broker responses to process only requests whose
 status is `pending`. This keeps the PCAP broker safe if an n8n proxy returns a

@@ -9,6 +9,8 @@ Troubleshooting usually starts with the final JSON summary printed by this
 script.
 """
 import argparse
+import base64
+import hashlib
 import json
 import socket
 import sqlite3
@@ -433,6 +435,10 @@ def upload_pcap_artifact(config: dict, pcap_request: dict, export_result: dict) 
     artifact_base64 = export_result.get("artifact_base64")
     if not artifact_base64:
         return None
+    broker = config.get("pcap_broker", {})
+    upload_mode = str(broker.get("artifact_upload_mode") or "inline").strip().lower()
+    if upload_mode == "chunked":
+        return upload_pcap_artifact_chunks(config, pcap_request, export_result, artifact_base64)
     payload = {
         "request_id": pcap_request.get("request_id"),
         "relay_host": socket.gethostname(),
@@ -442,6 +448,38 @@ def upload_pcap_artifact(config: dict, pcap_request: dict, export_result: dict) 
         "artifact_base64": artifact_base64,
     }
     return broker_request(config, "POST", broker_path(config, "artifact", "/pcap-artifact"), payload)
+
+
+def upload_pcap_artifact_chunks(config: dict, pcap_request: dict, export_result: dict, artifact_base64: str) -> dict:
+    broker = config.get("pcap_broker", {})
+    chunk_size = max(1024, min(4 * 1024 * 1024, int(broker.get("artifact_chunk_size_bytes", 512 * 1024) or 512 * 1024)))
+    artifact_bytes = base64.b64decode("".join(str(artifact_base64).split()), validate=True)
+    expected_size = int(export_result.get("artifact_size_bytes") or 0)
+    expected_sha256 = str(export_result.get("artifact_sha256") or "").lower()
+    if expected_size and len(artifact_bytes) != expected_size:
+        raise RuntimeError("PCAP artifact size does not match Security Onion export metadata")
+    actual_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
+    if expected_sha256 and actual_sha256 != expected_sha256:
+        raise RuntimeError("PCAP artifact sha256 does not match Security Onion export metadata")
+    chunk_count = max(1, (len(artifact_bytes) + chunk_size - 1) // chunk_size)
+    final_response: dict | None = None
+    chunk_path = broker_path(config, "artifact_chunk", "/pcap-artifact")
+    for chunk_index in range(chunk_count):
+        start = chunk_index * chunk_size
+        chunk = artifact_bytes[start : start + chunk_size]
+        payload = {
+            "request_id": pcap_request.get("request_id"),
+            "relay_host": socket.gethostname(),
+            "artifact_path": export_result.get("artifact_path"),
+            "artifact_sha256": actual_sha256,
+            "artifact_size_bytes": len(artifact_bytes),
+            "chunk_index": chunk_index,
+            "chunk_count": chunk_count,
+            "chunk_sha256": hashlib.sha256(chunk).hexdigest(),
+            "chunk_base64": base64.b64encode(chunk).decode("ascii"),
+        }
+        final_response = broker_request(config, "POST", chunk_path, payload)
+    return final_response or {"ok": False, "status": "no_chunks_uploaded"}
 
 
 def broker_path(config: dict, name: str, default_path: str) -> str:

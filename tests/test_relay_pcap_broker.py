@@ -198,6 +198,61 @@ class RelayPcapBrokerTest(unittest.TestCase):
         self.assertEqual(calls[2][2]["artifact_base64"], "ZmFrZS1wY2FwLXRhcg==")
         self.assertTrue(calls[3][2]["artifact_ingested"])
 
+    def test_relay_can_upload_artifact_in_verified_chunks(self) -> None:
+        request = {"request_id": "pcap-unit-test", "source_ip": "192.0.2.10", "destination_ip": "198.51.100.10"}
+        artifact = (b"chunked-pcap-artifact-" * 120)[:2500]
+        artifact_sha256 = self.relay.hashlib.sha256(artifact).hexdigest()
+        calls: list[tuple[str, str, dict | None]] = []
+
+        def fake_broker(config, method, path, payload_data=None):
+            calls.append((method, path, payload_data))
+            if path.startswith("/pcap-requests"):
+                return {"ok": True, "requests": [request]}
+            if path == "/pcap-claim":
+                return {"ok": True, "claimed": True, "request": request}
+            if path == "/pcap-artifact":
+                self.assertIn("chunk_base64", payload_data)
+                return {"ok": True, "status": "chunk_stored"}
+            if path == "/pcap-complete":
+                return {"ok": True, "status": payload_data["status"], "request": payload_data}
+            raise AssertionError(f"unexpected broker call: {method} {path}")
+
+        config = {
+            "pcap_broker": {
+                "enabled": True,
+                "limit": 1,
+                "requests_method": "POST",
+                "upload_artifact": True,
+                "artifact_upload_mode": "chunked",
+                "artifact_chunk_size_bytes": 1024,
+                "paths": {
+                    "requests": "/pcap-requests",
+                    "claim": "/pcap-claim",
+                    "complete": "/pcap-complete",
+                    "artifact": "/pcap-artifact",
+                },
+            }
+        }
+        with mock.patch.object(self.relay, "broker_request", side_effect=fake_broker):
+            with mock.patch.object(
+                self.relay,
+                "run_ssh_pcap_export",
+                return_value={
+                    "artifact_path": "/nsm/pcapout/onion-sentinel/pcap-unit-test.tar",
+                    "artifact_sha256": artifact_sha256,
+                    "artifact_size_bytes": len(artifact),
+                    "artifact_base64": self.relay.base64.b64encode(artifact).decode("ascii"),
+                },
+            ):
+                result = self.relay.process_pcap_requests(config)
+
+        chunk_calls = [call for call in calls if call[1] == "/pcap-artifact"]
+        self.assertEqual(len(chunk_calls), 3)
+        self.assertEqual([call[2]["chunk_index"] for call in chunk_calls], [0, 1, 2])
+        self.assertTrue(all(call[2]["chunk_count"] == 3 for call in chunk_calls))
+        self.assertEqual(result["fulfilled"], 1)
+        self.assertTrue(calls[-1][2]["artifact_ingested"])
+
     def test_artifact_upload_failure_records_fulfillment_metadata(self) -> None:
         request = {"request_id": "pcap-unit-test", "source_ip": "192.0.2.10", "destination_ip": "198.51.100.10"}
         completions: list[dict] = []

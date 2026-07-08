@@ -38,6 +38,10 @@ const pcapArtifactMaxBytes = Math.max(
   1024,
   Number(process.env.PCAP_ARTIFACT_MAX_BYTES || Math.floor(maxRequestBytes * 0.7)),
 );
+const pcapArtifactChunkMaxBytes = Math.max(
+  1024,
+  Math.min(pcapArtifactMaxBytes, Number(process.env.PCAP_ARTIFACT_CHUNK_MAX_BYTES || 512 * 1024)),
+);
 const telegramAlertLevels = new Set(
   (process.env.TELEGRAM_ALERT_LEVELS || 'critical,high')
     .split(',')
@@ -1542,12 +1546,27 @@ async function initDb() {
       updated_at TEXT NOT NULL
     )
   `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS pcap_artifact_chunks (
+      request_id TEXT NOT NULL,
+      chunk_index INTEGER NOT NULL,
+      chunk_count INTEGER NOT NULL,
+      chunk_sha256 TEXT NOT NULL,
+      chunk_size_bytes INTEGER NOT NULL,
+      artifact_sha256 TEXT NOT NULL,
+      artifact_size_bytes INTEGER NOT NULL,
+      chunk_path TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (request_id, chunk_index)
+    )
+  `);
   await ensureColumn('pcap_requests', 'claimed_at', 'TEXT');
   await ensureColumn('pcap_requests', 'completed_at', 'TEXT');
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_status_created ON pcap_requests(status, created_at)');
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_completed_at ON pcap_requests(completed_at)');
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_alert_id ON pcap_requests(alert_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_group_id ON pcap_requests(group_id)');
+  await run('CREATE INDEX IF NOT EXISTS idx_pcap_artifact_chunks_created ON pcap_artifact_chunks(created_at)');
   await rebuildAlertGroupSummaries();
 }
 
@@ -2629,6 +2648,111 @@ async function ingestPcapArtifact(payload) {
   };
 }
 
+async function ingestPcapArtifactChunk(payload) {
+  const requestId = safeString(payload?.request_id, 64);
+  if (!requestId) throw new Error('request_id is required');
+  const row = await get('SELECT * FROM pcap_requests WHERE request_id = ?', [requestId]);
+  if (!row) throw new Error('pcap request not found');
+  if (!['claimed', 'fulfilled'].includes(String(row.status || '').toLowerCase())) {
+    throw new Error(`pcap request must be claimed or fulfilled before artifact upload; current status is ${row.status}`);
+  }
+  const artifactPath = safeString(payload?.artifact_path || row.artifact_path, 1024);
+  if (!artifactPath.startsWith('/nsm/pcapout/onion-sentinel/')) {
+    throw new Error('artifact_path is outside the allowed Security Onion PCAP output directory');
+  }
+  const artifactSha256 = safeString(payload?.artifact_sha256 || row.artifact_sha256, 128).toLowerCase();
+  const artifactSizeBytes = nonNegativeIntegerField(payload?.artifact_size_bytes ?? row.artifact_size_bytes);
+  const chunkIndex = nonNegativeIntegerField(payload?.chunk_index);
+  const chunkCount = nonNegativeIntegerField(payload?.chunk_count);
+  const chunkSha256 = safeString(payload?.chunk_sha256, 128).toLowerCase();
+  const chunkBase64 = safeString(payload?.chunk_base64, maxRequestBytes);
+  if (!artifactSha256 || !artifactSizeBytes || !chunkSha256 || !chunkBase64) {
+    throw new Error('chunk upload requires artifact_sha256, artifact_size_bytes, chunk_sha256, and chunk_base64');
+  }
+  if (!Number.isInteger(chunkIndex) || !Number.isInteger(chunkCount) || chunkCount < 1 || chunkIndex >= chunkCount) {
+    throw new Error('chunk_index and chunk_count must describe a valid zero-based chunk range');
+  }
+  if (artifactSizeBytes > pcapArtifactMaxBytes) {
+    throw new Error(`artifact_size_bytes exceeds ${pcapArtifactMaxBytes} byte PCAP artifact limit`);
+  }
+  if (!/^[a-f0-9]{64}$/.test(artifactSha256)) throw new Error('artifact_sha256 must be a hex sha256 digest');
+  if (!/^[a-f0-9]{64}$/.test(chunkSha256)) throw new Error('chunk_sha256 must be a hex sha256 digest');
+  if (!/^[A-Za-z0-9+/=\r\n ]+$/.test(chunkBase64)) throw new Error('chunk_base64 contains invalid characters');
+  const chunkBytes = Buffer.from(chunkBase64.replace(/\s+/g, ''), 'base64');
+  if (chunkBytes.length < 1) throw new Error('decoded chunk is empty');
+  if (chunkBytes.length > pcapArtifactChunkMaxBytes) {
+    throw new Error(`decoded PCAP artifact chunk exceeds ${pcapArtifactChunkMaxBytes} byte limit`);
+  }
+  const digest = crypto.createHash('sha256').update(chunkBytes).digest('hex');
+  if (digest !== chunkSha256) throw new Error('chunk sha256 mismatch');
+
+  const requestDir = path.join(pcapArtifactDir, safeFileToken(requestId, 'pcap-request'));
+  const chunkDir = path.join(requestDir, '.chunks');
+  const artifactRoot = path.resolve(pcapArtifactDir);
+  if (!path.resolve(chunkDir).startsWith(`${artifactRoot}${path.sep}`)) {
+    throw new Error('resolved chunk destination escaped artifact directory');
+  }
+  await fs.promises.mkdir(chunkDir, {recursive: true, mode: 0o700});
+  const chunkPath = path.join(chunkDir, `${String(chunkIndex).padStart(8, '0')}.chunk`);
+  const tempPath = `${chunkPath}.tmp-${process.pid}`;
+  await fs.promises.writeFile(tempPath, chunkBytes, {mode: 0o600});
+  await fs.promises.rename(tempPath, chunkPath);
+  const now = nowUtc();
+  await run(
+    `
+      INSERT INTO pcap_artifact_chunks (
+        request_id, chunk_index, chunk_count, chunk_sha256, chunk_size_bytes,
+        artifact_sha256, artifact_size_bytes, chunk_path, created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(request_id, chunk_index) DO UPDATE SET
+        chunk_count = excluded.chunk_count,
+        chunk_sha256 = excluded.chunk_sha256,
+        chunk_size_bytes = excluded.chunk_size_bytes,
+        artifact_sha256 = excluded.artifact_sha256,
+        artifact_size_bytes = excluded.artifact_size_bytes,
+        chunk_path = excluded.chunk_path,
+        created_at = excluded.created_at
+    `,
+    [requestId, chunkIndex, chunkCount, chunkSha256, chunkBytes.length, artifactSha256, artifactSizeBytes, chunkPath, now],
+  );
+  const chunks = await all('SELECT * FROM pcap_artifact_chunks WHERE request_id = ? ORDER BY chunk_index ASC', [requestId]);
+  if (chunks.length !== chunkCount) {
+    return {ok: true, status: 'chunk_stored', request_id: requestId, chunks_received: chunks.length, chunk_count: chunkCount};
+  }
+  const expectedIndexes = chunks.map((chunk) => chunk.chunk_index).join(',');
+  const completeIndexes = Array.from({length: chunkCount}, (_, index) => index).join(',');
+  if (expectedIndexes !== completeIndexes) {
+    return {ok: true, status: 'chunk_stored', request_id: requestId, chunks_received: chunks.length, chunk_count: chunkCount};
+  }
+  const fileName = safeFileToken(path.basename(artifactPath), `${safeFileToken(requestId)}.tar`);
+  const destination = path.join(requestDir, fileName);
+  if (!path.resolve(destination).startsWith(`${artifactRoot}${path.sep}`)) {
+    throw new Error('resolved artifact destination escaped artifact directory');
+  }
+  const buffers = [];
+  for (const chunk of chunks) buffers.push(await fs.promises.readFile(chunk.chunk_path));
+  const artifactBytes = Buffer.concat(buffers);
+  if (artifactBytes.length !== artifactSizeBytes) throw new Error('reassembled artifact size mismatch');
+  const artifactDigest = crypto.createHash('sha256').update(artifactBytes).digest('hex');
+  if (artifactDigest !== artifactSha256) throw new Error('reassembled artifact sha256 mismatch');
+  const artifactTempPath = `${destination}.tmp-${process.pid}`;
+  await fs.promises.writeFile(artifactTempPath, artifactBytes, {mode: 0o600});
+  await fs.promises.rename(artifactTempPath, destination);
+  await fs.promises.rm(chunkDir, {recursive: true, force: true});
+  await run('DELETE FROM pcap_artifact_chunks WHERE request_id = ?', [requestId]);
+  return {
+    ok: true,
+    status: 'artifact_stored',
+    request_id: requestId,
+    artifact_file: destination,
+    artifact_size_bytes: artifactBytes.length,
+    artifact_sha256: artifactDigest,
+    chunks_received: chunks.length,
+    chunk_count: chunkCount,
+  };
+}
+
 function readJsonBody(request) {
   // n8n should POST one alert object per request. Arrays are rejected to avoid
   // partial batch inserts that are harder to reason about.
@@ -2740,6 +2864,14 @@ async function handleRequest(request, response) {
       // evidence after validating size and sha256 against broker metadata.
       const payload = await readJsonBody(request);
       const result = await ingestPcapArtifact(payload);
+      sendJson(response, 200, result);
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/pcap/artifact-chunk') {
+      // Chunked uploads keep each relay-to-Mac request small. The final chunk
+      // triggers reassembly only after all chunks and hashes are verified.
+      const payload = await readJsonBody(request);
+      const result = await ingestPcapArtifactChunk(payload);
       sendJson(response, 200, result);
       return;
     }

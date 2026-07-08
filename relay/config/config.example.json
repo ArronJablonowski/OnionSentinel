@@ -32,6 +32,8 @@
     "token": "",
     "requests_method": "POST",
     "upload_artifact": true,
+    "artifact_upload_mode": "inline",
+    "artifact_chunk_size_bytes": 524288,
     "timeout_seconds": 20,
     "limit": 3,
     "paths": {

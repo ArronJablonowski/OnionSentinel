@@ -546,6 +546,8 @@ broker token, and path map are configured in
     "artifact": "/pcap-artifact"
   },
   "upload_artifact": true,
+  "artifact_upload_mode": "inline",
+  "artifact_chunk_size_bytes": 524288,
   "timeout_seconds": 20,
   "limit": 3
 }
@@ -563,6 +565,13 @@ That keeps fulfillment correct even if a proxy returns recent request history
 alongside pending work. A request that reaches Security Onion and returns
 `no matching packets found` is valid negative packet evidence, not a relay
 transport failure.
+
+Keep `artifact_upload_mode` set to `inline` until the updated PCAP broker
+workflow export has been imported and activated in n8n. After that, set it to
+`chunked` to send bounded artifact chunks through the same `/pcap-artifact`
+webhook. Alert-store stores chunks in a runtime-only staging directory,
+validates each chunk SHA256, reassembles only when all chunks are present, and
+then verifies the full artifact SHA256 before writing the final artifact.
 
 Test service:
 
