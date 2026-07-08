@@ -827,7 +827,9 @@ System Health exposes the PCAP workflow as first-class operational state:
 request counts, latest request, parser output count, runtime artifact size, and
 warnings for stale pending/claimed work or unexpected failures. Normal
 `No Packets` results are tracked separately so packet absence does not look like
-a transport or parser failure.
+a transport or parser failure. The page also shows recent PCAP broker request
+history so operators can distinguish queued, claimed, fulfilled, no-packet, and
+unexpected-failure states without opening the database.
 
 Runtime retention is handled on the Mac Studio with
 `$HOME/n8n-local/bin/maintain-pcap-evidence.py`. It defaults to dry-run, keeps

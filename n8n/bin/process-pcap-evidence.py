@@ -132,7 +132,7 @@ def pending_requests(db_path: Path, request_id: str | None, limit: int, out_dir:
         columns = table_columns(conn, "pcap_requests")
         order_column = "completed_at" if "completed_at" in columns else "updated_at"
         if request_id:
-            found = rows(conn, "SELECT * FROM pcap_requests WHERE request_id = ?", [request_id])
+            found = rows(conn, "SELECT * FROM pcap_requests WHERE request_id = ? AND status = 'fulfilled'", [request_id])
         else:
             found = rows(
                 conn,

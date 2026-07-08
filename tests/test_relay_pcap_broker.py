@@ -112,6 +112,42 @@ class RelayPcapBrokerTest(unittest.TestCase):
         self.assertEqual(calls[1][1], "/pcap-claim")
         self.assertEqual(calls[2][1], "/pcap-complete")
 
+    def test_mixed_broker_history_only_processes_pending_requests(self) -> None:
+        history = [
+            {"request_id": "old-failed", "status": "failed", "source_ip": "192.0.2.1"},
+            {"request_id": "new-pending", "status": "pending", "source_ip": "192.0.2.10", "destination_ip": "198.51.100.10"},
+            {"request_id": "old-fulfilled", "status": "fulfilled", "source_ip": "192.0.2.2"},
+        ]
+        calls: list[tuple[str, str, dict | None]] = []
+
+        def fake_broker(config, method, path, payload_data=None):
+            calls.append((method, path, payload_data))
+            if path.startswith("/pcap/requests"):
+                return {"ok": True, "requests": history}
+            if path == "/pcap/claim":
+                self.assertEqual(payload_data["request_id"], "new-pending")
+                return {"ok": True, "claimed": True, "request": history[1]}
+            if path == "/pcap/complete":
+                return {"ok": True, "status": payload_data["status"], "request": payload_data}
+            raise AssertionError(f"unexpected broker call: {method} {path}")
+
+        with mock.patch.object(self.relay, "broker_request", side_effect=fake_broker):
+            with mock.patch.object(
+                self.relay,
+                "run_ssh_pcap_export",
+                return_value={
+                    "artifact_path": "/nsm/pcapout/onion-sentinel/new-pending.tar",
+                    "artifact_sha256": "a" * 64,
+                    "artifact_size_bytes": 1024,
+                },
+            ) as export:
+                result = self.relay.process_pcap_requests({"pcap_broker": {"enabled": True, "limit": 3}})
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(result["fulfilled"], 1)
+        export.assert_called_once()
+        self.assertEqual([call[2]["request_id"] for call in calls if call[1] == "/pcap/claim"], ["new-pending"])
+
     def test_relay_uploads_inline_artifact_before_completion(self) -> None:
         request = {"request_id": "pcap-unit-test", "source_ip": "192.0.2.10", "destination_ip": "198.51.100.10"}
         calls: list[tuple[str, str, dict | None]] = []

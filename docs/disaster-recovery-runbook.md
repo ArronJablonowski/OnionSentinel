@@ -225,10 +225,17 @@ PCAP analysis JSON/Markdown defaults to 30 days. The helper refuses cleanup
 paths outside `$HOME/n8n-local` so a bad argument cannot erase an operator
 directory.
 
+The optional LaunchAgent `com.arron.soc.pcap-retention` runs the helper daily
+at 03:20 in dry-run mode. Keep the repo plist dry-run only; enable destructive
+cleanup by adding `--apply` only to the rendered live plist after reviewing the
+dry-run log.
+
 System Health includes compact PCAP broker/parser health. `No Packets` PCAP
 failures are expected negative evidence and are counted separately. Stale
 pending/claimed requests older than 20 minutes and non-no-packet failures are
-reported as PCAP warnings. If `pcap-analysis.err.log` shows an old traceback
+reported as PCAP warnings. The System Health page also lists recent PCAP broker
+requests with status, request id, group id, artifact size, update time, and
+sanitized error text. If `pcap-analysis.err.log` shows an old traceback
 but `launchctl` reports `last exit code = 0`, run the worker directly before
 assuming the schedule is broken:
 
@@ -531,6 +538,12 @@ relay mode:
 ```bash
 sudo -u soalert /usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/so-alert-relay/app/config.json --process-pcap-requests
 ```
+
+The relay filters the broker response and processes only `pending` requests.
+That keeps fulfillment correct even if a proxy returns recent request history
+alongside pending work. A request that reaches Security Onion and returns
+`no matching packets found` is valid negative packet evidence, not a relay
+transport failure.
 
 Test service:
 

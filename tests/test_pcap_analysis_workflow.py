@@ -63,6 +63,38 @@ class PcapAnalysisWorkflowTest(unittest.TestCase):
         self.assertTrue((self.root / "pcap-analysis" / "pcap-unit-test-pcap-analysis.json").exists())
         self.assertTrue((self.root / "pcap-analysis" / "pcap-unit-test-pcap-analysis.md").exists())
 
+    def test_worker_ignores_pending_request_id(self) -> None:
+        db_path = self.root / "alerts.sqlite3"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE pcap_requests (
+              request_id TEXT,
+              status TEXT,
+              created_at TEXT,
+              updated_at TEXT,
+              artifact_path TEXT
+            );
+            INSERT INTO pcap_requests VALUES (
+              'pending-unit-test', 'pending',
+              '2026-07-07  10:00:00-06:00',
+              '2026-07-07  10:00:00-06:00',
+              NULL
+            );
+            """
+        )
+        conn.close()
+
+        found = self.worker.pending_requests(
+            db_path,
+            "pending-unit-test",
+            1,
+            self.root / "pcap-analysis",
+            False,
+        )
+
+        self.assertEqual(found, [])
+
     def test_worker_positive_path_uses_generated_runtime_pcap_fixture(self) -> None:
         pcap_path = self.root / "benign-dns.pcap"
         pcap_path.write_bytes(

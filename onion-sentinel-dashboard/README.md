@@ -9,6 +9,7 @@ This directory contains the Mac Studio LAN Portal backend and the generated SOC 
 | `report_portal.py` | Serves the LAN Portal and SOC alert APIs. |
 | `scripts/build_soc_alerts_dashboard.py` | Builds the static dashboard pages from SQLite/report artifacts. |
 | `scripts/dashboard_metric_components.py` | Small tested render helpers for the SOC Alerts metric cards. |
+| `scripts/dashboard_system_health_components.py` | System Health page markup, PCAP workflow panel styles, and browser refresh logic. |
 | `assets/` | Onion Sentinel, metric, privacy, brand, and dashboard CSS assets used by the dashboard. |
 
 ## Runtime Locations
@@ -17,6 +18,7 @@ This directory contains the Mac Studio LAN Portal backend and the generated SOC 
 | --- | --- |
 | `scripts/build_soc_alerts_dashboard.py` | `$HOME/.hermes/scripts/build_soc_alerts_dashboard.py` |
 | `scripts/dashboard_metric_components.py` | `$HOME/.hermes/scripts/dashboard_metric_components.py` |
+| `scripts/dashboard_system_health_components.py` | `$HOME/.hermes/scripts/dashboard_system_health_components.py` |
 | `report_portal.py` | `$HOME/report_portal/report_portal.py` |
 | `assets/` | copied into generated SOC dashboard output |
 
@@ -37,6 +39,7 @@ This directory contains the Mac Studio LAN Portal backend and the generated SOC 
 
 - Keep high-churn SOC metric-card styling in `assets/dashboard-metrics.css`.
 - Keep SOC metric-card markup in the named render helpers inside `scripts/dashboard_metric_components.py`.
+- Keep System Health beacon and PCAP workflow UI in `scripts/dashboard_system_health_components.py`.
 - Avoid adding new metric-card HTML directly into the large page template string.
 
 ## Manual Rebuild

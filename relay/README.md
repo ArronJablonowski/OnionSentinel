@@ -106,6 +106,11 @@ evidence directory. Packet artifacts remain runtime evidence, not repo content.
 Use a separate broker token from the alert ingestion token and store it only in
 the live relay config and live n8n workflow.
 
+The relay defensively filters broker responses to process only requests whose
+status is `pending`. This keeps the PCAP broker safe if an n8n proxy returns a
+mixed request history instead of a strict pending-only list. Legacy rows without
+a status are treated as pending for compatibility.
+
 PCAP export and artifact upload are tracked separately. If Security Onion
 returns bounded capture metadata but the `/pcap-artifact` upload is temporarily
 unavailable, the relay logs `pcap_artifact_upload_failed`, reports
@@ -123,6 +128,11 @@ sub-steps on every timer cycle. A downstream alert webhook failure must not
 skip PCAP broker processing, and a PCAP broker failure must not block normal
 alert delivery. The wrapper exits nonzero if either sub-step fails so systemd,
 journald, and relay health state still show degraded service.
+
+PCAP SSH runs under the service account used for the broker command. If the
+broker is invoked with `sudo`, make sure the Security Onion host key is present
+in that account's `known_hosts`; otherwise PCAP export will fail before the
+forced-command wrapper receives the request.
 
 ## Firewall Needs
 

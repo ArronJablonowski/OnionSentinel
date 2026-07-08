@@ -143,7 +143,10 @@ def run_ssh_pcap_export(config: dict, pcap_request: dict) -> dict:
         payload = parse_last_json_object(result.stdout)
     except json.JSONDecodeError as exc:
         preview = result.stdout[:500]
-        raise RuntimeError(f"PCAP export returned invalid JSON: {exc}; preview={preview!r}") from exc
+        stderr_preview = result.stderr[:500]
+        raise RuntimeError(
+            f"PCAP export returned invalid JSON: {exc}; stdout_preview={preview!r}; stderr_preview={stderr_preview!r}"
+        ) from exc
     if result.returncode != 0 or not payload.get("ok"):
         raise RuntimeError(payload.get("error") or result.stderr.strip() or f"PCAP export failed with exit code {result.returncode}")
     return payload
@@ -491,6 +494,8 @@ def process_pcap_requests(config: dict) -> dict:
     completion_failed = 0
     artifact_upload_failed = 0
     for pcap_request in pending.get("requests", []):
+        if str(pcap_request.get("status") or "pending").lower() != "pending":
+            continue
         request_id = pcap_request.get("request_id")
         claim = broker_request(
             config,

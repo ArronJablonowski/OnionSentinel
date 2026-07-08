@@ -385,6 +385,7 @@ def pcap_workflow_health_response() -> dict[str, object]:
         "no_packet_failures": 0,
         "warning_count": 0,
         "warnings": [],
+        "recent_requests": [],
         "latest_request": None,
         "analysis_count": 0,
         "latest_analysis": None,
@@ -452,6 +453,25 @@ def pcap_workflow_health_response() -> dict[str, object]:
                             "group_id": latest["group_id"] or "",
                             "updated_at": latest["completed_at"] or latest["updated_at"] or "",
                         }
+                    recent = conn.execute(
+                        """
+                        SELECT request_id, status, error, group_id, artifact_size_bytes, updated_at, completed_at, created_at
+                        FROM pcap_requests
+                        ORDER BY COALESCE(completed_at, updated_at, created_at) DESC
+                        LIMIT 12
+                        """
+                    ).fetchall()
+                    summary["recent_requests"] = [
+                        {
+                            "request_id": row["request_id"] or "",
+                            "status": row["status"] or "",
+                            "error": row["error"] or "",
+                            "group_id": row["group_id"] or "",
+                            "artifact_size_bytes": int(row["artifact_size_bytes"] or 0),
+                            "updated_at": row["completed_at"] or row["updated_at"] or row["created_at"] or "",
+                        }
+                        for row in recent
+                    ]
                     summary["available"] = True
     except Exception as exc:
         summary["error"] = str(exc)[:240]

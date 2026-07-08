@@ -14,6 +14,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `alert_store/config/scoring_rules.json` | Tunable local filtering/scoring policy. |
 | `bin/` | Local AI prompt, analysis, scheduler, rollup, and stack management scripts. |
 | `bin/maintain-alert-store-sqlite.zsh` | Hourly SQLite `quick_check`, verified backup, and recovery-candidate maintenance. |
+| `bin/maintain-pcap-evidence.py` | Runtime-only PCAP artifact and derived-analysis retention helper; dry-run by default. |
 | `config/soc_analyst_system_prompt.md` | SOC analyst system prompt used for alert analysis. |
 | `config/siem_engineer_system_prompt.md` | SIEM engineering prompt used for periodic tuning and detection recommendations. |
 | `config/threat_hunter_system_prompt.md` | Threat hunter prompt used for hunt hypothesis and query recommendation work. |
@@ -21,7 +22,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `config/incident_responder_system_prompt.md` | Incident responder prompt used for response planning and future host artifact collection guidance. |
 | `config/ai_model_settings.json` | Local/cloud/hybrid AI routing defaults. |
 | `agent-memory/` | Sanitized starter Markdown memory files for individual Cyber Security Agents plus shared cross-agent memory. Installed into `$HOME/n8n-local/soc-alerts/agent-memory` only if missing. |
-| `launchd/` | Mac Studio LaunchAgents for stack supervision and AI jobs. |
+| `launchd/` | Mac Studio LaunchAgents for stack supervision, AI jobs, PCAP parsing, and dry-run PCAP retention. |
 
 ## Install on Mac Studio
 
@@ -122,6 +123,10 @@ out of Git.
 Use `n8n/bin/maintain-pcap-evidence.py` for runtime retention. It defaults to
 dry-run, keeps raw PCAP artifacts for 14 days, keeps derived analysis for 30
 days, and refuses cleanup paths outside `$HOME/n8n-local`.
+
+`launchd/com.arron.soc.pcap-retention.plist` installs a daily 03:20 dry-run
+retention check. Add `--apply` only in the rendered live LaunchAgent after an
+operator verifies the dry-run output and confirms the runtime paths.
 
 Optional enrichment keys are also set in `$HOME/n8n-local/.env`. Blank or
 placeholder values are treated as disabled, so a source can be enabled or

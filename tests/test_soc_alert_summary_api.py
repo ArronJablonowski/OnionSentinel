@@ -440,6 +440,8 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["pcap"]["no_packet_failures"], 1)
         self.assertEqual(payload["pcap"]["analysis_count"], 1)
         self.assertEqual(payload["pcap"]["warning_count"], 0)
+        self.assertEqual(payload["pcap"]["recent_requests"][0]["request_id"], "pcap-health-test")
+        self.assertEqual(payload["pcap"]["recent_requests"][0]["status"], "failed")
 
     def test_system_health_warns_on_stale_or_unexpected_pcap_work(self) -> None:
         self.conn.execute(
