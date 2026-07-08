@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sqlite3
 import sys
 import unittest
@@ -48,6 +49,64 @@ class RelayWebhookRetryTest(unittest.TestCase):
                     self.relay.post_json_to_webhook(config, {"alert_id": "example-alert"})
 
         self.assertEqual(post_once.call_count, 2)
+        sleep.assert_called_once()
+
+    def test_http_200_workflow_rejection_fails_without_retry(self) -> None:
+        config = {
+            "webhook": {
+                "url": "http://example.invalid/webhook",
+                "timeout_seconds": 1,
+                "retry_attempts": 3,
+                "retry_backoff_seconds": 0.01,
+            }
+        }
+        response_body = json.dumps({
+            "ok": False,
+            "status": "rejected",
+            "reason": "invalid or missing X-Relay-Token",
+        }).encode("utf-8")
+        response = mock.MagicMock()
+        response.status = 200
+        response.read.return_value = response_body
+        response.__enter__.return_value = response
+
+        with mock.patch.object(self.relay.request, "urlopen", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "workflow rejected payload"):
+                self.relay.post_json_to_webhook(config, {"message_type": "relay_heartbeat"})
+
+    def test_n8n_array_wrapped_workflow_rejection_fails(self) -> None:
+        parsed = [{"json": {"ok": False, "status": "rejected", "reason": "bad token"}}]
+        self.assertEqual(self.relay.webhook_response_failure(parsed), "bad token")
+
+    def test_non_json_webhook_response_is_allowed_for_compatibility(self) -> None:
+        response = mock.MagicMock()
+        response.status = 200
+        response.read.return_value = b""
+        response.__enter__.return_value = response
+        config = {"webhook": {"url": "http://example.invalid/webhook", "timeout_seconds": 1}}
+
+        with mock.patch.object(self.relay.request, "urlopen", return_value=response):
+            self.relay.post_json_to_webhook(config, {"alert_id": "example-alert"})
+
+    def test_webhook_timeout_is_retryable(self) -> None:
+        config = {
+            "webhook": {
+                "url": "http://example.invalid/webhook",
+                "timeout_seconds": 1,
+                "retry_attempts": 2,
+                "retry_backoff_seconds": 0.01,
+            }
+        }
+        response = mock.MagicMock()
+        response.status = 200
+        response.read.return_value = b""
+        response.__enter__.return_value = response
+
+        with mock.patch.object(self.relay.request, "urlopen", side_effect=[TimeoutError("timed out"), response]):
+            with mock.patch.object(self.relay.time, "sleep") as sleep:
+                with mock.patch("sys.stderr"):
+                    self.relay.post_json_to_webhook(config, {"alert_id": "example-alert"})
+
         sleep.assert_called_once()
 
     def test_partial_batch_marks_successfully_posted_alerts_seen(self) -> None:

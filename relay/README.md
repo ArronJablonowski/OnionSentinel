@@ -139,6 +139,29 @@ skip PCAP broker processing, and a PCAP broker failure must not block normal
 alert delivery. The wrapper exits nonzero if either sub-step fails so systemd,
 journald, and relay health state still show degraded service.
 
+The relay also validates n8n's webhook response body. n8n can return HTTP 200
+for a workflow execution that rejected the payload inside the validation node,
+such as a stale `X-Relay-Token`. If the response JSON contains `ok: false` or a
+`rejected` status, the relay treats the run as failed so the wrapper can trigger
+Telegram failure/recovery notifications. When both `/opt/so-alert-relay/app/config.json`
+and `/etc/so-alert-relay/relay.env` contain webhook tokens, the wrapper checks
+that they match before polling Security Onion.
+
+High-volume bursts can take longer than a quiet heartbeat because n8n processes
+each alert workflow before returning the webhook response. The wrapper defaults
+to a 300 second alert relay timeout and a 180 second PCAP broker timeout. Tune
+these in `/etc/so-alert-relay/relay.env` when needed:
+
+```bash
+RELAY_COMMAND_TIMEOUT_SECONDS=300
+RELAY_PCAP_TIMEOUT_SECONDS=180
+RELAY_FAILURE_NOTIFY_THRESHOLD=3
+```
+
+Do not pass the relay webhook token on the command line. The systemd wrapper
+passes only the webhook URL; `relay.py` reads `RELAY_WEBHOOK_TOKEN` from the
+service environment so process listings do not expose token material.
+
 PCAP SSH runs under the service account used for the broker command. If the
 broker is invoked with `sudo`, make sure the Security Onion host key is present
 in that account's `known_hosts`; otherwise PCAP export will fail before the

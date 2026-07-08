@@ -319,10 +319,11 @@ Repo export: n8n/workflows/onion-sentinel-pcap-broker.workflow.json
 Production webhook paths: /pcap-requests, /pcap-claim, /pcap-complete, /pcap-artifact
 ```
 
-The PCAP proxy uses a separate `REPLACE_WITH_PCAP_BROKER_TOKEN` placeholder in
-Git. The live token is stored only in the Mac Studio n8n workflow/runtime config
-and the relay `pcap_broker.token` field. The relay calls n8n over TCP/5678; n8n
-then calls alert-store over the Docker-internal `alert-store:8787` service name.
+The PCAP proxy uses a separate n8n variable, `PCAP_BROKER_TOKEN`, and the relay
+`pcap_broker.token` field must match it. Keep this broker token distinct from
+the alert ingestion token. The relay calls n8n over TCP/5678; n8n then calls
+alert-store over the Docker-internal `alert-store:8787` service name without
+storing the live broker token in workflow JSON or workflow history.
 
 The workflow is split into separate operational nodes so filtering behavior is
 easy to inspect and tune:
@@ -1203,6 +1204,20 @@ that never reach n8n cannot be written at failure time, so
 successful relay run when a previous failure was recorded. HTTP failures include
 the returned status code when a response exists; timeouts are recorded as
 timeout/error text because no HTTP code is available.
+
+The relay does not trust HTTP 200 alone. n8n can complete a webhook workflow
+with HTTP success while the validation node rejects the payload, for example
+when the Pi `RELAY_WEBHOOK_TOKEN` is stale. `relay.py` parses the webhook
+response body and fails the timer run when n8n returns `ok: false` or a
+`rejected` status. The Pi wrapper also preflights token drift between
+`config.json` and `relay.env` when both contain a token. Those failures flow
+through the same stateful Telegram failure/recovery path as network or SSH
+failures, while PCAP broker processing still runs independently.
+
+The n8n validation node reads `$vars.RELAY_WEBHOOK_TOKEN`, not a literal token
+inside workflow JSON and not broad container environment access. This keeps the
+live relay token out of workflow exports, workflow history, and execution
+snapshots while avoiding Code-node access to unrelated container secrets.
 
 The dashboard polls this file every 3 seconds and updates the metric card with
 the latest webhook time, status, rule, and source/destination summary. This

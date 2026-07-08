@@ -9,7 +9,7 @@ The Mac Studio hosts the n8n Docker stack, alert-store, SQLite database, local A
 3. Run `n8n/bin/install-macstudio-stack.zsh`.
 4. Edit `$HOME/n8n-local/.env`.
 5. Import `n8n/workflows/security-onion-configurable-scoring.workflow.json` into n8n.
-6. Replace `REPLACE_WITH_RELAY_TOKEN` in the n8n workflow validation node.
+6. Create n8n variables for `RELAY_WEBHOOK_TOKEN` and, when PCAP fulfillment is enabled, `PCAP_BROKER_TOKEN`.
 7. Activate the n8n workflow.
 8. Start or reload the LAN Portal LaunchAgent.
 9. Run `operations/verify-stack.zsh`.

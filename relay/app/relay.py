@@ -12,6 +12,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import socket
 import sqlite3
 import subprocess
@@ -324,6 +325,37 @@ def is_retryable_http_status(status_code: int) -> bool:
     return status_code in {408, 409, 425, 429} or status_code >= 500
 
 
+def parse_webhook_response(body: str) -> dict | list | None:
+    """Best-effort parse of n8n's webhook response body.
+
+    n8n returns HTTP 200 for some workflow-level validation failures. The relay
+    must inspect the body so an invalid X-Relay-Token or rejected heartbeat
+    becomes a failed timer run instead of a silent false positive.
+    """
+    if not body.strip():
+        return None
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        return None
+
+
+def webhook_response_failure(parsed: dict | list | None) -> str | None:
+    """Return a sanitized failure reason when the workflow rejected a payload."""
+    if parsed is None:
+        return None
+    candidates = parsed if isinstance(parsed, list) else [parsed]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        payload = candidate.get("json") if isinstance(candidate.get("json"), dict) else candidate
+        status = str(payload.get("status") or "").lower()
+        if payload.get("ok") is False or status in {"rejected", "error"}:
+            reason = payload.get("reason") or payload.get("error") or status or "workflow rejected payload"
+            return str(reason)[:240]
+    return None
+
+
 def post_json_to_webhook_once(config: dict, payload_data: dict) -> None:
     webhook = config.get("webhook", {})
     url = webhook.get("url")
@@ -338,16 +370,24 @@ def post_json_to_webhook_once(config: dict, payload_data: dict) -> None:
         "User-Agent": "so-alert-relay-dev/0.1",
     }
     if token:
-        # Must match the token configured inside the imported n8n workflow.
+        # Must match the token configured in the n8n RELAY_WEBHOOK_TOKEN variable.
         headers["X-Relay-Token"] = token
 
     req = request.Request(url, data=payload, headers=headers, method="POST")
     try:
         with request.urlopen(req, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
             if response.status < 200 or response.status >= 300:
                 raise WebhookPostError(
                     f"Webhook returned HTTP {response.status}",
                     retryable=is_retryable_http_status(response.status),
+                    status_code=response.status,
+                )
+            failure_reason = webhook_response_failure(parse_webhook_response(body))
+            if failure_reason:
+                raise WebhookPostError(
+                    f"Webhook workflow rejected payload: {failure_reason}",
+                    retryable=False,
                     status_code=response.status,
                 )
     except HTTPError as exc:
@@ -358,6 +398,8 @@ def post_json_to_webhook_once(config: dict, payload_data: dict) -> None:
         ) from exc
     except URLError as exc:
         raise WebhookPostError(f"Webhook request failed: {exc.reason}", retryable=True) from exc
+    except TimeoutError as exc:
+        raise WebhookPostError("Webhook request timed out", retryable=True) from exc
 
 
 def post_json_to_webhook(config: dict, payload_data: dict) -> None:
@@ -679,7 +721,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--webhook-token",
-        default="",
+        default=None,
         help="Optional X-Relay-Token header value for webhook forwarding",
     )
     args = parser.parse_args()
@@ -698,7 +740,9 @@ def main() -> int:
         config.setdefault("webhook", {})
         config["webhook"]["enabled"] = True
         config["webhook"]["url"] = args.webhook_url
-        config["webhook"]["token"] = args.webhook_token
+        # Prefer env over argv for the systemd path so tokens do not leak
+        # through process listings. The argv option remains for isolated tests.
+        config["webhook"]["token"] = args.webhook_token if args.webhook_token is not None else os.environ.get("RELAY_WEBHOOK_TOKEN", "")
 
     batch = run_ssh_pull(config)
     output_path = save_batch(config, batch)

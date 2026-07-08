@@ -68,13 +68,18 @@ Set:
 - `TELEGRAM_CHAT_ID`
 - `TELEGRAM_ALERT_LEVELS=critical,high`
 
-Configure the relay token inside the imported n8n workflow validation node by replacing `REPLACE_WITH_RELAY_TOKEN`.
+Create an n8n variable named `RELAY_WEBHOOK_TOKEN` and set it to the same value
+as `/etc/so-alert-relay/relay.env` on the Raspberry Pi. The alert intake
+workflow reads this value from `$vars.RELAY_WEBHOOK_TOKEN`, which keeps live
+token material out of workflow JSON, workflow history, and execution snapshots.
 
 Import `workflows/onion-sentinel-pcap-broker.workflow.json` when PCAP request
-fulfillment is enabled. Replace `REPLACE_WITH_PCAP_BROKER_TOKEN` in the live
-n8n copy only; keep the repo export placeholder-based. The relay should point
-`pcap_broker.url` at `http://10.77.7.225:5678/webhook`, use
-`requests_method: "POST"`, and map:
+fulfillment is enabled. Create an n8n variable named `PCAP_BROKER_TOKEN` and
+set it to the same value as the Pi relay `pcap_broker.token`. The broker
+workflow reads `$vars.PCAP_BROKER_TOKEN`, which keeps live packet-evidence
+broker secrets out of workflow JSON, workflow history, and execution snapshots.
+The relay should point `pcap_broker.url` at `http://10.77.7.225:5678/webhook`,
+use `requests_method: "POST"`, and map:
 
 ```json
 {

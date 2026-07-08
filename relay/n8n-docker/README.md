@@ -6,7 +6,7 @@ Relay-side config points to:
 
 ```bash
 RELAY_WEBHOOK_URL=http://10.77.7.225:5678/webhook/security-onion-alert
-RELAY_WEBHOOK_TOKEN=<same value configured inside the n8n workflow validation node>
+RELAY_WEBHOOK_TOKEN=<same value configured in the n8n RELAY_WEBHOOK_TOKEN variable>
 ```
 
 During restore, deploy `n8n/` on the Mac Studio before enabling the relay timer. Then confirm from the Pi:

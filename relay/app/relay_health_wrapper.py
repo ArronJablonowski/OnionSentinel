@@ -22,7 +22,7 @@ STATE_PATH = Path(os.environ.get("RELAY_HEALTH_STATE", "/opt/so-alert-relay/stat
 # RELAY_COMMAND=/bin/false sudo -E systemctl start so-alert-relay.service
 RELAY_COMMAND = os.environ.get(
     "RELAY_COMMAND",
-    '/usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/so-alert-relay/app/config.json --pull-once --webhook-url "$RELAY_WEBHOOK_URL" --webhook-token "$RELAY_WEBHOOK_TOKEN"',
+    '/usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/so-alert-relay/app/config.json --pull-once --webhook-url "$RELAY_WEBHOOK_URL"',
 )
 RELAY_PCAP_COMMAND = os.environ.get(
     "RELAY_PCAP_COMMAND",
@@ -33,6 +33,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 HOST_LABEL = os.environ.get("RELAY_HOST_LABEL", "Raspberry Pi SOC relay")
 RELAY_WEBHOOK_URL = os.environ.get("RELAY_WEBHOOK_URL", "").strip()
 RELAY_WEBHOOK_TOKEN = os.environ.get("RELAY_WEBHOOK_TOKEN", "").strip()
+RELAY_CONFIG_PATH = Path(os.environ.get("RELAY_CONFIG_PATH", "/opt/so-alert-relay/app/config.json"))
 
 
 def env_int(name: str, default: int) -> int:
@@ -43,6 +44,8 @@ def env_int(name: str, default: int) -> int:
 
 
 FAILURE_NOTIFY_THRESHOLD = max(1, env_int("RELAY_FAILURE_NOTIFY_THRESHOLD", 3))
+RELAY_COMMAND_TIMEOUT_SECONDS = max(30, env_int("RELAY_COMMAND_TIMEOUT_SECONDS", 300))
+RELAY_PCAP_TIMEOUT_SECONDS = max(30, env_int("RELAY_PCAP_TIMEOUT_SECONDS", 180))
 
 
 def now_iso() -> str:
@@ -132,6 +135,24 @@ def send_relay_health_event(event: dict) -> dict:
         return {"ok": False, "status": "error", "error": str(exc)}
 
 
+def config_webhook_token() -> str:
+    try:
+        config = json.loads(RELAY_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    return str(config.get("webhook", {}).get("token") or "").strip()
+
+
+def validate_webhook_token_sources() -> str | None:
+    """Catch config/env token drift before a quiet heartbeat is silently lost."""
+    config_token = config_webhook_token()
+    if not config_token or not RELAY_WEBHOOK_TOKEN:
+        return None
+    if config_token != RELAY_WEBHOOK_TOKEN:
+        return "relay webhook token mismatch between config.json and relay.env"
+    return None
+
+
 def summarize_output(stdout: str, stderr: str) -> str:
     # relay.py prints a JSON summary as its final line. Pull out the operational
     # counters so health notices are short enough to read on a phone.
@@ -174,11 +195,11 @@ def run_shell_command(command: str, timeout: int = 120) -> subprocess.CompletedP
 
 
 def run_relay() -> subprocess.CompletedProcess:
-    return run_shell_command(RELAY_COMMAND, timeout=120)
+    return run_shell_command(RELAY_COMMAND, timeout=RELAY_COMMAND_TIMEOUT_SECONDS)
 
 
 def run_pcap_broker() -> subprocess.CompletedProcess:
-    return run_shell_command(RELAY_PCAP_COMMAND, timeout=180)
+    return run_shell_command(RELAY_PCAP_COMMAND, timeout=RELAY_PCAP_TIMEOUT_SECONDS)
 
 
 def combine_results(primary: subprocess.CompletedProcess, secondary: subprocess.CompletedProcess) -> subprocess.CompletedProcess:
@@ -207,11 +228,16 @@ def main() -> int:
 
     state = load_state()
     started_at = now_iso()
-    try:
-        result = run_relay()
-    except Exception as exc:
-        result = subprocess.CompletedProcess(RELAY_COMMAND, 1, "", str(exc))
-    relay_result = result
+    token_error = validate_webhook_token_sources()
+    if token_error:
+        result = subprocess.CompletedProcess(RELAY_COMMAND, 1, "", token_error)
+        relay_result = result
+    else:
+        try:
+            result = run_relay()
+        except Exception as exc:
+            result = subprocess.CompletedProcess(RELAY_COMMAND, 1, "", str(exc))
+        relay_result = result
 
     print(result.stdout, end="")
     if result.stderr:

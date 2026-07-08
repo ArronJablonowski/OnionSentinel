@@ -40,6 +40,7 @@ class RelayHealthWrapperTest(unittest.TestCase):
         with (
             mock.patch.object(self.wrapper, "run_relay", return_value=relay_result) as run_relay,
             mock.patch.object(self.wrapper, "run_pcap_broker", return_value=pcap_result) as run_pcap,
+            mock.patch.object(self.wrapper, "validate_webhook_token_sources", return_value=None),
             mock.patch.object(self.wrapper, "load_state", return_value={"status": "unknown", "consecutive_failures": 0}),
             mock.patch.object(self.wrapper, "save_state", side_effect=lambda state: saved_states.append(dict(state))),
             mock.patch.object(self.wrapper, "send_telegram", return_value={"ok": True, "status": 200}),
@@ -82,6 +83,29 @@ class RelayHealthWrapperTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn('"health_status": "ok"', stdout)
         self.assertIn("alert_relay=ok pcap_broker=ok", states[-1]["last_summary"])
+
+    def test_webhook_token_drift_fails_before_alert_relay(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        saved_states: list[dict] = []
+        with (
+            mock.patch.object(self.wrapper, "validate_webhook_token_sources", return_value="relay webhook token mismatch between config.json and relay.env"),
+            mock.patch.object(self.wrapper, "run_relay") as run_relay,
+            mock.patch.object(self.wrapper, "run_pcap_broker", return_value=completed(0, stdout='{"ok": true, "enabled": true, "processed": 0}\n')) as run_pcap,
+            mock.patch.object(self.wrapper, "load_state", return_value={"status": "unknown", "consecutive_failures": 0}),
+            mock.patch.object(self.wrapper, "save_state", side_effect=lambda state: saved_states.append(dict(state))),
+            mock.patch.object(self.wrapper, "send_telegram", return_value={"ok": True, "status": 200}),
+            mock.patch.object(self.wrapper, "send_relay_health_event", return_value={"ok": True, "status": 200}),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            rc = self.wrapper.main()
+
+        self.assertEqual(rc, 1)
+        run_relay.assert_not_called()
+        run_pcap.assert_called_once()
+        self.assertIn("relay webhook token mismatch", stderr.getvalue())
+        self.assertIn("alert_relay=failed(1) pcap_broker=ok", saved_states[-1]["last_summary"])
 
 
 if __name__ == "__main__":

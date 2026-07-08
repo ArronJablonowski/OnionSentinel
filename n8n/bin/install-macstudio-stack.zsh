@@ -148,7 +148,7 @@ Mac Studio n8n stack installed at:
 Next manual steps:
 1. Edit $STACK_DIR/.env with the Telegram token and chat id.
 2. Import n8n/workflows/security-onion-configurable-scoring.workflow.json into n8n.
-3. Replace REPLACE_WITH_RELAY_TOKEN inside the n8n workflow code node.
+3. Create n8n variables for RELAY_WEBHOOK_TOKEN and, when PCAP is enabled, PCAP_BROKER_TOKEN.
 4. Activate the workflow.
 
 MSG

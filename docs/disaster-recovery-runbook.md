@@ -156,8 +156,14 @@ REPLACE_WITH_PCAP_BROKER_TOKEN
 
 Use one token for alert ingestion and a separate token for PCAP broker access.
 The alert ingestion token must match `/etc/so-alert-relay/relay.env` on the Pi.
-The PCAP broker token must match the `pcap_broker.token` value rendered into
-`/opt/so-alert-relay/app/config.json` on the Pi.
+Create an n8n variable named `RELAY_WEBHOOK_TOKEN` with the same alert
+ingestion token; the workflow reads `$vars.RELAY_WEBHOOK_TOKEN` so the live
+token is not stored in workflow JSON, workflow history, or execution snapshots.
+Create a second n8n variable named `PCAP_BROKER_TOKEN` with the same value as
+the `pcap_broker.token` rendered into `/opt/so-alert-relay/app/config.json` on
+the Pi. The PCAP broker workflow reads `$vars.PCAP_BROKER_TOKEN`, keeping that
+live packet-evidence broker secret out of workflow JSON, workflow history, and
+execution snapshots.
 
 Activate both workflows. The PCAP broker workflow exposes relay-safe n8n proxy
 routes and keeps alert-store reachable only on the Docker network:
@@ -606,6 +612,54 @@ The relay retries transient webhook failures (`408`, `409`, `425`, `429`, and
 such as `400`, `401`, or `403`. Alerts are marked seen immediately after their
 own successful POST, so a partial outage resumes with unposted alerts rather
 than replaying the whole batch.
+
+The relay must also fail closed on n8n workflow-level rejects. n8n may return
+HTTP 200 for a workflow execution that rejected the payload inside the
+validation node. `relay.py` inspects the JSON response body and treats
+`ok: false` or `status: rejected` as webhook failure. This is what makes stale
+relay webhook tokens visible to `relay_health_wrapper.py`, systemd, journald,
+and Telegram notifications.
+
+The n8n validation node should use:
+
+```javascript
+const expectedToken = $vars.RELAY_WEBHOOK_TOKEN || 'REPLACE_WITH_RELAY_TOKEN';
+```
+
+Do not enable broad Code-node environment-variable access just for this token.
+
+When debugging a stale beacon, confirm the relay env and config token sources
+are not drifting. Do not print token values:
+
+```bash
+ssh <relay_user>@10.88.8.8 'sudo python3 - <<'"'"'PY'"'"'
+import hashlib, json
+from pathlib import Path
+cfg=json.loads(Path("/opt/so-alert-relay/app/config.json").read_text())
+env={}
+for line in Path("/etc/so-alert-relay/relay.env").read_text().splitlines():
+    if line.strip() and not line.startswith("#") and "=" in line:
+        k,v=line.split("=",1)
+        env[k]=v.strip().strip("\"").strip("'")
+for label, token in [("config", cfg.get("webhook",{}).get("token") or ""), ("env", env.get("RELAY_WEBHOOK_TOKEN") or "")]:
+    print(label, "len", len(token), "sha256_12", hashlib.sha256(token.encode()).hexdigest()[:12])
+PY'
+```
+
+For high-volume bursts, the wrapper must have enough time to let n8n return a
+response for each new alert. Keep these timeout controls in
+`/etc/so-alert-relay/relay.env`:
+
+```bash
+RELAY_COMMAND_TIMEOUT_SECONDS=300
+RELAY_PCAP_TIMEOUT_SECONDS=180
+RELAY_FAILURE_NOTIFY_THRESHOLD=3
+```
+
+Do not pass `RELAY_WEBHOOK_TOKEN` on the command line in production. The
+wrapper should pass only `--webhook-url`; `relay.py` reads the token from
+`/etc/so-alert-relay/relay.env` through the service environment so process
+listings do not expose token material.
 
 ## 5. Harden Pi SSH
 
