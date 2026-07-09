@@ -170,6 +170,126 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         self.assertIsNotNone(selected)
         self.assertEqual(selected["alert_id"], "medium-with-pcap")
 
+    def test_newer_group_pcap_evidence_marks_duplicate_group_ai_stale(self) -> None:
+        for alert_id, last_seen in (
+            ("medium-dup-old", "2026-07-03  00:40:00Z"),
+            ("medium-dup-new", "2026-07-03  00:50:00Z"),
+        ):
+            self.insert_alert(
+                alert_id,
+                "medium",
+                last_seen,
+                rule_name="same medium duplicate group",
+                source_ip="192.0.2.55",
+                destination_ip="198.51.100.55",
+            )
+        self.conn.commit()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            analysis_dir = root / "ai-analysis"
+            pcap_dir = root / "pcap-analysis"
+            analysis_dir.mkdir()
+            pcap_dir.mkdir()
+            ai_path = analysis_dir / "old-member-local-ai-analysis.json"
+            pcap_path = pcap_dir / "new-group-pcap-analysis.json"
+            ai_path.write_text(json.dumps({"alert_id": "medium-dup-old"}), encoding="utf-8")
+            newest = self.conn.execute("SELECT * FROM alerts WHERE alert_id = ?", ("medium-dup-new",)).fetchone()
+            group_id = self.scheduler.alert_group_id(self.scheduler.alert_group_key(newest))
+            pcap_path.write_text(
+                json.dumps({"request": {"alert_id": "medium-dup-new", "group_id": group_id}}),
+                encoding="utf-8",
+            )
+            os.utime(ai_path, (100, 100))
+            os.utime(pcap_path, (200, 200))
+            self.args.analysis_dir = analysis_dir
+            self.args.pcap_analysis_dir = pcap_dir
+
+            analyzed = self.scheduler.analyzed_alert_ids(analysis_dir, pcap_dir)
+            selected = self.scheduler.select_next_alert(self.conn, self.args, analyzed, set())
+
+        self.assertIn("medium-dup-old", analyzed)
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["alert_id"], "medium-dup-new")
+
+    def test_newer_group_prompt_marks_duplicate_group_ai_stale(self) -> None:
+        for alert_id, last_seen in (
+            ("medium-manual-old", "2026-07-03  00:40:00Z"),
+            ("medium-manual-new", "2026-07-03  00:50:00Z"),
+        ):
+            self.insert_alert(
+                alert_id,
+                "medium",
+                last_seen,
+                rule_name="same manually requeued duplicate group",
+                source_ip="192.0.2.66",
+                destination_ip="198.51.100.66",
+            )
+        self.conn.commit()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            analysis_dir = root / "ai-analysis"
+            prompt_dir = root / "ai-prompts"
+            analysis_dir.mkdir()
+            prompt_dir.mkdir()
+            ai_path = analysis_dir / "old-member-local-ai-analysis.json"
+            prompt_path = prompt_dir / "new-group-ai-prompt.json"
+            ai_path.write_text(json.dumps({"alert_id": "medium-manual-old"}), encoding="utf-8")
+            prompt_path.write_text(
+                json.dumps(
+                    {
+                        "alert": {
+                            "alert_id": "medium-manual-new",
+                            "triage_level": "medium",
+                            "rule_name": "same manually requeued duplicate group",
+                            "source_ip": "192.0.2.66",
+                            "destination_ip": "198.51.100.66",
+                            "filter_status": "accepted",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.utime(ai_path, (100, 100))
+            os.utime(prompt_path, (200, 200))
+            self.args.analysis_dir = analysis_dir
+            self.args.prompt_dir = prompt_dir
+
+            analyzed = self.scheduler.analyzed_alert_ids(analysis_dir, prompt_dir=prompt_dir)
+            selected = self.scheduler.select_next_alert(self.conn, self.args, analyzed, set())
+
+        self.assertIn("medium-manual-old", analyzed)
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["alert_id"], "medium-manual-new")
+
+    def test_newer_group_pcap_evidence_rebuilds_stale_prompt_package(self) -> None:
+        self.insert_alert("medium-with-stale-prompt", "medium", "2026-07-03  00:50:00Z", 90)
+        self.conn.commit()
+        selected = self.scheduler.select_next_alert(self.conn, self.args, set(), set())
+        self.assertIsNotNone(selected)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            prompt_dir = root / "ai-prompts"
+            pcap_dir = root / "pcap-analysis"
+            prompt_dir.mkdir()
+            pcap_dir.mkdir()
+            prompt_path = prompt_dir / "old-ai-prompt.json"
+            pcap_path = pcap_dir / "new-pcap-analysis.json"
+            prompt_path.write_text(
+                json.dumps({"alert": {"alert_id": "medium-with-stale-prompt"}}),
+                encoding="utf-8",
+            )
+            group_id = self.scheduler.alert_group_id(selected["queue_group_key"])
+            pcap_path.write_text(
+                json.dumps({"request": {"alert_id": "medium-with-stale-prompt", "group_id": group_id}}),
+                encoding="utf-8",
+            )
+            os.utime(prompt_path, (100, 100))
+            os.utime(pcap_path, (200, 200))
+
+            reusable = self.scheduler.reusable_prompt_for_alert(prompt_dir, selected, pcap_dir)
+
+        self.assertIsNone(reusable)
+
 
 if __name__ == "__main__":
     unittest.main()

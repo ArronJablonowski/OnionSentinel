@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -146,16 +147,115 @@ def latest_pcap_analysis_mtimes(pcap_analysis_dir: Path) -> dict[str, float]:
     return latest
 
 
-def analyzed_alert_ids(analysis_dir: Path, pcap_analysis_dir: Path | None = None) -> set[str]:
-    """Return analyzed alert ids, excluding AI artifacts stale versus PCAP evidence."""
+def latest_pcap_group_mtimes(pcap_analysis_dir: Path) -> dict[str, float]:
+    """Return newest parsed PCAP evidence time keyed by grouped detection id."""
+    latest: dict[str, float] = {}
+    if not pcap_analysis_dir.exists():
+        return latest
+    for path in pcap_analysis_dir.glob("*-pcap-analysis.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        request = data.get("request") if isinstance(data.get("request"), dict) else {}
+        group_id = str(request.get("group_id") or "").strip()
+        if group_id:
+            latest[group_id] = max(latest.get(group_id, 0), path.stat().st_mtime)
+    return latest
+
+
+def latest_prompt_mtimes(prompt_dir: Path) -> dict[str, float]:
+    latest: dict[str, float] = {}
+    if not prompt_dir.exists():
+        return latest
+    for path in prompt_dir.glob("*-ai-prompt.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        alert = data.get("alert") if isinstance(data.get("alert"), dict) else {}
+        alert_id = str(alert.get("alert_id") or data.get("alert_id") or "").strip()
+        if alert_id:
+            latest[alert_id] = max(latest.get(alert_id, 0), path.stat().st_mtime)
+    return latest
+
+
+def alert_group_key_from_mapping(alert: dict) -> str:
+    """Return the scheduler duplicate-group key for prompt-package alert data."""
+    suppression_key = str(alert.get("suppression_key") or "").strip()
+    if suppression_key:
+        return suppression_key
+    return "|".join(
+        [
+            str(alert.get("triage_level") or ""),
+            str(alert.get("rule_name") or ""),
+            str(alert.get("source_ip") or ""),
+            str(alert.get("destination_ip") or ""),
+            str(alert.get("filter_status") or "accepted"),
+        ]
+    )
+
+
+def latest_prompt_group_mtimes(conn: sqlite3.Connection, prompt_dir: Path) -> dict[str, float]:
+    """Return newest AI prompt time keyed by the live DB duplicate group.
+
+    Prompt packages are immutable queue artifacts, but duplicate-group fields can
+    be repaired or normalized later in SQLite. Resolve prompt alert IDs through
+    the current DB so manual reanalysis uses the same group key as selection.
+    """
+    prompt_mtimes = latest_prompt_mtimes(prompt_dir)
+    latest: dict[str, float] = {}
+    if not prompt_mtimes:
+        return latest
+    placeholders = ", ".join("?" for _ in prompt_mtimes)
+    prompt_rows = rows(
+        conn,
+        f"""
+        SELECT alert_id, suppression_key, triage_level, rule_name, source_ip,
+               destination_ip, filter_status
+        FROM alerts
+        WHERE alert_id IN ({placeholders})
+        """,
+        sorted(prompt_mtimes),
+    )
+    db_prompt_ids: set[str] = set()
+    for row in prompt_rows:
+        alert_id = str(row["alert_id"] or "").strip()
+        db_prompt_ids.add(alert_id)
+        group_key = alert_group_key(row)
+        latest[group_key] = max(latest.get(group_key, 0), prompt_mtimes.get(alert_id, 0))
+
+    # Fallback for prompt packages whose source alert has been aged out of the
+    # DB. These cannot make the scheduler select work, but retaining the mapping
+    # keeps diagnostics deterministic.
+    if not prompt_dir.exists():
+        return latest
+    for path in prompt_dir.glob("*-ai-prompt.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        alert = data.get("alert") if isinstance(data.get("alert"), dict) else {}
+        alert_id = str(alert.get("alert_id") or data.get("alert_id") or "").strip()
+        if alert_id in db_prompt_ids:
+            continue
+        group_key = alert_group_key_from_mapping(alert)
+        if group_key:
+            latest[group_key] = max(latest.get(group_key, 0), path.stat().st_mtime)
+    return latest
+
+
+def analyzed_alert_ids(analysis_dir: Path, pcap_analysis_dir: Path | None = None, prompt_dir: Path | None = None) -> set[str]:
+    """Return analyzed alert ids, excluding AI artifacts stale versus PCAP or manual requeue prompts."""
     ai_mtimes = latest_analysis_mtimes(analysis_dir)
+    prompt_mtimes = latest_prompt_mtimes(prompt_dir) if prompt_dir else {}
     if not pcap_analysis_dir:
-        return set(ai_mtimes)
+        return {alert_id for alert_id, ai_mtime in ai_mtimes.items() if prompt_mtimes.get(alert_id, 0) <= ai_mtime}
     pcap_mtimes = latest_pcap_analysis_mtimes(pcap_analysis_dir)
     return {
         alert_id
         for alert_id, ai_mtime in ai_mtimes.items()
-        if pcap_mtimes.get(alert_id, 0) <= ai_mtime
+        if pcap_mtimes.get(alert_id, 0) <= ai_mtime and prompt_mtimes.get(alert_id, 0) <= ai_mtime
     }
 
 
@@ -176,15 +276,29 @@ def alert_group_key(row: sqlite3.Row) -> str:
     )
 
 
-def analyzed_alert_groups(conn: sqlite3.Connection, analyzed_ids: set[str]) -> set[str]:
+def alert_group_id(group_key: str) -> str:
+    return hashlib.sha1(group_key.encode("utf-8")).hexdigest()[:12]
+
+
+def analyzed_alert_groups(
+    conn: sqlite3.Connection,
+    analyzed_ids: set[str],
+    analysis_dir: Path | None = None,
+    pcap_analysis_dir: Path | None = None,
+    prompt_dir: Path | None = None,
+) -> set[str]:
     """Map analyzed alert IDs back to grouped detections.
 
     The dashboard displays grouped duplicate detections, not every raw alert row.
-    Once any member of a duplicate group has AI analysis, the scheduled runner
-    should move to another group instead of analyzing near-identical siblings.
+    A group is complete only when its newest AI analysis is newer than both its
+    newest parsed PCAP evidence and newest prompt package. That keeps duplicate
+    suppression efficient while still honoring manual reanalysis requests.
     """
     if not analyzed_ids:
         return set()
+    ai_mtimes = latest_analysis_mtimes(analysis_dir) if analysis_dir else {}
+    pcap_group_mtimes = latest_pcap_group_mtimes(pcap_analysis_dir) if pcap_analysis_dir else {}
+    prompt_group_mtimes = latest_prompt_group_mtimes(conn, prompt_dir) if prompt_dir else {}
     placeholders = ", ".join("?" for _ in analyzed_ids)
     analyzed_rows = rows(
         conn,
@@ -196,7 +310,22 @@ def analyzed_alert_groups(conn: sqlite3.Connection, analyzed_ids: set[str]) -> s
         """,
         sorted(analyzed_ids),
     )
-    return {alert_group_key(row) for row in analyzed_rows}
+    group_ai_mtimes: dict[str, float] = {}
+    for row in analyzed_rows:
+        group_key = alert_group_key(row)
+        ai_mtime = ai_mtimes.get(str(row["alert_id"] or "").strip(), 0)
+        group_ai_mtimes[group_key] = max(group_ai_mtimes.get(group_key, 0), ai_mtime)
+
+    analyzed_groups: set[str] = set()
+    for group_key, ai_mtime in group_ai_mtimes.items():
+        group_pcap_mtime = pcap_group_mtimes.get(alert_group_id(group_key), 0)
+        group_prompt_mtime = prompt_group_mtimes.get(group_key, 0)
+        if group_pcap_mtime and ai_mtime and group_pcap_mtime > ai_mtime:
+            continue
+        if group_prompt_mtime and ai_mtime and group_prompt_mtime > ai_mtime:
+            continue
+        analyzed_groups.add(group_key)
+    return analyzed_groups
 
 
 def select_next_alert(
@@ -217,7 +346,13 @@ def select_next_alert(
         filter_sql, filter_params = test_filter_sql()
         filter_sql = f"AND {filter_sql}"
     placeholders = ", ".join("?" for _ in levels)
-    analyzed_groups = analyzed_alert_groups(conn, already_analyzed)
+    analyzed_groups = analyzed_alert_groups(
+        conn,
+        already_analyzed,
+        getattr(args, "analysis_dir", None),
+        getattr(args, "pcap_analysis_dir", None),
+        getattr(args, "prompt_dir", None),
+    )
     skipped_groups = set(already_selected_groups or set())
     candidates = rows(
         conn,
@@ -282,6 +417,36 @@ def latest_prompt_for_alert(prompt_dir: Path, alert_id: str) -> Path | None:
     if not matches:
         return None
     return sorted(matches)[-1][1]
+
+
+def latest_pcap_evidence_mtime_for_alert(selected: sqlite3.Row, pcap_analysis_dir: Path) -> float:
+    """Return newest parsed PCAP evidence mtime for the selected alert group."""
+    if not pcap_analysis_dir.exists():
+        return 0
+    selected_alert_id = str(selected["alert_id"] or "").strip()
+    selected_group_id = alert_group_id(str(selected["queue_group_key"] or alert_group_key(selected)))
+    newest = 0.0
+    for path in pcap_analysis_dir.glob("*-pcap-analysis.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        request = data.get("request") if isinstance(data.get("request"), dict) else {}
+        if str(request.get("alert_id") or "").strip() != selected_alert_id and str(request.get("group_id") or "").strip() != selected_group_id:
+            continue
+        newest = max(newest, path.stat().st_mtime)
+    return newest
+
+
+def reusable_prompt_for_alert(prompt_dir: Path, selected: sqlite3.Row, pcap_analysis_dir: Path) -> Path | None:
+    """Return a prompt package only if it is current with parsed PCAP evidence."""
+    prompt = latest_prompt_for_alert(prompt_dir, str(selected["alert_id"] or ""))
+    if not prompt:
+        return None
+    pcap_mtime = latest_pcap_evidence_mtime_for_alert(selected, pcap_analysis_dir)
+    if pcap_mtime and pcap_mtime > prompt.stat().st_mtime:
+        return None
+    return prompt
 
 
 def run_command(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -413,7 +578,7 @@ def main() -> int:
                 selected = select_next_alert(
                     conn,
                     args,
-                    analyzed_alert_ids(args.analysis_dir, args.pcap_analysis_dir),
+                    analyzed_alert_ids(args.analysis_dir, args.pcap_analysis_dir, args.prompt_dir),
                     selected_groups,
                 )
             finally:
@@ -443,7 +608,7 @@ def main() -> int:
             if args.dry_run:
                 continue
 
-            prompt_path = latest_prompt_for_alert(args.prompt_dir, alert_id) or build_prompt(alert_id, args)
+            prompt_path = reusable_prompt_for_alert(args.prompt_dir, selected, args.pcap_analysis_dir) or build_prompt(alert_id, args)
             proc = run_analysis_with_activity_refresh(prompt_path, args)
             if proc.stdout:
                 print(proc.stdout, end="")
