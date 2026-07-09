@@ -150,6 +150,16 @@ Security Onion forced-command key that can run only
 uses bounded time windows, and writes artifacts under
 `/nsm/pcapout/onion-sentinel`.
 
+The PCAP request should include `suricata.capture_file` whenever that field is
+available in the raw Security Onion event. Alert-store and the dashboard resolve
+group-based requests back to a concrete representative alert row before
+queueing PCAP, so the request carries the exact tuple, timestamp, and capture
+file instead of a multi-day grouped summary. On Security Onion, the wrapper
+validates that the capture path stays under `/nsm/suripcap`, tries that file
+first, and uses a VLAN-aware BPF expression before falling back to the plain
+flow filter. This is required for tagged capture files where a non-VLAN BPF
+would incorrectly report no packets.
+
 The systemd service calls `relay_health_wrapper.py`. The wrapper runs alert
 delivery and PCAP broker processing as independent sub-steps, records combined
 health state, sends a Telegram notification on first failure, suppresses
@@ -258,7 +268,8 @@ This Mac was tested after the source restriction and is denied by Security Onion
 | Compose directory | `$HOME/n8n-local` |
 | n8n URL | `http://10.77.7.225:5678` |
 | n8n container | `n8n` |
-| alert-store container | `alert-store` |
+| alert-store host service | `com.arron.soc.alert-store` |
+| alert-store Docker proxy | `alert-store` |
 | SQLite DB | `$HOME/n8n-local/alert_store_data/alerts.sqlite3` |
 | SOC Markdown reports | `$HOME/Documents/SOC Alerts` |
 | Docker-mounted report directory | `$HOME/n8n-local/soc-alerts` |
@@ -288,15 +299,22 @@ com.arron.soc.alert-store-maintenance
 $HOME/n8n-local/bin/maintain-alert-store-sqlite.zsh
 ```
 
-It runs `PRAGMA quick_check`, writes verified `.backup` copies under
+It runs `PRAGMA quick_check`, verifies that `alert_group_summary` matches the
+raw `alerts` table, writes verified `.backup` copies under
 `$HOME/n8n-local/alert_store_backups`, prunes old verified backups, and creates
-`.recover` candidates when corruption is detected. It does not automatically
-replace the live DB unless `ALERT_STORE_AUTO_RECOVER=1` is deliberately set for
-that maintenance run. Alert-store itself opens SQLite with a busy timeout and
-explicit journal settings to reduce write-contention failures during ingestion,
-enrichment, dashboard polling, and maintenance. The default journal mode is
-`DELETE` for Docker Desktop bind-mount compatibility; only use `WAL` after
-validating the target runtime filesystem.
+`.recover` candidates when corruption is detected. If grouped state is stale,
+it calls the local alert-store `/refresh-groups` endpoint and rechecks the
+summary. It sends Telegram on failure and recovery transitions when Telegram
+credentials are present in the runtime `.env`. It does not automatically replace
+the live DB unless `ALERT_STORE_AUTO_RECOVER=1` is deliberately set for that
+maintenance run. Alert-store itself runs host-native on the Mac Studio and opens
+SQLite with a 30 second busy timeout, `DELETE` journaling, and `FULL`
+synchronous writes. The Docker Compose `alert-store` service is only a TCP proxy
+for n8n's Docker-network DNS name. Do not run the SQLite-writing alert-store
+inside Docker against the macOS bind-mounted DB; that path produced repeat
+`SQLITE_IOERR` and index corruption during summary rebuilds. Dashboard builders
+should open the DB read-only; portal writes use the same busy timeout and
+journal settings.
 
 The n8n workflow also writes one Obsidian-compatible Markdown file for every
 newly accepted alert. Duplicate and suppressed alerts are still tracked by
@@ -1051,6 +1069,14 @@ Safety controls:
   carefully extended forced-command wrapper. Do not reuse an unrestricted shell.
 - Security Onion-side fulfillment must enforce time-window, tuple,
   file-size, output-path, and cleanup limits before any PCAP is returned.
+- Group-based dashboard requests must resolve to a concrete alert row before
+  queueing PCAP. Do not build packet requests from aggregate group timestamps
+  alone; broad group windows can mix a representative tuple with unrelated
+  first/last seen boundaries.
+- When the raw event contains `suricata.capture_file`, include it in the
+  request JSON. The Security Onion wrapper validates the path under
+  `/nsm/suripcap`, prefers that file, and tests VLAN-aware BPF before the plain
+  filter because full packet capture commonly runs on tagged interfaces.
 - Artifact ingestion must go through n8n/alert-store instead of broad Mac Studio
   SSH into Security Onion. Alert-store writes only to the configured runtime
   artifact directory after verifying request id, artifact size, and SHA256.
@@ -1087,6 +1113,11 @@ Safety controls:
   primary parser for structured connection, DNS, TLS, HTTP, notice, and weird
   logs; TShark provides protocol hierarchy, conversation, and bounded packet
   field corroboration for the local model.
+- Parsed PCAP evidence updates are allowed to arrive after the original local
+  AI report. The dashboard appends current parsed PCAP evidence during lazy
+  detail loading, and the AI scheduler treats newer group-level PCAP evidence
+  as stale-making so the next SOC Analyst run rebuilds the prompt with packet
+  context.
 
 ## Alert Detail Enrichment
 

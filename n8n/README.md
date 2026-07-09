@@ -6,11 +6,11 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 
 | Path | Purpose |
 | --- | --- |
-| `docker-compose.yml` | Runs n8n and alert-store containers. |
+| `docker-compose.yml` | Runs n8n and an `alert-store` Docker-network proxy. |
 | `.env.example` | Placeholder Telegram and enrichment settings. Copy to runtime `.env`; never commit live `.env`. |
 | `workflows/security-onion-configurable-scoring.workflow.json` | n8n alert intake workflow export. |
 | `workflows/onion-sentinel-pcap-broker.workflow.json` | n8n PCAP broker proxy workflow export. |
-| `alert_store/` | SQLite-backed alert scoring, suppression, notification, and report logic. |
+| `alert_store/` | Host-native SQLite-backed alert scoring, suppression, notification, and report logic. |
 | `alert_store/config/scoring_rules.json` | Tunable local filtering/scoring policy. |
 | `bin/` | Local AI prompt, analysis, scheduler, rollup, and stack management scripts. |
 | `bin/maintain-alert-store-sqlite.zsh` | Hourly SQLite `quick_check`, verified backup, and recovery-candidate maintenance. |
@@ -164,12 +164,21 @@ Enrichment behavior knobs:
 - `VIRUSTOTAL_MINIMUM_LEVEL=high`
 - `URLSCAN_SUBMIT_ENABLED=false`
 
+Alert-store runtime model:
+
+- `com.arron.soc.alert-store` runs the real Node.js alert-store on the Mac host.
+- The Docker Compose `alert-store` service is only a TCP proxy so n8n workflows
+  can keep using `http://alert-store:8787`.
+- Do not run the SQLite-writing alert-store process inside Docker against the
+  macOS bind-mounted DB. That path produced repeat `SQLITE_IOERR` and index
+  corruption during summary rebuilds.
+
 Alert-store ingestion safety knob:
 
-- `ALERT_STORE_MAX_REQUEST_BYTES=5242880`
-- `ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS=10000`
+- `ALERT_STORE_MAX_REQUEST_BYTES=10485760`
+- `ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS=30000`
 - `ALERT_STORE_SQLITE_JOURNAL_MODE=DELETE`
-- `ALERT_STORE_SQLITE_SYNCHRONOUS=NORMAL`
+- `ALERT_STORE_SQLITE_SYNCHRONOUS=FULL`
 - `ALERT_STORE_SQLITE_TEMP_STORE=DEFAULT`
 
 `ALERT_STORE_MAX_REQUEST_BYTES` caps each `/alert` and `/enrich` POST body
@@ -177,10 +186,12 @@ before Node buffers it in memory. Keep it high enough for full-fidelity Security
 Onion alert JSON, but low enough that a malformed relay/n8n request cannot
 consume unbounded memory during a spike.
 
-The SQLite knobs give short write-contention windows time to clear and keep the
-journal behavior explicit. The default `DELETE` journal mode is conservative for
-Docker Desktop bind mounts. Do not switch to `WAL` unless it has been validated
-on the target runtime filesystem.
+The SQLite knobs give write-contention windows time to clear and keep durability
+behavior explicit. Use `DELETE` journaling with `FULL` synchronous writes for
+the Mac Studio host-native alert-store database. `WAL` is not safe on the old
+Docker Desktop bind-mounted writer path because it can produce `SQLITE_IOERR`
+restart loops. Dashboard builders should open the database read-only, and write
+paths should use the same busy timeout.
 
 ## SQLite Durability Maintenance
 
@@ -194,11 +205,16 @@ $HOME/n8n-local/bin/maintain-alert-store-sqlite.zsh
 The maintenance job:
 
 - runs `PRAGMA quick_check` against the live alert-store DB;
+- verifies `alert_group_summary` still matches the raw `alerts` table and calls
+  the local alert-store `/refresh-groups` repair endpoint if grouped state is
+  stale;
 - creates a verified SQLite `.backup` copy under
   `$HOME/n8n-local/alert_store_backups`;
 - keeps the newest 48 verified backups by default;
 - if corruption is detected, preserves the malformed DB and writes a recovered
   candidate with SQLite `.recover`;
+- sends Telegram on failure and recovery transitions when
+  `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are present in the runtime `.env`;
 - does not swap a recovered DB into production unless
   `ALERT_STORE_AUTO_RECOVER=1` is explicitly set for that run.
 
@@ -319,13 +335,13 @@ extraction so refresh jobs do not submit indicators found only inside previous
 third-party `raw_response` payloads.
 
 To retroactively enrich rows stored before the dedicated enrichment stage, run
-the backfill utility from inside the alert-store container. Start with a dry run
+the backfill utility against the host-native alert-store. Start with a dry run
 or small limit, confirm SQLite integrity, then run larger batches:
 
 ```bash
 cd $HOME/n8n-local
-/usr/local/bin/docker compose exec -T -e BACKFILL_DRY_RUN=1 -e BACKFILL_LIMIT=25 alert-store node /app/bin/backfill-public-enrichment.js
-/usr/local/bin/docker compose exec -T -e BACKFILL_LIMIT=250 alert-store node /app/bin/backfill-public-enrichment.js
+PATH="/opt/homebrew/bin:$PATH" BACKFILL_DRY_RUN=1 BACKFILL_LIMIT=25 ALERT_STORE_DB="$HOME/n8n-local/alert_store_data/alerts.sqlite3" ALERT_STORE_ENRICH_URL="http://127.0.0.1:8787/enrich" node "$HOME/n8n-local/bin/backfill-public-enrichment.js"
+PATH="/opt/homebrew/bin:$PATH" BACKFILL_LIMIT=250 ALERT_STORE_DB="$HOME/n8n-local/alert_store_data/alerts.sqlite3" ALERT_STORE_ENRICH_URL="http://127.0.0.1:8787/enrich" node "$HOME/n8n-local/bin/backfill-public-enrichment.js"
 sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "PRAGMA quick_check;"
 ```
 
@@ -338,7 +354,8 @@ filters, and rate-limit handling as live workflow ingestion.
 cd $HOME/n8n-local
 /usr/local/bin/docker compose ps
 curl -fsS http://127.0.0.1:5678/healthz
-/usr/local/bin/docker exec alert-store node -e 'fetch("http://127.0.0.1:8787/health").then(r=>r.text()).then(console.log)'
+curl -fsS http://127.0.0.1:8787/health
+/usr/local/bin/docker exec n8n node -e 'fetch("http://alert-store:8787/health").then(r=>r.text()).then(console.log)'
 ```
 
 ## AI Analysis

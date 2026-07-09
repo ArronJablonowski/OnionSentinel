@@ -83,18 +83,20 @@ TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID
 ```
 
-After editing `.env`, recreate `alert-store` so Docker Compose passes the
-updated environment into the container:
+After editing `.env`, restart the host-native alert-store and recreate the
+Docker-network proxy:
 
 ```bash
 cd $HOME/n8n-local
+launchctl kickstart -k gui/$(id -u)/com.arron.soc.alert-store
 /usr/local/bin/docker compose up -d --force-recreate alert-store
 ```
 
-Validate the running container without printing secrets:
+Validate both the host service and Docker-network proxy:
 
 ```bash
-/usr/local/bin/docker exec alert-store node -e 'const keys=["TELEGRAM_BOT_TOKEN","TELEGRAM_CHAT_ID","TELEGRAM_ALERT_LEVELS"]; for (const k of keys) { const v=process.env[k]||""; console.log(k+"="+(k.includes("TOKEN")&&v?"set(len="+v.length+")":v?"set":"unset")); }'
+curl -fsS http://127.0.0.1:8787/health
+/usr/local/bin/docker exec n8n node -e 'fetch("http://alert-store:8787/health").then(r=>r.text()).then(console.log)'
 ```
 
 If `TELEGRAM_CHAT_ID=unset`, alert-store can be healthy and still skip
@@ -267,11 +269,11 @@ Alert filtering and suppression are controlled on Mac Studio in:
 $HOME/n8n-local/alert_store/config/scoring_rules.json
 ```
 
-After changing `scoring_rules.json`, restart alert-store:
+After changing `scoring_rules.json`, restart the host-native alert-store:
 
 ```bash
 cd $HOME/n8n-local
-/usr/local/bin/docker compose restart alert-store
+launchctl kickstart -k gui/$(id -u)/com.arron.soc.alert-store
 ```
 
 Then verify health:
@@ -364,8 +366,32 @@ ssh aj_lobster@10.77.7.225 'ls -lh "$HOME/n8n-local/alert_store_backups" | tail'
 ```
 
 The maintenance job creates verified SQLite backups and recovered candidates
-when corruption is detected. It does not replace the live DB unless
-`ALERT_STORE_AUTO_RECOVER=1` is explicitly set for that run.
+when corruption is detected. It also verifies that `alert_group_summary` matches
+the raw `alerts` table and uses the local alert-store `/refresh-groups` endpoint
+to repair stale grouped state. It sends Telegram on failure and recovery
+transitions when the runtime `.env` contains Telegram credentials. It does not
+replace the live DB unless `ALERT_STORE_AUTO_RECOVER=1` is explicitly set for
+that run.
+
+Alert-store SQLite should run with these durability defaults in the Mac Studio
+runtime `.env` and repo compose template:
+
+```text
+ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS=30000
+ALERT_STORE_SQLITE_JOURNAL_MODE=DELETE
+ALERT_STORE_SQLITE_SYNCHRONOUS=FULL
+ALERT_STORE_SQLITE_TEMP_STORE=DEFAULT
+```
+
+The portal and alert-store can both write analyst workflow state and PCAP
+request records, so all writer connections must use the same busy timeout and
+DELETE/FULL durability settings. Dashboard generation should use read-only
+SQLite connections. On the current Docker Desktop bind-mounted runtime path,
+do not enable WAL; use a named Docker volume or host-native alert-store service
+before reconsidering WAL. If a recovered DB must be swapped in, stop both
+`alert-store` and the report portal before replacing `alerts.sqlite3`, then
+remove stale `alerts.sqlite3-journal`, `alerts.sqlite3-wal`, and
+`alerts.sqlite3-shm` sidecars before restarting.
 
 If `quick_check` reports index-only damage such as `wrong # of entries in
 index ...`, or page cleanup issues that still allow reads, use a short
@@ -374,10 +400,14 @@ tree and never copy them into Git:
 
 ```bash
 ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose stop alert-store'
+ssh aj_lobster@10.77.7.225 'launchctl bootout gui/$(id -u)/com.arron.soc.alert-store 2>/dev/null || true'
+ssh aj_lobster@10.77.7.225 'launchctl bootout gui/$(id -u)/com.arron.reportportal 2>/dev/null || true'
 ssh aj_lobster@10.77.7.225 'ts=$(date +%Y%m%dT%H%M%S%z); cp -p "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "$HOME/n8n-local/alert_store_backups/alerts.sqlite3.pre-index-repair-$ts.bak"'
 ssh aj_lobster@10.77.7.225 'sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "REINDEX;"'
 ssh aj_lobster@10.77.7.225 'ts=$(date +%Y%m%dT%H%M%S%z); out="$HOME/n8n-local/alert_store_data/alerts.repaired-$ts.sqlite3"; rm -f "$out"; sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "VACUUM INTO '\''$out'\'';"; sqlite3 "$out" "PRAGMA integrity_check;"; mv "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "$HOME/n8n-local/alert_store_data/alerts.sqlite3.pre-vacuum-replace-$ts.bak"; mv "$out" "$HOME/n8n-local/alert_store_data/alerts.sqlite3"; chmod 0644 "$HOME/n8n-local/alert_store_data/alerts.sqlite3"'
+ssh aj_lobster@10.77.7.225 'launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.arron.soc.alert-store.plist" 2>/dev/null || launchctl kickstart -k gui/$(id -u)/com.arron.soc.alert-store'
 ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose up -d alert-store'
+ssh aj_lobster@10.77.7.225 'launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.arron.reportportal.plist" 2>/dev/null || launchctl kickstart -k gui/$(id -u)/com.arron.reportportal'
 ssh aj_lobster@10.77.7.225 'sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "PRAGMA quick_check;"'
 ```
 
@@ -457,6 +487,15 @@ For PCAP fulfillment, install a separate forced-command public key using
 It accepts a bounded JSON request on stdin and writes runtime-only artifacts to
 `/nsm/pcapout/onion-sentinel`.
 
+Security Onion captures on tagged VLAN interfaces in this deployment, so the
+PCAP wrapper tests a VLAN-aware BPF expression before falling back to the plain
+flow filter. Requests should also carry `suricata.capture_file` when Security
+Onion provided it in the raw alert. The wrapper validates that capture path is
+under `/nsm/suripcap`, prefers that file first, and then scans recent candidate
+files. This keeps manual and automatic PCAP requests anchored to the actual
+capture file that produced the detection instead of relying only on broad
+timestamp searches.
+
 Fulfilled PCAP broker metadata is not enough for LLM analysis by itself. The
 preferred path is the n8n artifact ingestion route:
 
@@ -482,17 +521,24 @@ and writes bounded Zeek/TShark summaries to
 `$HOME/n8n-local/soc-alerts/pcap-analysis`. The SOC Analyst prompt builder
 automatically includes those summaries for matching alerts.
 
+When parsed PCAP evidence is newer than an existing SOC Analyst report, the AI
+scheduler considers that grouped detection stale and rebuilds the prompt before
+calling the local model again. The dashboard's lazy detail endpoint also
+appends current parsed PCAP evidence even when the static detail fragment was
+built before the PCAP parser finished.
+
 If Security Onion returns a valid negative result, such as no packets matching
 the requested flow/window, the dashboard shows `No Packets` instead of a
 generic failure. Operators should treat that as useful evidence about capture
 coverage or tuple/window selection, not as a broken broker.
 
-`export-pcap-window` evaluates Security Onion capture files newest-first before
-applying its candidate limit. If recent matching packets exist but no packets
-are returned, confirm the installed wrapper matches this repo before widening
-the requested time window. The wrapper uses destination port by default for BPF
-flow filtering. Use `require_source_port: true` only for controlled validation
-or rare cases where the source port is intentionally the discriminator.
+`export-pcap-window` evaluates a validated `capture_file` first, then Security
+Onion capture files newest-first before applying its candidate limit. If recent
+matching packets exist but no packets are returned, confirm the installed
+wrapper matches this repo before widening the requested time window. The
+wrapper uses destination port by default for BPF flow filtering. Use
+`require_source_port: true` only for controlled validation or rare cases where
+the source port is intentionally the discriminator.
 
 ## 4. Restore Pi Relay
 
