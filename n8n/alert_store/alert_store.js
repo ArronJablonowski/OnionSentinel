@@ -12,9 +12,15 @@ const http = require('http');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-// n8n's Docker image already includes sqlite3 in its pnpm tree, so this service
-// can run inside that image without building a custom Node container.
-const sqlite3 = require('/usr/local/lib/node_modules/n8n/node_modules/.pnpm/sqlite3@5.1.7/node_modules/sqlite3');
+let sqlite3;
+try {
+  // Host-native launchd deployments install sqlite3 beside this script.
+  sqlite3 = require('sqlite3');
+} catch (error) {
+  // The Docker proxy is preferred for n8n reachability, but this fallback keeps
+  // older container-based DR deployments bootable.
+  sqlite3 = require('/usr/local/lib/node_modules/n8n/node_modules/.pnpm/sqlite3@5.1.7/node_modules/sqlite3');
+}
 
 // Runtime values come from docker-compose.yml and .env. Keep real tokens in
 // .env only; this DR repo stores placeholders and source code.
@@ -1307,17 +1313,46 @@ function scoreAlert(alert) {
 
 fs.mkdirSync(path.dirname(dbPath), {recursive: true});
 const db = new sqlite3.Database(dbPath);
-db.configure('busyTimeout', Number(process.env.ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS || 10000));
+const sqliteBusyTimeoutMs = Number(process.env.ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS || 30000);
+db.configure('busyTimeout', sqliteBusyTimeoutMs);
 const sqliteJournalMode = String(process.env.ALERT_STORE_SQLITE_JOURNAL_MODE || 'DELETE').toUpperCase();
-const sqliteSynchronous = String(process.env.ALERT_STORE_SQLITE_SYNCHRONOUS || 'NORMAL').toUpperCase();
+const sqliteSynchronous = String(process.env.ALERT_STORE_SQLITE_SYNCHRONOUS || 'FULL').toUpperCase();
 const sqliteTempStore = String(process.env.ALERT_STORE_SQLITE_TEMP_STORE || 'DEFAULT').toUpperCase();
 const allowedJournalModes = new Set(['DELETE', 'TRUNCATE', 'PERSIST', 'MEMORY', 'WAL', 'OFF']);
 const allowedSynchronousModes = new Set(['OFF', 'NORMAL', 'FULL', 'EXTRA']);
 const allowedTempStoreModes = new Set(['DEFAULT', 'FILE', 'MEMORY']);
+const validTriageLevels = new Set(['critical', 'high', 'medium', 'low', 'informational', 'info', 'unknown']);
+
+function normalizeTriageLevel(value, fallback = '') {
+  const level = String(value || '').trim().toLowerCase();
+  if (validTriageLevels.has(level)) return level === 'info' ? 'informational' : level;
+  const fallbackLevel = String(fallback || '').trim().toLowerCase();
+  if (validTriageLevels.has(fallbackLevel)) return fallbackLevel === 'info' ? 'informational' : fallbackLevel;
+  return 'unknown';
+}
+
 const alertGroupKeySql = `
   COALESCE(
     NULLIF(suppression_key, ''),
-    COALESCE(triage_level, 'unknown-level') || '|' ||
+    (
+      CASE lower(COALESCE(triage_level, ''))
+        WHEN 'critical' THEN 'critical'
+        WHEN 'high' THEN 'high'
+        WHEN 'medium' THEN 'medium'
+        WHEN 'low' THEN 'low'
+        WHEN 'informational' THEN 'informational'
+        WHEN 'info' THEN 'informational'
+        ELSE CASE lower(COALESCE(severity_label, ''))
+          WHEN 'critical' THEN 'critical'
+          WHEN 'high' THEN 'high'
+          WHEN 'medium' THEN 'medium'
+          WHEN 'low' THEN 'low'
+          WHEN 'informational' THEN 'informational'
+          WHEN 'info' THEN 'informational'
+          ELSE 'unknown'
+        END
+      END
+    ) || '|' ||
     COALESCE(rule_name, 'unknown-rule') || '|' ||
     COALESCE(source_ip, 'unknown-source') || '|' ||
     COALESCE(destination_ip, 'unknown-destination') || '|' ||
@@ -1353,15 +1388,31 @@ function all(sql, params = []) {
   });
 }
 
+let sqliteWriteGate = Promise.resolve();
+
+function withSqliteWriteGate(task) {
+  // sqlite3 serializes individual statements, but HTTP handlers can still
+  // interleave multi-statement workflows. Queue alert-ingest write workflows so
+  // suppression state, raw alert rows, and group summaries stay coherent during
+  // bursts from n8n.
+  const next = sqliteWriteGate.catch(() => undefined).then(task);
+  sqliteWriteGate = next.catch(() => undefined);
+  return next;
+}
+
 async function initDb() {
   // Schema upgrades are additive. ensureColumn keeps existing SQLite DBs usable
   // after new triage fields are introduced.
   const journalMode = allowedJournalModes.has(sqliteJournalMode) ? sqliteJournalMode : 'DELETE';
-  const synchronousMode = allowedSynchronousModes.has(sqliteSynchronous) ? sqliteSynchronous : 'NORMAL';
+  const synchronousMode = allowedSynchronousModes.has(sqliteSynchronous) ? sqliteSynchronous : 'FULL';
   const tempStoreMode = allowedTempStoreModes.has(sqliteTempStore) ? sqliteTempStore : 'DEFAULT';
   await run(`PRAGMA journal_mode = ${journalMode}`);
   await run(`PRAGMA synchronous = ${synchronousMode}`);
   await run(`PRAGMA temp_store = ${tempStoreMode}`);
+  await run(`PRAGMA busy_timeout = ${sqliteBusyTimeoutMs}`);
+  if (journalMode === 'WAL') {
+    await run('PRAGMA wal_autocheckpoint = 1000');
+  }
   await run(`
     CREATE TABLE IF NOT EXISTS alerts (
       alert_id TEXT PRIMARY KEY,
@@ -1595,7 +1646,7 @@ function alertGroupKeyFromRow(row) {
   if (!row) return '';
   if (row.suppression_key) return String(row.suppression_key);
   return [
-    row.triage_level || 'unknown-level',
+    normalizeTriageLevel(row.triage_level, row.severity_label),
     row.rule_name || 'unknown-rule',
     row.source_ip || 'unknown-source',
     row.destination_ip || 'unknown-destination',
@@ -1703,7 +1754,7 @@ async function refreshAlertGroupSummary(groupKey) {
       representative.transport_protocol,
       representative.traffic_direction,
       representative.triage_score,
-      representative.triage_level,
+      normalizeTriageLevel(representative.triage_level, representative.severity_label),
       representative.routing,
       representative.filter_status,
       representative.filter_reason,
@@ -1723,6 +1774,10 @@ async function rebuildAlertGroupSummaries() {
 }
 
 async function storeAlert(rawAlert) {
+  return withSqliteWriteGate(() => storeAlertUnlocked(rawAlert));
+}
+
+async function storeAlertUnlocked(rawAlert) {
   // Store indexed summary fields for reports plus the full scored JSON for
   // investigation-note generation.
   let alert = {
@@ -2314,6 +2369,12 @@ function pcapCandidateFromRow(row) {
   if (!row) return {};
   const alertJson = parseJsonObject(row.alert_json);
   const rawEventJson = parseJsonObject(row.raw_event_json);
+  const captureFile =
+    nestedField(rawEventJson, 'suricata.capture_file') ||
+    nestedField(rawEventJson, 'message.capture_file') ||
+    nestedField(alertJson, 'suricata.capture_file') ||
+    nestedField(alertJson, 'capture_file') ||
+    null;
   return {
     alert_id: row.alert_id || row.representative_alert_id || null,
     group_id: row.group_id || null,
@@ -2327,6 +2388,7 @@ function pcapCandidateFromRow(row) {
     network_protocol: row.network_protocol || nestedField(alertJson, 'network.protocol') || nestedField(rawEventJson, 'network.protocol') || null,
     transport_protocol: row.transport_protocol || nestedField(alertJson, 'network.transport') || nestedField(rawEventJson, 'network.transport') || null,
     community_id: nestedField(alertJson, 'network.community_id') || nestedField(rawEventJson, 'network.community_id') || null,
+    capture_file: captureFile,
   };
 }
 
@@ -2337,7 +2399,28 @@ async function pcapCandidateFromPayload(payload) {
   }
   if (payload.group_id) {
     const row = await get('SELECT * FROM alert_group_summary WHERE group_id = ?', [String(payload.group_id)]);
-    if (row) return pcapCandidateFromRow(row);
+    if (row) {
+      if (row.representative_alert_id) {
+        const representative = await get('SELECT * FROM alerts WHERE alert_id = ?', [row.representative_alert_id]);
+        if (representative) return pcapCandidateFromRow(representative);
+      }
+      const newest = await get(`
+        SELECT *
+        FROM alerts
+        WHERE COALESCE(
+          NULLIF(suppression_key, ''),
+          COALESCE(triage_level, 'unknown-level') || '|' ||
+          COALESCE(rule_name, 'unknown-rule') || '|' ||
+          COALESCE(source_ip, 'unknown-source') || '|' ||
+          COALESCE(destination_ip, 'unknown-destination') || '|' ||
+          COALESCE(filter_status, 'accepted')
+        ) = ?
+        ORDER BY last_seen DESC
+        LIMIT 1
+      `, [row.group_key]);
+      if (newest) return pcapCandidateFromRow(newest);
+      return pcapCandidateFromRow(row);
+    }
   }
   return {};
 }
@@ -2372,6 +2455,7 @@ function normalizePcapRequest(payload, candidate = {}) {
     network_protocol: safeString(merged.network_protocol, 32) || null,
     transport_protocol: safeString(merged.transport_protocol, 32).toLowerCase() || null,
     community_id: safeString(merged.community_id, 128) || null,
+    capture_file: safeString(merged.capture_file, 512) || null,
     requested_by: safeString(merged.requested_by || 'soc-analyst', 80),
     reason,
     max_window_seconds: maxWindowSeconds,
@@ -2387,6 +2471,7 @@ function normalizePcapRequest(payload, candidate = {}) {
     destination_ip: request.destination_ip,
     destination_port: request.destination_port,
     community_id: request.community_id,
+    capture_file: request.capture_file,
     reason: request.reason,
   });
   return request;
@@ -2409,6 +2494,7 @@ function pcapRequestFromRow(row) {
     network_protocol: row.network_protocol,
     transport_protocol: row.transport_protocol,
     community_id: row.community_id,
+    capture_file: requestJson.capture_file || null,
     requested_by: row.requested_by,
     reason: row.reason,
     max_window_seconds: row.max_window_seconds,
