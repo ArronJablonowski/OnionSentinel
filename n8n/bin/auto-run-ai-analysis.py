@@ -346,6 +346,18 @@ def select_next_alert(
         filter_sql, filter_params = test_filter_sql()
         filter_sql = f"AND {filter_sql}"
     placeholders = ", ".join("?" for _ in levels)
+    prompt_mtimes = latest_prompt_mtimes(args.prompt_dir) if getattr(args, "prompt_dir", None) else {}
+    ai_mtimes = latest_analysis_mtimes(args.analysis_dir) if getattr(args, "analysis_dir", None) else {}
+    prompt_override_ids = sorted(
+        alert_id
+        for alert_id, prompt_mtime in prompt_mtimes.items()
+        if prompt_mtime > ai_mtimes.get(alert_id, 0)
+    )
+    prompt_override_sql = ""
+    prompt_override_params: list[object] = []
+    if prompt_override_ids:
+        prompt_override_sql = f" OR alert_id IN ({', '.join('?' for _ in prompt_override_ids)})"
+        prompt_override_params.extend(prompt_override_ids)
     analyzed_groups = analyzed_alert_groups(
         conn,
         already_analyzed,
@@ -369,7 +381,10 @@ def select_next_alert(
           FROM alerts
           WHERE replace(replace({newest_alert_time}, 'T', ' '), 'Z', '') >= replace(replace(?, 'T', ' '), 'Z', '')
             AND triage_level IN ({placeholders})
-            AND COALESCE(NULLIF(filter_status, ''), 'accepted') IN ({", ".join("?" for _ in ELIGIBLE_FILTER_STATUSES)})
+            AND (
+              COALESCE(NULLIF(filter_status, ''), 'accepted') IN ({", ".join("?" for _ in ELIGIBLE_FILTER_STATUSES)})
+              {prompt_override_sql}
+            )
             {filter_sql}
         ),
         ranked_groups AS (
@@ -389,7 +404,7 @@ def select_next_alert(
         ORDER BY severity_rank ASC, queue_time_sort DESC,
                  COALESCE(triage_score, 0) DESC, alert_id DESC
         """,
-        [since, *levels, *ELIGIBLE_FILTER_STATUSES, *filter_params],
+        [since, *levels, *ELIGIBLE_FILTER_STATUSES, *prompt_override_params, *filter_params],
     )
     for candidate in candidates:
         # SQLite has already reduced the raw alert stream to the newest row per

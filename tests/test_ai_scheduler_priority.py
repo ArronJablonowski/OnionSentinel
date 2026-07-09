@@ -261,6 +261,51 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         self.assertIsNotNone(selected)
         self.assertEqual(selected["alert_id"], "medium-manual-new")
 
+    def test_manual_prompt_can_select_duplicate_status_representative(self) -> None:
+        self.insert_alert(
+            "medium-duplicate-manual",
+            "medium",
+            "2026-07-03  00:50:00Z",
+            rule_name="manually requeued duplicate representative",
+            source_ip="192.0.2.77",
+            destination_ip="198.51.100.77",
+        )
+        self.conn.execute(
+            "UPDATE alerts SET filter_status = 'duplicate' WHERE alert_id = ?",
+            ("medium-duplicate-manual",),
+        )
+        self.conn.commit()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            analysis_dir = root / "ai-analysis"
+            prompt_dir = root / "ai-prompts"
+            analysis_dir.mkdir()
+            prompt_dir.mkdir()
+            prompt_path = prompt_dir / "manual-duplicate-ai-prompt.json"
+            prompt_path.write_text(
+                json.dumps(
+                    {
+                        "alert": {
+                            "alert_id": "medium-duplicate-manual",
+                            "triage_level": "medium",
+                            "rule_name": "manually requeued duplicate representative",
+                            "source_ip": "192.0.2.77",
+                            "destination_ip": "198.51.100.77",
+                            "filter_status": "duplicate",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.utime(prompt_path, (200, 200))
+            self.args.analysis_dir = analysis_dir
+            self.args.prompt_dir = prompt_dir
+
+            selected = self.scheduler.select_next_alert(self.conn, self.args, set(), set())
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["alert_id"], "medium-duplicate-manual")
+
     def test_newer_group_pcap_evidence_rebuilds_stale_prompt_package(self) -> None:
         self.insert_alert("medium-with-stale-prompt", "medium", "2026-07-03  00:50:00Z", 90)
         self.conn.commit()
