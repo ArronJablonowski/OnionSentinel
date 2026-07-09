@@ -225,6 +225,18 @@ $HOME/n8n-local/bin/maintain-alert-store-sqlite.zsh
 tail -80 "$HOME/n8n-local/logs/alert-store-sqlite-maintenance.log"
 ```
 
+AI queue diagnostics:
+
+```bash
+$HOME/n8n-local/bin/check-ai-queue-consistency.py
+$HOME/n8n-local/bin/check-ai-queue-consistency.py --json
+```
+
+The diagnostic checks SQLite `quick_check`, grouped-summary drift, invalid
+filter states, stale AI prompt packages, and orphan prompt packages. It is
+read-only by default. Use `--delete-resolved-prompts` or
+`--delete-orphan-prompts` only during deliberate cleanup.
+
 PCAP request broker safety knobs:
 
 - `PCAP_REQUEST_DEFAULT_WINDOW_SECONDS=120`
