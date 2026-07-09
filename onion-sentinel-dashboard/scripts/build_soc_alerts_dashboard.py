@@ -2414,6 +2414,18 @@ def reports_page_section(_reports: list[AlertReport]) -> str:
         </div>
         <div class="llm-log-table-wrap">
           <table class="llm-log-table">
+            <colgroup>
+              <col class="llm-log-started">
+              <col class="llm-log-count">
+              <col class="llm-log-alerts">
+              <col class="llm-log-runtime">
+              <col class="llm-log-gpu">
+              <col class="llm-log-memory">
+              <col class="llm-log-power">
+              <col class="llm-log-cpu">
+              <col class="llm-log-model">
+              <col class="llm-log-detail">
+            </colgroup>
             <thead><tr><th>Started</th><th>Count</th><th>Alert(s)</th><th>Runtime</th><th>Max GPU Temp</th><th>Max Memory</th><th>Max Power</th><th>Max CPU</th><th>Model</th><th>Detail</th></tr></thead>
             <tbody id="llm-log-table-body">{rows}</tbody>
           </table>
@@ -2445,28 +2457,28 @@ REPORTS_PAGE_ASSETS = '''
 .llm-log-toolbar label{display:flex;align-items:center;gap:8px;color:#9fb0c4;font-size:12px;font-weight:850}
 .llm-log-toolbar select{border:1px solid rgba(34,211,238,.32);border-radius:8px;background:#0a141e;color:#e8f1fb;padding:8px 28px 8px 10px;font-weight:850}
 .llm-log-table-wrap{overflow:auto;border:1px solid rgba(148,163,184,.12);border-radius:10px}
-.llm-log-table{width:100%;border-collapse:collapse;min-width:1580px;table-layout:fixed}
+.llm-log-table{width:100%;border-collapse:collapse;min-width:1680px;table-layout:fixed}
+.llm-log-started{width:210px}
+.llm-log-count{width:64px}
+.llm-log-alerts{width:auto}
+.llm-log-runtime{width:88px}
+.llm-log-gpu{width:112px}
+.llm-log-memory{width:104px}
+.llm-log-power{width:104px}
+.llm-log-cpu{width:88px}
+.llm-log-model{width:140px}
+.llm-log-detail{width:220px}
 .llm-log-table th{padding:10px 12px;background:#111d29;color:#9fb0c4;text-align:left;font-size:12px;font-weight:950}
 .llm-log-table td{padding:12px;border-top:1px solid rgba(148,163,184,.11);vertical-align:top;color:#d9e4f2;font-size:13px}
 .llm-log-table td strong{display:block;color:#f2f7ff;line-height:1.2;overflow-wrap:normal;word-break:normal}
 .llm-log-table td code{display:block;margin-top:4px;color:#aebbd0;background:transparent;font-size:12px;line-height:1.2;white-space:normal;overflow-wrap:normal;word-break:normal}
-.llm-log-table th:nth-child(1),.llm-log-table td:nth-child(1){width:180px}
-.llm-log-table th:nth-child(2),.llm-log-table td:nth-child(2){width:60px}
 .llm-log-table th:nth-child(2),.llm-log-table td:nth-child(2){text-align:center}
-.llm-log-table th:nth-child(3),.llm-log-table td:nth-child(3){width:500px}
-.llm-log-table th:nth-child(4),.llm-log-table td:nth-child(4){width:80px}
-.llm-log-table th:nth-child(5),.llm-log-table td:nth-child(5){width:100px}
-.llm-log-table th:nth-child(6),.llm-log-table td:nth-child(6){width:95px}
-.llm-log-table th:nth-child(7),.llm-log-table td:nth-child(7){width:95px}
-.llm-log-table th:nth-child(8),.llm-log-table td:nth-child(8){width:80px}
-.llm-log-table th:nth-child(9),.llm-log-table td:nth-child(9){width:135px}
-.llm-log-table th:nth-child(10),.llm-log-table td:nth-child(10){width:230px}
 .llm-log-table td:nth-child(1),.llm-log-table td:nth-child(2),.llm-log-table td:nth-child(4),.llm-log-table td:nth-child(5),.llm-log-table td:nth-child(6),.llm-log-table td:nth-child(7),.llm-log-table td:nth-child(8),.llm-log-table td:nth-child(9){white-space:nowrap}
 .llm-log-table td:nth-child(3) strong,.llm-log-table td:nth-child(3) code{max-width:100%}
 .llm-log-table td:nth-child(9) code{white-space:nowrap;overflow-wrap:normal}
 .llm-empty-row{text-align:center;color:#91a4ba!important;padding:28px!important}
 .llm-log-footer{display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-top:12px;color:#91a4ba;font-size:12px;font-weight:850}
-@media(max-width:900px){.llm-current-card{grid-template-columns:1fr}.llm-current-meta{grid-template-columns:1fr 1fr}.llm-log-toolbar{align-items:flex-start;flex-direction:column}.llm-log-table{min-width:1320px}}
+@media(max-width:900px){.llm-current-card{grid-template-columns:1fr}.llm-current-meta{grid-template-columns:1fr 1fr}.llm-log-toolbar{align-items:flex-start;flex-direction:column}.llm-log-table{min-width:1320px}.llm-log-started{width:190px}.llm-log-alerts{width:360px}.llm-log-detail{width:200px}}
 </style>
 <script>
 (() => {
