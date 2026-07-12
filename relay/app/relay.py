@@ -120,6 +120,14 @@ def safe_transfer_id(value: object) -> str:
     return cleaned
 
 
+class PcapExportError(RuntimeError):
+    """PCAP export failed after the restricted wrapper returned diagnostics."""
+
+    def __init__(self, message: str, diagnostics: dict | None = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+
+
 def run_ssh_pcap_export(config: dict, pcap_request: dict) -> dict:
     # PCAP export uses a separate forced-command key when configured. The
     # request JSON is sent over stdin; the Security Onion wrapper validates it
@@ -159,7 +167,10 @@ def run_ssh_pcap_export(config: dict, pcap_request: dict) -> dict:
             f"PCAP export returned invalid JSON: {exc}; stdout_preview={preview!r}; stderr_preview={stderr_preview!r}"
         ) from exc
     if result.returncode != 0 or not payload.get("ok"):
-        raise RuntimeError(payload.get("error") or result.stderr.strip() or f"PCAP export failed with exit code {result.returncode}")
+        raise PcapExportError(
+            payload.get("error") or result.stderr.strip() or f"PCAP export failed with exit code {result.returncode}",
+            payload.get("diagnostics"),
+        )
     return payload
 
 
@@ -800,30 +811,35 @@ def broker_path(config: dict, name: str, default_path: str) -> str:
 
 
 def complete_pcap_request(config: dict, request_id: str, status: str, payload: dict) -> bool:
-    try:
-        broker_request(
-            config,
-            "POST",
-            broker_path(config, "complete", "/pcap/complete"),
-            {"request_id": request_id, "status": status, "relay_host": socket.gethostname(), **payload},
-        )
-        return True
-    except Exception as exc:
-        # Completion callbacks are bookkeeping. Losing one should be loud in
-        # journald but should not stop the relay from servicing other requests.
-        print(
-            json.dumps(
-                {
-                    "event": "pcap_complete_failed",
-                    "request_id": request_id,
-                    "status": status,
-                    "error": str(exc)[:500],
-                },
-                sort_keys=True,
-            ),
-            file=sys.stderr,
-        )
-        return False
+    broker = config.get("pcap_broker", {})
+    attempts = max(1, min(5, int(broker.get("completion_retry_attempts", 3) or 3)))
+    delay_seconds = max(0.0, min(30.0, float(broker.get("completion_retry_delay_seconds", 2) or 0)))
+    completion = {"request_id": request_id, "status": status, "relay_host": socket.gethostname(), **payload}
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            broker_request(config, "POST", broker_path(config, "complete", "/pcap/complete"), completion)
+            return True
+        except Exception as exc:
+            last_error = exc
+            if attempt < attempts and delay_seconds:
+                time.sleep(delay_seconds)
+    # Completion callbacks are bookkeeping. Losing one should be loud in
+    # journald but should not stop the relay from servicing other requests.
+    print(
+        json.dumps(
+            {
+                "event": "pcap_complete_failed",
+                "request_id": request_id,
+                "status": status,
+                "attempts": attempts,
+                "error": str(last_error)[:500] if last_error else "unknown completion failure",
+            },
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+    )
+    return False
 
 
 def process_pcap_requests(config: dict) -> dict:
@@ -925,7 +941,11 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
             else:
                 completion_failed += 1
         except Exception as exc:
-            if not complete_pcap_request(config, request_id, "failed", {"error": str(exc)[:500]}):
+            completion_payload = {"error": str(exc)[:500]}
+            diagnostics = getattr(exc, "diagnostics", None)
+            if diagnostics:
+                completion_payload["diagnostics"] = diagnostics
+            if not complete_pcap_request(config, request_id, "failed", completion_payload):
                 completion_failed += 1
             failed += 1
         processed += 1

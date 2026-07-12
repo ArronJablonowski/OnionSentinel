@@ -169,6 +169,8 @@ Alert-store runtime model:
 - `com.arron.soc.alert-store` runs the real Node.js alert-store on the Mac host.
 - The Docker Compose `alert-store` service is only a TCP proxy so n8n workflows
   can keep using `http://alert-store:8787`.
+- The host launcher parses `.env` as literal `KEY=VALUE` data and never sources
+  it as shell code, so API keys containing shell metacharacters remain data.
 - Do not run the SQLite-writing alert-store process inside Docker against the
   macOS bind-mounted DB. That path produced repeat `SQLITE_IOERR` and index
   corruption during summary rebuilds.

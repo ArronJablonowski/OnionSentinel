@@ -1076,8 +1076,12 @@ Safety controls:
   first/last seen boundaries.
 - When the raw event contains `suricata.capture_file`, include it in the
   request JSON. The Security Onion wrapper validates the path under
-  `/nsm/suripcap`, prefers that file, and tests VLAN-aware BPF before the plain
-  filter because full packet capture commonly runs on tagged interfaces.
+  `/nsm/suripcap`, treats it as a preferred hint, then selects capture files by
+  the Security Onion capture epoch nearest the alert window. It tests
+  VLAN-aware BPF before the plain filter because full packet capture commonly
+  runs on tagged interfaces. This is intentionally event-time based: a
+  historical backfill must never fall through to the newest captures simply
+  because those files have the newest modification times.
 - Mac Studio does not need a direct path to Security Onion. The relay remains
   the only bridge between the isolated relay VLAN and the Mac Studio runtime.
 - The preferred artifact data plane is `spooled_rsync`: the Security Onion PCAP
@@ -1091,6 +1095,9 @@ Safety controls:
   mounted with `noatime,nosuid,nodev,noexec`. Current defaults allow an 8 GiB
   artifact ceiling while keeping 3 GiB free. Monitor average and maximum PCAP
   artifact size before deciding whether the 16 GiB SSD needs to be replaced.
+- Security Onion enforces the same 8 GiB ceiling during `tcpdump` extraction
+  through `ONION_SENTINEL_PCAP_MAX_ARTIFACT_BYTES`. This protects the export
+  directory before a large artifact reaches the relay-side capacity check.
 - n8n inline artifact upload and Security Onion chunk pulls are
   intentionally removed. If rsync fails, the relay marks the PCAP request failed
   with sanitized transfer metadata instead of falling back to a fragile encoded
@@ -1105,6 +1112,20 @@ Safety controls:
   `pcap_artifact_upload_failed`, and continues processing later requests. It
   must not report a request as fulfilled unless the Mac Studio artifact ingest
   path accepted the PCAP bytes.
+- The relay retries a transient completion callback three times by default with
+  a short bounded delay. A failed callback never stops the alert relay or later
+  PCAP work; the claim lease remains the final recovery path if every retry
+  fails.
+- Pending PCAP work is ordered by current group severity and then newest-first.
+  This prevents a historical backfill from delaying a newly detected critical
+  or high alert. The internal `/pcap/requeue` recovery route accepts an explicit
+  reviewed list of failed request IDs after a broker or selector repair; it is
+  not an automatic retry of every `No Packets` result.
+- Set `PCAP_CAPTURE_RETENTION_SECONDS` to Security Onion's verified rolling
+  capture horizon. Alert-store rejects new and pending requests older than this
+  boundary, preserving the reason instead of spending relay capacity on a
+  capture that Security Onion has already rotated away. The portable template
+  uses 96 hours; confirm the live retention range before changing it.
 - After the Mac Studio accepts the artifact and the completion callback
   succeeds, the relay calls the restricted Security Onion wrapper cleanup mode
   for that request id. Cleanup removes only the matching
@@ -1114,7 +1135,10 @@ Safety controls:
 - Valid negative fulfillment is surfaced distinctly. A failed request whose
   broker error indicates no matching packets is displayed as `No Packets` in
   the dashboard so analysts can distinguish capture absence from transport or
-  parser failures.
+  parser failures. The restricted wrapper returns bounded diagnostics with the
+  candidate count, candidate basenames, search window, and BPF variants; the
+  relay persists them with the request completion. Packet contents, raw packet
+  fields, and absolute artifact paths are never returned in diagnostics.
 - System Health exposes the PCAP workflow separately from n8n beacons. It
   reports request counts, latest request state, parser output count, runtime
   artifact size, and warnings for stale pending/claimed requests older than 20

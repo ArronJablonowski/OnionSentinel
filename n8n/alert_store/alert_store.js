@@ -57,6 +57,7 @@ const pcapRequestDefaultWindowSeconds = Math.min(
   Math.max(30, Number(process.env.PCAP_REQUEST_DEFAULT_WINDOW_SECONDS || 120)),
 );
 const pcapClaimLeaseSeconds = Math.max(300, Number(process.env.PCAP_CLAIM_LEASE_SECONDS || 1800));
+const pcapCaptureRetentionSeconds = Math.max(0, Number(process.env.PCAP_CAPTURE_RETENTION_SECONDS || 0));
 const autoPcapLevels = new Set(
   (process.env.PCAP_AUTO_REQUEST_LEVELS || 'critical,high,medium,low,informational')
     .split(',')
@@ -1582,6 +1583,7 @@ async function initDb() {
       artifact_sha256 TEXT,
       artifact_size_bytes INTEGER,
       error TEXT,
+      diagnostics_json TEXT,
       request_json TEXT NOT NULL,
       created_at TEXT NOT NULL,
       claimed_at TEXT,
@@ -1591,6 +1593,7 @@ async function initDb() {
   `);
   await ensureColumn('pcap_requests', 'claimed_at', 'TEXT');
   await ensureColumn('pcap_requests', 'completed_at', 'TEXT');
+  await ensureColumn('pcap_requests', 'diagnostics_json', 'TEXT');
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_status_created ON pcap_requests(status, created_at)');
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_completed_at ON pcap_requests(completed_at)');
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_alert_id ON pcap_requests(alert_id)');
@@ -2454,6 +2457,15 @@ function normalizePcapRequest(payload, candidate = {}) {
   return request;
 }
 
+function pcapRetentionError(lastSeen) {
+  if (!pcapCaptureRetentionSeconds || !lastSeen) return null;
+  const occurredAt = Date.parse(String(lastSeen).replace('  ', 'T'));
+  if (!Number.isFinite(occurredAt)) return null;
+  const ageSeconds = Math.floor((Date.now() - occurredAt) / 1000);
+  if (ageSeconds <= pcapCaptureRetentionSeconds) return null;
+  return `PCAP request exceeds configured capture retention (${pcapCaptureRetentionSeconds}s)`;
+}
+
 function pcapRequestFromRow(row) {
   const requestJson = parseJsonObject(row.request_json);
   return {
@@ -2481,6 +2493,7 @@ function pcapRequestFromRow(row) {
     artifact_sha256: row.artifact_sha256,
     artifact_size_bytes: row.artifact_size_bytes,
     error: row.error,
+    diagnostics: parseJsonObject(row.diagnostics_json),
     created_at: row.created_at,
     claimed_at: row.claimed_at,
     completed_at: row.completed_at,
@@ -2492,6 +2505,8 @@ async function createPcapRequest(payload) {
   const candidate = await pcapCandidateFromPayload(payload);
   const normalized = normalizePcapRequest(payload, candidate);
   const now = nowUtc();
+  const retentionError = pcapRetentionError(normalized.last_seen);
+  const initialStatus = retentionError ? 'rejected' : 'pending';
   await run(
     `
       INSERT INTO pcap_requests (
@@ -2500,7 +2515,7 @@ async function createPcapRequest(payload) {
         transport_protocol, community_id, requested_by, reason, max_window_seconds,
         request_json, created_at, updated_at
       )
-      VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(request_id) DO UPDATE SET
         reason = excluded.reason,
         requested_by = excluded.requested_by,
@@ -2510,6 +2525,7 @@ async function createPcapRequest(payload) {
     `,
     [
       normalized.request_id,
+      initialStatus,
       normalized.alert_id,
       normalized.group_id,
       normalized.group_key,
@@ -2578,11 +2594,77 @@ async function listPcapRequests(query = new URLSearchParams()) {
   const requestedStatus = safeString(query.get('status'), 32).toLowerCase();
   const status = allowed.has(requestedStatus) ? requestedStatus : '';
   const limit = Math.min(100, Math.max(1, Number(query.get('limit') || 25) || 25));
+  await rejectExpiredPendingPcapRequests();
   await requeueStalePcapClaims();
   const rows = status
-    ? await all('SELECT * FROM pcap_requests WHERE status = ? ORDER BY created_at ASC LIMIT ?', [status, limit])
+    ? await all(
+      `
+        SELECT p.*
+        FROM pcap_requests AS p
+        LEFT JOIN alert_group_summary AS g ON g.group_id = p.group_id
+        WHERE p.status = ?
+        ORDER BY
+          CASE lower(COALESCE(g.triage_level, ''))
+            WHEN 'critical' THEN 4
+            WHEN 'high' THEN 3
+            WHEN 'medium' THEN 2
+            WHEN 'low' THEN 1
+            WHEN 'informational' THEN 0
+            WHEN 'info' THEN 0
+            ELSE -1
+          END DESC,
+          p.created_at DESC
+        LIMIT ?
+      `,
+      [status, limit],
+    )
     : await all('SELECT * FROM pcap_requests ORDER BY created_at DESC LIMIT ?', [limit]);
   return {ok: true, status: status || 'all', requests: rows.map(pcapRequestFromRow)};
+}
+
+async function rejectExpiredPendingPcapRequests() {
+  if (!pcapCaptureRetentionSeconds) return;
+  const cutoff = new Date(Date.now() - pcapCaptureRetentionSeconds * 1000).toISOString();
+  const now = nowUtc();
+  await run(
+    `
+      UPDATE pcap_requests
+      SET status = 'rejected',
+          error = ?,
+          completed_at = ?,
+          updated_at = ?
+      WHERE status = 'pending'
+        AND last_seen IS NOT NULL
+        AND datetime(replace(last_seen, '  ', 'T')) < datetime(?)
+    `,
+    [`PCAP request exceeds configured capture retention (${pcapCaptureRetentionSeconds}s)`, now, now, cutoff],
+  );
+}
+
+async function requeuePcapRequests(payload) {
+  const requestIds = Array.isArray(payload?.request_ids)
+    ? [...new Set(payload.request_ids.map((value) => safeString(value, 64)).filter(Boolean))].slice(0, 500)
+    : [];
+  if (!requestIds.length) throw new Error('request_ids must contain at least one PCAP request id');
+  const now = nowUtc();
+  const placeholders = requestIds.map(() => '?').join(', ');
+  await run(
+    `
+      UPDATE pcap_requests
+      SET status = 'pending',
+          relay_host = NULL,
+          claimed_at = NULL,
+          completed_at = NULL,
+          error = 'requeued after PCAP capture-selection upgrade',
+          diagnostics_json = NULL,
+          updated_at = ?
+      WHERE status = 'failed'
+        AND request_id IN (${placeholders})
+    `,
+    [now, ...requestIds],
+  );
+  const rows = await all(`SELECT * FROM pcap_requests WHERE request_id IN (${placeholders})`, requestIds);
+  return {ok: true, requests: rows.map(pcapRequestFromRow)};
 }
 
 async function requeueStalePcapClaims() {
@@ -2643,6 +2725,9 @@ async function completePcapRequest(payload) {
   const artifactSizeBytes = nonNegativeIntegerField(payload?.artifact_size_bytes);
   const relayHost = safeString(payload?.relay_host, 120) || null;
   const error = safeString(payload?.error, 500) || null;
+  const diagnostics = payload?.diagnostics && typeof payload.diagnostics === 'object' && !Array.isArray(payload.diagnostics)
+    ? JSON.stringify(payload.diagnostics).slice(0, 12000)
+    : null;
   if (requestedStatus === 'fulfilled' && (!artifactPath || !artifactSha256 || !artifactSizeBytes)) {
     throw new Error('fulfilled pcap request requires artifact_path, artifact_sha256, and artifact_size_bytes');
   }
@@ -2655,6 +2740,7 @@ async function completePcapRequest(payload) {
           artifact_sha256 = ?,
           artifact_size_bytes = ?,
           error = ?,
+          diagnostics_json = ?,
           completed_at = ?,
           updated_at = ?
       WHERE request_id = ?
@@ -2666,6 +2752,7 @@ async function completePcapRequest(payload) {
       artifactSha256,
       artifactSizeBytes,
       requestedStatus === 'fulfilled' ? null : error,
+      requestedStatus === 'fulfilled' ? null : diagnostics,
       now,
       now,
       requestId,
@@ -2779,6 +2866,14 @@ async function handleRequest(request, response) {
       // controlled runtime path and are never committed to the DR repo.
       const payload = await readJsonBody(request);
       const result = await completePcapRequest(payload);
+      sendJson(response, 200, result);
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/pcap/requeue') {
+      // Internal operator recovery endpoint. The relay cannot call this route;
+      // it is used only after a reviewed broker or selector repair.
+      const payload = await readJsonBody(request);
+      const result = await requeuePcapRequests(payload);
       sendJson(response, 200, result);
       return;
     }

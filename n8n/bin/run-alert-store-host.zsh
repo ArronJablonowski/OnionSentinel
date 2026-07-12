@@ -10,9 +10,12 @@ ALERT_STORE_DIR="$STACK_DIR/alert_store"
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 if [[ -f "$ENV_FILE" ]]; then
-  eval "$(/usr/bin/python3 - "$ENV_FILE" <<'PY'
+  # Read literal KEY=VALUE pairs without evaluating the runtime .env as shell
+  # code. API keys can legally contain shell metacharacters.
+  while IFS= read -r -d $'\0' assignment; do
+    export "$assignment"
+  done < <(/usr/bin/python3 - "$ENV_FILE" <<'PY'
 from pathlib import Path
-import shlex
 import sys
 
 for raw in Path(sys.argv[1]).read_text().splitlines():
@@ -23,9 +26,9 @@ for raw in Path(sys.argv[1]).read_text().splitlines():
     key = key.strip()
     if not key.replace("_", "").isalnum() or key[0].isdigit():
         continue
-    print(f"export {key}={shlex.quote(value.strip())}")
+    sys.stdout.write(f"{key}={value.strip()}\0")
 PY
-)"
+)
 fi
 
 export ALERT_STORE_DB="${ALERT_STORE_DB:-$STACK_DIR/alert_store_data/alerts.sqlite3}"
@@ -37,6 +40,7 @@ export SCORING_RULES_PATH="${SCORING_RULES_PATH:-$ALERT_STORE_DIR/config/scoring
 export PCAP_ARTIFACT_DIR="${PCAP_ARTIFACT_DIR:-$STACK_DIR/pcap-evidence/artifacts}"
 export PCAP_REQUEST_DEFAULT_WINDOW_SECONDS="${PCAP_REQUEST_DEFAULT_WINDOW_SECONDS:-120}"
 export PCAP_REQUEST_MAX_WINDOW_SECONDS="${PCAP_REQUEST_MAX_WINDOW_SECONDS:-300}"
+export PCAP_CAPTURE_RETENTION_SECONDS="${PCAP_CAPTURE_RETENTION_SECONDS:-345600}"
 export PCAP_AUTO_REQUEST_LEVELS="${PCAP_AUTO_REQUEST_LEVELS:-critical,high,medium,low,informational}"
 export ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS="${ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS:-30000}"
 export ALERT_STORE_SQLITE_JOURNAL_MODE="${ALERT_STORE_SQLITE_JOURNAL_MODE:-DELETE}"

@@ -13,6 +13,7 @@ import ipaddress
 import json
 import os
 import re
+import resource
 import shutil
 import subprocess
 import sys
@@ -26,9 +27,14 @@ OUTPUT_ROOT = Path(os.environ.get("ONION_SENTINEL_PCAP_OUTPUT_ROOT", "/nsm/pcapo
 MAX_WINDOW_SECONDS = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_WINDOW_SECONDS", "300"))
 MAX_LOOKBACK_HOURS = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_LOOKBACK_HOURS", "24"))
 MAX_CANDIDATE_FILES = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_CANDIDATE_FILES", "80"))
+MAX_ARTIFACT_BYTES = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_ARTIFACT_BYTES", str(8 * 1024 * 1024 * 1024)))
 TRANSFER_GROUP = os.environ.get("ONION_SENTINEL_PCAP_TRANSFER_GROUP", "so-ai-relay-pcap-rsync")
-def fail(reason: str, code: int = 1) -> None:
-    print(json.dumps({"ok": False, "status": "failed", "error": reason}, sort_keys=True))
+def fail(reason: str, code: int = 1, diagnostics: dict | None = None) -> None:
+    """Return a bounded failure record without exposing packet contents."""
+    payload = {"ok": False, "status": "failed", "error": reason}
+    if diagnostics:
+        payload["diagnostics"] = diagnostics
+    print(json.dumps(payload, sort_keys=True))
     raise SystemExit(code)
 
 
@@ -101,9 +107,29 @@ def requested_capture_file(req: dict) -> Path | None:
     return resolved
 
 
+def capture_epoch(path: Path) -> int | None:
+    """Read Security Onion's capture-start epoch from a rotated PCAP filename."""
+    match = re.fullmatch(r"so-pcap\.(\d+)", path.name)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
 def candidate_files(start: datetime, end: datetime, req: dict | None = None) -> list[Path]:
-    now = datetime.now(timezone.utc)
-    lookback_seconds = max(3600, min(MAX_LOOKBACK_HOURS * 3600, int((now - start).total_seconds()) + 3600))
+    """Choose captures nearest the alert window, not the newest captures on disk.
+
+    The prior mtime-based method was correct only while an alert was fresh. A
+    historical backfill could instead inspect the newest captures in the
+    retention pool. Security Onion names its rotating files with their capture
+    epoch, so use that stable event-time signal and retain the requested file as
+    a preferred hint when it is still available.
+    """
+    lookback_seconds = max(3600, MAX_LOOKBACK_HOURS * 3600)
+    lower_epoch = int(start.timestamp()) - lookback_seconds
+    upper_epoch = int(end.timestamp()) + 3600
     find_cmd = [
         "find",
         str(PCAP_ROOT),
@@ -111,24 +137,25 @@ def candidate_files(start: datetime, end: datetime, req: dict | None = None) -> 
         "f",
         "-name",
         "so-pcap.*",
-        "-mmin",
-        f"-{max(1, lookback_seconds // 60)}",
-        "-printf",
-        "%T@ %p\n",
+        "-printf", "%f\t%p\n",
     ]
     result = subprocess.run(find_cmd, check=False, capture_output=True, text=True, timeout=30)
     if result.returncode != 0:
         fail("failed to enumerate pcap files")
-    files: list[tuple[float, Path]] = []
+    files: list[tuple[int, Path]] = []
     for line in result.stdout.splitlines():
         try:
-            raw_mtime, path = line.split(" ", 1)
-            mtime = float(raw_mtime)
-        except (TypeError, ValueError):
+            name, raw_path = line.split("\t", 1)
+        except ValueError:
             continue
-        files.append((mtime, Path(path)))
-    files.sort(key=lambda item: item[0])
-    candidates = [path for _, path in files[-MAX_CANDIDATE_FILES:]]
+        path = Path(raw_path)
+        epoch = capture_epoch(Path(name))
+        if epoch is None or epoch < lower_epoch or epoch > upper_epoch:
+            continue
+        files.append((epoch, path))
+    reference_epoch = int(end.timestamp())
+    files.sort(key=lambda item: (abs(item[0] - reference_epoch), -item[0], str(item[1])))
+    candidates = [path for _, path in files[:MAX_CANDIDATE_FILES]]
     if req:
         capture_file = requested_capture_file(req)
         if capture_file and capture_file.exists():
@@ -161,6 +188,12 @@ def prepare_output_root() -> None:
         # Export can still run in isolated test/dev environments that have not
         # created the transfer group. Production installs should create it.
         pass
+
+
+def limit_output_file_size(max_bytes: int) -> None:
+    """Prevent tcpdump from filling Security Onion export storage on a dense flow."""
+    safe_limit = max(1, int(max_bytes))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (safe_limit, safe_limit))
 
 
 def cleanup_artifact(req: dict) -> int:
@@ -231,24 +264,57 @@ def main() -> int:
         shutil.rmtree(work_dir)
     work_dir.mkdir(mode=0o750)
 
+    candidates = candidate_files(start, end, req)
+    diagnostics = {
+        "search_strategy": "capture-epoch-near-window",
+        "window_start": start.strftime("%Y-%m-%d  %H:%M:%S%z"),
+        "window_end": end.strftime("%Y-%m-%d  %H:%M:%S%z"),
+        "candidate_count": len(candidates),
+        "candidate_files": [path.name for path in candidates[:20]],
+        "requested_capture_file": requested_capture_file(req).name if requested_capture_file(req) else None,
+        "bpf_variants": bpf_variants,
+    }
     part_paths: list[Path] = []
+    part_bytes = 0
+    size_limit_hit = False
     part_index = 1
-    for pcap in candidate_files(start, end, req):
+    for pcap in candidates:
         for bpf in bpf_variants:
+            remaining_bytes = MAX_ARTIFACT_BYTES - part_bytes
+            if remaining_bytes <= 24:
+                size_limit_hit = True
+                break
             part = work_dir / f"part-{part_index:03d}.pcap"
             part_index += 1
             cmd = ["tcpdump", "-r", str(pcap), "-w", str(part), bpf]
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                preexec_fn=lambda: limit_output_file_size(remaining_bytes),
+            )
             if result.returncode not in (0, 1):
+                if part.exists() and part.stat().st_size >= remaining_bytes:
+                    size_limit_hit = True
+                    part.unlink()
                 continue
             if part.exists() and part.stat().st_size > 24:
+                part_size = part.stat().st_size
+                if part_size > remaining_bytes:
+                    size_limit_hit = True
+                    part.unlink()
+                    continue
                 part_paths.append(part)
+                part_bytes += part_size
                 break
             elif part.exists():
                 part.unlink()
 
     if not part_paths:
-        fail("no matching packets found", code=2)
+        reason = "PCAP extraction exceeded artifact size limit" if size_limit_hit else "no matching packets found"
+        fail(reason, code=2, diagnostics=diagnostics)
 
     artifact = OUTPUT_ROOT / f"{request_id}.tar"
     with tarfile.open(artifact, "w") as tar:
@@ -256,6 +322,9 @@ def main() -> int:
             tar.add(part, arcname=part.name)
 
     artifact_size = artifact.stat().st_size
+    if artifact_size > MAX_ARTIFACT_BYTES:
+        artifact.unlink(missing_ok=True)
+        fail("PCAP artifact exceeds configured size limit", diagnostics=diagnostics)
     try:
         shutil.chown(artifact, group=TRANSFER_GROUP)
         artifact.chmod(0o640)

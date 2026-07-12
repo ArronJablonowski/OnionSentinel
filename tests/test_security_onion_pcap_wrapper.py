@@ -29,33 +29,34 @@ def load_wrapper():
 
 
 class SecurityOnionPcapWrapperTest(unittest.TestCase):
-    def test_candidate_files_sorts_by_mtime_before_limiting(self) -> None:
+    def test_candidate_files_selects_capture_epochs_nearest_alert_window(self) -> None:
         wrapper = load_wrapper()
         wrapper.MAX_CANDIDATE_FILES = 3
+        reference = int(dt.datetime.now(dt.timezone.utc).timestamp())
 
         output = "\n".join(
             [
-                "300 /nsm/suripcap/oldish/so-pcap.300",
-                "100 /nsm/suripcap/old/so-pcap.100",
-                "500 /nsm/suripcap/newest/so-pcap.500",
-                "200 /nsm/suripcap/mid/so-pcap.200",
-                "400 /nsm/suripcap/newer/so-pcap.400",
+                f"so-pcap.{reference - 300}\t/nsm/suripcap/oldish/so-pcap.{reference - 300}",
+                f"so-pcap.{reference - 900}\t/nsm/suripcap/old/so-pcap.{reference - 900}",
+                f"so-pcap.{reference + 120}\t/nsm/suripcap/newest/so-pcap.{reference + 120}",
+                f"so-pcap.{reference - 60}\t/nsm/suripcap/mid/so-pcap.{reference - 60}",
+                f"so-pcap.{reference + 30}\t/nsm/suripcap/newer/so-pcap.{reference + 30}",
             ]
         )
         completed = subprocess.CompletedProcess(args=["find"], returncode=0, stdout=output, stderr="")
 
         with mock.patch.object(wrapper.subprocess, "run", return_value=completed):
             files = wrapper.candidate_files(
-                dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=10),
-                dt.datetime.now(dt.timezone.utc),
+                dt.datetime.fromtimestamp(reference - 10, dt.timezone.utc),
+                dt.datetime.fromtimestamp(reference, dt.timezone.utc),
             )
 
         self.assertEqual(
             [str(path) for path in files],
             [
-                "/nsm/suripcap/oldish/so-pcap.300",
-                "/nsm/suripcap/newer/so-pcap.400",
-                "/nsm/suripcap/newest/so-pcap.500",
+                f"/nsm/suripcap/newer/so-pcap.{reference + 30}",
+                f"/nsm/suripcap/mid/so-pcap.{reference - 60}",
+                f"/nsm/suripcap/newest/so-pcap.{reference + 120}",
             ],
         )
 
@@ -96,6 +97,11 @@ class SecurityOnionPcapWrapperTest(unittest.TestCase):
             wrapper.bpf_for_request(request, vlan=True),
             "vlan and host 192.0.2.10 and host 198.51.100.20 and port 443",
         )
+
+    def test_wrapper_has_an_extraction_size_ceiling(self) -> None:
+        wrapper = load_wrapper()
+        self.assertGreater(wrapper.MAX_ARTIFACT_BYTES, 0)
+        self.assertTrue(callable(wrapper.limit_output_file_size))
 
     def test_artifact_cleanup_removes_only_request_outputs(self) -> None:
         wrapper = load_wrapper()

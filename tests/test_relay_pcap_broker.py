@@ -550,6 +550,50 @@ class RelayPcapBrokerTest(unittest.TestCase):
         self.assertEqual(result["artifact_path"], "/nsm/pcapout/onion-sentinel/test.tar")
         self.assertEqual(result["artifact_size_bytes"], 4096)
 
+    def test_failed_export_forwards_wrapper_diagnostics_to_broker(self) -> None:
+        request = {"request_id": "pcap-diagnostics-test", "source_ip": "192.0.2.10", "destination_ip": "198.51.100.10"}
+        completions: list[dict] = []
+
+        def fake_broker(config, method, path, payload_data=None):
+            if path.startswith("/pcap/requests"):
+                return {"ok": True, "requests": [request]}
+            if path == "/pcap/claim":
+                return {"ok": True, "claimed": True, "request": request}
+            if path == "/pcap/complete":
+                completions.append(payload_data)
+                return {"ok": True, "status": payload_data["status"]}
+            raise AssertionError(f"unexpected broker call: {method} {path}")
+
+        diagnostics = {"candidate_count": 3, "search_strategy": "capture-epoch-near-window"}
+        with mock.patch.object(self.relay, "broker_request", side_effect=fake_broker):
+            with mock.patch.object(
+                self.relay,
+                "run_ssh_pcap_export",
+                side_effect=self.relay.PcapExportError("no matching packets found", diagnostics),
+            ):
+                result = self.relay.process_pcap_requests({"pcap_broker": {"enabled": True, "limit": 1}})
+
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(completions[0]["status"], "failed")
+        self.assertEqual(completions[0]["diagnostics"], diagnostics)
+
+    def test_completion_retries_a_transient_broker_failure(self) -> None:
+        config = {
+            "pcap_broker": {
+                "completion_retry_attempts": 3,
+                "completion_retry_delay_seconds": 0,
+            }
+        }
+        with mock.patch.object(
+            self.relay,
+            "broker_request",
+            side_effect=[RuntimeError("socket hang up"), {"ok": True}],
+        ) as broker_request:
+            completed = self.relay.complete_pcap_request(config, "pcap-retry-test", "failed", {"error": "test"})
+
+        self.assertTrue(completed)
+        self.assertEqual(broker_request.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

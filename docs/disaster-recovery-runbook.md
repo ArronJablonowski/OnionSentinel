@@ -570,11 +570,12 @@ the requested flow/window, the dashboard shows `No Packets` instead of a
 generic failure. Operators should treat that as useful evidence about capture
 coverage or tuple/window selection, not as a broken broker.
 
-`export-pcap-window` evaluates a validated `capture_file` first, then Security
-Onion capture files newest-first before applying its candidate limit. If recent
-matching packets exist but no packets are returned, confirm the installed
-wrapper matches this repo before widening the requested time window. The
-wrapper uses destination port by default for BPF flow filtering. Use
+`export-pcap-window` evaluates a validated `capture_file` first, then ranks
+Security Onion capture files by the capture epoch nearest the requested alert
+window before applying its candidate limit. If matching packets exist but no
+packets are returned, inspect the bounded completion diagnostics (candidate
+count, candidate basenames, BPF variants, and requested window) before
+widening the request. The wrapper uses destination port by default for BPF flow filtering. Use
 `require_source_port: true` only for controlled validation or rare cases where
 the source port is intentionally the discriminator.
 

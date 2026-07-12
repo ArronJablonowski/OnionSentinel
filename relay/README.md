@@ -111,6 +111,8 @@ PCAP fulfillment is disabled by default in `config/config.example.json`:
     "rsync_timeout_seconds": 1800
   },
   "lock_path": "/tmp/onion-sentinel-pcap-broker.lock",
+  "completion_retry_attempts": 3,
+  "completion_retry_delay_seconds": 2,
   "paths": {
     "requests": "/pcap-requests",
     "claim": "/pcap-claim",

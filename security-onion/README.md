@@ -61,13 +61,15 @@ The export wrapper grants the transfer group read/traverse access to
 `so-ai-relay-pcap-rsync`; set `ONION_SENTINEL_PCAP_TRANSFER_GROUP` before the
 forced command if you choose a different transfer account/group.
 
-`export-pcap-window` searches Security Onion PCAP files by modification time
-and evaluates the newest bounded candidate set first. This keeps short,
-recent detection windows from missing packets when `/nsm/suripcap` contains
-older captures mixed with current files. The wrapper defaults to using the
-destination service port as the BPF port discriminator; request JSON may set
-`require_source_port: true` for controlled validation or rare cases where an
-ephemeral source port is the only safe discriminator.
+`export-pcap-window` treats a validated `capture_file` as a preferred hint,
+then ranks bounded candidates by the capture epoch nearest the alert window.
+This prevents historical requests from accidentally searching only the newest
+captures. The wrapper defaults to using the destination service port as the
+BPF port discriminator; request JSON may set `require_source_port: true` for
+controlled validation or rare cases where an ephemeral source port is the only
+safe discriminator. `ONION_SENTINEL_PCAP_MAX_ARTIFACT_BYTES` defaults to 8 GiB
+and is applied to `tcpdump` itself, so an unusually dense flow cannot fill the
+Security Onion export directory before the relay SSD limit is enforced.
 
 After a relay upload has been accepted by the Mac Studio and the PCAP broker
 completion callback succeeds, the relay calls `export-pcap-window` with
