@@ -19,60 +19,19 @@ services:
       retries: 10
 
   alert-store:
-    # Uses the n8n image so sqlite3 is already available; alert-store itself is
-    # the Node script mounted at /app/alert_store.js.
+    # Docker-network compatibility proxy only. The real alert-store runs as a
+    # Mac launchd service so SQLite writes stay off Docker Desktop bind mounts.
     image: n8nio/n8n:latest
     container_name: alert-store
     restart: unless-stopped
     working_dir: /app
     environment:
-      # The real Telegram token comes from .env, not from this repo.
-      - ALERT_STORE_DB=/data/alerts.sqlite3
-      - ALERT_STORE_BEACON_PATHS=/data/n8n-beacon.json,/portal/n8n-beacon.json
-      - ALERT_STORE_PORT=8787
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
-      - TELEGRAM_ALERT_LEVELS=${TELEGRAM_ALERT_LEVELS:-critical,high}
-      - TELEGRAM_COOLDOWN_SECONDS=${TELEGRAM_COOLDOWN_SECONDS:-900}
-      - ABUSEIPDB_API_KEY=${ABUSEIPDB_API_KEY:-}
-      - GREYNOISE_API_KEY=${GREYNOISE_API_KEY:-}
-      - OTX_API_KEY=${OTX_API_KEY:-}
-      - URLHAUS_AUTH_KEY=${URLHAUS_AUTH_KEY:-}
-      - VIRUSTOTAL_API_KEY=${VIRUSTOTAL_API_KEY:-}
-      - URLSCAN_API_KEY=${URLSCAN_API_KEY:-}
-      - GOOGLE_SAFE_BROWSING_API_KEY=${GOOGLE_SAFE_BROWSING_API_KEY:-}
-      - PHISHTANK_API_KEY=${PHISHTANK_API_KEY:-}
-      - MALWAREBAZAAR_AUTH_KEY=${MALWAREBAZAAR_AUTH_KEY:-}
-      - THREATFOX_AUTH_KEY=${THREATFOX_AUTH_KEY:-}
-      - SHODAN_API_KEY=${SHODAN_API_KEY:-}
-      - CENSYS_API_ID=${CENSYS_API_ID:-}
-      - CENSYS_API_SECRET=${CENSYS_API_SECRET:-}
-      - CENSYS_API_TOKEN=${CENSYS_API_TOKEN:-}
-      - CENSYS_ORGANIZATION_ID=${CENSYS_ORGANIZATION_ID:-}
-      - NVD_API_KEY=${NVD_API_KEY:-}
-      - ENRICHMENT_CACHE_TTL_SECONDS=${ENRICHMENT_CACHE_TTL_SECONDS:-86400}
-      - ENRICHMENT_VULN_CACHE_TTL_SECONDS=${ENRICHMENT_VULN_CACHE_TTL_SECONDS:-86400}
-      - ENRICHMENT_TIMEOUT_MS=${ENRICHMENT_TIMEOUT_MS:-5000}
-      - VIRUSTOTAL_MINIMUM_LEVEL=${VIRUSTOTAL_MINIMUM_LEVEL:-high}
-      - URLSCAN_SUBMIT_ENABLED=${URLSCAN_SUBMIT_ENABLED:-false}
-      - ALERT_STORE_MAX_REQUEST_BYTES=${ALERT_STORE_MAX_REQUEST_BYTES:-10485760}
-      - PCAP_ARTIFACT_DIR=/pcap-artifacts
-      - PCAP_ARTIFACT_MAX_BYTES=${PCAP_ARTIFACT_MAX_BYTES:-7340032}
-      - PCAP_ARTIFACT_CHUNK_MAX_BYTES=${PCAP_ARTIFACT_CHUNK_MAX_BYTES:-524288}
-      - ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS=${ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS:-10000}
-      - ALERT_STORE_SQLITE_JOURNAL_MODE=${ALERT_STORE_SQLITE_JOURNAL_MODE:-DELETE}
-      - ALERT_STORE_SQLITE_SYNCHRONOUS=${ALERT_STORE_SQLITE_SYNCHRONOUS:-NORMAL}
-      - ALERT_STORE_SQLITE_TEMP_STORE=${ALERT_STORE_SQLITE_TEMP_STORE:-DEFAULT}
-      - PCAP_REQUEST_DEFAULT_WINDOW_SECONDS=${PCAP_REQUEST_DEFAULT_WINDOW_SECONDS:-120}
-      - PCAP_REQUEST_MAX_WINDOW_SECONDS=${PCAP_REQUEST_MAX_WINDOW_SECONDS:-300}
-      - PCAP_AUTO_REQUEST_LEVELS=${PCAP_AUTO_REQUEST_LEVELS:-critical,high}
+      - ALERT_STORE_PROXY_PORT=8787
+      - ALERT_STORE_HOST_TARGET=host.docker.internal
+      - ALERT_STORE_PORT_TARGET=8787
     volumes:
-      # Source code is read-only; SQLite data persists in alert_store_data.
       - ./alert_store:/app:ro
-      - ./alert_store_data:/data
-      - ./pcap-evidence/artifacts:/pcap-artifacts
-      - ${SOC_ALERTS_PORTAL_DIR:-./portal}:/portal
-    entrypoint: ["node", "/app/alert_store.js"]
+    entrypoint: ["node", "/app/alert_store_proxy.js"]
 
   n8n:
     # n8n hosts the webhook workflow and forwards accepted alerts to alert-store

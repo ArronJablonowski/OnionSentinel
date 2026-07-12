@@ -201,12 +201,87 @@ class PcapAnalysisWorkflowTest(unittest.TestCase):
         self.assertEqual(evidence["zeek"]["record_counts"]["conn"], 1)
         self.assertEqual(evidence["tshark"]["samples"][0]["conversations"], "TCP Conversations")
 
+    def test_prompt_package_includes_compact_public_enrichment(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE alerts (
+              alert_id TEXT PRIMARY KEY,
+              first_seen TEXT,
+              last_seen TEXT,
+              seen_count INTEGER,
+              rule_name TEXT,
+              source_ip TEXT,
+              destination_ip TEXT,
+              destination_port TEXT,
+              triage_level TEXT,
+              triage_score INTEGER,
+              filter_status TEXT,
+              suppression_key TEXT,
+              enrichment_json TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO alerts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "alert-1",
+                "2026-07-08  10:00:00-06:00",
+                "2026-07-08  10:00:00-06:00",
+                1,
+                "ET TEST public enrichment",
+                "192.0.2.10",
+                "198.51.100.10",
+                "443",
+                "medium",
+                50,
+                "accepted",
+                "medium|ET TEST public enrichment|192.0.2.10|198.51.100.10|accepted",
+                json.dumps(
+                    {
+                        "external_intel": {
+                            "records": [
+                                {
+                                    "source": "otx",
+                                    "indicator": "198.51.100.10",
+                                    "indicator_type": "ip",
+                                    "verdict": "suspicious",
+                                    "confidence": 55,
+                                    "tags": ["pulses:2"],
+                                    "raw_response": {"omitted": "from prompt"},
+                                }
+                            ],
+                            "skipped": [{"source": "virustotal", "reason": "rate_limited"}],
+                            "errors": [],
+                            "indicators": {"ips": ["198.51.100.10"]},
+                        }
+                    }
+                ),
+            ),
+        )
+        selected = conn.execute("SELECT * FROM alerts WHERE alert_id = 'alert-1'").fetchone()
+
+        context = self.prompt_builder.public_enrichment_context(conn, selected, 5, include_tests=True)
+        conn.close()
+
+        self.assertEqual(context["verdict_counts"], {"suspicious": 1})
+        self.assertEqual(context["records"][0]["source"], "otx")
+        self.assertEqual(context["records"][0]["indicator"], "198.51.100.10")
+        self.assertNotIn("raw_response", context["records"][0])
+        self.assertEqual(context["skipped"][0]["source"], "virustotal")
+
     def test_ai_runner_renders_pcap_analysis_findings(self) -> None:
         response = {
+            "detection_outcome": "true_positive_suspicious",
+            "bluf": "True Positive - Suspicious: The synthetic DNS evidence is real but not confirmed malicious.",
             "summary": "Synthetic alert summary.",
             "likely_meaning": "Synthetic meaning.",
             "severity_reasoning": "Synthetic severity.",
             "alert_frequency_assessment": "Synthetic frequency.",
+            "public_enrichment_findings": ["OTX marked 198.51.100.10 suspicious with medium confidence."],
             "pcap_analysis_findings": ["Zeek saw one DNS query for example.test."],
             "false_positive_possibilities": [],
             "recommended_next_steps": ["Pivot in Security Onion."],
@@ -227,7 +302,12 @@ class PcapAnalysisWorkflowTest(unittest.TestCase):
             self.root / "analysis.json",
         )
 
+        self.assertIn("## BLUF", markdown)
+        self.assertIn("**Detection outcome:** true_positive_suspicious", markdown)
+        self.assertIn("True Positive - Suspicious:", markdown)
         self.assertIn("## PCAP Analysis Findings", markdown)
+        self.assertIn("## Public Enrichment Findings", markdown)
+        self.assertIn("OTX marked 198.51.100.10 suspicious", markdown)
         self.assertIn("Zeek saw one DNS query for example.test.", markdown)
 
 

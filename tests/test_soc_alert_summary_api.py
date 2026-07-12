@@ -11,6 +11,7 @@ import unittest
 import datetime as dt
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +37,10 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.portal.SOC_ALERT_STATIC_STATUS_FILE = Path(self.tmp.name) / "soc-alerts-status.json"
         self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR = Path(self.tmp.name) / "pcap-analysis"
         self.portal.SOC_ALERT_PCAP_ARTIFACT_DIR = Path(self.tmp.name) / "pcap-artifacts"
+        self.portal.SOC_ALERT_AI_ANALYSIS_DIR = Path(self.tmp.name) / "ai-analysis"
+        self.portal.SOC_ALERT_AI_ANALYSIS_DIR.mkdir()
+        self.portal.SOC_ALERT_DETAIL_DIR = Path(self.tmp.name) / "details"
+        self.portal.SOC_ALERT_DETAIL_DIR.mkdir()
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(
@@ -51,9 +56,15 @@ class SocAlertSummaryApiTest(unittest.TestCase):
               severity INTEGER,
               severity_label TEXT,
               source_ip TEXT,
+              source_port INTEGER,
               destination_ip TEXT,
+              destination_port INTEGER,
+              network_protocol TEXT,
+              transport_protocol TEXT,
               triage_level TEXT,
-              filter_status TEXT
+              filter_status TEXT,
+              alert_json TEXT,
+              raw_event_json TEXT
             );
             CREATE TABLE alert_group_summary (
               group_id TEXT PRIMARY KEY,
@@ -156,6 +167,29 @@ class SocAlertSummaryApiTest(unittest.TestCase):
             filter_status="suppressed",
         )
         self.conn.commit()
+
+    def test_detail_sections_collapse_by_default(self) -> None:
+        detail_html = (
+            "<h3>Alert Summary</h3><p>summary context</p>"
+            "<h3>Network And Flow Details</h3><p>flow context</p>"
+            "<h4>Nested Evidence</h4><p>stays inside</p>"
+            "<h3>TShark Corroboration</h3><p>packet parser context</p>"
+            "<h3>Threat Context</h3><p>ioc context</p>"
+            "<h3>Analyst Notes</h3><p>operator notes</p>"
+            "<h3>Other Section</h3><p>remains expanded</p>"
+        )
+
+        collapsed = self.portal.soc_alert_collapse_detail_sections(detail_html)
+
+        self.assertEqual(collapsed.count('class="detail-report-section detail-collapsible-section'), 5)
+        self.assertNotIn("<details open", collapsed)
+        self.assertIn("<summary>Alert Summary</summary>", collapsed)
+        self.assertIn("<summary>Network And Flow Details</summary>", collapsed)
+        self.assertIn("<summary>TShark Findings</summary>", collapsed)
+        self.assertIn("<summary>Threat Context</summary>", collapsed)
+        self.assertIn("<summary>Analyst Notes</summary>", collapsed)
+        self.assertIn("<h4>Nested Evidence</h4><p>stays inside</p></div></details>", collapsed)
+        self.assertIn("<h3>Other Section</h3><p>remains expanded</p>", collapsed)
 
     def tearDown(self) -> None:
         self.conn.close()
@@ -260,10 +294,63 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["alerts"][0]["pcap_status_key"], "analyzed")
         self.assertEqual(payload["alerts"][0]["pcap_status_label"], "Analyzed")
 
+    def test_detail_fragment_appends_current_pcap_when_static_fragment_is_stale(self) -> None:
+        newest_group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR.mkdir()
+        (self.portal.SOC_ALERT_DETAIL_DIR / f"{newest_group_id}.html").write_text(
+            "<h2>AI Model Used</h2><h4>PCAP Analysis Findings</h4><ul><li>n/a</li></ul>",
+            encoding="utf-8",
+        )
+        (self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR / "unit-pcap-analysis.json").write_text(
+            json.dumps(
+                {
+                    "request": {"request_id": "unit", "group_id": newest_group_id, "alert_id": "newest-alert"},
+                    "generated_at": "2026-07-03  12:01:00-06:00",
+                    "pcap_files": [{"name": "unit.pcap", "size_bytes": 128}],
+                    "zeek": {
+                        "available": True,
+                        "record_counts": {"conn": 1},
+                        "top_connections": [{"id.orig_h": "192.0.2.10", "id.resp_h": "198.51.100.10"}],
+                    },
+                    "tshark": {
+                        "available": True,
+                        "samples": [{"protocol_hierarchy": "frame\\nip\\ntcp", "conversations": "192.0.2.10 <-> 198.51.100.10"}],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        status, payload = self.portal.soc_alert_detail_fragment_response(newest_group_id)
+
+        self.assertEqual(status, 200)
+        self.assertIn("PCAP Analysis Findings", payload["detail_html"])
+        self.assertIn("Parsed PCAP Evidence", payload["detail_html"])
+        self.assertIn("Top Connections", payload["detail_html"])
+        self.assertIn("192.0.2.10", payload["detail_html"])
+
     def test_pcap_request_endpoint_queues_group_for_broker(self) -> None:
         newest_group_id = self.portal.soc_alert_group_id(
             "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
         )
+        self.conn.execute(
+            """
+            INSERT INTO alerts (
+              alert_id, first_seen, last_seen, timestamp, source_ip, source_port,
+              destination_ip, destination_port, transport_protocol, alert_json,
+              raw_event_json, triage_level, filter_status
+            )
+            VALUES (
+              'newest-alert', '2026-07-03  12:00:01Z', '2026-07-03  12:00:01Z',
+              '2026-07-03  12:00:01Z', '192.0.2.10', 5555, '198.51.100.10',
+              443, 'tcp', '{}', '{"suricata":{"capture_file":"/nsm/suripcap/1/so-pcap.unit"}}',
+              'critical', 'accepted'
+            )
+            """
+        )
+        self.conn.commit()
 
         status, payload = self.portal.soc_alert_pcap_request_response(
             newest_group_id,
@@ -279,7 +366,9 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(row["requested_by"], "unit-test")
         self.assertEqual(row["source_ip"], "192.0.2.10")
         self.assertEqual(row["destination_ip"], "198.51.100.10")
-        self.assertTrue(json.loads(row["request_json"])["require_source_port"])
+        request_json = json.loads(row["request_json"])
+        self.assertTrue(request_json["require_source_port"])
+        self.assertEqual(request_json["capture_file"], "/nsm/suripcap/1/so-pcap.unit")
 
     def test_pcap_request_endpoint_requeues_failed_request(self) -> None:
         newest_group_id = self.portal.soc_alert_group_id(
@@ -309,8 +398,11 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         )
         self.portal.soc_alert_pcap_request_response(newest_group_id, {"reason": "unit test no packets"})
         self.conn.execute(
-            "UPDATE pcap_requests SET status = 'failed', error = 'no matching packets found for requested window', completed_at = updated_at WHERE group_id = ?",
-            (newest_group_id,),
+            "UPDATE pcap_requests SET status = 'failed', error = 'no matching packets found for requested window', request_json = ?, completed_at = updated_at WHERE group_id = ?",
+            (
+                json.dumps({"capture_file": "/nsm/suripcap/5/so-pcap.example"}),
+                newest_group_id,
+            ),
         )
         self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR.mkdir()
         (self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR / "empty-pcap-analysis.json").write_text(
@@ -334,9 +426,44 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["alerts"][0]["pcap_status_key"], "no-packets")
         self.assertEqual(payload["alerts"][0]["pcap_status_label"], "No Packets")
 
+    def test_alert_list_marks_stale_no_matching_packets_pcap_request_for_retry(self) -> None:
+        newest_group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        self.portal.soc_alert_pcap_request_response(newest_group_id, {"reason": "unit test stale no packets"})
+        self.conn.execute(
+            "UPDATE pcap_requests SET status = 'failed', error = 'no matching packets found for requested window', request_json = ?, completed_at = updated_at WHERE group_id = ?",
+            (json.dumps({"destination_ip": "198.51.100.10", "destination_port": 443}), newest_group_id),
+        )
+        self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR.mkdir()
+        (self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR / "empty-pcap-analysis.json").write_text(
+            json.dumps(
+                {
+                    "request": {"group_id": newest_group_id, "alert_id": "newest-alert"},
+                    "pcap_files": [],
+                    "artifact_state": "artifact-not-copied-to-mac",
+                    "zeek": {"available": False},
+                    "tshark": {"available": False},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.conn.commit()
+
+        status, payload = self.portal.soc_alerts_query_response({"limit": ["10"], "analyst_status": ["open"]})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["alerts"][0]["representative_alert_id"], "newest-alert")
+        self.assertEqual(payload["alerts"][0]["pcap_status_key"], "error")
+        self.assertEqual(payload["alerts"][0]["pcap_status_label"], "Retry")
+
     def test_alert_list_uses_static_ai_status_when_available(self) -> None:
         newest_group_id = self.portal.soc_alert_group_id(
             "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        (self.portal.SOC_ALERT_AI_ANALYSIS_DIR / "unit-local-ai-analysis.json").write_text(
+            json.dumps({"alert_id": "newest-alert", "generated_at": "2026-07-03  12:01:00Z"}),
+            encoding="utf-8",
         )
         self.portal.SOC_ALERT_STATIC_STATUS_FILE.write_text(
             json.dumps(
@@ -361,6 +488,62 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["alerts"][0]["ai_status_key"], "analyzed")
         self.assertEqual(payload["alerts"][0]["ai_status_label"], "Analyzed")
         self.assertEqual(payload["alerts"][0]["ai_status_detail"], "unit test analysis artifact")
+
+    def test_alert_list_corrects_stale_skipped_ai_status_without_artifact(self) -> None:
+        newest_group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        self.portal.SOC_ALERT_STATIC_STATUS_FILE.write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "reports": {
+                        newest_group_id: {
+                            "ai_status_key": "not-queued",
+                            "ai_status_label": "Skipped",
+                            "ai_status_detail": "stale status from previous build",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        status, payload = self.portal.soc_alerts_query_response({"limit": ["10"], "analyst_status": ["open"]})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["alerts"][0]["representative_alert_id"], "newest-alert")
+        self.assertEqual(payload["alerts"][0]["ai_status_key"], "queued")
+        self.assertEqual(payload["alerts"][0]["ai_status_label"], "Queued")
+        self.assertIn("No AI analysis artifact exists", payload["alerts"][0]["ai_status_detail"])
+
+    def test_manual_analyze_queues_fresh_full_group_prompt(self) -> None:
+        group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        prompt_path = Path(self.tmp.name) / "prompt.json"
+        prompt_path.write_text("{}", encoding="utf-8")
+        builder_path = Path(self.tmp.name) / "build-ai-investigation-prompt.py"
+        builder_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        self.portal.SOC_ALERT_AI_PROMPT_BUILDER = builder_path
+        self.portal.SOC_ALERT_AI_PROMPT_DIR = Path(self.tmp.name) / "ai-prompts"
+
+        completed = mock.Mock(returncode=0, stdout=f"{prompt_path}\n", stderr="")
+        with (
+            mock.patch.object(self.portal, "soc_alert_group_representative_alert_id", return_value="newest-alert"),
+            mock.patch.object(self.portal.subprocess, "run", return_value=completed) as run_mock,
+        ):
+            status, payload = self.portal.soc_alert_queue_analysis_response(group_id, {})
+
+        self.assertEqual(status, 202)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["ai_status_key"], "queued")
+        command = run_mock.call_args.args[0]
+        self.assertIn("--alert-id", command)
+        self.assertEqual(command[command.index("--alert-id") + 1], "newest-alert")
+        self.assertIn("--related-limit", command)
+        self.assertEqual(command[command.index("--related-limit") + 1], "250")
+        self.assertIn("--pcap-analysis-limit", command)
 
     def test_top_endpoint_metrics_use_visible_alert_volume(self) -> None:
         self.insert_summary(

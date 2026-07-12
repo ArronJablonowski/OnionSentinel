@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import html
 import json
+import math
 import mimetypes
 import os
 import re
@@ -58,6 +59,12 @@ SOC_ALERT_N8N_BEACON_FILE = SOC_ALERT_DASHBOARD_DIR / "n8n-beacon.json"
 SOC_ALERT_N8N_BEACON_HISTORY_FILE = SOC_ALERT_DASHBOARD_DIR / "n8n-beacon-history.json"
 SOC_ALERT_PCAP_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "pcap-analysis"
 SOC_ALERT_PCAP_ARTIFACT_DIR = HOME / "n8n-local" / "pcap-evidence" / "artifacts"
+SOC_ALERT_AI_PROMPT_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-prompts"
+SOC_ALERT_AI_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-analysis"
+SOC_ALERT_AI_PROMPT_BUILDER = HOME / "n8n-local" / "bin" / "build-ai-investigation-prompt.py"
+SOC_ALERT_LLM_ANALYSIS_LOG_DIR = HOME / "n8n-local" / "soc-alerts" / "llm-analysis-logs"
+SOC_ALERT_LLM_ANALYSIS_LOG_FILE = SOC_ALERT_LLM_ANALYSIS_LOG_DIR / "llm-analysis-log.jsonl"
+SOC_ALERT_LLM_ANALYSIS_CURRENT_FILE = SOC_ALERT_LLM_ANALYSIS_LOG_DIR / "current-analysis.json"
 SOC_ANALYST_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system_prompt.md"
 SIEM_ENGINEER_PROMPT_FILE = HOME / "n8n-local" / "config" / "siem_engineer_system_prompt.md"
 THREAT_HUNTER_PROMPT_FILE = HOME / "n8n-local" / "config" / "threat_hunter_system_prompt.md"
@@ -66,6 +73,8 @@ INCIDENT_RESPONDER_PROMPT_FILE = HOME / "n8n-local" / "config" / "incident_respo
 SOC_AI_SETTINGS_FILE = HOME / "n8n-local" / "config" / "ai_model_settings.json"
 SOC_ANALYST_PROMPT_MAX_BYTES = 20000
 SOC_ALERT_API_MAX_LIMIT = 500
+SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS = 30
+SOC_ALERT_DB_BUSY_TIMEOUT_MS = SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS * 1000
 SOC_ALERT_LEVEL_RANK = {
     "critical": 5,
     "high": 4,
@@ -3916,7 +3925,7 @@ def soc_alert_pcap_request_statuses(conn: sqlite3.Connection, rows: list[sqlite3
     try:
         found = conn.execute(
             f"""
-            SELECT request_id, alert_id, group_id, status, error, updated_at, completed_at
+            SELECT request_id, alert_id, group_id, status, error, request_json, updated_at, completed_at
             FROM pcap_requests
             WHERE group_id IN ({placeholders}) OR alert_id IN ({placeholders}) OR request_id IN ({placeholders})
             ORDER BY COALESCE(completed_at, updated_at, created_at) DESC
@@ -3932,7 +3941,13 @@ def soc_alert_pcap_request_statuses(conn: sqlite3.Connection, rows: list[sqlite3
             "status": str(item["status"] or "").strip().lower(),
             "error": str(item["error"] or "").strip(),
             "updated_at": str(item["completed_at"] or item["updated_at"] or "").strip(),
+            "used_capture_file": False,
         }
+        try:
+            request_json = json.loads(str(item["request_json"] or "{}"))
+            record["used_capture_file"] = bool(str(request_json.get("capture_file") or "").strip())
+        except (TypeError, ValueError):
+            record["used_capture_file"] = False
         for key in ("group_id", "alert_id", "request_id"):
             value = str(item[key] or "").strip()
             if value and value not in statuses:
@@ -3961,6 +3976,12 @@ def soc_alert_pcap_status(group_id: str, alert_id: str, analysis_index: dict[str
     if request_status == "failed":
         error = str(request_record.get("error") or "").strip() if isinstance(request_record, dict) else ""
         if "no matching packets" in error.lower():
+            if isinstance(request_record, dict) and not request_record.get("used_capture_file"):
+                return {
+                    "pcap_status_key": "error",
+                    "pcap_status_label": "Retry",
+                    "pcap_status_detail": "Older PCAP request did not include the Security Onion capture file hint; retry the request before treating this as no packets",
+                }
             return {
                 "pcap_status_key": "no-packets",
                 "pcap_status_label": "No Packets",
@@ -3976,6 +3997,174 @@ def soc_alert_pcap_status(group_id: str, alert_id: str, analysis_index: dict[str
         "pcap_status_label": "None",
         "pcap_status_detail": "No parsed PCAP analysis is available for this detection group",
     }
+
+
+def soc_alert_pcap_analysis_record(group_id: str) -> dict | None:
+    """Return newest parsed PCAP evidence for a grouped alert detail fragment."""
+    group_id = str(group_id or "").strip()
+    if not group_id or not SOC_ALERT_PCAP_ANALYSIS_DIR.exists():
+        return None
+    matches: list[tuple[float, dict]] = []
+    for path in SOC_ALERT_PCAP_ANALYSIS_DIR.glob("*-pcap-analysis.json"):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(record, dict) or not soc_alert_has_parsed_pcap(record):
+            continue
+        request = record.get("request") if isinstance(record.get("request"), dict) else {}
+        if str(request.get("group_id") or "").strip() != group_id:
+            continue
+        record["_analysis_path"] = str(path)
+        matches.append((path.stat().st_mtime, record))
+    if not matches:
+        return None
+    return sorted(matches, key=lambda item: item[0])[-1][1]
+
+
+def soc_alert_pcap_summary_html(record: dict) -> str:
+    """Render bounded, escaped parsed packet evidence for lazy detail loading."""
+    def esc(value: object) -> str:
+        return html.escape("n/a" if value is None else str(value))
+
+    def compact_json(value: object, limit: int = 2400) -> str:
+        text = json.dumps(value, indent=2, sort_keys=True) if not isinstance(value, str) else value
+        text = text.strip() or "n/a"
+        if len(text) > limit:
+            text = text[:limit].rstrip() + "\n... truncated ..."
+        return html.escape(text)
+
+    request = record.get("request") if isinstance(record.get("request"), dict) else {}
+    zeek = record.get("zeek") if isinstance(record.get("zeek"), dict) else {}
+    tshark = record.get("tshark") if isinstance(record.get("tshark"), dict) else {}
+    pcap_files = record.get("pcap_files") if isinstance(record.get("pcap_files"), list) else []
+    analysis_name = Path(str(record.get("_analysis_path") or "")).name or "n/a"
+    rows = [
+        ("Status", "Parsed"),
+        ("Request ID", request.get("request_id")),
+        ("Generated", record.get("generated_at")),
+        ("PCAP files parsed", len(pcap_files)),
+        ("Analysis artifact", analysis_name),
+    ]
+    summary_rows = "\n".join(
+        f"<tr><th>{esc(label)}</th><td>{esc(value)}</td></tr>"
+        for label, value in rows
+    )
+    parts = [
+        '<section class="detail-section parsed-pcap-evidence">',
+        "<h3>Parsed PCAP Evidence</h3>",
+        "<p>Current Zeek/TShark packet evidence for this grouped detection. "
+        "This section is generated from parsed summaries; raw packet payloads are not displayed.</p>",
+        f'<table class="detail-kv-table"><tbody>{summary_rows}</tbody></table>',
+        "<h4>Zeek Summary</h4>",
+    ]
+    if zeek.get("available"):
+        record_counts = zeek.get("record_counts") if isinstance(zeek.get("record_counts"), dict) else {}
+        parts.append(f"<p><strong>Record counts:</strong> <code>{esc(json.dumps(record_counts, sort_keys=True))}</code></p>")
+        for title, key in (
+            ("Top Connections", "top_connections"),
+            ("DNS Queries", "dns_queries"),
+            ("TLS SNI", "tls_sni"),
+            ("HTTP Hosts", "http_hosts"),
+            ("Notices", "notices"),
+            ("Weird Activity", "weird"),
+        ):
+            values = zeek.get(key) if isinstance(zeek.get(key), list) else []
+            if values:
+                parts.extend([f"<h5>{esc(title)}</h5>", f"<pre><code>{compact_json(values[:10])}</code></pre>"])
+    else:
+        parts.append(f"<p>Zeek unavailable: {esc(zeek.get('reason'))}</p>")
+    parts.append("<h4>TShark Corroboration</h4>")
+    if tshark.get("available"):
+        samples = tshark.get("samples") if isinstance(tshark.get("samples"), list) else []
+        if not samples:
+            parts.append("<p>No bounded TShark samples were produced.</p>")
+        for sample in samples[:2]:
+            if not isinstance(sample, dict):
+                continue
+            parts.extend(
+                [
+                    "<h5>Protocol hierarchy</h5>",
+                    f"<pre><code>{compact_json(sample.get('protocol_hierarchy'), 1800)}</code></pre>",
+                    "<h5>Conversations</h5>",
+                    f"<pre><code>{compact_json(sample.get('conversations'), 1800)}</code></pre>",
+                ]
+            )
+    else:
+        parts.append(f"<p>TShark unavailable: {esc(tshark.get('reason'))}</p>")
+    parts.append("</section>")
+    return "\n".join(parts)
+
+
+def soc_alert_append_live_pcap_detail(group_id: str, detail_html: str) -> str:
+    """Append current parsed PCAP evidence when a static detail fragment is stale."""
+    if "Parsed PCAP Evidence" in detail_html:
+        return detail_html
+    record = soc_alert_pcap_analysis_record(group_id)
+    if not record:
+        return detail_html
+    return f"{detail_html.rstrip()}\n{soc_alert_pcap_summary_html(record)}\n"
+
+
+SOC_ALERT_COLLAPSIBLE_DETAIL_SECTIONS = {
+    "ai model used": "AI Model Used",
+    "alert summary": "Alert Summary",
+    "network and flow details": "Network And Flow Details",
+    "tshark findings": "TShark Findings",
+    "tshark corroboration": "TShark Findings",
+    "protocol details": "Protocol Details",
+    "host and sensor details": "Host And Sensor Details",
+    "threat context": "Threat Context",
+    "analyst notes": "Analyst Notes",
+}
+
+
+def soc_alert_normalize_heading_text(value: str) -> str:
+    text = re.sub(r"<[^>]+>", "", value or "")
+    text = html.unescape(text)
+    text = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    return text
+
+
+def soc_alert_collapse_detail_sections(detail_html: str) -> str:
+    """Collapse expensive reference sections in lazy-loaded alert detail HTML."""
+    if not detail_html or "detail-collapsible-section" in detail_html:
+        return detail_html
+    heading_re = re.compile(r"<h([2-6])([^>]*)>(.*?)</h\1>", re.IGNORECASE | re.DOTALL)
+    matches = list(heading_re.finditer(detail_html))
+    if not matches:
+        return detail_html
+    chunks: list[str] = []
+    cursor = 0
+    index = 0
+    while index < len(matches):
+        match = matches[index]
+        level = int(match.group(1))
+        normalized = soc_alert_normalize_heading_text(match.group(3))
+        summary = SOC_ALERT_COLLAPSIBLE_DETAIL_SECTIONS.get(normalized)
+        if not summary:
+            index += 1
+            continue
+        end = len(detail_html)
+        next_index = index + 1
+        while next_index < len(matches):
+            next_level = int(matches[next_index].group(1))
+            if next_level <= level:
+                end = matches[next_index].start()
+                break
+            next_index += 1
+        slug = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-") or "detail"
+        chunks.append(detail_html[cursor:match.start()])
+        chunks.append(
+            f'<details class="detail-report-section detail-collapsible-section detail-section-{slug}">'
+            f"<summary>{html.escape(summary)}</summary>"
+            f'<div class="detail-collapsible-body">{detail_html[match.end():end]}</div>'
+            "</details>"
+        )
+        cursor = end
+        index = next_index
+    chunks.append(detail_html[cursor:])
+    return "".join(chunks)
 
 
 def sqlite_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -4019,6 +4208,28 @@ def normalize_pcap_timestamp(value: object) -> str:
         return ""
 
 
+def pcap_capture_file_from_json(*values: object) -> str | None:
+    for value in values:
+        if not value:
+            continue
+        try:
+            parsed = json.loads(str(value))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        for path in (
+            ("suricata", "capture_file"),
+            ("capture_file",),
+        ):
+            current = parsed
+            for key in path:
+                current = current.get(key) if isinstance(current, dict) else None
+            if current:
+                return str(current)[:512]
+    return None
+
+
 def pcap_request_candidate_from_group(conn: sqlite3.Connection, group_id: str) -> dict:
     if not sqlite_table_exists(conn, "alert_group_summary"):
         return {}
@@ -4036,7 +4247,7 @@ def pcap_request_candidate_from_group(conn: sqlite3.Connection, group_id: str) -
     ).fetchone()
     if not row:
         return {}
-    return {
+    candidate = {
         "alert_id": row["representative_alert_id"],
         "group_id": row["group_id"],
         "group_key": row["group_key"],
@@ -4050,6 +4261,40 @@ def pcap_request_candidate_from_group(conn: sqlite3.Connection, group_id: str) -
         "transport_protocol": row["transport_protocol"],
         "community_id": None,
     }
+    if sqlite_table_exists(conn, "alerts") and row["representative_alert_id"]:
+        alert_columns = sqlite_table_columns(conn, "alerts")
+        select_parts = [
+            "alert_id",
+            "first_seen" if "first_seen" in alert_columns else "NULL AS first_seen",
+            "last_seen" if "last_seen" in alert_columns else "NULL AS last_seen",
+            "timestamp" if "timestamp" in alert_columns else "NULL AS timestamp",
+            "source_ip" if "source_ip" in alert_columns else "NULL AS source_ip",
+            "source_port" if "source_port" in alert_columns else "NULL AS source_port",
+            "destination_ip" if "destination_ip" in alert_columns else "NULL AS destination_ip",
+            "destination_port" if "destination_port" in alert_columns else "NULL AS destination_port",
+            "network_protocol" if "network_protocol" in alert_columns else "NULL AS network_protocol",
+            "transport_protocol" if "transport_protocol" in alert_columns else "NULL AS transport_protocol",
+            "alert_json" if "alert_json" in alert_columns else "NULL AS alert_json",
+            "raw_event_json" if "raw_event_json" in alert_columns else "NULL AS raw_event_json",
+        ]
+        alert_row = conn.execute(
+            f"SELECT {', '.join(select_parts)} FROM alerts WHERE alert_id = ?",
+            (row["representative_alert_id"],),
+        ).fetchone()
+        if alert_row:
+            candidate.update({
+                "alert_id": alert_row["alert_id"] or candidate["alert_id"],
+                "first_seen": alert_row["first_seen"] or alert_row["timestamp"] or candidate["first_seen"],
+                "last_seen": alert_row["last_seen"] or alert_row["timestamp"] or candidate["last_seen"],
+                "source_ip": alert_row["source_ip"] or candidate["source_ip"],
+                "source_port": alert_row["source_port"] if alert_row["source_port"] is not None else candidate["source_port"],
+                "destination_ip": alert_row["destination_ip"] or candidate["destination_ip"],
+                "destination_port": alert_row["destination_port"] if alert_row["destination_port"] is not None else candidate["destination_port"],
+                "network_protocol": alert_row["network_protocol"] or candidate["network_protocol"],
+                "transport_protocol": alert_row["transport_protocol"] or candidate["transport_protocol"],
+                "capture_file": pcap_capture_file_from_json(alert_row["raw_event_json"], alert_row["alert_json"]),
+            })
+    return candidate
 
 
 def normalize_pcap_request(payload: dict, candidate: dict) -> tuple[dict | None, str]:
@@ -4077,6 +4322,7 @@ def normalize_pcap_request(payload: dict, candidate: dict) -> tuple[dict | None,
         "network_protocol": str(merged.get("network_protocol") or "").strip()[:32] or None,
         "transport_protocol": str(merged.get("transport_protocol") or "").strip().lower()[:32] or None,
         "community_id": str(merged.get("community_id") or "").strip()[:128] or None,
+        "capture_file": str(merged.get("capture_file") or "").strip()[:512] or None,
         "requested_by": str(merged.get("requested_by") or "dashboard").strip()[:80] or "dashboard",
         "reason": reason,
         "max_window_seconds": bounded_int(merged.get("max_window_seconds"), 120, 30, 300),
@@ -4092,6 +4338,7 @@ def normalize_pcap_request(payload: dict, candidate: dict) -> tuple[dict | None,
         "destination_ip": request["destination_ip"],
         "destination_port": request["destination_port"],
         "community_id": request["community_id"],
+        "capture_file": request["capture_file"],
         "reason": request["reason"],
     })
     return request, ""
@@ -4299,14 +4546,11 @@ def normalize_soc_group_statuses(conn: sqlite3.Connection) -> dict:
 def load_soc_alert_statuses_from_db() -> dict:
     if not SOC_ALERT_STORE_DB.exists():
         return {}
-    conn = sqlite3.connect(SOC_ALERT_STORE_DB, timeout=5)
-    conn.row_factory = sqlite3.Row
     try:
-        return normalize_soc_group_statuses(conn)
+        with soc_alert_db_write_connect() as conn:
+            return normalize_soc_group_statuses(conn)
     except Exception:
         return {}
-    finally:
-        conn.close()
 
 
 def write_soc_alert_status_json_snapshot(statuses: dict) -> None:
@@ -4328,49 +4572,42 @@ def write_soc_alert_status_json_snapshot(statuses: dict) -> None:
 def save_soc_alert_statuses_to_db(statuses: dict) -> None:
     if not SOC_ALERT_STORE_DB.parent.exists():
         return
-    conn = sqlite3.connect(SOC_ALERT_STORE_DB, timeout=5)
-    conn.row_factory = sqlite3.Row
     try:
-        ensure_soc_alert_status_table(conn)
-        conn.execute("BEGIN IMMEDIATE")
-        for alert_id, raw_meta in statuses.items():
-            meta = normalize_soc_alert_status_meta(raw_meta)
-            group_id = str(alert_id)
-            if not meta or meta["status"] == "open":
-                conn.execute("DELETE FROM analyst_alert_group_state WHERE group_id = ?", (group_id,))
-                continue
-            group_key = str(raw_meta.get("group_key") or "") if isinstance(raw_meta, dict) else ""
-            conn.execute(
-                """
-                INSERT INTO analyst_alert_group_state (
-                  group_id, group_key, status, repeat_count, reason, updated_at, updated_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(group_id) DO UPDATE SET
-                  group_key = excluded.group_key,
-                  status = excluded.status,
-                  repeat_count = excluded.repeat_count,
-                  reason = excluded.reason,
-                  updated_at = excluded.updated_at,
-                  updated_by = excluded.updated_by
-                """,
-                (
-                    group_id,
-                    group_key,
-                    meta["status"],
-                    meta["repeat_count"],
-                    meta["reason"],
-                    meta["updated_at"],
-                    str(raw_meta.get("updated_by") or "")[:80] if isinstance(raw_meta, dict) else "",
-                ),
-            )
-        conn.commit()
+        with soc_alert_db_write_connect() as conn:
+            ensure_soc_alert_status_table(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            for alert_id, raw_meta in statuses.items():
+                meta = normalize_soc_alert_status_meta(raw_meta)
+                group_id = str(alert_id)
+                if not meta or meta["status"] == "open":
+                    conn.execute("DELETE FROM analyst_alert_group_state WHERE group_id = ?", (group_id,))
+                    continue
+                group_key = str(raw_meta.get("group_key") or "") if isinstance(raw_meta, dict) else ""
+                conn.execute(
+                    """
+                    INSERT INTO analyst_alert_group_state (
+                      group_id, group_key, status, repeat_count, reason, updated_at, updated_by
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(group_id) DO UPDATE SET
+                      group_key = excluded.group_key,
+                      status = excluded.status,
+                      repeat_count = excluded.repeat_count,
+                      reason = excluded.reason,
+                      updated_at = excluded.updated_at,
+                      updated_by = excluded.updated_by
+                    """,
+                    (
+                        group_id,
+                        group_key,
+                        meta["status"],
+                        meta["repeat_count"],
+                        meta["reason"],
+                        meta["updated_at"],
+                        str(raw_meta.get("updated_by") or "")[:80] if isinstance(raw_meta, dict) else "",
+                    ),
+                )
     except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-    finally:
-        conn.close()
+        pass
 
 
 def load_soc_alert_statuses() -> dict:
@@ -4400,14 +4637,11 @@ def save_soc_alert_statuses(statuses: dict) -> None:
 def current_soc_alert_group_repeat_count(alert_id: str) -> int:
     if not SOC_ALERT_STORE_DB.exists():
         return 0
-    conn = sqlite3.connect(SOC_ALERT_STORE_DB, timeout=30)
-    conn.row_factory = sqlite3.Row
     try:
-        return int(soc_alert_group_counts(conn).get(alert_id, 0) or 0)
+        with soc_alert_db_connect() as conn:
+            return int(soc_alert_group_counts(conn).get(alert_id, 0) or 0)
     except Exception:
         return 0
-    finally:
-        conn.close()
 
 
 def write_soc_alert_status(alert_id: str, meta: dict) -> None:
@@ -4415,9 +4649,7 @@ def write_soc_alert_status(alert_id: str, meta: dict) -> None:
     if not SOC_ALERT_STORE_DB.parent.exists():
         return
     normalized = normalize_soc_alert_status_meta(meta)
-    conn = sqlite3.connect(SOC_ALERT_STORE_DB, timeout=30)
-    conn.row_factory = sqlite3.Row
-    try:
+    with soc_alert_db_write_connect() as conn:
         ensure_soc_alert_status_table(conn)
         conn.execute("BEGIN IMMEDIATE")
         if not normalized or normalized["status"] == "open":
@@ -4448,15 +4680,6 @@ def write_soc_alert_status(alert_id: str, meta: dict) -> None:
                     updated_by,
                 ),
             )
-        conn.commit()
-    except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        raise
-    finally:
-        conn.close()
     write_soc_alert_status_json_snapshot(load_soc_alert_statuses_from_db())
 
 
@@ -4472,13 +4695,9 @@ def soc_alert_status_response() -> dict:
     )
     counts = {"open": 0, "acknowledged": len(acknowledged), "suppressed": len(suppressed)}
     try:
-        conn = sqlite3.connect(SOC_ALERT_STORE_DB, timeout=5)
-        conn.row_factory = sqlite3.Row
-        try:
+        with soc_alert_db_connect() as conn:
             group_counts = soc_alert_group_counts(conn)
             active_group_ids = soc_alert_active_group_ids(conn, statuses)
-        finally:
-            conn.close()
         counts["open"] = len(active_group_ids)
         counts["total"] = len(group_counts)
     except Exception:
@@ -4490,6 +4709,99 @@ def soc_alert_status_response() -> dict:
         "acknowledged": acknowledged,
         "suppressed": suppressed,
         "counts": counts,
+    }
+
+
+def llm_analysis_log_limit(raw: object) -> int:
+    try:
+        value = int(str(raw or 25))
+    except ValueError:
+        value = 25
+    return max(1, min(50, value))
+
+
+def llm_analysis_log_page(raw: object) -> int:
+    try:
+        value = int(str(raw or 1))
+    except ValueError:
+        value = 1
+    return max(1, value)
+
+
+def read_llm_analysis_logs(max_rows: int = 1000) -> list[dict]:
+    if not SOC_ALERT_LLM_ANALYSIS_LOG_FILE.exists():
+        return []
+    logs: list[dict] = []
+    try:
+        lines = SOC_ALERT_LLM_ANALYSIS_LOG_FILE.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            logs.append(data)
+        if len(logs) >= max_rows:
+            break
+    return logs
+
+
+def current_llm_queue_size() -> int:
+    static_status = read_soc_alert_json_file(SOC_ALERT_STATIC_STATUS_FILE)
+    ai_counts = static_status.get("ai", {}).get("counts", {}) if isinstance(static_status, dict) else {}
+    try:
+        return max(0, int(ai_counts.get("queued") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def read_llm_current_analysis() -> dict:
+    queue_size = current_llm_queue_size()
+    try:
+        data = json.loads(SOC_ALERT_LLM_ANALYSIS_CURRENT_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"ok": True, "status": "idle", "alert": {}, "model": "n/a", "queue_size": queue_size}
+    if not isinstance(data, dict):
+        return {"ok": True, "status": "idle", "alert": {}, "model": "n/a", "queue_size": queue_size}
+    data = dict(data)
+    data["ok"] = True
+    data["queue_size"] = queue_size
+    if data.get("status") == "running" and not llm_analysis_process_active(str(data.get("prompt_package") or "")):
+        data["status"] = "idle"
+        data["stale_running_record"] = True
+    return data
+
+
+def llm_analysis_process_active(prompt_package: str) -> bool:
+    try:
+        proc = subprocess.run(["ps", "axo", "command="], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+    except Exception:
+        return False
+    commands = proc.stdout.splitlines()
+    if prompt_package:
+        return any("run-local-ai-analysis.py" in command and prompt_package in command for command in commands)
+    return any("run-local-ai-analysis.py" in command for command in commands)
+
+
+def llm_analysis_logs_response(query: dict[str, list[str]]) -> dict:
+    page = llm_analysis_log_page((query.get("page") or ["1"])[0])
+    limit = llm_analysis_log_limit((query.get("limit") or ["25"])[0])
+    logs = read_llm_analysis_logs()
+    total = len(logs)
+    total_pages = max(1, math.ceil(total / limit)) if total else 1
+    page = min(page, total_pages)
+    start = (page - 1) * limit
+    return {
+        "ok": True,
+        "page": page,
+        "limit": limit,
+        "total": total,
+        "total_pages": total_pages,
+        "logs": logs[start:start + limit],
     }
 
 
@@ -4558,8 +4870,13 @@ def soc_alert_api_error(message: str, status: int = 400) -> tuple[int, dict]:
 def soc_alert_db_connect():
     if not SOC_ALERT_STORE_DB.exists():
         raise FileNotFoundError(f"SOC alert store DB not found: {SOC_ALERT_STORE_DB}")
-    conn = sqlite3.connect(f"file:{SOC_ALERT_STORE_DB}?mode=ro", uri=True, timeout=2)
+    conn = sqlite3.connect(
+        f"file:{SOC_ALERT_STORE_DB}?mode=ro",
+        uri=True,
+        timeout=SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS,
+    )
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {SOC_ALERT_DB_BUSY_TIMEOUT_MS}")
     try:
         yield conn
     finally:
@@ -4570,8 +4887,12 @@ def soc_alert_db_connect():
 def soc_alert_db_write_connect():
     if not SOC_ALERT_STORE_DB.exists():
         raise FileNotFoundError(f"SOC alert store DB not found: {SOC_ALERT_STORE_DB}")
-    conn = sqlite3.connect(SOC_ALERT_STORE_DB, timeout=5)
+    conn = sqlite3.connect(SOC_ALERT_STORE_DB, timeout=SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {SOC_ALERT_DB_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA journal_mode = DELETE")
+    conn.execute("PRAGMA synchronous = FULL")
+    conn.execute("PRAGMA wal_autocheckpoint = 1000")
     try:
         yield conn
         conn.commit()
@@ -4743,17 +5064,185 @@ def soc_alert_static_ai_reports() -> dict:
     return reports if isinstance(reports, dict) else {}
 
 
-def soc_alert_group_ai_status(row: sqlite3.Row, group_id: str, ai_reports: dict | None = None) -> dict:
+def soc_alert_latest_prompt_mtime(alert_id: str) -> float:
+    if not alert_id or not SOC_ALERT_AI_PROMPT_DIR.exists():
+        return 0
+    newest = 0.0
+    for path in SOC_ALERT_AI_PROMPT_DIR.glob("*-ai-prompt.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        alert = data.get("alert") if isinstance(data.get("alert"), dict) else {}
+        if str(alert.get("alert_id") or data.get("alert_id") or "").strip() == alert_id:
+            newest = max(newest, path.stat().st_mtime)
+    return newest
+
+
+def soc_alert_latest_analysis_mtime(alert_id: str) -> float:
+    if not alert_id or not SOC_ALERT_AI_ANALYSIS_DIR.exists():
+        return 0
+    newest = 0.0
+    for path in SOC_ALERT_AI_ANALYSIS_DIR.glob("*-local-ai-analysis.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if str(data.get("alert_id") or "").strip() == alert_id:
+            newest = max(newest, path.stat().st_mtime)
+    return newest
+
+
+def soc_alert_ai_artifact_index() -> dict[str, dict[str, float]]:
+    """Index AI prompt/analysis artifact mtimes once for one API response."""
+    prompt_mtime_by_alert: dict[str, float] = {}
+    analysis_mtime_by_alert: dict[str, float] = {}
+    prompt_dir_matches_analysis = (
+        SOC_ALERT_AI_PROMPT_DIR.exists()
+        and SOC_ALERT_AI_ANALYSIS_DIR.exists()
+        and SOC_ALERT_AI_PROMPT_DIR.parent == SOC_ALERT_AI_ANALYSIS_DIR.parent
+    )
+    if prompt_dir_matches_analysis:
+        for path in SOC_ALERT_AI_PROMPT_DIR.glob("*-ai-prompt.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            alert = data.get("alert") if isinstance(data.get("alert"), dict) else {}
+            alert_id = str(alert.get("alert_id") or data.get("alert_id") or "").strip()
+            if alert_id:
+                prompt_mtime_by_alert[alert_id] = max(prompt_mtime_by_alert.get(alert_id, 0.0), path.stat().st_mtime)
+    if SOC_ALERT_AI_ANALYSIS_DIR.exists():
+        for path in SOC_ALERT_AI_ANALYSIS_DIR.glob("*-local-ai-analysis.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            alert_id = str(data.get("alert_id") or "").strip()
+            if alert_id:
+                analysis_mtime_by_alert[alert_id] = max(analysis_mtime_by_alert.get(alert_id, 0.0), path.stat().st_mtime)
+    return {
+        "prompt_mtime_by_alert": prompt_mtime_by_alert,
+        "analysis_mtime_by_alert": analysis_mtime_by_alert,
+    }
+
+
+def soc_alert_page_ai_artifact_context(rows: list[sqlite3.Row | dict]) -> dict[str, object]:
+    """Return page-scoped AI artifact state without per-row filesystem scans."""
+    artifact_index = soc_alert_ai_artifact_index()
+    analysis_mtime_by_alert = artifact_index["analysis_mtime_by_alert"]
+    analysis_group_ids: set[str] = set()
+    group_keys: list[str] = []
+    for row in rows:
+        if isinstance(row, dict):
+            group_key = str(row.get("group_key") or "").strip()
+            alert_id = str(row.get("alert_id") or row.get("representative_alert_id") or "").strip()
+        else:
+            group_key = str(row["group_key"] or "").strip() if "group_key" in row.keys() else ""
+            alert_id = str(row["alert_id"] or row["representative_alert_id"] or "").strip() if "alert_id" in row.keys() else ""
+        if group_key:
+            group_keys.append(group_key)
+            if alert_id in analysis_mtime_by_alert:
+                analysis_group_ids.add(soc_alert_group_id(group_key))
+    group_keys = sorted(set(group_keys))
+    if group_keys and analysis_mtime_by_alert:
+        placeholders = ",".join("?" for _ in group_keys)
+        try:
+            with soc_alert_db_connect() as conn:
+                found = conn.execute(
+                    f"""
+                    SELECT {soc_alert_group_key_sql()} AS group_key, alert_id
+                    FROM alerts
+                    WHERE {soc_alert_group_key_sql()} IN ({placeholders})
+                    """,
+                    group_keys,
+                ).fetchall()
+            for item in found:
+                if str(item["alert_id"] or "").strip() in analysis_mtime_by_alert:
+                    group_key = str(item["group_key"] or "").strip()
+                    if group_key:
+                        analysis_group_ids.add(soc_alert_group_id(group_key))
+        except Exception:
+            pass
+    return {
+        **artifact_index,
+        "analysis_group_ids": analysis_group_ids,
+    }
+
+
+def soc_alert_group_has_analysis_artifact(row: sqlite3.Row) -> bool:
+    """Return true when any current member of this dashboard group has AI output."""
+    if not SOC_ALERT_AI_ANALYSIS_DIR.exists():
+        return False
+    group_key = row["group_key"] if "group_key" in row.keys() else ""
+    representative = str(row["alert_id"] or "") if "alert_id" in row.keys() else ""
+    member_ids: set[str] = {representative} if representative else set()
+    if group_key:
+        try:
+            with soc_alert_db_connect() as conn:
+                member_ids.update(
+                    str(item["alert_id"] or "").strip()
+                    for item in conn.execute(
+                        f"""
+                        SELECT alert_id
+                        FROM alerts
+                        WHERE {soc_alert_group_key_sql()} = ?
+                        """,
+                        [group_key],
+                    )
+                    if str(item["alert_id"] or "").strip()
+                )
+        except Exception:
+            pass
+    return any(soc_alert_latest_analysis_mtime(alert_id) > 0 for alert_id in member_ids)
+
+
+def soc_alert_group_ai_status(
+    row: sqlite3.Row,
+    group_id: str,
+    ai_reports: dict | None = None,
+    ai_artifacts: dict[str, object] | None = None,
+) -> dict:
+    alert_id = str(row["alert_id"] or "") if "alert_id" in row.keys() else ""
+    prompt_mtime_by_alert = ai_artifacts.get("prompt_mtime_by_alert", {}) if isinstance(ai_artifacts, dict) else {}
+    analysis_mtime_by_alert = ai_artifacts.get("analysis_mtime_by_alert", {}) if isinstance(ai_artifacts, dict) else {}
+    analysis_group_ids = ai_artifacts.get("analysis_group_ids", set()) if isinstance(ai_artifacts, dict) else set()
+    prompt_mtime = float(prompt_mtime_by_alert.get(alert_id, 0.0)) if isinstance(prompt_mtime_by_alert, dict) else 0.0
+    analysis_mtime = float(analysis_mtime_by_alert.get(alert_id, 0.0)) if isinstance(analysis_mtime_by_alert, dict) else 0.0
+    if alert_id and not ai_artifacts:
+        prompt_mtime = soc_alert_latest_prompt_mtime(alert_id)
+        analysis_mtime = soc_alert_latest_analysis_mtime(alert_id)
+    if alert_id and prompt_mtime > analysis_mtime:
+        return {
+            "ai_status_key": "queued",
+            "ai_status_label": "Queued",
+            "ai_status_detail": "Manual SOC Analyst reanalysis prompt package is waiting for the local AI worker",
+        }
+
     reports = ai_reports if isinstance(ai_reports, dict) else soc_alert_static_ai_reports()
     status = reports.get(group_id)
     if isinstance(status, dict):
+        key = str(status.get("ai_status_key") or "queued")
+        filter_status = str(row["filter_status"] or "accepted").strip().lower() if "filter_status" in row.keys() else "accepted"
+        has_artifact = group_id in analysis_group_ids if ai_artifacts else soc_alert_group_has_analysis_artifact(row)
+        if key in {"analyzed", "analyzing"} and not has_artifact:
+            return {
+                "ai_status_key": "queued",
+                "ai_status_label": "Queued",
+                "ai_status_detail": "The previous AI status was stale; no AI analysis artifact exists for this group",
+            }
+        if key in {"not-queued", "skipped"} and filter_status in SOC_ALERT_AI_ELIGIBLE_FILTER_STATUSES and not has_artifact:
+            return {
+                "ai_status_key": "queued",
+                "ai_status_label": "Queued",
+                "ai_status_detail": "No AI analysis artifact exists for this eligible group; queued for the scheduled local AI analysis worker",
+            }
         return {
-            "ai_status_key": str(status.get("ai_status_key") or "queued"),
+            "ai_status_key": key,
             "ai_status_label": str(status.get("ai_status_label") or "Queued"),
             "ai_status_detail": str(status.get("ai_status_detail") or ""),
         }
 
-    alert_id = str(row["alert_id"] or "") if "alert_id" in row.keys() else ""
     if alert_id and alert_id.startswith(SOC_ALERT_TEST_PREFIXES):
         return {
             "ai_status_key": "not-queued",
@@ -4782,6 +5271,7 @@ def soc_alert_group_row_to_api(
     ai_reports: dict | None = None,
     pcap_analysis: dict[str, set[str]] | None = None,
     pcap_requests: dict[str, dict] | None = None,
+    ai_artifacts: dict[str, object] | None = None,
 ) -> dict:
     group_key = row["group_key"]
     group_id = soc_alert_group_id(group_key)
@@ -4823,10 +5313,94 @@ def soc_alert_group_row_to_api(
         "analyst_status_updated_at": local_status.get("updated_at") if isinstance(local_status, dict) else None,
         "analyst_status_updated_by": local_status.get("updated_by", "") if isinstance(local_status, dict) else "",
     }
-    data.update(soc_alert_group_ai_status(row, group_id, ai_reports))
+    data.update(soc_alert_group_ai_status(row, group_id, ai_reports, ai_artifacts))
     data.update(soc_alert_public_enrichment_status(enrichment_json))
     data.update(soc_alert_pcap_status(group_id, row["alert_id"], pcap_analysis or {}, pcap_requests or {}))
     return data
+
+
+def soc_alert_group_representative_alert_id(group_id: str) -> str:
+    """Resolve a dashboard group id to the newest raw alert id in SQLite."""
+    group_id = str(group_id or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{12}", group_id):
+        return ""
+    group_expr = soc_alert_group_key_sql()
+    newest_alert_time = "COALESCE(NULLIF(last_seen, ''), NULLIF(timestamp, ''), NULLIF(first_seen, ''))"
+    sql = f"""
+        SELECT alert_id, {group_expr} AS group_key
+        FROM alerts
+        ORDER BY replace(replace({newest_alert_time}, 'T', ' '), 'Z', '') DESC,
+                 alert_id DESC
+    """
+    with soc_alert_db_connect() as conn:
+        for row in conn.execute(sql):
+            if soc_alert_group_id(row["group_key"]) == group_id:
+                return str(row["alert_id"] or "").strip()
+    return ""
+
+
+def soc_alert_queue_analysis_response(group_id: str, payload: dict | None = None) -> tuple[int, dict]:
+    """Create a fresh SOC Analyst prompt package so the scheduler re-analyzes a group."""
+    group_id = str(group_id or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{12}", group_id):
+        return soc_alert_api_error("Invalid SOC alert group id")
+    if not SOC_ALERT_AI_PROMPT_BUILDER.exists():
+        return soc_alert_api_error(f"AI prompt builder is not installed: {SOC_ALERT_AI_PROMPT_BUILDER}", 503)
+    try:
+        alert_id = soc_alert_group_representative_alert_id(group_id)
+    except Exception as exc:
+        return soc_alert_api_error(f"Could not resolve alert group: {exc}", 503)
+    if not alert_id:
+        return soc_alert_api_error("SOC alert group was not found", 404)
+
+    payload = payload if isinstance(payload, dict) else {}
+    related_limit = payload.get("related_limit", 250)
+    try:
+        related_limit = max(1, min(500, int(related_limit)))
+    except (TypeError, ValueError):
+        related_limit = 250
+    pcap_limit = payload.get("pcap_analysis_limit", 8)
+    try:
+        pcap_limit = max(1, min(25, int(pcap_limit)))
+    except (TypeError, ValueError):
+        pcap_limit = 8
+
+    SOC_ALERT_AI_PROMPT_DIR.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable,
+        str(SOC_ALERT_AI_PROMPT_BUILDER),
+        "--db",
+        str(SOC_ALERT_STORE_DB),
+        "--alert-id",
+        alert_id,
+        "--out-dir",
+        str(SOC_ALERT_AI_PROMPT_DIR),
+        "--related-limit",
+        str(related_limit),
+        "--pcap-analysis-limit",
+        str(pcap_limit),
+    ]
+    try:
+        proc = subprocess.run(cmd, text=True, capture_output=True, timeout=90)
+    except subprocess.TimeoutExpired:
+        return soc_alert_api_error("AI prompt queue request timed out", 504)
+    except OSError as exc:
+        return soc_alert_api_error(f"AI prompt queue request failed: {exc}", 503)
+    if proc.returncode != 0:
+        error = (proc.stderr or proc.stdout or "AI prompt builder failed").strip()
+        return soc_alert_api_error(error[:500], 503)
+    prompt_path = Path((proc.stdout or "").strip().splitlines()[-1]) if proc.stdout.strip() else Path()
+    if not prompt_path.exists():
+        return soc_alert_api_error("AI prompt builder did not create a prompt package", 503)
+    return 202, {
+        "ok": True,
+        "group_id": group_id,
+        "representative_alert_id": alert_id,
+        "ai_status_key": "queued",
+        "ai_status_label": "Queued",
+        "ai_status_detail": f"Manual SOC Analyst reanalysis queued at {now_iso_local()}",
+        "prompt_package": str(prompt_path),
+    }
 
 
 def soc_alert_row_filter_status(row: sqlite3.Row) -> str:
@@ -4950,6 +5524,7 @@ def soc_alert_group_query_payload(
     sort_direction: str,
 ) -> dict:
     ai_reports = soc_alert_static_ai_reports()
+    ai_artifacts = soc_alert_page_ai_artifact_context(snapshot.page_rows)
     pcap_analysis = soc_alert_pcap_analysis_index()
     try:
         with soc_alert_db_connect() as conn:
@@ -4975,7 +5550,7 @@ def soc_alert_group_query_payload(
         "direction": sort_direction,
         "next_cursor": snapshot.next_cursor,
         "alerts": [
-            soc_alert_group_row_to_api(row, snapshot.statuses, ai_reports, pcap_analysis, pcap_requests)
+            soc_alert_group_row_to_api(row, snapshot.statuses, ai_reports, pcap_analysis, pcap_requests, ai_artifacts)
             for row in snapshot.page_rows
         ],
     }
@@ -5164,6 +5739,8 @@ def soc_alert_detail_fragment_response(group_id: str) -> tuple[int, dict]:
         detail_html = target.read_text(encoding="utf-8")
     except OSError as exc:
         return soc_alert_api_error(str(exc), 503)
+    detail_html = soc_alert_append_live_pcap_detail(group_id, detail_html)
+    detail_html = soc_alert_collapse_detail_sections(detail_html)
     return 200, {
         "ok": True,
         "source": "detail-fragment",
@@ -5292,7 +5869,10 @@ def soc_alert_events_snapshot() -> dict:
     analyst_status = soc_alert_status_response()
     static_status = read_soc_alert_json_file(SOC_ALERT_STATIC_STATUS_FILE)
     beacon = read_soc_alert_json_file(SOC_ALERT_N8N_BEACON_FILE)
-    metrics_status, metrics = soc_alert_metrics_response({"since": ["7d"]})
+    # Event snapshots drive live nav badges and metric cards. Keep them aligned
+    # with the default SOC Alerts table/counts instead of a time-windowed view,
+    # otherwise older still-active groups disappear from the live metrics.
+    metrics_status, metrics = soc_alert_metrics_response({"since": [""]})
     if metrics_status != 200:
         metrics = {"ok": False, "error": metrics.get("error", "SOC alert metrics unavailable")}
     return {
@@ -5414,7 +5994,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/cyber-threat-intel-prompt", "/api/soc-settings/incident-responder-prompt", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith("/ack")):
+        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/cyber-threat-intel-prompt", "/api/soc-settings/incident-responder-prompt", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith("/ack")):
             if parsed.path == "/admin" and not self._admin_authenticated():
                 self.send_response(HTTPStatus.FOUND)
                 self.send_header("Location", "/admin/login")
@@ -5435,7 +6015,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/cyber-threat-intel-prompt", "/api/soc-settings/incident-responder-prompt", "/api/soc-settings/ai-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and not (parsed.path.startswith("/api/soc-alerts/") and (parsed.path.endswith("/ack") or parsed.path.endswith("/pcap"))):
+        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/cyber-threat-intel-prompt", "/api/soc-settings/incident-responder-prompt", "/api/soc-settings/ai-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and not (parsed.path.startswith("/api/soc-alerts/") and (parsed.path.endswith("/ack") or parsed.path.endswith("/pcap") or parsed.path.endswith("/analyze"))):
             return self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain; charset=utf-8")
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -5444,7 +6024,7 @@ class PortalHandler(BaseHTTPRequestHandler):
         if length <= 0 or length > 50000:
             if parsed.path == "/api/admin/start-service":
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
-            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/cyber-threat-intel-prompt", "/api/soc-settings/incident-responder-prompt", "/api/soc-settings/ai-model") or (parsed.path.startswith("/api/soc-alerts/") and (parsed.path.endswith("/ack") or parsed.path.endswith("/pcap"))):
+            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/cyber-threat-intel-prompt", "/api/soc-settings/incident-responder-prompt", "/api/soc-settings/ai-model") or (parsed.path.startswith("/api/soc-alerts/") and (parsed.path.endswith("/ack") or parsed.path.endswith("/pcap") or parsed.path.endswith("/analyze"))):
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
             if parsed.path.startswith("/api/resource-library/"):
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
@@ -5467,6 +6047,14 @@ class PortalHandler(BaseHTTPRequestHandler):
                 payload = {}
             encoded_id = parsed.path[len("/api/soc-alerts/"):-len("/pcap")].strip("/")
             status, data = soc_alert_pcap_request_response(unquote(encoded_id), payload)
+            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/analyze"):
+            try:
+                payload = json.loads(raw or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            encoded_id = parsed.path[len("/api/soc-alerts/"):-len("/analyze")].strip("/")
+            status, data = soc_alert_queue_analysis_response(unquote(encoded_id), payload)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path == "/api/soc-alerts/status":
             try:
@@ -5624,6 +6212,10 @@ class PortalHandler(BaseHTTPRequestHandler):
         if path == "/api/system-health/beacons":
             data = n8n_beacon_history_response(query)
             return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if path == "/api/llm-analysis/current":
+            return self._send(HTTPStatus.OK, json.dumps(read_llm_current_analysis(), indent=2).encode(), "application/json; charset=utf-8")
+        if path == "/api/llm-analysis/logs":
+            return self._send(HTTPStatus.OK, json.dumps(llm_analysis_logs_response(query), indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/soc-alerts/events":
             return self._send_soc_alert_events()
         if path == "/api/soc-alerts/status":

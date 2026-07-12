@@ -1,6 +1,6 @@
 {
   "name": "Onion Sentinel PCAP Broker Proxy",
-  "description": "Relay-safe n8n proxy for alert-store PCAP broker endpoints. Uses a separate placeholder token from the alert ingestion webhook.",
+  "description": "Relay-safe n8n proxy for alert-store PCAP broker metadata endpoints. PCAP files are transferred out-of-band by relay SSD spool plus rsync, not through inline n8n payloads.",
   "active": true,
   "nodes": [
     {
@@ -92,36 +92,6 @@
         260,
         440
       ]
-    },
-    {
-      "parameters": {
-        "httpMethod": "POST",
-        "path": "pcap-artifact",
-        "responseMode": "lastNode",
-        "options": {}
-      },
-      "id": "8f07d68b-e30a-4a4b-aed3-8160c0839221",
-      "name": "PCAP Artifact Webhook",
-      "type": "n8n-nodes-base.webhook",
-      "typeVersion": 2,
-      "position": [
-        0,
-        660
-      ],
-      "webhookId": "onion-sentinel-pcap-artifact"
-    },
-    {
-      "parameters": {
-        "jsCode": "// Relay-safe PCAP artifact ingestion proxy. The relay uploads a bounded base64 tar after Security Onion export.\nconst http = require('http');\nconst expectedToken = $vars.PCAP_BROKER_TOKEN || 'REPLACE_WITH_PCAP_BROKER_TOKEN';\nconst headers = $json.headers || {};\nconst token = headers['x-relay-token'] || headers['X-Relay-Token'];\nif (token !== expectedToken) {\n  return [{json: {ok: false, status: 'rejected', reason: 'invalid or missing X-Relay-Token'}}];\n}\nconst body = $json.body || {};\nfunction requestAlertStore() {\n  return new Promise((resolve, reject) => {\n    const data = JSON.stringify(body || {});\n    const req = http.request({\n      hostname: 'alert-store',\n      port: 8787,\n      path: body.chunk_base64 ? '/pcap/artifact-chunk' : '/pcap/artifact',\n      method: 'POST',\n      headers: {'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data)},\n      timeout: 30000,\n    }, res => {\n      let responseBody = '';\n      res.setEncoding('utf8');\n      res.on('data', chunk => responseBody += chunk);\n      res.on('end', () => resolve({statusCode: res.statusCode, body: responseBody}));\n    });\n    req.on('timeout', () => req.destroy(new Error('alert-store pcap artifact ingest timed out')));\n    req.on('error', reject);\n    req.write(data);\n    req.end();\n  });\n}\ntry {\n  const response = await requestAlertStore();\n  let payload;\n  try { payload = JSON.parse(response.body || '{}'); }\n  catch (error) { throw new Error(`alert-store returned non-JSON: ${response.body.slice(0, 200)}`); }\n  return [{json: {...payload, proxy_status_code: response.statusCode}}];\n} catch (error) {\n  return [{json: {ok: false, status: 'error', reason: String(error.message || error).slice(0, 240)}}];\n}\n"
-      },
-      "id": "c48192d7-e2b4-4701-87ad-028e31a3f3fe",
-      "name": "Store PCAP Artifact",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        260,
-        660
-      ]
     }
   ],
   "connections": {
@@ -152,17 +122,6 @@
         [
           {
             "node": "Complete PCAP Request",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "PCAP Artifact Webhook": {
-      "main": [
-        [
-          {
-            "node": "Store PCAP Artifact",
             "type": "main",
             "index": 0
           }

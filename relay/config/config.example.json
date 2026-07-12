@@ -4,7 +4,14 @@
     "host": "192.168.1.7",
     "ssh_user": "so-ai-relay",
     "ssh_key": "/opt/so-alert-relay/keys/so-ai-relay_ed25519",
-    "pcap_ssh_key": "/opt/so-alert-relay/keys/so-ai-relay-pcap_ed25519"
+    "pcap_ssh_key": "/opt/so-alert-relay/keys/so-ai-relay-pcap_ed25519",
+    "pcap_artifact_transfer": {
+      "_comment": "Dedicated read-only rsync key. Security Onion authorized_keys should force /usr/local/sbin/onion-sentinel-rsync-pcapout for this account/key.",
+      "host": "192.168.1.7",
+      "ssh_user": "so-ai-relay-pcap-rsync",
+      "ssh_key": "/opt/so-alert-relay/keys/so-ai-relay-pcap-rsync_ed25519",
+      "rsync_timeout_seconds": 1800
+    }
   },
   "relay": {
     "_comment": "Runtime state paths on the Pi. These contain alert state and should not be committed.",
@@ -32,15 +39,27 @@
     "token": "",
     "requests_method": "POST",
     "upload_artifact": true,
-    "artifact_upload_mode": "inline",
-    "artifact_chunk_size_bytes": 524288,
+    "artifact_upload_mode": "spooled_rsync",
+    "artifact_spool_dir": "/mnt/onion-sentinel-pcap-spool/pcap",
+    "artifact_spool_max_bytes": 8589934592,
+    "artifact_spool_min_free_bytes": 3221225472,
+    "artifact_spool_delete_after_upload": true,
+    "artifact_spool_partial_ttl_seconds": 0,
+    "mac_transfer": {
+      "host": "10.77.7.225",
+      "user": "__MAC_STUDIO_SSH_USER__",
+      "ssh_key": "/opt/so-alert-relay/keys/macstudio-pcap-transfer_ed25519",
+      "artifact_dir": "n8n-local/pcap-evidence/artifacts",
+      "connect_timeout_seconds": 20,
+      "rsync_timeout_seconds": 1800
+    },
+    "lock_path": "/tmp/onion-sentinel-pcap-broker.lock",
     "timeout_seconds": 20,
     "limit": 3,
     "paths": {
       "requests": "/pcap-requests",
       "claim": "/pcap-claim",
-      "complete": "/pcap-complete",
-      "artifact": "/pcap-artifact"
+      "complete": "/pcap-complete"
     }
   },
   "filters": {

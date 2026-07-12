@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Onion Sentinel PCAP output retention cleanup hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target

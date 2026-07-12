@@ -9,7 +9,6 @@ contents never go to stdout/stderr.
 from __future__ import annotations
 
 import hashlib
-import base64
 import ipaddress
 import json
 import os
@@ -27,9 +26,7 @@ OUTPUT_ROOT = Path(os.environ.get("ONION_SENTINEL_PCAP_OUTPUT_ROOT", "/nsm/pcapo
 MAX_WINDOW_SECONDS = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_WINDOW_SECONDS", "300"))
 MAX_LOOKBACK_HOURS = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_LOOKBACK_HOURS", "24"))
 MAX_CANDIDATE_FILES = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_CANDIDATE_FILES", "80"))
-MAX_INLINE_ARTIFACT_BYTES = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_INLINE_ARTIFACT_BYTES", str(5 * 1024 * 1024)))
-
-
+TRANSFER_GROUP = os.environ.get("ONION_SENTINEL_PCAP_TRANSFER_GROUP", "so-ai-relay-pcap-rsync")
 def fail(reason: str, code: int = 1) -> None:
     print(json.dumps({"ok": False, "status": "failed", "error": reason}, sort_keys=True))
     raise SystemExit(code)
@@ -69,7 +66,7 @@ def safe_request_id(value: object) -> str:
     return cleaned or datetime.now(timezone.utc).strftime("pcap-%Y%m%dT%H%M%SZ")
 
 
-def bpf_for_request(req: dict) -> str:
+def bpf_for_request(req: dict, vlan: bool = False) -> str:
     src = str(ipaddress.ip_address(clean_token(req.get("source_ip"), 64)))
     dst = str(ipaddress.ip_address(clean_token(req.get("destination_ip"), 64)))
     src_port = parse_port(req.get("source_port"))
@@ -83,10 +80,28 @@ def bpf_for_request(req: dict) -> str:
         parts.append(f"port {src_port}")
     if dst_port:
         parts.append(f"port {dst_port}")
-    return " and ".join(parts)
+    bpf = " and ".join(parts)
+    return f"vlan and {bpf}" if vlan else bpf
 
 
-def candidate_files(start: datetime, end: datetime) -> list[Path]:
+def requested_capture_file(req: dict) -> Path | None:
+    raw = clean_token(req.get("capture_file"), 512)
+    if not raw:
+        return None
+    path = Path(raw)
+    try:
+        resolved = path.resolve(strict=False)
+        root = PCAP_ROOT.resolve(strict=False)
+    except OSError:
+        return None
+    if not str(resolved).startswith(str(root) + os.sep):
+        fail("capture_file is outside the Security Onion PCAP root")
+    if not resolved.name.startswith("so-pcap."):
+        fail("capture_file must reference a Security Onion so-pcap file")
+    return resolved
+
+
+def candidate_files(start: datetime, end: datetime, req: dict | None = None) -> list[Path]:
     now = datetime.now(timezone.utc)
     lookback_seconds = max(3600, min(MAX_LOOKBACK_HOURS * 3600, int((now - start).total_seconds()) + 3600))
     find_cmd = [
@@ -113,7 +128,12 @@ def candidate_files(start: datetime, end: datetime) -> list[Path]:
             continue
         files.append((mtime, Path(path)))
     files.sort(key=lambda item: item[0])
-    return [path for _, path in files[-MAX_CANDIDATE_FILES:]]
+    candidates = [path for _, path in files[-MAX_CANDIDATE_FILES:]]
+    if req:
+        capture_file = requested_capture_file(req)
+        if capture_file and capture_file.exists():
+            candidates = [capture_file] + [path for path in candidates if path != capture_file]
+    return candidates
 
 
 def sha256_file(path: Path) -> str:
@@ -124,6 +144,56 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def output_child(path: Path) -> Path:
+    resolved = path.resolve(strict=False)
+    output_root = OUTPUT_ROOT.resolve(strict=False)
+    if not str(resolved).startswith(str(output_root) + os.sep):
+        fail("artifact path escaped output root")
+    return resolved
+
+
+def prepare_output_root() -> None:
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.chown(OUTPUT_ROOT, group=TRANSFER_GROUP)
+        OUTPUT_ROOT.chmod(0o750)
+    except (LookupError, PermissionError, OSError):
+        # Export can still run in isolated test/dev environments that have not
+        # created the transfer group. Production installs should create it.
+        pass
+
+
+def cleanup_artifact(req: dict) -> int:
+    request_id = safe_request_id(req.get("request_id"))
+    artifact = output_child(OUTPUT_ROOT / f"{request_id}.tar")
+    work_dir = output_child(OUTPUT_ROOT / request_id)
+    removed: list[str] = []
+
+    if artifact.exists():
+        if not artifact.is_file():
+            fail("artifact cleanup target is not a file")
+        artifact.unlink()
+        removed.append(str(artifact))
+    if work_dir.exists():
+        if not work_dir.is_dir():
+            fail("artifact work target is not a directory")
+        shutil.rmtree(work_dir)
+        removed.append(str(work_dir))
+
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "status": "artifact_cleaned",
+                "request_id": request_id,
+                "removed": removed,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def main() -> int:
     try:
         req = json.loads(sys.stdin.read() or "{}")
@@ -131,6 +201,11 @@ def main() -> int:
         fail(f"invalid JSON: {exc}")
     if not isinstance(req, dict):
         fail("request must be a JSON object")
+    mode = clean_token(req.get("mode"), 40)
+    if mode == "artifact_cleanup":
+        return cleanup_artifact(req)
+    if mode:
+        fail(f"unsupported mode: {mode}")
 
     request_id = safe_request_id(req.get("request_id"))
     first_seen = parse_time(req.get("first_seen"))
@@ -146,24 +221,31 @@ def main() -> int:
         start = first_seen - timedelta(seconds=pad)
         end = last_seen + timedelta(seconds=pad)
 
-    bpf = bpf_for_request(req)
-    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    bpf_variants = [bpf_for_request(req)]
+    vlan_bpf = bpf_for_request(req, vlan=True)
+    if vlan_bpf not in bpf_variants:
+        bpf_variants.insert(0, vlan_bpf)
+    prepare_output_root()
     work_dir = OUTPUT_ROOT / request_id
     if work_dir.exists():
         shutil.rmtree(work_dir)
     work_dir.mkdir(mode=0o750)
 
     part_paths: list[Path] = []
-    for index, pcap in enumerate(candidate_files(start, end), start=1):
-        part = work_dir / f"part-{index:03d}.pcap"
-        cmd = ["tcpdump", "-r", str(pcap), "-w", str(part), bpf]
-        result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=60)
-        if result.returncode not in (0, 1):
-            continue
-        if part.exists() and part.stat().st_size > 24:
-            part_paths.append(part)
-        elif part.exists():
-            part.unlink()
+    part_index = 1
+    for pcap in candidate_files(start, end, req):
+        for bpf in bpf_variants:
+            part = work_dir / f"part-{part_index:03d}.pcap"
+            part_index += 1
+            cmd = ["tcpdump", "-r", str(pcap), "-w", str(part), bpf]
+            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=60)
+            if result.returncode not in (0, 1):
+                continue
+            if part.exists() and part.stat().st_size > 24:
+                part_paths.append(part)
+                break
+            elif part.exists():
+                part.unlink()
 
     if not part_paths:
         fail("no matching packets found", code=2)
@@ -174,6 +256,11 @@ def main() -> int:
             tar.add(part, arcname=part.name)
 
     artifact_size = artifact.stat().st_size
+    try:
+        shutil.chown(artifact, group=TRANSFER_GROUP)
+        artifact.chmod(0o640)
+    except (LookupError, PermissionError, OSError):
+        artifact.chmod(0o600)
     payload = {
         "ok": True,
         "status": "fulfilled",
@@ -185,10 +272,6 @@ def main() -> int:
         "window_start": start.strftime("%Y-%m-%d  %H:%M:%S%z"),
         "window_end": end.strftime("%Y-%m-%d  %H:%M:%S%z"),
     }
-    if req.get("inline_artifact_base64"):
-        if artifact_size > MAX_INLINE_ARTIFACT_BYTES:
-            fail(f"artifact exceeds inline transfer limit: {artifact_size} > {MAX_INLINE_ARTIFACT_BYTES}")
-        payload["artifact_base64"] = base64.b64encode(artifact.read_bytes()).decode("ascii")
     print(json.dumps(payload, sort_keys=True))
     return 0
 

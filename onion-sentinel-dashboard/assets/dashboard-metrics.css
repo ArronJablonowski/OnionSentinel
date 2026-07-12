@@ -242,8 +242,10 @@
   margin-top: 30px;
 }
 
-.system-health-metric-main span {
-  display: block !important;
+.system-health-metric-main > span {
+  display: inline-flex !important;
+  align-items: baseline !important;
+  gap: 5px !important;
   color: #9fb0c4 !important;
   font-size: 12px !important;
   line-height: 1.18 !important;
@@ -254,7 +256,17 @@
   white-space: nowrap !important;
 }
 
+.system-health-metric-main > span span {
+  display: inline !important;
+  margin: 0 !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
 .system-health-metric-main b {
+  flex: 0 0 auto !important;
   color: #8ff4ff !important;
   font-size: 12px !important;
   font-weight: 850 !important;

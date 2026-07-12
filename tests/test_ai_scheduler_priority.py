@@ -306,6 +306,99 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         self.assertIsNotNone(selected)
         self.assertEqual(selected["alert_id"], "medium-duplicate-manual")
 
+    def test_manual_prompt_overrides_automatic_queue_filters(self) -> None:
+        self.insert_alert(
+            "manual-any-state-alert",
+            "low",
+            "2020-01-01  00:00:00Z",
+            rule_name="manually queued regardless of state",
+            source_ip="192.0.2.88",
+            destination_ip="198.51.100.88",
+        )
+        self.conn.execute(
+            "UPDATE alerts SET filter_status = 'suppressed' WHERE alert_id = ?",
+            ("manual-any-state-alert",),
+        )
+        self.conn.commit()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            analysis_dir = root / "ai-analysis"
+            prompt_dir = root / "ai-prompts"
+            analysis_dir.mkdir()
+            prompt_dir.mkdir()
+            prompt_path = prompt_dir / "manual-any-state-ai-prompt.json"
+            prompt_path.write_text(
+                json.dumps(
+                    {
+                        "alert": {
+                            "alert_id": "manual-any-state-alert",
+                            "triage_level": "low",
+                            "rule_name": "manually queued regardless of state",
+                            "source_ip": "192.0.2.88",
+                            "destination_ip": "198.51.100.88",
+                            "filter_status": "suppressed",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.utime(prompt_path, (200, 200))
+            self.args.analysis_dir = analysis_dir
+            self.args.prompt_dir = prompt_dir
+            self.args.hours = 1
+            self.args.levels = "critical"
+
+            selected = self.scheduler.select_next_alert(self.conn, self.args, set(), set())
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["alert_id"], "manual-any-state-alert")
+
+    def test_manual_prompt_is_selected_before_automatic_backlog(self) -> None:
+        self.insert_alert("automatic-critical-backlog", "critical", "2026-07-03  00:50:00Z", 90)
+        self.insert_alert(
+            "manual-low-skipped-alert",
+            "low",
+            "2026-07-03  00:40:00Z",
+            rule_name="manual skipped detection",
+            source_ip="192.0.2.89",
+            destination_ip="198.51.100.89",
+        )
+        self.conn.execute(
+            "UPDATE alerts SET filter_status = 'duplicate' WHERE alert_id = ?",
+            ("manual-low-skipped-alert",),
+        )
+        self.conn.commit()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            analysis_dir = root / "ai-analysis"
+            prompt_dir = root / "ai-prompts"
+            analysis_dir.mkdir()
+            prompt_dir.mkdir()
+            prompt_path = prompt_dir / "manual-low-skipped-ai-prompt.json"
+            prompt_path.write_text(
+                json.dumps(
+                    {
+                        "alert": {
+                            "alert_id": "manual-low-skipped-alert",
+                            "triage_level": "low",
+                            "rule_name": "manual skipped detection",
+                            "source_ip": "192.0.2.89",
+                            "destination_ip": "198.51.100.89",
+                            "filter_status": "duplicate",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.utime(prompt_path, (200, 200))
+            self.args.analysis_dir = analysis_dir
+            self.args.prompt_dir = prompt_dir
+
+            selected = self.scheduler.select_next_alert(self.conn, self.args, set(), set())
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["alert_id"], "manual-low-skipped-alert")
+
     def test_newer_group_pcap_evidence_rebuilds_stale_prompt_package(self) -> None:
         self.insert_alert("medium-with-stale-prompt", "medium", "2026-07-03  00:50:00Z", 90)
         self.conn.commit()

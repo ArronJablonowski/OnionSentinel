@@ -9,10 +9,11 @@ Troubleshooting usually starts with the final JSON summary printed by this
 script.
 """
 import argparse
-import base64
+import fcntl
 import hashlib
 import json
 import os
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -110,6 +111,13 @@ def parse_last_json_object(text: str) -> dict:
         if isinstance(parsed, dict):
             return parsed
     raise json.JSONDecodeError("no JSON object found", text or "", 0)
+
+
+def safe_transfer_id(value: object) -> str:
+    cleaned = sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip()[:100]).strip("._")
+    if not cleaned:
+        raise RuntimeError("PCAP request_id is required for artifact transfer")
+    return cleaned
 
 
 def run_ssh_pcap_export(config: dict, pcap_request: dict) -> dict:
@@ -474,54 +482,315 @@ def broker_request(config: dict, method: str, path: str, payload_data: dict | No
 
 
 def upload_pcap_artifact(config: dict, pcap_request: dict, export_result: dict) -> dict | None:
-    artifact_base64 = export_result.get("artifact_base64")
-    if not artifact_base64:
-        return None
     broker = config.get("pcap_broker", {})
-    upload_mode = str(broker.get("artifact_upload_mode") or "inline").strip().lower()
-    if upload_mode == "chunked":
-        return upload_pcap_artifact_chunks(config, pcap_request, export_result, artifact_base64)
-    payload = {
-        "request_id": pcap_request.get("request_id"),
-        "relay_host": socket.gethostname(),
-        "artifact_path": export_result.get("artifact_path"),
-        "artifact_sha256": export_result.get("artifact_sha256"),
-        "artifact_size_bytes": export_result.get("artifact_size_bytes"),
-        "artifact_base64": artifact_base64,
-    }
-    return broker_request(config, "POST", broker_path(config, "artifact", "/pcap-artifact"), payload)
+    upload_mode = str(broker.get("artifact_upload_mode") or "spooled_rsync").strip().lower()
+    if upload_mode in {"spooled_rsync", "rsync"}:
+        return upload_pcap_artifact_via_rsync(config, pcap_request, export_result)
+    raise RuntimeError(
+        f"unsupported PCAP artifact_upload_mode {upload_mode!r}; "
+        "inline n8n artifact transfer has been removed, use spooled_rsync"
+    )
 
 
-def upload_pcap_artifact_chunks(config: dict, pcap_request: dict, export_result: dict, artifact_base64: str) -> dict:
+def completed_artifact_path(export_result: dict, upload_result: dict | None) -> str | None:
+    """Prefer Mac-side artifact metadata when the upload path provides it."""
+    if upload_result:
+        for key in ("path", "artifact_file"):
+            value = upload_result.get(key)
+            if value:
+                return str(value)
+    value = export_result.get("artifact_path")
+    return str(value) if value else None
+
+
+def pcap_spool_dir(config: dict) -> Path:
     broker = config.get("pcap_broker", {})
-    chunk_size = max(1024, min(4 * 1024 * 1024, int(broker.get("artifact_chunk_size_bytes", 512 * 1024) or 512 * 1024)))
-    artifact_bytes = base64.b64decode("".join(str(artifact_base64).split()), validate=True)
+    raw_path = str(broker.get("artifact_spool_dir") or "/mnt/onion-sentinel-pcap-spool/pcap")
+    path = Path(raw_path)
+    if not path.is_absolute():
+        raise RuntimeError("pcap_broker.artifact_spool_dir must be an absolute path")
+    return path
+
+
+def require_spool_capacity(config: dict, artifact_size: int) -> None:
+    broker = config.get("pcap_broker", {})
+    max_bytes = int(broker.get("artifact_spool_max_bytes", 8 * 1024 * 1024 * 1024) or 0)
+    min_free_bytes = int(broker.get("artifact_spool_min_free_bytes", 3 * 1024 * 1024 * 1024) or 0)
+    if max_bytes > 0 and artifact_size > max_bytes:
+        raise RuntimeError(f"PCAP artifact exceeds relay spool limit: {artifact_size} > {max_bytes}")
+    spool_dir = pcap_spool_dir(config)
+    if not spool_dir.exists() or not spool_dir.is_dir():
+        raise RuntimeError(f"relay PCAP spool directory is unavailable: {spool_dir}")
+    usage = shutil.disk_usage(spool_dir)
+    required = artifact_size + max(0, min_free_bytes)
+    if usage.free < required:
+        raise RuntimeError(f"relay PCAP spool has insufficient free space: free={usage.free} required={required}")
+
+
+def cleanup_stale_spool_partials(config: dict) -> int:
+    """Remove interrupted relay-spool transfer fragments older than the configured TTL."""
+    broker = config.get("pcap_broker", {})
+    ttl_seconds = int(broker.get("artifact_spool_partial_ttl_seconds", 0) or 0)
+    if ttl_seconds < 0:
+        return 0
+    try:
+        spool_dir = pcap_spool_dir(config)
+    except Exception:
+        return 0
+    if not spool_dir.exists() or not spool_dir.is_dir():
+        return 0
+    cutoff = time.time() - ttl_seconds
+    removed = 0
+    for path in spool_dir.glob("*.part"):
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def security_onion_transfer_config(config: dict) -> dict:
+    so = config.get("security_onion", {})
+    transfer = so.get("pcap_artifact_transfer") if isinstance(so.get("pcap_artifact_transfer"), dict) else {}
+    return transfer
+
+
+def security_onion_rsync_ssh(config: dict) -> tuple[list[str], str]:
+    so = config["security_onion"]
+    relay = config["relay"]
+    transfer = security_onion_transfer_config(config)
+    host = str(transfer.get("host") or so.get("host") or "").strip()
+    user = str(transfer.get("ssh_user") or "").strip()
+    key = str(transfer.get("ssh_key") or "").strip()
+    if not host or not user or not key:
+        raise RuntimeError("security_onion.pcap_artifact_transfer requires host, ssh_user, and ssh_key")
+    ssh_args = [
+        "ssh",
+        "-i",
+        str(resolve_path(key)),
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        f"ConnectTimeout={relay.get('ssh_timeout_seconds', 20)}",
+    ]
+    return ssh_args, f"{user}@{host}"
+
+
+def validate_security_onion_artifact_path(path_value: object, request_id: str) -> str:
+    path = str(path_value or "").strip()
+    expected_name = f"{safe_transfer_id(request_id)}.tar"
+    if not path.startswith("/nsm/pcapout/onion-sentinel/"):
+        raise RuntimeError("Security Onion artifact path is outside the approved PCAP output root")
+    if Path(path).name != expected_name:
+        raise RuntimeError("Security Onion artifact path does not match the requested artifact name")
+    if any(char in path for char in "\n\r\t*?[]{}'\""):
+        raise RuntimeError("Security Onion artifact path contains unsafe characters")
+    return path
+
+
+def spool_pcap_artifact_from_security_onion(config: dict, pcap_request: dict, export_result: dict) -> Path:
+    request_id = safe_transfer_id(export_result.get("request_id") or pcap_request.get("request_id"))
     expected_size = int(export_result.get("artifact_size_bytes") or 0)
     expected_sha256 = str(export_result.get("artifact_sha256") or "").lower()
-    if expected_size and len(artifact_bytes) != expected_size:
-        raise RuntimeError("PCAP artifact size does not match Security Onion export metadata")
-    actual_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
-    if expected_sha256 and actual_sha256 != expected_sha256:
-        raise RuntimeError("PCAP artifact sha256 does not match Security Onion export metadata")
-    chunk_count = max(1, (len(artifact_bytes) + chunk_size - 1) // chunk_size)
-    final_response: dict | None = None
-    chunk_path = broker_path(config, "artifact_chunk", "/pcap-artifact")
-    for chunk_index in range(chunk_count):
-        start = chunk_index * chunk_size
-        chunk = artifact_bytes[start : start + chunk_size]
-        payload = {
-            "request_id": pcap_request.get("request_id"),
-            "relay_host": socket.gethostname(),
-            "artifact_path": export_result.get("artifact_path"),
-            "artifact_sha256": actual_sha256,
-            "artifact_size_bytes": len(artifact_bytes),
-            "chunk_index": chunk_index,
-            "chunk_count": chunk_count,
-            "chunk_sha256": hashlib.sha256(chunk).hexdigest(),
-            "chunk_base64": base64.b64encode(chunk).decode("ascii"),
-        }
-        final_response = broker_request(config, "POST", chunk_path, payload)
-    return final_response or {"ok": False, "status": "no_chunks_uploaded"}
+    if not expected_size or not expected_sha256:
+        raise RuntimeError("spooled PCAP transfer requires artifact size and sha256 metadata")
+    remote_artifact = validate_security_onion_artifact_path(export_result.get("artifact_path"), request_id)
+    require_spool_capacity(config, expected_size)
+    spool_dir = pcap_spool_dir(config)
+    spool_dir.mkdir(parents=True, exist_ok=True)
+    final_path = spool_dir / f"{request_id}.tar"
+    temp_path = spool_dir / f"{request_id}.tar.part"
+    temp_path.unlink(missing_ok=True)
+    ssh_args, target = security_onion_rsync_ssh(config)
+    transfer = security_onion_transfer_config(config)
+    command = [
+        "rsync",
+        "-av",
+        "--partial",
+        "-e",
+        " ".join(remote_shell_quote(part) for part in ssh_args),
+        f"{target}:{remote_artifact}",
+        str(temp_path),
+    ]
+    timeout = int(transfer.get("rsync_timeout_seconds") or config.get("relay", {}).get("pcap_timeout_seconds", 1800) or 1800)
+    proc = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        temp_path.unlink(missing_ok=True)
+        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or f"Security Onion rsync exited {proc.returncode}")
+    if temp_path.stat().st_size != expected_size:
+        temp_path.unlink(missing_ok=True)
+        raise RuntimeError("spooled PCAP artifact size did not match Security Onion metadata")
+    if sha256_file(temp_path) != expected_sha256:
+        temp_path.unlink(missing_ok=True)
+        raise RuntimeError("spooled PCAP artifact sha256 did not match Security Onion metadata")
+    temp_path.replace(final_path)
+    final_path.chmod(0o600)
+    return final_path
+
+
+def mac_transfer_config(config: dict) -> dict:
+    broker = config.get("pcap_broker", {})
+    transfer = broker.get("mac_transfer") if isinstance(broker.get("mac_transfer"), dict) else {}
+    return transfer
+
+
+def remote_shell_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def remote_artifact_dir(config: dict, request_id: str) -> str:
+    transfer = mac_transfer_config(config)
+    base_dir = str(transfer.get("artifact_dir") or "n8n-local/pcap-evidence/artifacts").strip().rstrip("/")
+    if not base_dir or base_dir.startswith("/") or ".." in Path(base_dir).parts:
+        raise RuntimeError("mac_transfer.artifact_dir must be a relative safe path")
+    return f"{base_dir}/{safe_transfer_id(request_id)}"
+
+
+def mac_ssh_base(config: dict) -> list[str]:
+    transfer = mac_transfer_config(config)
+    host = str(transfer.get("host") or "").strip()
+    user = str(transfer.get("user") or "").strip()
+    key = str(transfer.get("ssh_key") or "").strip()
+    if not host or not user or not key:
+        raise RuntimeError("mac_transfer requires host, user, and ssh_key")
+    return [
+        "ssh",
+        "-i",
+        str(resolve_path(key)),
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        f"ConnectTimeout={int(transfer.get('connect_timeout_seconds') or 20)}",
+        f"{user}@{host}",
+    ]
+
+
+def run_mac_ssh(config: dict, command: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [*mac_ssh_base(config), command],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def verify_remote_artifact(config: dict, remote_path: str, expected_size: int, expected_sha256: str) -> None:
+    quoted = remote_shell_quote(remote_path)
+    command = (
+        "python3 - "
+        + quoted
+        + " <<'PY'\n"
+        + "import hashlib, json, sys\n"
+        + "from pathlib import Path\n"
+        + "path = Path(sys.argv[1])\n"
+        + "digest = hashlib.sha256()\n"
+        + "with path.open('rb') as handle:\n"
+        + "    for chunk in iter(lambda: handle.read(1024 * 1024), b''):\n"
+        + "        digest.update(chunk)\n"
+        + "print(json.dumps({'ok': True, 'size': path.stat().st_size, 'sha256': digest.hexdigest()}))\n"
+        + "PY"
+    )
+    proc = run_mac_ssh(config, command, timeout=300)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"remote artifact verification exited {proc.returncode}")
+    payload = parse_last_json_object(proc.stdout)
+    if int(payload.get("size") or -1) != expected_size:
+        raise RuntimeError("Mac artifact size did not match Security Onion metadata")
+    if str(payload.get("sha256") or "").lower() != expected_sha256:
+        raise RuntimeError("Mac artifact sha256 did not match Security Onion metadata")
+
+
+def upload_pcap_artifact_via_rsync(config: dict, pcap_request: dict, export_result: dict) -> dict:
+    request_id = safe_transfer_id(export_result.get("request_id") or pcap_request.get("request_id"))
+    expected_size = int(export_result.get("artifact_size_bytes") or 0)
+    expected_sha256 = str(export_result.get("artifact_sha256") or "").lower()
+    artifact_path = spool_pcap_artifact_from_security_onion(config, pcap_request, export_result)
+    transfer = mac_transfer_config(config)
+    remote_dir = remote_artifact_dir(config, request_id)
+    remote_name = Path(str(export_result.get("artifact_path") or artifact_path.name)).name
+    remote_path = f"{remote_dir}/{remote_name}"
+    mkdir_proc = run_mac_ssh(config, f"mkdir -p {remote_shell_quote(remote_dir)}", timeout=60)
+    if mkdir_proc.returncode != 0:
+        raise RuntimeError(mkdir_proc.stderr.strip() or f"failed to create Mac artifact dir {remote_dir}")
+    rsync_ssh = " ".join(remote_shell_quote(part) for part in mac_ssh_base(config)[:-1])
+    # remote_dir is already restricted to safe relative path segments. Avoid
+    # shell quoting inside the rsync target because rsync passes it through to
+    # the remote server and some implementations treat quotes as path bytes.
+    target = f"{str(transfer.get('user')).strip()}@{str(transfer.get('host')).strip()}:{remote_dir}/"
+    command = [
+        "rsync",
+        "-av",
+        "--partial",
+        "-e",
+        rsync_ssh,
+        str(artifact_path),
+        target,
+    ]
+    timeout = int(transfer.get("rsync_timeout_seconds") or 1800)
+    proc = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or f"rsync exited {proc.returncode}")
+    verify_remote_artifact(config, remote_path, expected_size, expected_sha256)
+    if config.get("pcap_broker", {}).get("artifact_spool_delete_after_upload", True):
+        artifact_path.unlink(missing_ok=True)
+    return {
+        "ok": True,
+        "status": "artifact_rsynced",
+        "path": remote_path,
+        "artifact_size_bytes": expected_size,
+        "artifact_sha256": expected_sha256,
+    }
+
+
+def cleanup_pcap_artifact(config: dict, request_id: str) -> bool:
+    try:
+        result = run_ssh_pcap_export(config, {"mode": "artifact_cleanup", "request_id": request_id})
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "event": "pcap_artifact_cleanup_failed",
+                    "request_id": request_id,
+                    "error": str(exc)[:500],
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return False
+    if not result.get("ok"):
+        print(
+            json.dumps(
+                {
+                    "event": "pcap_artifact_cleanup_failed",
+                    "request_id": request_id,
+                    "error": str(result.get("error") or result.get("status") or "cleanup rejected")[:500],
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return False
+    return True
 
 
 def broker_path(config: dict, name: str, default_path: str) -> str:
@@ -561,6 +830,24 @@ def process_pcap_requests(config: dict) -> dict:
     broker = config.get("pcap_broker", {})
     if not broker.get("enabled"):
         return {"ok": True, "enabled": False, "processed": 0}
+    lock_path = Path(str(broker.get("lock_path") or "/tmp/onion-sentinel-pcap-broker.lock"))
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as lock_handle:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"ok": True, "enabled": True, "locked": True, "processed": 0}
+        lock_handle.write(f"{os.getpid()}\n")
+        lock_handle.flush()
+        try:
+            return _process_pcap_requests_unlocked(config)
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def _process_pcap_requests_unlocked(config: dict) -> dict:
+    broker = config.get("pcap_broker", {})
+    stale_spool_partials_removed = cleanup_stale_spool_partials(config)
     limit = max(1, min(10, int(broker.get("limit", 3) or 3)))
     pending_path = f"{broker_path(config, 'requests', '/pcap/requests')}?status=pending&limit={limit}"
     requests_method = str(broker.get("requests_method") or "GET").strip().upper()
@@ -573,6 +860,8 @@ def process_pcap_requests(config: dict) -> dict:
     failed = 0
     completion_failed = 0
     artifact_upload_failed = 0
+    artifact_cleanup_failed = 0
+    artifact_cleanup_succeeded = 0
     for pcap_request in pending.get("requests", []):
         if str(pcap_request.get("status") or "pending").lower() != "pending":
             continue
@@ -587,8 +876,6 @@ def process_pcap_requests(config: dict) -> dict:
             continue
         try:
             export_request = dict(claim["request"])
-            if broker.get("upload_artifact", True):
-                export_request["inline_artifact_base64"] = True
             result = run_ssh_pcap_export(config, export_request)
             upload = None
             upload_error = ""
@@ -608,19 +895,33 @@ def process_pcap_requests(config: dict) -> dict:
                     ),
                     file=sys.stderr,
                 )
+            upload_ok = bool(upload and upload.get("ok"))
+            if not upload_error and not upload_ok:
+                upload_error = "Mac artifact ingest did not confirm success"
+            completion_status = "failed" if upload_error else "fulfilled"
+            completion_payload = {
+                "artifact_path": completed_artifact_path(result, upload),
+                "artifact_sha256": result.get("artifact_sha256"),
+                "artifact_size_bytes": result.get("artifact_size_bytes"),
+                "artifact_ingested": upload_ok,
+                "artifact_ingest_error": upload_error,
+            }
+            if upload_error:
+                completion_payload["error"] = f"artifact upload failed: {upload_error}"
             if complete_pcap_request(
                 config,
                 request_id,
-                "fulfilled",
-                {
-                    "artifact_path": result.get("artifact_path"),
-                    "artifact_sha256": result.get("artifact_sha256"),
-                    "artifact_size_bytes": result.get("artifact_size_bytes"),
-                    "artifact_ingested": bool(upload and upload.get("ok")),
-                    "artifact_ingest_error": upload_error,
-                },
+                completion_status,
+                completion_payload,
             ):
-                fulfilled += 1
+                if completion_status == "fulfilled":
+                    fulfilled += 1
+                    if cleanup_pcap_artifact(config, str(request_id)):
+                        artifact_cleanup_succeeded += 1
+                    else:
+                        artifact_cleanup_failed += 1
+                else:
+                    failed += 1
             else:
                 completion_failed += 1
         except Exception as exc:
@@ -636,6 +937,9 @@ def process_pcap_requests(config: dict) -> dict:
         "failed": failed,
         "completion_failed": completion_failed,
         "artifact_upload_failed": artifact_upload_failed,
+        "artifact_cleanup_failed": artifact_cleanup_failed,
+        "artifact_cleanup_succeeded": artifact_cleanup_succeeded,
+        "stale_spool_partials_removed": stale_spool_partials_removed,
     }
 
 

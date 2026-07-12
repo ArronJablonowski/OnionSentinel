@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Prune Onion Sentinel Security Onion-side PCAP export artifacts.
+
+This removes only top-level request artifacts created by export-pcap-window:
+`<request_id>.tar` files and matching `<request_id>/` work directories under
+the fixed output root. It intentionally refuses arbitrary cleanup roots.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import time
+from pathlib import Path
+
+
+DEFAULT_ROOT = "/nsm/pcapout/onion-sentinel"
+ROOT_PREFIX = "/nsm/pcapout/onion-sentinel"
+
+
+def fail(reason: str) -> None:
+    print(json.dumps({"ok": False, "error": reason}, sort_keys=True))
+    raise SystemExit(1)
+
+
+def safe_root(raw_root: str) -> Path:
+    root = Path(raw_root).resolve(strict=False)
+    if str(root) != ROOT_PREFIX and not str(root).startswith(f"{ROOT_PREFIX}/"):
+        fail("cleanup root must be under /nsm/pcapout/onion-sentinel")
+    if root.is_symlink():
+        fail("cleanup root must not be a symlink")
+    return root
+
+
+def top_level_targets(root: Path, cutoff: float) -> list[Path]:
+    if not root.exists():
+        return []
+    if not root.is_dir():
+        fail("cleanup root is not a directory")
+    targets: list[Path] = []
+    for child in root.iterdir():
+        if child.is_symlink():
+            continue
+        if not (child.is_file() and child.name.endswith(".tar")) and not child.is_dir():
+            continue
+        try:
+            mtime = child.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < cutoff:
+            targets.append(child)
+    return targets
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Prune Onion Sentinel PCAP output artifacts.")
+    parser.add_argument("--root", default=os.environ.get("ONION_SENTINEL_PCAP_OUTPUT_ROOT", DEFAULT_ROOT))
+    parser.add_argument(
+        "--hours",
+        type=float,
+        default=float(os.environ.get("ONION_SENTINEL_PCAP_RETENTION_HOURS", "24")),
+        help="Remove top-level artifacts older than this many hours.",
+    )
+    parser.add_argument("--apply", action="store_true", help="Actually delete files; default is dry-run.")
+    args = parser.parse_args()
+
+    if args.hours <= 0:
+        fail("retention hours must be greater than zero")
+
+    root = safe_root(args.root)
+    cutoff = time.time() - (args.hours * 3600)
+    targets = top_level_targets(root, cutoff)
+    removed: list[str] = []
+    errors: list[dict] = []
+
+    for target in targets:
+        if not args.apply:
+            removed.append(str(target))
+            continue
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+            removed.append(str(target))
+        except OSError as exc:
+            errors.append({"path": str(target), "error": str(exc)})
+
+    print(
+        json.dumps(
+            {
+                "ok": not errors,
+                "dry_run": not args.apply,
+                "root": str(root),
+                "retention_hours": args.hours,
+                "matched": len(targets),
+                "removed": removed,
+                "errors": errors,
+            },
+            sort_keys=True,
+        )
+    )
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

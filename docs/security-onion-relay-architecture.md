@@ -334,7 +334,7 @@ PCAP broker proxy workflow:
 Onion Sentinel PCAP Broker Proxy
 Workflow ID: onionSentinelPcapBroker
 Repo export: n8n/workflows/onion-sentinel-pcap-broker.workflow.json
-Production webhook paths: /pcap-requests, /pcap-claim, /pcap-complete, /pcap-artifact
+Production webhook paths: /pcap-requests, /pcap-claim, /pcap-complete
 ```
 
 The PCAP proxy uses a separate n8n variable, `PCAP_BROKER_TOKEN`, and the relay
@@ -1028,8 +1028,9 @@ SOC Analyst / analyst UI
   -> SQLite pcap_requests table
   -> Raspberry Pi relay polls pending requests
   -> Security Onion dedicated forced-command wrapper exports bounded PCAP
-  -> relay uploads bounded artifact through n8n /pcap-artifact
-  -> alert-store validates hash/size and writes Mac Studio pcap-evidence/artifacts
+  -> relay pulls artifact chunks onto SSD spool
+  -> relay rsyncs artifact to Mac Studio pcap-evidence/artifacts
+  -> relay verifies Mac artifact hash/size and completes request through n8n
   -> Mac Studio Zeek/TShark worker writes bounded packet summaries
   -> dashboard/local AI use parsed summaries, not raw PCAP bytes
 ```
@@ -1051,17 +1052,17 @@ Alert-store request broker:
 ```text
 POST /pcap/request
 GET /pcap/requests?status=pending&limit=25
-POST /pcap/artifact
-POST /pcap/artifact-chunk
+POST /pcap/claim
+POST /pcap/complete
 ```
 
 Safety controls:
 
 - Alert-store only validates and queues requests; it never exports PCAP.
 - Request windows are clamped by `PCAP_REQUEST_MAX_WINDOW_SECONDS`.
-- Artifact uploads are capped by `PCAP_ARTIFACT_MAX_BYTES` after base64 decode.
-  Chunked uploads are additionally capped per decoded chunk by
-  `PCAP_ARTIFACT_CHUNK_MAX_BYTES`.
+- Alert-store no longer accepts PCAP artifact bytes over HTTP. Artifacts move
+  through the relay SSD spool and restricted rsync, then alert-store records
+  fulfillment metadata only.
 - Requests store tuple fields, timestamps, optional `network.community_id`,
   requester, reason, and audit timestamps. `created_at`, `claimed_at`,
   `completed_at`, and `updated_at` are the canonical request lifecycle fields.
@@ -1077,20 +1078,39 @@ Safety controls:
   request JSON. The Security Onion wrapper validates the path under
   `/nsm/suripcap`, prefers that file, and tests VLAN-aware BPF before the plain
   filter because full packet capture commonly runs on tagged interfaces.
-- Artifact ingestion must go through n8n/alert-store instead of broad Mac Studio
-  SSH into Security Onion. Alert-store writes only to the configured runtime
-  artifact directory after verifying request id, artifact size, and SHA256.
-- The relay defaults to inline upload for compatibility. When
-  `artifact_upload_mode` is `chunked`, it sends bounded chunks through the same
-  n8n `/pcap-artifact` webhook; the n8n proxy forwards chunk payloads to
-  alert-store `/pcap/artifact-chunk`, and alert-store reassembles only after
-  all chunks and the final artifact digest validate.
+- Mac Studio does not need a direct path to Security Onion. The relay remains
+  the only bridge between the isolated relay VLAN and the Mac Studio runtime.
+- The preferred artifact data plane is `spooled_rsync`: the Security Onion PCAP
+  command key prepares a bounded tar artifact, then the relay uses a separate
+  read-only rsync key forced to `/usr/local/sbin/onion-sentinel-rsync-pcapout`
+  to pull that tar onto `/mnt/onion-sentinel-pcap-spool/pcap`. The relay
+  verifies size/SHA256, rsyncs the tar to
+  `$HOME/n8n-local/pcap-evidence/artifacts/<request_id>/`, verifies the Mac
+  copy, and only then reports fulfillment through the n8n control plane.
+- The relay SSD spool is intentionally outside the Pi SD card and should be
+  mounted with `noatime,nosuid,nodev,noexec`. Current defaults allow an 8 GiB
+  artifact ceiling while keeping 3 GiB free. Monitor average and maximum PCAP
+  artifact size before deciding whether the 16 GiB SSD needs to be replaced.
+- n8n inline artifact upload and Security Onion chunk pulls are
+  intentionally removed. If rsync fails, the relay marks the PCAP request failed
+  with sanitized transfer metadata instead of falling back to a fragile encoded
+  payload.
+- A relay-side lock file prevents overlapping timer runs from exporting or
+  uploading the same request concurrently.
+- Alert-store requeues stale `claimed` PCAP requests after
+  `PCAP_CLAIM_LEASE_SECONDS` so interrupted transfers do not strand work.
 - Relay fulfillment treats Security Onion export and artifact upload as
-  separate outcomes. If export succeeds but `/pcap-artifact` upload fails, the
-  relay still reports the request as fulfilled with `artifact_ingested=false`,
-  logs `pcap_artifact_upload_failed`, and continues processing later requests.
-  This prevents a transient n8n/artifact-ingest issue from hiding the fact that
-  Security Onion produced bounded capture metadata.
+  separate outcomes. If export succeeds but artifact upload fails, the relay
+  marks the request `failed` with a retryable artifact upload error, logs
+  `pcap_artifact_upload_failed`, and continues processing later requests. It
+  must not report a request as fulfilled unless the Mac Studio artifact ingest
+  path accepted the PCAP bytes.
+- After the Mac Studio accepts the artifact and the completion callback
+  succeeds, the relay calls the restricted Security Onion wrapper cleanup mode
+  for that request id. Cleanup removes only the matching
+  `/nsm/pcapout/onion-sentinel/<request_id>.tar` and work directory. Cleanup
+  failures are logged as `pcap_artifact_cleanup_failed` and do not block later
+  requests.
 - Valid negative fulfillment is surfaced distinctly. A failed request whose
   broker error indicates no matching packets is displayed as `No Packets` in
   the dashboard so analysts can distinguish capture absence from transport or
@@ -1103,12 +1123,18 @@ Safety controls:
   `$HOME/n8n-local/bin/maintain-pcap-evidence.py`, which defaults to dry-run,
   keeps raw PCAP artifacts for 14 days, keeps derived PCAP analysis for 30
   days, and refuses cleanup paths outside `$HOME/n8n-local`.
+- Security Onion cleanup is defense in depth. The primary cleanup path is the
+  per-request relay callback after verified Mac ingest. The safety-net timer
+  `onion-sentinel-pcapout-retention.timer` runs hourly and removes stale
+  top-level tar files and request work directories older than 24 hours under
+  `/nsm/pcapout/onion-sentinel`.
 - PCAP artifacts are runtime-only evidence. Never commit `.pcap`, `.pcapng`,
   packet payloads, generated packet artifacts, or `soc-alerts/pcap-analysis`
   output to Git.
-- Roadmap: after chunked upload has production runtime history, increase
-  supported PCAP size carefully or move to direct authenticated object/file
-  transfer, while retaining bounded Zeek/TShark summaries for LLM input.
+- Roadmap: harden the relay-to-Mac transfer key further with a forced-command
+  receive wrapper or dedicated chroot-style drop path. The current key is
+  source-restricted to the relay and disables agent, X11, port forwarding, and
+  pty allocation.
 - Zeek/zeek-cut and TShark live on the Mac Studio with Ollama. Zeek is the
   primary parser for structured connection, DNS, TLS, HTTP, notice, and weird
   logs; TShark provides protocol hierarchy, conversation, and bounded packet

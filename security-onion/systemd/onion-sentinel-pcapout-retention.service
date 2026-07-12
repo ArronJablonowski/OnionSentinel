@@ -1,0 +1,6 @@
+[Unit]
+Description=Onion Sentinel Security Onion PCAP output retention cleanup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/prune-onion-sentinel-pcapout --apply

@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
 import shlex
 import subprocess
 import sys
+import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -25,6 +28,9 @@ from typing import Any
 HOME = Path.home()
 DEFAULT_PROMPT_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-prompts"
 DEFAULT_OUT_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-analysis"
+DEFAULT_LLM_LOG_DIR = HOME / "n8n-local" / "soc-alerts" / "llm-analysis-logs"
+DEFAULT_LLM_LOG_FILE = DEFAULT_LLM_LOG_DIR / "llm-analysis-log.jsonl"
+DEFAULT_LLM_CURRENT_FILE = DEFAULT_LLM_LOG_DIR / "current-analysis.json"
 DEFAULT_SYSTEM_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system_prompt.md"
 DEFAULT_AI_SETTINGS_FILE = HOME / "n8n-local" / "config" / "ai_model_settings.json"
 DEFAULT_OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
@@ -36,10 +42,13 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 REQUIRED_KEYS = {
+    "detection_outcome",
+    "bluf",
     "summary",
     "likely_meaning",
     "severity_reasoning",
     "alert_frequency_assessment",
+    "public_enrichment_findings",
     "pcap_analysis_findings",
     "false_positive_possibilities",
     "recommended_next_steps",
@@ -53,7 +62,10 @@ REQUIRED_KEYS = {
     "recommended_tuning_actions",
 }
 DEFAULT_RESPONSE_VALUES = {
+    "detection_outcome": "Inconclusive",
+    "bluf": "Inconclusive - Needs More Data: The local model did not provide a BLUF classification.",
     "alert_frequency_assessment": "The local model did not explicitly assess alert frequency.",
+    "public_enrichment_findings": [],
     "pcap_analysis_findings": [],
     "false_positive_possibilities": [],
     "recommended_next_steps": ["Review the raw alert, related alerts, and endpoint/network context."],
@@ -68,6 +80,7 @@ DEFAULT_RESPONSE_VALUES = {
 }
 LIST_KEYS = {
     "false_positive_possibilities",
+    "public_enrichment_findings",
     "pcap_analysis_findings",
     "recommended_next_steps",
     "evidence_used",
@@ -76,6 +89,17 @@ LIST_KEYS = {
 }
 CONFIDENCE_VALUES = {"low", "medium", "high"}
 TUNING_VALUES = {"none", "suppress", "drop", "raise_score", "lower_score", "needs_more_data"}
+DETECTION_OUTCOME_VALUES = {
+    "true_positive_malicious",
+    "true_positive_suspicious",
+    "true_positive_authorized_benign",
+    "false_positive_logic_rule",
+    "false_positive_data_parser",
+    "false_positive_bad_intel_ioc",
+    "duplicate",
+    "informational_no_action",
+    "inconclusive",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -117,6 +141,336 @@ def filename_timestamp(value: str) -> str:
 def safe_filename(value: Any) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "alert")).strip("-")
     return (cleaned or "alert")[:120]
+
+
+def prompt_alert_summary(prompt_package: dict[str, Any]) -> dict[str, Any]:
+    """Return bounded alert metadata suitable for an operational LLM run log."""
+    alert = prompt_package.get("alert") if isinstance(prompt_package.get("alert"), dict) else {}
+    grouped = prompt_package.get("grouped_alert_context") if isinstance(prompt_package.get("grouped_alert_context"), dict) else {}
+    timeline = grouped.get("timeline") if isinstance(grouped.get("timeline"), list) else []
+    alert_ids: list[str] = []
+    for item in timeline[:25]:
+        if isinstance(item, dict) and item.get("alert_id"):
+            alert_ids.append(str(item.get("alert_id")))
+    primary_alert_id = str(alert.get("alert_id") or "").strip()
+    if primary_alert_id and primary_alert_id not in alert_ids:
+        alert_ids.insert(0, primary_alert_id)
+    alert_count = grouped.get("raw_alert_rows") or grouped.get("total_observations") or alert.get("seen_count") or len(alert_ids) or 1
+    try:
+        alert_count = max(1, int(alert_count))
+    except (TypeError, ValueError):
+        alert_count = 1
+    return {
+        "primary_alert_id": primary_alert_id,
+        "alert_ids": alert_ids,
+        "alert_ids_truncated": max(0, len(timeline) - len(alert_ids)),
+        "alert_count": alert_count,
+        "rule_name": str(alert.get("rule_name") or "Security Onion Alert"),
+        "triage_level": str(alert.get("triage_level") or "unknown"),
+        "triage_score": alert.get("triage_score"),
+        "source_ip": str(alert.get("source_ip") or ""),
+        "destination_ip": str(alert.get("destination_ip") or ""),
+        "destination_port": str(alert.get("destination_port") or ""),
+        "first_seen": str(grouped.get("first_seen") or alert.get("first_seen") or ""),
+        "last_seen": str(grouped.get("last_seen") or alert.get("last_seen") or ""),
+        "total_observations": grouped.get("total_observations", alert.get("seen_count")),
+    }
+
+
+def prompt_pcap_size_bytes(prompt_package: dict[str, Any]) -> int:
+    pcap_evidence = prompt_package.get("pcap_evidence") if isinstance(prompt_package.get("pcap_evidence"), dict) else {}
+    parsed = pcap_evidence.get("parsed_evidence") if isinstance(pcap_evidence.get("parsed_evidence"), list) else []
+    total = 0
+    seen: set[tuple[str, str]] = set()
+    for record in parsed:
+        if not isinstance(record, dict):
+            continue
+        request_id = str(record.get("request_id") or "")
+        files = record.get("pcap_files") if isinstance(record.get("pcap_files"), list) else []
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            key = (request_id, str(item.get("sha256") or item.get("name") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                total += max(0, int(item.get("size_bytes") or 0))
+            except (TypeError, ValueError):
+                continue
+    return total
+
+
+def prompt_alert_context_size_bytes(prompt_package: dict[str, Any]) -> int:
+    context = {
+        "alert": prompt_package.get("alert"),
+        "grouped_alert_context": prompt_package.get("grouped_alert_context"),
+        "public_enrichment": prompt_package.get("public_enrichment"),
+        "analyst_state": prompt_package.get("analyst_state"),
+        "pcap_evidence": prompt_package.get("pcap_evidence"),
+    }
+    return len(json.dumps(context, sort_keys=True, default=str).encode("utf-8"))
+
+
+def parse_gpu_temperature(output: str) -> float | None:
+    """Extract a GPU temperature from common macOS sensor command output."""
+    matches = re.findall(r"(?im)\bgpu\b[^\n:]*[:=]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:°\s*)?c\b", output)
+    if not matches:
+        matches = re.findall(r"(?im)\bgpu\b.*?([0-9]+(?:\.[0-9]+)?)\s*(?:°\s*)?c\b", output)
+    if not matches:
+        return None
+    values = [float(value) for value in matches]
+    return max(values) if values else None
+
+
+def mactop_command() -> list[str] | None:
+    custom = os.environ.get("SOC_MACTOP_COMMAND", "").strip()
+    if custom:
+        return shlex.split(custom)
+    for path in (
+        "/opt/homebrew/bin/mactop",
+        "/usr/local/bin/mactop",
+        "mactop",
+    ):
+        if path.startswith("/") and not Path(path).exists():
+            continue
+        return [path]
+    return None
+
+
+def parse_float(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_mactop_sample(
+    output: str,
+) -> tuple[
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+]:
+    """Return max-relevant system metrics from mactop JSON for one sample."""
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        return None, None, None, None, None, None, None
+    sample = payload[0] if isinstance(payload, list) and payload else payload
+    if not isinstance(sample, dict):
+        return None, None, None, None, None, None, None
+    soc_metrics = sample.get("soc_metrics") if isinstance(sample.get("soc_metrics"), dict) else {}
+    gpu_metrics = sample.get("gpu_metrics") if isinstance(sample.get("gpu_metrics"), dict) else {}
+    gpu_temp_value = parse_float(soc_metrics.get("gpu_temp"))
+    gpu_percent = parse_float(gpu_metrics.get("active_percent"))
+    if gpu_percent is None:
+        gpu_percent = parse_float(sample.get("gpu_usage"))
+    if gpu_percent is None:
+        gpu_percent = parse_float(soc_metrics.get("gpu_active"))
+    cpu_temp_value = parse_float(soc_metrics.get("cpu_temp"))
+    soc_temp_value = parse_float(soc_metrics.get("soc_temp"))
+    power_watts = parse_float(soc_metrics.get("total_power"))
+    if power_watts is None:
+        power_watts = parse_float(soc_metrics.get("system_power"))
+    cpu_percent = parse_float(sample.get("cpu_usage"))
+
+    memory = sample.get("memory") if isinstance(sample.get("memory"), dict) else {}
+    used = memory.get("used")
+    total = memory.get("total")
+    try:
+        memory_percent = (float(used) / float(total)) * 100 if used is not None and total else None
+    except (TypeError, ValueError, ZeroDivisionError):
+        memory_percent = None
+    return gpu_temp_value, memory_percent, power_watts, cpu_percent, gpu_percent, cpu_temp_value, soc_temp_value
+
+
+def read_mactop_system_sample() -> tuple[
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    str,
+]:
+    command = mactop_command()
+    if not command:
+        return None, None, None, None, None, None, None, "mactop not found"
+    try:
+        proc = subprocess.run(
+            [*command, "--headless", "--format", "json", "--count", "1"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=8,
+        )
+    except FileNotFoundError:
+        return None, None, None, None, None, None, None, f"{command[0]} not found"
+    except subprocess.TimeoutExpired:
+        return None, None, None, None, None, None, None, f"{command[0]} timed out"
+    except Exception as exc:
+        return None, None, None, None, None, None, None, f"{command[0]} failed: {exc}"
+    if proc.returncode != 0 and not proc.stdout.strip():
+        detail = (proc.stderr or "").strip().splitlines()
+        return None, None, None, None, None, None, None, f"{command[0]} unavailable" + (f": {detail[-1][:120]}" if detail else "")
+    gpu_temp, memory_percent, power_watts, cpu_percent, gpu_percent, cpu_temp, soc_temp = parse_mactop_sample(proc.stdout)
+    if any(value is not None for value in (gpu_temp, memory_percent, power_watts, cpu_percent, gpu_percent, cpu_temp, soc_temp)):
+        return gpu_temp, memory_percent, power_watts, cpu_percent, gpu_percent, cpu_temp, soc_temp, "mactop sampled"
+    return None, None, None, None, None, None, None, f"{command[0]} returned no parseable mactop metrics"
+
+
+def read_gpu_temperature_celsius() -> tuple[float | None, str]:
+    """Read GPU temperature if the Mac exposes it to an unprivileged command."""
+    commands: list[list[str]] = []
+    custom = os.environ.get("SOC_GPU_TEMP_COMMAND", "").strip()
+    if custom:
+        commands.append(shlex.split(custom))
+    commands.extend([
+        ["powermetrics", "--samplers", "smc", "-n", "1", "-i", "500"],
+        ["/usr/bin/powermetrics", "--samplers", "smc", "-n", "1", "-i", "500"],
+    ])
+    notes: list[str] = []
+    for command in commands:
+        try:
+            proc = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=4)
+        except FileNotFoundError:
+            notes.append(f"{command[0]} not found")
+            continue
+        except subprocess.TimeoutExpired:
+            notes.append(f"{command[0]} timed out")
+            continue
+        except Exception as exc:
+            notes.append(f"{command[0]} failed: {exc}")
+            continue
+        output = "\n".join(part for part in (proc.stdout, proc.stderr) if part)
+        value = parse_gpu_temperature(output)
+        if value is not None:
+            return value, "GPU temperature sampled"
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        notes.append(f"{command[0]} unavailable" + (f": {detail[-1][:120]}" if detail else ""))
+    return None, "; ".join(notes[:3]) or "GPU temperature unavailable"
+
+
+class SystemResourceMonitor:
+    """Best-effort mactop sampler for max system metrics per run."""
+
+    def __init__(self, interval_seconds: float = 5.0) -> None:
+        self.interval_seconds = interval_seconds
+        self.max_gpu_celsius: float | None = None
+        self.max_memory_percent: float | None = None
+        self.max_power_watts: float | None = None
+        self.max_cpu_percent: float | None = None
+        self.max_gpu_percent: float | None = None
+        self.max_cpu_celsius: float | None = None
+        self.max_soc_celsius: float | None = None
+        self.note = "system metrics not sampled"
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._sample_once()
+        self._thread = threading.Thread(target=self._run, name="system-resource-monitor", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            if self._stop.wait(self.interval_seconds):
+                break
+            self._sample_once()
+
+    def _sample_once(self) -> None:
+        gpu_value, memory_value, power_value, cpu_value, gpu_percent, cpu_temp, soc_temp, note = read_mactop_system_sample()
+        if gpu_value is None:
+            gpu_value, fallback_note = read_gpu_temperature_celsius()
+            if gpu_value is not None:
+                note = f"{note}; {fallback_note}"
+        self.note = note
+        if gpu_value is not None:
+            self.max_gpu_celsius = gpu_value if self.max_gpu_celsius is None else max(self.max_gpu_celsius, gpu_value)
+        if memory_value is not None:
+            self.max_memory_percent = memory_value if self.max_memory_percent is None else max(self.max_memory_percent, memory_value)
+        if power_value is not None:
+            self.max_power_watts = power_value if self.max_power_watts is None else max(self.max_power_watts, power_value)
+        if cpu_value is not None:
+            self.max_cpu_percent = cpu_value if self.max_cpu_percent is None else max(self.max_cpu_percent, cpu_value)
+        if gpu_percent is not None:
+            self.max_gpu_percent = gpu_percent if self.max_gpu_percent is None else max(self.max_gpu_percent, gpu_percent)
+        if cpu_temp is not None:
+            self.max_cpu_celsius = cpu_temp if self.max_cpu_celsius is None else max(self.max_cpu_celsius, cpu_temp)
+        if soc_temp is not None:
+            self.max_soc_celsius = soc_temp if self.max_soc_celsius is None else max(self.max_soc_celsius, soc_temp)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1)
+
+
+def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def append_jsonl(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(data, sort_keys=True) + "\n")
+
+
+def build_llm_log_record(
+    *,
+    run_id: str,
+    status: str,
+    started_at: str,
+    finished_at: str | None,
+    runtime_seconds: float | None,
+    prompt_path: Path | None,
+    prompt_package: dict[str, Any],
+    settings: dict[str, Any],
+    response: dict[str, Any] | None,
+    json_path: Path | None,
+    md_path: Path | None,
+    resource_monitor: SystemResourceMonitor,
+    error: str = "",
+) -> dict[str, Any]:
+    alert_summary = prompt_alert_summary(prompt_package) if prompt_package else {}
+    model_path = str((response or {}).get("_analysis_model_path") or settings.get("mode") or "unknown")
+    model = str((response or {}).get("_analysis_model") or settings.get("ollama_model") or settings.get("cloud_model") or "unknown")
+    return {
+        "log_id": run_id,
+        "status": status,
+        "success": status == "success",
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "runtime_seconds": round(runtime_seconds, 3) if runtime_seconds is not None else None,
+        "mode": str(settings.get("mode") or "unknown"),
+        "model": model,
+        "model_path": model_path,
+        "prompt_package": str(prompt_path) if prompt_path else "",
+        "analysis_json": str(json_path) if json_path else "",
+        "analysis_markdown": str(md_path) if md_path else "",
+        "gpu_temperature_celsius_max": resource_monitor.max_gpu_celsius,
+        "gpu_utilization_percent_max": resource_monitor.max_gpu_percent,
+        "cpu_temperature_celsius_max": resource_monitor.max_cpu_celsius,
+        "soc_temperature_celsius_max": resource_monitor.max_soc_celsius,
+        "memory_used_percent_max": resource_monitor.max_memory_percent,
+        "power_watts_max": resource_monitor.max_power_watts,
+        "cpu_used_percent_max": resource_monitor.max_cpu_percent,
+        "system_metrics_note": resource_monitor.note,
+        "gpu_temperature_note": resource_monitor.note,
+        "pcap_total_size_bytes": prompt_pcap_size_bytes(prompt_package) if prompt_package else 0,
+        "alert_context_size_bytes": prompt_alert_context_size_bytes(prompt_package) if prompt_package else 0,
+        "error": error,
+        "alert": alert_summary,
+    }
 
 
 def latest_prompt(prompt_dir: Path) -> Path:
@@ -257,7 +611,8 @@ def ollama_chat(prompt_package: dict[str, Any], args: argparse.Namespace, settin
     user = {
         "task": (
             "Analyze this Security Onion alert and return JSON matching response_schema exactly. "
-            "Use parsed pcap_evidence when present. Use agent_memory.role_memory and agent_memory.shared_memory when relevant, "
+            "Use public_enrichment records and parsed pcap_evidence when present. "
+            "Use agent_memory.role_memory and agent_memory.shared_memory when relevant, "
             "but prefer current alert evidence if memory conflicts."
         ),
         "prompt_package": prompt_package,
@@ -381,6 +736,8 @@ def validate_response(response: dict[str, Any]) -> dict[str, Any]:
         }
     for key in LIST_KEYS:
         normalized[key] = coerce_list(normalized.get(key))
+    normalized["detection_outcome"] = str(normalized["detection_outcome"])
+    normalized["bluf"] = str(normalized["bluf"])
     normalized["summary"] = str(normalized["summary"])
     normalized["likely_meaning"] = str(normalized["likely_meaning"])
     normalized["severity_reasoning"] = str(normalized["severity_reasoning"])
@@ -397,6 +754,10 @@ def validate_response(response: dict[str, Any]) -> dict[str, Any]:
     if normalized["tuning_recommendation"] not in TUNING_VALUES:
         normalized["_invalid_tuning_recommendation"] = normalized["tuning_recommendation"]
         normalized["tuning_recommendation"] = "needs_more_data"
+    outcome_key = re.sub(r"[^a-z0-9]+", "_", normalized["detection_outcome"].strip().lower()).strip("_")
+    if outcome_key not in DETECTION_OUTCOME_VALUES:
+        normalized["_invalid_detection_outcome"] = normalized["detection_outcome"]
+        normalized["detection_outcome"] = "Inconclusive"
     return normalized
 
 
@@ -449,6 +810,11 @@ def render_markdown(prompt_package: dict[str, Any], response: dict[str, Any], ge
         f"- **Hosted second opinion allowed:** {policy.get('hosted_second_opinion_allowed')}",
         f"- **Machine JSON:** `{json_path.name}`",
         "",
+        "## BLUF",
+        "",
+        f"- **Detection outcome:** {response['detection_outcome']}",
+        f"- **Bottom line:** {response['bluf']}",
+        "",
         "## Summary",
         "",
         response["summary"],
@@ -464,6 +830,10 @@ def render_markdown(prompt_package: dict[str, Any], response: dict[str, Any], ge
         "## Alert Frequency Assessment",
         "",
         response["alert_frequency_assessment"],
+        "",
+        "## Public Enrichment Findings",
+        "",
+        markdown_list(response["public_enrichment_findings"]),
         "",
         "## PCAP Analysis Findings",
         "",
@@ -533,28 +903,91 @@ def write_outputs(prompt_path: Path, prompt_package: dict[str, Any], response: d
 
 def main() -> int:
     args = parse_args()
-    prompt_path = args.prompt_package
-    if args.generate_prompt:
-        prompt_path = generate_prompt(args)
-    if prompt_path is None:
-        prompt_path = latest_prompt(args.prompt_dir)
+    prompt_path: Path | None = args.prompt_package
+    prompt_package: dict[str, Any] = {}
+    settings: dict[str, Any] = {}
+    response: dict[str, Any] | None = None
+    json_path: Path | None = None
+    md_path: Path | None = None
+    started_at = project_now()
+    started_monotonic = time.monotonic()
+    run_id = hashlib.sha1(f"{started_at}:{prompt_path or ''}:{os.getpid()}".encode("utf-8")).hexdigest()[:16]
+    resource_monitor = SystemResourceMonitor()
+    status = "failure"
+    error = ""
+    monitor_started = False
 
-    prompt_package = load_json(prompt_path)
-    if prompt_package.get("package_type") != "soc-ai-investigation-prompt":
-        raise SystemExit(f"unexpected prompt package type in {prompt_path}")
+    try:
+        if args.generate_prompt:
+            prompt_path = generate_prompt(args)
+        if prompt_path is None:
+            prompt_path = latest_prompt(args.prompt_dir)
 
-    if args.response_json:
-        response = load_json(args.response_json)
-    else:
-        response = analyze_with_config(prompt_package, args)
-    response = validate_response(response)
-    json_path, md_path = write_outputs(prompt_path, prompt_package, response, args)
+        prompt_package = load_json(prompt_path)
+        if prompt_package.get("package_type") != "soc-ai-investigation-prompt":
+            raise SystemExit(f"unexpected prompt package type in {prompt_path}")
 
-    print(md_path)
-    print(json_path)
-    if args.stdout:
-        print(json.dumps(response, indent=2, sort_keys=True))
-    return 0
+        settings = effective_ai_settings(args)
+        running_record = build_llm_log_record(
+            run_id=run_id,
+            status="running",
+            started_at=started_at,
+            finished_at=None,
+            runtime_seconds=None,
+            prompt_path=prompt_path,
+            prompt_package=prompt_package,
+            settings=settings,
+            response=None,
+            json_path=None,
+            md_path=None,
+            resource_monitor=resource_monitor,
+        )
+        atomic_write_json(DEFAULT_LLM_CURRENT_FILE, running_record)
+
+        resource_monitor.start()
+        monitor_started = True
+        if args.response_json:
+            response = load_json(args.response_json)
+        else:
+            response = analyze_with_config(prompt_package, args)
+        response = validate_response(response)
+        json_path, md_path = write_outputs(prompt_path, prompt_package, response, args)
+        status = "success"
+
+        print(md_path)
+        print(json_path)
+        if args.stdout:
+            print(json.dumps(response, indent=2, sort_keys=True))
+        return 0
+    except SystemExit as exc:
+        error = str(exc) if str(exc) else f"SystemExit({exc.code})"
+        raise
+    except Exception as exc:
+        error = str(exc)
+        raise
+    finally:
+        if monitor_started:
+            resource_monitor.stop()
+        finished_at = project_now()
+        runtime_seconds = time.monotonic() - started_monotonic
+        if prompt_path or prompt_package:
+            record = build_llm_log_record(
+                run_id=run_id,
+                status=status,
+                started_at=started_at,
+                finished_at=finished_at,
+                runtime_seconds=runtime_seconds,
+                prompt_path=prompt_path,
+                prompt_package=prompt_package,
+                settings=settings or effective_ai_settings(args),
+                response=response,
+                json_path=json_path,
+                md_path=md_path,
+                resource_monitor=resource_monitor,
+                error=error,
+            )
+            append_jsonl(DEFAULT_LLM_LOG_FILE, record)
+            atomic_write_json(DEFAULT_LLM_CURRENT_FILE, record)
 
 
 if __name__ == "__main__":

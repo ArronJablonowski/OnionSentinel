@@ -1,0 +1,14 @@
+{
+  "name": "onion-sentinel-alert-store",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Host-native Onion Sentinel alert-store runtime dependencies.",
+  "main": "alert_store.js",
+  "scripts": {
+    "start": "node alert_store.js",
+    "check": "node --check alert_store.js"
+  },
+  "dependencies": {
+    "sqlite3": "^5.1.7"
+  }
+}

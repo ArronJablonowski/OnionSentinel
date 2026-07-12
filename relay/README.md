@@ -34,6 +34,13 @@ that path:
 sudo install -o soalert -g soalert -m 0600 /path/to/so-ai-relay-pcap_ed25519 /opt/so-alert-relay/keys/so-ai-relay-pcap_ed25519
 ```
 
+Install a third dedicated read-only artifact transfer key for rsyncing prepared
+PCAP tar files from Security Onion to the relay SSD spool:
+
+```bash
+sudo install -o soalert -g soalert -m 0600 /path/to/so-ai-relay-pcap-rsync_ed25519 /opt/so-alert-relay/keys/so-ai-relay-pcap-rsync_ed25519
+```
+
 Edit the live env file:
 
 ```bash
@@ -89,44 +96,101 @@ PCAP fulfillment is disabled by default in `config/config.example.json`:
   "url": "http://10.77.7.225:5678/webhook",
   "requests_method": "POST",
   "upload_artifact": true,
-  "artifact_upload_mode": "inline",
-  "artifact_chunk_size_bytes": 524288,
+  "artifact_upload_mode": "spooled_rsync",
+  "artifact_spool_dir": "/mnt/onion-sentinel-pcap-spool/pcap",
+  "artifact_spool_max_bytes": 8589934592,
+  "artifact_spool_min_free_bytes": 3221225472,
+  "artifact_spool_delete_after_upload": true,
+  "artifact_spool_partial_ttl_seconds": 0,
+  "mac_transfer": {
+    "host": "10.77.7.225",
+    "user": "__MAC_STUDIO_SSH_USER__",
+    "ssh_key": "/opt/so-alert-relay/keys/macstudio-pcap-transfer_ed25519",
+    "artifact_dir": "n8n-local/pcap-evidence/artifacts",
+    "connect_timeout_seconds": 20,
+    "rsync_timeout_seconds": 1800
+  },
+  "lock_path": "/tmp/onion-sentinel-pcap-broker.lock",
   "paths": {
     "requests": "/pcap-requests",
     "claim": "/pcap-claim",
-    "complete": "/pcap-complete",
-    "artifact": "/pcap-artifact"
+    "complete": "/pcap-complete"
+  }
+}
+```
+
+The matching `security_onion` config must include the dedicated artifact
+transfer key:
+
+```json
+"security_onion": {
+  "host": "192.168.1.7",
+  "ssh_user": "so-ai-relay",
+  "ssh_key": "/opt/so-alert-relay/keys/so-ai-relay_ed25519",
+  "pcap_ssh_key": "/opt/so-alert-relay/keys/so-ai-relay-pcap_ed25519",
+  "pcap_artifact_transfer": {
+    "host": "192.168.1.7",
+    "ssh_user": "so-ai-relay-pcap-rsync",
+    "ssh_key": "/opt/so-alert-relay/keys/so-ai-relay-pcap-rsync_ed25519",
+    "rsync_timeout_seconds": 1800
   }
 }
 ```
 
 When enabled, the relay polls a relay-safe n8n broker/proxy endpoint for pending
 requests, claims one request at a time, sends the bounded JSON request to the
-Security Onion forced-command PCAP key, and uploads the bounded artifact back
-through n8n. Alert-store verifies the request id, Security Onion output path,
-decoded size, and SHA256 before storing the artifact in the Mac Studio runtime
-evidence directory. Packet artifacts remain runtime evidence, not repo content.
-Use a separate broker token from the alert ingestion token and store it only in
-the live relay config and live n8n workflow.
+Security Onion forced-command PCAP key, pulls the exported artifact onto the
+relay SSD spool with the dedicated read-only rsync key, and transfers the tar
+to the Mac Studio with restricted SSH and `rsync`. The relay verifies artifact
+size and SHA256 on both the relay spool and the Mac Studio before it reports
+the request as fulfilled.
 
-The safe default artifact upload mode is `inline`, which preserves compatibility
-with the original single `/pcap-artifact` n8n proxy. After importing the updated
-PCAP broker workflow, operators may set `artifact_upload_mode` to `chunked`.
-Chunked mode still uses the same n8n webhook, but each request carries one
-bounded chunk; alert-store verifies each chunk hash, reassembles only after all
-chunks arrive, and then verifies the full artifact SHA256.
+The relay SSD spool should be mounted outside the Pi SD card. The current
+portable target is `/mnt/onion-sentinel-pcap-spool/pcap`, mounted with
+`noatime,nosuid,nodev,noexec`. The default repo limit allows artifacts up to
+8 GiB while keeping 3 GiB free. A 16 GiB SSD is sufficient for current
+multi-hundred-MB captures, but the project should watch average and maximum
+artifact sizes and upgrade the spool disk if captures regularly approach the
+limit.
+
+Successful relay-spooled `.tar` artifacts are deleted immediately after the
+Mac Studio copy has been verified by size and SHA256. Interrupted `.tar.part`
+files are pruned at the start of the next broker run by default. Set
+`artifact_spool_partial_ttl_seconds` higher than `0` to keep partials for a
+short retry window, or `-1` to disable partial cleanup during troubleshooting.
+
+The `spooled_rsync` mode is the preferred data plane for large captures. n8n
+remains the control plane for request, claim, and completion state, while SSH
+and rsync move raw artifact bytes. The older n8n inline artifact upload route
+and Security Onion chunk pull path have been removed because they are
+fragile for large captures and can pressure workflow memory, HTTP body limits,
+proxy timeouts, and relay memory.
+
+Packet artifacts remain runtime evidence, not repo content. Use a separate
+broker token from the alert ingestion token and store it only in the live relay
+config and live n8n workflow.
 
 The relay defensively filters broker responses to process only requests whose
 status is `pending`. This keeps the PCAP broker safe if an n8n proxy returns a
 mixed request history instead of a strict pending-only list. Legacy rows without
 a status are treated as pending for compatibility.
 
+Alert-store requeues stale `claimed` PCAP requests after the claim lease expires
+so interrupted relay runs do not strand work forever. Tune the lease with
+`PCAP_CLAIM_LEASE_SECONDS` on Mac Studio when very large captures need a longer
+exclusive window.
+
 PCAP export and artifact upload are tracked separately. If Security Onion
-returns bounded capture metadata but the `/pcap-artifact` upload is temporarily
-unavailable, the relay logs `pcap_artifact_upload_failed`, reports
-`artifact_ingested=false` with the completion payload, and continues processing
-other requests. Alert relay delivery and PCAP broker delivery are also isolated
-by the health wrapper so one path does not mask the other.
+returns bounded capture metadata but artifact upload is temporarily unavailable,
+the relay logs `pcap_artifact_upload_failed`, marks that PCAP request failed
+with a retryable artifact upload error, and continues processing other requests.
+After the Mac Studio confirms artifact ingest and the completion callback
+succeeds, the relay asks the restricted Security Onion wrapper to delete only
+that request id's temporary tar and work directory. Cleanup failures are logged
+as `pcap_artifact_cleanup_failed` but do not convert an already-ingested request
+back to failed.
+Alert relay delivery and PCAP broker delivery are also isolated by the health
+wrapper so one path does not mask the other.
 
 The relay does not parse packet captures or call LLMs. After a fulfilled capture
 is ingested into the Mac Studio runtime evidence directory, the Mac Studio
@@ -148,13 +212,14 @@ and `/etc/so-alert-relay/relay.env` contain webhook tokens, the wrapper checks
 that they match before polling Security Onion.
 
 High-volume bursts can take longer than a quiet heartbeat because n8n processes
-each alert workflow before returning the webhook response. The wrapper defaults
-to a 300 second alert relay timeout and a 180 second PCAP broker timeout. Tune
-these in `/etc/so-alert-relay/relay.env` when needed:
+each alert workflow before returning the webhook response. Large PCAP exports
+also take longer than alert polling because the Security Onion wrapper validates
+and serves artifacts in bounded chunks. Tune these in
+`/etc/so-alert-relay/relay.env` when needed:
 
 ```bash
 RELAY_COMMAND_TIMEOUT_SECONDS=300
-RELAY_PCAP_TIMEOUT_SECONDS=180
+RELAY_PCAP_TIMEOUT_SECONDS=1800
 RELAY_FAILURE_NOTIFY_THRESHOLD=3
 ```
 

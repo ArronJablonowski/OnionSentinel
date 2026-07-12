@@ -379,13 +379,15 @@ def select_next_alert(
                  {group_key_expr} AS queue_group_key,
                  {severity_priority_sql()} AS severity_rank
           FROM alerts
-          WHERE replace(replace({newest_alert_time}, 'T', ' '), 'Z', '') >= replace(replace(?, 'T', ' '), 'Z', '')
-            AND triage_level IN ({placeholders})
-            AND (
-              COALESCE(NULLIF(filter_status, ''), 'accepted') IN ({", ".join("?" for _ in ELIGIBLE_FILTER_STATUSES)})
+          WHERE (
+              (
+                replace(replace({newest_alert_time}, 'T', ' '), 'Z', '') >= replace(replace(?, 'T', ' '), 'Z', '')
+                AND triage_level IN ({placeholders})
+                AND COALESCE(NULLIF(filter_status, ''), 'accepted') IN ({", ".join("?" for _ in ELIGIBLE_FILTER_STATUSES)})
+                {filter_sql}
+              )
               {prompt_override_sql}
             )
-            {filter_sql}
         ),
         ranked_groups AS (
           SELECT *,
@@ -404,8 +406,18 @@ def select_next_alert(
         ORDER BY severity_rank ASC, queue_time_sort DESC,
                  COALESCE(triage_score, 0) DESC, alert_id DESC
         """,
-        [since, *levels, *ELIGIBLE_FILTER_STATUSES, *prompt_override_params, *filter_params],
+        [since, *levels, *ELIGIBLE_FILTER_STATUSES, *filter_params, *prompt_override_params],
     )
+    if prompt_override_ids:
+        prompt_override_set = set(prompt_override_ids)
+        # A manual Analyze click is an analyst-directed override. Keep the SQL
+        # severity ordering inside manual/automatic buckets, but drain manual
+        # prompts before unattended backlog so the UI action has immediate effect.
+        candidates = sorted(
+            candidates,
+            key=lambda candidate: 0 if str(candidate["alert_id"] or "") in prompt_override_set else 1,
+        )
+
     for candidate in candidates:
         # SQLite has already reduced the raw alert stream to the newest row per
         # duplicate group and sorted those groups by strict severity drain

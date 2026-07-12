@@ -143,8 +143,9 @@ in SQLite, but fulfillment must be performed by the relay/Security Onion
 forced-command path with strict validation, small time windows, output size
 limits, audit metadata, and runtime-only artifact storage.
 
-Alert-store should automatically queue PCAP requests for newly stored Critical
-and High alerts. The default policy is `PCAP_AUTO_REQUEST_LEVELS=critical,high`;
+Alert-store should automatically queue PCAP requests for every newly stored,
+non-suppressed alert with a known triage level. The default policy is
+`PCAP_AUTO_REQUEST_LEVELS=critical,high,medium,low,informational`;
 operators may set it empty during maintenance for manual-only packet evidence
 requests.
 
@@ -153,12 +154,11 @@ timer should attempt both subpaths every cycle and report component status for
 each path. A failed alert webhook POST must not skip PCAP broker processing, and
 a PCAP broker error must not block normal alert delivery.
 
-Future roadmap: increase supported PCAP pull size with a chunked or streamed
-artifact transport instead of a single inline base64 webhook body. That work
-should include explicit n8n/alert-store request limits, per-request and
-per-day quotas, disk cleanup, checksum validation for every chunk, retry-safe
-resume, and denial-of-service controls before raising production capture
-windows or byte limits.
+Future roadmap: increase supported PCAP pull size through the relay SSD spool
+and restricted rsync path. That work should include per-request and per-day
+quotas, disk cleanup, checksum validation, retry-safe resume, and
+denial-of-service controls before raising production capture windows or byte
+limits. PCAP artifacts must not be transferred as inline payloads through n8n.
 
 ## Notification Requirements
 

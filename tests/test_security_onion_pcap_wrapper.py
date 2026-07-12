@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import datetime as dt
+import io
 import importlib.util
 import importlib.machinery
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -56,6 +58,76 @@ class SecurityOnionPcapWrapperTest(unittest.TestCase):
                 "/nsm/suripcap/newest/so-pcap.500",
             ],
         )
+
+    def test_candidate_files_prefers_valid_capture_file_from_request(self) -> None:
+        wrapper = load_wrapper()
+        wrapper.MAX_CANDIDATE_FILES = 2
+        wrapper.PCAP_ROOT = Path("/nsm/suripcap")
+        preferred = Path("/nsm/suripcap/3/so-pcap.300")
+
+        output = "\n".join(
+            [
+                "100 /nsm/suripcap/1/so-pcap.100",
+                "200 /nsm/suripcap/2/so-pcap.200",
+                "300 /nsm/suripcap/3/so-pcap.300",
+            ]
+        )
+        completed = subprocess.CompletedProcess(args=["find"], returncode=0, stdout=output, stderr="")
+
+        with mock.patch.object(wrapper.subprocess, "run", return_value=completed):
+            with mock.patch.object(Path, "exists", return_value=True):
+                files = wrapper.candidate_files(
+                    dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=10),
+                    dt.datetime.now(dt.timezone.utc),
+                    {"capture_file": str(preferred)},
+                )
+
+        self.assertEqual(str(files[0]), str(preferred))
+
+    def test_vlan_bpf_variant_preserves_flow_tuple(self) -> None:
+        wrapper = load_wrapper()
+        request = {
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "destination_port": 443,
+        }
+
+        self.assertEqual(
+            wrapper.bpf_for_request(request, vlan=True),
+            "vlan and host 192.0.2.10 and host 198.51.100.20 and port 443",
+        )
+
+    def test_artifact_cleanup_removes_only_request_outputs(self) -> None:
+        wrapper = load_wrapper()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            wrapper.OUTPUT_ROOT = root
+            artifact = root / "pcap-unit-test.tar"
+            work_dir = root / "pcap-unit-test"
+            unrelated = root / "keep-me.tar"
+            artifact.write_text("artifact", encoding="utf-8")
+            work_dir.mkdir()
+            (work_dir / "part-001.pcap").write_text("pcap", encoding="utf-8")
+            unrelated.write_text("unrelated", encoding="utf-8")
+
+            with mock.patch("builtins.print") as printed:
+                status = wrapper.cleanup_artifact({"request_id": "pcap-unit-test"})
+
+            self.assertEqual(status, 0)
+            self.assertFalse(artifact.exists())
+            self.assertFalse(work_dir.exists())
+            self.assertTrue(unrelated.exists())
+            payload = printed.call_args.args[0]
+            self.assertIn("artifact_cleaned", payload)
+
+    def test_artifact_chunk_mode_is_not_supported(self) -> None:
+        wrapper = load_wrapper()
+        with self.assertRaises(SystemExit):
+            with mock.patch("builtins.print") as printed:
+                with mock.patch.object(sys, "stdin", new=io.StringIO('{"mode":"artifact_chunk","request_id":"pcap-unit-test"}')):
+                    wrapper.main()
+        payload = printed.call_args.args[0]
+        self.assertIn("unsupported mode", payload)
 
 
 if __name__ == "__main__":

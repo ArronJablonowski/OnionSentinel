@@ -85,13 +85,13 @@ use `requests_method: "POST"`, and map:
 {
   "requests": "/pcap-requests",
   "claim": "/pcap-claim",
-  "complete": "/pcap-complete",
-  "artifact": "/pcap-artifact"
+  "complete": "/pcap-complete"
 }
 ```
 
 The n8n proxy keeps alert-store private to Docker while exposing only the
-relay-safe PCAP broker operations to the relay VLAN.
+relay-safe PCAP broker metadata operations to the relay VLAN. PCAP tar files
+move separately through the relay SSD spool and rsync.
 
 Parsed PCAP evidence is handled on the Mac Studio, not inside Security Onion,
 the Pi relay, or Git. Install Zeek/zeek-cut and TShark on the Mac Studio and
@@ -114,11 +114,11 @@ $HOME/n8n-local/pcap-evidence/artifacts
 $HOME/n8n-local/soc-alerts/pcap-analysis
 ```
 
-The preferred artifact path is n8n-mediated ingestion: the relay asks Security
-Onion for a bounded export, uploads the capped base64 tar to
-`POST /webhook/pcap-artifact`, and alert-store verifies request id, size, and
-SHA256 before writing the runtime-only tar under
-`pcap-evidence/artifacts/<request_id>/`. The worker reads fulfilled
+The preferred artifact path keeps n8n as the control plane and uses the relay
+as the bulk data plane. The relay asks Security Onion for a bounded export,
+spools the artifact on the relay SSD, rsyncs it to
+`pcap-evidence/artifacts/<request_id>/`, verifies size/SHA256 on the Mac Studio,
+then completes the request through n8n/alert-store. The worker reads fulfilled
 `pcap_requests`, extracts the local artifact, runs Zeek first for structured
 network logs, runs TShark for protocol hierarchy/conversation corroboration,
 and writes bounded JSON/Markdown summaries for the SOC Analyst prompt builder.
@@ -241,36 +241,34 @@ PCAP request broker safety knobs:
 
 - `PCAP_REQUEST_DEFAULT_WINDOW_SECONDS=120`
 - `PCAP_REQUEST_MAX_WINDOW_SECONDS=300`
-- `PCAP_ARTIFACT_MAX_BYTES=7340032`
-- `PCAP_ARTIFACT_CHUNK_MAX_BYTES=524288`
-- `PCAP_AUTO_REQUEST_LEVELS=critical,high`
+- `PCAP_CLAIM_LEASE_SECONDS=1800`
+- `PCAP_AUTO_REQUEST_LEVELS=critical,high,medium,low,informational`
 
 `PCAP_REQUEST_MAX_WINDOW_SECONDS` caps the requested packet window before any
-Security Onion export occurs. `PCAP_ARTIFACT_MAX_BYTES` caps the decoded
-runtime-only artifact accepted by alert-store from the relay.
-`PCAP_ARTIFACT_CHUNK_MAX_BYTES` caps each decoded chunk when the relay uses
-chunked artifact upload mode.
+Security Onion export occurs. PCAP artifacts are transferred out-of-band by the
+relay SSD spool and rsync; alert-store no longer accepts inline PCAP blobs or
+artifact chunks through n8n.
+`PCAP_CLAIM_LEASE_SECONDS` controls when alert-store requeues interrupted
+relay claims so stale `claimed` rows do not strand PCAP work forever.
 
 `PCAP_AUTO_REQUEST_LEVELS` controls server-side automatic PCAP request
 creation during `/alert` ingest. The production default queues PCAP evidence
-for newly stored Critical and High alerts only. Set it to an empty value during
-maintenance to disable auto-queueing without changing dashboard/manual request
-behavior.
+for every newly stored, non-suppressed alert with a known triage level. Set it
+to an empty value during maintenance to disable auto-queueing without changing
+dashboard/manual request behavior.
 
-The relay can keep the original inline artifact POST or use chunked upload
-after the updated n8n broker workflow is imported. Chunked upload keeps each
-relay-to-Mac request small, validates every chunk hash, verifies the final
-artifact SHA256 after reassembly, and keeps direct authenticated object/file
-transfer as a later scale option. Do not raise the JSON body limit as the
-long-term scaling path.
+PCAP bytes are not posted through n8n. The broker workflow is metadata-only:
+it accepts requests, lets the relay claim work, and records completion
+metadata after the relay moves artifacts through the SSD spool and restricted
+rsync path. Keep this separation so a large packet archive cannot overload the
+n8n webhook or alert-store JSON parser.
 
 System Health separates PCAP broker conditions into operational warnings and
 diagnostic counters. Stale pending/claimed requests and unexpected failures
-raise `warning_count`; valid negative evidence (`no matching packets found`),
-legacy empty-output wrapper failures, and inline artifact oversize failures are
-counted separately. Oversize failures are a signal to use a narrower capture
-window today and to prioritize chunked/direct artifact transfer on the roadmap,
-not a sign that alert ingestion or analyst state is broken.
+raise `warning_count`; valid negative evidence (`no matching packets found`)
+and legacy empty-output wrapper failures are counted separately. Transfer
+failures should be resolved in the relay SSD spool, restricted SSH wrapper, or
+rsync path, not by reintroducing inline artifact uploads through n8n.
 
 If the live n8n PCAP broker workflow is edited through a database restore or
 manual import, confirm the active workflow version contains the same node

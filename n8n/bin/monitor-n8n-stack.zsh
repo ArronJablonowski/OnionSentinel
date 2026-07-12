@@ -13,12 +13,25 @@ mkdir -p "$LOG_DIR"
 
 send_telegram() {
   local message="$1"
-  # Source .env at send time so token/chat changes do not require editing this
-  # script. The real .env is ignored by Git.
+  # Parse .env as data so token-like values can never be executed as shell.
   [[ -f "$ENV_FILE" ]] || return 1
-  set -a
-  source "$ENV_FILE"
-  set +a
+  eval "$(/usr/bin/python3 - "$ENV_FILE" <<'PY'
+from pathlib import Path
+import shlex
+import sys
+
+for raw in Path(sys.argv[1]).read_text().splitlines():
+    line = raw.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    key = key.strip()
+    if not key.replace("_", "").isalnum() or key[0].isdigit():
+        continue
+    if key in {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"}:
+        print(f"export {key}={shlex.quote(value.strip())}")
+PY
+)"
   [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]] || return 1
   local chat_id="${TELEGRAM_CHAT_ID:-REPLACE_WITH_TELEGRAM_CHAT_ID}"
   /usr/bin/python3 - "$TELEGRAM_BOT_TOKEN" "$chat_id" "$message" <<'PY'
@@ -85,9 +98,10 @@ check_stack() {
   # alert-store from inside the Docker network.
   "$DOCKER" info >/dev/null 2>&1 || { echo "Docker is not responding"; return 1; }
   "$DOCKER" inspect -f "{{.State.Status}}" n8n 2>/dev/null | grep -qx running || { echo "n8n container is not running"; return 1; }
-  "$DOCKER" inspect -f "{{.State.Status}}" alert-store 2>/dev/null | grep -qx running || { echo "alert-store container is not running"; return 1; }
+  "$DOCKER" inspect -f "{{.State.Status}}" alert-store 2>/dev/null | grep -qx running || { echo "alert-store proxy container is not running"; return 1; }
   /usr/bin/curl -fsS --max-time 5 http://127.0.0.1:5678/healthz >/dev/null || { echo "n8n healthz failed"; return 1; }
-  "$DOCKER" exec n8n node -e '(async()=>{const r=await fetch("http://alert-store:8787/health"); if(!r.ok) process.exit(1); const j=await r.json(); if(!j.ok) process.exit(1);})().catch(()=>process.exit(1))' || { echo "alert-store health failed"; return 1; }
+  /usr/bin/curl -fsS --max-time 5 http://127.0.0.1:8787/health >/dev/null || { echo "host alert-store health failed"; return 1; }
+  "$DOCKER" exec n8n node -e '(async()=>{const r=await fetch("http://alert-store:8787/health"); if(!r.ok) process.exit(1); const j=await r.json(); if(!j.ok) process.exit(1);})().catch(()=>process.exit(1))' || { echo "alert-store proxy health failed"; return 1; }
   echo "ok"
 }
 

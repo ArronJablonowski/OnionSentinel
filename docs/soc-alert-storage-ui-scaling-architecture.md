@@ -667,12 +667,31 @@ Critical, High, Medium, Low, or Informational colors shown in the table.
 PCAP evidence is intentionally request/broker based rather than coupled to
 normal alert ingest. The dashboard and alert-store may queue a bounded PCAP
 request, the Pi relay claims pending requests through n8n, Security Onion
-exports only a bounded artifact through its forced-command wrapper, and the Mac
-Studio stores/parses the artifact as runtime evidence. No-packet results and
-inline oversize artifacts are useful broker outcomes and are counted separately
-from active System Health warnings. Larger PCAP support should be implemented
-as chunked upload or direct authenticated artifact transfer, keeping Zeek-first
-and TShark-corroborated parsing on the Mac Studio.
+exports only a bounded artifact through its forced-command wrapper, the relay
+uses a separate read-only rsync key to spool the artifact to its SSD, and rsync moves it to the Mac Studio runtime
+evidence directory. n8n remains the control plane, not the bulk artifact data
+plane. No-packet results and oversize artifacts are useful broker outcomes and
+are counted separately from active System Health warnings. The only supported
+artifact data plane is SSD-backed `spooled_rsync` with hash/size verification,
+keeping Zeek-first and TShark-corroborated parsing on the Mac Studio. PCAP
+artifact bytes must not be carried inline in n8n or in the
+Security Onion-to-relay transfer path.
+
+PCAP requests for grouped alerts must be built from a concrete alert row, not
+from aggregate group timestamps alone. The portal and alert-store prefer the
+group's `representative_alert_id`, then fall back to the newest matching alert,
+so the request contains the exact source/destination tuple, ports, timestamp
+window, and `suricata.capture_file` when present. Including the capture file
+lets the Security Onion wrapper validate and inspect the capture that produced
+the alert before scanning broader candidate files, and avoids false `No
+Packets` results on VLAN-tagged captures.
+
+Parsed PCAP evidence can arrive after the original SOC Analyst AI report was
+generated. The lazy detail endpoint appends current parsed Zeek/TShark evidence
+to stale detail fragments immediately, and the local AI scheduler treats newer
+PCAP evidence as making the grouped detection's previous AI analysis stale. The
+next scheduler pass rebuilds the prompt package instead of reusing a pre-PCAP
+prompt, so refreshed SOC Analyst reports can include `pcap_analysis_findings`.
 
 ## Duplicate Alert Grouping
 
@@ -828,10 +847,10 @@ summaries and TShark corroboration only; raw packet captures stay in runtime
 artifact storage and are not copied into dashboard HTML, prompts, or Git.
 Current guardrails keep PCAP pulls intentionally small: dashboard and
 alert-store request windows are clamped to 30-300 seconds, with 120 seconds as
-the default, and alert-store rejects decoded PCAP artifacts larger than
-`PCAP_ARTIFACT_MAX_BYTES` before writing runtime evidence. Larger captures are a
-roadmap item and should use chunked or direct authenticated transfer rather than
-raising JSON POST body limits.
+the default. PCAP artifacts are not accepted through n8n or alert-store JSON
+POST bodies; larger captures should continue to use the relay SSD spool,
+restricted rsync transfer, checksum validation, and retention cleanup rather
+than raising workflow or HTTP payload limits.
 
 System Health exposes the PCAP workflow as first-class operational state:
 request counts, latest request, parser output count, runtime artifact size, and
@@ -855,7 +874,19 @@ and enrichment JSON grow.
 | Section | Source | Behavior |
 | --- | --- | --- |
 | `AI Model Used` | `$HOME/n8n-local/soc-alerts/ai-analysis/*-local-ai-analysis.json` | Shows analysis status, model path, model name, generation time, prompt package, and analysis artifact path |
-| `AI Analysis Output` | Same JSON artifact `response` object | Shows summary, likely meaning, severity reasoning, PCAP analysis findings, false-positive possibilities, recommended next steps, evidence used, evidence gaps, tuning recommendation, escalation fields, and complete AI response JSON |
+| `AI Analysis Output` | Same JSON artifact `response` object | Shows summary, likely meaning, severity reasoning, public enrichment findings, PCAP analysis findings, false-positive possibilities, recommended next steps, evidence used, evidence gaps, tuning recommendation, escalation fields, and complete AI response JSON |
+
+The Reports page includes a live local LLM analysis log view. Its top panel
+polls `/api/llm-analysis/current` to show the current alert/group being
+analyzed, model, start time, grouped alert count, and current queue size. Its
+log table polls `/api/llm-analysis/logs` and paginates at a maximum of 50 rows
+per page. The table includes runtime, maximum GPU temperature, maximum GPU
+utilization percentage, maximum CPU temperature, maximum SoC package
+temperature, maximum system memory percentage, maximum total power draw in
+watts, and maximum CPU usage percentage captured by the Mac Studio `mactop`
+headless sampler. The runtime
+source is `$HOME/n8n-local/soc-alerts/llm-analysis-logs`, which is live operator
+data and must not be committed to Git.
 
 When the artifact `analysis_type` is `local-ai`, the dashboard displays the
 model path as `Ollama local` so the UI clearly shows that the analysis ran via
@@ -877,11 +908,22 @@ The SOC Alerts table also includes an `AI` status column:
 | Status | Source |
 | --- | --- |
 | `Analyzing` | A live `run-local-ai-analysis.py` process references the alert's prompt package |
-| `Analyzed` | A matching JSON artifact exists in `$HOME/n8n-local/soc-alerts/ai-analysis` |
-| `Queued` | No analysis JSON exists yet. If a prompt package exists, the row is actively staged; otherwise it is scheduler backlog and the prompt will be generated just-in-time by the local AI worker. |
+| `Queued` from fresh prompt | A fresh prompt package exists without a newer matching JSON artifact. This includes manual reanalysis requests from the table `Analyze` action. |
+| `Analyzed` | A matching JSON artifact exists in `$HOME/n8n-local/soc-alerts/ai-analysis` and is newer than any matching prompt package |
+| `Queued` from backlog | If no analysis JSON exists yet and no explicit prompt package exists, the row is scheduler backlog and the prompt will be generated just-in-time by the local AI worker. |
 | `Not queued` | Reserved for fallback/error states where SQLite alert-store status cannot be resolved. Normal unique dashboard alerts should not remain in this state. |
 
-Status precedence is `Analyzing -> Analyzed -> Queued -> Not queued`. Every unique grouped dashboard alert should resolve to `Analyzed`, `Analyzing`, or `Queued`.
+Status precedence is `Analyzing -> Queued fresh prompt -> Analyzed -> Queued backlog -> Not queued`. Every unique grouped dashboard alert should resolve to `Analyzed`, `Analyzing`, or `Queued`.
+
+Each alert row has an `Analyze` action. The browser sends only the validated
+dashboard group id to `/api/soc-alerts/{group_id}/analyze`; the Mac Studio
+portal resolves the newest representative alert from SQLite and runs
+`$HOME/n8n-local/bin/build-ai-investigation-prompt.py` locally. The resulting
+prompt package includes grouped alert context, public enrichment, parsed PCAP
+evidence when present, previous notes/reports, and bounded agent memory. A
+manual prompt newer than the last JSON analysis makes the previous analysis
+stale, so the next AI scheduler pass reprocesses that grouped detection even if
+it had already been analyzed.
 
 alert-store stores detail/enrichment data in:
 
@@ -1002,6 +1044,13 @@ write-maintained grouped summary table are deployed.
 `alert-store` maintains `alert_group_summary` inside
 `~/n8n-local/alert_store_data/alerts.sqlite3`. Each row represents one grouped
 detection and stores:
+
+On the Mac Studio deployment, the SQLite-writing alert-store process runs as the
+host LaunchAgent `com.arron.soc.alert-store`. The Docker Compose service named
+`alert-store` is intentionally only a TCP proxy so existing n8n workflow nodes
+can keep using `http://alert-store:8787`. This avoids writing SQLite through
+Docker Desktop's macOS bind-mount virtualization layer, which produced
+`SQLITE_IOERR` and index corruption during high-volume summary rebuilds.
 
 - Stable `group_id` and `group_key`.
 - Newest representative alert id.

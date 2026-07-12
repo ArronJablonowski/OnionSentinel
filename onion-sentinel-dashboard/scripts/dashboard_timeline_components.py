@@ -88,6 +88,14 @@ def short_alert_id(alert_id: object) -> str:
     return value[-16:] if len(value) > 16 else value
 
 
+def timeline_display_percent(point_ts: float, first_ts: float, span: float) -> float:
+    """Map timestamps into the visible rail while keeping the endpoints padded."""
+    if span <= 1.0:
+        return 50.0
+    raw_percent = ((point_ts - first_ts) / span) * 100
+    return max(2.0, min(98.0, round(2 + (raw_percent * 0.96), 2)))
+
+
 def row_get(row: Any, key: str, default: object = None) -> object:
     if isinstance(row, dict):
         return row.get(key, default)
@@ -123,9 +131,9 @@ def alert_seen_timeline_html(row: Any) -> str:
             'destination_port': str(event.get('destination_port') or 'n/a'),
             'point_ts': point_ts,
         })
-    if len(normalized) <= 1:
-        return ''
     normalized.sort(key=lambda event: (event['point_ts'], str(event['alert_id'])))
+    if sum(safe_int(event['seen_count']) for event in normalized) <= 1:
+        return ''
     first_ts = float(normalized[0]['point_ts'])
     last_ts = float(normalized[-1]['point_ts'])
     span = max(1.0, last_ts - first_ts)
@@ -133,11 +141,12 @@ def alert_seen_timeline_html(row: Any) -> str:
     visual_bucket_width_pct = max(0.75, min(2.0, 100 / max(24, min(90, last_event_index))))
     visual_buckets: dict[int, dict[str, object]] = {}
     markers = []
+    burst_bands = []
     rows = []
     observation_index = 0
     for index, event in enumerate(normalized, start=1):
         point_ts = float(event['point_ts'])
-        percent = 2 if span == 1.0 and last_ts == first_ts else max(2, min(98, round(((point_ts - first_ts) / span) * 100, 2)))
+        percent = timeline_display_percent(point_ts, first_ts, span)
         bucket_key = int(round(percent / visual_bucket_width_pct))
         bucket = visual_buckets.setdefault(bucket_key, {
             'percent_sum': 0.0,
@@ -201,6 +210,33 @@ def alert_seen_timeline_html(row: Any) -> str:
             f'style="left:{percent}%;--marker-size:{marker_size}px" title="{html.escape(title, quote=True)}">'
             f'{f"<span>{html.escape(label)}</span>" if label else ""}</span>'
         )
+    cluster_gap_seconds = max(60.0, min(900.0, span * 0.01))
+    clusters: list[list[dict[str, object]]] = []
+    for event in normalized:
+        if not clusters:
+            clusters.append([event])
+            continue
+        previous_ts = float(clusters[-1][-1]['point_ts'])
+        if float(event['point_ts']) - previous_ts <= cluster_gap_seconds:
+            clusters[-1].append(event)
+        else:
+            clusters.append([event])
+    for cluster in clusters:
+        if len(cluster) < 2:
+            continue
+        start_percent = timeline_display_percent(float(cluster[0]['point_ts']), first_ts, span)
+        end_percent = timeline_display_percent(float(cluster[-1]['point_ts']), first_ts, span)
+        observations = sum(safe_int(event['seen_count']) for event in cluster)
+        width = max(4.0, min(24.0, end_percent - start_percent))
+        left = max(2.0, min(98.0 - width, start_percent))
+        title = (
+            f"Activity burst | events {len(cluster)} | observations {observations} | "
+            f"{cluster[0]['timestamp']} to {cluster[-1]['timestamp']}"
+        )
+        burst_bands.append(
+            f'<span class="alert-timeline-burst" style="left:{left}%;width:{round(width, 2)}%" '
+            f'title="{html.escape(title, quote=True)}"><i>{observations}</i></span>'
+        )
     seen_candidates = []
     for event in normalized:
         for key in ('first_seen', 'timestamp', 'last_seen'):
@@ -231,8 +267,8 @@ def alert_seen_timeline_html(row: Any) -> str:
       <div><dt>Last Seen:</dt><dd>{html.escape(last_seen_display)}</dd></div>
       <div><dt>Duration:</dt><dd>{html.escape(duration_text)}</dd></div>
     </dl>
-    <div class="alert-timeline-rail" aria-hidden="true">{''.join(markers)}</div>
-    <div class="table-wrap alert-timeline-table"><table><thead><tr><th>#</th><th>Timestamp</th><th>Seen</th><th>Source IP</th><th>Destination IP</th><th>Destination Port</th><th>Alert</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
+    <div class="alert-timeline-rail" aria-hidden="true">{''.join(burst_bands)}{''.join(markers)}</div>
+    <div class="table-wrap alert-timeline-table"><table><colgroup><col class="timeline-col-index"><col class="timeline-col-timestamp"><col class="timeline-col-seen"><col class="timeline-col-source"><col class="timeline-col-destination"><col class="timeline-col-port"><col class="timeline-col-alert"></colgroup><thead><tr><th>#</th><th>Timestamp</th><th>Seen</th><th>Source IP</th><th>Destination IP</th><th>Destination Port</th><th>Alert</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
     {pagination_html}
   </div>
 </details>

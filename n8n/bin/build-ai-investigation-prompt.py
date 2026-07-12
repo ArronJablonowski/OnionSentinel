@@ -110,6 +110,14 @@ def parse_alert_json(value: str | None) -> dict:
         return {}
 
 
+def parse_json_object(value: str | None) -> dict:
+    try:
+        parsed = json.loads(value or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
 def safe_int(value: object, default: int = 0) -> int:
     try:
         if value in (None, ""):
@@ -220,6 +228,105 @@ def compact_pcap_analysis(record: dict) -> dict:
                 if isinstance(sample, dict)
             ],
         },
+    }
+
+
+def compact_public_enrichment_record(record: dict) -> dict:
+    """Keep public enrichment useful for the model without raw provider payloads."""
+    return {
+        "source": record.get("source"),
+        "indicator": record.get("indicator"),
+        "indicator_type": record.get("indicator_type"),
+        "verdict": record.get("verdict"),
+        "confidence": record.get("confidence"),
+        "tags": record.get("tags") if isinstance(record.get("tags"), list) else [],
+        "first_seen": record.get("first_seen"),
+        "last_seen": record.get("last_seen"),
+        "cached_at": record.get("cached_at"),
+    }
+
+
+def public_enrichment_context(conn: sqlite3.Connection, selected: sqlite3.Row, limit: int, include_tests: bool) -> dict:
+    """Collect normalized public enrichment for the selected duplicate group."""
+    filter_sql = ""
+    filter_params: list[object] = []
+    if not include_tests:
+        test_sql, filter_params = test_filter_sql("alert_id")
+        filter_sql = f"AND {test_sql}"
+    try:
+        candidates = rows(
+            conn,
+            f"""
+            SELECT alert_id, first_seen, last_seen, seen_count, rule_name, source_ip,
+                   destination_ip, destination_port, triage_level, triage_score,
+                   filter_status, suppression_key, enrichment_json
+            FROM alerts
+            WHERE COALESCE(filter_status, 'accepted') IN ('accepted', 'escalated', 'unknown', 'suppressed')
+              {filter_sql}
+            ORDER BY last_seen DESC, alert_id DESC
+            """,
+            filter_params,
+        )
+    except sqlite3.Error:
+        candidates = [selected]
+
+    selected_group_key = alert_group_key(selected)
+    group_rows = [item for item in candidates if alert_group_key(item) == selected_group_key] or [selected]
+    records: list[dict] = []
+    skipped: list[dict] = []
+    errors: list[dict] = []
+    indicators: dict[str, list[str]] = {}
+    seen_records: set[tuple[str, str, str]] = set()
+
+    for item in group_rows:
+        bundle = parse_json_object(str(sqlite_value(item, "enrichment_json") or ""))
+        external = bundle.get("external_intel") if isinstance(bundle.get("external_intel"), dict) else bundle
+        for record in external.get("records", []) if isinstance(external.get("records"), list) else []:
+            if not isinstance(record, dict):
+                continue
+            compact = compact_public_enrichment_record(record)
+            key = (
+                str(compact.get("source") or ""),
+                str(compact.get("indicator_type") or ""),
+                str(compact.get("indicator") or ""),
+            )
+            if key in seen_records:
+                continue
+            seen_records.add(key)
+            records.append(compact)
+            if len(records) >= limit:
+                break
+        for item_list, target in ((external.get("skipped"), skipped), (external.get("errors"), errors)):
+            if isinstance(item_list, list):
+                for entry in item_list[:limit]:
+                    if isinstance(entry, dict):
+                        target.append({key: entry.get(key) for key in ("source", "reason", "indicator", "indicator_type") if key in entry})
+                    else:
+                        target.append({"reason": str(entry)})
+        raw_indicators = external.get("indicators") if isinstance(external.get("indicators"), dict) else {}
+        for key, value in raw_indicators.items():
+            if isinstance(value, list):
+                indicators[str(key)] = [str(item) for item in value[:limit]]
+        if len(records) >= limit:
+            break
+
+    verdict_counts: dict[str, int] = {}
+    for record in records:
+        verdict = str(record.get("verdict") or "unknown").lower()
+        verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
+
+    return {
+        "records": records,
+        "record_limit": limit,
+        "verdict_counts": verdict_counts,
+        "indicators": indicators,
+        "skipped": skipped[:limit],
+        "errors": errors[:limit],
+        "usage_guidance": (
+            "Use public enrichment records as reputation/context evidence, not as sole proof of compromise. "
+            "Mention malicious, suspicious, benign, scanner/noise, and unknown verdicts when they affect assessment, "
+            "false-positive reasoning, escalation, or SIEM tuning."
+        ),
     }
 
 
@@ -484,6 +591,7 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
         ),
     }
     pcap_context = pcap_evidence_context(conn, selected, args.pcap_analysis_dir, args.pcap_analysis_limit)
+    enrichment_context = public_enrichment_context(conn, selected, args.related_limit, args.include_tests)
     return {
         "package_type": "soc-ai-investigation-prompt",
         "generated_at": project_now(),
@@ -496,9 +604,11 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             "grounding": [
                 "Use only the provided evidence.",
                 "Use agent_memory.role_memory and agent_memory.shared_memory as analyst memory context when relevant.",
+                "Use public_enrichment records when present; weigh verdicts, confidence, tags, and skipped/error notes in the overall assessment.",
                 "Use pcap_evidence.parsed_evidence when present; prefer Zeek summaries for flows/protocols and TShark summaries for packet-level corroboration.",
                 "If memory conflicts with current alert evidence, prefer the current alert evidence and mention the conflict.",
                 "Use grouped_alert_context.total_observations and raw_alert_rows when judging urgency, repeat behavior, and tuning.",
+                "Start the assessment with a BLUF classification. Classify whether the detection outcome is true-positive malicious, true-positive suspicious, true-positive authorized/benign, false positive, duplicate, informational/no-action, or inconclusive based on whether the rule correctly identified the intended behavior and whether the behavior appears malicious, suspicious, authorized, benign, or unknown.",
                 "Do not invent packet contents, hostnames, users, process names, files, commands, or malware family names.",
                 "If evidence is missing, say what is missing.",
                 "Separate facts from hypotheses.",
@@ -507,10 +617,13 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             "task": "Explain likely meaning, repeat frequency, false positive possibilities, urgency, next investigative steps, tuning actions, and whether a hosted second opinion is warranted.",
         },
         "response_schema": {
+            "detection_outcome": "true_positive_malicious|true_positive_suspicious|true_positive_authorized_benign|false_positive_logic_rule|false_positive_data_parser|false_positive_bad_intel_ioc|duplicate|informational_no_action|inconclusive",
+            "bluf": "Bottom-line sentence that starts with the classification and briefly states why.",
             "summary": "string",
             "likely_meaning": "string",
             "severity_reasoning": "string",
             "alert_frequency_assessment": "string",
+            "public_enrichment_findings": ["string"],
             "pcap_analysis_findings": ["string"],
             "false_positive_possibilities": ["string"],
             "recommended_next_steps": ["string"],
@@ -525,6 +638,7 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
         },
         "alert": compact_alert(selected),
         "grouped_alert_context": group_context,
+        "public_enrichment": enrichment_context,
         "pcap_evidence": pcap_context,
         "related_alerts": related_alerts(conn, selected, args.related_limit, args.include_tests),
         "recent_notifications": notification_context(conn, selected),

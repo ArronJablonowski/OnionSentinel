@@ -36,6 +36,19 @@ def system_health_page_section() -> str:
       </section>
       <section class="system-health-panel" aria-label="Beacon history">
         <div class="system-health-panel-title"><h3>Beacon events</h3><span id="health-event-note">Last 24 hours</span></div>
+        <div class="system-health-table-controls" aria-label="Beacon events pagination">
+          <label>Rows
+            <select id="health-beacon-page-size">
+              <option value="25" selected>25</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+              <option value="250">250</option>
+            </select>
+          </label>
+          <button id="health-beacon-prev" type="button">Previous</button>
+          <span id="health-beacon-page-label">Page 1 of 1</span>
+          <button id="health-beacon-next" type="button">Next</button>
+        </div>
         <div class="system-health-table-wrap">
           <table class="system-health-table">
             <thead><tr><th>Time</th><th>Result</th><th>Stage</th><th>Relay</th><th>Alerts</th><th>HTTP</th><th>Details</th></tr></thead>
@@ -48,7 +61,7 @@ def system_health_page_section() -> str:
 
 SYSTEM_HEALTH_CSS = '''
 <style>
-.system-health-link{display:block;text-decoration:none}.system-health-view{display:grid;gap:14px;padding-top:8px}.system-health-hero{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;align-items:end;border-bottom:1px solid rgba(148,163,184,.12);padding:4px 0 16px}.system-health-hero h2{margin:8px 0 5px;color:#f5f9ff;font-size:26px;line-height:1;letter-spacing:-.02em}.system-health-hero p{max-width:82ch;margin:0;color:#9aaabd;font-size:13px;line-height:1.45}.system-health-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.system-health-kpis article,.system-health-panel{border:1px solid rgba(148,163,184,.11);border-radius:8px;background:#0d1620}.system-health-kpis article{padding:11px 12px}.system-health-kpis span{display:block;color:#8ff4ff;font-size:10px;font-weight:950;text-transform:uppercase;letter-spacing:.1em}.system-health-kpis strong{display:block;margin-top:7px;color:#f7fbff;font-size:18px;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.system-health-kpis em{display:block;margin-top:6px;color:#91a4ba;font-size:11.5px;font-style:normal;line-height:1.35}.system-health-panel{overflow:hidden}.system-health-panel-title{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border-bottom:1px solid rgba(148,163,184,.10);background:#101b26}.system-health-panel-title h3{margin:0;color:#f4f8ff;font-size:16px;letter-spacing:-.01em}.system-health-panel-title span{color:#91a4ba;font-size:12px}.health-gap-list{display:grid;gap:8px;padding:12px}.health-gap-item{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;border:1px solid rgba(246,199,109,.22);border-radius:8px;padding:9px 10px;background:rgba(246,199,109,.055);color:#dce8f7;font-size:12px}.health-gap-item b{color:#f6c76d}.health-gap-item code{color:#f3f8ff;background:transparent;font:11.5px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}.health-gap-empty{padding:12px;color:#91a4ba;font-size:12px}.health-pcap-details{display:grid;gap:10px;padding:12px}.health-pcap-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.health-pcap-grid div{min-width:0;border:1px solid rgba(148,163,184,.11);border-radius:8px;padding:9px;background:rgba(148,163,184,.035)}.health-pcap-grid b{display:block;color:#8ff4ff;font-size:10px;text-transform:uppercase;letter-spacing:.08em}.health-pcap-grid span{display:block;min-width:0;margin-top:5px;color:#dce8f7;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.health-pcap-warnings{display:grid;gap:6px}.health-pcap-warnings span{border:1px solid rgba(251,113,133,.28);border-radius:8px;padding:8px 10px;color:#ff9aae;background:rgba(251,113,133,.065);font-size:12px;font-weight:800}.health-pcap-recent{overflow:auto;border:1px solid rgba(148,163,184,.11);border-radius:8px}.health-pcap-recent table{width:100%;min-width:980px;border-collapse:collapse}.health-pcap-recent th{padding:8px 10px;color:#91a4ba;background:#101b26;border-bottom:1px solid rgba(148,163,184,.10);font-size:10px;text-align:left;text-transform:uppercase;letter-spacing:.08em}.health-pcap-recent td{padding:9px 10px;border-bottom:1px solid rgba(148,163,184,.08);color:#d7e3f1;font-size:12px}.health-pcap-recent code{color:#dce9f8;background:rgba(148,163,184,.05);border:1px solid rgba(148,163,184,.12);border-radius:6px;padding:3px 6px;font-size:11.5px;white-space:nowrap}.system-health-table-wrap{overflow:auto}.system-health-table{width:100%;min-width:980px;border-collapse:collapse}.system-health-table th{padding:9px 11px;border-bottom:1px solid rgba(148,163,184,.12);color:#96a6b8;background:#101b26;font-size:10px;font-weight:900;text-align:left;text-transform:uppercase;letter-spacing:.08em}.system-health-table td{padding:11px;border-bottom:1px solid rgba(148,163,184,.09);vertical-align:top;color:#d7e3f1;font-size:12.5px;line-height:1.35}.system-health-table code{color:#dce9f8;background:rgba(148,163,184,.05);border:1px solid rgba(148,163,184,.12);border-radius:6px;padding:3px 6px;font-size:11.5px;white-space:nowrap}.health-result{display:inline-flex;align-items:center;border:1px solid rgba(34,197,94,.24);border-radius:999px;padding:3px 8px;color:#86efac;background:rgba(34,197,94,.055);font-size:10.5px;font-weight:950;text-transform:uppercase;letter-spacing:.04em}.health-result.failed{border-color:rgba(251,113,133,.34);color:#fb7185;background:rgba(251,113,133,.075)}.health-row-failed{background:rgba(251,113,133,.045)}.health-row-failed td{border-bottom-color:rgba(251,113,133,.16)}@media(max-width:1100px){.health-pcap-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:900px){.system-health-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.system-health-hero{grid-template-columns:1fr}}@media(max-width:620px){.system-health-kpis,.health-pcap-grid{grid-template-columns:1fr}.health-gap-item{grid-template-columns:1fr}}
+.system-health-link{display:block;text-decoration:none}.system-health-view{display:grid;gap:14px;min-width:0;padding-top:8px}.system-health-hero{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;align-items:end;border-bottom:1px solid rgba(148,163,184,.12);padding:4px 0 16px}.system-health-hero h2{margin:8px 0 5px;color:#f5f9ff;font-size:26px;line-height:1;letter-spacing:-.02em}.system-health-hero p{max-width:82ch;margin:0;color:#9aaabd;font-size:13px;line-height:1.45}.system-health-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.system-health-kpis article,.system-health-panel{min-width:0;border:1px solid rgba(148,163,184,.11);border-radius:8px;background:#0d1620}.system-health-kpis article{padding:11px 12px}.system-health-kpis span{display:block;color:#8ff4ff;font-size:10px;font-weight:950;text-transform:uppercase;letter-spacing:.1em}.system-health-kpis strong{display:block;margin-top:7px;color:#f7fbff;font-size:18px;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.system-health-kpis em{display:block;margin-top:6px;color:#91a4ba;font-size:11.5px;font-style:normal;line-height:1.35}.system-health-panel{overflow:hidden}.system-health-panel-title{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border-bottom:1px solid rgba(148,163,184,.10);background:#101b26}.system-health-panel-title h3{margin:0;color:#f4f8ff;font-size:16px;letter-spacing:-.01em}.system-health-panel-title span{color:#91a4ba;font-size:12px}.system-health-table-controls{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:9px 12px;border-bottom:1px solid rgba(148,163,184,.08);background:rgba(16,27,38,.55);color:#91a4ba;font-size:12px;font-weight:800}.system-health-table-controls label{display:inline-flex;align-items:center;gap:7px}.system-health-table-controls select,.system-health-table-controls button{border:1px solid rgba(143,244,255,.28);border-radius:8px;background:#08111a;color:#dce8f7;font:inherit;font-weight:900}.system-health-table-controls select{min-height:36px;padding:4px 26px 4px 9px}.system-health-table-controls button{min-height:36px;padding:5px 10px}.system-health-table-controls button:disabled{opacity:.45;cursor:not-allowed}.health-gap-list{display:grid;gap:8px;padding:12px}.health-gap-item{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;border:1px solid rgba(246,199,109,.22);border-radius:8px;padding:9px 10px;background:rgba(246,199,109,.055);color:#dce8f7;font-size:12px}.health-gap-item b{color:#f6c76d}.health-gap-item code{color:#f3f8ff;background:transparent;font:11.5px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}.health-gap-empty{padding:12px;color:#91a4ba;font-size:12px}.health-pcap-details{display:grid;gap:10px;padding:12px}.health-pcap-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.health-pcap-grid div{min-width:0;border:1px solid rgba(148,163,184,.11);border-radius:8px;padding:9px;background:rgba(148,163,184,.035)}.health-pcap-grid b{display:block;color:#8ff4ff;font-size:10px;text-transform:uppercase;letter-spacing:.08em}.health-pcap-grid span{display:block;min-width:0;margin-top:5px;color:#dce8f7;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.health-pcap-warnings{display:grid;gap:6px}.health-pcap-warnings span{border:1px solid rgba(251,113,133,.28);border-radius:8px;padding:8px 10px;color:#ff9aae;background:rgba(251,113,133,.065);font-size:12px;font-weight:800}.health-pcap-recent{max-width:100%;overflow:auto;border:1px solid rgba(148,163,184,.11);border-radius:8px;box-shadow:inset -18px 0 18px -18px rgba(143,244,255,.38)}.health-pcap-recent table{width:100%;min-width:860px;border-collapse:collapse}.health-pcap-recent th{padding:8px 10px;color:#91a4ba;background:#101b26;border-bottom:1px solid rgba(148,163,184,.10);font-size:10px;text-align:left;text-transform:uppercase;letter-spacing:.08em}.health-pcap-recent td{padding:9px 10px;border-bottom:1px solid rgba(148,163,184,.08);color:#d7e3f1;font-size:12px;overflow-wrap:anywhere}.health-pcap-recent code{color:#dce9f8;background:rgba(148,163,184,.05);border:1px solid rgba(148,163,184,.12);border-radius:6px;padding:3px 6px;font-size:11.5px;white-space:normal;overflow-wrap:anywhere}.system-health-table-wrap{max-width:100%;overflow:auto;box-shadow:inset -18px 0 18px -18px rgba(143,244,255,.38)}.system-health-table{width:100%;min-width:860px;border-collapse:collapse}.system-health-table th{padding:9px 11px;border-bottom:1px solid rgba(148,163,184,.12);color:#96a6b8;background:#101b26;font-size:10px;font-weight:900;text-align:left;text-transform:uppercase;letter-spacing:.08em}.system-health-table td{padding:11px;border-bottom:1px solid rgba(148,163,184,.09);vertical-align:top;color:#d7e3f1;font-size:12.5px;line-height:1.35;overflow-wrap:anywhere}.system-health-table code{color:#dce9f8;background:rgba(148,163,184,.05);border:1px solid rgba(148,163,184,.12);border-radius:6px;padding:3px 6px;font-size:11.5px;white-space:normal;overflow-wrap:anywhere}.health-result{display:inline-flex;align-items:center;border:1px solid rgba(34,197,94,.24);border-radius:999px;padding:3px 8px;color:#86efac;background:rgba(34,197,94,.055);font-size:10.5px;font-weight:950;text-transform:uppercase;letter-spacing:.04em}.health-result.failed{border-color:rgba(251,113,133,.34);color:#fb7185;background:rgba(251,113,133,.075)}.health-row-failed{background:rgba(251,113,133,.045)}.health-row-failed td{border-bottom-color:rgba(251,113,133,.16)}@media(max-width:1100px){.health-pcap-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:900px){.system-health-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.system-health-hero{grid-template-columns:1fr}.system-health-view .alerts-refresh{min-width:44px;min-height:44px}}@media(max-width:620px){.system-health-kpis,.health-pcap-grid{grid-template-columns:1fr}.system-health-kpis strong{white-space:normal;overflow-wrap:anywhere;line-height:1.18}.health-gap-item{grid-template-columns:1fr}.system-health-table-controls{justify-content:flex-start;flex-wrap:wrap}.system-health-table-wrap,.health-pcap-recent{overflow:visible;box-shadow:none}.system-health-table,.health-pcap-recent table,.system-health-table tbody,.health-pcap-recent tbody,.system-health-table tr,.health-pcap-recent tr,.system-health-table td,.health-pcap-recent td{display:block;width:100%;min-width:0;box-sizing:border-box}.system-health-table thead,.health-pcap-recent thead{display:none}.system-health-table tr,.health-pcap-recent tr{padding:10px 12px;border-top:1px solid rgba(148,163,184,.12)}.system-health-table td,.health-pcap-recent td{display:grid;grid-template-columns:86px minmax(0,1fr);gap:8px;border:0;padding:5px 0}.system-health-table td::before,.health-pcap-recent td::before{color:#8ff4ff;font-size:10px;font-weight:950;letter-spacing:.08em;text-transform:uppercase}.system-health-table td:nth-child(1)::before{content:"Time"}.system-health-table td:nth-child(2)::before{content:"Result"}.system-health-table td:nth-child(3)::before{content:"HTTP"}.system-health-table td:nth-child(4)::before{content:"Age"}.system-health-table td:nth-child(5)::before{content:"Gap"}.system-health-table td:nth-child(6)::before{content:"Source"}.system-health-table td:nth-child(7)::before{content:"Detail"}.health-pcap-recent td:nth-child(1)::before{content:"Updated"}.health-pcap-recent td:nth-child(2)::before{content:"Status"}.health-pcap-recent td:nth-child(3)::before{content:"Request"}.health-pcap-recent td:nth-child(4)::before{content:"Group"}.health-pcap-recent td:nth-child(5)::before{content:"Size"}.health-pcap-recent td:nth-child(6)::before{content:"Error"}}
 </style>
 '''
 
@@ -66,15 +79,41 @@ SYSTEM_HEALTH_JS = '''
   const gapNote = document.querySelector('#health-gap-note');
   const rows = document.querySelector('#health-beacon-rows');
   const eventNote = document.querySelector('#health-event-note');
+  const beaconPageSizeSelect = document.querySelector('#health-beacon-page-size');
+  const beaconPrev = document.querySelector('#health-beacon-prev');
+  const beaconNext = document.querySelector('#health-beacon-next');
+  const beaconPageLabel = document.querySelector('#health-beacon-page-label');
   const pcapQueue = document.querySelector('#health-pcap-queue');
   const pcapQueueDetail = document.querySelector('#health-pcap-queue-detail');
   const pcapParser = document.querySelector('#health-pcap-parser');
   const pcapParserDetail = document.querySelector('#health-pcap-parser-detail');
   const pcapNote = document.querySelector('#health-pcap-note');
   const pcapDetails = document.querySelector('#health-pcap-details');
+  let beaconEntries = [];
+  let beaconGeneratedAt = '';
+  let beaconPage = 1;
+  let beaconPageSize = 25;
+  let pcapSnapshot = {};
+  let pcapRecentRequests = [];
+  let pcapPage = 1;
+  let pcapPageSize = 25;
   const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
   const fmt = value => typeof formatProjectIso === 'function' ? formatProjectIso(value) : String(value || '');
   const bytes = value => typeof formatApiBytes === 'function' ? formatApiBytes(Number(value || 0)) : `${Number(value || 0)} B`;
+  function pageInfo(total, page, pageSize) {
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const safePage = Math.min(Math.max(1, page), totalPages);
+    const start = total ? ((safePage - 1) * pageSize) : 0;
+    const end = total ? Math.min(start + pageSize, total) : 0;
+    return {page: safePage, totalPages, start, end};
+  }
+  function updatePager({total, page, pageSize, prev, next, label}) {
+    const info = pageInfo(total, page, pageSize);
+    if (prev) prev.disabled = info.page <= 1;
+    if (next) next.disabled = info.page >= info.totalPages;
+    if (label) label.textContent = `Page ${info.page} of ${info.totalPages} · Showing ${total ? info.start + 1 : 0}-${info.end} of ${total}`;
+    return info;
+  }
   function detailText(entry) {
     if (entry.error) return entry.error;
     if (entry.rule_name) return entry.rule_name;
@@ -95,13 +134,18 @@ SYSTEM_HEALTH_JS = '''
         <span>${esc(gap.status || 'closed')}</span>
       </div>`).join('');
   }
-  function renderRows(entries) {
+  function renderRows() {
     if (!rows) return;
-    if (!entries.length) {
+    if (!beaconEntries.length) {
       rows.innerHTML = '<tr><td colspan="7">No beacon history found in the last 24 hours.</td></tr>';
+      updatePager({total: 0, page: 1, pageSize: beaconPageSize, prev: beaconPrev, next: beaconNext, label: beaconPageLabel});
       return;
     }
-    rows.innerHTML = [...entries].reverse().map(entry => {
+    const sorted = [...beaconEntries].reverse();
+    const info = updatePager({total: sorted.length, page: beaconPage, pageSize: beaconPageSize, prev: beaconPrev, next: beaconNext, label: beaconPageLabel});
+    beaconPage = info.page;
+    if (eventNote) eventNote.textContent = `${sorted.length} event(s), generated ${fmt(beaconGeneratedAt)}`;
+    rows.innerHTML = sorted.slice(info.start, info.end).map(entry => {
       const failed = !entry.successful;
       return `<tr class="${failed ? 'health-row-failed' : ''}">
         <td><code>${esc(fmt(entry.timestamp))}</code></td>
@@ -114,7 +158,26 @@ SYSTEM_HEALTH_JS = '''
       </tr>`;
     }).join('');
   }
+  function renderPcapTableControls(total) {
+    const info = updatePager({total, page: pcapPage, pageSize: pcapPageSize});
+    pcapPage = info.page;
+    return `<div class="system-health-table-controls" aria-label="PCAP workflow pagination">
+      <label>Rows
+        <select id="health-pcap-page-size">
+          ${[25, 50, 100, 250].map(size => `<option value="${size}" ${size === pcapPageSize ? 'selected' : ''}>${size}</option>`).join('')}
+        </select>
+      </label>
+      <button id="health-pcap-prev" type="button" ${info.page <= 1 ? 'disabled' : ''}>Previous</button>
+      <span id="health-pcap-page-label">Page ${info.page} of ${info.totalPages} · Showing ${total ? info.start + 1 : 0}-${info.end} of ${total}</span>
+      <button id="health-pcap-next" type="button" ${info.page >= info.totalPages ? 'disabled' : ''}>Next</button>
+    </div>`;
+  }
   function renderPcapHealth(pcap) {
+    if (pcap) {
+      pcapSnapshot = pcap;
+      pcapRecentRequests = Array.isArray(pcap?.recent_requests) ? pcap.recent_requests : [];
+    }
+    pcap = pcapSnapshot || {};
     const counts = pcap?.request_counts || {};
     const queued = Number(counts.pending || 0) + Number(counts.claimed || 0);
     if (pcapQueue) pcapQueue.textContent = String(queued);
@@ -135,12 +198,15 @@ SYSTEM_HEALTH_JS = '''
       const latestRequest = pcap?.latest_request || {};
       const latestAnalysis = pcap?.latest_analysis || {};
       const warnings = Array.isArray(pcap?.warnings) ? pcap.warnings : [];
-      const recent = Array.isArray(pcap?.recent_requests) ? pcap.recent_requests : [];
+      const recent = pcapRecentRequests;
+      const page = pageInfo(recent.length, pcapPage, pcapPageSize);
+      pcapPage = page.page;
+      const visibleRecent = recent.slice(page.start, page.end);
       const warningHtml = warnings.length
         ? `<div class="health-pcap-warnings">${warnings.map(item => `<span>${esc(item)}</span>`).join('')}</div>`
         : '<div class="health-gap-empty">No stale PCAP queue items or unexpected PCAP failures.</div>';
       const recentHtml = recent.length
-        ? `<div class="health-pcap-recent"><table><thead><tr><th>Updated</th><th>Status</th><th>Request</th><th>Group</th><th>Size</th><th>Error</th></tr></thead><tbody>${recent.map(item => `<tr><td><code>${esc(item.updated_at ? fmt(item.updated_at) : 'n/a')}</code></td><td><span class="pcap-status-pill pcap-status-${esc(String(item.status || 'none').toLowerCase())}">${esc(item.status || 'n/a')}</span></td><td><code>${esc(item.request_id || 'n/a')}</code></td><td><code>${esc(item.group_id || 'n/a')}</code></td><td>${esc(bytes(item.artifact_size_bytes || 0))}</td><td>${esc(item.error || '')}</td></tr>`).join('')}</tbody></table></div>`
+        ? `${renderPcapTableControls(recent.length)}<div class="health-pcap-recent"><table><thead><tr><th>Updated</th><th>Status</th><th>Request</th><th>Group</th><th>Size</th><th>Error</th></tr></thead><tbody>${visibleRecent.map(item => `<tr><td><code>${esc(item.updated_at ? fmt(item.updated_at) : 'n/a')}</code></td><td><span class="pcap-status-pill pcap-status-${esc(String(item.status || 'none').toLowerCase())}">${esc(item.status || 'n/a')}</span></td><td><code>${esc(item.request_id || 'n/a')}</code></td><td><code>${esc(item.group_id || 'n/a')}</code></td><td>${esc(bytes(item.artifact_size_bytes || 0))}</td><td>${esc(item.error || '')}</td></tr>`).join('')}</tbody></table></div>`
         : '<div class="health-gap-empty">No PCAP request history found.</div>';
       pcapDetails.innerHTML = `
         ${warningHtml}
@@ -174,10 +240,12 @@ SYSTEM_HEALTH_JS = '''
       if (unsuccessful) unsuccessful.textContent = String(summary.unsuccessful || 0);
       if (gaps) gaps.textContent = String(summary.gap_count || 0);
       if (gapNote) gapNote.textContent = summary.gap_count ? `${summary.gap_count} gap(s) require review` : 'No gaps over 10 minutes';
-      if (eventNote) eventNote.textContent = `${summary.total || 0} event(s), generated ${fmt(data.generated_at)}`;
+      beaconGeneratedAt = data.generated_at || '';
+      beaconEntries = Array.isArray(data.entries) ? data.entries : [];
+      beaconPage = Math.min(beaconPage, Math.max(1, Math.ceil(beaconEntries.length / beaconPageSize)));
       renderPcapHealth(data.pcap || {});
       renderGaps(data.gaps || []);
-      renderRows(data.entries || []);
+      renderRows();
     } catch (error) {
       if (latest) latest.textContent = 'Unavailable';
       if (latestDetail) latestDetail.textContent = String(error.message || error);
@@ -187,6 +255,40 @@ SYSTEM_HEALTH_JS = '''
       refreshButton?.classList.remove('refreshing');
     }
   }
+  beaconPageSizeSelect?.addEventListener('change', () => {
+    beaconPageSize = Number(beaconPageSizeSelect.value || 25) || 25;
+    beaconPage = 1;
+    renderRows();
+  });
+  beaconPrev?.addEventListener('click', () => {
+    if (beaconPage > 1) {
+      beaconPage -= 1;
+      renderRows();
+    }
+  });
+  beaconNext?.addEventListener('click', () => {
+    beaconPage += 1;
+    renderRows();
+  });
+  pcapDetails?.addEventListener('change', event => {
+    if (event.target?.id !== 'health-pcap-page-size') return;
+    pcapPageSize = Number(event.target.value || 25) || 25;
+    pcapPage = 1;
+    renderPcapHealth(null);
+  });
+  pcapDetails?.addEventListener('click', event => {
+    if (event.target?.id === 'health-pcap-prev') {
+      if (pcapPage > 1) {
+        pcapPage -= 1;
+        renderPcapHealth(null);
+      }
+      return;
+    }
+    if (event.target?.id === 'health-pcap-next') {
+      pcapPage += 1;
+      renderPcapHealth(null);
+    }
+  });
   refreshButton?.addEventListener('click', loadHealth);
   loadHealth();
   setInterval(loadHealth, 60000);

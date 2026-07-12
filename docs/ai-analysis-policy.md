@@ -118,6 +118,10 @@ As of 2026-07-02, prompt packages also include `grouped_alert_context` with the 
 - Selected alert from alert-store SQLite.
 - Deterministic triage score, level, routing, and reasons.
 - Curated raw alert subset.
+- Compact public enrichment evidence from `enrichment_json`, including source,
+  indicator, type, verdict, confidence, tags, first/last seen, cache time,
+  skipped sources, and provider errors. Raw provider API responses are not
+  included in prompt packages.
 - Related alerts from SQLite.
 - Recent Telegram notification context.
 - Latest daily SOC rollup excerpt.
@@ -131,11 +135,14 @@ The model must return valid JSON with these fields:
 
 ```json
 {
+  "detection_outcome": "true_positive_malicious|true_positive_suspicious|true_positive_authorized_benign|false_positive_logic_rule|false_positive_data_parser|false_positive_bad_intel_ioc|duplicate|informational_no_action|inconclusive",
+  "bluf": "Bottom-line sentence that starts with the classification and briefly states why.",
   "summary": "string",
   "likely_meaning": "string",
   "severity_reasoning": "string",
-  "pcap_analysis_findings": ["string"],
   "alert_frequency_assessment": "string",
+  "public_enrichment_findings": ["string"],
+  "pcap_analysis_findings": ["string"],
   "false_positive_possibilities": ["string"],
   "recommended_next_steps": ["string"],
   "evidence_used": ["string"],
@@ -148,6 +155,21 @@ The model must return valid JSON with these fields:
   "recommended_tuning_actions": ["string"]
 }
 ```
+
+The BLUF fields use SOC detection outcome taxonomy:
+
+- `true_positive_malicious`: detection correctly identified actual attacker,
+  malware, or unauthorized activity.
+- `true_positive_suspicious`: detection correctly identified real concerning
+  behavior that needs action, but maliciousness is not fully proven.
+- `true_positive_authorized_benign`: detection correctly identified real
+  behavior that appears approved, expected, or business/lab justified.
+- `false_positive_logic_rule`, `false_positive_data_parser`, or
+  `false_positive_bad_intel_ioc`: detection fired incorrectly because the
+  activity did not match the intended behavior, data/parser quality was wrong,
+  or threat intelligence was bad/noisy.
+- `duplicate`, `informational_no_action`, or `inconclusive`: repeated,
+  low-action, or insufficient-evidence outcomes.
 
 ## Guardrails
 
@@ -298,6 +320,16 @@ is planned for a 6 hour cron review after analysis backlog clears, Cyber Threat
 Intel is manual until scheduled intelligence briefs are built, and Threat Hunter
 is manual until automated hunts are built.
 
+SOC Alerts table rows also provide a manual `Analyze` action. The action posts
+only the dashboard group id to the Mac Studio portal, which resolves the newest
+matching alert in SQLite and creates a fresh SOC Analyst prompt package locally.
+The prompt package uses the same bounded evidence model as scheduled analysis:
+all grouped alert observations, public enrichment, parsed PCAP evidence when
+available, prior reports/comments, notification context, and agent memory. A
+newer prompt package intentionally makes the previous JSON analysis stale, so
+the next scheduled AI worker run reanalyzes that grouped detection even when it
+was already analyzed before.
+
 Cyber Security Agent Markdown memory files:
 
 ```text
@@ -335,11 +367,26 @@ Output:
 ```text
 $HOME/n8n-local/soc-alerts/ai-analysis/*-local-ai-analysis.md
 $HOME/n8n-local/soc-alerts/ai-analysis/*-local-ai-analysis.json
+$HOME/n8n-local/soc-alerts/llm-analysis-logs/llm-analysis-log.jsonl
+$HOME/n8n-local/soc-alerts/llm-analysis-logs/current-analysis.json
 ```
 
 The runner validates required response keys before writing output. It can also
 accept a saved response via `--response-json`, which is useful for Hermes/manual
 testing without calling Ollama.
+
+Each run also appends one operational audit row to `llm-analysis-log.jsonl` and
+updates `current-analysis.json`. The log records the alert/group being analyzed,
+model route and model name, start and finish timestamps, runtime in seconds,
+number of grouped alert rows/observations, success or failure, output artifact
+paths, maximum GPU temperature, maximum GPU utilization percentage, maximum CPU
+temperature, maximum SoC package temperature, maximum system memory percentage,
+maximum total power draw in watts, and maximum CPU usage percentage seen during
+the run. On the Mac Studio, the runner samples these values with
+`mactop --headless --format json --count 1`; it looks in Homebrew paths first so
+launchd jobs do not depend on an interactive shell `PATH`. If `mactop` or a
+metric is unavailable, the log stores `null` plus a short reason instead of
+inventing a value.
 
 Validated 2026-07-02:
 
@@ -435,6 +482,8 @@ Operational logs:
 ```text
 $HOME/n8n-local/logs/ai-analysis.out.log
 $HOME/n8n-local/logs/ai-analysis.err.log
+$HOME/n8n-local/soc-alerts/llm-analysis-logs/llm-analysis-log.jsonl
+$HOME/n8n-local/soc-alerts/llm-analysis-logs/current-analysis.json
 ```
 
 Validated 2026-07-02:
