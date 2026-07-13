@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import contextlib
+import hashlib
 import io
 import os
 import sys
@@ -129,6 +130,51 @@ class RelayPcapBrokerTest(unittest.TestCase):
             self.assertFalse(old_part.exists())
             self.assertTrue(active_part.exists())
             self.assertTrue(completed_tar.exists())
+
+    def test_stale_completed_spool_artifacts_are_pruned(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            spool = Path(temp_dir)
+            stale = spool / "stale-request.tar"
+            recent = spool / "recent-request.tar"
+            stale.write_bytes(b"stale")
+            recent.write_bytes(b"recent")
+            old_mtime = time.time() - 7200
+            os.utime(stale, (old_mtime, old_mtime))
+
+            removed = self.relay.cleanup_stale_spool_artifacts(
+                {
+                    "pcap_broker": {
+                        "artifact_spool_dir": str(spool),
+                        "artifact_spool_completed_ttl_seconds": 3600,
+                    }
+                }
+            )
+
+            self.assertEqual(removed, 1)
+            self.assertFalse(stale.exists())
+            self.assertTrue(recent.exists())
+
+    def test_retry_reuses_verified_completed_spool_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            spool = Path(temp_dir)
+            artifact = spool / "pcap-unit-test.tar"
+            artifact.write_bytes(b"verified retry artifact")
+            digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            config = {"pcap_broker": {"artifact_spool_dir": str(spool)}}
+            result = {
+                "request_id": "pcap-unit-test",
+                "artifact_path": "/nsm/pcapout/onion-sentinel/pcap-unit-test.tar",
+                "artifact_size_bytes": artifact.stat().st_size,
+                "artifact_sha256": digest,
+            }
+
+            with mock.patch.object(self.relay, "require_spool_capacity") as capacity:
+                with mock.patch.object(self.relay.subprocess, "run") as run:
+                    returned = self.relay.spool_pcap_artifact_from_security_onion(config, {}, result)
+
+            self.assertEqual(returned, artifact)
+            capacity.assert_not_called()
+            run.assert_not_called()
 
     def test_broker_paths_can_match_n8n_webhook_routes(self) -> None:
         request = {"request_id": "pcap-unit-test", "source_ip": "192.0.2.10", "destination_ip": "198.51.100.10"}

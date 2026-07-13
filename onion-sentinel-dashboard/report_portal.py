@@ -36,6 +36,8 @@ if str(PORTAL_SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(PORTAL_SOURCE_DIR))
 
 import soc_alert_api
+from artifact_cache import ArtifactCache
+from response_cache import ResponseCache
 
 HOME = Path.home()
 DEFAULT_PORT = 8765
@@ -91,7 +93,8 @@ SOC_ALERT_LEVEL_RANK = {
 SOC_ALERT_AI_ELIGIBLE_FILTER_STATUSES = {"accepted", "escalated", "unknown", "suppressed"}
 SOC_ALERT_TEST_PREFIXES = ("phase", "config-", "internal-test-", "sqlite-", "policy-", "codex-")
 SOC_ALERT_ARTIFACT_CACHE_TTL_SECONDS = 5.0
-_SOC_ALERT_ARTIFACT_CACHE: dict[str, tuple[float, tuple[str, int], object]] = {}
+SOC_ALERT_ARTIFACT_CACHE = ArtifactCache(SOC_ALERT_ARTIFACT_CACHE_TTL_SECONDS)
+SOC_ALERT_RESPONSE_CACHE = ResponseCache(1.0)
 HERMES_DR_BACKUP_DIR = HOME / "Hermes_DR_Backups"
 HERMES_DR_REMOTE_DEST = "aj_lab@10.77.7.222"
 HERMES_DR_REMOTE_DIR = "/Users/aj_lab/Hermes_DR_Backups"
@@ -3883,52 +3886,37 @@ def soc_alert_has_parsed_pcap(record: dict) -> bool:
     return bool(zeek.get("available") or tshark.get("available"))
 
 
-def artifact_cache_fingerprint(path: Path) -> tuple[str, int]:
-    """Return a cheap cache key for append-only runtime artifact directories."""
-    try:
-        return str(path), path.stat().st_mtime_ns
-    except OSError:
-        return str(path), 0
-
-
 def read_artifact_cache(name: str, path: Path) -> object | None:
-    cached = _SOC_ALERT_ARTIFACT_CACHE.get(name)
-    if not cached:
-        return None
-    cached_at, fingerprint, value = cached
-    if time.monotonic() - cached_at > SOC_ALERT_ARTIFACT_CACHE_TTL_SECONDS:
-        return None
-    return value if fingerprint == artifact_cache_fingerprint(path) else None
+    return SOC_ALERT_ARTIFACT_CACHE.get(name, path)
 
 
 def write_artifact_cache(name: str, path: Path, value: object) -> object:
-    _SOC_ALERT_ARTIFACT_CACHE[name] = (time.monotonic(), artifact_cache_fingerprint(path), value)
-    return value
+    return SOC_ALERT_ARTIFACT_CACHE.put(name, path, value)
 
 
 def soc_alert_pcap_analysis_index() -> dict[str, set[str]]:
     """Index parsed Zeek/TShark artifacts once per API response."""
-    cached = read_artifact_cache("pcap-analysis-index", SOC_ALERT_PCAP_ANALYSIS_DIR)
-    if isinstance(cached, dict):
-        return cached
-    index = {"request_ids": set(), "alert_ids": set(), "group_ids": set()}
-    if not SOC_ALERT_PCAP_ANALYSIS_DIR.exists():
+    def build_index() -> dict[str, set[str]]:
+        index = {"request_ids": set(), "alert_ids": set(), "group_ids": set()}
+        if not SOC_ALERT_PCAP_ANALYSIS_DIR.exists():
+            return index
+        for path in SOC_ALERT_PCAP_ANALYSIS_DIR.glob("*-pcap-analysis.json"):
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(record, dict) or not soc_alert_has_parsed_pcap(record):
+                continue
+            request = record.get("request") if isinstance(record.get("request"), dict) else {}
+            for key, bucket in (("request_id", "request_ids"), ("alert_id", "alert_ids"), ("group_id", "group_ids")):
+                value = str(request.get(key) or "").strip()
+                if value:
+                    index[bucket].add(value)
         return index
-    for path in SOC_ALERT_PCAP_ANALYSIS_DIR.glob("*-pcap-analysis.json"):
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if not isinstance(record, dict):
-            continue
-        if not soc_alert_has_parsed_pcap(record):
-            continue
-        request = record.get("request") if isinstance(record.get("request"), dict) else {}
-        for key, bucket in (("request_id", "request_ids"), ("alert_id", "alert_ids"), ("group_id", "group_ids")):
-            value = str(request.get(key) or "").strip()
-            if value:
-                index[bucket].add(value)
-    return write_artifact_cache("pcap-analysis-index", SOC_ALERT_PCAP_ANALYSIS_DIR, index)
+
+    return SOC_ALERT_ARTIFACT_CACHE.get_or_compute(
+        "pcap-analysis-index", SOC_ALERT_PCAP_ANALYSIS_DIR, build_index
+    )
 
 
 def soc_alert_pcap_request_statuses(conn: sqlite3.Connection, rows: list[sqlite3.Row | dict]) -> dict[str, dict]:
@@ -5172,39 +5160,39 @@ def soc_alert_latest_analysis_mtime(alert_id: str) -> float:
 def soc_alert_ai_artifact_index() -> dict[str, dict[str, float]]:
     """Index AI prompt/analysis artifact mtimes once for one API response."""
     cache_path = SOC_ALERT_AI_ANALYSIS_DIR.parent
-    cached = read_artifact_cache("ai-artifact-index", cache_path)
-    if isinstance(cached, dict):
-        return cached
-    prompt_mtime_by_alert: dict[str, float] = {}
-    analysis_mtime_by_alert: dict[str, float] = {}
-    prompt_dir_matches_analysis = (
-        SOC_ALERT_AI_PROMPT_DIR.exists()
-        and SOC_ALERT_AI_ANALYSIS_DIR.exists()
-        and SOC_ALERT_AI_PROMPT_DIR.parent == SOC_ALERT_AI_ANALYSIS_DIR.parent
-    )
-    if prompt_dir_matches_analysis:
-        for path in SOC_ALERT_AI_PROMPT_DIR.glob("*-ai-prompt.json"):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            alert = data.get("alert") if isinstance(data.get("alert"), dict) else {}
-            alert_id = str(alert.get("alert_id") or data.get("alert_id") or "").strip()
-            if alert_id:
-                prompt_mtime_by_alert[alert_id] = max(prompt_mtime_by_alert.get(alert_id, 0.0), path.stat().st_mtime)
-    if SOC_ALERT_AI_ANALYSIS_DIR.exists():
-        for path in SOC_ALERT_AI_ANALYSIS_DIR.glob("*-local-ai-analysis.json"):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            alert_id = str(data.get("alert_id") or "").strip()
-            if alert_id:
-                analysis_mtime_by_alert[alert_id] = max(analysis_mtime_by_alert.get(alert_id, 0.0), path.stat().st_mtime)
-    return write_artifact_cache("ai-artifact-index", cache_path, {
-        "prompt_mtime_by_alert": prompt_mtime_by_alert,
-        "analysis_mtime_by_alert": analysis_mtime_by_alert,
-    })
+    def build_index() -> dict[str, dict[str, float]]:
+        prompt_mtime_by_alert: dict[str, float] = {}
+        analysis_mtime_by_alert: dict[str, float] = {}
+        prompt_dir_matches_analysis = (
+            SOC_ALERT_AI_PROMPT_DIR.exists()
+            and SOC_ALERT_AI_ANALYSIS_DIR.exists()
+            and SOC_ALERT_AI_PROMPT_DIR.parent == SOC_ALERT_AI_ANALYSIS_DIR.parent
+        )
+        if prompt_dir_matches_analysis:
+            for path in SOC_ALERT_AI_PROMPT_DIR.glob("*-ai-prompt.json"):
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                alert = data.get("alert") if isinstance(data.get("alert"), dict) else {}
+                alert_id = str(alert.get("alert_id") or data.get("alert_id") or "").strip()
+                if alert_id:
+                    prompt_mtime_by_alert[alert_id] = max(prompt_mtime_by_alert.get(alert_id, 0.0), path.stat().st_mtime)
+        if SOC_ALERT_AI_ANALYSIS_DIR.exists():
+            for path in SOC_ALERT_AI_ANALYSIS_DIR.glob("*-local-ai-analysis.json"):
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                alert_id = str(data.get("alert_id") or "").strip()
+                if alert_id:
+                    analysis_mtime_by_alert[alert_id] = max(analysis_mtime_by_alert.get(alert_id, 0.0), path.stat().st_mtime)
+        return {
+            "prompt_mtime_by_alert": prompt_mtime_by_alert,
+            "analysis_mtime_by_alert": analysis_mtime_by_alert,
+        }
+
+    return SOC_ALERT_ARTIFACT_CACHE.get_or_compute("ai-artifact-index", cache_path, build_index)
 
 
 def soc_alert_page_ai_artifact_context(rows: list[sqlite3.Row | dict]) -> dict[str, object]:
@@ -5801,6 +5789,17 @@ def soc_alerts_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
     )
 
 
+def cached_soc_alerts_query_response(query: dict[str, list[str]]) -> tuple[int, bytes]:
+    """Coalesce query and JSON encoding work during multi-analyst bursts."""
+    key = json.dumps(query, sort_keys=True, separators=(",", ":"))
+
+    def build_response() -> tuple[int, bytes]:
+        status, data = soc_alerts_query_response(query)
+        return status, json.dumps(data, separators=(",", ":")).encode()
+
+    return SOC_ALERT_RESPONSE_CACHE.get_or_compute(("soc-alerts", key), build_response)
+
+
 def soc_alert_detail_fragment_response(group_id: str) -> tuple[int, dict]:
     group_id = str(group_id or "").strip().lower()
     if not re.fullmatch(r"[a-f0-9]{12}", group_id):
@@ -6119,6 +6118,8 @@ class PortalHandler(BaseHTTPRequestHandler):
                 payload = {}
             encoded_id = parsed.path[len("/api/soc-alerts/"):-len("/ack")].strip("/")
             status, data = ack_soc_alert_store_id(unquote(encoded_id), payload)
+            if status < 400:
+                SOC_ALERT_RESPONSE_CACHE.clear()
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/pcap"):
             try:
@@ -6127,6 +6128,8 @@ class PortalHandler(BaseHTTPRequestHandler):
                 payload = {}
             encoded_id = parsed.path[len("/api/soc-alerts/"):-len("/pcap")].strip("/")
             status, data = soc_alert_pcap_request_response(unquote(encoded_id), payload)
+            if status < 400:
+                SOC_ALERT_RESPONSE_CACHE.clear()
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/analyze"):
             try:
@@ -6135,6 +6138,8 @@ class PortalHandler(BaseHTTPRequestHandler):
                 payload = {}
             encoded_id = parsed.path[len("/api/soc-alerts/"):-len("/analyze")].strip("/")
             status, data = soc_alert_queue_analysis_response(unquote(encoded_id), payload)
+            if status < 400:
+                SOC_ALERT_RESPONSE_CACHE.clear()
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path == "/api/soc-alerts/status":
             try:
@@ -6142,6 +6147,8 @@ class PortalHandler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 payload = {}
             ok, data = update_soc_alert_status(payload)
+            if ok:
+                SOC_ALERT_RESPONSE_CACHE.clear()
             return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path == "/api/soc-settings/analyst-prompt":
             try:
@@ -6257,8 +6264,8 @@ class PortalHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query, keep_blank_values=True)
-        reports = scan_reports()
         if path == "/" or path == "/index.html":
+            reports = scan_reports()
             body = render_home(reports, self.server.server_address[0], self.server.server_address[1])
             return self._send(HTTPStatus.OK, body)
         if path == "/admin/login":
@@ -6272,6 +6279,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             admin_error = (query.get("admin_error") or [""])[0]
             return self._send(HTTPStatus.OK, render_admin_dashboard(admin_message or admin_error, bool(admin_error)))
         if path == "/healthz":
+            reports = scan_reports()
             roots = []
             for root in SCAN_ROOTS:
                 info = {"path": str(root), "exists": root.exists(), "is_dir": root.is_dir(), "html_here": 0, "error": None}
@@ -6321,8 +6329,8 @@ class PortalHandler(BaseHTTPRequestHandler):
         if path == "/api/soc-settings/ollama-models":
             return self._send(HTTPStatus.OK, json.dumps(ollama_models_response(), indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/soc-alerts":
-            status, data = soc_alerts_query_response(query)
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+            status, payload = cached_soc_alerts_query_response(query)
+            return self._send(status, payload, "application/json; charset=utf-8")
         if path == "/api/soc-alerts/metrics":
             status, data = soc_alert_metrics_response(query)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
@@ -6345,6 +6353,10 @@ class PortalHandler(BaseHTTPRequestHandler):
             if not status_path.exists():
                 return self._send(HTTPStatus.OK, json.dumps({"ok": True, "state": "pending"}).encode(), "application/json; charset=utf-8")
             return self._send(HTTPStatus.OK, status_path.read_bytes(), "application/json; charset=utf-8")
+        # The report catalog is unrelated to the SOC APIs above and requires a
+        # recursive filesystem walk. Defer it until a catalog/view route needs
+        # it so concurrent alert refreshes do not rescan hundreds of reports.
+        reports = scan_reports()
         if path == "/api/reports":
             data = [{"id": r.rid, "title": r.title, "path": r.rel, "category": r.category, "mtime": r.mtime, "size": r.size} for r in reports]
             return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")

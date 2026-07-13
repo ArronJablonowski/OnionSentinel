@@ -5001,6 +5001,10 @@ def render_static_page(shell_html: str, page_key: str, reports: list[AlertReport
     active_severity = active_alert_highest_severity_class(reports)
     data_view = 'alerts' if page_key == 'alerts' else 'overview'
     rendered = shell_html
+    rendered = rendered.replace(
+        "dashboard-metrics.css?v=20260707-metric-card-spacing",
+        "dashboard-metrics.css?v=20260712-responsive-qa",
+    )
     rendered = re.sub(r'<title>.*?</title>', f'<title>{html.escape(page["title"])} - Onion Sentinel</title>', rendered, count=1)
     rendered = rendered.replace('<div class="app-shell" data-view="overview">', f'<div class="app-shell" data-view="{data_view}">', 1)
     rendered = re.sub(r'<nav class="nav">.*?</nav>', build_nav_html(page_key, active_count, active_severity), rendered, count=1, flags=re.S)

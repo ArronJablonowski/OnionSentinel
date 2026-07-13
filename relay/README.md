@@ -101,7 +101,8 @@ PCAP fulfillment is disabled by default in `config/config.example.json`:
   "artifact_spool_max_bytes": 8589934592,
   "artifact_spool_min_free_bytes": 3221225472,
   "artifact_spool_delete_after_upload": true,
-  "artifact_spool_partial_ttl_seconds": 0,
+  "artifact_spool_partial_ttl_seconds": 86400,
+  "artifact_spool_completed_ttl_seconds": 3600,
   "mac_transfer": {
     "host": "10.77.7.225",
     "user": "__MAC_STUDIO_SSH_USER__",
@@ -156,10 +157,12 @@ artifact sizes and upgrade the spool disk if captures regularly approach the
 limit.
 
 Successful relay-spooled `.tar` artifacts are deleted immediately after the
-Mac Studio copy has been verified by size and SHA256. Interrupted `.tar.part`
-files are pruned at the start of the next broker run by default. Set
-`artifact_spool_partial_ttl_seconds` higher than `0` to keep partials for a
-short retry window, or `-1` to disable partial cleanup during troubleshooting.
+Mac Studio copy has been verified by size and SHA256. A checksum-valid artifact
+is reused when the same request is retried after a Mac upload failure.
+Interrupted `.tar.part` files are retained for 24 hours so rsync can resume
+them with `--append-verify`. Completed artifacts abandoned by failed or lost
+broker state are removed after one hour while the broker lock is held. Set the
+corresponding TTL to `-1` only during controlled troubleshooting.
 
 The `spooled_rsync` mode is the preferred data plane for large captures. n8n
 remains the control plane for request, claim, and completion state, while SSH

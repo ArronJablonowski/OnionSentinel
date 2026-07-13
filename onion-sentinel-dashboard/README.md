@@ -7,6 +7,8 @@ This directory contains the Mac Studio LAN Portal backend and the generated SOC 
 | Path | Purpose |
 | --- | --- |
 | `report_portal.py` | Serves the LAN Portal and SOC alert APIs. |
+| `artifact_cache.py` | Thread-safe, single-flight cache for parsed Markdown/JSON artifacts. |
+| `response_cache.py` | Short-lived, bounded cache for serialized read-only API responses. |
 | `scripts/build_soc_alerts_dashboard.py` | Builds the static dashboard pages from SQLite/report artifacts. |
 | `scripts/dashboard_metric_components.py` | Small tested render helpers for the SOC Alerts metric cards. |
 | `scripts/dashboard_system_health_components.py` | System Health page markup, PCAP workflow panel styles, and browser refresh logic. |
@@ -43,6 +45,33 @@ This directory contains the Mac Studio LAN Portal backend and the generated SOC 
 - Keep SOC metric-card markup in the named render helpers inside `scripts/dashboard_metric_components.py`.
 - Keep System Health beacon and PCAP workflow UI in `scripts/dashboard_system_health_components.py`.
 - Avoid adding new metric-card HTML directly into the large page template string.
+- Route API requests before scanning the report library. Recursive report scans belong
+  only on report-library and view routes; placing them in the common request path makes
+  SOC APIs scale with the entire Markdown corpus.
+- Use `ArtifactCache` for parsed artifacts and `ResponseCache` for short-lived API
+  payloads. Both caches coalesce concurrent misses so a burst does not duplicate the
+  same disk or SQLite work. Invalidate response entries after analyst mutations rather
+  than extending their TTL.
+
+## Performance Verification
+
+Exercise the live read APIs with concurrent clients after portal changes. A healthy
+cached burst should complete without errors or serialized multi-second stalls:
+
+```bash
+python3 - <<'PY'
+from concurrent.futures import ThreadPoolExecutor
+from urllib.request import urlopen
+
+url = "http://127.0.0.1:8765/api/soc-alerts?limit=1"
+with ThreadPoolExecutor(max_workers=40) as pool:
+    results = list(pool.map(lambda _: urlopen(url, timeout=5).status, range(120)))
+assert results == [200] * 120
+PY
+```
+
+Run this on the Mac Studio. Do not print response bodies because they contain live
+alert data.
 
 ## Manual Rebuild
 

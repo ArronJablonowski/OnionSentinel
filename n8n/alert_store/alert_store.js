@@ -12,6 +12,7 @@ const http = require('http');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const {createProviderScheduler} = require('./lib/provider_scheduler');
 let sqlite3;
 try {
   // Host-native launchd deployments install sqlite3 beside this script.
@@ -46,9 +47,21 @@ const telegramAlertLevels = new Set(
     .filter(Boolean),
 );
 const telegramCooldownSeconds = Number(process.env.TELEGRAM_COOLDOWN_SECONDS || 900);
+const telegramOutboxIntervalMs = Math.max(1000, Number(process.env.TELEGRAM_OUTBOX_INTERVAL_MS || 15000));
+const telegramOutboxBaseRetrySeconds = Math.max(5, Number(process.env.TELEGRAM_OUTBOX_BASE_RETRY_SECONDS || 30));
+const telegramOutboxMaxRetrySeconds = Math.max(
+  telegramOutboxBaseRetrySeconds,
+  Number(process.env.TELEGRAM_OUTBOX_MAX_RETRY_SECONDS || 3600),
+);
+const telegramOutboxMaxAttempts = Math.max(1, Number(process.env.TELEGRAM_OUTBOX_MAX_ATTEMPTS || 8));
+const telegramOutboxAutostart = !['0', 'false', 'no'].includes(
+  String(process.env.TELEGRAM_OUTBOX_AUTOSTART || '1').toLowerCase(),
+);
 const enrichmentCacheDefaultTtlSeconds = Number(process.env.ENRICHMENT_CACHE_TTL_SECONDS || 86400);
 const vulnerabilityCacheDefaultTtlSeconds = Number(process.env.ENRICHMENT_VULN_CACHE_TTL_SECONDS || 86400);
 const enrichmentTimeoutMs = Number(process.env.ENRICHMENT_TIMEOUT_MS || 5000);
+const enrichmentCircuitFailureThreshold = Math.max(1, Number(process.env.ENRICHMENT_CIRCUIT_FAILURE_THRESHOLD || 3));
+const enrichmentCircuitResetMs = Math.max(10000, Number(process.env.ENRICHMENT_CIRCUIT_RESET_MS || 60000));
 const virustotalMinimumLevel = String(process.env.VIRUSTOTAL_MINIMUM_LEVEL || 'high').toLowerCase();
 const urlscanSubmitEnabled = ['1', 'true', 'yes'].includes(String(process.env.URLSCAN_SUBMIT_ENABLED || '').toLowerCase());
 const pcapRequestMaxWindowSeconds = Math.max(30, Number(process.env.PCAP_REQUEST_MAX_WINDOW_SECONDS || 300));
@@ -1008,7 +1021,10 @@ async function runEnrichmentLookup(source, indicatorType, indicator, lookup, sum
     return;
   }
   try {
-    const result = await cachedLookup(source, indicatorType, indicator, lookup);
+    const result = await enrichmentScheduler.run(
+      source,
+      () => cachedLookup(source, indicatorType, indicator, lookup),
+    );
     summary.records.push(result.record);
     summary.sources[source] = {status: result.cached ? 'cached' : 'queried', limit_note: sourceLimitNote(source)};
   } catch (error) {
@@ -1043,55 +1059,69 @@ async function enrichAlert(alert) {
     },
   };
 
+  const jobs = [];
+  const schedule = (source, indicatorType, indicator, lookup) => {
+    jobs.push(runEnrichmentLookup(source, indicatorType, indicator, lookup, summary));
+  };
+
   for (const ip of indicators.public_ips.slice(0, 4)) {
-    await runEnrichmentLookup('abuseipdb', 'ip', ip, () => lookupAbuseIpdb(ip), summary);
-    await runEnrichmentLookup('greynoise', 'ip', ip, () => lookupGreynoise(ip), summary);
-    await runEnrichmentLookup('shodan_internetdb', 'ip', ip, () => lookupShodanInternetDb(ip), summary);
-    await runEnrichmentLookup('otx', 'ip', ip, () => lookupOtx('ip', ip), summary);
-    await runEnrichmentLookup('shodan', 'ip', ip, () => lookupShodan(ip), summary);
-    await runEnrichmentLookup('censys', 'ip', ip, () => lookupCensys(ip), summary);
+    schedule('abuseipdb', 'ip', ip, () => lookupAbuseIpdb(ip));
+    schedule('greynoise', 'ip', ip, () => lookupGreynoise(ip));
+    schedule('shodan_internetdb', 'ip', ip, () => lookupShodanInternetDb(ip));
+    schedule('otx', 'ip', ip, () => lookupOtx('ip', ip));
+    schedule('shodan', 'ip', ip, () => lookupShodan(ip));
+    schedule('censys', 'ip', ip, () => lookupCensys(ip));
   }
 
   for (const domain of indicators.domains.slice(0, 4)) {
-    await runEnrichmentLookup('otx', 'domain', domain, () => lookupOtx('domain', domain), summary);
-    await runEnrichmentLookup('urlscan', 'domain', domain, () => lookupUrlscan('domain', domain), summary);
-    await runEnrichmentLookup('threatfox', 'domain', domain, () => lookupThreatFox('domain', domain), summary);
+    schedule('otx', 'domain', domain, () => lookupOtx('domain', domain));
+    schedule('urlscan', 'domain', domain, () => lookupUrlscan('domain', domain));
+    schedule('threatfox', 'domain', domain, () => lookupThreatFox('domain', domain));
     if (shouldUseVirusTotal(alert)) {
-      await runEnrichmentLookup('virustotal', 'domain', domain, () => lookupVirusTotal('domain', domain), summary);
+      schedule('virustotal', 'domain', domain, () => lookupVirusTotal('domain', domain));
     } else {
       summary.skipped.push({source: 'virustotal', indicator: domain, indicator_type: 'domain', reason: `below_${virustotalMinimumLevel}_severity`, limit_note: sourceLimitNote('virustotal')});
     }
   }
 
   for (const urlValue of indicators.urls.slice(0, 3)) {
-    await runEnrichmentLookup('urlhaus', 'url', urlValue, () => lookupUrlhaus(urlValue), summary);
-    await runEnrichmentLookup('urlscan', 'url', urlValue, () => lookupUrlscan('url', urlValue), summary);
-    await runEnrichmentLookup('google_safe_browsing', 'url', urlValue, () => lookupGoogleSafeBrowsing(urlValue), summary);
-    await runEnrichmentLookup('phishtank', 'url', urlValue, () => lookupPhishTank(urlValue), summary);
-    await runEnrichmentLookup('otx', 'url', urlValue, () => lookupOtx('url', urlValue), summary);
+    schedule('urlhaus', 'url', urlValue, () => lookupUrlhaus(urlValue));
+    schedule('urlscan', 'url', urlValue, () => lookupUrlscan('url', urlValue));
+    schedule('google_safe_browsing', 'url', urlValue, () => lookupGoogleSafeBrowsing(urlValue));
+    schedule('phishtank', 'url', urlValue, () => lookupPhishTank(urlValue));
+    schedule('otx', 'url', urlValue, () => lookupOtx('url', urlValue));
     if (shouldUseVirusTotal(alert)) {
-      await runEnrichmentLookup('virustotal', 'url', urlValue, () => lookupVirusTotal('url', urlValue), summary);
+      schedule('virustotal', 'url', urlValue, () => lookupVirusTotal('url', urlValue));
     } else {
       summary.skipped.push({source: 'virustotal', indicator: urlValue, indicator_type: 'url', reason: `below_${virustotalMinimumLevel}_severity`, limit_note: sourceLimitNote('virustotal')});
     }
   }
 
   for (const hash of indicators.hashes.slice(0, 4)) {
-    await runEnrichmentLookup('malwarebazaar', 'hash', hash.value, () => lookupMalwareBazaar(hash.value), summary);
-    await runEnrichmentLookup('otx', 'hash', hash.value, () => lookupOtx('hash', hash.value), summary);
-    await runEnrichmentLookup('threatfox', 'hash', hash.value, () => lookupThreatFox('hash', hash.value), summary);
+    schedule('malwarebazaar', 'hash', hash.value, () => lookupMalwareBazaar(hash.value));
+    schedule('otx', 'hash', hash.value, () => lookupOtx('hash', hash.value));
+    schedule('threatfox', 'hash', hash.value, () => lookupThreatFox('hash', hash.value));
     if (shouldUseVirusTotal(alert)) {
-      await runEnrichmentLookup('virustotal', 'hash', hash.value, () => lookupVirusTotal('hash', hash.value), summary);
+      schedule('virustotal', 'hash', hash.value, () => lookupVirusTotal('hash', hash.value));
     } else {
       summary.skipped.push({source: 'virustotal', indicator: hash.value, indicator_type: 'hash', reason: `below_${virustotalMinimumLevel}_severity`, limit_note: sourceLimitNote('virustotal')});
     }
   }
 
   for (const cve of indicators.cves.slice(0, 6)) {
-    await runEnrichmentLookup('cisa_kev', 'cve', cve, () => lookupCisaKev(cve), summary);
-    await runEnrichmentLookup('epss', 'cve', cve, () => lookupEpss(cve), summary);
-    await runEnrichmentLookup('nvd', 'cve', cve, () => lookupNvd(cve), summary);
+    schedule('cisa_kev', 'cve', cve, () => lookupCisaKev(cve));
+    schedule('epss', 'cve', cve, () => lookupEpss(cve));
+    schedule('nvd', 'cve', cve, () => lookupNvd(cve));
   }
+
+  await Promise.all(jobs);
+  const stableOrder = (left, right) => (
+    `${left.source}|${left.indicator_type}|${left.indicator}`
+      .localeCompare(`${right.source}|${right.indicator_type}|${right.indicator}`)
+  );
+  summary.records.sort(stableOrder);
+  summary.skipped.sort(stableOrder);
+  summary.errors.sort(stableOrder);
 
   const enrichedAlert = {
     ...alert,
@@ -1383,7 +1413,12 @@ function all(sql, params = []) {
 }
 
 let sqliteWriteGate = Promise.resolve();
-let enrichmentGate = Promise.resolve();
+const enrichmentScheduler = createProviderScheduler({
+  failureThreshold: enrichmentCircuitFailureThreshold,
+  resetMs: enrichmentCircuitResetMs,
+  formatTimestamp: formatProjectTimestamp,
+});
+let telegramOutboxDrainActive = false;
 
 function withSqliteWriteGate(task) {
   // sqlite3 serializes individual statements, but HTTP handlers can still
@@ -1395,12 +1430,16 @@ function withSqliteWriteGate(task) {
   return next;
 }
 
-function withEnrichmentGate(task) {
-  // External providers have strict request limits. Keep enrichment serialized
-  // independently from SQLite so a slow provider cannot block alert writes.
-  const next = enrichmentGate.catch(() => undefined).then(task);
-  enrichmentGate = next.catch(() => undefined);
-  return next;
+async function withImmediateTransaction(task) {
+  await run('BEGIN IMMEDIATE');
+  try {
+    const result = await task();
+    await run('COMMIT');
+    return result;
+  } catch (error) {
+    await run('ROLLBACK').catch(() => undefined);
+    throw error;
+  }
 }
 
 async function initDb() {
@@ -1544,6 +1583,31 @@ async function initDb() {
       destination_ip TEXT
     )
   `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS notification_outbox (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      notification_key TEXT NOT NULL,
+      channel TEXT NOT NULL DEFAULT 'telegram',
+      alert_id TEXT,
+      triage_level TEXT,
+      rule_name TEXT,
+      source_ip TEXT,
+      destination_ip TEXT,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TEXT NOT NULL,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      sent_at TEXT
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_notification_outbox_due ON notification_outbox(status, next_attempt_at, id)');
+  await run('CREATE INDEX IF NOT EXISTS idx_notification_outbox_key ON notification_outbox(notification_key, status)');
+  // A process exit can interrupt delivery after claim. Retrying is safe because
+  // notification_log cooldown still prevents a second queued alert message.
+  await run("UPDATE notification_outbox SET status = 'pending', updated_at = ? WHERE status = 'delivering'", [nowUtc()]);
   await run(`
     CREATE TABLE IF NOT EXISTS suppression_log (
       suppression_key TEXT PRIMARY KEY,
@@ -1925,30 +1989,29 @@ async function storeAlert(rawAlert) {
     triage: scoreAlert(rawAlert),
   };
   if (!hasUsableExternalIntel(alert)) {
-    const enrichmentResult = await withEnrichmentGate(() => enrichAlert(alert));
+    const enrichmentResult = await enrichAlert(alert);
     if (enrichmentResult.ok && enrichmentResult.alert) {
       alert = {...enrichmentResult.alert, triage: alert.triage};
     }
   }
-  const result = await withSqliteWriteGate(() => storeAlertUnlocked(alert));
+  const result = await withSqliteWriteGate(() => withImmediateTransaction(async () => {
+    const stored = await storeAlertUnlocked(alert);
+    if (stored.ok) {
+      stored.notification = await queueTelegramNotification(
+        alert,
+        stored.alert,
+        stored.stored,
+        nowUtc(),
+        stored.filter,
+      );
+    }
+    return stored;
+  }));
   if (!result.ok) return result;
-  try {
-    result.notification = await maybeNotifyTelegram(
-      alert,
-      result.alert,
-      result.stored,
-      nowUtc(),
-      result.filter,
-    );
-  } catch (error) {
-    // Persistence succeeded. Report the notification failure without causing
-    // n8n to replay an alert that is already safely committed.
-    result.notification = {
-      channel: 'telegram',
-      status: 'failed',
-      reason: String(error.message || error).slice(0, 240),
-    };
-  }
+  // Delivery is deliberately outside the ingest transaction. A Telegram
+  // timeout cannot delay the webhook response or cause n8n to replay a safely
+  // committed alert.
+  void drainTelegramOutbox();
   return result;
 }
 
@@ -2438,9 +2501,9 @@ function postTelegramMessage(text) {
   });
 }
 
-async function maybeNotifyTelegram(alert, storedAlert, inserted, now, suppression = {status: 'accepted'}) {
-  // Notification order: new alert only, Telegram configured, level allowed,
-  // cooldown clear, then send and record.
+async function queueTelegramNotification(alert, storedAlert, inserted, now, suppression = {status: 'accepted'}) {
+  // This function runs inside the alert transaction. It never performs network
+  // I/O, so the alert and its durable notification intent commit together.
   if (!inserted) {
     return {channel: 'telegram', status: 'skipped_duplicate'};
   }
@@ -2475,36 +2538,132 @@ async function maybeNotifyTelegram(alert, storedAlert, inserted, now, suppressio
       cooldown_seconds: telegramCooldownSeconds,
     };
   }
-
-  await postTelegramMessage(formatTelegramAlert(alert, storedAlert));
+  const pending = await get(
+    `SELECT id FROM notification_outbox
+     WHERE notification_key = ? AND status IN ('pending', 'delivering')
+     ORDER BY id DESC LIMIT 1`,
+    [key],
+  );
+  if (pending) {
+    return {channel: 'telegram', status: 'skipped_pending', triage_level: triageLevel};
+  }
   await run(
     `
-      INSERT INTO notification_log (
-        notification_key, last_sent, sent_count, channel, alert_id,
-        triage_level, rule_name, source_ip, destination_ip
+      INSERT INTO notification_outbox (
+        notification_key, channel, alert_id, triage_level, rule_name,
+        source_ip, destination_ip, payload_json, status, attempt_count,
+        next_attempt_at, created_at, updated_at
       )
-      VALUES (?, ?, 1, 'telegram', ?, ?, ?, ?, ?)
-      ON CONFLICT(notification_key) DO UPDATE SET
-        last_sent = excluded.last_sent,
-        sent_count = notification_log.sent_count + 1,
-        alert_id = excluded.alert_id,
-        triage_level = excluded.triage_level,
-        rule_name = excluded.rule_name,
-        source_ip = excluded.source_ip,
-        destination_ip = excluded.destination_ip
+      VALUES (?, 'telegram', ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
     `,
     [
       key,
-      now,
       alert.alert_id,
       triageLevel,
       alert.rule_name || null,
       nestedField(alert, 'source.ip'),
       nestedField(alert, 'destination.ip'),
+      JSON.stringify({text: formatTelegramAlert(alert, storedAlert)}),
+      now,
+      now,
+      now,
     ],
   );
+  return {channel: 'telegram', status: 'queued', triage_level: triageLevel};
+}
 
-  return {channel: 'telegram', status: 'sent', triage_level: triageLevel};
+function outboxRetryTimestamp(attemptCount) {
+  const delaySeconds = Math.min(
+    telegramOutboxMaxRetrySeconds,
+    telegramOutboxBaseRetrySeconds * (2 ** Math.max(0, attemptCount - 1)),
+  );
+  return formatProjectTimestamp(new Date(Date.now() + delaySeconds * 1000));
+}
+
+async function claimTelegramOutboxItem() {
+  return withSqliteWriteGate(() => withImmediateTransaction(async () => {
+    const row = await get(
+      `SELECT * FROM notification_outbox
+       WHERE status = 'pending' AND next_attempt_at <= ?
+       ORDER BY next_attempt_at ASC, id ASC LIMIT 1`,
+      [nowUtc()],
+    );
+    if (!row) return null;
+    await run(
+      "UPDATE notification_outbox SET status = 'delivering', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?",
+      [nowUtc(), row.id],
+    );
+    return {...row, attempt_count: Number(row.attempt_count || 0) + 1};
+  }));
+}
+
+async function completeTelegramOutboxItem(item) {
+  const sentAt = nowUtc();
+  await withSqliteWriteGate(() => withImmediateTransaction(async () => {
+    await run(
+      "UPDATE notification_outbox SET status = 'sent', sent_at = ?, updated_at = ?, last_error = NULL WHERE id = ?",
+      [sentAt, sentAt, item.id],
+    );
+    await run(
+      `INSERT INTO notification_log (
+         notification_key, last_sent, sent_count, channel, alert_id,
+         triage_level, rule_name, source_ip, destination_ip
+       ) VALUES (?, ?, 1, 'telegram', ?, ?, ?, ?, ?)
+       ON CONFLICT(notification_key) DO UPDATE SET
+         last_sent = excluded.last_sent,
+         sent_count = notification_log.sent_count + 1,
+         alert_id = excluded.alert_id,
+         triage_level = excluded.triage_level,
+         rule_name = excluded.rule_name,
+         source_ip = excluded.source_ip,
+         destination_ip = excluded.destination_ip`,
+      [item.notification_key, sentAt, item.alert_id, item.triage_level, item.rule_name, item.source_ip, item.destination_ip],
+    );
+  }));
+}
+
+async function failTelegramOutboxItem(item, error) {
+  const terminal = Number(item.attempt_count || 0) >= telegramOutboxMaxAttempts;
+  await withSqliteWriteGate(() => run(
+    `UPDATE notification_outbox
+     SET status = ?, next_attempt_at = ?, last_error = ?, updated_at = ?
+     WHERE id = ?`,
+    [
+      terminal ? 'failed' : 'pending',
+      terminal ? nowUtc() : outboxRetryTimestamp(item.attempt_count),
+      String(error.message || error).slice(0, 500),
+      nowUtc(),
+      item.id,
+    ],
+  ));
+}
+
+async function drainTelegramOutbox() {
+  if (!telegramOutboxAutostart || !isTelegramConfigured() || telegramOutboxDrainActive) return;
+  telegramOutboxDrainActive = true;
+  try {
+    for (let processed = 0; processed < 10; processed += 1) {
+      const item = await claimTelegramOutboxItem();
+      if (!item) break;
+      try {
+        const payload = JSON.parse(item.payload_json || '{}');
+        await postTelegramMessage(String(payload.text || ''));
+        await completeTelegramOutboxItem(item);
+      } catch (error) {
+        await failTelegramOutboxItem(item, error);
+        break;
+      }
+    }
+  } catch (error) {
+    console.error(`Telegram outbox drain failed: ${error.message}`);
+  } finally {
+    telegramOutboxDrainActive = false;
+  }
+}
+
+async function telegramOutboxSnapshot() {
+  const rows = await all('SELECT status, COUNT(*) AS count FROM notification_outbox GROUP BY status');
+  return Object.fromEntries(rows.map((row) => [row.status, Number(row.count || 0)]));
 }
 
 function safeString(value, maxLength = 240) {
@@ -3016,7 +3175,12 @@ async function handleRequest(request, response) {
     const parsedUrl = new URL(request.url, 'http://alert-store.local');
     if (request.method === 'GET' && request.url === '/health') {
       // Used by the Mac Studio monitor LaunchAgent.
-      sendJson(response, 200, {ok: true, status: 'healthy'});
+      sendJson(response, 200, {
+        ok: true,
+        status: 'healthy',
+        telegram_outbox: await telegramOutboxSnapshot(),
+        enrichment_scheduler: enrichmentScheduler.snapshot(),
+      });
       return;
     }
     if (request.method === 'GET' && parsedUrl.pathname === '/analyst-status') {
@@ -3049,7 +3213,7 @@ async function handleRequest(request, response) {
       // intentionally keyless public sources such as Shodan InternetDB, KEV,
       // EPSS, and NVD without a key.
       const alert = await readJsonBody(request);
-      const result = await withEnrichmentGate(() => enrichAlert(alert));
+      const result = await enrichAlert(alert);
       sendJson(response, result.ok ? 200 : 400, result);
       return;
     }
@@ -3120,6 +3284,10 @@ initDb().then(() => {
   http.createServer(handleRequest).listen(port, host, () => {
     console.log(`alert-store listening on ${host}:${port}, db=${dbPath}`);
   });
+  if (telegramOutboxAutostart) {
+    setInterval(() => void drainTelegramOutbox(), telegramOutboxIntervalMs).unref();
+    void drainTelegramOutbox();
+  }
 }).catch((error) => {
   console.error(error);
   process.exit(1);

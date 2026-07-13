@@ -659,7 +659,8 @@ The default n8n proxy configuration is:
   "artifact_spool_max_bytes": 8589934592,
   "artifact_spool_min_free_bytes": 3221225472,
   "artifact_spool_delete_after_upload": true,
-  "artifact_spool_partial_ttl_seconds": 0,
+  "artifact_spool_partial_ttl_seconds": 86400,
+  "artifact_spool_completed_ttl_seconds": 3600,
   "mac_transfer": {
     "host": "10.77.7.225",
     "user": "__MAC_STUDIO_SSH_USER__",
@@ -863,8 +864,50 @@ Result:  public-key login verified, password auth disabled, port 22 still open
 From this repo on the admin Mac:
 
 ```bash
-./ops/verify-stack.zsh
+PI_HOST=<relay_user>@10.88.8.8 \
+SO_HOST=<security_onion_user>@192.168.1.7 \
+MAC_HOST=<mac_user>@10.77.7.225 \
+./operations/verify-stack.zsh
 ```
+
+### Non-Destructive SQLite Restore Drill
+
+Run this after storage, maintenance, or alert-store ownership changes. It uses
+SQLite's online backup API, validates the copy independently, and deletes the
+temporary drill artifact. It does not stop services or modify production data.
+
+```bash
+ssh <mac_user>@10.77.7.225 'bash -s' <<'REMOTE'
+set -euo pipefail
+db="$HOME/n8n-local/alert_store_data/alerts.sqlite3"
+tmp="$(mktemp /tmp/onion-sentinel-dr-XXXXXX.sqlite3)"
+trap 'rm -f "$tmp"' EXIT
+test "$(sqlite3 "$db" "PRAGMA quick_check;")" = ok
+sqlite3 "$db" ".backup '$tmp'"
+test "$(sqlite3 "$tmp" "PRAGMA quick_check;")" = ok
+test "$(sqlite3 "$tmp" "SELECT count(*) > 0 FROM sqlite_master WHERE type IN ('table','view');")" = 1
+test -s "$tmp"
+REMOTE
+```
+
+Also verify that `$HOME/n8n-local/alert_store_backups` contains recent
+`alerts.sqlite3.*.backup` files and open the newest backup with
+`PRAGMA quick_check`. Never copy those runtime backups into this repository.
+
+### Post-Deployment Acceptance
+
+Before declaring recovery complete, confirm all of the following:
+
+- n8n and portal `/healthz` endpoints return success;
+- alert-store production SQLite and the newest maintenance backup pass
+  `PRAGMA quick_check`;
+- the relay timer's last completed service result is successful and the
+  dedicated PCAP spool is mounted with adequate free space;
+- Security Onion's restricted export wrapper and 24-hour PCAP export retention
+  timer are enabled;
+- System Health records recent successful beacons and exposes historical gaps;
+- desktop and mobile SOC Alerts can sort, expand details, reload without stale
+  row expansion, and open the suppression modal without viewport zoom.
 
 ## SD Card Failure Note
 

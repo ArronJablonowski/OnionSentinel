@@ -44,7 +44,8 @@
     "artifact_spool_max_bytes": 8589934592,
     "artifact_spool_min_free_bytes": 3221225472,
     "artifact_spool_delete_after_upload": true,
-    "artifact_spool_partial_ttl_seconds": 0,
+    "artifact_spool_partial_ttl_seconds": 86400,
+    "artifact_spool_completed_ttl_seconds": 3600,
     "mac_transfer": {
       "host": "10.77.7.225",
       "user": "__MAC_STUDIO_SSH_USER__",

@@ -6,20 +6,29 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALERT_STORE = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
+PROVIDER_SCHEDULER = REPO_ROOT / "n8n" / "alert_store" / "lib" / "provider_scheduler.js"
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.code = ALERT_STORE.read_text(encoding="utf-8")
+        cls.provider_scheduler = PROVIDER_SCHEDULER.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
-        self.assertIn("let enrichmentGate = Promise.resolve();", self.code)
-        self.assertIn("withEnrichmentGate(() => enrichAlert(alert))", self.code)
+        self.assertIn("require('./lib/provider_scheduler')", self.code)
+        self.assertIn("enrichmentScheduler.run(", self.code)
+        self.assertIn("await Promise.all(jobs);", self.code)
+        self.assertNotIn("withEnrichmentGate", self.code)
+
+    def test_enrichment_provider_circuits_are_bounded(self) -> None:
+        self.assertIn("ENRICHMENT_CIRCUIT_FAILURE_THRESHOLD", self.code)
+        self.assertIn("ENRICHMENT_CIRCUIT_RESET_MS", self.code)
+        self.assertIn("provider circuit open until", self.provider_scheduler)
 
     def test_sqlite_gate_only_wraps_storage(self) -> None:
         self.assertIn(
-            "withSqliteWriteGate(() => storeAlertUnlocked(alert))",
+            "withSqliteWriteGate(() => withImmediateTransaction(async () =>",
             self.code,
         )
         store_unlocked = self.code.split("async function storeAlertUnlocked(alert)", 1)[1].split(
@@ -29,8 +38,18 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertNotIn("maybeNotifyTelegram(", store_unlocked)
 
     def test_notification_failure_does_not_reject_persisted_alert(self) -> None:
-        self.assertIn("status: 'failed'", self.code)
-        self.assertIn("Persistence succeeded", self.code)
+        self.assertIn("CREATE TABLE IF NOT EXISTS notification_outbox", self.code)
+        self.assertIn("withImmediateTransaction(async () =>", self.code)
+        self.assertIn("void drainTelegramOutbox();", self.code)
+        store = self.code.split("async function storeAlert(rawAlert)", 1)[1].split(
+            "async function storeAlertUnlocked(alert)", 1
+        )[0]
+        self.assertNotIn("postTelegramMessage(", store)
+
+    def test_notification_outbox_has_bounded_retry(self) -> None:
+        self.assertIn("TELEGRAM_OUTBOX_MAX_ATTEMPTS", self.code)
+        self.assertIn("outboxRetryTimestamp", self.code)
+        self.assertIn("terminal ? 'failed' : 'pending'", self.code)
 
     def test_analyst_state_is_owned_by_alert_store(self) -> None:
         self.assertIn("CREATE TABLE IF NOT EXISTS analyst_alert_group_state", self.code)

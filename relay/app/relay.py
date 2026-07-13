@@ -562,6 +562,35 @@ def cleanup_stale_spool_partials(config: dict) -> int:
     return removed
 
 
+def cleanup_stale_spool_artifacts(config: dict) -> int:
+    """Remove completed relay artifacts after their bounded retry window.
+
+    This runs while the broker lock is held, so a matching rsync upload cannot
+    be active. Security Onion keeps its independently retained export as the
+    recovery source if a request is retried after this relay-side TTL.
+    """
+    broker = config.get("pcap_broker", {})
+    ttl_seconds = int(broker.get("artifact_spool_completed_ttl_seconds", 3600) or 0)
+    if ttl_seconds < 0:
+        return 0
+    try:
+        spool_dir = pcap_spool_dir(config)
+    except Exception:
+        return 0
+    if not spool_dir.exists() or not spool_dir.is_dir():
+        return 0
+    cutoff = time.time() - ttl_seconds
+    removed = 0
+    for path in spool_dir.glob("*.tar"):
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -620,18 +649,27 @@ def spool_pcap_artifact_from_security_onion(config: dict, pcap_request: dict, ex
     if not expected_size or not expected_sha256:
         raise RuntimeError("spooled PCAP transfer requires artifact size and sha256 metadata")
     remote_artifact = validate_security_onion_artifact_path(export_result.get("artifact_path"), request_id)
-    require_spool_capacity(config, expected_size)
     spool_dir = pcap_spool_dir(config)
     spool_dir.mkdir(parents=True, exist_ok=True)
     final_path = spool_dir / f"{request_id}.tar"
     temp_path = spool_dir / f"{request_id}.tar.part"
-    temp_path.unlink(missing_ok=True)
+
+    # A failed Mac upload leaves the verified relay artifact in place. Reuse it
+    # on retry instead of requiring enough free space for a duplicate pull.
+    if final_path.is_file():
+        if final_path.stat().st_size == expected_size and sha256_file(final_path) == expected_sha256:
+            final_path.chmod(0o600)
+            return final_path
+        final_path.unlink(missing_ok=True)
+
+    require_spool_capacity(config, expected_size)
     ssh_args, target = security_onion_rsync_ssh(config)
     transfer = security_onion_transfer_config(config)
     command = [
         "rsync",
         "-av",
         "--partial",
+        "--append-verify",
         "-e",
         " ".join(remote_shell_quote(part) for part in ssh_args),
         f"{target}:{remote_artifact}",
@@ -864,6 +902,7 @@ def process_pcap_requests(config: dict) -> dict:
 def _process_pcap_requests_unlocked(config: dict) -> dict:
     broker = config.get("pcap_broker", {})
     stale_spool_partials_removed = cleanup_stale_spool_partials(config)
+    stale_spool_artifacts_removed = cleanup_stale_spool_artifacts(config)
     limit = max(1, min(10, int(broker.get("limit", 3) or 3)))
     pending_path = f"{broker_path(config, 'requests', '/pcap/requests')}?status=pending&limit={limit}"
     requests_method = str(broker.get("requests_method") or "GET").strip().upper()
@@ -960,6 +999,7 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
         "artifact_cleanup_failed": artifact_cleanup_failed,
         "artifact_cleanup_succeeded": artifact_cleanup_succeeded,
         "stale_spool_partials_removed": stale_spool_partials_removed,
+        "stale_spool_artifacts_removed": stale_spool_artifacts_removed,
     }
 
 

@@ -181,10 +181,32 @@ Alert-store runtime model:
 - Manual PCAP requests are posted to `http://127.0.0.1:8787/pcap/request` so
   the portal does not become a second SQLite queue writer. Alert-store also
   serializes relay claim, completion, and operator requeue mutations.
-- Enrichment has its own serialized provider gate. A slow public API no longer
-  holds the SQLite ingest write gate. Telegram delivery also runs after the
-  alert commit, so a Telegram timeout cannot make n8n replay an alert that was
-  already stored successfully.
+- Enrichment uses one serialized queue per provider. Provider rate limits and
+  cache writes stay coherent, while unrelated providers run concurrently. A
+  three-failure circuit opens for 60 seconds by default so one unhealthy API
+  cannot hold the rest of the enrichment pipeline. No enrichment network call
+  holds the SQLite ingest write gate.
+
+Enrichment scheduler safety knobs:
+
+- `ENRICHMENT_CIRCUIT_FAILURE_THRESHOLD=3`
+- `ENRICHMENT_CIRCUIT_RESET_MS=60000`
+- Eligible Telegram notifications are committed to `notification_outbox` in
+  the same SQLite transaction as their alert. A background worker delivers up
+  to ten due messages per pass with bounded exponential backoff and records
+  terminal failures after the configured attempt limit. `/health` exposes
+  outbox counts without message contents or credentials.
+
+Telegram outbox safety knobs:
+
+- `TELEGRAM_OUTBOX_INTERVAL_MS=15000`
+- `TELEGRAM_OUTBOX_BASE_RETRY_SECONDS=30`
+- `TELEGRAM_OUTBOX_MAX_RETRY_SECONDS=3600`
+- `TELEGRAM_OUTBOX_MAX_ATTEMPTS=8`
+
+The outbox worker is intentionally independent of alert ingestion. Telegram
+timeouts cannot roll back a committed alert or make n8n replay it. Restarting
+alert-store resumes due outbox rows from SQLite.
 
 Alert-store ingestion safety knob:
 
