@@ -1026,6 +1026,17 @@ Dashboard visibility controls:
 - **Suppress** opens a confirmation dialog that requires a typed suppression reason before the grouped detection is hidden. The reason is limited to 140 characters, is saved with the analyst status record, and is displayed in a **Suppression Note** inside that alert's detailed report.
 - Confirmed suppressions write the grouped detection state through `/api/soc-alerts/<group_id>/ack`, then immediately refresh the active API table page. With **Show suppressed** off, the suppressed grouped detection disappears from the active table view right away. With **Show suppressed** on, it remains visible with the **Expose** action, which removes the analyst suppression and allows matching detections to appear again.
 - Analyst-entered workflow state is persisted in SQLite in the `analyst_alert_group_state` table, keyed by grouped detection id. This keeps user decisions such as `acknowledged`, `suppressed`, repeat count at decision time, typed reason, and update timestamp separate from raw alert evidence while still keeping the complete state in the same backed-up alert store. The older `analyst_alert_status` table may exist for backward compatibility, but the grouped API path writes suppression comments to `analyst_alert_group_state.reason`.
+- The portal sends analyst transitions to the host alert-store through
+  `POST http://127.0.0.1:8787/analyst-status`. Alert-store validates and
+  serializes the transition through its SQLite write gate. The portal does not
+  optimistically fall back to a direct production DB write when that endpoint
+  is unavailable; the UI receives an error and retains the last confirmed
+  server state.
+- Manual dashboard PCAP requests similarly use
+  `POST http://127.0.0.1:8787/pcap/request`. Request, claim, completion, and
+  recovery mutations share the same alert-store write gate. Retrying an
+  identical failed request clears stale claim/error/artifact metadata and
+  returns it to `pending`.
 - **Show acknowledged** and **Show suppressed** toggles reveal those hidden groups without deleting or rewriting alert evidence.
 
 Recommended default TTLs:
@@ -1044,6 +1055,11 @@ write-maintained grouped summary table are deployed.
 `alert-store` maintains `alert_group_summary` inside
 `~/n8n-local/alert_store_data/alerts.sqlite3`. Each row represents one grouped
 detection and stores:
+
+Full summary repair uses one windowed SQLite scan followed by a transactional
+write of the final grouped rows. It does not rescan the complete alerts table
+once for every distinct group. Routine ingestion continues to refresh only the
+affected old/new group keys.
 
 On the Mac Studio deployment, the SQLite-writing alert-store process runs as the
 host LaunchAgent `com.arron.soc.alert-store`. The Docker Compose service named
@@ -1099,6 +1115,11 @@ The portal opens alert-store SQLite in read-only mode through a closing context
 manager. This avoids leaking file handles under repeated API calls; Python's
 native `sqlite3.Connection` context manager only commits or rolls back and does
 not close the connection by itself.
+
+AI and parsed-PCAP artifact indexes are cached for a short five-second window
+and invalidated when the runtime artifact directory changes. This bounds
+repeated filesystem parsing when multiple dashboard sessions poll the same API
+without making new analysis artifacts slow to appear.
 
 Manual repair command from the Mac Studio:
 

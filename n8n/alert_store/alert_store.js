@@ -58,6 +58,7 @@ const pcapRequestDefaultWindowSeconds = Math.min(
 );
 const pcapClaimLeaseSeconds = Math.max(300, Number(process.env.PCAP_CLAIM_LEASE_SECONDS || 1800));
 const pcapCaptureRetentionSeconds = Math.max(0, Number(process.env.PCAP_CAPTURE_RETENTION_SECONDS || 0));
+const analystStatusReasonMaxLength = 140;
 const autoPcapLevels = new Set(
   (process.env.PCAP_AUTO_REQUEST_LEVELS || 'critical,high,medium,low,informational')
     .split(',')
@@ -1382,6 +1383,7 @@ function all(sql, params = []) {
 }
 
 let sqliteWriteGate = Promise.resolve();
+let enrichmentGate = Promise.resolve();
 
 function withSqliteWriteGate(task) {
   // sqlite3 serializes individual statements, but HTTP handlers can still
@@ -1390,6 +1392,14 @@ function withSqliteWriteGate(task) {
   // bursts from n8n.
   const next = sqliteWriteGate.catch(() => undefined).then(task);
   sqliteWriteGate = next.catch(() => undefined);
+  return next;
+}
+
+function withEnrichmentGate(task) {
+  // External providers have strict request limits. Keep enrichment serialized
+  // independently from SQLite so a slow provider cannot block alert writes.
+  const next = enrichmentGate.catch(() => undefined).then(task);
+  enrichmentGate = next.catch(() => undefined);
   return next;
 }
 
@@ -1508,6 +1518,19 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_alert_group_summary_rule_name ON alert_group_summary(rule_name)');
   await run('CREATE INDEX IF NOT EXISTS idx_alert_group_summary_source_ip ON alert_group_summary(source_ip)');
   await run('CREATE INDEX IF NOT EXISTS idx_alert_group_summary_destination_ip ON alert_group_summary(destination_ip)');
+  await run(`
+    CREATE TABLE IF NOT EXISTS analyst_alert_group_state (
+      group_id TEXT PRIMARY KEY,
+      group_key TEXT,
+      status TEXT NOT NULL CHECK(status IN ('acknowledged', 'suppressed')),
+      repeat_count INTEGER NOT NULL DEFAULT 0,
+      reason TEXT,
+      updated_at TEXT NOT NULL,
+      updated_by TEXT
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_alert_group_state_status ON analyst_alert_group_state(status)');
+  await run('CREATE INDEX IF NOT EXISTS idx_alert_group_state_updated_at ON analyst_alert_group_state(updated_at)');
   await run(`
     CREATE TABLE IF NOT EXISTS notification_log (
       notification_key TEXT PRIMARY KEY,
@@ -1744,35 +1767,194 @@ async function refreshAlertGroupSummary(groupKey) {
   );
 }
 
-async function rebuildAlertGroupSummaries() {
-  await run('DELETE FROM alert_group_summary');
-  const groups = await all(`SELECT DISTINCT ${alertGroupKeySql} AS group_key FROM alerts`);
-  for (const group of groups) {
-    await refreshAlertGroupSummary(group.group_key);
+async function rebuildAlertGroupSummariesUnlocked() {
+  // One windowed scan replaces the former per-group aggregate and
+  // representative queries. The small insert loop only writes final summaries.
+  const groups = await all(`
+    WITH ranked AS (
+      SELECT ${alertGroupKeySql} AS group_key,
+             alert_id, first_seen, last_seen, timestamp, rule_name, event_dataset,
+             severity, severity_label, source_ip, source_port, destination_ip,
+             destination_port, network_protocol, transport_protocol,
+             traffic_direction, triage_score, triage_level, routing,
+             filter_status, filter_reason, suppression_key,
+             COUNT(*) OVER (PARTITION BY ${alertGroupKeySql}) AS raw_alert_count,
+             SUM(MAX(1, COALESCE(seen_count, 1))) OVER (PARTITION BY ${alertGroupKeySql}) AS total_seen_count,
+             MIN(first_seen) OVER (PARTITION BY ${alertGroupKeySql}) AS group_first_seen,
+             MAX(last_seen) OVER (PARTITION BY ${alertGroupKeySql}) AS group_last_seen,
+             ROW_NUMBER() OVER (
+               PARTITION BY ${alertGroupKeySql}
+               ORDER BY replace(replace(COALESCE(last_seen, timestamp, first_seen), 'T', ' '), 'Z', '') DESC,
+                        alert_id DESC
+             ) AS representative_rank
+      FROM alerts
+    )
+    SELECT * FROM ranked WHERE representative_rank = 1
+  `);
+  await run('BEGIN IMMEDIATE');
+  try {
+    await run('DELETE FROM alert_group_summary');
+    for (const row of groups) {
+      await run(
+        `
+          INSERT INTO alert_group_summary (
+            group_id, group_key, representative_alert_id, first_seen, last_seen,
+            raw_alert_count, total_seen_count, timestamp, rule_name, event_dataset,
+            severity, severity_label, source_ip, source_port, destination_ip,
+            destination_port, network_protocol, transport_protocol, traffic_direction,
+            triage_score, triage_level, routing, filter_status, filter_reason,
+            suppression_key, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        [
+          alertGroupId(row.group_key), row.group_key, row.alert_id,
+          row.group_first_seen, row.group_last_seen,
+          Number(row.raw_alert_count || 0), Number(row.total_seen_count || 0),
+          row.timestamp, row.rule_name, row.event_dataset, row.severity,
+          row.severity_label, row.source_ip, row.source_port, row.destination_ip,
+          row.destination_port, row.network_protocol, row.transport_protocol,
+          row.traffic_direction, row.triage_score,
+          normalizeTriageLevel(row.triage_level, row.severity_label), row.routing,
+          row.filter_status, row.filter_reason, row.suppression_key, nowUtc(),
+        ],
+      );
+    }
+    await run('COMMIT');
+  } catch (error) {
+    await run('ROLLBACK').catch(() => undefined);
+    throw error;
   }
   return {ok: true, status: 'group_summary_rebuilt', groups: groups.length};
 }
 
-async function storeAlert(rawAlert) {
-  return withSqliteWriteGate(() => storeAlertUnlocked(rawAlert));
+async function rebuildAlertGroupSummaries() {
+  return withSqliteWriteGate(rebuildAlertGroupSummariesUnlocked);
 }
 
-async function storeAlertUnlocked(rawAlert) {
-  // Store indexed summary fields for reports plus the full scored JSON for
-  // investigation-note generation.
+function validAnalystGroupId(value) {
+  const groupId = String(value || '').trim().toLowerCase();
+  return /^[a-f0-9]{12}$/.test(groupId) ? groupId : '';
+}
+
+async function analystStatusSnapshotUnlocked() {
+  const rows = await all(`
+    SELECT state.group_id, state.group_key, state.status, state.repeat_count,
+           state.reason, state.updated_at, state.updated_by,
+           COALESCE(summary.total_seen_count, summary.raw_alert_count, state.repeat_count, 0) AS current_count
+    FROM analyst_alert_group_state AS state
+    LEFT JOIN alert_group_summary AS summary ON summary.group_id = state.group_id
+    WHERE state.status IN ('acknowledged', 'suppressed')
+  `);
+  const expired = new Set(
+    rows
+      .filter((row) => row.status === 'acknowledged' && Number(row.current_count || 0) > Number(row.repeat_count || 0))
+      .map((row) => row.group_id),
+  );
+  for (const groupId of expired) {
+    await run('DELETE FROM analyst_alert_group_state WHERE group_id = ?', [groupId]);
+  }
+  const statuses = {};
+  for (const row of rows) {
+    if (expired.has(row.group_id)) continue;
+    statuses[row.group_id] = {
+      status: row.status,
+      repeat_count: Number(row.repeat_count || 0),
+      reason: row.reason || '',
+      updated_at: row.updated_at,
+      updated_by: row.updated_by || '',
+      group_key: row.group_key || '',
+    };
+  }
+  return {
+    ok: true,
+    statuses,
+    acknowledged: Object.keys(statuses).filter((groupId) => statuses[groupId].status === 'acknowledged'),
+    suppressed: Object.keys(statuses).filter((groupId) => statuses[groupId].status === 'suppressed'),
+  };
+}
+
+async function analystStatusSnapshot() {
+  return withSqliteWriteGate(analystStatusSnapshotUnlocked);
+}
+
+async function updateAnalystStatus(payload) {
+  return withSqliteWriteGate(async () => {
+    const groupId = validAnalystGroupId(payload?.id);
+    if (!groupId) throw new Error('invalid analyst alert group id');
+    const status = String(payload?.status || '').trim().toLowerCase();
+    if (!['open', 'acknowledged', 'suppressed'].includes(status)) {
+      throw new Error('invalid analyst alert status');
+    }
+    const summary = await get(
+      'SELECT group_key, raw_alert_count, total_seen_count FROM alert_group_summary WHERE group_id = ?',
+      [groupId],
+    );
+    if (!summary) throw new Error('analyst alert group not found');
+    let repeatCount = Math.max(0, Number.parseInt(payload?.repeat_count, 10) || 0);
+    if (status === 'acknowledged' && repeatCount <= 0) {
+      repeatCount = Math.max(Number(summary.raw_alert_count || 0), Number(summary.total_seen_count || 0));
+    }
+    const reason = String(payload?.reason || '').trim().slice(0, analystStatusReasonMaxLength);
+    if (status === 'suppressed' && !reason) throw new Error('suppression reason is required');
+    if (status === 'open') {
+      await run('DELETE FROM analyst_alert_group_state WHERE group_id = ?', [groupId]);
+    } else {
+      await run(
+        `
+          INSERT INTO analyst_alert_group_state (
+            group_id, group_key, status, repeat_count, reason, updated_at, updated_by
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(group_id) DO UPDATE SET
+            group_key = excluded.group_key,
+            status = excluded.status,
+            repeat_count = excluded.repeat_count,
+            reason = excluded.reason,
+            updated_at = excluded.updated_at,
+            updated_by = excluded.updated_by
+        `,
+        [groupId, summary.group_key || '', status, repeatCount, reason, nowUtc(), String(payload?.updated_by || 'dashboard').trim().slice(0, 80)],
+      );
+    }
+    return analystStatusSnapshotUnlocked();
+  });
+}
+
+async function storeAlert(rawAlert) {
   let alert = {
     ...rawAlert,
     triage: scoreAlert(rawAlert),
   };
   if (!hasUsableExternalIntel(alert)) {
-    const enrichmentResult = await enrichAlert(alert);
+    const enrichmentResult = await withEnrichmentGate(() => enrichAlert(alert));
     if (enrichmentResult.ok && enrichmentResult.alert) {
-      alert = {
-        ...enrichmentResult.alert,
-        triage: alert.triage,
-      };
+      alert = {...enrichmentResult.alert, triage: alert.triage};
     }
   }
+  const result = await withSqliteWriteGate(() => storeAlertUnlocked(alert));
+  if (!result.ok) return result;
+  try {
+    result.notification = await maybeNotifyTelegram(
+      alert,
+      result.alert,
+      result.stored,
+      nowUtc(),
+      result.filter,
+    );
+  } catch (error) {
+    // Persistence succeeded. Report the notification failure without causing
+    // n8n to replay an alert that is already safely committed.
+    result.notification = {
+      channel: 'telegram',
+      status: 'failed',
+      reason: String(error.message || error).slice(0, 240),
+    };
+  }
+  return result;
+}
+
+async function storeAlertUnlocked(alert) {
+  // Store indexed summary fields for reports plus the full scored JSON for
+  // investigation-note generation.
   const alertId = alert.alert_id;
   if (!alertId) {
     return {ok: false, status: 'rejected', reason: 'missing alert_id'};
@@ -1980,7 +2162,7 @@ async function storeAlertUnlocked(rawAlert) {
     triage: alert.triage,
     filter: suppression,
     pcap,
-    notification: await maybeNotifyTelegram(alert, row, inserted, timestamp, suppression),
+    notification: {channel: 'telegram', status: 'pending'},
   };
 }
 
@@ -2064,7 +2246,7 @@ function all(sql, params = []) {
   });
 }
 
-async function rescoreAlerts() {
+async function rescoreAlertsUnlocked() {
   // POST /rescore after editing scoring_rules.json to update existing rows
   // without replaying historical alerts from Security Onion.
   const rows = await all('SELECT alert_id, alert_json FROM alerts');
@@ -2112,7 +2294,7 @@ async function rescoreAlerts() {
     }
   }
 
-  const groupSummary = await rebuildAlertGroupSummaries();
+  const groupSummary = await rebuildAlertGroupSummariesUnlocked();
 
   return {
     ok: true,
@@ -2123,6 +2305,11 @@ async function rescoreAlerts() {
     group_summary_groups: groupSummary.groups,
     scoring_rules: path.basename(scoringRulesPath),
   };
+}
+
+async function rescoreAlerts() {
+  // Maintenance writes must not interleave with multi-statement ingestion.
+  return withSqliteWriteGate(rescoreAlertsUnlocked);
 }
 
 function isTelegramConfigured() {
@@ -2517,10 +2704,17 @@ async function createPcapRequest(payload) {
       )
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(request_id) DO UPDATE SET
+        status = excluded.status,
         reason = excluded.reason,
         requested_by = excluded.requested_by,
         max_window_seconds = excluded.max_window_seconds,
         request_json = excluded.request_json,
+        claimed_at = NULL,
+        completed_at = NULL,
+        error = NULL,
+        artifact_path = NULL,
+        artifact_sha256 = NULL,
+        artifact_size_bytes = NULL,
         updated_at = excluded.updated_at
     `,
     [
@@ -2767,6 +2961,14 @@ function readJsonBody(request) {
   // n8n should POST one alert object per request. Arrays are rejected to avoid
   // partial batch inserts that are harder to reason about.
   return new Promise((resolve, reject) => {
+    const declaredLength = Number(request.headers['content-length'] || 0);
+    if (Number.isFinite(declaredLength) && declaredLength > maxRequestBytes) {
+      const error = new Error(`payload exceeds ${maxRequestBytes} byte limit`);
+      error.statusCode = 413;
+      request.resume();
+      reject(error);
+      return;
+    }
     const chunks = [];
     let bytes = 0;
     let rejected = false;
@@ -2775,7 +2977,10 @@ function readJsonBody(request) {
       bytes += chunk.length;
       if (bytes > maxRequestBytes) {
         rejected = true;
-        request.destroy(new Error(`payload exceeds ${maxRequestBytes} byte limit`));
+        chunks.length = 0;
+        const error = new Error(`payload exceeds ${maxRequestBytes} byte limit`);
+        error.statusCode = 413;
+        reject(error);
         return;
       }
       chunks.push(chunk);
@@ -2814,6 +3019,15 @@ async function handleRequest(request, response) {
       sendJson(response, 200, {ok: true, status: 'healthy'});
       return;
     }
+    if (request.method === 'GET' && parsedUrl.pathname === '/analyst-status') {
+      sendJson(response, 200, await analystStatusSnapshot());
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/analyst-status') {
+      const payload = await readJsonBody(request);
+      sendJson(response, 200, await updateAnalystStatus(payload));
+      return;
+    }
     if (request.method === 'POST' && request.url === '/alert') {
       // Main ingestion endpoint called by the n8n workflow.
       const alert = await readJsonBody(request);
@@ -2835,7 +3049,7 @@ async function handleRequest(request, response) {
       // intentionally keyless public sources such as Shodan InternetDB, KEV,
       // EPSS, and NVD without a key.
       const alert = await readJsonBody(request);
-      const result = await enrichAlert(alert);
+      const result = await withEnrichmentGate(() => enrichAlert(alert));
       sendJson(response, result.ok ? 200 : 400, result);
       return;
     }
@@ -2844,7 +3058,7 @@ async function handleRequest(request, response) {
       // or contacts Security Onion; relay-side fulfillment will use its own
       // forced-command SSH path with additional Security Onion validation.
       const payload = await readJsonBody(request);
-      const result = await createPcapRequest(payload);
+      const result = await withSqliteWriteGate(() => createPcapRequest(payload));
       sendJson(response, 200, result);
       return;
     }
@@ -2857,7 +3071,7 @@ async function handleRequest(request, response) {
     if (request.method === 'POST' && parsedUrl.pathname === '/pcap/claim') {
       // Relay claims a pending request before contacting Security Onion.
       const payload = await readJsonBody(request);
-      const result = await claimPcapRequest(payload);
+      const result = await withSqliteWriteGate(() => claimPcapRequest(payload));
       sendJson(response, 200, result);
       return;
     }
@@ -2865,7 +3079,7 @@ async function handleRequest(request, response) {
       // Relay reports fulfillment metadata only. Packet artifacts stay on the
       // controlled runtime path and are never committed to the DR repo.
       const payload = await readJsonBody(request);
-      const result = await completePcapRequest(payload);
+      const result = await withSqliteWriteGate(() => completePcapRequest(payload));
       sendJson(response, 200, result);
       return;
     }
@@ -2873,7 +3087,7 @@ async function handleRequest(request, response) {
       // Internal operator recovery endpoint. The relay cannot call this route;
       // it is used only after a reviewed broker or selector repair.
       const payload = await readJsonBody(request);
-      const result = await requeuePcapRequests(payload);
+      const result = await withSqliteWriteGate(() => requeuePcapRequests(payload));
       sendJson(response, 200, result);
       return;
     }
@@ -2894,7 +3108,7 @@ async function handleRequest(request, response) {
     if (request.method === 'POST' && request.url === '/alert') {
       writeN8nBeacon('error', {}, null, error);
     }
-    sendJson(response, 400, {
+    sendJson(response, Number(error.statusCode || 400), {
       ok: false,
       status: 'rejected',
       reason: error.message,

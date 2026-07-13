@@ -400,15 +400,15 @@ ALERT_STORE_SQLITE_SYNCHRONOUS=FULL
 ALERT_STORE_SQLITE_TEMP_STORE=DEFAULT
 ```
 
-The portal and alert-store can both write analyst workflow state and PCAP
-request records, so all writer connections must use the same busy timeout and
-DELETE/FULL durability settings. Dashboard generation should use read-only
-SQLite connections. On the current Docker Desktop bind-mounted runtime path,
-do not enable WAL; use a named Docker volume or host-native alert-store service
-before reconsidering WAL. If a recovered DB must be swapped in, stop both
-`alert-store` and the report portal before replacing `alerts.sqlite3`, then
-remove stale `alerts.sqlite3-journal`, `alerts.sqlite3-wal`, and
-`alerts.sqlite3-shm` sidecars before restarting.
+The host-native alert-store is the sole production writer for alert evidence,
+analyst workflow state, grouped summaries, and PCAP request records. The portal
+proxies mutations to alert-store and opens SQLite read-only for dashboard
+queries. On the current Docker Desktop bind-mounted runtime path, do not enable
+WAL; use a named Docker volume or host-native service before reconsidering it.
+If a recovered DB must be swapped in, stop alert-store and all readers,
+including the report portal, before replacing `alerts.sqlite3`. Remove stale
+`alerts.sqlite3-journal`, `alerts.sqlite3-wal`, and `alerts.sqlite3-shm`
+sidecars before restarting.
 
 If `quick_check` reports index-only damage such as `wrong # of entries in
 index ...`, or page cleanup issues that still allow reads, use a short

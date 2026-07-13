@@ -174,6 +174,17 @@ Alert-store runtime model:
 - Do not run the SQLite-writing alert-store process inside Docker against the
   macOS bind-mounted DB. That path produced repeat `SQLITE_IOERR` and index
   corruption during summary rebuilds.
+- The LAN portal sends acknowledge, suppress, and expose transitions to
+  `http://127.0.0.1:8787/analyst-status`. Alert-store is the production owner
+  of `analyst_alert_group_state` writes and automatically reopens an
+  acknowledged group after its stored observation count increases.
+- Manual PCAP requests are posted to `http://127.0.0.1:8787/pcap/request` so
+  the portal does not become a second SQLite queue writer. Alert-store also
+  serializes relay claim, completion, and operator requeue mutations.
+- Enrichment has its own serialized provider gate. A slow public API no longer
+  holds the SQLite ingest write gate. Telegram delivery also runs after the
+  alert commit, so a Telegram timeout cannot make n8n replay an alert that was
+  already stored successfully.
 
 Alert-store ingestion safety knob:
 

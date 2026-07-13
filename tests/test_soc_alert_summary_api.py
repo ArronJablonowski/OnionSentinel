@@ -33,6 +33,7 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.db_path = Path(self.tmp.name) / "alerts.sqlite3"
         self.portal = load_portal()
         self.portal.SOC_ALERT_STORE_DB = self.db_path
+        self.portal.SOC_ALERT_STORE_API_URL = ""
         self.portal.SOC_ALERT_STATUS_FILE = Path(self.tmp.name) / ".soc_alert_status.json"
         self.portal.SOC_ALERT_STATIC_STATUS_FILE = Path(self.tmp.name) / "soc-alerts-status.json"
         self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR = Path(self.tmp.name) / "pcap-analysis"
@@ -369,6 +370,33 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         request_json = json.loads(row["request_json"])
         self.assertTrue(request_json["require_source_port"])
         self.assertEqual(request_json["capture_file"], "/nsm/suripcap/1/so-pcap.unit")
+
+    def test_production_pcap_request_uses_alert_store_api(self) -> None:
+        group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        response = mock.MagicMock()
+        response.read.return_value = json.dumps({
+            "ok": True,
+            "status": "pending",
+            "request": {"request_id": "synthetic-request", "group_id": group_id},
+        }).encode("utf-8")
+        context = mock.MagicMock()
+        context.__enter__.return_value = response
+        self.portal.SOC_ALERT_STORE_API_URL = "http://127.0.0.1:8787"
+
+        with mock.patch.object(self.portal.urllib_request, "urlopen", return_value=context) as urlopen:
+            status, payload = self.portal.soc_alert_pcap_request_response(
+                group_id,
+                {"reason": "unit test request"},
+            )
+
+        self.assertEqual(status, 202)
+        self.assertEqual(payload["status"], "pending")
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8787/pcap/request")
+        sent = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(sent["group_id"], group_id)
 
     def test_pcap_request_endpoint_requeues_failed_request(self) -> None:
         newest_group_id = self.portal.soc_alert_group_id(
@@ -837,6 +865,35 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["total_matching"], 2)
         self.assertEqual(payload["alerts"][0]["representative_alert_id"], "newest-alert")
         self.assertNotIn(newest_group_id, status_payload["statuses"])
+
+    def test_production_status_update_uses_alert_store_api(self) -> None:
+        group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        response = mock.MagicMock()
+        response.read.return_value = json.dumps({
+            "ok": True,
+            "statuses": {group_id: {"status": "acknowledged", "repeat_count": 5}},
+        }).encode("utf-8")
+        context = mock.MagicMock()
+        context.__enter__.return_value = response
+        self.portal.SOC_ALERT_STORE_API_URL = "http://127.0.0.1:8787"
+
+        with mock.patch.object(self.portal.urllib_request, "urlopen", return_value=context) as urlopen:
+            with mock.patch.object(self.portal, "write_soc_alert_status", side_effect=AssertionError("direct DB write")):
+                ok, payload = self.portal.update_soc_alert_status({
+                    "id": group_id,
+                    "status": "acknowledged",
+                    "repeat_count": 5,
+                })
+
+        self.assertTrue(ok)
+        self.assertTrue(payload["ok"])
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8787/analyst-status")
+        sent = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(sent["id"], group_id)
+        self.assertEqual(sent["status"], "acknowledged")
 
 
 if __name__ == "__main__":

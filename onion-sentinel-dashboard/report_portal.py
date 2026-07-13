@@ -21,11 +21,14 @@ import subprocess
 import sys
 import time
 import uuid
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 PORTAL_SOURCE_DIR = Path(__file__).resolve().parent
@@ -52,6 +55,7 @@ LAST_UPDATED_FILE = HOME / "report_portal" / ".last_updated"
 MACOS_UPDATE_STATUS_FILE = HOME / "report_portal" / ".macos_update_status.json"
 SOC_ALERT_STATUS_FILE = HOME / "report_portal" / ".soc_alert_status.json"
 SOC_ALERT_STORE_DB = HOME / "n8n-local" / "alert_store_data" / "alerts.sqlite3"
+SOC_ALERT_STORE_API_URL = os.environ.get("SOC_ALERT_STORE_API_URL", "http://127.0.0.1:8787").rstrip("/")
 SOC_ALERT_DASHBOARD_DIR = HOME / "report_portal" / "library" / "Cybersecurity" / "SOC Alerts"
 SOC_ALERT_DETAIL_DIR = SOC_ALERT_DASHBOARD_DIR / "details"
 SOC_ALERT_STATIC_STATUS_FILE = SOC_ALERT_DASHBOARD_DIR / "soc-alerts-status.json"
@@ -86,6 +90,8 @@ SOC_ALERT_LEVEL_RANK = {
 }
 SOC_ALERT_AI_ELIGIBLE_FILTER_STATUSES = {"accepted", "escalated", "unknown", "suppressed"}
 SOC_ALERT_TEST_PREFIXES = ("phase", "config-", "internal-test-", "sqlite-", "policy-", "codex-")
+SOC_ALERT_ARTIFACT_CACHE_TTL_SECONDS = 5.0
+_SOC_ALERT_ARTIFACT_CACHE: dict[str, tuple[float, tuple[str, int], object]] = {}
 HERMES_DR_BACKUP_DIR = HOME / "Hermes_DR_Backups"
 HERMES_DR_REMOTE_DEST = "aj_lab@10.77.7.222"
 HERMES_DR_REMOTE_DIR = "/Users/aj_lab/Hermes_DR_Backups"
@@ -3877,8 +3883,34 @@ def soc_alert_has_parsed_pcap(record: dict) -> bool:
     return bool(zeek.get("available") or tshark.get("available"))
 
 
+def artifact_cache_fingerprint(path: Path) -> tuple[str, int]:
+    """Return a cheap cache key for append-only runtime artifact directories."""
+    try:
+        return str(path), path.stat().st_mtime_ns
+    except OSError:
+        return str(path), 0
+
+
+def read_artifact_cache(name: str, path: Path) -> object | None:
+    cached = _SOC_ALERT_ARTIFACT_CACHE.get(name)
+    if not cached:
+        return None
+    cached_at, fingerprint, value = cached
+    if time.monotonic() - cached_at > SOC_ALERT_ARTIFACT_CACHE_TTL_SECONDS:
+        return None
+    return value if fingerprint == artifact_cache_fingerprint(path) else None
+
+
+def write_artifact_cache(name: str, path: Path, value: object) -> object:
+    _SOC_ALERT_ARTIFACT_CACHE[name] = (time.monotonic(), artifact_cache_fingerprint(path), value)
+    return value
+
+
 def soc_alert_pcap_analysis_index() -> dict[str, set[str]]:
     """Index parsed Zeek/TShark artifacts once per API response."""
+    cached = read_artifact_cache("pcap-analysis-index", SOC_ALERT_PCAP_ANALYSIS_DIR)
+    if isinstance(cached, dict):
+        return cached
     index = {"request_ids": set(), "alert_ids": set(), "group_ids": set()}
     if not SOC_ALERT_PCAP_ANALYSIS_DIR.exists():
         return index
@@ -3896,7 +3928,7 @@ def soc_alert_pcap_analysis_index() -> dict[str, set[str]]:
             value = str(request.get(key) or "").strip()
             if value:
                 index[bucket].add(value)
-    return index
+    return write_artifact_cache("pcap-analysis-index", SOC_ALERT_PCAP_ANALYSIS_DIR, index)
 
 
 def soc_alert_pcap_request_statuses(conn: sqlite3.Connection, rows: list[sqlite3.Row | dict]) -> dict[str, dict]:
@@ -4399,10 +4431,43 @@ def insert_pcap_request(conn: sqlite3.Connection, request: dict) -> sqlite3.Row:
     return conn.execute("SELECT * FROM pcap_requests WHERE request_id = ?", (request["request_id"],)).fetchone()
 
 
+def alert_store_post_json(path: str, payload: dict, timeout: float = 5.0) -> dict:
+    """POST to the host alert-store and preserve its bounded error detail."""
+    encoded = json.dumps(payload).encode("utf-8")
+    req = urllib_request.Request(
+        f"{SOC_ALERT_STORE_API_URL}{path}",
+        data=encoded,
+        method="POST",
+        headers={"Content-Type": "application/json", "Content-Length": str(len(encoded))},
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=timeout) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib_error.HTTPError as exc:
+        try:
+            error_payload = json.loads(exc.read().decode("utf-8"))
+            detail = str(error_payload.get("reason") or error_payload.get("error") or exc.reason)
+        except (OSError, json.JSONDecodeError):
+            detail = str(exc.reason)
+        raise RuntimeError(detail) from exc
+    except (OSError, urllib_error.URLError, json.JSONDecodeError) as exc:
+        raise RuntimeError(str(exc)) from exc
+    if not isinstance(result, dict) or not result.get("ok"):
+        raise RuntimeError(str(result.get("reason") or result.get("error") or "alert-store rejected request"))
+    return result
+
+
 def soc_alert_pcap_request_response(group_id: str, payload: dict) -> tuple[int, dict]:
     group_id = str(group_id or "").strip().lower()
     if not re.fullmatch(r"[a-f0-9]{12}", group_id):
         return soc_alert_api_error("Invalid SOC alert group id")
+    if SOC_ALERT_STORE_API_URL:
+        try:
+            data = alert_store_post_json("/pcap/request", {**payload, "group_id": group_id})
+        except RuntimeError as exc:
+            return soc_alert_api_error(f"Alert-store PCAP request failed: {exc}", 503)
+        data.update({"pcap_status_key": "queued", "pcap_status_label": "Queued"})
+        return 202, data
     try:
         with soc_alert_db_write_connect() as conn:
             if not sqlite_table_exists(conn, "pcap_requests"):
@@ -4504,13 +4569,15 @@ def soc_alert_active_group_ids(conn: sqlite3.Connection, statuses: dict) -> set[
 
 
 def normalize_soc_group_statuses(conn: sqlite3.Connection) -> dict:
-    """Load current group state and auto-expire stale acknowledgements.
+    """Load current group state and hide stale acknowledgements.
 
     Acknowledged detections should reappear when the matching grouped detection
     count increases. Suppressed detections remain hidden until explicitly
-    exposed.
+    exposed. Production deletion is owned by alert-store; portal reads must not
+    become a second SQLite writer.
     """
-    ensure_soc_alert_status_table(conn)
+    if not sqlite_table_exists(conn, "analyst_alert_group_state"):
+        return {}
     counts = soc_alert_group_counts(conn)
     rows = conn.execute(
         """
@@ -4520,14 +4587,12 @@ def normalize_soc_group_statuses(conn: sqlite3.Connection) -> dict:
         """
     ).fetchall()
     statuses: dict[str, dict] = {}
-    expired_acknowledged: list[str] = []
     for row in rows:
         group_id = row["group_id"]
         status = row["status"]
         repeat_count = int(row["repeat_count"] or 0)
         current_count = counts.get(group_id, repeat_count)
         if status == "acknowledged" and current_count > repeat_count:
-            expired_acknowledged.append(group_id)
             continue
         statuses[group_id] = {
             "status": status,
@@ -4537,9 +4602,6 @@ def normalize_soc_group_statuses(conn: sqlite3.Connection) -> dict:
             "updated_by": row["updated_by"] or "",
             "group_key": row["group_key"] or "",
         }
-    if expired_acknowledged:
-        conn.executemany("DELETE FROM analyst_alert_group_state WHERE group_id = ?", [(gid,) for gid in expired_acknowledged])
-        conn.commit()
     return statuses
 
 
@@ -4547,7 +4609,7 @@ def load_soc_alert_statuses_from_db() -> dict:
     if not SOC_ALERT_STORE_DB.exists():
         return {}
     try:
-        with soc_alert_db_write_connect() as conn:
+        with soc_alert_db_connect() as conn:
             return normalize_soc_group_statuses(conn)
     except Exception:
         return {}
@@ -4570,6 +4632,7 @@ def write_soc_alert_status_json_snapshot(statuses: dict) -> None:
 
 
 def save_soc_alert_statuses_to_db(statuses: dict) -> None:
+    """Persist offline DR-test state; production writes through alert-store."""
     if not SOC_ALERT_STORE_DB.parent.exists():
         return
     try:
@@ -4607,7 +4670,9 @@ def save_soc_alert_statuses_to_db(statuses: dict) -> None:
                     ),
                 )
     except Exception:
-        pass
+        # Do not let a failed transaction be followed by a successful-looking
+        # JSON mirror update.
+        raise
 
 
 def load_soc_alert_statuses() -> dict:
@@ -4731,23 +4796,23 @@ def llm_analysis_log_page(raw: object) -> int:
 def read_llm_analysis_logs(max_rows: int = 1000) -> list[dict]:
     if not SOC_ALERT_LLM_ANALYSIS_LOG_FILE.exists():
         return []
-    logs: list[dict] = []
+    # Stream the JSONL file and retain only the requested tail. read_text()
+    # previously duplicated the complete growing log in memory on every poll.
+    logs: deque[dict] = deque(maxlen=max_rows)
     try:
-        lines = SOC_ALERT_LLM_ANALYSIS_LOG_FILE.read_text(encoding="utf-8").splitlines()
+        with SOC_ALERT_LLM_ANALYSIS_LOG_FILE.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(data, dict):
+                    logs.append(data)
     except OSError:
         return []
-    for line in reversed(lines):
-        if not line.strip():
-            continue
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict):
-            logs.append(data)
-        if len(logs) >= max_rows:
-            break
-    return logs
+    return list(reversed(logs))
 
 
 def current_llm_queue_size() -> int:
@@ -4843,13 +4908,24 @@ def update_soc_alert_status(payload: dict) -> tuple[bool, dict]:
     if raw_status == "acknowledged" and repeat_count <= 0:
         repeat_count = current_soc_alert_group_repeat_count(alert_id)
     reason = str(payload.get("reason") or "").strip()[:140]
-    write_soc_alert_status(alert_id, {
+    request_payload = {
+        "id": alert_id,
         "status": raw_status,
         "repeat_count": repeat_count,
         "reason": reason,
         "updated_at": now,
-    })
-    return True, soc_alert_status_response()
+        "updated_by": "dashboard",
+    }
+    if not SOC_ALERT_STORE_API_URL:
+        # Offline DR tests can explicitly disable the API. Production uses the
+        # alert-store endpoint so only one process owns SQLite writes.
+        write_soc_alert_status(alert_id, request_payload)
+        return True, soc_alert_status_response()
+    try:
+        result = alert_store_post_json("/analyst-status", request_payload)
+    except RuntimeError as exc:
+        return False, {"ok": False, "error": f"Alert-store state update failed: {exc}"}
+    return True, result
 
 
 def valid_soc_alert_store_id(value: object) -> str:
@@ -5095,6 +5171,10 @@ def soc_alert_latest_analysis_mtime(alert_id: str) -> float:
 
 def soc_alert_ai_artifact_index() -> dict[str, dict[str, float]]:
     """Index AI prompt/analysis artifact mtimes once for one API response."""
+    cache_path = SOC_ALERT_AI_ANALYSIS_DIR.parent
+    cached = read_artifact_cache("ai-artifact-index", cache_path)
+    if isinstance(cached, dict):
+        return cached
     prompt_mtime_by_alert: dict[str, float] = {}
     analysis_mtime_by_alert: dict[str, float] = {}
     prompt_dir_matches_analysis = (
@@ -5121,10 +5201,10 @@ def soc_alert_ai_artifact_index() -> dict[str, dict[str, float]]:
             alert_id = str(data.get("alert_id") or "").strip()
             if alert_id:
                 analysis_mtime_by_alert[alert_id] = max(analysis_mtime_by_alert.get(alert_id, 0.0), path.stat().st_mtime)
-    return {
+    return write_artifact_cache("ai-artifact-index", cache_path, {
         "prompt_mtime_by_alert": prompt_mtime_by_alert,
         "analysis_mtime_by_alert": analysis_mtime_by_alert,
-    }
+    })
 
 
 def soc_alert_page_ai_artifact_context(rows: list[sqlite3.Row | dict]) -> dict[str, object]:
