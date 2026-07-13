@@ -18,11 +18,17 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tarfile
 import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+from pcap_lifecycle import analysis_completed, delete_request_artifacts
 
 
 HOME = Path.home()
@@ -48,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ssh-target", default=os.environ.get("PCAP_ARTIFACT_SSH_TARGET", ""), help="SSH target used with --fetch-remote, for example user@security-onion")
     parser.add_argument("--ssh-bin", default=os.environ.get("PCAP_ARTIFACT_SSH_BIN", "ssh"), help="SSH executable for artifact fetch")
     parser.add_argument("--overwrite", action="store_true", help="Rebuild existing analysis artifacts")
+    parser.add_argument("--retain-artifact", action="store_true", help="Keep a successfully parsed broker artifact for controlled troubleshooting")
     parser.add_argument("--stdout", action="store_true", help="Print JSON summaries after processing")
     args = parser.parse_args()
     if args.limit <= 0:
@@ -132,29 +139,29 @@ def pending_requests(db_path: Path, request_id: str | None, limit: int, out_dir:
         columns = table_columns(conn, "pcap_requests")
         order_column = "completed_at" if "completed_at" in columns else "updated_at"
         if request_id:
-            found = rows(conn, "SELECT * FROM pcap_requests WHERE request_id = ? AND status = 'fulfilled'", [request_id])
+            candidates = rows(conn, "SELECT * FROM pcap_requests WHERE request_id = ? AND status = 'fulfilled'", [request_id])
         else:
-            found = rows(
-                conn,
+            # Do not LIMIT before excluding existing analysis artifacts. Doing
+            # so repeatedly selected the newest already-processed rows and
+            # starved older fulfilled captures forever.
+            candidates = conn.execute(
                 f"""
                 SELECT *
                 FROM pcap_requests
                 WHERE status = 'fulfilled'
                 ORDER BY {order_column} DESC, created_at DESC
-                LIMIT ?
-                """,
-                [limit],
+                """
             )
+        found: list[sqlite3.Row] = []
+        for item in candidates:
+            item_request_id = str(item["request_id"] or "")
+            if overwrite or not analysis_json_path(out_dir, item_request_id).exists():
+                found.append(item)
+                if len(found) >= limit:
+                    break
     finally:
         conn.close()
-    requests = [request_from_row(item) for item in found]
-    if overwrite:
-        return requests
-    return [
-        item
-        for item in requests
-        if not analysis_json_path(out_dir, str(item.get("request_id") or "")).exists()
-    ]
+    return [request_from_row(item) for item in found]
 
 
 def analysis_json_path(out_dir: Path, request_id: str) -> Path:
@@ -452,6 +459,16 @@ def build_markdown(analysis: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def atomic_write_text(path: Path, content: str) -> None:
+    """Publish complete derived evidence before raw packets become disposable."""
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temp_path.replace(path)
+
+
 def process_one(request: dict[str, Any], args: argparse.Namespace, direct_pcap: Path | None = None) -> dict[str, Any]:
     request_id = safe_filename(request.get("request_id") or (direct_pcap.stem if direct_pcap else "pcap"))
     with tempfile.TemporaryDirectory(prefix="onion-sentinel-pcap-") as temp_name:
@@ -484,8 +501,21 @@ def process_one(request: dict[str, Any], args: argparse.Namespace, direct_pcap: 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     json_path = analysis_json_path(args.out_dir, request_id)
     md_path = args.out_dir / f"{request_id}-pcap-analysis.md"
-    json_path.write_text(json.dumps(analysis, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    md_path.write_text(build_markdown(analysis), encoding="utf-8")
+    atomic_write_text(json_path, json.dumps(analysis, indent=2, sort_keys=True) + "\n")
+    atomic_write_text(md_path, build_markdown(analysis))
+    # Re-open both outputs before deleting runtime packet data. A parser failure,
+    # partial output write, direct/manual PCAP, or operator retain flag preserves
+    # the source artifact for troubleshooting and retry.
+    json.loads(json_path.read_text(encoding="utf-8"))
+    if not md_path.read_text(encoding="utf-8").strip():
+        raise RuntimeError("PCAP Markdown analysis output is empty")
+    cleanup = {"deleted": False, "bytes": 0, "files": 0}
+    if direct_pcap is None and not getattr(args, "retain_artifact", False) and analysis_completed(analysis):
+        cleanup = delete_request_artifacts(args.artifact_dir, request.get("request_id"))
+    analysis["raw_artifact_cleanup"] = cleanup
+    # Preserve cleanup telemetry when possible. The already validated first
+    # version remains durable if this metadata-only rewrite is interrupted.
+    atomic_write_text(json_path, json.dumps(analysis, indent=2, sort_keys=True) + "\n")
     analysis["_json_path"] = str(json_path)
     analysis["_markdown_path"] = str(md_path)
     return analysis

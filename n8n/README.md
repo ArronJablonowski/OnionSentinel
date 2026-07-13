@@ -125,13 +125,21 @@ and writes bounded JSON/Markdown summaries for the SOC Analyst prompt builder.
 Raw PCAPs, extracted captures, and generated PCAP analysis artifacts must remain
 out of Git.
 
-Use `n8n/bin/maintain-pcap-evidence.py` for runtime retention. It defaults to
-dry-run, keeps raw PCAP artifacts for 14 days, keeps derived analysis for 30
-days, and refuses cleanup paths outside `$HOME/n8n-local`.
+Broker-managed raw archives are deleted from the Mac immediately after both
+Zeek and TShark commands succeed and the derived JSON/Markdown files are
+atomically written and reopened. A missing tool, failed parser command, partial
+output, or direct/manual `--pcap` input preserves the raw file. Use
+`--retain-artifact` only during controlled troubleshooting. Derived summaries
+remain available to the SOC Analyst and dashboard after raw deletion.
 
-`launchd/com.arron.soc.pcap-retention.plist` installs a daily 03:20 dry-run
-retention check. Add `--apply` only in the rendered live LaunchAgent after an
-operator verifies the dry-run output and confirms the runtime paths.
+Use `n8n/bin/maintain-pcap-evidence.py` for runtime retention. Its
+`--analyzed-only --apply` mode is the daily safety net for a crash between
+analysis publication and raw deletion. It requires validated successful Zeek
+and TShark command records and refuses cleanup paths outside
+`$HOME/n8n-local`. Age-based cleanup remains dry-run unless explicitly applied.
+
+`launchd/com.arron.soc.pcap-retention.plist` installs a daily 03:20
+analyzed-only cleanup. It cannot delete an unparsed or partially parsed request.
 
 Optional enrichment keys are also set in `$HOME/n8n-local/.env`. Blank or
 placeholder values are treated as disabled, so a source can be enabled or

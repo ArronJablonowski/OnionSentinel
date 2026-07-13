@@ -14,7 +14,7 @@ HERMES_SCRIPT_DIR="${HOME}/.hermes/scripts"
 HERMES_ASSET_DIR="${HOME}/.hermes/assets"
 PORTAL_DIR="${HOME}/report_portal"
 
-mkdir -p "$STACK_DIR/alert_store/config" "$STACK_DIR/bin" "$STACK_DIR/config" "$STACK_DIR/logs" "$STACK_DIR/alert_store_data" "$STACK_DIR/n8n_data" "$STACK_DIR/soc-alerts" "$STACK_DIR/soc-alerts/agent-memory" "$STACK_DIR/soc-alerts/pcap-analysis" "$STACK_DIR/pcap-evidence/artifacts"
+mkdir -p "$STACK_DIR/alert_store/config" "$STACK_DIR/alert_store/lib" "$STACK_DIR/bin" "$STACK_DIR/config" "$STACK_DIR/logs" "$STACK_DIR/alert_store_data" "$STACK_DIR/n8n_data" "$STACK_DIR/soc-alerts" "$STACK_DIR/soc-alerts/agent-memory" "$STACK_DIR/soc-alerts/pcap-analysis" "$STACK_DIR/pcap-evidence/artifacts"
 
 # n8n writes reports to ./soc-alerts inside the compose project. Hermes and
 # Obsidian expect the friendlier Documents path, so expose the same directory
@@ -35,6 +35,7 @@ cp "$REPO_DIR/n8n/alert_store/alert_store_proxy.js" "$STACK_DIR/alert_store/aler
 cp "$REPO_DIR/n8n/alert_store/package.json" "$STACK_DIR/alert_store/package.json"
 cp "$REPO_DIR/n8n/alert_store/review_alerts.js" "$STACK_DIR/alert_store/review_alerts.js"
 cp "$REPO_DIR/n8n/alert_store/investigation_notes.js" "$STACK_DIR/alert_store/investigation_notes.js"
+cp "$REPO_DIR/n8n/alert_store/lib/provider_scheduler.js" "$STACK_DIR/alert_store/lib/provider_scheduler.js"
 cp "$REPO_DIR/n8n/alert_store/config/scoring_rules.json" "$STACK_DIR/alert_store/config/scoring_rules.json"
 if [[ ! -f "$STACK_DIR/config/soc_analyst_system_prompt.md" && -f "$STACK_DIR/config/soc_analyst_system_prompt.txt" ]]; then
   cp "$STACK_DIR/config/soc_analyst_system_prompt.txt" "$STACK_DIR/config/soc_analyst_system_prompt.md"
@@ -77,6 +78,8 @@ cp "$REPO_DIR/n8n/bin/build-ai-investigation-prompt.py" "$STACK_DIR/bin/build-ai
 cp "$REPO_DIR/n8n/bin/run-local-ai-analysis.py" "$STACK_DIR/bin/run-local-ai-analysis.py"
 cp "$REPO_DIR/n8n/bin/auto-run-ai-analysis.py" "$STACK_DIR/bin/auto-run-ai-analysis.py"
 cp "$REPO_DIR/n8n/bin/process-pcap-evidence.py" "$STACK_DIR/bin/process-pcap-evidence.py"
+cp "$REPO_DIR/n8n/bin/pcap_lifecycle.py" "$STACK_DIR/bin/pcap_lifecycle.py"
+cp "$REPO_DIR/n8n/bin/maintain-pcap-evidence.py" "$STACK_DIR/bin/maintain-pcap-evidence.py"
 cp "$REPO_DIR/n8n/bin/sync-soc-alerts-portal.py" "$STACK_DIR/bin/sync-soc-alerts-portal.py"
 cp "$REPO_DIR/n8n/bin/write-daily-soc-rollup.py" "$STACK_DIR/bin/write-daily-soc-rollup.py"
 chmod +x "$STACK_DIR/bin/"*.zsh
@@ -88,12 +91,15 @@ chmod +x "$STACK_DIR/bin/"*.py
 mkdir -p "$HERMES_SCRIPT_DIR"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py" "$HERMES_SCRIPT_DIR/build_soc_alerts_dashboard.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_metric_components.py" "$HERMES_SCRIPT_DIR/dashboard_metric_components.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_system_health_components.py" "$HERMES_SCRIPT_DIR/dashboard_system_health_components.py"
 chmod +x "$HERMES_SCRIPT_DIR/build_soc_alerts_dashboard.py"
 mkdir -p "$HERMES_ASSET_DIR"
 cp -R "$REPO_DIR/onion-sentinel-dashboard/assets/." "$HERMES_ASSET_DIR/"
 mkdir -p "$PORTAL_DIR"
 cp "$REPO_DIR/onion-sentinel-dashboard/report_portal.py" "$PORTAL_DIR/report_portal.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/soc_alert_api.py" "$PORTAL_DIR/soc_alert_api.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/artifact_cache.py" "$PORTAL_DIR/artifact_cache.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/response_cache.py" "$PORTAL_DIR/response_cache.py"
 chmod +x "$PORTAL_DIR/report_portal.py"
 
 if [[ ! -f "$STACK_DIR/.env" ]]; then
@@ -117,6 +123,7 @@ for plist in \
   com.arron.soc.alert-store.plist \
   com.arron.soc.alert-store-maintenance.plist \
   com.arron.soc.pcap-analysis.plist \
+  com.arron.soc.pcap-retention.plist \
   com.arron.soc.ai-analysis.plist \
   com.arron.soc.daily-rollup.plist
 do
@@ -138,6 +145,7 @@ launchctl unload "$LAUNCHD_DIR/com.arron.n8n.monitor-stack.plist" >/dev/null 2>&
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.alert-store.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.alert-store-maintenance.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.pcap-analysis.plist" >/dev/null 2>&1 || true
+launchctl unload "$LAUNCHD_DIR/com.arron.soc.pcap-retention.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.ai-analysis.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist" >/dev/null 2>&1 || true
 launchctl load "$LAUNCHD_DIR/com.arron.n8n.ensure-stack.plist"
@@ -145,6 +153,7 @@ launchctl load "$LAUNCHD_DIR/com.arron.n8n.monitor-stack.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.alert-store.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.alert-store-maintenance.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.pcap-analysis.plist"
+launchctl load "$LAUNCHD_DIR/com.arron.soc.pcap-retention.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.ai-analysis.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist"
 

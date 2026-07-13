@@ -231,17 +231,19 @@ packet evidence:
 ```bash
 python3 $HOME/n8n-local/bin/maintain-pcap-evidence.py
 python3 $HOME/n8n-local/bin/maintain-pcap-evidence.py --apply
+python3 $HOME/n8n-local/bin/maintain-pcap-evidence.py --analyzed-only --apply
 ```
 
-Dry-run is the default. Raw PCAP artifacts default to 14 days, while derived
-PCAP analysis JSON/Markdown defaults to 30 days. The helper refuses cleanup
-paths outside `$HOME/n8n-local` so a bad argument cannot erase an operator
-directory.
+The parser deletes broker-managed raw artifacts immediately only after Zeek and
+TShark both succeed and validated JSON/Markdown evidence is durable. Direct
+manual PCAP inputs and partial analyses are retained. `--analyzed-only` applies
+the same proof requirement to historical request directories. The helper
+refuses cleanup paths outside `$HOME/n8n-local` so a bad argument cannot erase
+an operator directory.
 
-The optional LaunchAgent `com.arron.soc.pcap-retention` runs the helper daily
-at 03:20 in dry-run mode. Keep the repo plist dry-run only; enable destructive
-cleanup by adding `--apply` only to the rendered live plist after reviewing the
-dry-run log.
+The LaunchAgent `com.arron.soc.pcap-retention` runs the helper daily at 03:20
+with `--analyzed-only --apply`. Unanalyzed, failed, pending, and partially
+parsed captures are outside this automatic delete set.
 
 System Health includes compact PCAP broker/parser health. `No Packets` PCAP
 failures are expected negative evidence and are counted separately. Stale

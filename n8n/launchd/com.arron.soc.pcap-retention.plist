@@ -10,6 +10,8 @@
   <array>
     <string>/usr/bin/python3</string>
     <string>__HOME__/n8n-local/bin/maintain-pcap-evidence.py</string>
+    <string>--analyzed-only</string>
+    <string>--apply</string>
   </array>
 
   <key>WorkingDirectory</key>

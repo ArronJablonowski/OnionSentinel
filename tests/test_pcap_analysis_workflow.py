@@ -95,6 +95,29 @@ class PcapAnalysisWorkflowTest(unittest.TestCase):
 
         self.assertEqual(found, [])
 
+    def test_worker_does_not_starve_older_unprocessed_fulfilled_request(self) -> None:
+        db_path = self.root / "alerts.sqlite3"
+        out_dir = self.root / "analysis"
+        out_dir.mkdir()
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE pcap_requests (
+              request_id TEXT, status TEXT, created_at TEXT, updated_at TEXT,
+              completed_at TEXT, artifact_path TEXT
+            );
+            INSERT INTO pcap_requests VALUES
+              ('older-unprocessed', 'fulfilled', '2026-07-12  10:00:00-06:00', '2026-07-12  10:01:00-06:00', '2026-07-12  10:01:00-06:00', 'older.tar'),
+              ('newer-processed', 'fulfilled', '2026-07-12  11:00:00-06:00', '2026-07-12  11:01:00-06:00', '2026-07-12  11:01:00-06:00', 'newer.tar');
+            """
+        )
+        conn.close()
+        self.worker.analysis_json_path(out_dir, "newer-processed").write_text("{}", encoding="utf-8")
+
+        found = self.worker.pending_requests(db_path, None, 1, out_dir, False)
+
+        self.assertEqual([item["request_id"] for item in found], ["older-unprocessed"])
+
     def test_worker_positive_path_uses_generated_runtime_pcap_fixture(self) -> None:
         pcap_path = self.root / "benign-dns.pcap"
         pcap_path.write_bytes(
@@ -143,6 +166,38 @@ class PcapAnalysisWorkflowTest(unittest.TestCase):
         self.assertEqual(analysis["pcap_files"][0]["name"], "benign-dns.pcap")
         self.assertEqual(analysis["zeek"]["record_counts"]["dns"], 1)
         self.assertIn("UDP Conversations", (self.root / "pcap-analysis" / "benign-dns-pcap-analysis.md").read_text(encoding="utf-8"))
+
+    def test_successful_broker_analysis_deletes_raw_request_directory(self) -> None:
+        artifact_dir = self.root / "artifacts"
+        request_dir = artifact_dir / "broker-cleanup-test"
+        request_dir.mkdir(parents=True)
+        (request_dir / "capture.pcap").write_bytes(b"synthetic-pcap")
+        args = type("Args", (), {"artifact_dir": artifact_dir, "out_dir": self.root / "analysis", "retain_artifact": False})()
+        request = {"request_id": "broker-cleanup-test", "artifact_path": "capture.pcap", "status": "fulfilled"}
+        with (
+            mock.patch.object(self.worker, "run_zeek", return_value={"available": True, "commands": [{"ok": True}]}),
+            mock.patch.object(self.worker, "run_tshark", return_value={"available": True, "commands": [{"ok": True}], "samples": []}),
+        ):
+            analysis = self.worker.process_one(request, args)
+        self.assertFalse(request_dir.exists())
+        self.assertTrue(analysis["raw_artifact_cleanup"]["deleted"])
+        persisted = json.loads((args.out_dir / "broker-cleanup-test-pcap-analysis.json").read_text(encoding="utf-8"))
+        self.assertTrue(persisted["raw_artifact_cleanup"]["deleted"])
+
+    def test_partial_broker_analysis_preserves_raw_artifact(self) -> None:
+        artifact_dir = self.root / "artifacts"
+        request_dir = artifact_dir / "broker-retry-test"
+        request_dir.mkdir(parents=True)
+        (request_dir / "capture.pcap").write_bytes(b"synthetic-pcap")
+        args = type("Args", (), {"artifact_dir": artifact_dir, "out_dir": self.root / "analysis", "retain_artifact": False})()
+        request = {"request_id": "broker-retry-test", "artifact_path": "capture.pcap", "status": "fulfilled"}
+        with (
+            mock.patch.object(self.worker, "run_zeek", return_value={"available": True, "commands": [{"ok": True}]}),
+            mock.patch.object(self.worker, "run_tshark", return_value={"available": True, "commands": [{"ok": False}], "samples": []}),
+        ):
+            analysis = self.worker.process_one(request, args)
+        self.assertTrue(request_dir.exists())
+        self.assertFalse(analysis["raw_artifact_cleanup"]["deleted"])
 
     def test_prompt_package_includes_compact_pcap_evidence(self) -> None:
         analysis_dir = self.root / "pcap-analysis"

@@ -1132,6 +1132,15 @@ Safety controls:
   `/nsm/pcapout/onion-sentinel/<request_id>.tar` and work directory. Cleanup
   failures are logged as `pcap_artifact_cleanup_failed` and do not block later
   requests.
+
+- On the Mac Studio, `process-pcap-evidence.py` treats raw broker artifacts as
+  temporary transport data. It runs Zeek and TShark, atomically publishes
+  bounded derived evidence, reopens the outputs for validation, and then
+  removes exactly that request's raw artifact directory. Both parser command
+  sets must succeed. Failed or partial analysis preserves the raw capture for
+  retry, and direct operator-supplied PCAP paths are never deleted. A daily
+  analyzed-only cleanup provides crash recovery without applying age-based
+  deletion to unparsed data.
 - Valid negative fulfillment is surfaced distinctly. A failed request whose
   broker error indicates no matching packets is displayed as `No Packets` in
   the dashboard so analysts can distinguish capture absence from transport or
@@ -1144,9 +1153,10 @@ Safety controls:
   artifact size, and warnings for stale pending/claimed requests older than 20
   minutes or failed requests that are not normal no-packet outcomes.
 - Mac Studio cleanup is handled by
-  `$HOME/n8n-local/bin/maintain-pcap-evidence.py`, which defaults to dry-run,
-  keeps raw PCAP artifacts for 14 days, keeps derived PCAP analysis for 30
-  days, and refuses cleanup paths outside `$HOME/n8n-local`.
+  `$HOME/n8n-local/bin/maintain-pcap-evidence.py`. The daily LaunchAgent uses
+  `--analyzed-only --apply`, which requires durable successful Zeek and TShark
+  evidence. Age-based cleanup remains an explicit operator action, and all
+  modes refuse paths outside `$HOME/n8n-local`.
 - Security Onion cleanup is defense in depth. The primary cleanup path is the
   per-request relay callback after verified Mac ingest. The safety-net timer
   `onion-sentinel-pcapout-retention.timer` runs hourly and removes stale

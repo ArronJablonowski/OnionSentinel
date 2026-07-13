@@ -11,8 +11,14 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import sys
 from pathlib import Path
 from typing import Any
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+from pcap_lifecycle import analysis_completed, delete_request_artifacts
 
 
 HOME = Path.home()
@@ -29,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifact-retention-days", type=int, default=DEFAULT_ARTIFACT_RETENTION_DAYS)
     parser.add_argument("--analysis-retention-days", type=int, default=DEFAULT_ANALYSIS_RETENTION_DAYS)
     parser.add_argument("--apply", action="store_true", help="Delete matched files. Omit for dry-run.")
+    parser.add_argument("--analyzed-only", action="store_true", help="Only remove raw request directories with validated Zeek and TShark analysis")
     return parser.parse_args()
 
 
@@ -96,14 +103,53 @@ def cleanup_tree(root: Path, retention_days: int, now: dt.datetime, apply: bool)
     }
 
 
+def cleanup_analyzed_artifacts(artifact_dir: Path, analysis_dir: Path, apply: bool) -> dict[str, Any]:
+    """Remove historical raw artifacts only when durable dual-parser evidence exists."""
+    artifact_root = validate_runtime_path(artifact_dir)
+    analysis_root = validate_runtime_path(analysis_dir)
+    matches: list[dict[str, Any]] = []
+    if analysis_root.exists():
+        for path in sorted(analysis_root.glob("*-pcap-analysis.json")):
+            try:
+                analysis = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            request = analysis.get("request") if isinstance(analysis, dict) else None
+            request_id = request.get("request_id") if isinstance(request, dict) else None
+            if not request_id or not analysis_completed(analysis):
+                continue
+            try:
+                target = (artifact_root / str(request_id)).resolve()
+                if target.parent != artifact_root or not target.is_dir():
+                    continue
+                files = [item for item in target.rglob("*") if item.is_file()]
+                match = {"request_id": str(request_id), "bytes": sum(item.stat().st_size for item in files), "files": len(files)}
+                if apply:
+                    match.update(delete_request_artifacts(artifact_root, request_id))
+                matches.append(match)
+            except (OSError, ValueError):
+                continue
+    return {
+        "matched_requests": len(matches),
+        "matched_bytes": sum(int(item.get("bytes") or 0) for item in matches),
+        "requests": matches,
+    }
+
+
 def run(args: argparse.Namespace, now: dt.datetime | None = None) -> dict[str, Any]:
     now = now or utc_now()
-    artifact = cleanup_tree(args.artifact_dir, args.artifact_retention_days, now, args.apply)
-    analysis = cleanup_tree(args.analysis_dir, args.analysis_retention_days, now, args.apply)
+    analyzed = cleanup_analyzed_artifacts(args.artifact_dir, args.analysis_dir, args.apply)
+    if getattr(args, "analyzed_only", False):
+        artifact = {"skipped": True, "reason": "analyzed-only mode"}
+        analysis = {"skipped": True, "reason": "analyzed-only mode"}
+    else:
+        artifact = cleanup_tree(args.artifact_dir, args.artifact_retention_days, now, args.apply)
+        analysis = cleanup_tree(args.analysis_dir, args.analysis_retention_days, now, args.apply)
     return {
         "ok": True,
         "mode": "apply" if args.apply else "dry-run",
         "generated_at": project_now(),
+        "analyzed_artifact_cleanup": analyzed,
         "artifact_cleanup": artifact,
         "analysis_cleanup": analysis,
     }
