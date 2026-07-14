@@ -24,6 +24,16 @@ class DurableJobQueueTest(unittest.TestCase):
         self.assertIn("2 ** Math.max", self.code)
         self.assertIn("Math.min(3600", self.code)
 
+    def test_completed_artifacts_can_reconcile_stale_pending_jobs_in_batches(self):
+        self.assertIn("completePendingByDedupeKeys", self.code)
+        self.assertIn("offset += 500", self.code)
+        self.assertIn("status = 'pending'", self.code)
+
+    def test_last_completion_survives_requeue(self):
+        self.assertIn("last_completed_at TEXT", self.code)
+        self.assertIn("ELSE last_completed_at END", self.code)
+        self.assertIn("last_completed_at = completed_at", self.code)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -28,7 +28,9 @@ class RelayAlertOutboxTest(unittest.TestCase):
         self.outbox.initialize(self.conn)
 
     def tearDown(self) -> None:
-        self.conn.close()
+        if self.conn:
+            self.conn.close()
+            self.conn = None
         self.temp.cleanup()
 
     def test_pending_delivery_survives_reopen(self) -> None:
@@ -36,6 +38,7 @@ class RelayAlertOutboxTest(unittest.TestCase):
         self.assertEqual(self.outbox.enqueue(self.conn, [alert]), 1)
         self.assertEqual(self.outbox.enqueue(self.conn, [alert]), 0)
         self.conn.close()
+        self.conn = None
         self.conn = sqlite3.connect(Path(self.temp.name) / "relay.sqlite3")
         self.outbox.initialize(self.conn)
         self.assertEqual(self.outbox.pending(self.conn)[0]["payload"], alert)

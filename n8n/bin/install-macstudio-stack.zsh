@@ -74,6 +74,10 @@ do
 done
 cp "$REPO_DIR/n8n/bin/ensure-n8n-stack.zsh" "$STACK_DIR/bin/ensure-n8n-stack.zsh"
 cp "$REPO_DIR/n8n/bin/monitor-n8n-stack.zsh" "$STACK_DIR/bin/monitor-n8n-stack.zsh"
+cp "$REPO_DIR/n8n/bin/evaluate-operational-slos.py" "$STACK_DIR/bin/evaluate-operational-slos.py"
+cp "$REPO_DIR/n8n/bin/backup-onion-sentinel-runtime.py" "$STACK_DIR/bin/backup-onion-sentinel-runtime.py"
+cp "$REPO_DIR/n8n/bin/report-production-soak.py" "$STACK_DIR/bin/report-production-soak.py"
+cp "$REPO_DIR/n8n/bin/run-recovery-restore-drill.py" "$STACK_DIR/bin/run-recovery-restore-drill.py"
 cp "$REPO_DIR/n8n/bin/run-alert-store-host.zsh" "$STACK_DIR/bin/run-alert-store-host.zsh"
 cp "$REPO_DIR/n8n/bin/maintain-alert-store-sqlite.zsh" "$STACK_DIR/bin/maintain-alert-store-sqlite.zsh"
 cp "$REPO_DIR/n8n/bin/build-ai-investigation-prompt.py" "$STACK_DIR/bin/build-ai-investigation-prompt.py"
@@ -128,7 +132,8 @@ for plist in \
   com.arron.soc.pcap-analysis.plist \
   com.arron.soc.pcap-retention.plist \
   com.arron.soc.ai-analysis.plist \
-  com.arron.soc.daily-rollup.plist
+  com.arron.soc.daily-rollup.plist \
+  com.arron.onion-sentinel.runtime-backup.plist
 do
   /usr/bin/python3 - "$HOME" "$REPO_DIR/n8n/launchd/$plist" "$LAUNCHD_DIR/$plist" <<'PY'
 from pathlib import Path
@@ -151,6 +156,7 @@ launchctl unload "$LAUNCHD_DIR/com.arron.soc.pcap-analysis.plist" >/dev/null 2>&
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.pcap-retention.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.ai-analysis.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist" >/dev/null 2>&1 || true
+launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.runtime-backup.plist" >/dev/null 2>&1 || true
 launchctl load "$LAUNCHD_DIR/com.arron.n8n.ensure-stack.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.n8n.monitor-stack.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.alert-store.plist"
@@ -159,6 +165,7 @@ launchctl load "$LAUNCHD_DIR/com.arron.soc.pcap-analysis.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.pcap-retention.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.ai-analysis.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist"
+launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.runtime-backup.plist"
 
 cat <<MSG
 

@@ -47,15 +47,38 @@ while (( FETCHED < MAX_TOTAL )); do
   fi
   printf '{
   "size": %s,
-  "sort": [{"@timestamp": {"order": "desc"}}, {"_id": {"order": "desc"}}],
+  "sort": [{"@timestamp": {"order": "desc"}}, "_shard_doc"],
   "track_total_hits": true,
   "_source": true,
   "query": {"range": {"@timestamp": {"gte": "now-%s", "lte": "%s"}}}%b
 }\n' "$SIZE" "$LOOKBACK" "$POLL_END" "$SEARCH_AFTER_FIELD" > "$QUERY_FILE"
 
   "$QUERY_BIN" \
-    'logs-suricata.alerts-so,logs-detections.alerts-so/_search?ignore_unavailable=true' \
+    'logs-suricata.alerts-so,logs-detections.alerts-so/_search?ignore_unavailable=true&preference=onion-sentinel-alert-export' \
     -d @"$QUERY_FILE" > "$RAW_FILE"
+
+  # Elasticsearch can return HTTP success with partial shard failures. Treat
+  # that as a failed poll: an empty result is unsafe when one alert shard never
+  # participated in the query. `_id` is deliberately not used as a tiebreaker
+  # because modern Security Onion Elasticsearch disables `_id` fielddata.
+  if ! jq -e '
+    (.error? == null)
+    and ((._shards.failed // 0) == 0)
+    and (.hits.hits | type == "array")
+  ' "$RAW_FILE" >/dev/null; then
+    echo "Security Onion alert query failed or returned failed shards" >&2
+    jq -c '{
+      error: (.error // null),
+      failed_shards: (._shards.failed // null),
+      shard_failures: [._shards.failures[]? | {
+        index,
+        type: (.reason.type // null),
+        reason: (.reason.reason // null)
+      }]
+    }' "$RAW_FILE" >&2 || true
+    exit 1
+  fi
+
   PAGE_COUNT=$(jq '.hits.hits | length' "$RAW_FILE")
   TOTAL=$(jq -r '.hits.total.value // .hits.total // 0' "$RAW_FILE")
   jq -s '.[0] + .[1]' "$HITS_FILE" <(jq '.hits.hits' "$RAW_FILE") > "$NEXT_HITS_FILE"

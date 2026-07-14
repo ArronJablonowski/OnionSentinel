@@ -400,6 +400,35 @@ transitions when the runtime `.env` contains Telegram credentials. It does not
 replace the live DB unless `ALERT_STORE_AUTO_RECOVER=1` is explicitly set for
 that run.
 
+The daily runtime recovery bundle complements the hourly SQLite backups with
+n8n PostgreSQL and encryption/configuration state:
+
+```bash
+ssh <mac_user>@<mac_studio_ip> 'python3 "$HOME/n8n-local/bin/backup-onion-sentinel-runtime.py"'
+ssh <mac_user>@<mac_studio_ip> 'latest=$(find "$HOME/n8n-local/recovery_backups" -mindepth 1 -maxdepth 1 -type d ! -name ".*" | sort | tail -1); python3 -m json.tool "$latest/manifest.json"'
+```
+
+Each atomic bundle contains a quick-checked SQLite database, a PostgreSQL
+custom-format dump validated by `pg_restore --list`, a SHA-256 manifest, and
+the runtime `.env`, n8n encryption config, prompts/settings, and agent memories
+needed for recovery. The bundle is mode `0700` with files mode `0600`, retained
+for seven days, and must never enter Git. Because it contains secrets and live
+operator state, any off-host copy must use an operator-controlled encrypted
+backup target.
+
+Qualify a bundle with a full isolated restore rather than relying only on dump
+creation checks:
+
+```bash
+ssh <mac_user>@<mac_studio_ip> 'python3 "$HOME/n8n-local/bin/run-recovery-restore-drill.py"'
+```
+
+This uses a disposable PostgreSQL container with networking disabled and a
+temporary data filesystem. It validates the restored n8n schema and workflow
+records, verifies the SQLite copy and manifest row count, checks all bundle
+hashes, and confirms the archive contains the n8n encryption configuration.
+The production containers, databases, keys, and workflows are not modified.
+
 Alert-store SQLite should run with these durability defaults in the Mac Studio
 runtime `.env` and repo compose template:
 

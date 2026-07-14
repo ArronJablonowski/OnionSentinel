@@ -22,9 +22,15 @@ function createDurableJobQueue({run, get, all, now}) {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         completed_at TEXT,
+        last_completed_at TEXT,
         UNIQUE(job_type, dedupe_key)
       )
     `);
+    const columns = new Set((await all('PRAGMA table_info(durable_jobs)')).map((row) => String(row.name || '')));
+    if (!columns.has('last_completed_at')) {
+      await run('ALTER TABLE durable_jobs ADD COLUMN last_completed_at TEXT');
+    }
+    await run('UPDATE durable_jobs SET last_completed_at = completed_at WHERE last_completed_at IS NULL AND completed_at IS NOT NULL');
     await run('CREATE INDEX IF NOT EXISTS idx_durable_jobs_due ON durable_jobs(status, job_type, next_attempt_at, priority DESC, id)');
     await run('CREATE INDEX IF NOT EXISTS idx_durable_jobs_lease ON durable_jobs(status, lease_expires_at)');
     await run(
@@ -80,9 +86,31 @@ function createDurableJobQueue({run, get, all, now}) {
   async function complete(id) {
     const timestamp = now();
     await run(
-      "UPDATE durable_jobs SET status = 'completed', lease_expires_at = NULL, last_error = NULL, completed_at = ?, updated_at = ? WHERE id = ?",
-      [timestamp, timestamp, id],
+      "UPDATE durable_jobs SET status = 'completed', lease_expires_at = NULL, last_error = NULL, completed_at = ?, last_completed_at = ?, updated_at = ? WHERE id = ?",
+      [timestamp, timestamp, timestamp, id],
     );
+  }
+
+  async function completePendingByDedupeKeys(jobType, dedupeKeys) {
+    const keys = [...new Set((dedupeKeys || []).map((value) => String(value || '').trim()).filter(Boolean))];
+    if (!keys.length) return 0;
+    const timestamp = now();
+    let completed = 0;
+    // Keep each statement below common SQLite parameter limits. The caller's
+    // surrounding write transaction makes the full reconciliation atomic.
+    for (let offset = 0; offset < keys.length; offset += 500) {
+      const chunk = keys.slice(offset, offset + 500);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const result = await run(
+        `UPDATE durable_jobs SET status = 'completed', lease_expires_at = NULL,
+           last_error = NULL, completed_at = ?, last_completed_at = ?, updated_at = ?
+         WHERE job_type = ? AND status = 'pending'
+           AND dedupe_key IN (${placeholders})`,
+        [timestamp, timestamp, timestamp, jobType, ...chunk],
+      );
+      completed += Number(result.changes || 0);
+    }
+    return completed;
   }
 
   async function fail(job, error, baseRetrySeconds = 30) {
@@ -111,14 +139,16 @@ function createDurableJobQueue({run, get, all, now}) {
          attempt_count = attempt_count + CASE WHEN ? = 'processing' THEN 1 ELSE 0 END,
          lease_expires_at = CASE WHEN ? = 'processing' THEN ? ELSE NULL END,
          last_error = ?, completed_at = CASE WHEN ? = 'completed' THEN ? ELSE NULL END,
+         last_completed_at = CASE WHEN ? = 'completed' THEN ? ELSE last_completed_at END,
          updated_at = ? WHERE job_type = ? AND dedupe_key = ?`,
       [status, status, status, new Date(Date.now() + 3600 * 1000).toISOString(),
-        String(error || '').slice(0, 1000) || null, status, timestamp, timestamp, jobType, dedupeKey],
+        String(error || '').slice(0, 1000) || null, status, timestamp, status, timestamp,
+        timestamp, jobType, dedupeKey],
     );
     return result.changes === 1;
   }
 
-  return {install, enqueue, claim, complete, fail, stats, transition};
+  return {install, enqueue, claim, complete, completePendingByDedupeKeys, fail, stats, transition};
 }
 
 module.exports = {createDurableJobQueue};

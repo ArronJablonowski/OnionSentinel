@@ -35,6 +35,11 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("ENRICHMENT_CIRCUIT_RESET_MS", self.code)
         self.assertIn("provider circuit open until", self.provider_scheduler)
 
+    def test_enrichment_requests_identify_the_service_and_keep_safe_provider_errors(self) -> None:
+        self.assertIn("'User-Agent': 'Onion-Sentinel/1.0'", self.code)
+        self.assertIn("function providerErrorDetail(body)", self.code)
+        self.assertIn("Censys Platform API returned HTTP", self.code)
+
     def test_sqlite_gate_only_wraps_storage(self) -> None:
         self.assertIn(
             "withSqliteWriteGate(() => withImmediateTransaction(async () =>",
@@ -69,6 +74,11 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("withSqliteWriteGate(() => createPcapRequest(payload))", self.code)
         self.assertIn("withSqliteWriteGate(() => claimPcapRequest(payload))", self.code)
         self.assertIn("withSqliteWriteGate(() => completePcapRequest(payload))", self.code)
+
+    def test_ai_job_reconciliation_is_bounded_and_transactional(self) -> None:
+        self.assertIn("parsedUrl.pathname === '/jobs/reconcile-completed'", self.code)
+        self.assertIn(".slice(0, 2000)", self.code)
+        self.assertIn("durableJobs.completePendingByDedupeKeys", self.code)
 
     def test_summary_rebuild_uses_one_windowed_scan(self) -> None:
         rebuild = self.code.split("async function rebuildAlertGroupSummariesUnlocked()", 1)[1].split(

@@ -132,6 +132,34 @@ def report_ai_job_status(base_url: str, group_id: str, status: str, error: str =
             raise
 
 
+def reconcile_completed_ai_jobs(base_url: str, group_ids: set[str]) -> int:
+    """Mark pending queue intent complete when current artifacts already satisfy it."""
+    if not group_ids:
+        return 0
+    payload = json.dumps({
+        "job_type": "ai_analysis",
+        "dedupe_keys": sorted(group_ids),
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        f"{base_url.rstrip('/')}/jobs/reconcile-completed",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            if response.status not in range(200, 300):
+                raise RuntimeError(f"AI job reconciliation returned HTTP {response.status}")
+            result = json.load(response)
+            return int(result.get("reconciled") or 0)
+    except urllib.error.HTTPError as exc:
+        # Older alert-store versions may not have the batch endpoint during a
+        # rolling deployment. Analysis must continue and the next run retries.
+        if exc.code == 404:
+            return 0
+        raise
+
+
 def test_filter_sql() -> tuple[str, list[object]]:
     clauses = []
     params: list[object] = []
@@ -351,6 +379,45 @@ def analyzed_alert_groups(
             continue
         analyzed_groups.add(group_key)
     return analyzed_groups
+
+
+def completed_analysis_group_ids(
+    conn: sqlite3.Connection,
+    analyzed_ids: set[str],
+    analysis_dir: Path,
+    pcap_analysis_dir: Path,
+    prompt_dir: Path,
+) -> set[str]:
+    """Return stable queue keys for groups whose analysis artifacts are current."""
+    completed_keys = analyzed_alert_groups(
+        conn,
+        analyzed_ids,
+        analysis_dir,
+        pcap_analysis_dir,
+        prompt_dir,
+    )
+    if not completed_keys or not analyzed_ids:
+        return set()
+    columns = {str(item[1]) for item in conn.execute("PRAGMA table_info(alerts)").fetchall()}
+    stable_select = "stable_group_id" if "stable_group_id" in columns else "NULL AS stable_group_id"
+    placeholders = ", ".join("?" for _ in analyzed_ids)
+    analyzed_rows = rows(
+        conn,
+        f"""
+        SELECT alert_id, suppression_key, triage_level, rule_name, source_ip,
+               destination_ip, filter_status, {stable_select}
+        FROM alerts WHERE alert_id IN ({placeholders})
+        """,
+        sorted(analyzed_ids),
+    )
+    completed_ids: set[str] = set()
+    for row in analyzed_rows:
+        group_key = alert_group_key(row)
+        if group_key not in completed_keys:
+            continue
+        stable_id = str(row["stable_group_id"] or "").strip()
+        completed_ids.add(stable_id or alert_group_id(group_key))
+    return completed_ids
 
 
 def select_next_alert(
@@ -621,6 +688,22 @@ def main() -> int:
 
         args.prompt_dir.mkdir(parents=True, exist_ok=True)
         args.analysis_dir.mkdir(parents=True, exist_ok=True)
+        current_analyzed_ids = analyzed_alert_ids(args.analysis_dir, args.pcap_analysis_dir, args.prompt_dir)
+        conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            completed_group_ids = completed_analysis_group_ids(
+                conn,
+                current_analyzed_ids,
+                args.analysis_dir,
+                args.pcap_analysis_dir,
+                args.prompt_dir,
+            )
+        finally:
+            conn.close()
+        reconciled = reconcile_completed_ai_jobs(args.alert_store_url, completed_group_ids)
+        if reconciled:
+            print(f"{project_now()} reconciled {reconciled} completed durable AI job(s)", flush=True)
         selected_groups: set[str] = set()
         analyzed_count = 0
         while args.max_per_run == 0 or analyzed_count < args.max_per_run:

@@ -19,6 +19,13 @@ class DashboardMobileNavigationTest(unittest.TestCase):
         self.assertNotIn(".sidebar{{position:fixed;left:0;right:0;bottom:0;top:auto", source)
         self.assertNotIn(".content{{padding:14px 10px 92px}}", source)
 
+    def test_mobile_expansion_survives_api_refresh_without_persisting(self):
+        source = DASHBOARD_BUILDER.read_text()
+
+        self.assertIn("expandedMobileId=document.querySelector('.mobile-alert-card.mobile-expanded')", source)
+        self.assertIn("restoreExpandedApiMobileCard(expandedMobileId)", source)
+        self.assertNotIn("localStorage.setItem('expandedMobile", source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -125,12 +125,20 @@ tag in production Compose.
 
 ## SLOs And Alerts
 
+The AI worker reconciles durable `ai_analysis` queue intent against current AI,
+prompt, and parsed-PCAP artifact timestamps before selecting more work. This
+prevents an already-satisfied group from remaining pending indefinitely after
+a duplicate alert or recovery replay re-enqueues its stable group ID.
+Durable jobs preserve `last_completed_at` across later re-enqueues so health
+monitoring can prove forward progress without confusing current pending state
+with the absence of a prior successful run.
+
 | Signal | Target | Warning / action |
 | --- | --- | --- |
 | Relay heartbeat | Successful every 5 minutes | Critical when older than 20 minutes. |
 | Alert ingest | Normal error rate 0; p95 below 500 ms | Investigate sustained errors or p95 above 1 second. |
 | Enrichment jobs | Oldest pending below 15 minutes | Inspect provider latency, keys, cache, worker retries. |
-| AI jobs | Highest-severity newest work continuously progresses | Inspect Ollama, LaunchAgent, leases, failed jobs. |
+| AI jobs | A completion at least every 15 minutes while work is pending | Inspect PCAP evidence arrival, Ollama, LaunchAgent, leases, and failed jobs. Oldest age remains informational because strict severity priority can defer low alerts. |
 | PCAP broker | Pending age below 60 minutes normally | Inspect relay timer, export, rsync, parser state. |
 | Relay SSD | Below 80 percent used plus free-space reserve | Stop new exports before spool exhaustion. |
 | Relay SSD SMART | Healthy, zero media/critical errors, stable unsafe-shutdown baseline, below 70 C | Telegram failure after the configured consecutive-failure threshold; inspect disk, bridge, power, and previous-boot journal. |
@@ -138,8 +146,96 @@ tag in production Compose.
 | SO export | `query.saturated=false` | Increase poll frequency or diagnose backlog before raising caps. |
 
 `/metrics` reports aggregate ingest counters and latency, durable job depth and
-age, PCAP state and age, Telegram outbox state, and SQLite size. It contains no
+age, PCAP state and age, Telegram outbox state, and SQLite size. Pending PCAP
+age is measured from the latest request refresh because repeated detections can
+update an existing group request without creating another row. It contains no
 secrets or raw alert payloads.
+
+The Mac Studio LaunchAgent runs `evaluate-operational-slos.py` through the
+existing stateful stack monitor every five minutes. It fails the monitor when
+the heartbeat is older than 20 minutes, enrichment is older than 15 minutes,
+pending AI work has made no completion for 15 minutes, a PCAP request is pending
+longer than 60 minutes, recent PCAP workflow
+warnings exist, ingest errors increase, runtime disk use reaches 85 percent,
+or a verified backup becomes stale. The monitor sends one Telegram transition
+message and one recovery message rather than repeating the same alarm every
+cycle. Its runtime-only snapshot is
+`$HOME/n8n-local/logs/operational-slo-snapshot.json`. A bounded 14-day history
+is retained in `operational-slo-history.jsonl`; its `soak.healthy_since` clock
+resets on any failed evaluation and `soak.qualified_48h` becomes true only
+after 48 uninterrupted hours.
+
+## Verified Recovery Bundles
+
+Hourly alert-store maintenance continues to make online SQLite backups and run
+`PRAGMA quick_check`. A separate daily LaunchAgent creates an atomic recovery
+bundle under `$HOME/n8n-local/recovery_backups` containing:
+
+- an independently verified SQLite backup;
+- an n8n PostgreSQL custom-format dump validated with `pg_restore --list`;
+- the local `.env`, n8n encryption configuration, model/prompt configuration,
+  and agent memories needed to decrypt and restore the operational runtime;
+- a manifest with byte counts, SHA-256 hashes, and the alert-row count.
+
+Recovery bundles are mode `0700` with files mode `0600`, retained for seven
+days, and never copied into Git. They contain secrets and operational data, so
+replicate them only to an operator-controlled encrypted backup target. A copy
+on the same Mac protects against application corruption, not host or disk loss.
+
+```bash
+# Create and verify a bundle immediately.
+python3 "$HOME/n8n-local/bin/backup-onion-sentinel-runtime.py"
+
+# Inspect metadata without exposing secret-bearing archive contents.
+python3 -m json.tool "$HOME/n8n-local/recovery_backups/$(ls -1 "$HOME/n8n-local/recovery_backups" | tail -1)/manifest.json"
+```
+
+The SQLite SLO is healthy when the newest hourly backup is at most two hours
+old. The PostgreSQL/runtime SLO is healthy when the newest daily bundle is at
+most 26 hours old.
+
+## Production Soak
+
+After a reliability deployment, preserve 48 continuous hours of SLO snapshots
+before declaring the milestone qualified. The soak passes only when heartbeat
+age remains below 20 minutes, ingest errors do not increase, durable AI and
+enrichment work continues to drain, no PCAP request remains stale, both backup
+SLOs remain healthy, SQLite maintenance stays green, and relay storage health
+does not transition to failed. A reboot or service interruption resets the
+continuous-soak clock; an expected empty PCAP or expired historical request
+does not.
+
+Generate the current acceptance report without changing production state:
+
+```bash
+python3 "$HOME/n8n-local/bin/report-production-soak.py"
+```
+
+The report requires at least 48 continuous healthy hours, no failed samples,
+at least 90 percent of the expected five-minute samples, and no gap between
+samples longer than 12 minutes. Before 48 hours it reports `in_progress`, not a
+false pass. Runtime-only JSON and Markdown reports are written under
+`$HOME/n8n-local/logs/soak-reports` and contain operational metrics rather than
+alert payloads.
+
+## Isolated Restore Drill
+
+Run a complete restore drill against the newest recovery bundle without
+stopping or writing to production:
+
+```bash
+python3 "$HOME/n8n-local/bin/run-recovery-restore-drill.py"
+```
+
+The drill verifies every manifest hash, copies and opens SQLite read-only,
+runs `PRAGMA quick_check`, compares the restored alert-row count with the
+manifest, and inspects the secret archive for required n8n encryption material
+without extracting it. It then restores the PostgreSQL custom-format dump into
+a disposable container using the exact pinned production image. The container
+has `--network none`, a temporary data filesystem, no production credentials,
+and is forcibly removed on success or failure. The drill passes only when the
+n8n schema and workflow table are present. Its runtime-only result is stored
+under `$HOME/n8n-local/logs/restore-drills`.
 
 ## Verification Baseline
 
@@ -208,7 +304,7 @@ Security Onion runs `onion-sentinel-pcapout-retention.timer` hourly as a
 24-hour cleanup safety net. Successful broker completion still performs
 immediate request-specific cleanup; the timer covers interrupted workflows.
 
-## Open Deployment Qualification
+## Deployment Qualification History
 
 During the 2026-07-13 controlled reboot validation, the Raspberry Pi did not
 return to ICMP or SSH and required a hard power cycle. After recovery, the OS
@@ -223,3 +319,19 @@ and only the PCAP worker uses `RequiresMountsFor` on the external spool. A
 missing SSD cannot block alert polling. Treat unattended soft reboot as an open
 deployment qualification item until at least three consecutive reboot drills
 pass and `journalctl -b -1` remains available after each boot.
+
+The relay reboot gate passed on 2026-07-14. Three consecutive unattended soft
+reboots returned unique boot IDs, mounted the ext4 SSD at
+`/mnt/onion-sentinel-pcap-spool`, restored the enabled `so-alert-poll.timer` and
+`so-pcap-broker.timer`, and returned SMART `PASSED`. After the final boot the
+first alert poll exported and durably delivered a nonzero batch with an empty
+outbox, and produced a fresh successful Mac Studio health event. Keep
+the legacy combined `so-alert-relay.timer` disabled; the split poll and PCAP
+timers are the production units.
+
+The desktop and mobile API-rendered alert tables preserve an explicitly open
+detail only across an in-page data refresh. Expansion state is never written
+to browser storage, so a fresh navigation or reload starts collapsed and
+cannot resurrect stale analyst context. Responsive acceptance covers 320,
+390, 768, 1024, and 1440 pixel widths with no document-level horizontal
+overflow; the mobile suppression textarea remains 16 px to prevent iOS zoom.

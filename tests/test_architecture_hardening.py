@@ -25,7 +25,10 @@ class ArchitectureHardeningTest(unittest.TestCase):
         self.assertIn("async function operationalMetricsSnapshot", code)
         self.assertIn("'/metrics'", code)
         self.assertIn("oldest_pending_job_seconds", code)
+        self.assertIn("oldest_pending_jobs", code)
+        self.assertIn("latest_completed_jobs", code)
         self.assertIn("oldest_pending_pcap_seconds", code)
+        self.assertIn("MIN(COALESCE(updated_at, created_at))", code)
         self.assertIn("ingest_latency_ms_average", code)
 
     def test_group_alias_is_refreshed_with_each_group_summary(self):

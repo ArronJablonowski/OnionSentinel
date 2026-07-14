@@ -102,3 +102,15 @@ sudo -u so-ai-relay sudo -n /usr/local/sbin/export-recent-alerts | jq '.alerts |
 ```
 
 Expected result: JSON prints without prompting for a password.
+
+The alert query uses `@timestamp` plus Elasticsearch's supported
+`_shard_doc` tiebreaker with a fixed search preference. Do not change the
+tiebreaker back to `_id`: current Security Onion Elasticsearch releases disable
+`_id` fielddata, and sorting on it causes the active alert shard to fail. The
+wrapper rejects top-level errors, partial shard failures, and malformed hit
+responses instead of reporting a false successful zero-alert poll.
+
+If relay heartbeats remain current but alert ingestion unexpectedly stops,
+compare the wrapper's `.query` metadata with a metadata-only Elasticsearch
+count. A wrapper failure must produce a nonzero relay poll result; a successful
+empty batch is valid only when every queried shard succeeded.

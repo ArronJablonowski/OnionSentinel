@@ -30,6 +30,12 @@ Hermes local agents, Ollama, or another local LLM runtime
 The hosted model path should be an escalation analyst, not the default
 processor.
 
+Hermes Agent, OpenClaw, and a thin Onion Sentinel Investigation Runtime are
+future adapter options, not current production dependencies. Their trust
+boundaries, phased evaluation, typed-tool policy, and acceptance gates are
+defined in `llm-harness-and-investigation-runtime-roadmap.md`. Direct Ollama
+remains the production baseline and rollback path until those gates pass.
+
 ## Why Local First
 
 Local AI should handle routine SOC work because it keeps the following data on

@@ -428,6 +428,42 @@ class AiSchedulerPriorityTest(unittest.TestCase):
 
         self.assertIsNone(reusable)
 
+    def test_completed_analysis_group_ids_prefers_stable_group_id(self) -> None:
+        self.conn.execute("ALTER TABLE alerts ADD COLUMN stable_group_id TEXT")
+        self.insert_alert(
+            "analyzed-stable-group",
+            "medium",
+            "2026-07-03  00:50:00Z",
+            rule_name="stable analyzed group",
+        )
+        self.conn.execute(
+            "UPDATE alerts SET stable_group_id = ? WHERE alert_id = ?",
+            ("stable-group-id", "analyzed-stable-group"),
+        )
+        self.conn.commit()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            analysis_dir = root / "ai-analysis"
+            pcap_dir = root / "pcap-analysis"
+            prompt_dir = root / "ai-prompts"
+            analysis_dir.mkdir()
+            pcap_dir.mkdir()
+            prompt_dir.mkdir()
+            (analysis_dir / "current-local-ai-analysis.json").write_text(
+                json.dumps({"alert_id": "analyzed-stable-group"}),
+                encoding="utf-8",
+            )
+            analyzed = self.scheduler.analyzed_alert_ids(analysis_dir, pcap_dir, prompt_dir)
+            group_ids = self.scheduler.completed_analysis_group_ids(
+                self.conn,
+                analyzed,
+                analysis_dir,
+                pcap_dir,
+                prompt_dir,
+            )
+
+        self.assertEqual(group_ids, {"stable-group-id"})
+
 
 if __name__ == "__main__":
     unittest.main()

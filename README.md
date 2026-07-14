@@ -65,6 +65,12 @@ policy-brokered OSQuery investigations is in
 `docs/security-onion-api-and-osquery-roadmap.md`. Restricted SSH remains the
 production transport until that roadmap's acceptance gates pass.
 
+The staged plan for evaluating Hermes Agent, OpenClaw, and a thin
+Onion Sentinel-specific investigation runtime is in
+`docs/llm-harness-and-investigation-runtime-roadmap.md`. Direct Ollama remains
+the production baseline until the adapter, policy, security, shadow-testing,
+and rollback gates in that roadmap pass.
+
 ## Secret Handling
 
 Never commit these live files:

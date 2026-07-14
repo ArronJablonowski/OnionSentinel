@@ -14,6 +14,9 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `alert_store/config/scoring_rules.json` | Tunable local filtering/scoring policy. |
 | `bin/` | Local AI prompt, analysis, scheduler, rollup, and stack management scripts. |
 | `bin/maintain-alert-store-sqlite.zsh` | Hourly SQLite `quick_check`, verified backup, and recovery-candidate maintenance. |
+| `bin/backup-onion-sentinel-runtime.py` | Daily atomic SQLite, PostgreSQL, and secret-bearing runtime recovery bundle. |
+| `bin/report-production-soak.py` | Read-only 48-hour SLO coverage and acceptance reporter. |
+| `bin/run-recovery-restore-drill.py` | Full SQLite and network-isolated disposable PostgreSQL restore qualification. |
 | `bin/maintain-pcap-evidence.py` | Runtime-only PCAP artifact and derived-analysis retention helper; dry-run by default. |
 | `config/soc_analyst_system_prompt.md` | SOC analyst system prompt used for alert analysis. |
 | `config/siem_engineer_system_prompt.md` | SIEM engineering prompt used for periodic tuning and detection recommendations. |
@@ -162,6 +165,11 @@ rotated by editing `.env` and restarting `alert-store`.
 | ThreatFox | `THREATFOX_AUTH_KEY` | IOC lookups for domains, hashes, and C2 indicators. |
 | Shodan | `SHODAN_API_KEY` | Authenticated host API; separate from keyless InternetDB. |
 | Censys | `CENSYS_API_TOKEN` or `CENSYS_API_ID` + `CENSYS_API_SECRET` | Authenticated exposed-service IP context. Personal Access Tokens use the Censys Platform API; set optional `CENSYS_ORGANIZATION_ID` when your account requires an organization header. |
+
+Censys Platform HTTP `422` responses with `insufficient balance` mean the PAT
+was accepted but the selected account has no lookup credits. Onion Sentinel
+records the provider error and its per-provider circuit contains retries; alert
+ingestion, other enrichment providers, and AI analysis continue independently.
 | CISA KEV | none | Public CVE catalog; cached with vulnerability TTL. |
 | EPSS | none | Public CVE exploit probability; cached with vulnerability TTL. |
 | NVD | `NVD_API_KEY` optional | CVE metadata; key raises NVD's allowed request rate. |

@@ -608,6 +608,7 @@ function requestJson({method = 'GET', url, headers = {}, body = null, timeoutMs 
         method,
         headers: {
           Accept: 'application/json',
+          'User-Agent': 'Onion-Sentinel/1.0',
           ...(payload ? {'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload)} : {}),
           ...headers,
         },
@@ -633,6 +634,14 @@ function requestJson({method = 'GET', url, headers = {}, body = null, timeoutMs 
     if (payload) req.write(payload);
     req.end();
   });
+}
+
+function providerErrorDetail(body) {
+  if (!body || typeof body !== 'object') return '';
+  const errors = Array.isArray(body.errors)
+    ? body.errors.map((item) => safeString(item?.message || item, 160)).filter(Boolean)
+    : [];
+  return safeString(errors.join('; ') || body.detail || body.message || body.error, 240);
 }
 
 function normalizedEnrichmentRecord(source, indicator, indicatorType, verdict, confidence, tags, rawResponse, firstSeen = null, lastSeen = null) {
@@ -973,7 +982,8 @@ async function lookupCensys(ip) {
     }
     const response = await requestJson({url: `https://api.platform.censys.io/v3/global/asset/host/${encodeURIComponent(ip)}`, headers});
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw new Error(`Censys Platform API returned HTTP ${response.statusCode}`);
+      const detail = providerErrorDetail(response.body);
+      throw new Error(`Censys Platform API returned HTTP ${response.statusCode}${detail ? `: ${detail}` : ''}`);
     }
     const body = response.body || {};
     const services = body.result?.services || body.resource?.services || body.host?.services || [];
@@ -984,7 +994,8 @@ async function lookupCensys(ip) {
   const headers = {Authorization: `Basic ${auth}`};
   const response = await requestJson({url: `https://search.censys.io/api/v2/hosts/${encodeURIComponent(ip)}`, headers});
   if (response.statusCode < 200 || response.statusCode >= 300) {
-    throw new Error(`Censys Search API returned HTTP ${response.statusCode}`);
+    const detail = providerErrorDetail(response.body);
+    throw new Error(`Censys Search API returned HTTP ${response.statusCode}${detail ? `: ${detail}` : ''}`);
   }
   const body = response.body || {};
   const services = body.result?.services || [];
@@ -3398,6 +3409,12 @@ async function operationalMetricsSnapshot() {
   const durable = durableJobs ? await durableJobs.stats() : [];
   const oldestJob = await get(`SELECT MAX(0, CAST((julianday('now') - julianday(replace(MIN(next_attempt_at), '  ', 'T'))) * 86400 AS INTEGER)) AS seconds
     FROM durable_jobs WHERE status = 'pending'`);
+  const oldestJobsByType = await all(`SELECT job_type,
+      MAX(0, CAST((julianday('now') - julianday(replace(MIN(next_attempt_at), '  ', 'T'))) * 86400 AS INTEGER)) AS seconds
+    FROM durable_jobs WHERE status = 'pending' GROUP BY job_type`);
+  const latestCompletedJobsByType = await all(`SELECT job_type,
+      MAX(0, CAST((julianday('now') - julianday(replace(MAX(last_completed_at), '  ', 'T'))) * 86400 AS INTEGER)) AS seconds
+    FROM durable_jobs WHERE last_completed_at IS NOT NULL GROUP BY job_type`);
   const pcap = await all('SELECT status, analysis_status, COUNT(*) AS count FROM pcap_requests GROUP BY status, analysis_status');
   const pcapOutcomes = await all("SELECT COALESCE(outcome, 'unknown') AS outcome, COUNT(*) AS count FROM pcap_requests GROUP BY COALESCE(outcome, 'unknown')");
   const pcapStorage = await get(`SELECT
@@ -3408,7 +3425,7 @@ async function operationalMetricsSnapshot() {
       COALESCE(SUM(CASE WHEN datetime(replace(completed_at, '  ', 'T')) >= datetime('now', '-24 hours') THEN artifact_size_bytes ELSE 0 END), 0) AS artifact_bytes_24h,
       SUM(CASE WHEN datetime(replace(completed_at, '  ', 'T')) >= datetime('now', '-24 hours') THEN 1 ELSE 0 END) AS fulfilled_24h
     FROM pcap_requests WHERE status = 'fulfilled'`);
-  const oldestPcap = await get(`SELECT MAX(0, CAST((julianday('now') - julianday(replace(MIN(created_at), '  ', 'T'))) * 86400 AS INTEGER)) AS seconds
+  const oldestPcap = await get(`SELECT MAX(0, CAST((julianday('now') - julianday(replace(MIN(COALESCE(updated_at, created_at)), '  ', 'T'))) * 86400 AS INTEGER)) AS seconds
     FROM pcap_requests WHERE status = 'pending'`);
   const pageCount = await get('PRAGMA page_count');
   const pageSize = await get('PRAGMA page_size');
@@ -3421,6 +3438,8 @@ async function operationalMetricsSnapshot() {
     },
     durable_jobs: durable,
     oldest_pending_job_seconds: Number(oldestJob?.seconds || 0),
+    oldest_pending_jobs: oldestJobsByType,
+    latest_completed_jobs: latestCompletedJobsByType,
     pcap,
     pcap_outcomes: pcapOutcomes,
     pcap_storage: pcapStorage || {},
@@ -3515,6 +3534,22 @@ async function handleRequest(request, response) {
         jobType, dedupeKey, status, safeString(payload?.error, 1000),
       ));
       sendJson(response, updated ? 200 : 404, {ok: updated, job_type: jobType, dedupe_key: dedupeKey, status});
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/jobs/reconcile-completed') {
+      // Local workers reconcile queue intent with durable artifacts in one
+      // bounded write. This avoids stale pending rows when an up-to-date AI
+      // artifact makes a queued group ineligible for duplicate analysis.
+      const payload = await readJsonBody(request);
+      const jobType = safeString(payload?.job_type, 64);
+      const dedupeKeys = Array.isArray(payload?.dedupe_keys)
+        ? payload.dedupe_keys.map((value) => safeString(value, 256)).filter(Boolean).slice(0, 2000)
+        : [];
+      if (!jobType || !dedupeKeys.length) throw new Error('job_type and dedupe_keys are required');
+      const completed = await withSqliteWriteGate(() => withImmediateTransaction(
+        () => durableJobs.completePendingByDedupeKeys(jobType, dedupeKeys),
+      ));
+      sendJson(response, 200, {ok: true, job_type: jobType, reconciled: completed});
       return;
     }
     if (request.method === 'POST' && parsedUrl.pathname === '/pcap/claim') {
