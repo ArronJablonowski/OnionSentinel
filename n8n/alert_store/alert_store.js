@@ -13,6 +13,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const {createProviderScheduler} = require('./lib/provider_scheduler');
+const {createDurableJobQueue} = require('./lib/durable_job_queue');
+const {stableGroupKey, stableGroupId} = require('./lib/group_identity');
 let sqlite3;
 try {
   // Host-native launchd deployments install sqlite3 beside this script.
@@ -62,6 +64,8 @@ const vulnerabilityCacheDefaultTtlSeconds = Number(process.env.ENRICHMENT_VULN_C
 const enrichmentTimeoutMs = Number(process.env.ENRICHMENT_TIMEOUT_MS || 5000);
 const enrichmentCircuitFailureThreshold = Math.max(1, Number(process.env.ENRICHMENT_CIRCUIT_FAILURE_THRESHOLD || 3));
 const enrichmentCircuitResetMs = Math.max(10000, Number(process.env.ENRICHMENT_CIRCUIT_RESET_MS || 60000));
+const enrichmentWorkerIntervalMs = Math.max(1000, Number(process.env.ENRICHMENT_WORKER_INTERVAL_MS || 5000));
+const enrichmentWorkerMaxAttempts = Math.max(1, Number(process.env.ENRICHMENT_WORKER_MAX_ATTEMPTS || 8));
 const virustotalMinimumLevel = String(process.env.VIRUSTOTAL_MINIMUM_LEVEL || 'high').toLowerCase();
 const urlscanSubmitEnabled = ['1', 'true', 'yes'].includes(String(process.env.URLSCAN_SUBMIT_ENABLED || '').toLowerCase());
 const pcapRequestMaxWindowSeconds = Math.max(30, Number(process.env.PCAP_REQUEST_MAX_WINDOW_SECONDS || 300));
@@ -1419,6 +1423,15 @@ const enrichmentScheduler = createProviderScheduler({
   formatTimestamp: formatProjectTimestamp,
 });
 let telegramOutboxDrainActive = false;
+let enrichmentDrainActive = false;
+let durableJobs;
+const serviceMetrics = {
+  started_at: nowUtc(),
+  ingest_requests: 0,
+  ingest_errors: 0,
+  ingest_latency_ms_total: 0,
+  ingest_latency_ms_max: 0,
+};
 
 function withSqliteWriteGate(task) {
   // sqlite3 serializes individual statements, but HTTP handlers can still
@@ -1499,6 +1512,10 @@ async function initDb() {
   await ensureColumn('alerts', 'suppression_key', 'TEXT');
   await ensureColumn('alerts', 'raw_event_json', 'TEXT');
   await ensureColumn('alerts', 'enrichment_json', 'TEXT');
+  await ensureColumn('alerts', 'rule_id', 'TEXT');
+  await ensureColumn('alerts', 'stable_group_key', 'TEXT');
+  await ensureColumn('alerts', 'stable_group_id', 'TEXT');
+  await run('CREATE INDEX IF NOT EXISTS idx_alerts_stable_group_id ON alerts(stable_group_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_alerts_triage_level ON alerts(triage_level)');
   await run('CREATE INDEX IF NOT EXISTS idx_alerts_filter_status ON alerts(filter_status)');
   await run('CREATE INDEX IF NOT EXISTS idx_alerts_source_ip ON alerts(source_ip)');
@@ -1570,6 +1587,15 @@ async function initDb() {
   `);
   await run('CREATE INDEX IF NOT EXISTS idx_alert_group_state_status ON analyst_alert_group_state(status)');
   await run('CREATE INDEX IF NOT EXISTS idx_alert_group_state_updated_at ON analyst_alert_group_state(updated_at)');
+  await run(`
+    CREATE TABLE IF NOT EXISTS alert_group_alias (
+      legacy_group_id TEXT PRIMARY KEY,
+      stable_group_id TEXT NOT NULL,
+      stable_group_key TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_alert_group_alias_stable ON alert_group_alias(stable_group_id)');
   await run(`
     CREATE TABLE IF NOT EXISTS notification_log (
       notification_key TEXT PRIMARY KEY,
@@ -1681,11 +1707,22 @@ async function initDb() {
   await ensureColumn('pcap_requests', 'claimed_at', 'TEXT');
   await ensureColumn('pcap_requests', 'completed_at', 'TEXT');
   await ensureColumn('pcap_requests', 'diagnostics_json', 'TEXT');
+  await ensureColumn('pcap_requests', 'analysis_status', "TEXT NOT NULL DEFAULT 'not_ready'");
+  await ensureColumn('pcap_requests', 'analysis_attempt_count', 'INTEGER NOT NULL DEFAULT 0');
+  await ensureColumn('pcap_requests', 'analysis_error', 'TEXT');
+  await ensureColumn('pcap_requests', 'analysis_started_at', 'TEXT');
+  await ensureColumn('pcap_requests', 'analysis_completed_at', 'TEXT');
+  await ensureColumn('pcap_requests', 'outcome', 'TEXT');
+  await backfillPcapOutcomes();
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_status_created ON pcap_requests(status, created_at)');
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_completed_at ON pcap_requests(completed_at)');
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_alert_id ON pcap_requests(alert_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_group_id ON pcap_requests(group_id)');
+  durableJobs = createDurableJobQueue({run, get, all, now: nowUtc});
+  await durableJobs.install();
+  await backfillStableGroupIdentity();
   await rebuildAlertGroupSummaries();
+  await refreshGroupAliases();
 }
 
 async function tableColumns(tableName) {
@@ -1707,6 +1744,38 @@ async function ensureColumn(tableName, columnName, columnType) {
 
 function alertGroupId(groupKey) {
   return crypto.createHash('sha1').update(String(groupKey || '')).digest('hex').slice(0, 12);
+}
+
+async function persistStableIdentity(alertId, row, alert = {}) {
+  const identityRow = {...row, rule_id: alert.rule_id || row.rule_id};
+  const key = stableGroupKey(identityRow);
+  const id = stableGroupId(identityRow);
+  await run('UPDATE alerts SET rule_id = COALESCE(?, rule_id), stable_group_key = ?, stable_group_id = ? WHERE alert_id = ?',
+    [alert.rule_id || null, key, id, alertId]);
+  return {stable_group_key: key, stable_group_id: id};
+}
+
+async function backfillStableGroupIdentity() {
+  const pending = await all("SELECT * FROM alerts WHERE stable_group_id IS NULL OR stable_group_id = ''");
+  for (const item of pending) {
+    const alert = parseJsonObject(item.alert_json);
+    await persistStableIdentity(item.alert_id, item, alert);
+  }
+}
+
+async function refreshGroupAliases() {
+  const groups = await all(`
+    SELECT g.group_id AS legacy_group_id, a.stable_group_id, a.stable_group_key
+    FROM alert_group_summary g JOIN alerts a ON a.alert_id = g.representative_alert_id
+    WHERE a.stable_group_id IS NOT NULL AND a.stable_group_key IS NOT NULL
+  `);
+  for (const item of groups) {
+    await run(`INSERT INTO alert_group_alias (legacy_group_id, stable_group_id, stable_group_key, updated_at)
+      VALUES (?, ?, ?, ?) ON CONFLICT(legacy_group_id) DO UPDATE SET
+      stable_group_id = excluded.stable_group_id, stable_group_key = excluded.stable_group_key,
+      updated_at = excluded.updated_at`,
+    [item.legacy_group_id, item.stable_group_id, item.stable_group_key, nowUtc()]);
+  }
 }
 
 function alertGroupKeyFromRow(row) {
@@ -1742,6 +1811,7 @@ async function refreshAlertGroupSummary(groupKey) {
   const groupId = alertGroupId(groupKey);
   if (!aggregate || Number(aggregate.raw_alert_count || 0) === 0) {
     await run('DELETE FROM alert_group_summary WHERE group_id = ?', [groupId]);
+    await run('DELETE FROM alert_group_alias WHERE legacy_group_id = ?', [groupId]);
     return;
   }
   const representative = await get(
@@ -1760,6 +1830,7 @@ async function refreshAlertGroupSummary(groupKey) {
   );
   if (!representative) {
     await run('DELETE FROM alert_group_summary WHERE group_id = ?', [groupId]);
+    await run('DELETE FROM alert_group_alias WHERE legacy_group_id = ?', [groupId]);
     return;
   }
   await run(
@@ -1829,6 +1900,17 @@ async function refreshAlertGroupSummary(groupKey) {
       nowUtc(),
     ],
   );
+  const stableIdentity = await get(
+    'SELECT stable_group_id, stable_group_key FROM alerts WHERE alert_id = ?',
+    [representative.alert_id],
+  );
+  if (stableIdentity?.stable_group_id && stableIdentity?.stable_group_key) {
+    await run(`INSERT INTO alert_group_alias (legacy_group_id, stable_group_id, stable_group_key, updated_at)
+      VALUES (?, ?, ?, ?) ON CONFLICT(legacy_group_id) DO UPDATE SET
+      stable_group_id = excluded.stable_group_id, stable_group_key = excluded.stable_group_key,
+      updated_at = excluded.updated_at`,
+    [groupId, stableIdentity.stable_group_id, stableIdentity.stable_group_key, nowUtc()]);
+  }
 }
 
 async function rebuildAlertGroupSummariesUnlocked() {
@@ -1984,16 +2066,10 @@ async function updateAnalystStatus(payload) {
 }
 
 async function storeAlert(rawAlert) {
-  let alert = {
+  const alert = {
     ...rawAlert,
     triage: scoreAlert(rawAlert),
   };
-  if (!hasUsableExternalIntel(alert)) {
-    const enrichmentResult = await enrichAlert(alert);
-    if (enrichmentResult.ok && enrichmentResult.alert) {
-      alert = {...enrichmentResult.alert, triage: alert.triage};
-    }
-  }
   const result = await withSqliteWriteGate(() => withImmediateTransaction(async () => {
     const stored = await storeAlertUnlocked(alert);
     if (stored.ok) {
@@ -2004,6 +2080,23 @@ async function storeAlert(rawAlert) {
         nowUtc(),
         stored.filter,
       );
+      if (stored.alert?.alert_id && stored.status !== 'dropped' && !hasUsableExternalIntel(alert)) {
+        const level = String(stored.alert.triage_level || nestedField(alert, 'triage.level') || 'informational').toLowerCase();
+        await durableJobs.enqueue('public_enrichment', stored.alert.alert_id, {alert_id: stored.alert.alert_id}, {
+          priority: severityRank[level] ?? 0,
+          maxAttempts: enrichmentWorkerMaxAttempts,
+        });
+      }
+      if (stored.alert?.alert_id && !['dropped', 'suppressed'].includes(stored.status)) {
+        const groupKey = stored.alert.stable_group_key || alertGroupKeyFromRow(stored.alert);
+        const groupId = stored.alert.stable_group_id || alertGroupId(groupKey);
+        const level = String(stored.alert.triage_level || 'informational').toLowerCase();
+        await durableJobs.enqueue('ai_analysis', groupId, {
+          group_id: groupId,
+          group_key: groupKey,
+          representative_alert_id: stored.alert.alert_id,
+        }, {priority: severityRank[level] ?? 0, maxAttempts: 8});
+      }
     }
     return stored;
   }));
@@ -2012,7 +2105,39 @@ async function storeAlert(rawAlert) {
   // timeout cannot delay the webhook response or cause n8n to replay a safely
   // committed alert.
   void drainTelegramOutbox();
+  void drainEnrichmentJobs();
   return result;
+}
+
+async function drainEnrichmentJobs() {
+  if (enrichmentDrainActive || !durableJobs) return;
+  enrichmentDrainActive = true;
+  try {
+    // One provider bundle at a time prevents free-tier bursts. The interval
+    // immediately runs again after completion, so ingest never waits on it.
+    const job = await withSqliteWriteGate(() => withImmediateTransaction(
+      () => durableJobs.claim('public_enrichment', Math.ceil(enrichmentTimeoutMs * 20 / 1000)),
+    ));
+    if (!job) return;
+    try {
+      const row = await get('SELECT alert_json FROM alerts WHERE alert_id = ?', [job.payload.alert_id]);
+      if (!row) throw new Error('alert no longer exists');
+      const alert = JSON.parse(row.alert_json);
+      const result = await enrichAlert(alert);
+      if (!result.ok || !result.alert) throw new Error(result.reason || 'enrichment returned no alert');
+      await withSqliteWriteGate(() => withImmediateTransaction(async () => {
+        await run(
+          'UPDATE alerts SET enrichment_json = ?, alert_json = ? WHERE alert_id = ?',
+          [jsonText(enrichmentRecord(result.alert)), jsonText(result.alert), job.payload.alert_id],
+        );
+        await durableJobs.complete(job.id);
+      }));
+    } catch (error) {
+      await withSqliteWriteGate(() => durableJobs.fail(job, error.message));
+    }
+  } finally {
+    enrichmentDrainActive = false;
+  }
 }
 
 async function storeAlertUnlocked(alert) {
@@ -2210,6 +2335,8 @@ async function storeAlertUnlocked(alert) {
     `,
     [alertId],
   );
+  const stableIdentity = await persistStableIdentity(alertId, row, alert);
+  Object.assign(row, stableIdentity);
   const nextGroupKey = alertGroupKeyFromRow(row);
   if (previousGroupKey && previousGroupKey !== nextGroupKey) {
     await refreshAlertGroupSummary(previousGroupKey);
@@ -2839,12 +2966,47 @@ function pcapRequestFromRow(row) {
     artifact_sha256: row.artifact_sha256,
     artifact_size_bytes: row.artifact_size_bytes,
     error: row.error,
+    outcome: row.outcome || classifyPcapOutcome(row.status, row.error, parseJsonObject(row.diagnostics_json)),
     diagnostics: parseJsonObject(row.diagnostics_json),
+    analysis_status: row.analysis_status || 'not_ready',
+    analysis_attempt_count: Number(row.analysis_attempt_count || 0),
+    analysis_error: row.analysis_error || null,
+    analysis_started_at: row.analysis_started_at || null,
+    analysis_completed_at: row.analysis_completed_at || null,
     created_at: row.created_at,
     claimed_at: row.claimed_at,
     completed_at: row.completed_at,
     updated_at: row.updated_at,
   };
+}
+
+const PCAP_OUTCOMES = new Set([
+  'captured', 'no_packets_available', 'expired', 'oversize', 'timeout',
+  'transport_failed', 'checksum_failed', 'rejected', 'failed',
+]);
+
+function classifyPcapOutcome(status, error, diagnostics = {}) {
+  const state = String(status || '').toLowerCase();
+  const detail = `${String(error || '')} ${JSON.stringify(diagnostics || {})}`.toLowerCase();
+  if (state === 'fulfilled') return 'captured';
+  if (detail.includes('no matching packets')) return 'no_packets_available';
+  if (detail.includes('capture retention') || detail.includes('expired')) return 'expired';
+  if (detail.includes('exceed') && (detail.includes('size') || detail.includes('artifact'))) return 'oversize';
+  if (detail.includes('timeout') || detail.includes('timed out')) return 'timeout';
+  if (detail.includes('sha256') || detail.includes('checksum')) return 'checksum_failed';
+  if (detail.includes('rsync') || detail.includes('artifact upload') || detail.includes('connection') || detail.includes('ssh')) {
+    return 'transport_failed';
+  }
+  if (state === 'rejected') return 'rejected';
+  return state === 'failed' ? 'failed' : '';
+}
+
+async function backfillPcapOutcomes() {
+  const rows = await all("SELECT request_id, status, error, diagnostics_json FROM pcap_requests WHERE outcome IS NULL OR outcome = ''");
+  for (const row of rows) {
+    const outcome = classifyPcapOutcome(row.status, row.error, parseJsonObject(row.diagnostics_json));
+    if (outcome) await run('UPDATE pcap_requests SET outcome = ? WHERE request_id = ?', [outcome, row.request_id]);
+  }
 }
 
 async function createPcapRequest(payload) {
@@ -2859,9 +3021,9 @@ async function createPcapRequest(payload) {
         request_id, status, alert_id, group_id, group_key, first_seen, last_seen,
         source_ip, source_port, destination_ip, destination_port, network_protocol,
         transport_protocol, community_id, requested_by, reason, max_window_seconds,
-        request_json, created_at, updated_at
+        error, outcome, request_json, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(request_id) DO UPDATE SET
         status = excluded.status,
         reason = excluded.reason,
@@ -2874,6 +3036,7 @@ async function createPcapRequest(payload) {
         artifact_path = NULL,
         artifact_sha256 = NULL,
         artifact_size_bytes = NULL,
+        outcome = excluded.outcome,
         updated_at = excluded.updated_at
     `,
     [
@@ -2894,6 +3057,8 @@ async function createPcapRequest(payload) {
       normalized.requested_by,
       normalized.reason,
       normalized.max_window_seconds,
+      retentionError || null,
+      retentionError ? 'expired' : null,
       jsonText(normalized),
       now,
       now,
@@ -2924,6 +3089,26 @@ async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppre
   try {
     const groupKey = alertGroupKeyFromRow(storedRow);
     const groupId = alertGroupId(groupKey);
+    const stableId = storedRow.stable_group_id || groupId;
+    const existingPending = await get(
+      `SELECT p.* FROM pcap_requests p
+       LEFT JOIN alert_group_alias a ON a.legacy_group_id = p.group_id
+       WHERE COALESCE(a.stable_group_id, p.group_id) = ? AND p.status = 'pending'
+       ORDER BY p.created_at DESC LIMIT 1`,
+      [stableId],
+    );
+    if (existingPending) {
+      const existingPayload = parseJsonObject(existingPending.request_json);
+      existingPayload.last_seen = storedRow.last_seen || existingPayload.last_seen;
+      existingPayload.alert_id = storedRow.alert_id || existingPayload.alert_id;
+      await run(
+        `UPDATE pcap_requests SET alert_id = ?, last_seen = ?, request_json = ?,
+           reason = ?, updated_at = ? WHERE request_id = ? AND status = 'pending'`,
+        [storedRow.alert_id, storedRow.last_seen, jsonText(existingPayload),
+          `Coalesced automatic PCAP request for ${level} alert group`, nowUtc(), existingPending.request_id],
+      );
+      return {status: 'coalesced', request_id: existingPending.request_id, group_id: groupId, triage_level: level};
+    }
     const result = await createPcapRequest({
       group_id: groupId,
       alert_id: storedRow.alert_id,
@@ -2957,6 +3142,10 @@ async function listPcapRequests(query = new URLSearchParams()) {
         LEFT JOIN alert_group_summary AS g ON g.group_id = p.group_id
         WHERE p.status = ?
         ORDER BY
+          CASE WHEN ? > 0 AND p.last_seen IS NOT NULL
+            THEN datetime(replace(p.last_seen, '  ', 'T'), '+' || ? || ' seconds')
+            ELSE datetime(p.created_at, '+100 years')
+          END ASC,
           CASE lower(COALESCE(g.triage_level, ''))
             WHEN 'critical' THEN 4
             WHEN 'high' THEN 3
@@ -2969,7 +3158,7 @@ async function listPcapRequests(query = new URLSearchParams()) {
           p.created_at DESC
         LIMIT ?
       `,
-      [status, limit],
+      [status, pcapCaptureRetentionSeconds, pcapCaptureRetentionSeconds, limit],
     )
     : await all('SELECT * FROM pcap_requests ORDER BY created_at DESC LIMIT ?', [limit]);
   return {ok: true, status: status || 'all', requests: rows.map(pcapRequestFromRow)};
@@ -2983,6 +3172,7 @@ async function rejectExpiredPendingPcapRequests() {
     `
       UPDATE pcap_requests
       SET status = 'rejected',
+          outcome = 'expired',
           error = ?,
           completed_at = ?,
           updated_at = ?
@@ -3005,6 +3195,7 @@ async function requeuePcapRequests(payload) {
     `
       UPDATE pcap_requests
       SET status = 'pending',
+          outcome = NULL,
           relay_host = NULL,
           claimed_at = NULL,
           completed_at = NULL,
@@ -3081,6 +3272,10 @@ async function completePcapRequest(payload) {
   const diagnostics = payload?.diagnostics && typeof payload.diagnostics === 'object' && !Array.isArray(payload.diagnostics)
     ? JSON.stringify(payload.diagnostics).slice(0, 12000)
     : null;
+  const requestedOutcome = safeString(payload?.outcome, 64).toLowerCase();
+  const outcome = PCAP_OUTCOMES.has(requestedOutcome)
+    ? requestedOutcome
+    : classifyPcapOutcome(requestedStatus, error, payload?.diagnostics || {});
   if (requestedStatus === 'fulfilled' && (!artifactPath || !artifactSha256 || !artifactSizeBytes)) {
     throw new Error('fulfilled pcap request requires artifact_path, artifact_sha256, and artifact_size_bytes');
   }
@@ -3093,7 +3288,12 @@ async function completePcapRequest(payload) {
           artifact_sha256 = ?,
           artifact_size_bytes = ?,
           error = ?,
+          outcome = ?,
           diagnostics_json = ?,
+          analysis_status = CASE WHEN ? = 'fulfilled' THEN 'pending' ELSE 'not_ready' END,
+          analysis_error = NULL,
+          analysis_started_at = NULL,
+          analysis_completed_at = NULL,
           completed_at = ?,
           updated_at = ?
       WHERE request_id = ?
@@ -3105,7 +3305,9 @@ async function completePcapRequest(payload) {
       artifactSha256,
       artifactSizeBytes,
       requestedStatus === 'fulfilled' ? null : error,
+      outcome || null,
       requestedStatus === 'fulfilled' ? null : diagnostics,
+      requestedStatus,
       now,
       now,
       requestId,
@@ -3114,6 +3316,28 @@ async function completePcapRequest(payload) {
   const row = await get('SELECT * FROM pcap_requests WHERE request_id = ?', [requestId]);
   if (!row) throw new Error('pcap request not found');
   return {ok: true, status: row.status, request: pcapRequestFromRow(row)};
+}
+
+async function completePcapAnalysis(payload) {
+  const requestId = safeString(payload?.request_id, 64);
+  if (!requestId) throw new Error('request_id is required');
+  const status = safeString(payload?.status, 32).toLowerCase();
+  if (!['processing', 'completed', 'failed'].includes(status)) {
+    throw new Error('analysis status must be processing, completed, or failed');
+  }
+  const now = nowUtc();
+  const result = await run(
+    `UPDATE pcap_requests SET analysis_status = ?,
+       analysis_attempt_count = analysis_attempt_count + CASE WHEN ? = 'processing' THEN 1 ELSE 0 END,
+       analysis_error = ?,
+       analysis_started_at = CASE WHEN ? = 'processing' THEN COALESCE(analysis_started_at, ?) ELSE analysis_started_at END,
+       analysis_completed_at = CASE WHEN ? IN ('completed', 'failed') THEN ? ELSE NULL END,
+       updated_at = ?
+     WHERE request_id = ? AND status = 'fulfilled'`,
+    [status, status, safeString(payload?.error, 1000) || null, status, now, status, now, now, requestId],
+  );
+  if (result.changes !== 1) throw new Error('fulfilled PCAP request not found');
+  return {ok: true, request_id: requestId, analysis_status: status};
 }
 
 function readJsonBody(request) {
@@ -3170,6 +3394,42 @@ function sendJson(response, code, payload) {
   response.end(body);
 }
 
+async function operationalMetricsSnapshot() {
+  const durable = durableJobs ? await durableJobs.stats() : [];
+  const oldestJob = await get(`SELECT MAX(0, CAST((julianday('now') - julianday(replace(MIN(next_attempt_at), '  ', 'T'))) * 86400 AS INTEGER)) AS seconds
+    FROM durable_jobs WHERE status = 'pending'`);
+  const pcap = await all('SELECT status, analysis_status, COUNT(*) AS count FROM pcap_requests GROUP BY status, analysis_status');
+  const pcapOutcomes = await all("SELECT COALESCE(outcome, 'unknown') AS outcome, COUNT(*) AS count FROM pcap_requests GROUP BY COALESCE(outcome, 'unknown')");
+  const pcapStorage = await get(`SELECT
+      COUNT(*) AS fulfilled_count,
+      COALESCE(SUM(artifact_size_bytes), 0) AS artifact_bytes_total,
+      COALESCE(AVG(artifact_size_bytes), 0) AS artifact_bytes_average,
+      COALESCE(MAX(artifact_size_bytes), 0) AS artifact_bytes_maximum,
+      COALESCE(SUM(CASE WHEN datetime(replace(completed_at, '  ', 'T')) >= datetime('now', '-24 hours') THEN artifact_size_bytes ELSE 0 END), 0) AS artifact_bytes_24h,
+      SUM(CASE WHEN datetime(replace(completed_at, '  ', 'T')) >= datetime('now', '-24 hours') THEN 1 ELSE 0 END) AS fulfilled_24h
+    FROM pcap_requests WHERE status = 'fulfilled'`);
+  const oldestPcap = await get(`SELECT MAX(0, CAST((julianday('now') - julianday(replace(MIN(created_at), '  ', 'T'))) * 86400 AS INTEGER)) AS seconds
+    FROM pcap_requests WHERE status = 'pending'`);
+  const pageCount = await get('PRAGMA page_count');
+  const pageSize = await get('PRAGMA page_size');
+  return {
+    generated_at: nowUtc(),
+    process: {
+      ...serviceMetrics,
+      ingest_latency_ms_average: serviceMetrics.ingest_requests
+        ? Math.round(serviceMetrics.ingest_latency_ms_total / serviceMetrics.ingest_requests) : 0,
+    },
+    durable_jobs: durable,
+    oldest_pending_job_seconds: Number(oldestJob?.seconds || 0),
+    pcap,
+    pcap_outcomes: pcapOutcomes,
+    pcap_storage: pcapStorage || {},
+    oldest_pending_pcap_seconds: Number(oldestPcap?.seconds || 0),
+    telegram_outbox: await telegramOutboxSnapshot(),
+    sqlite_bytes: Number(pageCount?.page_count || 0) * Number(pageSize?.page_size || 0),
+  };
+}
+
 async function handleRequest(request, response) {
   try {
     const parsedUrl = new URL(request.url, 'http://alert-store.local');
@@ -3183,6 +3443,10 @@ async function handleRequest(request, response) {
       });
       return;
     }
+    if (request.method === 'GET' && parsedUrl.pathname === '/metrics') {
+      sendJson(response, 200, {ok: true, metrics: await operationalMetricsSnapshot()});
+      return;
+    }
     if (request.method === 'GET' && parsedUrl.pathname === '/analyst-status') {
       sendJson(response, 200, await analystStatusSnapshot());
       return;
@@ -3194,6 +3458,8 @@ async function handleRequest(request, response) {
     }
     if (request.method === 'POST' && request.url === '/alert') {
       // Main ingestion endpoint called by the n8n workflow.
+      const startedAt = Date.now();
+      serviceMetrics.ingest_requests += 1;
       const alert = await readJsonBody(request);
       writeN8nBeacon('received', alert);
       if (isRelayHeartbeat(alert)) {
@@ -3203,6 +3469,9 @@ async function handleRequest(request, response) {
         return;
       }
       const result = await storeAlert(alert);
+      const latency = Date.now() - startedAt;
+      serviceMetrics.ingest_latency_ms_total += latency;
+      serviceMetrics.ingest_latency_ms_max = Math.max(serviceMetrics.ingest_latency_ms_max, latency);
       writeN8nBeacon('stored', alert, result);
       sendJson(response, result.ok ? 200 : 400, result);
       return;
@@ -3232,6 +3501,22 @@ async function handleRequest(request, response) {
       sendJson(response, 200, result);
       return;
     }
+    if (request.method === 'GET' && parsedUrl.pathname === '/jobs/stats') {
+      sendJson(response, 200, {ok: true, jobs: durableJobs ? await durableJobs.stats() : []});
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/jobs/status') {
+      const payload = await readJsonBody(request);
+      const jobType = safeString(payload?.job_type, 64);
+      const dedupeKey = safeString(payload?.dedupe_key, 256);
+      const status = safeString(payload?.status, 32).toLowerCase();
+      if (!jobType || !dedupeKey) throw new Error('job_type and dedupe_key are required');
+      const updated = await withSqliteWriteGate(() => durableJobs.transition(
+        jobType, dedupeKey, status, safeString(payload?.error, 1000),
+      ));
+      sendJson(response, updated ? 200 : 404, {ok: updated, job_type: jobType, dedupe_key: dedupeKey, status});
+      return;
+    }
     if (request.method === 'POST' && parsedUrl.pathname === '/pcap/claim') {
       // Relay claims a pending request before contacting Security Onion.
       const payload = await readJsonBody(request);
@@ -3244,6 +3529,12 @@ async function handleRequest(request, response) {
       // controlled runtime path and are never committed to the DR repo.
       const payload = await readJsonBody(request);
       const result = await withSqliteWriteGate(() => completePcapRequest(payload));
+      sendJson(response, 200, result);
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/pcap/analysis-status') {
+      const payload = await readJsonBody(request);
+      const result = await withSqliteWriteGate(() => completePcapAnalysis(payload));
       sendJson(response, 200, result);
       return;
     }
@@ -3270,6 +3561,7 @@ async function handleRequest(request, response) {
     sendJson(response, 404, {ok: false, status: 'not_found'});
   } catch (error) {
     if (request.method === 'POST' && request.url === '/alert') {
+      serviceMetrics.ingest_errors += 1;
       writeN8nBeacon('error', {}, null, error);
     }
     sendJson(response, Number(error.statusCode || 400), {
@@ -3288,6 +3580,8 @@ initDb().then(() => {
     setInterval(() => void drainTelegramOutbox(), telegramOutboxIntervalMs).unref();
     void drainTelegramOutbox();
   }
+  setInterval(() => void drainEnrichmentJobs(), enrichmentWorkerIntervalMs).unref();
+  void drainEnrichmentJobs();
 }).catch((error) => {
   console.error(error);
   process.exit(1);

@@ -112,7 +112,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Override local Ollama model name")
     parser.add_argument("--ollama-url", default=DEFAULT_OLLAMA_URL, help="Ollama base URL")
     parser.add_argument("--system-prompt-file", type=Path, default=DEFAULT_SYSTEM_PROMPT_FILE, help="Editable SOC Analyst system prompt file")
-    parser.add_argument("--timeout", type=int, default=180, help="Ollama request timeout in seconds")
+    parser.add_argument("--timeout", type=int, default=600, help="Ollama request timeout in seconds")
+    parser.add_argument(
+        "--max-predict-tokens",
+        type=int,
+        default=4096,
+        help="Maximum output tokens for one bounded local analysis",
+    )
     parser.add_argument("--temperature", type=float, default=0.1, help="Low temperature keeps SOC analysis repeatable")
     parser.add_argument("--response-json", type=Path, help="Use an existing model response JSON instead of calling Ollama")
     parser.add_argument("--generate-prompt", action="store_true", help="Generate a fresh prompt package before analysis")
@@ -123,6 +129,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
+    if args.max_predict_tokens <= 0:
+        parser.error("--max-predict-tokens must be positive")
     return args
 
 
@@ -579,7 +587,12 @@ def effective_ai_settings(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
-    """Parse strict JSON, fenced JSON, or the first balanced object in output."""
+    """Parse strict JSON, fenced JSON, or the first complete object in output.
+
+    Local models occasionally append a second object or a short explanation.
+    ``raw_decode`` accepts the first complete JSON value without broad regex
+    repair, preserving the fail-closed contract for malformed evidence.
+    """
     stripped = text.strip()
     if stripped.startswith("```"):
         stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
@@ -591,16 +604,15 @@ def extract_json_object(text: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         pass
 
-    start = stripped.find("{")
-    end = stripped.rfind("}")
-    if start >= 0 and end > start:
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", stripped):
         try:
-            parsed = json.loads(stripped[start : end + 1])
+            parsed, _ = decoder.raw_decode(stripped, match.start())
             if isinstance(parsed, dict):
                 return parsed
-        except json.JSONDecodeError as exc:
-            raise SystemExit(f"model output contained invalid JSON object: {exc}") from exc
-    raise SystemExit("model output did not contain a JSON object")
+        except json.JSONDecodeError:
+            continue
+    raise SystemExit("model output did not contain a valid JSON object")
 
 
 def ollama_chat(prompt_package: dict[str, Any], args: argparse.Namespace, settings: dict[str, Any]) -> dict[str, Any]:
@@ -621,7 +633,13 @@ def ollama_chat(prompt_package: dict[str, Any], args: argparse.Namespace, settin
         {
             "model": model,
             "stream": False,
-            "options": {"temperature": args.temperature},
+            # Ollama's JSON grammar prevents formatting drift from turning a
+            # completed inference into a failed durable job.
+            "format": "json",
+            "options": {
+                "temperature": args.temperature,
+                "num_predict": args.max_predict_tokens,
+            },
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": json.dumps(user, separators=(",", ":"))},

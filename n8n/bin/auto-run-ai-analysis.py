@@ -17,6 +17,8 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import urllib.error
+import urllib.request
 import sys
 import time
 from pathlib import Path
@@ -83,10 +85,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-per-run", type=int, default=0, help="Maximum unique alert groups to analyze per scheduler run; 0 drains the queue until no eligible alerts remain")
     parser.add_argument("--related-limit", type=int, default=8, help="Related alert count passed to prompt builder")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Optional Ollama model override; defaults to Settings page AI model routing config")
-    parser.add_argument("--timeout", type=int, default=240, help="Ollama request timeout in seconds")
+    parser.add_argument("--timeout", type=int, default=600, help="Ollama request timeout in seconds")
     parser.add_argument("--portal-builder", type=Path, default=DEFAULT_PORTAL_BUILDER, help="Dashboard builder to run after successful analysis")
     parser.add_argument("--portal-sync", type=Path, default=DEFAULT_PORTAL_SYNC, help="Dashboard sync script to run after successful analysis")
     parser.add_argument("--no-portal-refresh", action="store_true", help="Do not rebuild/sync the SOC portal after analysis")
+    parser.add_argument("--alert-store-url", default=os.environ.get("ALERT_STORE_URL", "http://127.0.0.1:8787"), help="Alert-store URL for durable AI job status")
     parser.add_argument("--include-tests", action="store_true", help="Allow test/validation alert IDs")
     parser.add_argument("--dry-run", action="store_true", help="Print the selected alert without calling Ollama")
     args = parser.parse_args()
@@ -105,6 +108,28 @@ def project_now() -> str:
 
 def rows(conn: sqlite3.Connection, sql: str, params: Iterable[object] = ()) -> list[sqlite3.Row]:
     return conn.execute(sql, tuple(params)).fetchall()
+
+
+def report_ai_job_status(base_url: str, group_id: str, status: str, error: str = "") -> None:
+    payload = json.dumps({
+        "job_type": "ai_analysis",
+        "dedupe_key": group_id,
+        "status": status,
+        "error": error[:1000],
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        f"{base_url.rstrip('/')}/jobs/status",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            if response.status not in range(200, 300) and response.status != 404:
+                raise RuntimeError(f"AI job status returned HTTP {response.status}")
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            raise
 
 
 def test_filter_sql() -> tuple[str, list[object]]:
@@ -366,6 +391,8 @@ def select_next_alert(
         getattr(args, "prompt_dir", None),
     )
     skipped_groups = set(already_selected_groups or set())
+    alert_columns = {str(item[1]) for item in conn.execute("PRAGMA table_info(alerts)").fetchall()}
+    stable_group_select = "stable_group_id" if "stable_group_id" in alert_columns else "NULL AS stable_group_id"
     candidates = rows(
         conn,
         f"""
@@ -373,6 +400,7 @@ def select_next_alert(
           SELECT alert_id, first_seen, last_seen, timestamp, rule_name,
                  source_ip, destination_ip, triage_level, triage_score,
                  COALESCE(NULLIF(filter_status, ''), 'accepted') AS filter_status,
+                 {stable_group_select},
                  routing, suppression_key,
                  {newest_alert_time} AS queue_time,
                  replace(replace({newest_alert_time}, 'T', ' '), 'Z', '') AS queue_time_sort,
@@ -636,13 +664,19 @@ def main() -> int:
                 continue
 
             prompt_path = reusable_prompt_for_alert(args.prompt_dir, selected, args.pcap_analysis_dir) or build_prompt(alert_id, args)
+            selected_group_id = str(selected["stable_group_id"] or "") if "stable_group_id" in selected.keys() else ""
+            if not selected_group_id:
+                selected_group_id = alert_group_id(str(selected["queue_group_key"] or alert_group_key(selected)))
+            report_ai_job_status(args.alert_store_url, selected_group_id, "processing")
             proc = run_analysis_with_activity_refresh(prompt_path, args)
             if proc.stdout:
                 print(proc.stdout, end="")
             if proc.stderr:
                 print(proc.stderr, file=sys.stderr, end="")
             if proc.returncode != 0:
+                report_ai_job_status(args.alert_store_url, selected_group_id, "failed", proc.stderr or f"rc={proc.returncode}")
                 raise SystemExit(f"local AI analysis failed rc={proc.returncode}")
+            report_ai_job_status(args.alert_store_url, selected_group_id, "completed")
             analyzed_count += 1
 
         if analyzed_count:

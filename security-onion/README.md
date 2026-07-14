@@ -67,9 +67,11 @@ This prevents historical requests from accidentally searching only the newest
 captures. The wrapper defaults to using the destination service port as the
 BPF port discriminator; request JSON may set `require_source_port: true` for
 controlled validation or rare cases where an ephemeral source port is the only
-safe discriminator. `ONION_SENTINEL_PCAP_MAX_ARTIFACT_BYTES` defaults to 8 GiB
+safe discriminator. `ONION_SENTINEL_PCAP_MAX_ARTIFACT_BYTES` defaults to 32 GiB
 and is applied to `tcpdump` itself, so an unusually dense flow cannot fill the
-Security Onion export directory before the relay SSD limit is enforced.
+Security Onion export directory before the relay SSD limit is enforced. Keep
+this bound below available Security Onion and Mac Studio capacity; the live
+1 TB relay spool reserves 100 GiB and stops accepting work at 80 percent used.
 
 After a relay upload has been accepted by the Mac Studio and the PCAP broker
 completion callback succeeds, the relay calls `export-pcap-window` with

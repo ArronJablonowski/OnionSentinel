@@ -21,6 +21,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.error
+import urllib.request
 from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
@@ -38,6 +40,9 @@ DEFAULT_OUT_DIR = HOME / "n8n-local" / "soc-alerts" / "pcap-analysis"
 PCAP_SUFFIXES = {".pcap", ".pcapng", ".cap"}
 LOG_LIMIT = 2000
 SUMMARY_LIMIT = 20
+MAX_ARCHIVE_MEMBERS = max(1, int(os.environ.get("PCAP_MAX_ARCHIVE_MEMBERS", "2048")))
+MAX_EXTRACTED_BYTES = max(1, int(os.environ.get("PCAP_MAX_EXTRACTED_BYTES", str(40 * 1024 * 1024 * 1024))))
+MAX_PCAP_FILES = max(1, int(os.environ.get("PCAP_MAX_FILES", "256")))
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,6 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ssh-bin", default=os.environ.get("PCAP_ARTIFACT_SSH_BIN", "ssh"), help="SSH executable for artifact fetch")
     parser.add_argument("--overwrite", action="store_true", help="Rebuild existing analysis artifacts")
     parser.add_argument("--retain-artifact", action="store_true", help="Keep a successfully parsed broker artifact for controlled troubleshooting")
+    parser.add_argument("--alert-store-url", default=os.environ.get("ALERT_STORE_URL", "http://127.0.0.1:8787"), help="Alert-store base URL for durable parser status")
     parser.add_argument("--stdout", action="store_true", help="Print JSON summaries after processing")
     args = parser.parse_args()
     if args.limit <= 0:
@@ -155,7 +161,8 @@ def pending_requests(db_path: Path, request_id: str | None, limit: int, out_dir:
         found: list[sqlite3.Row] = []
         for item in candidates:
             item_request_id = str(item["request_id"] or "")
-            if overwrite or not analysis_json_path(out_dir, item_request_id).exists():
+            durable_incomplete = "analysis_status" in columns and str(item["analysis_status"] or "") != "completed"
+            if overwrite or durable_incomplete or not analysis_json_path(out_dir, item_request_id).exists():
                 found.append(item)
                 if len(found) >= limit:
                     break
@@ -219,11 +226,19 @@ def fetch_remote_artifact(request: dict[str, Any], artifact_dir: Path, ssh_targe
 
 def safe_extract_tar(path: Path, destination: Path) -> None:
     with tarfile.open(path) as archive:
-        for member in archive.getmembers():
+        members = archive.getmembers()
+        if len(members) > MAX_ARCHIVE_MEMBERS:
+            raise ValueError(f"archive has too many members: {len(members)} > {MAX_ARCHIVE_MEMBERS}")
+        expanded_bytes = sum(max(0, int(member.size or 0)) for member in members if member.isfile())
+        if expanded_bytes > MAX_EXTRACTED_BYTES:
+            raise ValueError(f"archive expands beyond limit: {expanded_bytes} > {MAX_EXTRACTED_BYTES}")
+        for member in members:
+            if member.issym() or member.islnk() or member.isdev() or member.isfifo():
+                raise ValueError(f"unsupported archive member type: {member.name}")
             target = (destination / member.name).resolve()
-            if not str(target).startswith(str(destination.resolve())):
+            if target != destination.resolve() and destination.resolve() not in target.parents:
                 raise ValueError(f"unsafe tar member path: {member.name}")
-        archive.extractall(destination)
+        archive.extractall(destination, members=members)
 
 
 def materialize_pcap_files(request: dict[str, Any], args: argparse.Namespace, work_dir: Path, direct_pcap: Path | None = None) -> tuple[list[Path], str]:
@@ -248,6 +263,8 @@ def materialize_pcap_files(request: dict[str, Any], args: argparse.Namespace, wo
             extract_dir.mkdir(parents=True, exist_ok=True)
             safe_extract_tar(candidate, extract_dir)
             pcaps = [path for path in extract_dir.rglob("*") if path.is_file() and path.suffix.lower() in PCAP_SUFFIXES]
+            if len(pcaps) > MAX_PCAP_FILES:
+                raise ValueError(f"archive contains too many PCAP files: {len(pcaps)} > {MAX_PCAP_FILES}")
             return sorted(pcaps), "extracted-artifact"
     return [], "artifact-not-copied-to-mac"
 
@@ -469,6 +486,19 @@ def atomic_write_text(path: Path, content: str) -> None:
     temp_path.replace(path)
 
 
+def report_analysis_status(base_url: str, request_id: str, status: str, error: str = "") -> None:
+    payload = json.dumps({"request_id": request_id, "status": status, "error": error[:1000]}).encode("utf-8")
+    request = urllib.request.Request(
+        f"{base_url.rstrip('/')}/pcap/analysis-status",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        if response.status < 200 or response.status >= 300:
+            raise RuntimeError(f"alert-store analysis status returned HTTP {response.status}")
+
+
 def process_one(request: dict[str, Any], args: argparse.Namespace, direct_pcap: Path | None = None) -> dict[str, Any]:
     request_id = safe_filename(request.get("request_id") or (direct_pcap.stem if direct_pcap else "pcap"))
     with tempfile.TemporaryDirectory(prefix="onion-sentinel-pcap-") as temp_name:
@@ -523,6 +553,7 @@ def process_one(request: dict[str, Any], args: argparse.Namespace, direct_pcap: 
 
 def main() -> int:
     args = parse_args()
+    failed_count = 0
     if args.pcap:
         request = {
             "request_id": safe_filename(args.pcap.stem),
@@ -534,14 +565,34 @@ def main() -> int:
         processed = [process_one(request, args, args.pcap)]
     else:
         requests = pending_requests(args.db, args.request_id, args.limit, args.out_dir, args.overwrite)
-        processed = [process_one(request, args) for request in requests]
+        processed = []
+        for request in requests:
+            request_id = safe_filename(request.get("request_id"))
+            existing = analysis_json_path(args.out_dir, request_id)
+            try:
+                report_analysis_status(args.alert_store_url, request_id, "processing")
+                if existing.exists() and not args.overwrite:
+                    analysis = json.loads(existing.read_text(encoding="utf-8"))
+                    analysis["_json_path"] = str(existing)
+                    analysis["_markdown_path"] = str(existing.with_name(existing.name.replace("-pcap-analysis.json", "-pcap-analysis.md")))
+                else:
+                    analysis = process_one(request, args)
+                report_analysis_status(args.alert_store_url, request_id, "completed")
+                processed.append(analysis)
+            except Exception as exc:
+                failed_count += 1
+                try:
+                    report_analysis_status(args.alert_store_url, request_id, "failed", str(exc))
+                except Exception as status_exc:
+                    print(f"status update failed for {request_id}: {status_exc}", file=sys.stderr)
+                print(f"PCAP analysis failed for {request_id}: {exc}", file=sys.stderr)
     if args.stdout:
         print(json.dumps(processed, indent=2, sort_keys=True))
     else:
         for item in processed:
             print(item["_markdown_path"])
             print(item["_json_path"])
-    return 0
+    return 1 if failed_count else 0
 
 
 if __name__ == "__main__":

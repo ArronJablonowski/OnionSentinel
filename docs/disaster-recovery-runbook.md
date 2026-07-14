@@ -277,7 +277,15 @@ The relay SSD should be mounted with:
 noatime,nosuid,nodev,noexec,nofail
 ```
 
-Use `RELAY_PCAP_TIMEOUT_SECONDS=1800` for large captures. Alert-store also
+Use a UUID-based `/etc/fstab` entry with
+`x-systemd.device-timeout=30s`. Before enabling the broker, verify that
+`findmnt /mnt/onion-sentinel-pcap-spool` resolves to the external SSD rather
+than the SD-card root filesystem, and perform a write/read/delete test as the
+`soalert` account. The production profile uses a 1 TB ext4 SSD, 32 GiB
+per-artifact limit, 100 GiB free-space reserve, and 80 percent high-water mark.
+
+Use `RELAY_PCAP_TIMEOUT_SECONDS=3900` for large captures. This outer watchdog
+must exceed both 30-minute rsync legs plus export/checksum overhead. Alert-store also
 requeues stale `claimed` PCAP requests after `PCAP_CLAIM_LEASE_SECONDS`
 defaults to 1800 seconds, so interrupted transfers do not need direct database
 repair before the relay can retry them.
@@ -358,7 +366,7 @@ If the tile is red, check the newest beacon timestamp and the Pi timer logs:
 ```bash
 ssh aj_lobster@10.77.7.225 'cat "$HOME/report_portal/library/Cybersecurity/SOC Alerts/n8n-beacon.json"'
 ssh aj_lobster@10.77.7.225 'curl -fsS "http://127.0.0.1:8765/api/system-health/beacons?hours=24"'
-ssh aj@10.88.8.8 'systemctl list-timers --all so-alert-relay.timer --no-pager; sudo journalctl -u so-alert-relay.service -n 40 --no-pager'
+ssh aj@10.88.8.8 'systemctl list-timers --all so-alert-poll.timer so-pcap-broker.timer --no-pager; sudo journalctl -u so-alert-poll.service -u so-pcap-broker.service -n 40 --no-pager'
 ```
 
 The System Health page at `/view/b68c5a48b9778061/system-health.html` uses
@@ -658,8 +666,9 @@ The default n8n proxy configuration is:
   "upload_artifact": true,
   "artifact_upload_mode": "spooled_rsync",
   "artifact_spool_dir": "/mnt/onion-sentinel-pcap-spool/pcap",
-  "artifact_spool_max_bytes": 8589934592,
-  "artifact_spool_min_free_bytes": 3221225472,
+  "artifact_spool_require_mount": true,
+  "artifact_spool_max_bytes": 34359738368,
+  "artifact_spool_min_free_bytes": 107374182400,
   "artifact_spool_delete_after_upload": true,
   "artifact_spool_partial_ttl_seconds": 86400,
   "artifact_spool_completed_ttl_seconds": 3600,
@@ -733,9 +742,9 @@ files or request work directories older than 24 hours under
 Test service:
 
 ```bash
-sudo systemctl start so-alert-relay.service
-sudo journalctl -u so-alert-relay.service -n 30 --no-pager
-systemctl list-timers --all so-alert-relay.timer --no-pager
+sudo systemctl start so-alert-poll.service
+sudo journalctl -u so-alert-poll.service -n 30 --no-pager
+systemctl list-timers --all so-alert-poll.timer so-pcap-broker.timer --no-pager
 ```
 
 The Pi should not own normal rule filtering. Its live config should keep:
@@ -803,7 +812,7 @@ response for each new alert. Keep these timeout controls in
 
 ```bash
 RELAY_COMMAND_TIMEOUT_SECONDS=300
-RELAY_PCAP_TIMEOUT_SECONDS=180
+RELAY_PCAP_TIMEOUT_SECONDS=3900
 RELAY_FAILURE_NOTIFY_THRESHOLD=3
 ```
 
@@ -903,8 +912,11 @@ Before declaring recovery complete, confirm all of the following:
 - n8n and portal `/healthz` endpoints return success;
 - alert-store production SQLite and the newest maintenance backup pass
   `PRAGMA quick_check`;
-- the relay timer's last completed service result is successful and the
-  dedicated PCAP spool is mounted with adequate free space;
+- both `so-alert-poll.timer` and `so-pcap-broker.timer` are active, their last
+  service results are successful, and the dedicated PCAP spool is below its
+  80 percent high-water mark with the configured free-space reserve;
+- alert-store `/metrics` reports no sustained ingest errors or stale durable
+  AI/enrichment/PCAP work;
 - Security Onion's restricted export wrapper and 24-hour PCAP export retention
   timer are enabled;
 - System Health records recent successful beacons and exposes historical gaps;

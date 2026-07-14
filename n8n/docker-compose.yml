@@ -3,7 +3,7 @@ services:
     # n8n's internal runtime DB needs higher write concurrency than SQLite can
     # reliably provide under relay webhook bursts. This database is for n8n
     # metadata/execution state only; alert-store remains the SOC alert source.
-    image: postgres:16-alpine
+    image: postgres@sha256:e53683f43dd931aeacaef349422caf1f6259389ca5eab0c11763fcb8d38f26af
     container_name: n8n-postgres
     restart: unless-stopped
     environment:
@@ -21,7 +21,7 @@ services:
   alert-store:
     # Docker-network compatibility proxy only. The real alert-store runs as a
     # Mac launchd service so SQLite writes stay off Docker Desktop bind mounts.
-    image: n8nio/n8n:latest
+    image: n8nio/n8n@sha256:d136339f394dbe7f5a8cb87c2882348c0fc0a404edc0380ba03f1d2664bc0a97
     container_name: alert-store
     restart: unless-stopped
     working_dir: /app
@@ -32,13 +32,20 @@ services:
     volumes:
       - ./alert_store:/app:ro
     entrypoint: ["node", "/app/alert_store_proxy.js"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
 
   n8n:
     # n8n hosts the webhook workflow and forwards accepted alerts to alert-store
     # over the Docker-internal service name.
-    image: n8nio/n8n:latest
+    image: n8nio/n8n@sha256:d136339f394dbe7f5a8cb87c2882348c0fc0a404edc0380ba03f1d2664bc0a97
     container_name: n8n
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "5678:5678"
     depends_on:

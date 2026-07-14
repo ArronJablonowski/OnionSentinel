@@ -402,6 +402,8 @@ def pcap_workflow_health_response() -> dict[str, object]:
         "request_counts": {"pending": 0, "claimed": 0, "fulfilled": 0, "failed": 0, "total": 0},
         "no_packet_failures": 0,
         "oversize_failures": 0,
+        "outcome_counts": {},
+        "storage": {},
         "warning_count": 0,
         "warnings": [],
         "recent_requests": [],
@@ -414,6 +416,8 @@ def pcap_workflow_health_response() -> dict[str, object]:
         if SOC_ALERT_STORE_DB.exists():
             with soc_alert_db_connect() as conn:
                 if sqlite_table_exists(conn, "pcap_requests"):
+                    pcap_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(pcap_requests)")}
+                    has_outcome = "outcome" in pcap_columns
                     counts = {
                         str(row["status"] or "unknown").lower(): int(row["count"] or 0)
                         for row in conn.execute("SELECT status, COUNT(*) AS count FROM pcap_requests GROUP BY status")
@@ -426,22 +430,35 @@ def pcap_workflow_health_response() -> dict[str, object]:
                         "failed": counts.get("failed", 0),
                         "total": total,
                     }
-                    no_packets = conn.execute(
-                        "SELECT COUNT(*) AS count FROM pcap_requests WHERE status = 'failed' AND lower(coalesce(error, '')) LIKE '%no matching packets%'"
-                    ).fetchone()
-                    summary["no_packet_failures"] = int(no_packets["count"] or 0) if no_packets else 0
-                    oversize = conn.execute(
-                        "SELECT COUNT(*) AS count FROM pcap_requests WHERE status = 'failed' AND lower(coalesce(error, '')) LIKE '%artifact exceeds inline transfer limit%'"
-                    ).fetchone()
-                    summary["oversize_failures"] = int(oversize["count"] or 0) if oversize else 0
-                    unexpected_failure_rows = conn.execute(
+                    if has_outcome:
+                        summary["outcome_counts"] = {
+                            str(row["outcome"] or "unknown"): int(row["count"] or 0)
+                            for row in conn.execute("SELECT COALESCE(outcome, 'unknown') AS outcome, COUNT(*) AS count FROM pcap_requests GROUP BY COALESCE(outcome, 'unknown')")
+                        }
+                    storage = conn.execute(
                         """
+                        SELECT COUNT(*) AS fulfilled_count,
+                               COALESCE(SUM(artifact_size_bytes), 0) AS bytes_total,
+                               COALESCE(AVG(artifact_size_bytes), 0) AS bytes_average,
+                               COALESCE(MAX(artifact_size_bytes), 0) AS bytes_maximum,
+                               COALESCE(SUM(CASE WHEN datetime(replace(completed_at, '  ', 'T')) >= datetime('now', '-24 hours') THEN artifact_size_bytes ELSE 0 END), 0) AS bytes_24h
+                        FROM pcap_requests WHERE status = 'fulfilled'
+                        """
+                    ).fetchone()
+                    summary["storage"] = {key: int(storage[key] or 0) for key in storage.keys()} if storage else {}
+                    no_packets_sql = "SELECT COUNT(*) AS count FROM pcap_requests WHERE outcome = 'no_packets_available'" if has_outcome else "SELECT COUNT(*) AS count FROM pcap_requests WHERE status = 'failed' AND lower(coalesce(error, '')) LIKE '%no matching packets%'"
+                    no_packets = conn.execute(no_packets_sql).fetchone()
+                    summary["no_packet_failures"] = int(no_packets["count"] or 0) if no_packets else 0
+                    oversize_sql = "SELECT COUNT(*) AS count FROM pcap_requests WHERE outcome = 'oversize'" if has_outcome else "SELECT COUNT(*) AS count FROM pcap_requests WHERE status = 'failed' AND lower(coalesce(error, '')) LIKE '%artifact exceeds inline transfer limit%'"
+                    oversize = conn.execute(oversize_sql).fetchone()
+                    summary["oversize_failures"] = int(oversize["count"] or 0) if oversize else 0
+                    unexpected_where = "outcome NOT IN ('no_packets_available', 'expired', 'oversize')" if has_outcome else "lower(coalesce(error, '')) NOT LIKE '%no matching packets%' AND lower(coalesce(error, '')) NOT LIKE '%artifact exceeds inline transfer limit%' AND lower(coalesce(error, '')) NOT LIKE '%invalid json:%preview=''''%'"
+                    unexpected_failure_rows = conn.execute(
+                        f"""
                         SELECT error, completed_at, updated_at, created_at
                         FROM pcap_requests
                         WHERE status = 'failed'
-                          AND lower(coalesce(error, '')) NOT LIKE '%no matching packets%'
-                          AND lower(coalesce(error, '')) NOT LIKE '%artifact exceeds inline transfer limit%'
-                          AND lower(coalesce(error, '')) NOT LIKE '%invalid json:%preview=''''%'
+                          AND {unexpected_where}
                         """
                     ).fetchall()
                     failure_cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=24)
@@ -479,8 +496,8 @@ def pcap_workflow_health_response() -> dict[str, object]:
                     summary["warnings"] = warnings
                     summary["warning_count"] = len(warnings)
                     latest = conn.execute(
-                        """
-                        SELECT request_id, status, error, group_id, updated_at, completed_at
+                        f"""
+                        SELECT request_id, status, error, group_id, updated_at, completed_at{', outcome' if has_outcome else ''}
                         FROM pcap_requests
                         ORDER BY COALESCE(completed_at, updated_at, created_at) DESC
                         LIMIT 1
@@ -490,13 +507,14 @@ def pcap_workflow_health_response() -> dict[str, object]:
                         summary["latest_request"] = {
                             "request_id": latest["request_id"],
                             "status": latest["status"],
+                            "outcome": latest["outcome"] if has_outcome else "",
                             "error": latest["error"] or "",
                             "group_id": latest["group_id"] or "",
                             "updated_at": latest["completed_at"] or latest["updated_at"] or "",
                         }
                     recent = conn.execute(
-                        """
-                        SELECT request_id, status, error, group_id, artifact_size_bytes, updated_at, completed_at, created_at
+                        f"""
+                        SELECT request_id, status, error, group_id, artifact_size_bytes, updated_at, completed_at, created_at{', outcome' if has_outcome else ''}
                         FROM pcap_requests
                         ORDER BY COALESCE(completed_at, updated_at, created_at) DESC
                         LIMIT 12
@@ -506,6 +524,7 @@ def pcap_workflow_health_response() -> dict[str, object]:
                         {
                             "request_id": row["request_id"] or "",
                             "status": row["status"] or "",
+                            "outcome": row["outcome"] if has_outcome else "",
                             "error": row["error"] or "",
                             "group_id": row["group_id"] or "",
                             "artifact_size_bytes": int(row["artifact_size_bytes"] or 0),

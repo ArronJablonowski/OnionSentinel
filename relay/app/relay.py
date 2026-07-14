@@ -9,6 +9,7 @@ Troubleshooting usually starts with the final JSON summary printed by this
 script.
 """
 import argparse
+import importlib.util
 import fcntl
 import hashlib
 import json
@@ -24,6 +25,17 @@ from pathlib import Path
 from re import sub
 from urllib import request
 from urllib.error import HTTPError, URLError
+
+try:
+    import alert_outbox
+except ModuleNotFoundError:
+    # Unit tests and recovery tooling may load relay.py directly without adding
+    # its directory to sys.path. Resolve the sibling module explicitly.
+    _outbox_spec = importlib.util.spec_from_file_location("alert_outbox", Path(__file__).with_name("alert_outbox.py"))
+    if _outbox_spec is None or _outbox_spec.loader is None:
+        raise
+    alert_outbox = importlib.util.module_from_spec(_outbox_spec)
+    _outbox_spec.loader.exec_module(alert_outbox)
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -204,6 +216,7 @@ def connect_db(config: dict) -> sqlite3.Connection:
         )
         """
     )
+    alert_outbox.initialize(conn)
     conn.commit()
     return conn
 
@@ -523,19 +536,54 @@ def pcap_spool_dir(config: dict) -> Path:
     return path
 
 
+def spool_mount_ready(config: dict) -> bool:
+    broker = config.get("pcap_broker", {})
+    if not bool(broker.get("artifact_spool_require_mount", False)):
+        return True
+    spool_dir = pcap_spool_dir(config)
+    # The configured directory is intentionally one level below the filesystem
+    # root. Requiring that parent to be a mount prevents an absent USB disk from
+    # silently redirecting multi-gigabyte writes onto the Pi SD card.
+    return os.path.ismount(spool_dir.parent)
+
+
 def require_spool_capacity(config: dict, artifact_size: int) -> None:
     broker = config.get("pcap_broker", {})
-    max_bytes = int(broker.get("artifact_spool_max_bytes", 8 * 1024 * 1024 * 1024) or 0)
-    min_free_bytes = int(broker.get("artifact_spool_min_free_bytes", 3 * 1024 * 1024 * 1024) or 0)
+    max_bytes = int(broker.get("artifact_spool_max_bytes", 32 * 1024 * 1024 * 1024) or 0)
+    min_free_bytes = int(broker.get("artifact_spool_min_free_bytes", 100 * 1024 * 1024 * 1024) or 0)
+    max_used_percent = max(1.0, min(99.0, float(broker.get("artifact_spool_max_used_percent", 95) or 95)))
     if max_bytes > 0 and artifact_size > max_bytes:
         raise RuntimeError(f"PCAP artifact exceeds relay spool limit: {artifact_size} > {max_bytes}")
     spool_dir = pcap_spool_dir(config)
     if not spool_dir.exists() or not spool_dir.is_dir():
         raise RuntimeError(f"relay PCAP spool directory is unavailable: {spool_dir}")
+    if not spool_mount_ready(config):
+        raise RuntimeError(f"relay PCAP spool filesystem is not mounted: {spool_dir.parent}")
     usage = shutil.disk_usage(spool_dir)
     required = artifact_size + max(0, min_free_bytes)
     if usage.free < required:
         raise RuntimeError(f"relay PCAP spool has insufficient free space: free={usage.free} required={required}")
+    projected_percent = ((usage.used + artifact_size) / usage.total) * 100 if usage.total else 100.0
+    if projected_percent > max_used_percent:
+        raise RuntimeError(
+            f"relay PCAP spool high watermark exceeded: projected={projected_percent:.1f}% limit={max_used_percent:.1f}%"
+        )
+
+
+def spool_usage(config: dict) -> dict:
+    spool_dir = pcap_spool_dir(config)
+    if not spool_dir.exists():
+        return {"available": False, "path": str(spool_dir)}
+    if not spool_mount_ready(config):
+        return {"available": False, "path": str(spool_dir), "reason": "spool filesystem is not mounted"}
+    usage = shutil.disk_usage(spool_dir)
+    return {
+        "available": True,
+        "total_bytes": usage.total,
+        "used_bytes": usage.used,
+        "free_bytes": usage.free,
+        "used_percent": round((usage.used / usage.total) * 100, 1) if usage.total else 100.0,
+    }
 
 
 def cleanup_stale_spool_partials(config: dict) -> int:
@@ -743,21 +791,12 @@ def run_mac_ssh(config: dict, command: str, timeout: int = 60) -> subprocess.Com
 
 
 def verify_remote_artifact(config: dict, remote_path: str, expected_size: int, expected_sha256: str) -> None:
-    quoted = remote_shell_quote(remote_path)
-    command = (
-        "python3 - "
-        + quoted
-        + " <<'PY'\n"
-        + "import hashlib, json, sys\n"
-        + "from pathlib import Path\n"
-        + "path = Path(sys.argv[1])\n"
-        + "digest = hashlib.sha256()\n"
-        + "with path.open('rb') as handle:\n"
-        + "    for chunk in iter(lambda: handle.read(1024 * 1024), b''):\n"
-        + "        digest.update(chunk)\n"
-        + "print(json.dumps({'ok': True, 'size': path.stat().st_size, 'sha256': digest.hexdigest()}))\n"
-        + "PY"
-    )
+    request_id = safe_transfer_id(Path(remote_path).parent.name)
+    filename = Path(remote_path).name
+    command = " ".join([
+        "onion-sentinel-pcap-intake", "verify", request_id, filename,
+        str(expected_size), expected_sha256,
+    ])
     proc = run_mac_ssh(config, command, timeout=300)
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or f"remote artifact verification exited {proc.returncode}")
@@ -777,7 +816,7 @@ def upload_pcap_artifact_via_rsync(config: dict, pcap_request: dict, export_resu
     remote_dir = remote_artifact_dir(config, request_id)
     remote_name = Path(str(export_result.get("artifact_path") or artifact_path.name)).name
     remote_path = f"{remote_dir}/{remote_name}"
-    mkdir_proc = run_mac_ssh(config, f"mkdir -p {remote_shell_quote(remote_dir)}", timeout=60)
+    mkdir_proc = run_mac_ssh(config, f"onion-sentinel-pcap-intake prepare {request_id}", timeout=60)
     if mkdir_proc.returncode != 0:
         raise RuntimeError(mkdir_proc.stderr.strip() or f"failed to create Mac artifact dir {remote_dir}")
     rsync_ssh = " ".join(remote_shell_quote(part) for part in mac_ssh_base(config)[:-1])
@@ -880,6 +919,23 @@ def complete_pcap_request(config: dict, request_id: str, status: str, payload: d
     return False
 
 
+def pcap_outcome_from_error(error: object) -> str:
+    detail = str(error or "").lower()
+    if "no matching packets" in detail:
+        return "no_packets_available"
+    if "retention" in detail or "expired" in detail:
+        return "expired"
+    if "exceed" in detail and ("size" in detail or "artifact" in detail):
+        return "oversize"
+    if "timeout" in detail or "timed out" in detail:
+        return "timeout"
+    if "sha256" in detail or "checksum" in detail:
+        return "checksum_failed"
+    if any(term in detail for term in ("rsync", "artifact upload", "connection", "ssh", "spool filesystem")):
+        return "transport_failed"
+    return "failed"
+
+
 def process_pcap_requests(config: dict) -> dict:
     broker = config.get("pcap_broker", {})
     if not broker.get("enabled"):
@@ -903,6 +959,12 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
     broker = config.get("pcap_broker", {})
     stale_spool_partials_removed = cleanup_stale_spool_partials(config)
     stale_spool_artifacts_removed = cleanup_stale_spool_artifacts(config)
+    spool_snapshot = spool_usage(config)
+    if bool(broker.get("artifact_spool_require_mount", False)) and not spool_snapshot.get("available"):
+        return {
+            "ok": False, "enabled": True, "processed": 0,
+            "operational_failures": 1, "outcomes": {}, "spool": spool_snapshot,
+        }
     limit = max(1, min(10, int(broker.get("limit", 3) or 3)))
     pending_path = f"{broker_path(config, 'requests', '/pcap/requests')}?status=pending&limit={limit}"
     requests_method = str(broker.get("requests_method") or "GET").strip().upper()
@@ -917,6 +979,8 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
     artifact_upload_failed = 0
     artifact_cleanup_failed = 0
     artifact_cleanup_succeeded = 0
+    outcomes: dict[str, int] = {}
+    operational_failures = 0
     for pcap_request in pending.get("requests", []):
         if str(pcap_request.get("status") or "pending").lower() != "pending":
             continue
@@ -963,6 +1027,9 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
             }
             if upload_error:
                 completion_payload["error"] = f"artifact upload failed: {upload_error}"
+                completion_payload["outcome"] = "transport_failed"
+            else:
+                completion_payload["outcome"] = "captured"
             if complete_pcap_request(
                 config,
                 request_id,
@@ -977,16 +1044,30 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
                         artifact_cleanup_failed += 1
                 else:
                     failed += 1
+                    outcomes["transport_failed"] = outcomes.get("transport_failed", 0) + 1
+                    operational_failures += 1
             else:
                 completion_failed += 1
         except Exception as exc:
-            completion_payload = {"error": str(exc)[:500]}
+            outcome = pcap_outcome_from_error(exc)
+            completion_payload = {"error": str(exc)[:500], "outcome": outcome}
             diagnostics = getattr(exc, "diagnostics", None)
             if diagnostics:
                 completion_payload["diagnostics"] = diagnostics
-            if not complete_pcap_request(config, request_id, "failed", completion_payload):
+            completion_recorded = complete_pcap_request(config, request_id, "failed", completion_payload)
+            if not completion_recorded:
                 completion_failed += 1
+            elif outcome == "oversize":
+                # Oversize is terminal under the current guardrail, so keeping
+                # the source export cannot help a retry and only consumes /nsm.
+                if cleanup_pcap_artifact(config, str(request_id)):
+                    artifact_cleanup_succeeded += 1
+                else:
+                    artifact_cleanup_failed += 1
             failed += 1
+            outcomes[outcome] = outcomes.get(outcome, 0) + 1
+            if outcome not in {"no_packets_available", "expired", "oversize"}:
+                operational_failures += 1
         processed += 1
     return {
         "ok": True,
@@ -998,8 +1079,11 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
         "artifact_upload_failed": artifact_upload_failed,
         "artifact_cleanup_failed": artifact_cleanup_failed,
         "artifact_cleanup_succeeded": artifact_cleanup_succeeded,
+        "outcomes": outcomes,
+        "operational_failures": operational_failures + completion_failed + artifact_cleanup_failed,
         "stale_spool_partials_removed": stale_spool_partials_removed,
         "stale_spool_artifacts_removed": stale_spool_artifacts_removed,
+        "spool": spool_usage(config),
     }
 
 
@@ -1023,6 +1107,28 @@ def post_alerts_to_webhook(
         if conn is not None:
             mark_seen(conn, [alert])
 
+    return posted_count
+
+
+def drain_alert_outbox(config: dict, conn: sqlite3.Connection) -> int:
+    """Deliver durable queued alerts in fetch order and stop on first outage."""
+    webhook = config.get("webhook", {})
+    if not webhook.get("enabled"):
+        return 0
+    posted_count = 0
+    limit = max(1, min(int(webhook.get("outbox_drain_limit", 1000) or 1000), 10000))
+    for item in alert_outbox.pending(conn, limit):
+        alert_id = item["alert_id"]
+        if not alert_outbox.claim(conn, alert_id):
+            continue
+        try:
+            post_json_to_webhook(config, item["payload"])
+        except Exception as exc:
+            alert_outbox.mark_failure(conn, alert_id, str(exc))
+            raise
+        mark_seen(conn, [item["payload"]])
+        alert_outbox.mark_delivered(conn, alert_id)
+        posted_count += 1
     return posted_count
 
 
@@ -1113,11 +1219,17 @@ def main() -> int:
     all_alerts = batch.get("alerts", [])
     filtered_alerts, dropped_count = filter_dropped_alerts(config, all_alerts)
     with connect_db(config) as conn:
-        # Important order: filter -> dedupe -> save/post -> mark seen.
+        # Important order: filter -> dedupe -> durable queue -> post -> mark seen.
         new_alerts, duplicate_count = filter_unseen_alerts(conn, filtered_alerts)
         saved_alert_paths = save_new_alerts(config, new_alerts)
         webhook_enabled = bool(config.get("webhook", {}).get("enabled"))
-        posted_count = post_alerts_to_webhook(config, new_alerts, conn if webhook_enabled else None)
+        queued_count = alert_outbox.enqueue(conn, new_alerts) if webhook_enabled else 0
+        posted_count = drain_alert_outbox(config, conn) if webhook_enabled else 0
+        outbox_counts = alert_outbox.counts(conn)
+        alert_outbox.prune_delivered(
+            conn,
+            int(config.get("webhook", {}).get("outbox_delivered_retention_days", 30) or 30),
+        )
         first_rule = all_alerts[0].get("rule_name") if all_alerts else "none"
         heartbeat_posted = False
         if not new_alerts:
@@ -1148,6 +1260,8 @@ def main() -> int:
                 "duplicate_alert_count": duplicate_count,
                 "saved_new_alert_files": len(saved_alert_paths),
                 "posted_webhook_alerts": posted_count,
+                "queued_webhook_alerts": queued_count,
+                "outbox_pending_alerts": outbox_counts.get("pending", 0),
                 "posted_webhook_heartbeat": heartbeat_posted,
                 "first_rule": first_rule,
             },

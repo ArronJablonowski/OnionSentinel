@@ -8,6 +8,7 @@ import importlib.util
 import importlib.machinery
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -125,6 +126,41 @@ class SecurityOnionPcapWrapperTest(unittest.TestCase):
             self.assertTrue(unrelated.exists())
             payload = printed.call_args.args[0]
             self.assertIn("artifact_cleaned", payload)
+
+    def test_remove_request_outputs_cleans_partial_work_without_touching_other_requests(self) -> None:
+        wrapper = load_wrapper()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            wrapper.OUTPUT_ROOT = root
+            partial = root / "failed-request"
+            partial.mkdir()
+            (partial / "part-001.pcap").write_bytes(b"partial")
+            unrelated = root / "other-request.tar"
+            unrelated.write_bytes(b"keep")
+
+            removed = wrapper.remove_request_outputs("failed-request")
+
+            self.assertEqual(removed, [str(partial.resolve())])
+            self.assertFalse(partial.exists())
+            self.assertTrue(unrelated.exists())
+
+    def test_complete_existing_artifact_is_reused(self) -> None:
+        wrapper = load_wrapper()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            wrapper.OUTPUT_ROOT = root
+            part = root / "part-001.pcap"
+            part.write_bytes(b"pcap evidence")
+            artifact = root / "pcap-unit-test.tar"
+            with tarfile.open(artifact, "w") as archive:
+                archive.add(part, arcname=part.name)
+
+            payload = wrapper.reusable_artifact_payload("pcap-unit-test")
+
+            self.assertIsNotNone(payload)
+            self.assertTrue(payload["reused_existing_artifact"])
+            self.assertEqual(payload["part_count"], 1)
+            self.assertEqual(payload["artifact_size_bytes"], artifact.stat().st_size)
 
     def test_artifact_chunk_mode_is_not_supported(self) -> None:
         wrapper = load_wrapper()

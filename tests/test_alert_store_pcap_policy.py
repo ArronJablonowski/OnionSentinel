@@ -72,6 +72,31 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
         self.assertIn("capture_file: safeString(merged.capture_file, 512) || null", code)
         self.assertIn("capture_file: requestJson.capture_file || null", code)
 
+    def test_pcap_parser_state_is_durable_and_reported_by_worker(self) -> None:
+        code = ALERT_STORE.read_text(encoding="utf-8")
+        worker = (REPO_ROOT / "n8n" / "bin" / "process-pcap-evidence.py").read_text(encoding="utf-8")
+        self.assertIn("analysis_status", code)
+        self.assertIn("parsedUrl.pathname === '/pcap/analysis-status'", code)
+        self.assertIn("report_analysis_status", worker)
+        self.assertIn('"processing"', worker)
+        self.assertIn('"completed"', worker)
+        self.assertIn('"failed"', worker)
+
+    def test_automatic_pcap_requests_coalesce_pending_group_work(self) -> None:
+        code = ALERT_STORE.read_text(encoding="utf-8")
+        self.assertIn("existingPending", code)
+        self.assertIn("status = 'pending'", code)
+        self.assertIn("status: 'coalesced'", code)
+
+    def test_pcap_terminal_outcomes_and_storage_metrics_are_durable(self) -> None:
+        code = ALERT_STORE.read_text(encoding="utf-8")
+        self.assertIn("ensureColumn('pcap_requests', 'outcome', 'TEXT')", code)
+        self.assertIn("function classifyPcapOutcome", code)
+        self.assertIn("backfillPcapOutcomes", code)
+        self.assertIn("pcap_outcomes", code)
+        self.assertIn("pcap_storage", code)
+        self.assertIn("datetime(replace(p.last_seen, '  ', 'T'), '+' || ? || ' seconds')", code)
+
 
 if __name__ == "__main__":
     unittest.main()

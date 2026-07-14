@@ -7,11 +7,14 @@ The relay is intentionally dumb and reliable. It pulls alerts from Security Onio
 | File | Destination | Purpose |
 | --- | --- | --- |
 | `app/relay.py` | `/opt/so-alert-relay/app/relay.py` | Pulls alert JSON and posts new alerts or quiet-cycle heartbeats. |
+| `app/alert_outbox.py` | `/opt/so-alert-relay/app/alert_outbox.py` | Durable, idempotent SQLite webhook outbox. |
 | `app/relay_health_wrapper.py` | `/opt/so-alert-relay/app/relay_health_wrapper.py` | Adds failure/recovery notification thresholding. |
 | `config/config.example.json` | `/opt/so-alert-relay/app/config.json` | Non-secret relay config. |
 | `config/relay.example.env` | `/etc/so-alert-relay/relay.env` | Secret-bearing env template. Do not commit live copy. |
-| `systemd/so-alert-relay.service` | `/etc/systemd/system/so-alert-relay.service` | One relay execution. |
-| `systemd/so-alert-relay.timer` | `/etc/systemd/system/so-alert-relay.timer` | Runs relay every 5 minutes. |
+| `systemd/so-alert-poll.service` | `/etc/systemd/system/so-alert-poll.service` | One alert poll/outbox/heartbeat execution. |
+| `systemd/so-alert-poll.timer` | `/etc/systemd/system/so-alert-poll.timer` | Runs alert polling every 5 minutes. |
+| `systemd/so-pcap-broker.service` | `/etc/systemd/system/so-pcap-broker.service` | One independent PCAP broker execution. |
+| `systemd/so-pcap-broker.timer` | `/etc/systemd/system/so-pcap-broker.timer` | Runs PCAP work every minute. |
 | `ssh/99-key-only-admin.conf` | `/etc/ssh/sshd_config.d/99-key-only-admin.conf` | Optional SSH hardening after deployment is confirmed. |
 
 ## Install
@@ -60,14 +63,16 @@ Required live values:
 
 ```bash
 sudo -u soalert /usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/so-alert-relay/app/config.json --pull-once
-sudo systemctl start so-alert-relay.service
-sudo journalctl -u so-alert-relay.service -n 50 --no-pager
-sudo systemctl enable --now so-alert-relay.timer
+sudo systemctl start so-alert-poll.service
+sudo journalctl -u so-alert-poll.service -n 50 --no-pager
+sudo systemctl enable --now so-alert-poll.timer so-pcap-broker.timer
 ```
 
 Quiet timer cycles should log `posted_webhook_heartbeat: true`. Alert cycles
 should log `posted_webhook_alerts` greater than zero. Either path updates the
 Mac Studio `n8n-beacon.json` used by dashboard health.
+The installer disables the legacy combined `so-alert-relay.timer`; alert and
+PCAP failures therefore cannot block one another's schedule.
 
 ## Webhook Retry Behavior
 
@@ -82,9 +87,10 @@ systemd. Defaults live in `config/config.example.json`:
 
 HTTP `408`, `409`, `425`, `429`, and `5xx` responses are retried. Client/auth
 errors such as `400`, `401`, and `403` fail immediately because another retry
-would repeat the same bad request. Each alert is marked seen only after its own
-successful POST, so a partial-batch failure resumes with the remaining unposted
-alerts on the next timer run.
+would repeat the same bad request. Each alert is committed to the relay SQLite
+outbox before delivery and marked delivered only after its successful POST.
+Expired delivery leases are requeued after a crash. `alert_id` is the outbox
+idempotency key, so a partial-batch failure resumes only undelivered alerts.
 
 ## PCAP Broker
 
@@ -98,8 +104,10 @@ PCAP fulfillment is disabled by default in `config/config.example.json`:
   "upload_artifact": true,
   "artifact_upload_mode": "spooled_rsync",
   "artifact_spool_dir": "/mnt/onion-sentinel-pcap-spool/pcap",
-  "artifact_spool_max_bytes": 8589934592,
-  "artifact_spool_min_free_bytes": 3221225472,
+  "artifact_spool_require_mount": true,
+  "artifact_spool_max_bytes": 34359738368,
+  "artifact_spool_min_free_bytes": 107374182400,
+  "artifact_spool_max_used_percent": 80,
   "artifact_spool_delete_after_upload": true,
   "artifact_spool_partial_ttl_seconds": 86400,
   "artifact_spool_completed_ttl_seconds": 3600,
@@ -150,11 +158,88 @@ the request as fulfilled.
 
 The relay SSD spool should be mounted outside the Pi SD card. The current
 portable target is `/mnt/onion-sentinel-pcap-spool/pcap`, mounted with
-`noatime,nosuid,nodev,noexec`. The default repo limit allows artifacts up to
-8 GiB while keeping 3 GiB free. A 16 GiB SSD is sufficient for current
-multi-hundred-MB captures, but the project should watch average and maximum
-artifact sizes and upgrade the spool disk if captures regularly approach the
-limit.
+`noatime,nosuid,nodev,noexec`. The current production profile uses a 1 TB ext4
+SSD, allows an individual artifact up to 32 GiB, reserves at least 100 GiB
+free, and stops new exports at 80 percent used. Keep watching average and
+maximum capture size; do not raise the per-artifact limit without checking free
+space on Security Onion and the Mac Studio as well as the relay.
+
+Mount by filesystem UUID so USB enumeration changes cannot redirect the spool
+onto the SD card. Replace the placeholder with `blkid` output for the installed
+SSD:
+
+```text
+UUID=REPLACE_WITH_SPOOL_UUID /mnt/onion-sentinel-pcap-spool ext4 defaults,noatime,nosuid,nodev,noexec,nofail,x-systemd.device-timeout=30s 0 2
+```
+
+The PCAP worker has an explicit `RequiresMountsFor` dependency on the spool,
+but the alert poller does not. A missing or slow USB SSD can therefore delay or
+fail PCAP work without delaying alert delivery. The installer also retains a
+size-capped 14 days of journald data so reboot, USB, and mount failures remain
+available after a hard power cycle.
+
+The production Sabrent USB bridge may take about 30 seconds to enumerate after
+power-on. This is acceptable with the current three-minute PCAP worker startup
+delay. Repeated UAS resets, I/O errors, or a need for hard power cycles are not
+normal; capture the previous boot before changing USB transport behavior:
+
+```bash
+sudo journalctl -b -1 -k --no-pager | grep -Ei 'usb|uas|scsi|sd[a-z]|I/O error|reset|under.?voltage'
+vcgencmd get_throttled
+systemd-analyze time
+```
+
+Install and enable SMART monitoring when the relay VLAN has controlled package
+repository access. Auto-detection works for the current NVMe SSD through its
+Sabrent USB bridge; do not force an ATA device mode unless auto-detection fails:
+
+```bash
+sudo apt-get install smartmontools
+sudo systemctl enable --now smartmontools.service
+sudo smartctl -H /dev/sda
+sudo smartctl -a -j /dev/sda
+```
+
+Treat a failed health assessment, media errors, rising critical warnings, or
+unexpected unsafe shutdown counts as a maintenance condition. SMART is an
+additional signal and does not replace the relay's mount, capacity, checksum,
+and write-path checks.
+
+The installer enables `so-storage-health.timer` for an independent hourly
+check. It verifies that the spool resolves to an external block device rather
+than the SD card, enforces capacity and temperature thresholds, and reads SMART
+through one exact passwordless sudo command. Storage failures and recoveries
+use the existing stateful Telegram health path without affecting alert polling
+or PCAP broker scheduling. Portable defaults are:
+
+```text
+RELAY_SSD_MIN_FREE_BYTES=107374182400
+RELAY_SSD_MAX_USED_PERCENT=80
+RELAY_SSD_MAX_TEMPERATURE_C=70
+RELAY_SSD_MAX_UNSAFE_SHUTDOWNS=0
+```
+
+If an SSD already has a known nonzero unsafe-shutdown baseline, set the last
+value to that audited count. A later increase will then trigger the monitor.
+Do not increase the baseline merely to clear an unexplained alarm.
+
+```bash
+sudo mkdir -p /mnt/onion-sentinel-pcap-spool
+sudo mount /mnt/onion-sentinel-pcap-spool
+sudo chown root:soalert /mnt/onion-sentinel-pcap-spool
+sudo chmod 0750 /mnt/onion-sentinel-pcap-spool
+sudo install -d -o soalert -g soalert -m 0750 /mnt/onion-sentinel-pcap-spool/pcap
+sudo systemctl daemon-reload
+sudo systemctl enable --now so-storage-health.timer
+sudo systemctl start so-storage-health.service
+sudo systemctl status so-storage-health.service --no-pager
+sudo findmnt --verify
+```
+
+Do not start `so-pcap-broker.timer` unless `findmnt` confirms the spool source
+is the intended external disk and a write/read/delete test succeeds as
+`soalert`. This prevents an absent USB disk from sending large writes to the SD
+card through an empty fallback mount directory.
 
 Successful relay-spooled `.tar` artifacts are deleted immediately after the
 Mac Studio copy has been verified by size and SHA256. A checksum-valid artifact
@@ -224,7 +309,7 @@ and serves artifacts in bounded chunks. Tune these in
 
 ```bash
 RELAY_COMMAND_TIMEOUT_SECONDS=300
-RELAY_PCAP_TIMEOUT_SECONDS=1800
+RELAY_PCAP_TIMEOUT_SECONDS=3900
 RELAY_FAILURE_NOTIFY_THRESHOLD=3
 ```
 

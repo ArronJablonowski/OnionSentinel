@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import re
 import sqlite3
@@ -23,6 +24,7 @@ DEFAULT_OUT = HOME / "n8n-local" / "soc-alerts" / "ai-prompts"
 DEFAULT_SYSTEM_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system_prompt.md"
 DEFAULT_AGENT_MEMORY_DIR = HOME / "n8n-local" / "soc-alerts" / "agent-memory"
 DEFAULT_PCAP_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "pcap-analysis"
+DEFAULT_AI_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-analysis"
 DEFAULT_SOC_ANALYST_MEMORY_FILE = DEFAULT_AGENT_MEMORY_DIR / "soc-analyst-memory.md"
 DEFAULT_SHARED_AGENT_MEMORY_FILE = DEFAULT_AGENT_MEMORY_DIR / "shared-agent-memory.md"
 DEFAULT_SYSTEM_PROMPT = "You are a careful SOC analyst assisting with Security Onion alerts."
@@ -44,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--agent-memory-file", type=Path, default=DEFAULT_SOC_ANALYST_MEMORY_FILE, help="SOC Analyst Markdown memory file")
     parser.add_argument("--shared-memory-file", type=Path, default=DEFAULT_SHARED_AGENT_MEMORY_FILE, help="Shared Cyber Security Agent Markdown memory file")
     parser.add_argument("--pcap-analysis-dir", type=Path, default=DEFAULT_PCAP_ANALYSIS_DIR, help="Parsed Zeek/TShark PCAP evidence directory")
+    parser.add_argument("--analysis-dir", type=Path, default=DEFAULT_AI_ANALYSIS_DIR, help="Prior local AI analysis directory")
     parser.add_argument("--memory-bytes", type=int, default=8000, help="Maximum bytes to include from each agent memory file")
     parser.add_argument("--pcap-analysis-limit", type=int, default=3, help="Maximum parsed PCAP evidence artifacts to include")
     parser.add_argument("--include-tests", action="store_true", help="Include validation/test alerts")
@@ -156,6 +159,63 @@ def alert_group_key(row_value: sqlite3.Row) -> str:
             str(sqlite_value(row_value, "filter_status") or "accepted"),
         ]
     )
+
+
+def alert_group_id(group_key: str) -> str:
+    return hashlib.sha1(str(group_key or "").encode("utf-8")).hexdigest()[:12]
+
+
+def analyst_state_context(conn: sqlite3.Connection, selected: sqlite3.Row) -> dict:
+    group_key = alert_group_key(selected)
+    group_id = alert_group_id(group_key)
+    try:
+        state = row(
+            conn,
+            """SELECT status, repeat_count, reason, updated_at, updated_by
+               FROM analyst_alert_group_state WHERE group_id = ? OR group_key = ?
+               ORDER BY updated_at DESC LIMIT 1""",
+            [group_id, group_key],
+        )
+    except sqlite3.OperationalError:
+        state = None
+    return {
+        "group_id": group_id,
+        "group_key": group_key,
+        "status": state["status"] if state else "open",
+        "repeat_count_at_decision": state["repeat_count"] if state else 0,
+        "reason": state["reason"] if state else None,
+        "updated_at": state["updated_at"] if state else None,
+        "updated_by": state["updated_by"] if state else None,
+    }
+
+
+def prior_analysis_context(analysis_dir: Path, selected: sqlite3.Row, limit: int = 3) -> list[dict]:
+    alert_id = str(selected["alert_id"] or "")
+    found: list[dict] = []
+    if not analysis_dir.exists():
+        return found
+    for path in sorted(analysis_dir.glob("*-local-ai-analysis.json"), reverse=True):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        text = json.dumps(payload, sort_keys=True)
+        if alert_id not in text:
+            continue
+        result = payload.get("analysis") if isinstance(payload.get("analysis"), dict) else payload
+        found.append({
+            "artifact": str(path),
+            "generated_at": payload.get("generated_at") or result.get("generated_at"),
+            "model": payload.get("analysis_model") or payload.get("model"),
+            "detection_outcome": result.get("detection_outcome"),
+            "bluf": result.get("bluf"),
+            "summary": result.get("summary"),
+            "confidence": result.get("confidence"),
+            "tuning_recommendation": result.get("tuning_recommendation"),
+        })
+        if len(found) >= limit:
+            break
+    return found
 
 
 def latest_rollup(rollup_dir: Path, limit_bytes: int) -> dict:
@@ -592,6 +652,7 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
     }
     pcap_context = pcap_evidence_context(conn, selected, args.pcap_analysis_dir, args.pcap_analysis_limit)
     enrichment_context = public_enrichment_context(conn, selected, args.related_limit, args.include_tests)
+    analyst_state = analyst_state_context(conn, selected)
     return {
         "package_type": "soc-ai-investigation-prompt",
         "generated_at": project_now(),
@@ -608,6 +669,7 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
                 "Use pcap_evidence.parsed_evidence when present; prefer Zeek summaries for flows/protocols and TShark summaries for packet-level corroboration.",
                 "If memory conflicts with current alert evidence, prefer the current alert evidence and mention the conflict.",
                 "Use grouped_alert_context.total_observations and raw_alert_rows when judging urgency, repeat behavior, and tuning.",
+                "Use analyst_state and prior_analyses as context; do not treat an earlier conclusion as stronger than current evidence.",
                 "Start the assessment with a BLUF classification. Classify whether the detection outcome is true-positive malicious, true-positive suspicious, true-positive authorized/benign, false positive, duplicate, informational/no-action, or inconclusive based on whether the rule correctly identified the intended behavior and whether the behavior appears malicious, suspicious, authorized, benign, or unknown.",
                 "Do not invent packet contents, hostnames, users, process names, files, commands, or malware family names.",
                 "If evidence is missing, say what is missing.",
@@ -640,6 +702,8 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
         "grouped_alert_context": group_context,
         "public_enrichment": enrichment_context,
         "pcap_evidence": pcap_context,
+        "analyst_state": analyst_state,
+        "prior_analyses": prior_analysis_context(args.analysis_dir, selected),
         "related_alerts": related_alerts(conn, selected, args.related_limit, args.include_tests),
         "recent_notifications": notification_context(conn, selected),
         "agent_memory": memory_context,

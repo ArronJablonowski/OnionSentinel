@@ -8,6 +8,7 @@ Transient failures are common enough on home lab networks that notification is
 delayed until a configurable number of consecutive failures occurs.
 """
 import json
+import argparse
 import os
 import subprocess
 import sys
@@ -28,6 +29,10 @@ RELAY_PCAP_COMMAND = os.environ.get(
     "RELAY_PCAP_COMMAND",
     '/usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/so-alert-relay/app/config.json --process-pcap-requests',
 )
+RELAY_STORAGE_COMMAND = os.environ.get(
+    "RELAY_STORAGE_COMMAND",
+    "/usr/bin/python3 /opt/so-alert-relay/app/storage_health.py",
+)
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 HOST_LABEL = os.environ.get("RELAY_HOST_LABEL", "Raspberry Pi SOC relay")
@@ -45,17 +50,26 @@ def env_int(name: str, default: int) -> int:
 
 FAILURE_NOTIFY_THRESHOLD = max(1, env_int("RELAY_FAILURE_NOTIFY_THRESHOLD", 3))
 RELAY_COMMAND_TIMEOUT_SECONDS = max(30, env_int("RELAY_COMMAND_TIMEOUT_SECONDS", 300))
-RELAY_PCAP_TIMEOUT_SECONDS = max(30, env_int("RELAY_PCAP_TIMEOUT_SECONDS", 180))
+# The broker can execute two independently bounded rsync legs (SO -> relay and
+# relay -> Mac) plus export/checksum work. The outer watchdog must be longer
+# than their combined budget or it will kill a healthy resumable transfer.
+RELAY_PCAP_TIMEOUT_SECONDS = max(300, env_int("RELAY_PCAP_TIMEOUT_SECONDS", 3900))
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d  %H:%M:%SZ")
 
 
-def load_state() -> dict:
+def component_state_path(component: str) -> Path:
+    if component == "all":
+        return STATE_PATH
+    return STATE_PATH.with_name(f"{STATE_PATH.stem}-{component}{STATE_PATH.suffix}")
+
+
+def load_state(path: Path = STATE_PATH) -> dict:
     # A missing/corrupt state file should never block alert polling.
     try:
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {
             "status": "unknown",
@@ -66,10 +80,21 @@ def load_state() -> dict:
         }
 
 
-def save_state(state: dict) -> None:
+def save_state(state: dict, path: Path = STATE_PATH) -> None:
     # The state file is the suppression memory for repeated failures.
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def persist_component_state(state: dict, component: str, path: Path) -> None:
+    # Preserve the original single-argument call contract for legacy tooling
+    # and tests while split services use independent state files.
+    if component == "all":
+        save_state(state)
+    else:
+        save_state(state, path)
 
 
 def telegram_enabled() -> bool:
@@ -199,7 +224,31 @@ def run_relay() -> subprocess.CompletedProcess:
 
 
 def run_pcap_broker() -> subprocess.CompletedProcess:
-    return run_shell_command(RELAY_PCAP_COMMAND, timeout=RELAY_PCAP_TIMEOUT_SECONDS)
+    result = run_shell_command(RELAY_PCAP_COMMAND, timeout=RELAY_PCAP_TIMEOUT_SECONDS)
+    if result.returncode != 0:
+        return result
+    summary = None
+    for line in reversed((result.stdout or "").splitlines()):
+        try:
+            candidate = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(candidate, dict) and "operational_failures" in candidate:
+            summary = candidate
+            break
+    if summary and (not summary.get("ok", True) or int(summary.get("operational_failures") or 0) > 0):
+        detail = json.dumps({
+            "ok": summary.get("ok"),
+            "operational_failures": summary.get("operational_failures"),
+            "outcomes": summary.get("outcomes", {}),
+            "spool": summary.get("spool", {}),
+        }, sort_keys=True)
+        return subprocess.CompletedProcess(result.args, 2, result.stdout, detail)
+    return result
+
+
+def run_storage_health() -> subprocess.CompletedProcess:
+    return run_shell_command(RELAY_STORAGE_COMMAND, timeout=120)
 
 
 def combine_results(primary: subprocess.CompletedProcess, secondary: subprocess.CompletedProcess) -> subprocess.CompletedProcess:
@@ -226,33 +275,56 @@ def main() -> int:
         print(json.dumps({"notification": result}, sort_keys=True))
         return 0 if result.get("ok") else 1
 
-    state = load_state()
+    parser = argparse.ArgumentParser(description="Run and monitor an Onion Sentinel relay component")
+    parser.add_argument("--component", choices=("all", "alert", "pcap", "storage"), default="all")
+    args, _unknown = parser.parse_known_args()
+    component = args.component
+    state_path = component_state_path(component)
+    state = load_state(state_path)
     started_at = now_iso()
-    token_error = validate_webhook_token_sources()
-    if token_error:
-        result = subprocess.CompletedProcess(RELAY_COMMAND, 1, "", token_error)
-        relay_result = result
-    else:
+    relay_result = subprocess.CompletedProcess(RELAY_COMMAND, 0, "", "")
+    pcap_result = subprocess.CompletedProcess(RELAY_PCAP_COMMAND, 0, "", "")
+    storage_result = subprocess.CompletedProcess(RELAY_STORAGE_COMMAND, 0, "", "")
+    if component in {"all", "alert"}:
+        token_error = validate_webhook_token_sources()
+        if token_error:
+            relay_result = subprocess.CompletedProcess(RELAY_COMMAND, 1, "", token_error)
+        else:
+            try:
+                relay_result = run_relay()
+            except Exception as exc:
+                relay_result = subprocess.CompletedProcess(RELAY_COMMAND, 1, "", str(exc))
+        print(relay_result.stdout, end="")
+        if relay_result.stderr:
+            print(relay_result.stderr, end="", file=sys.stderr)
+
+    if component in {"all", "pcap"}:
         try:
-            result = run_relay()
+            pcap_result = run_pcap_broker()
         except Exception as exc:
-            result = subprocess.CompletedProcess(RELAY_COMMAND, 1, "", str(exc))
-        relay_result = result
+            pcap_result = subprocess.CompletedProcess(RELAY_PCAP_COMMAND, 1, "", str(exc))
+        print(pcap_result.stdout, end="")
+        if pcap_result.stderr:
+            print(pcap_result.stderr, end="", file=sys.stderr)
 
-    print(result.stdout, end="")
-    if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
+    if component == "storage":
+        try:
+            storage_result = run_storage_health()
+        except Exception as exc:
+            storage_result = subprocess.CompletedProcess(RELAY_STORAGE_COMMAND, 1, "", str(exc))
+        print(storage_result.stdout, end="")
+        if storage_result.stderr:
+            print(storage_result.stderr, end="", file=sys.stderr)
 
-    try:
-        pcap_result = run_pcap_broker()
-    except Exception as exc:
-        pcap_result = subprocess.CompletedProcess(RELAY_PCAP_COMMAND, 1, "", str(exc))
-    print(pcap_result.stdout, end="")
-    if pcap_result.stderr:
-        print(pcap_result.stderr, end="", file=sys.stderr)
-
-    result = combine_results(relay_result, pcap_result)
-    summary = f"{component_summary(relay_result, pcap_result)}; {summarize_output(result.stdout, result.stderr)}"
+    result = storage_result if component == "storage" else combine_results(relay_result, pcap_result)
+    component_label = component_summary(relay_result, pcap_result) if component == "all" else (
+        f"alert_relay={'ok' if relay_result.returncode == 0 else f'failed({relay_result.returncode})'}"
+        if component == "alert"
+        else f"pcap_broker={'ok' if pcap_result.returncode == 0 else f'failed({pcap_result.returncode})'}"
+        if component == "pcap"
+        else f"storage_health={'ok' if storage_result.returncode == 0 else f'failed({storage_result.returncode})'}"
+    )
+    summary = f"{component_label}; {summarize_output(result.stdout, result.stderr)}"
 
     if result.returncode == 0:
         # If the previous run failed, this successful run is recovery-worthy.
@@ -272,7 +344,7 @@ def main() -> int:
             "consecutive_failures": 0,
             "failure_notification_sent": False,
         })
-        save_state(state)
+        persist_component_state(state, component, state_path)
         if previous_failure:
             recovery_event = {
                 "message_type": "relay_health_recovery",
@@ -285,7 +357,7 @@ def main() -> int:
             notice = send_relay_health_event(recovery_event)
             print(json.dumps({"health_event_status": notice}, sort_keys=True))
         if recovered:
-            notice = send_telegram(f"[RECOVERY] {HOST_LABEL} recovered at {state['last_success']}\n{summary}")
+            notice = send_telegram(f"[RECOVERY] {HOST_LABEL} {component} recovered at {state['last_success']}\n{summary}")
             print(json.dumps({"health_status": "recovered", "notification": notice}, sort_keys=True))
         else:
             print(json.dumps({"health_status": "ok", "summary": summary}, sort_keys=True))
@@ -306,7 +378,7 @@ def main() -> int:
         "consecutive_failures": consecutive_failures,
         "last_http_status": parse_http_status(summary + "\n" + result.stderr),
     })
-    save_state(state)
+    persist_component_state(state, component, state_path)
 
     if consecutive_failures < FAILURE_NOTIFY_THRESHOLD:
         print(json.dumps({
@@ -322,9 +394,9 @@ def main() -> int:
             "summary": summary,
         }, sort_keys=True))
     else:
-        notice = send_telegram(f"[FAILURE] {HOST_LABEL} failed at {failed_at}\n{summary}")
+        notice = send_telegram(f"[FAILURE] {HOST_LABEL} {component} failed at {failed_at}\n{summary}")
         state["failure_notification_sent"] = bool(notice.get("ok"))
-        save_state(state)
+        persist_component_state(state, component, state_path)
         print(json.dumps({"health_status": "failed", "notification": notice}, sort_keys=True))
     return result.returncode or 1
 

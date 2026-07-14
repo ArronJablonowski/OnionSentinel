@@ -103,6 +103,27 @@ class RelayPcapBrokerTest(unittest.TestCase):
         self.assertEqual(result["artifact_cleanup_succeeded"], 1)
         cleanup.assert_called_once_with(mock.ANY, "pcap-cleanup-test")
 
+    def test_terminal_oversize_failure_triggers_security_onion_cleanup(self) -> None:
+        request = {"request_id": "pcap-oversize-test", "source_ip": "192.0.2.10", "destination_ip": "198.51.100.10"}
+
+        def fake_broker(config, method, path, payload_data=None):
+            if path.startswith("/pcap/requests"):
+                return {"ok": True, "requests": [request]}
+            if path == "/pcap/claim":
+                return {"ok": True, "claimed": True, "request": request}
+            if path == "/pcap/complete":
+                return {"ok": True, "status": payload_data["status"], "request": payload_data}
+            raise AssertionError(f"unexpected broker call: {method} {path}")
+
+        with mock.patch.object(self.relay, "broker_request", side_effect=fake_broker):
+            with mock.patch.object(self.relay, "run_ssh_pcap_export", side_effect=RuntimeError("PCAP artifact exceeds relay spool limit")):
+                with mock.patch.object(self.relay, "cleanup_pcap_artifact", return_value=True) as cleanup:
+                    result = self.relay.process_pcap_requests({"pcap_broker": {"enabled": True, "limit": 1}})
+
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(result["artifact_cleanup_succeeded"], 1)
+        cleanup.assert_called_once_with(mock.ANY, "pcap-oversize-test")
+
     def test_stale_relay_spool_partials_are_pruned_without_touching_active_transfer(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             spool = Path(temp_dir)
@@ -389,6 +410,20 @@ class RelayPcapBrokerTest(unittest.TestCase):
                     },
                 )
 
+    def test_spool_mount_guard_rejects_sd_card_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            spool = Path(temp_dir) / "pcap"
+            spool.mkdir()
+            config = {
+                "pcap_broker": {
+                    "artifact_spool_dir": str(spool),
+                    "artifact_spool_require_mount": True,
+                    "artifact_spool_min_free_bytes": 0,
+                }
+            }
+            with self.assertRaisesRegex(RuntimeError, "filesystem is not mounted"):
+                self.relay.require_spool_capacity(config, 1)
+
     def test_security_onion_to_relay_transfer_uses_rsync_without_inline_chunks(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             spool = Path(temp_dir) / "spool"
@@ -620,8 +655,30 @@ class RelayPcapBrokerTest(unittest.TestCase):
                 result = self.relay.process_pcap_requests({"pcap_broker": {"enabled": True, "limit": 1}})
 
         self.assertEqual(result["failed"], 1)
+        self.assertEqual(result["outcomes"], {"no_packets_available": 1})
+        self.assertEqual(result["operational_failures"], 0)
         self.assertEqual(completions[0]["status"], "failed")
+        self.assertEqual(completions[0]["outcome"], "no_packets_available")
         self.assertEqual(completions[0]["diagnostics"], diagnostics)
+
+    def test_required_missing_spool_fails_before_polling(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            spool = Path(temp_dir) / "pcap"
+            spool.mkdir()
+            config = {
+                "pcap_broker": {
+                    "enabled": True,
+                    "artifact_spool_dir": str(spool),
+                    "artifact_spool_require_mount": True,
+                }
+            }
+            with mock.patch.object(self.relay, "broker_request") as broker_request:
+                result = self.relay.process_pcap_requests(config)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["operational_failures"], 1)
+        self.assertIn("not mounted", result["spool"]["reason"])
+        broker_request.assert_not_called()
 
     def test_completion_retries_a_transient_broker_failure(self) -> None:
         config = {

@@ -107,6 +107,49 @@ class RelayHealthWrapperTest(unittest.TestCase):
         self.assertIn("relay webhook token mismatch", stderr.getvalue())
         self.assertIn("alert_relay=failed(1) pcap_broker=ok", saved_states[-1]["last_summary"])
 
+    def test_pcap_operational_failure_changes_component_exit_status(self) -> None:
+        with mock.patch.object(
+            self.wrapper,
+            "run_shell_command",
+            return_value=completed(
+                0,
+                stdout='{"ok": true, "processed": 1, "failed": 1, "operational_failures": 1}\n',
+            ),
+        ):
+            result = self.wrapper.run_pcap_broker()
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('"operational_failures": 1', result.stderr)
+
+    def test_expected_no_packet_outcome_does_not_fail_component(self) -> None:
+        with mock.patch.object(
+            self.wrapper,
+            "run_shell_command",
+            return_value=completed(
+                0,
+                stdout='{"ok": true, "processed": 1, "failed": 1, "operational_failures": 0, "outcomes": {"no_packets_available": 1}}\n',
+            ),
+        ):
+            result = self.wrapper.run_pcap_broker()
+
+        self.assertEqual(result.returncode, 0)
+
+    def test_storage_component_uses_independent_state_and_command(self) -> None:
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(self.wrapper, "run_storage_health", return_value=completed(0, stdout='{"ok": true}\n')) as run_storage,
+            mock.patch.object(self.wrapper, "load_state", return_value={"status": "unknown", "consecutive_failures": 0}),
+            mock.patch.object(self.wrapper, "persist_component_state") as persist,
+            mock.patch.object(self.wrapper, "send_relay_health_event", return_value={"ok": True}),
+            mock.patch.object(sys, "argv", ["relay_health_wrapper.py", "--component", "storage"]),
+            contextlib.redirect_stdout(stdout),
+        ):
+            rc = self.wrapper.main()
+
+        self.assertEqual(rc, 0)
+        run_storage.assert_called_once()
+        self.assertIn("storage_health=ok", persist.call_args.args[0]["last_summary"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -197,6 +197,6 @@ ssh <mac_user>@10.77.7.225 'python3 "$HOME/n8n-local/bin/sync-soc-alerts-portal.
 Relay validation examples:
 
 ```bash
-ssh <relay_user>@10.88.8.8 'systemctl is-enabled so-alert-relay.timer; systemctl is-active so-alert-relay.timer'
-ssh <relay_user>@10.88.8.8 'sudo journalctl -u so-alert-relay.service -n 40 --no-pager'
+ssh <relay_user>@10.88.8.8 'systemctl is-enabled so-alert-poll.timer so-pcap-broker.timer; systemctl is-active so-alert-poll.timer so-pcap-broker.timer'
+ssh <relay_user>@10.88.8.8 'sudo journalctl -u so-alert-poll.service -u so-pcap-broker.service -n 40 --no-pager'
 ```

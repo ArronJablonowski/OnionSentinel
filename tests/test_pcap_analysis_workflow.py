@@ -6,6 +6,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -37,6 +38,17 @@ class PcapAnalysisWorkflowTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
+
+    def test_ai_runner_extracts_first_complete_json_object(self) -> None:
+        result = self.ai_runner.extract_json_object(
+            'Preface {"summary":"usable"}\n{"extra":"trailing object"}'
+        )
+
+        self.assertEqual(result, {"summary": "usable"})
+
+    def test_ai_runner_rejects_malformed_json_without_guessing(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "valid JSON object"):
+            self.ai_runner.extract_json_object('analysis: {"summary": invalid}')
 
     def test_worker_records_missing_local_artifact_without_failing(self) -> None:
         args = type(
@@ -198,6 +210,27 @@ class PcapAnalysisWorkflowTest(unittest.TestCase):
             analysis = self.worker.process_one(request, args)
         self.assertTrue(request_dir.exists())
         self.assertFalse(analysis["raw_artifact_cleanup"]["deleted"])
+
+    def test_safe_extract_rejects_archive_links(self) -> None:
+        archive_path = self.root / "linked.tar"
+        with tarfile.open(archive_path, "w") as archive:
+            member = tarfile.TarInfo("capture.pcap")
+            member.type = tarfile.SYMTYPE
+            member.linkname = "/etc/passwd"
+            archive.addfile(member)
+
+        with self.assertRaisesRegex(ValueError, "unsupported archive member type"):
+            self.worker.safe_extract_tar(archive_path, self.root / "extract")
+
+    def test_safe_extract_enforces_member_budget(self) -> None:
+        archive_path = self.root / "many.tar"
+        with tarfile.open(archive_path, "w") as archive:
+            for index in range(3):
+                archive.addfile(tarfile.TarInfo(f"empty-{index}.pcap"))
+
+        with mock.patch.object(self.worker, "MAX_ARCHIVE_MEMBERS", 2):
+            with self.assertRaisesRegex(ValueError, "too many members"):
+                self.worker.safe_extract_tar(archive_path, self.root / "extract")
 
     def test_prompt_package_includes_compact_pcap_evidence(self) -> None:
         analysis_dir = self.root / "pcap-analysis"

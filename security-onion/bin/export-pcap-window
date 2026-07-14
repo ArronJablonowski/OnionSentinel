@@ -27,7 +27,7 @@ OUTPUT_ROOT = Path(os.environ.get("ONION_SENTINEL_PCAP_OUTPUT_ROOT", "/nsm/pcapo
 MAX_WINDOW_SECONDS = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_WINDOW_SECONDS", "300"))
 MAX_LOOKBACK_HOURS = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_LOOKBACK_HOURS", "24"))
 MAX_CANDIDATE_FILES = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_CANDIDATE_FILES", "80"))
-MAX_ARTIFACT_BYTES = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_ARTIFACT_BYTES", str(8 * 1024 * 1024 * 1024)))
+MAX_ARTIFACT_BYTES = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_ARTIFACT_BYTES", str(32 * 1024 * 1024 * 1024)))
 TRANSFER_GROUP = os.environ.get("ONION_SENTINEL_PCAP_TRANSFER_GROUP", "so-ai-relay-pcap-rsync")
 def fail(reason: str, code: int = 1, diagnostics: dict | None = None) -> None:
     """Return a bounded failure record without exposing packet contents."""
@@ -183,11 +183,46 @@ def prepare_output_root() -> None:
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     try:
         shutil.chown(OUTPUT_ROOT, group=TRANSFER_GROUP)
-        OUTPUT_ROOT.chmod(0o750)
     except (LookupError, PermissionError, OSError):
         # Export can still run in isolated test/dev environments that have not
         # created the transfer group. Production installs should create it.
         pass
+    OUTPUT_ROOT.chmod(0o750)
+
+
+def reusable_artifact_payload(request_id: str) -> dict | None:
+    """Return metadata for a complete prior export without touching rolling PCAP.
+
+    Relay retries must survive source-PCAP retention. Only regular, bounded tar
+    files containing the wrapper's flat `part-*.pcap` members are reusable.
+    """
+    artifact = OUTPUT_ROOT / f"{request_id}.tar"
+    if not artifact.is_file() or artifact.is_symlink():
+        return None
+    size = artifact.stat().st_size
+    if size <= 0 or size > MAX_ARTIFACT_BYTES:
+        return None
+    try:
+        with tarfile.open(artifact, "r") as archive:
+            members = [member for member in archive.getmembers() if member.isfile()]
+            if not members:
+                return None
+            for member in members:
+                name = Path(member.name)
+                if name.name != member.name or not re.fullmatch(r"part-[0-9]{3}\.pcap", member.name):
+                    return None
+    except (OSError, tarfile.TarError):
+        return None
+    return {
+        "ok": True,
+        "status": "fulfilled",
+        "request_id": request_id,
+        "artifact_path": str(artifact),
+        "artifact_sha256": sha256_file(artifact),
+        "artifact_size_bytes": size,
+        "part_count": len(members),
+        "reused_existing_artifact": True,
+    }
 
 
 def limit_output_file_size(max_bytes: int) -> None:
@@ -196,8 +231,8 @@ def limit_output_file_size(max_bytes: int) -> None:
     resource.setrlimit(resource.RLIMIT_FSIZE, (safe_limit, safe_limit))
 
 
-def cleanup_artifact(req: dict) -> int:
-    request_id = safe_request_id(req.get("request_id"))
+def remove_request_outputs(request_id: str) -> list[str]:
+    """Remove only one request's tar and work directory."""
     artifact = output_child(OUTPUT_ROOT / f"{request_id}.tar")
     work_dir = output_child(OUTPUT_ROOT / request_id)
     removed: list[str] = []
@@ -212,6 +247,12 @@ def cleanup_artifact(req: dict) -> int:
             fail("artifact work target is not a directory")
         shutil.rmtree(work_dir)
         removed.append(str(work_dir))
+    return removed
+
+
+def cleanup_artifact(req: dict) -> int:
+    request_id = safe_request_id(req.get("request_id"))
+    removed = remove_request_outputs(request_id)
 
     print(
         json.dumps(
@@ -259,6 +300,10 @@ def main() -> int:
     if vlan_bpf not in bpf_variants:
         bpf_variants.insert(0, vlan_bpf)
     prepare_output_root()
+    existing = reusable_artifact_payload(request_id)
+    if existing:
+        print(json.dumps(existing, sort_keys=True))
+        return 0
     work_dir = OUTPUT_ROOT / request_id
     if work_dir.exists():
         shutil.rmtree(work_dir)
@@ -314,6 +359,7 @@ def main() -> int:
 
     if not part_paths:
         reason = "PCAP extraction exceeded artifact size limit" if size_limit_hit else "no matching packets found"
+        remove_request_outputs(request_id)
         fail(reason, code=2, diagnostics=diagnostics)
 
     artifact = OUTPUT_ROOT / f"{request_id}.tar"
@@ -323,7 +369,7 @@ def main() -> int:
 
     artifact_size = artifact.stat().st_size
     if artifact_size > MAX_ARTIFACT_BYTES:
-        artifact.unlink(missing_ok=True)
+        remove_request_outputs(request_id)
         fail("PCAP artifact exceeds configured size limit", diagnostics=diagnostics)
     try:
         shutil.chown(artifact, group=TRANSFER_GROUP)

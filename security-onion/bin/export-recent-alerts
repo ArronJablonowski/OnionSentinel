@@ -4,54 +4,95 @@ set -euo pipefail
 # Security Onion forced-command wrapper. The Pi connects as so-ai-relay, but SSH
 # authorized_keys forces this script regardless of the command the client sends.
 LOOKBACK="${SO_ALERT_LOOKBACK:-10m}"
-SIZE="${SO_ALERT_SIZE:-100}"
+SIZE="${SO_ALERT_SIZE:-500}"
 MAX_SIZE=500
+MAX_TOTAL="${SO_ALERT_MAX_TOTAL:-5000}"
+QUERY_BIN="${SO_ELASTICSEARCH_QUERY_BIN:-/usr/sbin/so-elasticsearch-query}"
 
 # Clamp caller-controlled size to prevent accidental heavy Elasticsearch pulls.
 if ! [[ "$SIZE" =~ ^[0-9]+$ ]]; then
-  SIZE=100
+  SIZE=500
 fi
 if (( SIZE > MAX_SIZE )); then
   SIZE=$MAX_SIZE
 fi
+if ! [[ "$MAX_TOTAL" =~ ^[0-9]+$ ]] || (( MAX_TOTAL < SIZE )); then
+  MAX_TOTAL=$SIZE
+fi
+if (( MAX_TOTAL > 20000 )); then
+  MAX_TOTAL=20000
+fi
 
 QUERY_FILE=$(mktemp)
-trap 'rm -f "$QUERY_FILE"' EXIT
+RAW_FILE=$(mktemp)
+HITS_FILE=$(mktemp)
+NEXT_HITS_FILE=$(mktemp)
+trap 'rm -f "$QUERY_FILE" "$RAW_FILE" "$HITS_FILE" "$NEXT_HITS_FILE"' EXIT
+printf '[]\n' > "$HITS_FILE"
+POLL_END="$(date -u '+%Y-%m-%dT%H:%M:%S.%3NZ')"
+SEARCH_AFTER=""
+FETCHED=0
+PAGES=0
+TOTAL=0
 
 # Pull the full Security Onion alert document. The Pi forwards this JSON as-is;
 # Mac Studio stores it in SQLite and renders it in each alert detail page. This
 # full-fidelity mode may include packet, payload, PCAP, and HTTP body fields when
 # Security Onion has them available.
-cat > "$QUERY_FILE" <<JSON
-{
-  "size": $SIZE,
-  "sort": [{"@timestamp": {"order": "desc"}}],
+while (( FETCHED < MAX_TOTAL )); do
+  if [[ -n "$SEARCH_AFTER" ]]; then
+    SEARCH_AFTER_FIELD=",\n  \"search_after\": $SEARCH_AFTER"
+  else
+    SEARCH_AFTER_FIELD=""
+  fi
+  printf '{
+  "size": %s,
+  "sort": [{"@timestamp": {"order": "desc"}}, {"_id": {"order": "desc"}}],
+  "track_total_hits": true,
   "_source": true,
-  "query": {
-    "range": {
-      "@timestamp": {
-        "gte": "now-$LOOKBACK"
-      }
-    }
-  }
-}
-JSON
+  "query": {"range": {"@timestamp": {"gte": "now-%s", "lte": "%s"}}}%b
+}\n' "$SIZE" "$LOOKBACK" "$POLL_END" "$SEARCH_AFTER_FIELD" > "$QUERY_FILE"
 
-RAW=$(/usr/sbin/so-elasticsearch-query 'logs-suricata.alerts-so,logs-detections.alerts-so/_search?ignore_unavailable=true' -d @"$QUERY_FILE")
+  "$QUERY_BIN" \
+    'logs-suricata.alerts-so,logs-detections.alerts-so/_search?ignore_unavailable=true' \
+    -d @"$QUERY_FILE" > "$RAW_FILE"
+  PAGE_COUNT=$(jq '.hits.hits | length' "$RAW_FILE")
+  TOTAL=$(jq -r '.hits.total.value // .hits.total // 0' "$RAW_FILE")
+  jq -s '.[0] + .[1]' "$HITS_FILE" <(jq '.hits.hits' "$RAW_FILE") > "$NEXT_HITS_FILE"
+  mv "$NEXT_HITS_FILE" "$HITS_FILE"
+  FETCHED=$((FETCHED + PAGE_COUNT))
+  PAGES=$((PAGES + 1))
+  if (( PAGE_COUNT < SIZE || PAGE_COUNT == 0 || FETCHED >= MAX_TOTAL )); then
+    break
+  fi
+  SEARCH_AFTER=$(jq -c '.hits.hits[-1].sort // empty' "$RAW_FILE")
+  if [[ -z "$SEARCH_AFTER" ]]; then
+    break
+  fi
+done
+
+SATURATED=false
+if (( TOTAL > FETCHED )); then
+  SATURATED=true
+fi
 
 # Normalize Security Onion's Elasticsearch response into the compact JSON schema
 # consumed by relay/app/relay.py.
-jq -c --arg exported_at "$(date -u '+%Y-%m-%d  %H:%M:%SZ')" --arg lookback "$LOOKBACK" '
+jq -c --arg exported_at "$(date -u '+%Y-%m-%d  %H:%M:%SZ')" \
+  --arg lookback "$LOOKBACK" --argjson total "$TOTAL" --argjson fetched "$FETCHED" \
+  --argjson pages "$PAGES" --argjson saturated "$SATURATED" '
 {
   source: "security-onion",
   exported_at: $exported_at,
   query: {
     lookback: $lookback,
-    max_alerts: (.hits.hits | length),
-    total: (.hits.total.value // .hits.total // null)
+    fetched: $fetched,
+    total: $total,
+    pages: $pages,
+    saturated: $saturated
   },
   alerts: [
-    .hits.hits[] | ._source as $s | {
+    .[] | ._source as $s | {
       alert_id: (._index + ":" + ._id),
       elastic_id: ._id,
       elastic_index: ._index,
@@ -119,4 +160,4 @@ jq -c --arg exported_at "$(date -u '+%Y-%m-%d  %H:%M:%SZ')" --arg lookback "$LOO
     }
   ]
 }
-' <<< "$RAW"
+' "$HITS_FILE"

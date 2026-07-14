@@ -1,0 +1,12 @@
+[Unit]
+Description=Process Onion Sentinel PCAP requests independently
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1min
+AccuracySec=15s
+Persistent=true
+Unit=so-pcap-broker.service
+
+[Install]
+WantedBy=timers.target

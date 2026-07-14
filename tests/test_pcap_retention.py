@@ -8,6 +8,7 @@ import os
 import json
 import sys
 import tempfile
+import sqlite3
 import unittest
 from pathlib import Path
 
@@ -128,6 +129,22 @@ class PcapRetentionTest(unittest.TestCase):
         self.assertEqual(result["analyzed_artifact_cleanup"]["matched_requests"], 1)
         self.assertFalse(complete_dir.exists())
         self.assertTrue(partial_dir.exists())
+
+    def test_terminal_non_artifact_outcome_removes_legacy_request_directory(self) -> None:
+        request_dir = self.artifact_dir / "no-packets-request"
+        self.write_file(request_dir / ".chunks" / "00000001.chunk", 0)
+        db_path = self.safe_root / "alert_store_data" / "alerts.sqlite3"
+        db_path.parent.mkdir(parents=True)
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE pcap_requests (request_id TEXT, status TEXT, outcome TEXT)")
+        conn.execute("INSERT INTO pcap_requests VALUES (?, ?, ?)", ("no-packets-request", "failed", "no_packets_available"))
+        conn.commit()
+        conn.close()
+
+        result = self.module.cleanup_terminal_artifacts(self.artifact_dir, db_path, True)
+
+        self.assertEqual(result["matched_requests"], 1)
+        self.assertFalse(request_dir.exists())
 
 
 if __name__ == "__main__":

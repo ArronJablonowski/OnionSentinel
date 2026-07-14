@@ -496,6 +496,12 @@ interval: 300 seconds
 stuck-alert cause fixed: missing tuning_reason no longer fails the analysis job
 ```
 
+As of 2026-07-13, prompt packages also include current grouped analyst state
+and bounded prior local analyses. Acknowledgement or suppression state, repeat
+count, analyst reason, and state-change time are evidence inputs, not identity
+fields. `$HOME/n8n-local/config/ai_model_settings.json` is the runtime model
+routing authority; the LaunchAgent intentionally does not hardcode `--model`.
+
 ## Next Implementation Step
 
 Then add optional hosted escalation:

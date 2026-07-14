@@ -136,7 +136,9 @@ Use `n8n/bin/maintain-pcap-evidence.py` for runtime retention. Its
 `--analyzed-only --apply` mode is the daily safety net for a crash between
 analysis publication and raw deletion. It requires validated successful Zeek
 and TShark command records and refuses cleanup paths outside
-`$HOME/n8n-local`. Age-based cleanup remains dry-run unless explicitly applied.
+`$HOME/n8n-local`. It also reconciles exact request directories associated with
+terminal no-packet, expired, or oversize database outcomes. Age-based cleanup
+remains dry-run unless explicitly applied.
 
 `launchd/com.arron.soc.pcap-retention.plist` installs a daily 03:20
 analyzed-only cleanup. It cannot delete an unparsed or partially parsed request.
@@ -345,6 +347,12 @@ from `$HOME/n8n-local/soc-alerts/pcap-analysis` when analyzing the alert. If the
 broker metadata exists but the artifact has not been copied to the Mac yet, the
 prompt records that as an evidence gap rather than inventing packet contents.
 
+Before extraction, the parser rejects path traversal, links, device entries,
+more than `PCAP_MAX_ARCHIVE_MEMBERS`, more than `PCAP_MAX_EXTRACTED_BYTES` of
+expanded regular files, or more than `PCAP_MAX_FILES` packet files. The
+sanitized `.env.example` defaults are 2,048 members, 40 GiB expanded, and 256
+PCAP files. Keep these limits aligned with the relay and Mac storage budgets.
+
 Alert-store exposes a request-only broker for packet-capture evidence:
 
 ```text
@@ -370,12 +378,14 @@ Example request body:
 }
 ```
 
-The n8n workflow includes a dedicated `Enrich Alert` node between relay
-validation and alert-store persistence. That node calls alert-store
-`POST /enrich`; alert-store extracts only public indicators, redacts URL query
-strings and credentials, skips private IPs/internal hostnames, checks configured
-sources, writes normalized records into `alerts.enrichment_json`, and caches
-results in SQLite.
+The n8n workflow includes a dedicated `Enrich Alert` handoff between relay
+validation and alert-store persistence. It marks enrichment as queued and
+forwards the item to `POST /alert`. Alert-store atomically stores the alert and
+a durable enrichment job; a background worker then extracts only public
+indicators, redacts URL query strings and credentials, skips private
+IPs/internal hostnames, checks configured sources, writes normalized records
+into `alerts.enrichment_json`, and caches results in SQLite. Provider latency
+does not hold the alert ingest transaction open.
 
 Indicator extraction covers public IPv4s, domains, full URLs/URIs, file hashes,
 and CVEs from common ECS, Suricata, and Security Onion raw-event shapes. Local

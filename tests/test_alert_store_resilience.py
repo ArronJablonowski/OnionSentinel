@@ -21,6 +21,15 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("await Promise.all(jobs);", self.code)
         self.assertNotIn("withEnrichmentGate", self.code)
 
+    def test_enrichment_is_durable_and_outside_ingest_latency(self) -> None:
+        self.assertIn("require('./lib/durable_job_queue')", self.code)
+        self.assertIn("durableJobs.enqueue('public_enrichment'", self.code)
+        self.assertIn("async function drainEnrichmentJobs()", self.code)
+        store = self.code.split("async function storeAlert(rawAlert)", 1)[1].split(
+            "async function drainEnrichmentJobs", 1
+        )[0]
+        self.assertNotIn("await enrichAlert(", store)
+
     def test_enrichment_provider_circuits_are_bounded(self) -> None:
         self.assertIn("ENRICHMENT_CIRCUIT_FAILURE_THRESHOLD", self.code)
         self.assertIn("ENRICHMENT_CIRCUIT_RESET_MS", self.code)

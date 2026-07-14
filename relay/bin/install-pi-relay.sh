@@ -26,7 +26,9 @@ install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay/state/new-alerts
 install -o root -g soalert -m 0750 -d /etc/so-alert-relay
 
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay.py" /opt/so-alert-relay/app/relay.py
+install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/alert_outbox.py" /opt/so-alert-relay/app/alert_outbox.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay_health_wrapper.py" /opt/so-alert-relay/app/relay_health_wrapper.py
+install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/storage_health.py" /opt/so-alert-relay/app/storage_health.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/config/config.example.json" /opt/so-alert-relay/app/config.json
 
 if [[ ! -f /etc/so-alert-relay/relay.env ]]; then
@@ -37,11 +39,24 @@ fi
 
 install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-alert-relay.service" /etc/systemd/system/so-alert-relay.service
 install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-alert-relay.timer" /etc/systemd/system/so-alert-relay.timer
+install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-alert-poll.service" /etc/systemd/system/so-alert-poll.service
+install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-alert-poll.timer" /etc/systemd/system/so-alert-poll.timer
+install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-pcap-broker.service" /etc/systemd/system/so-pcap-broker.service
+install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-pcap-broker.timer" /etc/systemd/system/so-pcap-broker.timer
+install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-storage-health.service" /etc/systemd/system/so-storage-health.service
+install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-storage-health.timer" /etc/systemd/system/so-storage-health.timer
+install -o root -g root -m 0440 "$REPO_DIR/relay/sudoers/so-storage-health" /etc/sudoers.d/91-so-alert-relay-storage-health
+visudo -cf /etc/sudoers.d/91-so-alert-relay-storage-health
+install -o root -g root -m 0755 -d /etc/systemd/journald.conf.d
+install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/onion-sentinel-journald.conf" /etc/systemd/journald.conf.d/onion-sentinel.conf
+install -o root -g systemd-journal -m 2755 -d /var/log/journal
 
 systemctl daemon-reload
+systemctl restart systemd-journald
 # NetworkManager-wait-online may not exist on every OS image; tolerate that.
 systemctl enable NetworkManager-wait-online.service >/dev/null 2>&1 || true
-systemctl enable so-alert-relay.timer
+systemctl disable --now so-alert-relay.timer >/dev/null 2>&1 || true
+systemctl enable so-alert-poll.timer so-pcap-broker.timer so-storage-health.timer
 
 cat <<'MSG'
 

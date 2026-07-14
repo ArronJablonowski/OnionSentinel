@@ -10,17 +10,17 @@ N8N_URL="${N8N_URL:-http://10.77.7.225:5678/healthz}"
 
 echo "== Pi reachability =="
 # Confirms SSH admin access plus timer status after boot/reboot.
-ssh -o BatchMode=yes -o ConnectTimeout=5 "$PI_HOST" 'hostname; uptime; systemctl is-enabled so-alert-relay.timer; systemctl is-active so-alert-relay.timer; systemctl list-timers --all so-alert-relay.timer --no-pager --plain'
+ssh -o BatchMode=yes -o ConnectTimeout=5 "$PI_HOST" 'hostname; uptime; systemctl is-enabled so-alert-poll.timer so-pcap-broker.timer so-storage-health.timer; systemctl is-active so-alert-poll.timer so-pcap-broker.timer so-storage-health.timer; systemctl list-timers --all so-alert-poll.timer so-pcap-broker.timer so-storage-health.timer --no-pager --plain; findmnt /mnt/onion-sentinel-pcap-spool; sudo -n /usr/sbin/smartctl -a -j /dev/sda | python3 -c '"'"'import json,sys; d=json.load(sys.stdin); n=d.get("nvme_smart_health_information_log",{}); print("smart_passed="+str((d.get("smart_status") or {}).get("passed"))); print("temperature_c="+str((d.get("temperature") or {}).get("current"))); print("media_errors="+str(n.get("media_errors"))); print("unsafe_shutdowns="+str(n.get("unsafe_shutdowns")))'"'"''
 
 echo
 echo "== Pi firewall paths =="
 # These match the minimum pfSense rules for the relay VLAN.
-ssh "$PI_HOST" 'nc -vz -w 3 192.168.1.7 22; nc -vz -w 3 10.77.7.225 5678; getent hosts api.telegram.org | head -n 1; nc -vz -w 3 api.telegram.org 443'
+ssh "$PI_HOST" 'nc -vz -w 3 192.168.1.7 22; nc -vz -w 3 10.77.7.225 22; nc -vz -w 3 10.77.7.225 5678; getent hosts api.telegram.org | head -n 1; nc -vz -w 3 api.telegram.org 443'
 
 echo
 echo "== Security Onion wrapper =="
 # Checks that the export wrapper exists and sudoers still parses.
-ssh "$SO_HOST" 'sudo test -x /usr/local/sbin/export-recent-alerts && sudo visudo -cf /etc/sudoers.d/90-so-ai-relay-export'
+ssh "$SO_HOST" 'sudo test -x /usr/local/sbin/export-recent-alerts; sudo test -x /usr/local/sbin/export-pcap-window; sudo test -x /usr/local/sbin/onion-sentinel-pcapout-prune; sudo visudo -cf /etc/sudoers.d/90-so-ai-relay-export; systemctl is-active onion-sentinel-pcapout-retention.timer'
 
 echo
 echo "== Mac Studio n8n =="
@@ -45,4 +45,4 @@ ssh "$MAC_HOST" 'launchctl print gui/$(id -u)/com.arron.soc.pcap-retention | gre
 echo
 echo "== Pi relay recent logs =="
 # Recent relay logs show counts for pulled/dropped/new/posted alerts.
-ssh "$PI_HOST" 'sudo journalctl -u so-alert-relay.service -n 20 --no-pager'
+ssh "$PI_HOST" 'sudo journalctl -u so-alert-poll.service -u so-pcap-broker.service -u so-storage-health.service -n 60 --no-pager'

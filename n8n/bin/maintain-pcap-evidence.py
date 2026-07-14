@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from pcap_lifecycle import analysis_completed, delete_request_artifacts
 HOME = Path.home()
 DEFAULT_ARTIFACT_DIR = HOME / "n8n-local" / "pcap-evidence" / "artifacts"
 DEFAULT_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "pcap-analysis"
+DEFAULT_DB = HOME / "n8n-local" / "alert_store_data" / "alerts.sqlite3"
 DEFAULT_ARTIFACT_RETENTION_DAYS = 14
 DEFAULT_ANALYSIS_RETENTION_DAYS = 30
 
@@ -32,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Clean old Onion Sentinel PCAP runtime artifacts")
     parser.add_argument("--artifact-dir", type=Path, default=DEFAULT_ARTIFACT_DIR)
     parser.add_argument("--analysis-dir", type=Path, default=DEFAULT_ANALYSIS_DIR)
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--artifact-retention-days", type=int, default=DEFAULT_ARTIFACT_RETENTION_DAYS)
     parser.add_argument("--analysis-retention-days", type=int, default=DEFAULT_ANALYSIS_RETENTION_DAYS)
     parser.add_argument("--apply", action="store_true", help="Delete matched files. Omit for dry-run.")
@@ -136,9 +139,47 @@ def cleanup_analyzed_artifacts(artifact_dir: Path, analysis_dir: Path, apply: bo
     }
 
 
+def cleanup_terminal_artifacts(artifact_dir: Path, db_path: Path, apply: bool) -> dict[str, Any]:
+    """Remove artifacts that cannot participate in any future successful parse."""
+    artifact_root = validate_runtime_path(artifact_dir)
+    if not db_path.exists():
+        return {"matched_requests": 0, "matched_bytes": 0, "requests": [], "reason": "database not found"}
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            """
+            SELECT request_id
+            FROM pcap_requests
+            WHERE status IN ('failed', 'rejected')
+              AND outcome IN ('no_packets_available', 'expired', 'oversize')
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+    matches: list[dict[str, Any]] = []
+    for (request_id,) in rows:
+        try:
+            target = (artifact_root / str(request_id)).resolve()
+            if target.parent != artifact_root or not target.is_dir():
+                continue
+            files = [item for item in target.rglob("*") if item.is_file()]
+            match = {"request_id": str(request_id), "bytes": sum(item.stat().st_size for item in files), "files": len(files)}
+            if apply:
+                match.update(delete_request_artifacts(artifact_root, request_id))
+            matches.append(match)
+        except (OSError, ValueError):
+            continue
+    return {
+        "matched_requests": len(matches),
+        "matched_bytes": sum(int(item.get("bytes") or 0) for item in matches),
+        "requests": matches,
+    }
+
+
 def run(args: argparse.Namespace, now: dt.datetime | None = None) -> dict[str, Any]:
     now = now or utc_now()
     analyzed = cleanup_analyzed_artifacts(args.artifact_dir, args.analysis_dir, args.apply)
+    terminal = cleanup_terminal_artifacts(args.artifact_dir, getattr(args, "db", DEFAULT_DB), args.apply)
     if getattr(args, "analyzed_only", False):
         artifact = {"skipped": True, "reason": "analyzed-only mode"}
         analysis = {"skipped": True, "reason": "analyzed-only mode"}
@@ -150,6 +191,7 @@ def run(args: argparse.Namespace, now: dt.datetime | None = None) -> dict[str, A
         "mode": "apply" if args.apply else "dry-run",
         "generated_at": project_now(),
         "analyzed_artifact_cleanup": analyzed,
+        "terminal_artifact_cleanup": terminal,
         "artifact_cleanup": artifact,
         "analysis_cleanup": analysis,
     }

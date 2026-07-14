@@ -30,7 +30,9 @@
     "timeout_seconds": 10,
     "retry_attempts": 3,
     "retry_backoff_seconds": 1.5,
-    "retry_max_backoff_seconds": 10
+    "retry_max_backoff_seconds": 10,
+    "outbox_drain_limit": 1000,
+    "outbox_delivered_retention_days": 30
   },
   "pcap_broker": {
     "_comment": "Disabled until the n8n PCAP broker proxy workflow is imported, tokenized, active, and reachable from the relay VLAN.",
@@ -41,8 +43,10 @@
     "upload_artifact": true,
     "artifact_upload_mode": "spooled_rsync",
     "artifact_spool_dir": "/mnt/onion-sentinel-pcap-spool/pcap",
-    "artifact_spool_max_bytes": 8589934592,
-    "artifact_spool_min_free_bytes": 3221225472,
+    "artifact_spool_require_mount": true,
+    "artifact_spool_max_bytes": 34359738368,
+    "artifact_spool_min_free_bytes": 107374182400,
+    "artifact_spool_max_used_percent": 80,
     "artifact_spool_delete_after_upload": true,
     "artifact_spool_partial_ttl_seconds": 86400,
     "artifact_spool_completed_ttl_seconds": 3600,

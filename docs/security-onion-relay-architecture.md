@@ -16,8 +16,14 @@ Current design boundary:
 Pi relay: transport, exact alert-id retry dedupe, local evidence files
 Mac Studio alert-store: scoring, drop policy, suppression windows, routing, notifications
 Mac Studio n8n: webhook intake and Markdown report creation for accepted alerts
-Hermes LAN Portal: analyst UI over Markdown today; should move to SQLite-backed API for scale
+Onion Sentinel portal: SQLite-backed analyst API with Markdown/JSON evidence corpus
 ```
+
+Reliability update (2026-07-13): alert polling and PCAP brokerage now run as
+independent systemd timers; webhook delivery uses a durable relay outbox;
+enrichment and AI use durable Mac Studio jobs; Security Onion alert export is
+deterministically paginated. See `docs/reliability-and-slo-runbook.md` for the
+authoritative service inventory and SLOs.
 
 ## Network Segments
 
@@ -33,7 +39,7 @@ Hermes LAN Portal: analyst UI over Markdown today; should move to SQLite-backed 
 | Host | IP | Role | Runs |
 | --- | --- | --- | --- |
 | Security Onion | `192.168.1.7` | Alert source | Restricted SSH wrapper `/usr/local/sbin/export-recent-alerts` |
-| Raspberry Pi relay | `10.88.8.8` | Poller, forwarder, and relay health monitor | `so-alert-relay.service`, `so-alert-relay.timer`, `relay_health_wrapper.py`, Python relay |
+| Raspberry Pi relay | `10.88.8.8` | Poller, forwarder, PCAP broker, and relay health monitor | `so-alert-poll.timer`, `so-pcap-broker.timer`, durable outbox, `relay_health_wrapper.py` |
 | Mac Studio | `10.77.7.225` | Workflow engine, storage, and stack health monitor | Docker Desktop, n8n, alert-store, SQLite, Telegram notification logic, `com.arron.n8n.monitor-stack` |
 | This Mac | varies | Admin/development workstation | Obsidian vault, project source copies, manual report generation only |
 | pfSense | `10.88.8.1` on VLAN 888 | Router/firewall | VLAN 888 gateway and access rules |
@@ -75,11 +81,14 @@ flowchart LR
   end
 
   subgraph "Raspberry Pi"
-    TIMER["so-alert-relay.timer<br/>every 5 minutes"]
-    SERVICE["so-alert-relay.service<br/>oneshot"]
+    ATIMER["so-alert-poll.timer<br/>every 5 minutes"]
+    ASERVICE["so-alert-poll.service<br/>oneshot"]
+    PTIMER["so-pcap-broker.timer<br/>every minute"]
+    PSERVICE["so-pcap-broker.service<br/>oneshot"]
     HEALTH["relay_health_wrapper.py<br/>failure/recovery state"]
     APP["/opt/so-alert-relay/app/relay.py"]
     STATE["/opt/so-alert-relay/state/seen.sqlite3"]
+    OUTBOX["/opt/so-alert-relay/state/alert-outbox.sqlite3"]
     HSTATE["/opt/so-alert-relay/state/health_state.json"]
     ENV["/etc/so-alert-relay/relay.env"]
   end
@@ -95,9 +104,11 @@ flowchart LR
     PORTAL["report_portal<br/>Hermes LAN viewer"]
   end
 
-  TIMER --> SERVICE --> HEALTH --> APP
+  ATIMER --> ASERVICE --> HEALTH --> APP
+  PTIMER --> PSERVICE --> HEALTH
   HEALTH --> HSTATE
   APP --> STATE
+  APP --> OUTBOX
   APP --> ENV
   APP --> AK
   AK --> WRAP
@@ -128,8 +139,9 @@ flowchart LR
 | State DB | `/opt/so-alert-relay/state/seen.sqlite3` |
 | Raw batches | `/opt/so-alert-relay/state/batches` |
 | New alert files | `/opt/so-alert-relay/state/new-alerts` |
-| Timer | `/etc/systemd/system/so-alert-relay.timer` |
-| Service | `/etc/systemd/system/so-alert-relay.service` |
+| Alert timer/service | `/etc/systemd/system/so-alert-poll.timer`, `so-alert-poll.service` |
+| PCAP timer/service | `/etc/systemd/system/so-pcap-broker.timer`, `so-pcap-broker.service` |
+| Durable webhook outbox | `/opt/so-alert-relay/state/alert-outbox.sqlite3` |
 
 The Pi pulls alert JSON from Security Onion, deduplicates alert IDs with local
 SQLite for retry safety, writes local state, and posts new alerts to Mac Studio
@@ -137,10 +149,12 @@ n8n. Normal rule filtering is intentionally not done on the Pi. The live Pi
 config keeps `filters.drop_alerts` empty so tuning can move with the Mac Studio
 workflow if the forwarding method changes later.
 
-Webhook delivery uses bounded retry/backoff for transient downstream failures:
+Webhook delivery uses a durable SQLite outbox plus bounded retry/backoff for
+transient downstream failures:
 HTTP `408`, `409`, `425`, `429`, and `5xx` are retried; client/auth failures are
-not. Each alert is marked seen immediately after its own successful POST so a
-partial outage resumes with the remaining unposted alerts on the next timer run.
+not. An alert is queued before delivery and marked delivered after a successful
+POST; expired leases are requeued after interruption. The alert ID prevents a
+duplicate outbox item during replay.
 
 PCAP fulfillment is brokered separately from alert polling. Alert-store owns the
 request queue and exposes pending/claim/complete state. The relay should poll a
@@ -180,14 +194,16 @@ AccuracySec=30s
 Persistent=true
 ```
 
-Reboot behavior verified on 2026-07-01: `so-alert-relay.timer` is enabled and active, `NetworkManager-wait-online.service` is enabled, and `so-alert-relay.service` is a `Type=oneshot` job that exits cleanly between timer runs. After Pi updates and reboot, the timer should start at boot, wait roughly two minutes, then run every five minutes.
+Current reboot behavior: `so-alert-poll.timer` and `so-pcap-broker.timer` are
+enabled and active, `NetworkManager-wait-online.service` is enabled, and both
+services are `Type=oneshot` jobs that exit between runs.
 
 Reboot validation update on 2026-07-01:
 
 ```text
 Pre-reboot:
 - Pi reachable at 10.88.8.8 over SSH.
-- so-alert-relay.timer enabled and active.
+- `so-alert-poll.timer` and `so-pcap-broker.timer` enabled and active.
 - Relay service last run completed successfully.
 
 Initial post-reboot problem:
@@ -202,7 +218,7 @@ Console recovery:
 
 Validated after repair:
 - SSH to 10.88.8.8 returned.
-- so-alert-relay.timer is enabled and active after reboot.
+- both split relay timers are enabled and active after reboot.
 - First post-boot scheduled relay run posted 14 new alerts to Mac Studio n8n.
 - Follow-up relay run posted 2 new alerts.
 - /opt/so-alert-relay/state/health_state.json reported status ok.
@@ -216,9 +232,9 @@ Risk note:
 Operational commands:
 
 ```bash
-ssh <relay_user>@10.88.8.8 'systemctl list-timers --all so-alert-relay.timer --no-pager'
-ssh <relay_user>@10.88.8.8 'sudo journalctl -u so-alert-relay.service -n 40 --no-pager'
-ssh <relay_user>@10.88.8.8 'sudo systemctl start so-alert-relay.service'
+ssh <relay_user>@10.88.8.8 'systemctl list-timers --all so-alert-poll.timer so-pcap-broker.timer --no-pager'
+ssh <relay_user>@10.88.8.8 'sudo journalctl -u so-alert-poll.service -u so-pcap-broker.service -n 40 --no-pager'
+ssh <relay_user>@10.88.8.8 'sudo systemctl start so-alert-poll.service'
 ssh -o BatchMode=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o PreferredAuthentications=publickey <relay_user>@10.88.8.8 'echo key_auth_ok'
 ```
 
@@ -350,20 +366,21 @@ easy to inspect and tune:
 | --- | --- | --- |
 | 1 | `Security Onion Alert Webhook` | Receive relay POSTs |
 | 2 | `Validate Relay Request` | Validate token and alert payload shape |
-| 3 | `Enrich Alert` | Call alert-store `/enrich` for configured public enrichment lookups, cache/rate-limit handling, and privacy-safe indicator submission |
+| 3 | `Enrich Alert` | Mark the explicit asynchronous enrichment handoff; `/alert` durably queues provider work |
 | 4 | `Store Score And Filter Alert` | Call alert-store for scoring, drop, suppression, dedupe, and Telegram decisions |
 | 5 | `Route Report Decision` | Decide whether a Markdown report should be written |
 | 6 | `Write SOC Markdown Report` | Write accepted-alert Markdown into `/soc-alerts` |
 
-The enrichment node is visible in n8n, but alert-store owns the enrichment
-service. It extracts public IPs, domains, redacted public URLs, hashes, and
+The enrichment node is visible in n8n, but alert-store owns the asynchronous
+enrichment service. The `/alert` transaction stores the alert and durable job;
+a background worker extracts public IPs, domains, redacted public URLs, hashes, and
 CVEs; skips private IPs/internal hostnames; honors configured API keys; caches
 responses in SQLite; and records skipped/rate-limited source notes in the alert
 detail bundle.
 
-The enrichment stage is best-effort by design. If `/enrich` fails or times out,
-the workflow marks the alert with an `external_intel.errors` record and still
-passes it to `Store Score And Filter Alert`. That store node uses a 30 second
+The enrichment stage is best-effort by design. Provider failures are retried by
+the durable worker and recorded without rolling back alert storage. The store
+node uses a 30 second
 alert-store timeout and does not let a failed enrichment retry trigger surprise
 public API work inside the storage path. Alert-store also maintains an indexed
 group-key expression for `alert_group_summary` refreshes so high-volume inserts
@@ -476,10 +493,11 @@ Raspberry Pi relay 10.88.8.8 on VLAN 888
 Docker on Mac Studio 10.77.7.225
   -> container network
 n8n workflow :5678 webhook
-  -> validation, scoring, and routing
-  -> alert-store /enrich dedicated enrichment stage
-alert-store /enrich
-  -> API-key gating, privacy checks, cache, and rate-limit handling
+  -> validation and explicit enrichment handoff
+alert-store /alert
+  -> atomic alert storage plus durable enrichment and AI jobs
+alert-store enrichment worker
+  -> API-key gating, privacy checks, cache, retries, and rate-limit handling
   -> public enrichment sources when configured or keyless
   -> normalized enrichment_json
 SQLite alert-store
@@ -916,8 +934,8 @@ ssh <relay_user>@10.88.8.8 'sudo reboot'
 5. Verify the Pi returns and the relay timer resumes:
 
 ```bash
-ssh <relay_user>@10.88.8.8 'systemctl is-enabled so-alert-relay.timer; systemctl is-active so-alert-relay.timer; systemctl list-timers --all so-alert-relay.timer --no-pager'
-ssh <relay_user>@10.88.8.8 'sudo journalctl -u so-alert-relay.service -n 30 --no-pager'
+ssh <relay_user>@10.88.8.8 'systemctl is-enabled so-alert-poll.timer so-pcap-broker.timer; systemctl is-active so-alert-poll.timer so-pcap-broker.timer; systemctl list-timers --all so-alert-poll.timer so-pcap-broker.timer --no-pager'
+ssh <relay_user>@10.88.8.8 'sudo journalctl -u so-alert-poll.service -u so-pcap-broker.service -n 30 --no-pager'
 ```
 
 The timer should be enabled and active. The service should show a successful run within a few minutes after boot.
@@ -969,8 +987,8 @@ The old Obsidian/report sync helper on this Mac has been removed because schedul
 Pi relay:
 
 ```bash
-ssh <relay_user>@10.88.8.8 'systemctl list-timers --all so-alert-relay.timer --no-pager'
-ssh <relay_user>@10.88.8.8 'sudo journalctl -u so-alert-relay.service -n 40 --no-pager'
+ssh <relay_user>@10.88.8.8 'systemctl list-timers --all so-alert-poll.timer so-pcap-broker.timer --no-pager'
+ssh <relay_user>@10.88.8.8 'sudo journalctl -u so-alert-poll.service -u so-pcap-broker.service -n 40 --no-pager'
 ```
 
 Mac Studio stack:
@@ -1092,10 +1110,10 @@ Safety controls:
   `$HOME/n8n-local/pcap-evidence/artifacts/<request_id>/`, verifies the Mac
   copy, and only then reports fulfillment through the n8n control plane.
 - The relay SSD spool is intentionally outside the Pi SD card and should be
-  mounted with `noatime,nosuid,nodev,noexec`. Current defaults allow an 8 GiB
-  artifact ceiling while keeping 3 GiB free. Monitor average and maximum PCAP
-  artifact size before deciding whether the 16 GiB SSD needs to be replaced.
-- Security Onion enforces the same 8 GiB ceiling during `tcpdump` extraction
+  mounted with `noatime,nosuid,nodev,noexec`. The production 1 TB ext4 SSD uses
+  a 32 GiB per-artifact ceiling, 100 GiB free-space reserve, and 80 percent
+  high-water cutoff. Continue monitoring average and maximum artifact size.
+- Security Onion enforces the same 32 GiB ceiling during `tcpdump` extraction
   through `ONION_SENTINEL_PCAP_MAX_ARTIFACT_BYTES`. This protects the export
   directory before a large artifact reaches the relay-side capacity check.
 - n8n inline artifact upload and Security Onion chunk pulls are
@@ -1132,6 +1150,11 @@ Safety controls:
   `/nsm/pcapout/onion-sentinel/<request_id>.tar` and work directory. Cleanup
   failures are logged as `pcap_artifact_cleanup_failed` and do not block later
   requests.
+- Security Onion also removes a request work directory immediately when
+  extraction yields no packets or exceeds its bounded artifact limit. A
+  terminal relay-side `oversize` result triggers request-specific cleanup after
+  that outcome is durably recorded. Retryable transfer and checksum failures
+  retain the source export for recovery until the 24-hour safety-net timer.
 
 - On the Mac Studio, `process-pcap-evidence.py` treats raw broker artifacts as
   temporary transport data. It runs Zeek and TShark, atomically publishes
@@ -1140,7 +1163,9 @@ Safety controls:
   sets must succeed. Failed or partial analysis preserves the raw capture for
   retry, and direct operator-supplied PCAP paths are never deleted. A daily
   analyzed-only cleanup provides crash recovery without applying age-based
-  deletion to unparsed data.
+  deletion to unparsed data. The same maintenance pass removes exact legacy
+  request directories for terminal `no_packets_available`, `expired`, and
+  `oversize` outcomes; those artifacts cannot produce a successful parse.
 - Valid negative fulfillment is surfaced distinctly. A failed request whose
   broker error indicates no matching packets is displayed as `No Packets` in
   the dashboard so analysts can distinguish capture absence from transport or
@@ -1335,6 +1360,12 @@ Full-fidelity mode may store sensitive packet payloads, HTTP bodies, credentials
 tokens, internal URLs, hostnames, and file/process artifacts in SQLite, Markdown,
 and rendered dashboard HTML. Keep access to the Mac Studio, SQLite database,
 SOC Alerts directory, and LAN Portal restricted.
+
+Future supported Security Onion API access and OSQuery investigation work must
+follow `docs/security-onion-api-and-osquery-roadmap.md`. These are adapter and
+policy-broker additions; they do not grant the SOC Analyst arbitrary shell or
+query execution, and they do not replace restricted SSH until the documented
+security and rollback gates pass.
 ```
 
 Backfill status from 2026-07-02:

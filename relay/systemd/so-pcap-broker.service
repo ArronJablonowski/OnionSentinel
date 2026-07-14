@@ -1,0 +1,14 @@
+[Unit]
+Description=Onion Sentinel PCAP broker transfer worker
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/mnt/onion-sentinel-pcap-spool
+
+[Service]
+Type=oneshot
+User=soalert
+Group=soalert
+WorkingDirectory=/opt/so-alert-relay/app
+EnvironmentFile=/etc/so-alert-relay/relay.env
+ExecStart=/usr/bin/python3 /opt/so-alert-relay/app/relay_health_wrapper.py --component pcap
+TimeoutStartSec=70min

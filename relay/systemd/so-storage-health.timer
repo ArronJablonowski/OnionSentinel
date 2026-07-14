@@ -1,0 +1,12 @@
+[Unit]
+Description=Check Onion Sentinel relay SSD health hourly
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+AccuracySec=1min
+Persistent=true
+Unit=so-storage-health.service
+
+[Install]
+WantedBy=timers.target

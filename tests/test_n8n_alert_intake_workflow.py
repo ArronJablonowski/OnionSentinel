@@ -26,10 +26,10 @@ def test_store_node_uses_alert_store_timeout_with_headroom():
     assert "const alertForStore = $json.alert || {};" in code
 
 
-def test_enrichment_passthrough_marks_alert_as_enrichment_attempted():
+def test_enrichment_stage_is_a_fast_durable_queue_handoff():
     workflow = json.loads(WORKFLOW_PATH.read_text())
     code = _node_code(workflow, "Enrich Alert")
 
-    assert "enrichment_status: 'error_passthrough'" in code
-    assert "external_intel" in code
-    assert "errors: [{source: 'alert-store'" in code
+    assert "enrichment_status: 'queued_by_alert_store'" in code
+    assert "http.request" not in code
+    assert "public APIs" in code

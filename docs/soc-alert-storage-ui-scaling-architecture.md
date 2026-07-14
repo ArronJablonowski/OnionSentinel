@@ -92,12 +92,12 @@ in JSON:
 These columns are additive derived fields. `alert_json`, `raw_event_json`, and
 `enrichment_json` remain the evidence source of truth.
 
-As of 2026-07-05, `enrichment_json` also carries public enrichment records
-created by the dedicated n8n `Enrich Alert` node. The node calls alert-store
-`POST /enrich` before the normal `/alert` persistence call. Alert-store owns
-the API key checks, privacy filtering, rate limits, SQLite cache, and normalized
-output, so the n8n workflow stays easy to inspect while the state remains
-durable.
+As of 2026-07-13, `enrichment_json` carries public enrichment records produced
+asynchronously by alert-store. The n8n `Enrich Alert` node is an explicit
+handoff marker; `/alert` commits both the alert and a durable enrichment job.
+The background worker owns API-key checks, privacy filtering, rate limits,
+SQLite cache, retries, and normalized output. Provider latency therefore does
+not hold the alert ingest transaction open.
 
 Rows stored before the enrichment stage can be repaired with
 `n8n/bin/backfill-public-enrichment.js`. Run it inside the alert-store
@@ -487,8 +487,8 @@ diagram is an ordered operational map:
 
 ```text
 Security Onion -> Raspberry Pi Relay -> Docker -> n8n Workflow
-n8n Workflow -> alert-store /enrich
-alert-store /enrich -> configured public enrichment services
+n8n Workflow -> alert-store /alert plus durable enrichment handoff
+alert-store enrichment worker -> configured public enrichment services
 alert-store -> SQLite alert_json, enrichment_json, raw_event_json
 SQLite + Mac Studio AI Lab + Ollama + AI Reports + Telegram -> Onion Sentinel
 ```
@@ -609,8 +609,8 @@ Current Flow page model:
 
 ```text
 Security Onion -> Raspberry Pi relay -> Docker -> n8n Workflow
-n8n Workflow -> alert-store /enrich -> public enrichment services
-alert-store /enrich -> alert-store /alert -> SQLite grouped detection store
+n8n Workflow -> alert-store /alert -> SQLite grouped detection store plus durable job
+alert-store enrichment worker -> public enrichment services -> enrichment_json
 SQLite -> Mac Studio AI Lab -> Ollama current local model -> AI Reports
 SQLite + AI Reports -> Onion Sentinel dashboard
 SQLite/n8n notification policy -> Telegram high/critical notifications

@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll Security Onion alerts every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=15s
+Persistent=true
+Unit=so-alert-poll.service
+
+[Install]
+WantedBy=timers.target

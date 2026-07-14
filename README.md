@@ -56,6 +56,15 @@ generated reports, or live alert data. See
 `docs/product-deployment-requirements.md` for the current UI, workflow,
 deployment, AI, notification, and validation requirements.
 
+The current reliability boundaries, durable queue behavior, service-level
+objectives, and recovery checks are in
+`docs/reliability-and-slo-runbook.md`.
+
+The least-privilege migration plan for supported Security Onion APIs and
+policy-brokered OSQuery investigations is in
+`docs/security-onion-api-and-osquery-roadmap.md`. Restricted SSH remains the
+production transport until that roadmap's acceptance gates pass.
+
 ## Secret Handling
 
 Never commit these live files:

@@ -18,10 +18,8 @@
     <string>0</string>
     <string>--related-limit</string>
     <string>8</string>
-    <string>--model</string>
-    <string>devstral:latest</string>
     <string>--timeout</string>
-    <string>240</string>
+    <string>600</string>
   </array>
 
   <key>WorkingDirectory</key>

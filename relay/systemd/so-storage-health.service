@@ -1,0 +1,12 @@
+[Unit]
+Description=Onion Sentinel relay SSD health check
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=soalert
+Group=soalert
+WorkingDirectory=/opt/so-alert-relay/app
+EnvironmentFile=/etc/so-alert-relay/relay.env
+ExecStart=/usr/bin/python3 /opt/so-alert-relay/app/relay_health_wrapper.py --component storage
+TimeoutStartSec=2min

@@ -1,0 +1,2 @@
+# Read-only SMART access for the dedicated Onion Sentinel relay account.
+soalert ALL=(root) NOPASSWD: /usr/sbin/smartctl -a -j /dev/sda
