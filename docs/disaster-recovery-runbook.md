@@ -60,7 +60,7 @@ alert-store dependency tree with the committed `package-lock.json` via
 restore; do not fall back to an unlocked `npm install`.
 
 Create the SOC report directory used by n8n and expose it through the
-Hermes/Obsidian-facing Documents path:
+Obsidian-facing Documents path:
 
 ```bash
 mkdir -p $HOME/n8n-local/soc-alerts
@@ -72,9 +72,9 @@ if [ ! -e "$HOME/Documents/SOC Alerts" ]; then
 fi
 ```
 
-This keeps Docker's bind mount inside `$HOME/n8n-local` while
-still letting the Hermes portal read Markdown reports from
-`$HOME/Documents/SOC Alerts`.
+This keeps Docker's bind mount inside `$HOME/n8n-local` while preserving the
+operator-friendly `$HOME/Documents/SOC Alerts` path. Hermes does not read or
+publish this corpus as part of Onion Sentinel.
 
 Edit:
 
@@ -235,7 +235,7 @@ normal encrypted Mac Studio backups because Git contains templates only.
 The prompts and model routing can be edited from:
 
 ```text
-http://10.77.7.225:8765/view/b68c5a48b9778061/settings.html
+http://10.77.7.225:8766/settings.html
 ```
 
 Open n8n:
@@ -313,7 +313,7 @@ alert-store once after copying the current source so the additive schema
 migration creates any missing lifecycle columns.
 
 The dashboard can also queue packet evidence from the SOC Alerts table. The
-`PCAP` row action calls the portal API, which writes or requeues a bounded
+`PCAP` row action calls the Onion Sentinel API, which writes or requeues a bounded
 `pcap_requests` row and immediately returns `Queued` to the UI. The relay and
 Security Onion wrapper still own capture fulfillment, so a dashboard/API
 failure does not stop normal alert relay ingestion, and a relay/PCAP failure
@@ -440,17 +440,26 @@ Report output:
 $HOME/Documents/SOC Alerts
 ```
 
-Portal refresh:
+Dashboard refresh:
 
 ```bash
-python3 $HOME/.hermes/scripts/build_soc_alerts_dashboard.py
-python3 $HOME/n8n-local/bin/sync-soc-alerts-portal.py
+python3 $HOME/n8n-local/bin/refresh-soc-dashboard.py
 ```
 
-Portal URL:
+The refresh worker serializes builds behind its own lock and writes directly to
+`$HOME/SOC Alerts Web`. The dedicated `com.arron.onion-sentinel.web`
+LaunchAgent serves that tree and SOC APIs on port `8766`. No supported Onion
+Sentinel job reads or writes `$HOME/.hermes` or `$HOME/report_portal`.
+
+The Hermes LAN Portal is a separate project on port `8765`. It may provide an
+ordinary external link to Onion Sentinel, but it must not iframe, proxy, copy,
+rebuild, authenticate, delete, or otherwise manage Onion Sentinel content.
+Hermes and OpenClaw availability cannot affect this dashboard runtime.
+
+Dashboard URL:
 
 ```text
-http://10.77.7.225:8765/view/b68c5a48b9778061/
+http://10.77.7.225:8766/
 ```
 
 Synthetic durable-intake test from the relay:
@@ -495,12 +504,12 @@ operation, new alerts and quiet-cycle relay heartbeats both update that file.
 If the tile is red, check the newest beacon timestamp and the Pi timer logs:
 
 ```bash
-ssh aj_lobster@10.77.7.225 'cat "$HOME/report_portal/library/Cybersecurity/SOC Alerts/n8n-beacon.json"'
-ssh aj_lobster@10.77.7.225 'curl -fsS "http://127.0.0.1:8765/api/system-health/beacons?hours=24"'
+ssh aj_lobster@10.77.7.225 'cat "$HOME/n8n-local/alert_store_data/n8n-beacon.json"'
+ssh aj_lobster@10.77.7.225 'curl -fsS "http://127.0.0.1:8766/api/system-health/beacons?hours=24"'
 ssh aj@10.88.8.8 'systemctl list-timers --all so-alert-poll.timer so-pcap-broker.timer --no-pager; sudo journalctl -u so-alert-poll.service -u so-pcap-broker.service -n 40 --no-pager'
 ```
 
-The System Health page at `/view/b68c5a48b9778061/system-health.html` uses
+The System Health page at `/system-health.html` uses
 `n8n-beacon-history.json` to show the last 24 hours of relay/n8n beacon events,
 unsuccessful recovery-marked events, and gaps longer than 10 minutes between
 successful beacons. The history file is generated beside `n8n-beacon.json` and
@@ -573,12 +582,15 @@ ALERT_STORE_SQLITE_TEMP_STORE=DEFAULT
 ```
 
 The host-native alert-store is the sole production writer for alert evidence,
-analyst workflow state, grouped summaries, and PCAP request records. The portal
+analyst workflow state, grouped summaries, and PCAP request records. The
+dedicated Onion Sentinel API service
 proxies mutations to alert-store and opens SQLite read-only for dashboard
 queries. On the current Docker Desktop bind-mounted runtime path, do not enable
 WAL; use a named Docker volume or host-native service before reconsidering it.
 If a recovered DB must be swapped in, stop alert-store and all readers,
-including the report portal, before replacing `alerts.sqlite3`. Remove stale
+including the Onion Sentinel web service, before replacing `alerts.sqlite3`.
+The separate Hermes LAN Portal is not an alert database reader and must not be
+stopped or restarted by this procedure. Remove stale
 `alerts.sqlite3-journal`, `alerts.sqlite3-wal`, and `alerts.sqlite3-shm`
 sidecars before restarting.
 
@@ -590,13 +602,13 @@ tree and never copy them into Git:
 ```bash
 ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose stop alert-store'
 ssh aj_lobster@10.77.7.225 'launchctl bootout gui/$(id -u)/com.arron.soc.alert-store 2>/dev/null || true'
-ssh aj_lobster@10.77.7.225 'launchctl bootout gui/$(id -u)/com.arron.reportportal 2>/dev/null || true'
+ssh aj_lobster@10.77.7.225 'launchctl bootout gui/$(id -u)/com.arron.onion-sentinel.web 2>/dev/null || true'
 ssh aj_lobster@10.77.7.225 'ts=$(date +%Y%m%dT%H%M%S%z); cp -p "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "$HOME/n8n-local/alert_store_backups/alerts.sqlite3.pre-index-repair-$ts.bak"'
 ssh aj_lobster@10.77.7.225 'sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "REINDEX;"'
 ssh aj_lobster@10.77.7.225 'ts=$(date +%Y%m%dT%H%M%S%z); out="$HOME/n8n-local/alert_store_data/alerts.repaired-$ts.sqlite3"; rm -f "$out"; sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "VACUUM INTO '\''$out'\'';"; sqlite3 "$out" "PRAGMA integrity_check;"; mv "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "$HOME/n8n-local/alert_store_data/alerts.sqlite3.pre-vacuum-replace-$ts.bak"; mv "$out" "$HOME/n8n-local/alert_store_data/alerts.sqlite3"; chmod 0644 "$HOME/n8n-local/alert_store_data/alerts.sqlite3"'
 ssh aj_lobster@10.77.7.225 'launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.arron.soc.alert-store.plist" 2>/dev/null || launchctl kickstart -k gui/$(id -u)/com.arron.soc.alert-store'
 ssh aj_lobster@10.77.7.225 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose up -d alert-store'
-ssh aj_lobster@10.77.7.225 'launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.arron.reportportal.plist" 2>/dev/null || launchctl kickstart -k gui/$(id -u)/com.arron.reportportal'
+ssh aj_lobster@10.77.7.225 'launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.arron.onion-sentinel.web.plist" 2>/dev/null || launchctl kickstart -k gui/$(id -u)/com.arron.onion-sentinel.web'
 ssh aj_lobster@10.77.7.225 'sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "PRAGMA quick_check;"'
 ```
 
@@ -867,7 +879,10 @@ worker runs. The wrapper's separate stream lock permits only one Security Onion
 read at a time, caps source reads at 4 MiB/s, caps relay-to-Mac rsync at 4 MiB/s,
 and combines tagged and untagged
 filters into one scan. The broker handles one request per run and the timer
-waits five minutes after completion before another run. The old n8n inline
+waits one minute after completion before another run. The worker remains
+single-flight, bandwidth-capped, and capture-loss gated; the shorter idle
+interval lets a healthy broker recover a burst backlog without concurrent
+Security Onion reads. The old n8n inline
 upload and Security Onion tar-staging paths are absent.
 
 Keep capture protection enabled. The relay must receive a fresh latest-interval
@@ -1065,7 +1080,7 @@ Also verify that `$HOME/n8n-local/alert_store_backups` contains recent
 
 Before declaring recovery complete, confirm all of the following:
 
-- n8n and portal `/healthz` endpoints return success;
+- n8n and Onion Sentinel `/healthz` endpoints return success;
 - alert-store production SQLite and the newest maintenance backup pass
   `PRAGMA quick_check`;
 - both `so-alert-poll.timer` and `so-pcap-broker.timer` are active, their last

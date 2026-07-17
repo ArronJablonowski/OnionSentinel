@@ -3,7 +3,7 @@
 The Onion Sentinel UI regression suite combines static unit assertions with
 two Playwright tracks:
 
-- A read-only browser crawl against the LAN portal. It intercepts mutating
+- A read-only browser crawl against the independent Onion Sentinel dashboard. It intercepts mutating
   `/api/` requests and permits read-only API traffic only.
 - A disposable mutation fixture generated under a temporary `HOME` and
   served on loopback. It uses TEST-NET alerts and exercises state-changing UI
@@ -61,6 +61,11 @@ touch-friendly section headers.
 Sampled live reports must
 each contain exactly one Duplicate Alert Timeline and one AI Analysis Output
 section, including grouped detections with only one observation.
+
+The read-only release gate also rebuilds the dashboard while repeatedly
+requesting sampled detail endpoints. Every request must remain HTTP 200. A
+transient 404 during publication indicates that the live detail directory was
+cleared or a fragment was exposed before completion and blocks release.
 
 Detail-renderer unit coverage also verifies nested packet-evidence accordions:
 `TShark Findings` may live inside `Parsed PCAP Evidence`, while `Alert Summary`

@@ -57,6 +57,14 @@ class ArchitectureHardeningTest(unittest.TestCase):
         self.assertIn("<key>PathState</key>", pcap_plist)
         self.assertIn("<key>StartInterval</key>", pcap_plist)
 
+    def test_relay_pcap_broker_uses_single_flight_one_minute_recovery(self):
+        timer = (ROOT / "relay/systemd/so-pcap-broker.timer").read_text(encoding="utf-8")
+        worker = (ROOT / "relay/app/relay.py").read_text(encoding="utf-8")
+        self.assertIn("OnUnitInactiveSec=1min", timer)
+        self.assertNotIn("OnUnitActiveSec=", timer)
+        self.assertIn("limit = 1", worker)
+        self.assertIn("fcntl.LOCK_EX | fcntl.LOCK_NB", worker)
+
     def test_dashboard_generation_is_decoupled_from_local_inference(self):
         scheduler = (ROOT / "n8n/bin/auto-run-ai-analysis.py").read_text(encoding="utf-8")
         refresher = (ROOT / "n8n/bin/refresh-soc-dashboard.py").read_text(encoding="utf-8")
@@ -73,6 +81,25 @@ class ArchitectureHardeningTest(unittest.TestCase):
         self.assertIn("<key>PathState</key>", plist)
         self.assertIn("<key>StartInterval</key>", plist)
         self.assertIn("com.arron.soc.dashboard-refresh.plist", installer)
+
+    def test_repair_install_preserves_live_scoring_policy(self):
+        installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text(encoding="utf-8")
+        destination = '$STACK_DIR/alert_store/config/scoring_rules.json'
+        guard = f'if [[ ! -f "{destination}" ]]'
+        copy = (
+            'cp "$REPO_DIR/n8n/alert_store/config/scoring_rules.json" '
+            f'"{destination}"'
+        )
+        self.assertIn(guard, installer)
+        self.assertIn(copy, installer)
+        self.assertLess(installer.index(guard), installer.index(copy))
+
+    def test_dashboard_documentation_uses_dedicated_service(self):
+        dashboard_readme = (ROOT / "onion-sentinel-dashboard/README.md").read_text(encoding="utf-8")
+        self.assertIn("onion_sentinel_server.py", dashboard_readme)
+        self.assertIn(":8766", dashboard_readme)
+        self.assertNotIn("sync-soc-alerts-portal.py", dashboard_readme)
+        self.assertNotIn("sync_report_portal.py", dashboard_readme)
 
     def test_worker_wake_markers_are_consumable_and_batches_rearm(self):
         ai = (ROOT / "n8n/bin/auto-run-ai-analysis.py").read_text(encoding="utf-8")

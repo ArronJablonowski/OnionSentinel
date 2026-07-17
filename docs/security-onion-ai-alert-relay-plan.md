@@ -470,11 +470,11 @@ Implemented runtime prompt path:
 $HOME/n8n-local/config/soc_analyst_system_prompt.md
 ```
 
-The SOC Alerts Settings page lets an authenticated LAN Portal admin edit and
+The SOC Alerts Settings page lets an authenticated Onion Sentinel admin edit and
 save this `SOC Analyst` system prompt:
 
 ```text
-http://10.77.7.225:8765/view/b68c5a48b9778061/settings.html
+http://10.77.7.225:8766/settings.html
 ```
 
 Use a bounded prompt:
@@ -696,7 +696,7 @@ Mac Studio alert-store now owns:
 - notification routing
 - Markdown report decisions
 
-For the LAN Portal, the current Markdown-generated UI is acceptable for modest
+For the Onion Sentinel dashboard, the current generated UI is acceptable for modest
 report counts. The recommended high-volume path is a SQLite-backed SOC Alerts
 API with pagination/search/metrics, while Markdown remains the local AI
 reference corpus.

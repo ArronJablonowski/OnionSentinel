@@ -32,8 +32,8 @@ PY
 fi
 
 export ALERT_STORE_DB="${ALERT_STORE_DB:-$STACK_DIR/alert_store_data/alerts.sqlite3}"
-export ALERT_STORE_BEACON_PATHS="${ALERT_STORE_BEACON_PATHS:-$STACK_DIR/alert_store_data/n8n-beacon.json,$HOME/report_portal/library/Cybersecurity/SOC Alerts/n8n-beacon.json}"
-export ALERT_STORE_BEACON_HISTORY_PATHS="${ALERT_STORE_BEACON_HISTORY_PATHS:-$STACK_DIR/alert_store_data/n8n-beacon-history.json,$HOME/report_portal/library/Cybersecurity/SOC Alerts/n8n-beacon-history.json}"
+export ALERT_STORE_BEACON_PATHS="${ALERT_STORE_BEACON_PATHS:-$STACK_DIR/alert_store_data/n8n-beacon.json,$HOME/SOC Alerts Web/n8n-beacon.json}"
+export ALERT_STORE_BEACON_HISTORY_PATHS="${ALERT_STORE_BEACON_HISTORY_PATHS:-$STACK_DIR/alert_store_data/n8n-beacon-history.json,$HOME/SOC Alerts Web/n8n-beacon-history.json}"
 export ALERT_STORE_HOST="${ALERT_STORE_HOST:-127.0.0.1}"
 export ALERT_STORE_PORT="${ALERT_STORE_PORT:-8787}"
 export SCORING_RULES_PATH="${SCORING_RULES_PATH:-$ALERT_STORE_DIR/config/scoring_rules.json}"

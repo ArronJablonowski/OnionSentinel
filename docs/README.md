@@ -16,5 +16,7 @@ Important documents:
 - `soc-daily-rollups.md`: daily summary generation.
 - `frontend-ui-qa-runbook.md`: responsive Playwright crawl, chaos interaction,
   and visual regression workflow.
+- `dashboard-service-boundary.md`: strict ownership boundary between the
+  independently served Onion Sentinel UI and the separate Hermes LAN Portal.
 
 The top-level node READMEs are the fastest path for rebuilds. These documents preserve design history and deeper operational context.

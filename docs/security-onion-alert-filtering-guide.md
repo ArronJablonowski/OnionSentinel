@@ -25,11 +25,18 @@ Production policy file on the Mac Studio:
 $HOME/n8n-local/alert_store/config/scoring_rules.json
 ```
 
-DR repo copy:
+Sanitized DR baseline in the repo:
 
 ```text
 n8n/alert_store/config/scoring_rules.json
 ```
+
+The installer copies this baseline only when the runtime policy does not
+already exist. A repair install must never overwrite production tuning, which
+may contain environment-specific rule names and addresses that are not safe to
+commit. The live policy is preserved by the encrypted/runtime DR backup flow;
+review and sanitize any rule before deliberately promoting it into the repo
+baseline.
 
 The n8n workflow sends validated alerts to alert-store:
 
@@ -125,12 +132,11 @@ python3 -m json.tool alert_store/config/scoring_rules.json >/dev/null
 /usr/local/bin/docker exec alert-store node /app/review_alerts.js --hours 24 --limit 20
 ```
 
-8. Rebuild the SOC dashboard if you want the static portal refreshed
+8. Rebuild the SOC dashboard if you want the generated UI refreshed
 immediately.
 
 ```bash
-python3 "$HOME/.hermes/scripts/build_soc_alerts_dashboard.py"
-python3 "$HOME/n8n-local/bin/sync-soc-alerts-portal.py"
+python3 "$HOME/n8n-local/bin/refresh-soc-dashboard.py"
 ```
 
 ## Drop Rule Example
@@ -354,8 +360,12 @@ python3 -m json.tool alert_store/config/scoring_rules.json >/dev/null
 /usr/local/bin/docker compose up -d --force-recreate alert-store
 ```
 
-The DR repo copy of the policy is:
+The sanitized DR baseline is:
 
 ```text
 n8n/alert_store/config/scoring_rules.json
 ```
+
+Restoring that file provides portable defaults, not a byte-for-byte copy of
+local production tuning. Restore the live policy from the qualified runtime
+backup when recovering the same environment.

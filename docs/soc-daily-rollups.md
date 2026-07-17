@@ -10,8 +10,8 @@ human SOC review.
 ```
 
 The daily rollup reads alert-store SQLite directly and writes an
-Obsidian-friendly Markdown file into the same SOC Alerts corpus used by the LAN
-Portal and local LLM.
+Obsidian-friendly Markdown file into the same SOC Alerts corpus used by Onion
+Sentinel and the local LLM.
 
 ## Live Paths
 

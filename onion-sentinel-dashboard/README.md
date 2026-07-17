@@ -1,12 +1,16 @@
 # Onion Sentinel Dashboard Node
 
-This directory contains the Mac Studio LAN Portal backend and the generated SOC dashboard builder.
+This directory contains the independently served Onion Sentinel dashboard,
+SOC APIs, builder, and static assets. The separate Hermes LAN Portal may link
+to Onion Sentinel, but it is not a build, publish, authentication, or runtime
+dependency.
 
 ## Files
 
 | Path | Purpose |
 | --- | --- |
-| `report_portal.py` | Serves the LAN Portal and SOC alert APIs. |
+| `onion_sentinel_server.py` | Dedicated port `8766` service that exposes only Onion Sentinel static files, admin login, and SOC APIs. |
+| `report_portal.py` | Transitional SOC API implementation imported from the dedicated server; non-SOC routes are not exposed by `onion_sentinel_server.py`. |
 | `artifact_cache.py` | Thread-safe, single-flight cache for parsed Markdown/JSON artifacts. |
 | `response_cache.py` | Short-lived, bounded cache for serialized read-only API responses. |
 | `scripts/build_soc_alerts_dashboard.py` | Builds the static dashboard pages from SQLite/report artifacts. |
@@ -19,12 +23,11 @@ This directory contains the Mac Studio LAN Portal backend and the generated SOC 
 
 | Repo file | Production destination |
 | --- | --- |
-| `scripts/build_soc_alerts_dashboard.py` | `$HOME/.hermes/scripts/build_soc_alerts_dashboard.py` |
-| `scripts/dashboard_metric_components.py` | `$HOME/.hermes/scripts/dashboard_metric_components.py` |
-| `scripts/dashboard_timeline_components.py` | `$HOME/.hermes/scripts/dashboard_timeline_components.py` |
-| `scripts/dashboard_system_health_components.py` | `$HOME/.hermes/scripts/dashboard_system_health_components.py` |
-| `report_portal.py` | `$HOME/report_portal/report_portal.py` |
-| `assets/` | copied into generated SOC dashboard output |
+| `onion_sentinel_server.py` | `$HOME/n8n-local/onion-sentinel-dashboard/onion_sentinel_server.py` |
+| `report_portal.py` and API helpers | `$HOME/n8n-local/onion-sentinel-dashboard/` |
+| `scripts/` | `$HOME/n8n-local/onion-sentinel-dashboard/scripts/` |
+| `assets/` | `$HOME/n8n-local/onion-sentinel-dashboard/assets/` and generated output |
+| generated pages | `$HOME/SOC Alerts Web/` |
 
 ## Dashboard Features
 
@@ -74,6 +77,9 @@ This directory contains the Mac Studio LAN Portal backend and the generated SOC 
   contract, builder validation, portal validation, tests, and architecture docs
   together. Never append late evidence after `Raw Logs`; the next dashboard
   rebuild must refresh the appropriate canonical section in place.
+- Publish detail fragments with same-directory temporary files and atomic
+  replacement. Remove stale group files only after every current fragment has
+  been published; never empty the live details directory during a rebuild.
 - The desktop selected-alert band must be fixed beneath a currently visible
   sticky header or at viewport top after the header leaves view. Do not use a
   cached header height as its unconditional top offset.
@@ -84,7 +90,7 @@ This directory contains the Mac Studio LAN Portal backend and the generated SOC 
 
 ## Performance Verification
 
-Exercise the live read APIs with concurrent clients after portal changes. A healthy
+Exercise the live read APIs with concurrent clients after dashboard changes. A healthy
 cached burst should complete without errors or serialized multi-second stalls:
 
 ```bash
@@ -92,7 +98,7 @@ python3 - <<'PY'
 from concurrent.futures import ThreadPoolExecutor
 from urllib.request import urlopen
 
-url = "http://127.0.0.1:8765/api/soc-alerts?limit=1"
+url = "http://127.0.0.1:8766/api/soc-alerts?limit=1"
 with ThreadPoolExecutor(max_workers=40) as pool:
     results = list(pool.map(lambda _: urlopen(url, timeout=5).status, range(120)))
 assert results == [200] * 120
@@ -109,9 +115,19 @@ clients share the coalesced snapshot rather than duplicating backend scans.
 ## Manual Rebuild
 
 ```bash
-ssh <mac_user>@10.77.7.225 'python3 ~/.hermes/scripts/build_soc_alerts_dashboard.py && python3 ~/.hermes/scripts/sync_report_portal.py'
+ssh <mac_user>@10.77.7.225 'python3 "$HOME/n8n-local/bin/refresh-soc-dashboard.py"'
 ```
 
-## Portal Runtime
+The refresh worker writes the completed build directly to `$HOME/SOC Alerts Web`.
+It must not invoke any file under `$HOME/.hermes`, copy into
+`$HOME/report_portal`, or depend on Hermes/OpenClaw availability. The dedicated
+LaunchAgent serves that directory directly.
 
-The LAN Portal server is expected to run on the Mac Studio at port `8765`. Admin state and session files are intentionally runtime-only and ignored by Git.
+## Dedicated Runtime
+
+Onion Sentinel runs at `http://10.77.7.225:8766/` under
+`com.arron.onion-sentinel.web`. Admin state and sessions live under
+`$HOME/n8n-local`, are runtime-only, and are ignored by Git. The Hermes LAN
+Portal at port `8765` is separately owned and may contain only an ordinary link
+to this URL. It must not iframe, proxy, copy, rebuild, or delete Onion Sentinel
+content.

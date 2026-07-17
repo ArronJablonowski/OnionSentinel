@@ -25,6 +25,13 @@ operations/secret-scan.zsh
 
 Run before every commit and before every push.
 
+The scanner checks ordinary tracked and untracked source while pruning known
+dependency and generated-test directories such as `.venv`, `node_modules`,
+`__pycache__`, Playwright output, and pytest caches. Those trees may contain
+third-party certificates or binary fixtures and are not repository content.
+Use `git status --ignored` separately when auditing whether local dependency or
+test-output directories remain correctly ignored.
+
 ## Frontend UI QA
 
 The Playwright chaos/regression suites are documented in

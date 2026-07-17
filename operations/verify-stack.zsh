@@ -7,12 +7,15 @@ set -euo pipefail
 : "${SO_HOST:?Set SO_HOST to the Security Onion SSH target, for example so-ai-relay@192.168.1.7}"
 : "${MAC_HOST:?Set MAC_HOST to the Mac Studio SSH target, for example mac_user@10.77.7.225}"
 N8N_URL="${N8N_URL:-http://10.77.7.225:5678/healthz}"
+ONION_SENTINEL_URL="${ONION_SENTINEL_URL:-http://10.77.7.225:8766}"
 PCAP_TIMER_EXPECTED_STATE="${PCAP_TIMER_EXPECTED_STATE:-active}"
 
 if [[ "$PCAP_TIMER_EXPECTED_STATE" != "active" && "$PCAP_TIMER_EXPECTED_STATE" != "safety-hold" ]]; then
   print -u2 "PCAP_TIMER_EXPECTED_STATE must be active or safety-hold"
   exit 2
 fi
+
+MAC_HOST="$MAC_HOST" "$(cd "$(dirname "$0")" && pwd)/verify-dashboard-isolation.zsh"
 
 echo "== Pi reachability =="
 # Confirms SSH admin access plus timer status after boot/reboot.
@@ -43,6 +46,11 @@ ssh "$MAC_HOST" 'cd $HOME/n8n-local && /usr/local/bin/docker compose ps'
 ssh "$MAC_HOST" 'curl -fsS http://127.0.0.1:8787/health | python3 -c '"'"'import json,sys; d=json.load(sys.stdin).get("disk_capacity") or {}; print("disk_used_percent="+str(d.get("used_percent"))); print("disk_start_limit="+str(d.get("start_max_used_percent"))); print("disk_hard_limit="+str(d.get("hard_max_used_percent"))); raise SystemExit(0 if float(d.get("start_max_used_percent") or 100) <= 75 and float(d.get("hard_max_used_percent") or 100) <= 80 else 1)'"'"''
 
 echo
+echo "== Onion Sentinel dedicated web service =="
+curl -fsS --max-time 5 "$ONION_SENTINEL_URL/healthz" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("service="+str(d.get("service"))); print("dashboard_ready="+str(d.get("dashboard_ready"))); print("alert_store_ready="+str(d.get("alert_store_ready"))); raise SystemExit(0 if d.get("ok") is True and d.get("service") == "onion-sentinel" else 1)'
+ssh "$MAC_HOST" 'launchctl print gui/$(id -u)/com.arron.onion-sentinel.web | grep -E "state =|last exit code|path ="'
+
+echo
 echo "== Mac Studio alert-store SQLite =="
 # Confirms the alert-store DB is readable and the maintenance LaunchAgent exists.
 # The live alert-store writes continuously. A read-only verification must wait
@@ -55,11 +63,11 @@ echo
 echo "== Mac Studio PCAP broker and parser =="
 # PCAP evidence is optional, but when enabled it should not degrade alert relay.
 if [[ "$PCAP_TIMER_EXPECTED_STATE" == "active" ]]; then
-  ssh "$MAC_HOST" 'curl -fsS "http://127.0.0.1:8765/api/system-health/beacons?hours=24" | python3 -c '"'"'import json,sys; data=json.load(sys.stdin); p=data.get("pcap",{}); counts=p.get("request_counts",{}); print("pcap_warning_count="+str(p.get("warning_count"))); print("pcap_pending="+str(counts.get("pending",0))); print("pcap_claimed="+str(counts.get("claimed",0))); print("pcap_fulfilled="+str(counts.get("fulfilled",0))); print("pcap_failed="+str(counts.get("failed",0))); print("pcap_no_packet_failures="+str(p.get("no_packet_failures"))); print("pcap_oversize_failures="+str(p.get("oversize_failures"))); raise SystemExit(0 if int(p.get("warning_count") or 0)==0 else 1)'"'"''
+  ssh "$MAC_HOST" 'curl -fsS "http://127.0.0.1:8766/api/system-health/beacons?hours=24" | python3 -c '"'"'import json,sys; data=json.load(sys.stdin); p=data.get("pcap",{}); counts=p.get("request_counts",{}); print("pcap_warning_count="+str(p.get("warning_count"))); print("pcap_pending="+str(counts.get("pending",0))); print("pcap_claimed="+str(counts.get("claimed",0))); print("pcap_fulfilled="+str(counts.get("fulfilled",0))); print("pcap_failed="+str(counts.get("failed",0))); print("pcap_no_packet_failures="+str(p.get("no_packet_failures"))); print("pcap_oversize_failures="+str(p.get("oversize_failures"))); raise SystemExit(0 if int(p.get("warning_count") or 0)==0 else 1)'"'"''
 else
   # Pending work is expected while admission is intentionally closed. An active
   # claim would mean the safety hold is not actually containing transfer work.
-  ssh "$MAC_HOST" 'curl -fsS "http://127.0.0.1:8765/api/system-health/beacons?hours=24" | python3 -c '"'"'import json,sys; data=json.load(sys.stdin); p=data.get("pcap",{}); counts=p.get("request_counts",{}); print("pcap_safety_hold=true"); print("pcap_warning_count="+str(p.get("warning_count"))); print("pcap_pending="+str(counts.get("pending",0))); print("pcap_claimed="+str(counts.get("claimed",0))); print("pcap_fulfilled="+str(counts.get("fulfilled",0))); print("pcap_failed="+str(counts.get("failed",0))); raise SystemExit(0 if int(counts.get("claimed") or 0)==0 else 1)'"'"''
+  ssh "$MAC_HOST" 'curl -fsS "http://127.0.0.1:8766/api/system-health/beacons?hours=24" | python3 -c '"'"'import json,sys; data=json.load(sys.stdin); p=data.get("pcap",{}); counts=p.get("request_counts",{}); print("pcap_safety_hold=true"); print("pcap_warning_count="+str(p.get("warning_count"))); print("pcap_pending="+str(counts.get("pending",0))); print("pcap_claimed="+str(counts.get("claimed",0))); print("pcap_fulfilled="+str(counts.get("fulfilled",0))); print("pcap_failed="+str(counts.get("failed",0))); raise SystemExit(0 if int(counts.get("claimed") or 0)==0 else 1)'"'"''
 fi
 ssh "$MAC_HOST" 'launchctl print gui/$(id -u)/com.arron.soc.pcap-analysis | grep -E "state =|last exit code|run interval|path ="'
 ssh "$MAC_HOST" 'launchctl print gui/$(id -u)/com.arron.soc.pcap-retention | grep -E "state =|last exit code|run interval|path ="'

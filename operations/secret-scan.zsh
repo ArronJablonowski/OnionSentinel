@@ -8,7 +8,13 @@ echo "== high-confidence secret scan =="
 
 if find . \
   -path './.git' -prune -o \
-  -path './node_modules' -prune -o \
+  -path './.venv' -prune -o \
+  -path '*/node_modules' -prune -o \
+  -path '*/__pycache__' -prune -o \
+  -path '*/.pytest_cache' -prune -o \
+  -path '*/.playwright-artifacts' -prune -o \
+  -path '*/playwright-report' -prune -o \
+  -path '*/test-results' -prune -o \
   -path './n8n_data' -prune -o \
   -path './alert_store_data' -prune -o \
   -path './soc-alerts' -prune -o \
@@ -27,6 +33,13 @@ echo "No high-confidence secret patterns found."
 echo "== forbidden runtime file scan =="
 if find . \
   -path './.git' -prune -o \
+  -path './.venv' -prune -o \
+  -path '*/node_modules' -prune -o \
+  -path '*/__pycache__' -prune -o \
+  -path '*/.pytest_cache' -prune -o \
+  -path '*/.playwright-artifacts' -prune -o \
+  -path '*/playwright-report' -prune -o \
+  -path '*/test-results' -prune -o \
   \( -name '.env' -o -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' -o -name 'id_*' -o -name '*.pem' -o -name '*.key' \) \
   -type f -print | rg . ; then
   echo

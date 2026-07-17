@@ -33,7 +33,7 @@ flowchart LR
 | `relay/` | Raspberry Pi relay | Pulls Security Onion alerts over restricted SSH and durably batches alerts plus quiet-cycle heartbeats into the Mac forced-command intake. Includes split systemd timers/services and install scripts. |
 | `relay/n8n-docker/` | Relay-facing Mac handoffs | Notes for the forced alert intake and n8n PCAP-control/rollback endpoints. The actual Mac stack lives in `n8n/`. |
 | `n8n/` | Mac Studio Docker n8n + alert-store | Docker Compose, n8n workflow export, alert-store code, local AI scripts, model settings, launchd jobs. |
-| `onion-sentinel-dashboard/` | Mac Studio dashboard | LAN portal backend and SOC dashboard builder/assets. |
+| `onion-sentinel-dashboard/` | Mac Studio dashboard | Dedicated Onion Sentinel web service, SOC API compatibility layer, builder, and assets. |
 | `mac-studio/` | Mac Studio host orchestration | Host-level restore order and service ownership. |
 | `operations/` | Cross-node validation | Stack verification commands and operational checks. |
 | `docs/` | Full project documentation | Architecture, filtering, AI policy, daily rollups, and DR runbooks. |
@@ -82,7 +82,8 @@ Never commit these live files:
 - `$HOME/n8n-local/.env`
 - `$HOME/n8n-local/alert_store_data/*.sqlite3`
 - `$HOME/n8n-local/n8n_data/`
-- `$HOME/report_portal/.admin_*`
+- `$HOME/n8n-local/admin-state/`
+- `$HOME/n8n-local/config/onion-sentinel-admin-password.json`
 - Telegram bot tokens, chat IDs, relay webhook tokens, SSH private keys, n8n credential exports.
 
 Before pushing:
@@ -116,6 +117,10 @@ operations/secret-scan.zsh
 | Relay host | `10.88.8.8` |
 | Mac Studio | `10.77.7.225` |
 | n8n webhook | `http://10.77.7.225:5678/webhook/security-onion-alert` |
-| Dashboard | `http://10.77.7.225:8765/view/b68c5a48b9778061/` |
+| Dashboard | `http://10.77.7.225:8766/` |
 | Alert DB | `$HOME/n8n-local/alert_store_data/alerts.sqlite3` |
 | Reports | `$HOME/n8n-local/soc-alerts` and `~/Documents/SOC Alerts` symlink |
+
+The Hermes LAN Portal on port `8765` is a separate project and may only link to
+the dashboard URL above. See `docs/dashboard-service-boundary.md` for the
+enforced build, runtime, and ownership boundary.

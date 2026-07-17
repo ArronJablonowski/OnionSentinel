@@ -55,11 +55,13 @@ The installer creates or updates:
 
 - `$HOME/n8n-local`
 - `$HOME/Documents/SOC Alerts` symlink
-- `$HOME/.hermes/scripts/build_soc_alerts_dashboard.py`
-- `$HOME/report_portal/report_portal.py`
+- `$HOME/n8n-local/onion-sentinel-dashboard`
+- `$HOME/SOC Alerts Web`
 - LaunchAgents under `~/Library/LaunchAgents`
 
-It does not overwrite an existing `$HOME/n8n-local/.env`.
+It does not overwrite an existing `$HOME/n8n-local/.env`, and it never writes
+to `$HOME/.hermes` or `$HOME/report_portal`. Those paths belong to the separate
+Hermes LAN Portal project.
 
 Agent memory is not a replacement for SQLite analysis history or the Markdown
 report corpus. The active SOC Analyst retrieves a small set of relevant role
@@ -341,12 +343,12 @@ Alert-store runtime model:
 - Do not run the SQLite-writing alert-store process inside Docker against the
   macOS bind-mounted DB. That path produced repeat `SQLITE_IOERR` and index
   corruption during summary rebuilds.
-- The LAN portal sends acknowledge, suppress, and expose transitions to
+- The Onion Sentinel API sends acknowledge, suppress, and expose transitions to
   `http://127.0.0.1:8787/analyst-status`. Alert-store is the production owner
   of `analyst_alert_group_state` writes and automatically reopens an
   acknowledged group after its stored observation count increases.
 - Manual PCAP requests are posted to `http://127.0.0.1:8787/pcap/request` so
-  the portal does not become a second SQLite queue writer. Alert-store also
+  the web service does not become a second SQLite queue writer. Alert-store also
   serializes relay claim, completion, and operator requeue mutations.
 - Enrichment uses one serialized queue per provider. Provider rate limits and
   cache writes stay coherent, while unrelated providers run concurrently. A

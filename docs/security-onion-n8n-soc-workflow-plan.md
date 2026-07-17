@@ -275,12 +275,12 @@ Editable SOC Analyst system prompt:
 
 ```text
 Prompt file: $HOME/n8n-local/config/<example_identifier>.md
-Dashboard page: http://10.77.7.225:8765/view/b68c5a48b9778061/settings.html
+Dashboard page: http://10.77.7.225:8766/settings.html
 Save API: /api/soc-settings/analyst-prompt
 ```
 
 - The Settings page shows the current `SOC Analyst` system prompt in an editable code block.
-- Saving requires a valid LAN Portal Administration session. If Save returns `Sign in to Administration`, open `http://10.77.7.225:8765/admin`, sign in, then save again from Settings.
+- Saving requires a valid Onion Sentinel Administration session. If Save returns `Sign in to Administration`, open `http://10.77.7.225:8766/admin`, sign in, then save again from Settings.
 - `<example_identifier>.py` loads this file immediately before calling Ollama, so new analyses use the updated prompt without restarting n8n or launchd.
 - `<example_identifier>.py` also records the same prompt text in the prompt package `instructions.role` field so evidence bundles and model calls stay aligned.
 - The DR installer creates the file on a fresh Mac Studio but does not overwrite an existing tuned production prompt.
@@ -469,7 +469,7 @@ Prompt output:  $HOME/n8n-local/soc-alerts/ai-prompts
 AI output:      $HOME/n8n-local/soc-alerts/ai-analysis
 Stdout log:     $HOME/n8n-local/logs/ai-analysis.out.log
 Stderr log:     $HOME/n8n-local/logs/ai-analysis.err.log
-Status JSON:    $HOME/report_portal/library/Cybersecurity/SOC Alerts/soc-alerts-status.json
+Status JSON:    $HOME/SOC Alerts Web/soc-alerts-status.json
 ```
 
 Current trigger policy:
@@ -528,9 +528,9 @@ launchd argument: `--max-per-run 0`, where zero means unlimited queue drain
 - The local AI runner repairs minor response schema drift, such as missing
   `tuning_reason`, with explicit safe defaults so a single imperfect local model
   response does not block later alerts.
-- The scheduled AI trigger uses `~/n8n-local/bin/sync-soc-alerts-portal.py`
-  to copy only `~/SOC Alerts Web` into the SOC Alerts portal library path, so
-  unrelated Hermes dashboard builders cannot block SOC dashboard refresh.
+- The scheduled AI trigger wakes `~/n8n-local/bin/refresh-soc-dashboard.py`,
+  which rebuilds `~/SOC Alerts Web` directly for the dedicated port `8766`
+  service. Hermes dashboard builders cannot block or modify that refresh.
 
 Validation:
 
@@ -1428,7 +1428,7 @@ Initial policy behavior:
 - Escalation thresholds allow high-volume repeated patterns to break through
   suppression periodically.
 
-The LAN Portal SOC Alerts page now uses SQLite-first API pagination/search for
+The Onion Sentinel SOC Alerts page now uses SQLite-first API pagination/search for
 the table body. The static builder still creates the shell, metrics, and local
 Markdown/AI corpus pages, but the browser fetches grouped detections from
 `/api/soc-alerts` in page-numbered slices so it does not load all alerts at
@@ -1502,7 +1502,7 @@ Data sensitivity warning:
 Full-fidelity mode can persist sensitive packet payloads, HTTP bodies, tokens,
 credentials, internal URLs, and other traffic contents in SQLite, Markdown, and
 the rendered dashboard. Keep the Mac Studio, SQLite database, SOC Alerts
-directory, and LAN Portal restricted.
+directory, and Onion Sentinel service restricted.
 ```
 
 ## Phase 8 Relay Noise Reduction

@@ -144,7 +144,8 @@ def evaluate(
         item for item in (pcap.get("active_transfers") or [])
         if isinstance(item, dict) and item.get("progress_at")
     ]
-    if int(metrics.get("oldest_pending_pcap_seconds") or 0) > 60 * 60 and not active_pcap_transfers:
+    pcap_queue_progressing = bool(pcap.get("queue_progressing")) or bool(active_pcap_transfers)
+    if int(metrics.get("oldest_pending_pcap_seconds") or 0) > 60 * 60 and not pcap_queue_progressing:
         failures.append("PCAP backlog exceeds 60 minutes")
     if int(pcap.get("warning_count") or 0) > 0:
         failures.append(f"PCAP workflow has {int(pcap.get('warning_count') or 0)} warning(s)")
@@ -177,6 +178,8 @@ def evaluate(
             "oldest_pending_pcap_seconds": int(metrics.get("oldest_pending_pcap_seconds") or 0),
             "pcap_warning_count": int(pcap.get("warning_count") or 0),
             "active_pcap_transfer_count": len(active_pcap_transfers),
+            "pcap_queue_progressing": pcap_queue_progressing,
+            "pcap_last_progress_age_seconds": pcap.get("last_progress_age_seconds"),
             "ingest_errors": ingest_errors,
             "disk_used_percent": round(disk_used_percent, 1),
             "disk_new_work_limit_percent": 75,
@@ -214,7 +217,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stack-dir", type=Path, default=Path.home() / "n8n-local")
     parser.add_argument("--metrics-url", default="http://127.0.0.1:8787/metrics")
-    parser.add_argument("--health-url", default="http://127.0.0.1:8765/api/system-health/beacons?hours=1")
+    parser.add_argument("--health-url", default="http://127.0.0.1:8766/api/system-health/beacons?hours=1")
     args = parser.parse_args()
     log_dir = args.stack_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)

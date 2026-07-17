@@ -35,7 +35,7 @@ ingest transaction closes.
 | Unit | Schedule | Responsibility |
 | --- | --- | --- |
 | `so-alert-poll.service` | `so-alert-poll.timer`, every 5 minutes | Restricted export, durable outbox delivery, heartbeat. |
-| `so-pcap-broker.service` | `so-pcap-broker.timer`, five minutes after the prior run completes | Sample `/nsm` telemetry, claim one request, stream bounded chunks to SSD, checksum, Mac transfer, completion. |
+| `so-pcap-broker.service` | `so-pcap-broker.timer`, one minute after the prior run completes | Sample `/nsm` telemetry, claim one request, stream bounded chunks to SSD, checksum, Mac transfer, completion. |
 | `so-storage-health.service` | `so-storage-health.timer`, hourly | External-mount identity, capacity, temperature, and read-only SMART health. |
 
 The legacy combined `so-alert-relay.timer` is disabled by the current installer
@@ -104,6 +104,38 @@ selected oldest-first across those tiers. Fresh work remains severity ordered,
 then closest-to-retention-expiry, with creation time as the final tie breaker.
 This preserves urgent response while preventing a continuous medium-alert
 stream from starving older low-priority packet evidence.
+
+PCAP health treats either a fresh transfer heartbeat or a terminal request
+completed within the prior three minutes as queue progress. The bounded
+completion grace covers the broker timer's intentional one-minute handoff
+without emitting a false failure/recovery pair. It does not hide a stopped
+worker: once the grace expires, old pending work and stale claimed work become
+warnings again, and the operational SLO fails when no forward progress exists.
+
+## Dashboard Service Boundary
+
+Dashboard generation and serving are asynchronous presentation
+work, not part of alert commit, PCAP transfer, enrichment, or inference. The
+supported path is:
+
+```text
+refresh-soc-dashboard.py
+  -> $HOME/n8n-local/onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py
+  -> $HOME/SOC Alerts Web
+  -> com.arron.onion-sentinel.web on port 8766
+```
+
+The refresh worker uses a non-overlap lock. Alert-store writes live beacon JSON
+to its runtime data directory and the served dashboard tree. The dedicated web
+service exposes only Onion Sentinel static files and an explicit SOC API
+allowlist; its admin session and password state live under `$HOME/n8n-local`.
+
+The Hermes LAN Portal is outside Onion Sentinel's ownership boundary. Hermes
+may link to `http://10.77.7.225:8766/` but must exclude Onion Sentinel from all
+builder, copy, stale-cleanup, iframe, reverse-proxy, and authentication jobs.
+CI guards active Onion Sentinel scripts against `$HOME/.hermes` and
+`$HOME/report_portal` paths. Hermes/OpenClaw failures therefore cannot block or
+alter SOC dashboard publication.
 
 ## Alert Identity
 
@@ -415,7 +447,7 @@ outbox, and produced a fresh successful Mac Studio health event. Keep
 the legacy combined `so-alert-relay.timer` disabled; the split poll and PCAP
 timers are the production units.
 
-## Portal Event Stream Concurrency
+## Dashboard Event Stream Concurrency
 
 The SOC alert event stream uses a short-lived, single-flight snapshot cache and
 a five-second poll interval. Concurrent dashboard tabs therefore share one
@@ -423,10 +455,10 @@ SQLite/report snapshot instead of independently scanning the same runtime
 state. Keep this cache bounded and invalidate the underlying API response
 caches after analyst mutations.
 
-After portal changes, hold at least four event streams open and issue repeated
+After Onion Sentinel web-service changes, hold at least four event streams open and issue repeated
 `/healthz` requests. Health must remain responsive while the streams are
 connected. This check protects against a regression where long-lived browser
-tabs consume all portal request capacity.
+tabs consume all dashboard request capacity.
 
 The desktop and mobile API-rendered alert tables preserve an explicitly open
 detail only across an in-page data refresh. Expansion state is never written

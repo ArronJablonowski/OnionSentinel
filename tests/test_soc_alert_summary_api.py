@@ -775,6 +775,35 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["pcap"]["warning_count"], 0)
         self.assertEqual(payload["pcap"]["active_transfers"][0]["request_id"], "pcap-active-large")
 
+    def test_system_health_preserves_bounded_progress_between_serial_pcap_jobs(self) -> None:
+        old_at = self.portal.format_iso_timestamp(
+            dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1),
+            timespec="seconds",
+        )
+        fresh_at = self.portal.format_iso_timestamp(
+            dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1),
+            timespec="seconds",
+        )
+        self.conn.executemany(
+            """
+            INSERT INTO pcap_requests (
+              request_id, status, reason, max_window_seconds, request_json,
+              created_at, updated_at, completed_at
+            ) VALUES (?, ?, 'unit test', 120, '{}', ?, ?, ?)
+            """,
+            [
+                ("pcap-old-pending", "pending", old_at, old_at, None),
+                ("pcap-recent-terminal", "fulfilled", old_at, fresh_at, fresh_at),
+            ],
+        )
+        self.conn.commit()
+
+        payload = self.portal.n8n_beacon_history_response({"hours": ["24"]})
+
+        self.assertTrue(payload["pcap"]["queue_progressing"])
+        self.assertLessEqual(payload["pcap"]["last_progress_age_seconds"], 65)
+        self.assertEqual(payload["pcap"]["warning_count"], 0)
+
     def test_event_snapshot_uses_consistent_status_and_metrics_counts(self) -> None:
         payload = self.portal.soc_alert_events_snapshot()
 

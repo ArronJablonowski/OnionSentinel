@@ -58,7 +58,7 @@ flowchart LR
   STORE -->|"high/critical only<br/>cooldown enforced"| TG["Telegram Bot"]
   N8N -->|"accepted committed alerts<br/>atomic deterministic Markdown write"| MD["~/Documents/SOC Alerts"]
   STORE -->|"review_alerts.js<br/>manual export"| OBS["Manual Review Reports"]
-  MD -->|"Hermes build/sync"| PORTAL["LAN SOC Alerts Portal<br/>:8765"]
+  MD -->|"independent build"| DASH["Onion Sentinel<br/>:8766"]
 ```
 
 ## Network Path
@@ -106,7 +106,7 @@ flowchart LR
     POSTCOMMIT["durable n8n_post_commit jobs"]
     DB["alert_store_data/alerts.sqlite3"]
     REPORTS["n8n-local/soc-alerts<br/>symlinked from ~/Documents/SOC Alerts"]
-    PORTAL["report_portal<br/>Hermes LAN viewer"]
+    DASH["Onion Sentinel web<br/>dedicated :8766 service"]
   end
 
   ATIMER --> ASERVICE --> HEALTH --> APP
@@ -249,8 +249,10 @@ Current reboot behavior: `so-alert-poll.timer` and `so-pcap-broker.timer` are
 enabled and active, `NetworkManager-wait-online.service` is enabled, and both
 services are `Type=oneshot` jobs that exit between runs.
 
-The PCAP timer uses `OnUnitInactiveSec=5min`, not `OnUnitActiveSec`. The cooldown
-therefore begins only after the broker service exits.
+The PCAP timer uses `OnUnitInactiveSec=1min`, not `OnUnitActiveSec`. The cooldown
+therefore begins only after the broker service exits. PCAP work remains
+single-flight and capture-loss gated, so reducing idle recovery time does not
+allow concurrent Security Onion reads.
 
 Reboot validation update on 2026-07-01:
 
@@ -341,7 +343,7 @@ This Mac was tested after the source restriction and is denied by Security Onion
 | SQLite DB | `$HOME/n8n-local/alert_store_data/alerts.sqlite3` |
 | SOC Markdown reports | `$HOME/Documents/SOC Alerts` |
 | Docker-mounted report directory | `$HOME/n8n-local/soc-alerts` |
-| SOC alert portal | `http://10.77.7.225:8765/view/b68c5a48b9778061/` |
+| Onion Sentinel dashboard | `http://10.77.7.225:8766/` |
 | Scoring config | `$HOME/n8n-local/alert_store/config/scoring_rules.json` |
 | Review CLI | `$HOME/n8n-local/alert_store/review_alerts.js` |
 | Investigation CLI | `$HOME/n8n-local/alert_store/investigation_notes.js` |
@@ -450,18 +452,19 @@ Implementation detail:
 $HOME/Documents/SOC Alerts -> $HOME/n8n-local/soc-alerts
 ```
 
-The symlink keeps the visible report location under Documents for Hermes and
-Obsidian while Docker mounts the less-protected
+The symlink keeps the visible report location under Documents for Obsidian
+while Docker mounts the less-protected
 `$HOME/n8n-local/soc-alerts` directory into the n8n container as
 `/soc-alerts`.
 
-The Hermes portal builder reads the Markdown folder and publishes the LAN view:
+The Onion Sentinel-owned builder reads SQLite and the Markdown corpus, then
+writes the independently served dashboard tree:
 
 ```text
 Source: $HOME/Documents/SOC Alerts
-Builder: $HOME/.hermes/scripts/build_soc_alerts_dashboard.py
-Sync: $HOME/n8n-local/bin/sync-soc-alerts-portal.py
-Portal: http://10.77.7.225:8765/view/b68c5a48b9778061/
+Builder: $HOME/n8n-local/onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py
+Refresh: $HOME/n8n-local/bin/refresh-soc-dashboard.py
+Dashboard: http://10.77.7.225:8766/
 ```
 
 Scaling note: the current SOC Alerts UI is generated from Markdown and is good
@@ -469,10 +472,10 @@ for analyst browsing at modest report counts. For large volumes, the recommended
 path is SQLite-backed API pagination and metrics, with Markdown retained as the
 local AI/reference corpus. See `soc-alert-storage-ui-scaling-architecture.md`.
 
-Implementation direction for Hermes:
+Dashboard implementation:
 
 ```text
-Dashboard URL: http://10.77.7.225:8765/view/b68c5a48b9778061/
+Dashboard URL: http://10.77.7.225:8766/
 Primary UI source: $HOME/n8n-local/alert_store_data/alerts.sqlite3
 LLM/report corpus: $HOME/Documents/SOC Alerts
 ```
@@ -481,8 +484,8 @@ The dashboard should use SQLite for alert tables, metrics, filters, suppressed
 records, dropped records, and pagination. Markdown generation should continue
 for accepted alerts so the local LLM has durable investigation notes to read.
 
-2026-07-03 status: the Hermes SOC Alerts dashboard builder now reads the
-SQLite `alerts` table as its primary source for metrics and uses the LAN Portal
+The SOC Alerts dashboard builder reads the
+SQLite `alerts` table as its primary source for metrics and uses the Onion Sentinel
 API for table rows. The page ships an empty table shell, then fetches grouped
 SQLite alert rows from `/api/soc-alerts` in page-numbered slices. The default
 page size is 25 grouped detections, and analysts can choose larger page sizes
@@ -492,9 +495,7 @@ load stays small.
 
 2026-07-03 update: lazy detail loading is deployed. The builder writes full
 rendered detail fragments to `SOC Alerts Web/details/<group_id>.html`, the
-portal sync mirrors them into
-`$HOME/report_portal/library/Cybersecurity/SOC Alerts/details/`,
-and the LAN Portal serves them through
+dedicated web service serves them directly through
 `GET /api/soc-alerts/<group_id>/detail`. The table loads lightweight rows first
 and fetches full Markdown/AI/raw-JSON detail only when a row is expanded.
 
@@ -573,8 +574,7 @@ n8n workflow :5678 webhook
 Validation command after redeploy:
 
 ```bash
-python3 $HOME/.hermes/scripts/build_soc_alerts_dashboard.py
-python3 $HOME/n8n-local/bin/sync-soc-alerts-portal.py
+python3 $HOME/n8n-local/bin/refresh-soc-dashboard.py
 ```
 
 Then confirm the served HTML contains `data-view="overview"` and the
@@ -588,7 +588,7 @@ acknowledged/suppressed visibility, severity, and last-seen window filters.
 
 Grouped analyst state: as of 2026-07-03, acknowledge/suppress/expose state is
 stored in SQLite table `analyst_alert_group_state`, keyed by the stable grouped
-detection digest instead of by a raw Security Onion alert id. The LAN Portal API
+detection digest instead of by a raw Security Onion alert id. The Onion Sentinel API
 supports server-side grouped alert queries with `analyst_status=open`,
 `analyst_status=acknowledged`, or `analyst_status=suppressed`, plus cursor
 pagination. This is now the production path for high-volume and multi-analyst
@@ -613,7 +613,7 @@ Grouped read performance: `alert-store` now maintains SQLite table
 `alert_group_summary` whenever alerts are inserted, rescored, or manually
 rebuilt. It stores one row per grouped detection with newest representative
 alert, first/last seen, raw row count, total observed count, log source,
-severity, route, filter state, and common endpoint fields. The LAN Portal API
+severity, route, filter state, and common endpoint fields. The Onion Sentinel API
 uses this table for alert pagination and metrics, then falls back to runtime
 grouping if the table is missing or empty after a restore.
 
@@ -640,7 +640,7 @@ SIEM Engineer prompt: $HOME/n8n-local/config/siem_engineer_system_prompt.md
 Cyber Threat Intel: $HOME/n8n-local/config/cyber_threat_intel_system_prompt.md
 Threat Hunter prompt: $HOME/n8n-local/config/threat_hunter_system_prompt.md
 Model routing: $HOME/n8n-local/config/ai_model_settings.json
-Settings UI:  http://10.77.7.225:8765/view/b68c5a48b9778061/settings.html
+Settings UI:  http://10.77.7.225:8766/settings.html
 Analyst Prompt API: /api/soc-settings/analyst-prompt
 Incident Response:  /api/soc-settings/incident-responder-prompt
 Engineer Prompt API: /api/soc-settings/siem-engineer-prompt
@@ -736,11 +736,9 @@ and missed runs, while the lock file still prevents overlapping Ollama jobs.
 The local AI runner also records repaired schema drift in the JSON artifact, so
 missing non-critical fields such as `tuning_reason` do not block later alerts.
 
-The AI trigger uses the Onion Sentinel-owned
-`$HOME/n8n-local/bin/sync-soc-alerts-portal.py` helper to copy only
-`$HOME/SOC Alerts Web` into
-`$HOME/report_portal/library/Cybersecurity/SOC Alerts`. This keeps scheduled
-SOC alert analysis independent from unrelated local Hermes dashboard builders.
+The AI trigger wakes the Onion Sentinel-owned dashboard refresh worker. It
+rebuilds `$HOME/SOC Alerts Web` for the dedicated service without invoking or
+writing any Hermes-owned path.
 
 This keeps the Raspberry Pi as a simple transport layer. AI scheduling, prompt
 construction, model execution, artifact storage, and UI refresh all live on the
@@ -1338,7 +1336,7 @@ The `/rescore` endpoint also backfills these derived columns from existing
 `alert_json`. On 2026-07-02, it processed 1,549 rows and populated 1,137
 source/destination port pairs plus 1,534 transport protocol values.
 
-The LAN Portal builder reads SQLite and adds `Enriched Alert Details` plus
+The Onion Sentinel builder reads SQLite and adds `Enriched Alert Details` plus
 `Complete Alert JSON` to each Detailed Alert Report. It also reads
 `$HOME/n8n-local/soc-alerts/ai-analysis/*-local-ai-analysis.json`
 and adds `AI Model Used` plus `AI Analysis Output` sections. The model section
@@ -1373,8 +1371,8 @@ validated separately through `/healthz` and the Mac stack monitor.
 
 ```text
 Container path: /data/n8n-beacon.json
-Served path:    $HOME/report_portal/library/Cybersecurity/SOC Alerts/n8n-beacon.json
-URL:            /view/b68c5a48b9778061/n8n-beacon.json
+Served path:    $HOME/SOC Alerts Web/n8n-beacon.json
+URL:            http://10.77.7.225:8766/n8n-beacon.json
 ```
 
 The alert-store also keeps a rolling beacon history beside each configured
@@ -1382,9 +1380,9 @@ beacon path:
 
 ```text
 Container path: /data/n8n-beacon-history.json
-Served path:    $HOME/report_portal/library/Cybersecurity/SOC Alerts/n8n-beacon-history.json
+Served path:    $HOME/SOC Alerts Web/n8n-beacon-history.json
 API:            /api/system-health/beacons?hours=24
-Page:           /view/b68c5a48b9778061/system-health.html
+Page:           /system-health.html
 ```
 
 The System Health page highlights unsuccessful recovery-marked events and any
@@ -1423,7 +1421,7 @@ Data sensitivity warning:
 Full-fidelity mode may store sensitive packet payloads, HTTP bodies, credentials,
 tokens, internal URLs, hostnames, and file/process artifacts in SQLite, Markdown,
 and rendered dashboard HTML. Keep access to the Mac Studio, SQLite database,
-SOC Alerts directory, and LAN Portal restricted.
+SOC Alerts directory, and Onion Sentinel service restricted.
 
 Future supported Security Onion API access and OSQuery investigation work must
 follow `docs/security-onion-api-and-osquery-roadmap.md`. These are adapter and

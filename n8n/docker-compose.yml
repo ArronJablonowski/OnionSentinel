@@ -89,7 +89,7 @@ services:
       - ./n8n_data:/home/node/.n8n
       # Keep Docker's bind mount inside n8n-local. The user-facing
       # ~/Documents/SOC Alerts path should be a symlink to this directory so
-      # Hermes and Obsidian see the reports without Docker needing a protected
+      # Obsidian sees the reports without Docker needing a protected
       # Documents-folder mount.
       - ./soc-alerts:/soc-alerts
     logging:

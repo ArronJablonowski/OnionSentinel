@@ -3,6 +3,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -396,6 +398,38 @@ class DashboardDetailOrderTests(unittest.TestCase):
         self.assertIn('rel="icon" type="image/png" sizes="64x64"', source)
         self.assertIn("assets/onion-sentinel-favicon.png", source)
         self.assertTrue(favicon.is_file())
+
+    def test_detail_fragments_are_published_without_clearing_live_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            detail_dir = Path(tmp) / "details"
+            detail_dir.mkdir()
+            existing_digest = "a" * 12
+            new_digest = "b" * 12
+            existing_path = detail_dir / f"{existing_digest}.html"
+            existing_path.write_text("old live fragment", encoding="utf-8")
+            (detail_dir / f"{'c' * 12}.html").write_text("stale", encoding="utf-8")
+            reports = [
+                SimpleNamespace(digest=existing_digest, rendered_html="updated fragment"),
+                SimpleNamespace(digest=new_digest, rendered_html="new fragment"),
+            ]
+            self.builder.DETAIL_DIR = detail_dir
+            real_replace = self.builder.os.replace
+
+            def observed_replace(source, destination):
+                destination = Path(destination)
+                if destination == existing_path:
+                    self.assertEqual(destination.read_text(encoding="utf-8"), "old live fragment")
+                return real_replace(source, destination)
+
+            with mock.patch.object(self.builder.shutil, "rmtree", side_effect=AssertionError("live directory cleared")):
+                with mock.patch.object(self.builder.os, "replace", side_effect=observed_replace):
+                    written = self.builder.write_detail_fragments(reports)
+
+            self.assertEqual({path.name for path in written}, {f"{existing_digest}.html", f"{new_digest}.html"})
+            self.assertIn("updated fragment", existing_path.read_text(encoding="utf-8"))
+            self.assertIn("new fragment", (detail_dir / f"{new_digest}.html").read_text(encoding="utf-8"))
+            self.assertFalse((detail_dir / f"{'c' * 12}.html").exists())
+            self.assertEqual(list(detail_dir.glob("*.tmp")), [])
 
 
 if __name__ == "__main__":

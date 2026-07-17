@@ -190,8 +190,8 @@ Live Mac Studio validation examples:
 ```bash
 ssh <mac_user>@10.77.7.225 'cd "$HOME/n8n-local" && /usr/local/bin/docker compose ps'
 ssh <mac_user>@10.77.7.225 'curl -fsS http://127.0.0.1:5678/healthz'
-ssh <mac_user>@10.77.7.225 'python3 "$HOME/.hermes/scripts/build_soc_alerts_dashboard.py"'
-ssh <mac_user>@10.77.7.225 'python3 "$HOME/n8n-local/bin/sync-soc-alerts-portal.py"'
+ssh <mac_user>@10.77.7.225 'python3 "$HOME/n8n-local/bin/refresh-soc-dashboard.py"'
+ssh <mac_user>@10.77.7.225 'curl -fsS http://127.0.0.1:8766/healthz'
 ```
 
 Relay validation examples:

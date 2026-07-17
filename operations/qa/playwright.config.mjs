@@ -1,7 +1,7 @@
 import { defineConfig } from '@playwright/test';
 
 const deploymentRoot = (process.env.ONION_SENTINEL_BASE_URL
-  || 'http://10.77.7.225:8765/view/b68c5a48b9778061').replace(/\/+$/, '');
+  || 'http://10.77.7.225:8766').replace(/\/+$/, '');
 
 export default defineConfig({
   testDir: '.',

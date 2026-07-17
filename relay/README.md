@@ -366,9 +366,11 @@ more than 4 MiB/s by default, with an 8 MiB/s code-enforced maximum. This
 second ceiling is mandatory because the
 relay-to-Mac VLAN flow is visible to the Security Onion mirror; an uncapped
 cached artifact can otherwise saturate a 1 Gb/s SPAN destination even though
-the earlier Security Onion read was throttled. The PCAP timer waits five
-minutes after each oneshot exits and the broker processes at most one request
-per run, so long transfers cannot cause continuous back-to-back source scans.
+the earlier Security Onion read was throttled. The PCAP timer waits one minute
+after each oneshot exits and the broker processes at most one request per run.
+The shorter idle interval improves burst recovery while the single-flight
+lock, bandwidth ceilings, and capture-loss gate prevent concurrent or unsafe
+source reads.
 
 Packet artifacts remain runtime evidence, not repo content. Use a separate
 broker token from the alert ingestion token and store it only in the live relay

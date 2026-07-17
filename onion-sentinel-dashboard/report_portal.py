@@ -441,6 +441,9 @@ def pcap_workflow_health_response() -> dict[str, object]:
         "warning_count": 0,
         "warnings": [],
         "active_transfers": [],
+        "queue_progressing": False,
+        "last_progress_at": None,
+        "last_progress_age_seconds": None,
         "recent_requests": [],
         "latest_request": None,
         "analysis_count": 0,
@@ -540,6 +543,37 @@ def pcap_workflow_health_response() -> dict[str, object]:
                                 "progress_at": progress_row["transfer_progress_at"] or "",
                             })
                     summary["active_transfers"] = active_transfers
+                    latest_terminal = conn.execute(
+                        """
+                        SELECT COALESCE(completed_at, updated_at) AS progress_at
+                        FROM pcap_requests
+                        WHERE status IN ('fulfilled', 'failed')
+                          AND COALESCE(completed_at, updated_at) IS NOT NULL
+                        ORDER BY COALESCE(completed_at, updated_at) DESC
+                        LIMIT 1
+                        """
+                    ).fetchone()
+                    last_progress_at = latest_terminal["progress_at"] if latest_terminal else None
+                    last_progress_age_seconds: int | None = None
+                    if last_progress_at:
+                        try:
+                            parsed_progress_at = parse_iso_timestamp(last_progress_at).astimezone(dt.timezone.utc)
+                            last_progress_age_seconds = max(0, int((now_utc - parsed_progress_at).total_seconds()))
+                        except Exception:
+                            last_progress_at = None
+                    # A completion-based timer has a short, intentional idle
+                    # interval between serial jobs. Preserve that interval as
+                    # forward progress, but bound it tightly so a dead broker
+                    # becomes unhealthy instead of receiving indefinite grace.
+                    recent_terminal_progress = (
+                        int(summary["request_counts"]["pending"] or 0) > 0
+                        and last_progress_age_seconds is not None
+                        and last_progress_age_seconds <= 3 * 60
+                    )
+                    queue_progressing = bool(active_transfers) or recent_terminal_progress
+                    summary["queue_progressing"] = queue_progressing
+                    summary["last_progress_at"] = last_progress_at
+                    summary["last_progress_age_seconds"] = last_progress_age_seconds
                     # A serial broker can legitimately leave queued work older
                     # than 20 minutes behind a multi-gigabyte transfer. Use a
                     # deliberately pessimistic 4 MiB/s floor, 1.5x headroom,
@@ -573,6 +607,8 @@ def pcap_workflow_health_response() -> dict[str, object]:
                             )
                             updated_at = parse_iso_timestamp(freshness_value)
                         except Exception:
+                            continue
+                        if row["status"] == "pending" and queue_progressing:
                             continue
                         row_cutoff = now_utc - pending_grace if row["status"] == "pending" else stale_cutoff
                         if updated_at.astimezone(dt.timezone.utc) < row_cutoff:

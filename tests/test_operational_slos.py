@@ -125,6 +125,38 @@ class OperationalSloTests(unittest.TestCase):
         self.assertNotIn("PCAP backlog exceeds 60 minutes", failures)
         self.assertEqual(snapshot["signals"]["active_pcap_transfer_count"], 1)
 
+    def test_recent_serial_pcap_completion_suppresses_handoff_backlog_failure(self):
+        now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
+        metrics = {"metrics": {
+            "process": {"ingest_errors": 0},
+            "oldest_pending_job_seconds": 0,
+            "oldest_pending_jobs": [],
+            "oldest_pending_pcap_seconds": 4 * 60 * 60,
+        }}
+        health = {
+            "summary": {"latest": {"timestamp_utc": "2026-07-14T17:55:00Z"}},
+            "pcap": {
+                "warning_count": 0,
+                "active_transfers": [],
+                "queue_progressing": True,
+                "last_progress_age_seconds": 75,
+            },
+        }
+
+        failures, snapshot = self.slo.evaluate(
+            metrics,
+            health,
+            now=now,
+            disk_used_percent=55,
+            sqlite_backup_age=60,
+            postgres_backup_age=60,
+            previous_ingest_errors=0,
+        )
+
+        self.assertNotIn("PCAP backlog exceeds 60 minutes", failures)
+        self.assertTrue(snapshot["signals"]["pcap_queue_progressing"])
+        self.assertEqual(snapshot["signals"]["pcap_last_progress_age_seconds"], 75)
+
     def test_enrichment_keeps_fifteen_minute_deadline(self):
         now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
         metrics = {"metrics": {

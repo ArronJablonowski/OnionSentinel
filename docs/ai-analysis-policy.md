@@ -344,7 +344,7 @@ the SOC Analyst, Incident Responder, SIEM Engineer, Cyber Threat Intel Analyst,
 and Threat Hunter roles under `Cyber Security Agents`:
 
 ```text
-http://10.77.7.225:8765/view/b68c5a48b9778061/settings.html
+http://10.77.7.225:8766/settings.html
 ```
 
 Save behavior:
@@ -355,8 +355,8 @@ Save behavior:
 - The web UI calls `/api/soc-settings/siem-engineer-prompt` for the SIEM Engineer system prompt.
 - The web UI calls `/api/soc-settings/cyber-threat-intel-prompt` for the Cyber Threat Intel Analyst system prompt.
 - The web UI calls `/api/soc-settings/threat-hunter-prompt` for the Threat Hunter system prompt.
-- Saving requires a LAN Portal Administration session.
-- The portal writes settings files atomically and rejects empty prompts or prompts larger than 20 KB.
+- Saving requires an Onion Sentinel Administration session.
+- The Onion Sentinel service writes settings files atomically and rejects empty prompts or prompts larger than 20 KB.
 - The next AI analysis run uses the saved model routing and prompt automatically because `run-local-ai-analysis.py` reads both files immediately before each model request.
 - `build-ai-investigation-prompt.py` also includes the same prompt in each prompt package so analyst-visible prompt artifacts match the actual system message.
 
@@ -389,7 +389,7 @@ Intel is manual until scheduled intelligence briefs are built, and Threat Hunter
 is manual until automated hunts are built.
 
 SOC Alerts table rows also provide a manual `Analyze` action. The action posts
-only the dashboard group id to the Mac Studio portal, which resolves the newest
+only the dashboard group id to the Mac Studio Onion Sentinel API, which resolves the newest
 matching alert in SQLite and creates a fresh SOC Analyst prompt package locally.
 The prompt package uses the same bounded evidence model as scheduled analysis:
 all grouped alert observations, public enrichment, parsed PCAP evidence when
@@ -412,7 +412,7 @@ $HOME/n8n-local/soc-alerts/agent-memory/shared-agent-memory.md
 The Settings page makes each displayed Prompt path open and focus its matching
 editable agent prompt panel. It shows each role memory path plus the shared memory path in
 the collapsed agent row. Selecting `Memory` or `Shared` opens the current live
-Markdown in a non-editable viewer. The portal accepts only a logical allowlisted
+Markdown in a non-editable viewer. The Onion Sentinel API accepts only a logical allowlisted
 memory key, rejects path input and symlink escapes, and limits a displayed file
 to 256 KiB. There is intentionally no memory write API in Settings; managed
 agent-memory tooling remains the only write boundary. These files are durable

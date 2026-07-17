@@ -278,10 +278,10 @@ recover_candidate() {
   log "recovered_candidate_ok path=$recovered corrupt_copy=$corrupt_copy recover_err=$err_file"
 
   if [[ "$AUTO_RECOVER" == "1" ]]; then
-    log "AUTO_RECOVER enabled; stopping host alert-store, alert-store proxy, and report portal before DB swap"
+    log "AUTO_RECOVER enabled; stopping host alert-store, alert-store proxy, and Onion Sentinel web service before DB swap"
     (cd "$STACK_DIR" && /usr/local/bin/docker compose stop alert-store >/dev/null)
     launchctl bootout "gui/$(id -u)/com.arron.soc.alert-store" >/dev/null 2>&1 || true
-    launchctl bootout "gui/$(id -u)/com.arron.reportportal" >/dev/null 2>&1 || true
+    launchctl bootout "gui/$(id -u)/com.arron.onion-sentinel.web" >/dev/null 2>&1 || true
     mv "$DB_PATH" "$BACKUP_DIR/alerts.sqlite3.$STAMP.malformed-swapped-out"
     cp -p "$recovered" "$DB_PATH"
     rm -f "$DB_PATH-wal" "$DB_PATH-shm"
@@ -289,8 +289,8 @@ recover_candidate() {
       || launchctl kickstart -k "gui/$(id -u)/com.arron.soc.alert-store" >/dev/null 2>&1 \
       || true
     (cd "$STACK_DIR" && /usr/local/bin/docker compose up -d alert-store >/dev/null)
-    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.arron.reportportal.plist" >/dev/null 2>&1 \
-      || launchctl kickstart -k "gui/$(id -u)/com.arron.reportportal" >/dev/null 2>&1 \
+    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.arron.onion-sentinel.web.plist" >/dev/null 2>&1 \
+      || launchctl kickstart -k "gui/$(id -u)/com.arron.onion-sentinel.web" >/dev/null 2>&1 \
       || true
     log "auto_recover_swap_complete"
     log "maintenance_complete recovered_db=$recovered"
