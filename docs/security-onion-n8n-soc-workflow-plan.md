@@ -1,5 +1,10 @@
 # Security Onion n8n SOC Alert Investigation Workflow
 
+> Historical planning worksheet. The current production alert boundary is
+> Raspberry Pi outbox -> forced SSH intake -> alert-store commit -> durable n8n
+> post-commit report job. Use `docs/security-onion-relay-architecture.md` and
+> `docs/disaster-recovery-runbook.md` for deployment and recovery.
+
 ## Purpose
 
 Design and build an n8n workflow that receives normalized Security Onion alerts from the local relay, validates them, deduplicates them, enriches them lightly, scores them, and eventually sends curated alert context to a local AI analyst workflow.

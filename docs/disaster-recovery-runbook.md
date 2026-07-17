@@ -27,7 +27,8 @@ pfSense VLAN 888 should allow:
 ```text
 admin Mac or admin network -> 10.88.8.8 TCP/22
 10.88.8.8 -> 192.168.1.7 TCP/22
-10.88.8.8 -> 10.77.7.225 TCP/5678
+10.88.8.8 -> 10.77.7.225 TCP/22 for forced alert intake and artifact transport
+10.88.8.8 -> 10.77.7.225 TCP/5678 for PCAP control metadata and emergency rollback
 10.88.8.8 -> DNS TCP/UDP 53
 10.88.8.8 -> NTP UDP/123, preferably to the VLAN-local firewall/NTP service
 temporary: 10.88.8.8 -> Internet UDP/123 until VLAN-local NTP is ready
@@ -99,6 +100,96 @@ curl -fsS http://127.0.0.1:8787/health
 /usr/local/bin/docker exec n8n node -e 'fetch("http://alert-store:8787/health").then(r=>r.text()).then(console.log)'
 ```
 
+### Restore the durable alert commit boundary
+
+Render and validate the portable workflow before importing it:
+
+```bash
+cd /path/to/OnionSentinel
+python3 n8n/bin/sync-alert-intake-workflow.py
+python3 n8n/bin/sync-alert-intake-workflow.py --check
+```
+
+Import and activate
+`n8n/workflows/security-onion-configurable-scoring.workflow.json`. Confirm the
+active workflow has both entry paths:
+
+```text
+Security Onion Alert Webhook -> ... -> Acknowledge Durable Alert Commit
+Committed Alert Webhook -> Validate Committed Alert -> Write SOC Markdown Report
+```
+
+The first path is rollback compatibility and must not reach the Markdown
+writer. The second path is the only report-writing path.
+
+Create the n8n variable `RELAY_WEBHOOK_TOKEN`. Store the same value only in the
+Mac runtime `.env` as `N8N_POST_COMMIT_TOKEN`; do not put it in Git, shell
+history, workflow JSON, or command-line arguments. Configure:
+
+```text
+N8N_POST_COMMIT_URL=http://127.0.0.1:5678/webhook/onion-sentinel-committed-alert
+N8N_POST_COMMIT_INTERVAL_MS=5000
+N8N_POST_COMMIT_TIMEOUT_MS=30000
+N8N_POST_COMMIT_MAX_ATTEMPTS=12
+N8N_POST_COMMIT_BASE_RETRY_SECONDS=15
+```
+
+The installer places the forced wrapper at
+`$HOME/n8n-local/bin/onion-sentinel-alert-intake.py`. Install the relay's
+dedicated public key with:
+
+```bash
+ssh <relay_user>@10.88.8.8 \\
+  'sudo cat /opt/so-alert-relay/keys/macstudio-alert-ingest_ed25519.pub' |
+  "$HOME/n8n-local/bin/install-alert-intake-authorized-key.py"
+```
+
+The helper creates a mode-0600 backup, preserves unrelated entries, and writes
+real newline-delimited records. Never build this file with escaped `\\n` shell
+strings. Verify the source restriction is `10.88.8.8` and that shell, PTY, rc,
+forwarding, and X11 access are denied.
+
+On the relay, pin the verified Mac ED25519 host key in
+`/opt/so-alert-relay/keys/macstudio_known_hosts` and enable `alert_ingest` in
+`config.json`. Do not use blind trust-on-first-use or
+`StrictHostKeyChecking=no`.
+
+Qualify the path with a synthetic TEST-NET alert before live traffic:
+
+1. Submit the same bounded batch twice and confirm one alert row and one report.
+2. Stop n8n, submit another synthetic alert, and confirm the alert commits while
+   `n8n_post_commit` remains pending.
+3. Restart n8n and confirm the job completes and one deterministic report exists.
+4. Submit one malformed and one valid item together; confirm only the malformed
+   item is dead-lettered and the valid item is acknowledged.
+5. Confirm `PRAGMA quick_check`, `/jobs/stats`, `/metrics`, and the relay timer.
+
+Rollback is transport-only: disable `alert_ingest`, enable the legacy webhook,
+and keep the active workflow's legacy branch ending at the acknowledgement
+node. Never route both branches to the report writer.
+
+The first host-native alert-store startup after restoring current source creates
+the additive observable, AI-analysis-history, and correlation tables. It also
+atomically indexes retained alerts that do not yet have observables. Confirm the
+tables exist without printing live alert content:
+
+```bash
+sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" \
+  "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('alert_observables','ai_analysis_runs','alert_correlations') ORDER BY name;"
+```
+
+If historical local-AI artifacts were restored, index their compact analysis
+history through alert-store after the service is healthy:
+
+```bash
+$HOME/n8n-local/bin/backfill-ai-correlation-context.py --dry-run
+$HOME/n8n-local/bin/backfill-ai-correlation-context.py
+```
+
+Do not import those artifacts with direct SQLite statements. The endpoint
+resolves the trusted stable group identity, performs idempotent upserts, and
+skips artifacts whose operational alert row has already aged out.
+
 If `TELEGRAM_CHAT_ID=unset`, alert-store can be healthy and still skip
 high/critical Telegram sends because it has no destination chat. Medium and low
 alerts are still intentionally stored without Telegram under the default
@@ -130,7 +221,13 @@ $HOME/n8n-local/soc-alerts/agent-memory/shared-agent-memory.md
 ```
 
 Do not overwrite these files during normal DR redeploys if they have been tuned
-or populated in production. The prompts and model routing can be edited from:
+or populated in production. The installer deploys `agent_memory.py` and
+`manage-agent-memory.py`; it never replaces existing memory files. Managed
+records are atomically updated inside delimited sections while operator notes
+outside those sections remain intact. Include the runtime memory directory in
+normal encrypted Mac Studio backups because Git contains templates only.
+
+The prompts and model routing can be edited from:
 
 ```text
 http://10.77.7.225:8765/view/b68c5a48b9778061/settings.html
@@ -156,11 +253,12 @@ REPLACE_WITH_RELAY_TOKEN
 REPLACE_WITH_PCAP_BROKER_TOKEN
 ```
 
-Use one token for alert ingestion and a separate token for PCAP broker access.
-The alert ingestion token must match `/etc/so-alert-relay/relay.env` on the Pi.
-Create an n8n variable named `RELAY_WEBHOOK_TOKEN` with the same alert
-ingestion token; the workflow reads `$vars.RELAY_WEBHOOK_TOKEN` so the live
-token is not stored in workflow JSON, workflow history, or execution snapshots.
+Use one token for the alert-store-to-n8n post-commit report handoff and a
+separate token for PCAP broker access. Create an n8n variable named
+`RELAY_WEBHOOK_TOKEN`; store the same value only as `N8N_POST_COMMIT_TOKEN` in
+the Mac runtime `.env`. The production Pi alert path does not hold this token.
+The workflow reads `$vars.RELAY_WEBHOOK_TOKEN` so the live value is not stored
+in workflow JSON, workflow history, or execution snapshots.
 Create a second n8n variable named `PCAP_BROKER_TOKEN` with the same value as
 the `pcap_broker.token` rendered into `/opt/so-alert-relay/app/config.json` on
 the Pi. The PCAP broker workflow reads `$vars.PCAP_BROKER_TOKEN`, keeping that
@@ -173,6 +271,7 @@ routes and keeps alert-store reachable only on the Docker network:
 ```text
 POST /webhook/pcap-requests
 POST /webhook/pcap-claim
+POST /webhook/pcap/progress
 POST /webhook/pcap-complete
 ```
 
@@ -220,6 +319,9 @@ non-suppressed alert with a known triage level by default through
 `PCAP_AUTO_REQUEST_LEVELS=critical,high,medium,low,informational`. This is
 server-side ingest policy, not dashboard JavaScript. Set the variable to an
 empty value during maintenance if operators need manual-only PCAP requests.
+Pending automatic requests coalesce by stable alert-group identity. Relay
+selection is severity-first (`critical` through `informational`), then uses
+capture-retention urgency and newest creation time within the same severity.
 
 Set `ZEEK_BIN`, `ZEEK_CUT_BIN`, or `TSHARK_BIN` only if the tools are not on
 the LaunchAgent `PATH`. Do not copy PCAP files or generated PCAP analysis
@@ -241,9 +343,9 @@ the same proof requirement to historical request directories. The helper
 refuses cleanup paths outside `$HOME/n8n-local` so a bad argument cannot erase
 an operator directory.
 
-The LaunchAgent `com.arron.soc.pcap-retention` runs the helper daily at 03:20
-with `--analyzed-only --apply`. Unanalyzed, failed, pending, and partially
-parsed captures are outside this automatic delete set.
+The LaunchAgent `com.arron.soc.pcap-retention` runs the helper every five
+minutes with `--analyzed-only --apply`. Unanalyzed, failed, pending, and
+partially parsed captures are outside this automatic delete set.
 
 System Health includes compact PCAP broker/parser health. `No Packets` PCAP
 failures are expected negative evidence and are counted separately. Stale
@@ -264,12 +366,15 @@ limit or the current configured artifact ceiling.
 
 Current production PCAP transfer keeps n8n as the request/claim/complete
 control plane and uses the relay as the data-plane bridge. Security Onion
-exports a bounded artifact, the relay pulls it into
-`/mnt/onion-sentinel-pcap-spool/pcap` on the relay SSD, then rsyncs it to
+streams one bounded tuple-filtered rotation at a time over restricted SSH;
+the relay writes each stream directly into
+`/mnt/onion-sentinel-pcap-spool/pcap` on the relay SSD, checkpoints it, builds
+the compatible tar locally, then rsyncs it to
 `$HOME/n8n-local/pcap-evidence/artifacts/<request_id>/` on the Mac Studio.
-The relay verifies size and SHA256 before completion, deletes the relay spool
-copy after successful transfer, and calls the Security Onion cleanup mode after
-Mac ingest is confirmed.
+The relay verifies size and SHA256 before completion, and deletes the relay
+spool copy only after alert-store durably acknowledges the fulfilled completion
+callback. A failed transfer or callback preserves the relay copy for bounded
+retry. Stream mode never creates an Onion Sentinel artifact on Security Onion.
 
 The relay SSD should be mounted with:
 
@@ -281,11 +386,19 @@ Use a UUID-based `/etc/fstab` entry with
 `x-systemd.device-timeout=30s`. Before enabling the broker, verify that
 `findmnt /mnt/onion-sentinel-pcap-spool` resolves to the external SSD rather
 than the SD-card root filesystem, and perform a write/read/delete test as the
-`soalert` account. The production profile uses a 1 TB ext4 SSD, 32 GiB
-per-artifact limit, 100 GiB free-space reserve, and 80 percent high-water mark.
+`soalert` account. The production profile uses a 1 TB ext4 SSD, 128 GiB
+per-artifact limit, 200 GiB free-space reserve, and 75 percent high-water mark.
 
-Use `RELAY_PCAP_TIMEOUT_SECONDS=3900` for large captures. This outer watchdog
-must exceed both 30-minute rsync legs plus export/checksum overhead. Alert-store also
+The Mac alert-store independently rejects new `/alert` and `/enrich` writes
+with HTTP 507 at 75 percent use, when a projected request would cross that
+threshold, or when the 50 GiB reserve would be consumed. Relay heartbeats are
+still accepted, and completion/cleanup metadata remains writable so queued
+work can drain. The relay keeps rejected alerts in its durable batch evidence
+for retry rather than dropping them.
+
+Use `RELAY_PCAP_TIMEOUT_SECONDS=43200` for large captures. The systemd oneshot
+also permits 12 hours while bounded per-chunk and rsync timeouts detect stalls.
+Alert-store also
 requeues stale `claimed` PCAP requests after `PCAP_CLAIM_LEASE_SECONDS`
 defaults to 1800 seconds, so interrupted transfers do not need direct database
 repair before the relay can retry them.
@@ -335,29 +448,42 @@ Portal URL:
 http://10.77.7.225:8765/view/b68c5a48b9778061/
 ```
 
-Low-severity report writer test:
+Synthetic durable-intake test from the relay:
 
 ```bash
-cat > /tmp/soc-report-test-alert.json <<'JSON'
+cat > /tmp/onion-sentinel-intake-test.json <<'JSON'
 {
-  "alert_id": "<example_alert_id>",
-  "timestamp": "2026-07-01  20:31:15Z",
-  "rule_name": "<example alert rule>",
-  "event_dataset": "integration.test",
-  "severity": 1,
-  "severity_label": "low",
-  "source": {"ip": "<example_ip>", "port": 4444},
-  "destination": {"ip": "10.88.8.8", "port": 443},
-  "network": {"transport": "tcp"},
-  "rule_category": "test"
+  "protocol": "onion-sentinel-alert-batch/v1",
+  "messages": [{
+    "delivery_id": "synthetic-dr-intake-check",
+    "payload": {
+      "alert_id": "synthetic-dr-intake-check",
+      "timestamp": "2026-07-01  20:31:15Z",
+      "rule_name": "Synthetic DR intake check",
+      "event_dataset": "integration.test",
+      "severity": 1,
+      "severity_label": "low",
+      "source": {"ip": "192.0.2.10", "port": 4444},
+      "destination": {"ip": "198.51.100.20", "port": 443},
+      "network": {"transport": "tcp"},
+      "rule_category": "test"
+    }
+  }]
 }
 JSON
 
-curl -sS -X POST http://127.0.0.1:5678/webhook/security-onion-alert \
-  -H "Content-Type: application/json" \
-  -H "X-Relay-Token: REPLACE_WITH_RELAY_TOKEN" \
-  --data @/tmp/soc-report-test-alert.json
+sudo -u soalert ssh \
+  -i /opt/so-alert-relay/keys/macstudio-alert-ingest_ed25519 \
+  -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile=/opt/so-alert-relay/keys/macstudio_known_hosts \
+  -o GlobalKnownHostsFile=/dev/null -T \
+  <mac_user>@10.77.7.225 onion-sentinel-alert-intake batch \
+  < /tmp/onion-sentinel-intake-test.json
 ```
+
+The response must contain one `ok: true` acknowledgement for
+`synthetic-dr-intake-check`. Repeating the same batch must return a successful
+idempotent result and must not create another alert row or report artifact.
 
 The dashboard sidebar health tile depends on `n8n-beacon.json`. During normal
 operation, new alerts and quiet-cycle relay heartbeats both update that file.
@@ -398,7 +524,9 @@ the raw `alerts` table and uses the local alert-store `/refresh-groups` endpoint
 to repair stale grouped state. It sends Telegram on failure and recovery
 transitions when the runtime `.env` contains Telegram credentials. It does not
 replace the live DB unless `ALERT_STORE_AUTO_RECOVER=1` is explicitly set for
-that run.
+that run. Online backup operations wait up to 60 seconds for active writers and
+retry a bounded number of times; a transient `database is locked` result is not
+evidence of corruption.
 
 The daily runtime recovery bundle complements the hourly SQLite backups with
 n8n PostgreSQL and encryption/configuration state:
@@ -540,46 +668,34 @@ For PCAP fulfillment, install a separate forced-command public key using
 /usr/local/sbin/export-pcap-window
 ```
 
-It accepts a bounded JSON request on stdin and writes runtime-only artifacts to
-`/nsm/pcapout/onion-sentinel`.
+It accepts a bounded JSON request on stdin. `stream_manifest` returns source
+metadata; `stream_chunk` writes one filtered PCAP to SSH stdout. The relay writes
+stdout directly to its external SSD. Do not install or enable the former
+`so-ai-relay-pcap-rsync` account: the production design stages zero bytes under
+`/nsm`. The staged implementation and rollback switch are absent from the
+current source tree.
 
-Install a third, read-only rsync transfer key for moving prepared artifacts from
-Security Onion to the relay SSD spool without inline encoding:
-
-```bash
-sudo install -o root -g root -m 0755 security-onion/bin/onion-sentinel-rsync-pcapout /usr/local/sbin/onion-sentinel-rsync-pcapout
-sudo useradd --system --create-home --shell /usr/sbin/nologin so-ai-relay-pcap-rsync
-sudo install -o so-ai-relay-pcap-rsync -g so-ai-relay-pcap-rsync -m 0700 -d /home/so-ai-relay-pcap-rsync/.ssh
-sudo cp security-onion/ssh/authorized_keys.pcap-rsync.example /home/so-ai-relay-pcap-rsync/.ssh/authorized_keys
-sudo nano /home/so-ai-relay-pcap-rsync/.ssh/authorized_keys
-sudo chown so-ai-relay-pcap-rsync:so-ai-relay-pcap-rsync /home/so-ai-relay-pcap-rsync/.ssh/authorized_keys
-sudo chmod 0600 /home/so-ai-relay-pcap-rsync/.ssh/authorized_keys
-sudo install -o root -g root -m 0644 security-onion/ssh/99-onion-sentinel-pcap-rsync.conf /etc/ssh/sshd_config.d/99-onion-sentinel-pcap-rsync.conf
-sudo sshd -t
-sudo systemctl reload sshd
-```
-
-The PCAP command key prepares and cleans artifacts. The rsync transfer key is
-forced to `/usr/local/sbin/onion-sentinel-rsync-pcapout`, cannot open a shell,
-and can only serve existing tar files under `/nsm/pcapout/onion-sentinel`.
-The export wrapper sets that output directory and tar artifacts readable by the
-`so-ai-relay-pcap-rsync` group. If you use a different transfer group, set
-`ONION_SENTINEL_PCAP_TRANSFER_GROUP` for the wrapper.
+The installer creates `/etc/onion-sentinel/pcap-stream-token.key` as a root-only
+32-byte signing key. Manifest chunks bind the exact source inode, initial size,
+request window, and BPF variant. This lets `stream_chunk` validate a prior
+manifest after normal capture rotation without rescanning the directory. Treat
+the key as a runtime secret: never print, copy to the relay, or commit it.
 
 Security Onion captures on tagged VLAN interfaces in this deployment, so the
-PCAP wrapper tests a VLAN-aware BPF expression before falling back to the plain
-flow filter. Requests should also carry `suricata.capture_file` when Security
+PCAP wrapper combines VLAN-aware and plain flow filters into one BPF expression
+and scans each candidate rotation once. Requests should also carry
+`suricata.capture_file` when Security
 Onion provided it in the raw alert. The wrapper validates that capture path is
-under `/nsm/suripcap`, prefers that file first, and then scans recent candidate
-files. This keeps manual and automatic PCAP requests anchored to the actual
+under `/nsm/suripcap`, prefers that file first, and otherwise selects rotations
+whose capture epochs overlap the bounded window. This keeps requests anchored to the actual
 capture file that produced the detection instead of relying only on broad
 timestamp searches.
 
 Fulfilled PCAP broker metadata is not enough for LLM analysis by itself. The
 preferred path is the relay artifact data plane: the relay requests bounded
-artifact metadata from the Security Onion forced-command wrapper, pulls the
-artifact onto the relay SSD spool with the dedicated read-only rsync key,
-verifies size and SHA256, rsyncs the tar to
+stream metadata from the Security Onion forced-command wrapper, captures each
+SSH stream on the relay SSD with a durable checkpoint, builds and verifies the
+tar on the relay, and rsyncs it to
 the Mac Studio, and verifies the Mac copy before reporting fulfillment. n8n is
 only the request/claim/complete control plane; PCAP tar bytes do not move
 through n8n, alert-store HTTP bodies, or inline chunk payloads.
@@ -609,9 +725,11 @@ the requested flow/window, the dashboard shows `No Packets` instead of a
 generic failure. Operators should treat that as useful evidence about capture
 coverage or tuple/window selection, not as a broken broker.
 
-`export-pcap-window` evaluates a validated `capture_file` first, then ranks
-Security Onion capture files by the capture epoch nearest the requested alert
-window before applying its candidate limit. If matching packets exist but no
+`export-pcap-window` evaluates a validated `capture_file` first, then selects
+time-overlapping Security Onion rotations before applying its candidate limit.
+Each source is limited to 1.1 GiB, at most 12 are considered, and one stream runs
+at a time. Security Onion disk utilization is telemetry only and never blocks
+the read-only stream. If matching packets exist but no
 packets are returned, inspect the bounded completion diagnostics (candidate
 count, candidate basenames, BPF variants, and requested window) before
 widening the request. The wrapper uses destination port by default for BPF flow filtering. Use
@@ -662,20 +780,14 @@ sudo -u soalert /usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/
 PCAP fulfillment remains disabled until the n8n broker/proxy URL, separate
 broker token, and path map are configured in
 `/opt/so-alert-relay/app/config.json`. Configure the dedicated Security Onion
-artifact transfer key under the top-level `security_onion` object:
+stream key under the top-level `security_onion` object:
 
 ```json
 "security_onion": {
   "host": "192.168.1.7",
   "ssh_user": "so-ai-relay",
   "ssh_key": "/opt/so-alert-relay/keys/so-ai-relay_ed25519",
-  "pcap_ssh_key": "/opt/so-alert-relay/keys/so-ai-relay-pcap_ed25519",
-  "pcap_artifact_transfer": {
-    "host": "192.168.1.7",
-    "ssh_user": "so-ai-relay-pcap-rsync",
-    "ssh_key": "/opt/so-alert-relay/keys/so-ai-relay-pcap-rsync_ed25519",
-    "rsync_timeout_seconds": 1800
-  }
+  "pcap_ssh_key": "/opt/so-alert-relay/keys/so-ai-relay-pcap_ed25519"
 }
 ```
 
@@ -690,28 +802,37 @@ The default n8n proxy configuration is:
   "paths": {
     "requests": "/pcap-requests",
     "claim": "/pcap-claim",
+    "progress": "/pcap/progress",
     "complete": "/pcap-complete"
   },
   "upload_artifact": true,
-  "artifact_upload_mode": "spooled_rsync",
+  "artifact_upload_mode": "streamed_chunks",
   "artifact_spool_dir": "/mnt/onion-sentinel-pcap-spool/pcap",
   "artifact_spool_require_mount": true,
-  "artifact_spool_max_bytes": 34359738368,
-  "artifact_spool_min_free_bytes": 107374182400,
+  "artifact_spool_max_bytes": 137438953472,
+  "artifact_spool_min_free_bytes": 214748364800,
+  "artifact_spool_max_used_percent": 75,
   "artifact_spool_delete_after_upload": true,
   "artifact_spool_partial_ttl_seconds": 86400,
   "artifact_spool_completed_ttl_seconds": 3600,
+  "security_onion_storage_telemetry": true,
+  "capture_protection_enabled": true,
+  "capture_protection_require_telemetry": true,
+  "capture_loss_threshold_percent": 0.1,
+  "capture_loss_freshness_seconds": 900,
+  "stream_chunk_idle_timeout_seconds": 300,
   "mac_transfer": {
     "host": "10.77.7.225",
     "user": "__MAC_STUDIO_SSH_USER__",
     "ssh_key": "/opt/so-alert-relay/keys/macstudio-pcap-transfer_ed25519",
     "artifact_dir": "n8n-local/pcap-evidence/artifacts",
     "connect_timeout_seconds": 20,
-    "rsync_timeout_seconds": 1800
+    "rsync_timeout_seconds": 1800,
+    "minimum_bytes_per_second": 2097152
   },
   "lock_path": "/tmp/onion-sentinel-pcap-broker.lock",
   "timeout_seconds": 20,
-  "limit": 3
+  "limit": 1
 }
 ```
 
@@ -735,38 +856,24 @@ the next broker run by default. Set `artifact_spool_partial_ttl_seconds` higher
 than `0` to keep partials for a short retry window, or `-1` to disable partial
 cleanup during troubleshooting.
 
-Use `artifact_upload_mode: "spooled_rsync"` after importing and activating the
-metadata-only PCAP broker workflow export in n8n. The older n8n inline artifact
-upload path and the Security Onion chunk pull path were removed because
-they are not reliable for large captures and can hit workflow memory, HTTP
-body, timeout, and relay memory limits. Keep `lock_path` enabled so overlapping
-relay timer runs cannot mutate the same Security Onion artifact while it is
-being transferred.
+Use `artifact_upload_mode: "streamed_chunks"` after importing and activating
+the metadata-only n8n workflow. Keep `lock_path` enabled so only one relay
+worker runs. The wrapper's separate stream lock permits only one Security Onion
+read at a time, caps source reads at 4 MiB/s, caps relay-to-Mac rsync at 4 MiB/s,
+and combines tagged and untagged
+filters into one scan. The broker handles one request per run and the timer
+waits five minutes after completion before another run. The old n8n inline
+upload and Security Onion tar-staging paths are absent.
 
-After Mac Studio artifact ingest is confirmed and the completion callback
-succeeds, the relay calls the Security Onion wrapper with
-`mode: artifact_cleanup` for that request id. The wrapper removes only the
-matching `/nsm/pcapout/onion-sentinel/<request_id>.tar` and
-`/nsm/pcapout/onion-sentinel/<request_id>/` work directory. Install the
-Security Onion retention timer as a safety net for interrupted transfers:
+Keep capture protection enabled. The relay must receive a fresh latest-interval
+Zeek capture-loss sample before claiming work and should defer when any worker
+exceeds 1 percent. A protected deferral is healthy and must not consume a retry
+attempt or be reported as a stack failure.
 
-```bash
-sudo install -o root -g root -m 0755 security-onion/bin/prune-onion-sentinel-pcapout /usr/local/sbin/prune-onion-sentinel-pcapout
-sudo install -o root -g root -m 0644 security-onion/systemd/onion-sentinel-pcapout-retention.service /etc/systemd/system/onion-sentinel-pcapout-retention.service
-sudo install -o root -g root -m 0644 security-onion/systemd/onion-sentinel-pcapout-retention.timer /etc/systemd/system/onion-sentinel-pcapout-retention.timer
-sudo systemctl daemon-reload
-sudo systemctl enable --now onion-sentinel-pcapout-retention.timer
-```
-
-Manual dry-run:
-
-```bash
-sudo /usr/local/sbin/prune-onion-sentinel-pcapout
-```
-
-The timer applies the cleanup hourly and removes only top-level request tar
-files or request work directories older than 24 hours under
-`/nsm/pcapout/onion-sentinel`.
+Do not install the obsolete Security Onion PCAP output retention timer. The
+production wrapper is read-only, stages zero bytes, and leaves native capture
+retention to Security Onion. A healthy production stream creates no Onion
+Sentinel directory or packet artifact under `/nsm`.
 
 Test service:
 
@@ -788,26 +895,42 @@ The Pi still deduplicates exact alert IDs locally to avoid retry storms, but
 drop rules, suppression windows, routing, reports, and notifications belong to
 Mac Studio alert-store/n8n.
 
-Webhook retry defaults live in `/opt/so-alert-relay/app/config.json`:
+Preferred alert delivery settings live in
+`/opt/so-alert-relay/app/config.json`:
 
 ```json
-"retry_attempts": 3,
-"retry_backoff_seconds": 1.5,
-"retry_max_backoff_seconds": 10
+"alert_ingest": {
+  "enabled": true,
+  "mode": "ssh_batch",
+  "host": "10.77.7.225",
+  "user": "__MAC_STUDIO_SSH_USER__",
+  "ssh_key": "/opt/so-alert-relay/keys/macstudio-alert-ingest_ed25519",
+  "known_hosts": "/opt/so-alert-relay/keys/macstudio_known_hosts",
+  "remote_command": "onion-sentinel-alert-intake batch",
+  "batch_max_items": 100,
+  "batch_max_bytes": 8388608,
+  "connect_timeout_seconds": 20,
+  "request_timeout_seconds": 180
+}
 ```
 
-The relay retries transient webhook failures (`408`, `409`, `425`, `429`, and
-`5xx`) with bounded exponential backoff. It does not retry client/auth errors
-such as `400`, `401`, or `403`. Alerts are marked seen immediately after their
-own successful POST, so a partial outage resumes with unposted alerts rather
-than replaying the whole batch.
+The relay persists each fetched alert in its SQLite outbox before delivery.
+Each forced SSH batch returns one acknowledgement per delivery ID. Missing or
+retryable acknowledgements remain pending for the next timer run; permanent
+per-item rejects move only that message to the dead-letter table. Alert-store
+uses `alert_id` as an idempotency key, so replay after a lost connection is safe.
 
-The relay must also fail closed on n8n workflow-level rejects. n8n may return
-HTTP 200 for a workflow execution that rejected the payload inside the
-validation node. `relay.py` inspects the JSON response body and treats
-`ok: false` or `status: rejected` as webhook failure. This is what makes stale
-relay webhook tokens visible to `relay_health_wrapper.py`, systemd, journald,
-and Telegram notifications.
+The direct alert path does not require a shared application token on the Pi and
+does not depend on n8n availability. Authentication and authorization come from
+the dedicated key, verified Mac host key, source-restricted `authorized_keys`
+entry, forced command, and loopback-only alert-store endpoint.
+
+### Emergency HTTP rollback only
+
+If direct intake cannot be restored, the legacy n8n webhook may be enabled for
+a controlled rollback. In that mode, the relay must fail closed on workflow
+rejects even when n8n returns HTTP 200: `relay.py` inspects the JSON body and
+treats `ok: false` or `status: rejected` as failure.
 
 The n8n validation node should use:
 
@@ -817,7 +940,7 @@ const expectedToken = $vars.RELAY_WEBHOOK_TOKEN || 'REPLACE_WITH_RELAY_TOKEN';
 
 Do not enable broad Code-node environment-variable access just for this token.
 
-When debugging a stale beacon, confirm the relay env and config token sources
+When debugging rollback mode, confirm the relay env and config token sources
 are not drifting. Do not print token values:
 
 ```bash
@@ -835,20 +958,19 @@ for label, token in [("config", cfg.get("webhook",{}).get("token") or ""), ("env
 PY'
 ```
 
-For high-volume bursts, the wrapper must have enough time to let n8n return a
-response for each new alert. Keep these timeout controls in
+For high-volume bursts, the wrapper must have enough time to commit each bounded
+alert batch. Keep these timeout controls in
 `/etc/so-alert-relay/relay.env`:
 
 ```bash
 RELAY_COMMAND_TIMEOUT_SECONDS=300
-RELAY_PCAP_TIMEOUT_SECONDS=3900
+RELAY_PCAP_TIMEOUT_SECONDS=43200
 RELAY_FAILURE_NOTIFY_THRESHOLD=3
 ```
 
-Do not pass `RELAY_WEBHOOK_TOKEN` on the command line in production. The
-wrapper should pass only `--webhook-url`; `relay.py` reads the token from
-`/etc/so-alert-relay/relay.env` through the service environment so process
-listings do not expose token material.
+Do not pass `RELAY_WEBHOOK_TOKEN` on the command line. It is unused in preferred
+SSH mode. If rollback mode is enabled, `relay.py` reads it from
+`/etc/so-alert-relay/relay.env` so process listings do not expose token material.
 
 ## 5. Harden Pi SSH
 
@@ -943,11 +1065,14 @@ Before declaring recovery complete, confirm all of the following:
   `PRAGMA quick_check`;
 - both `so-alert-poll.timer` and `so-pcap-broker.timer` are active, their last
   service results are successful, and the dedicated PCAP spool is below its
-  80 percent high-water mark with the configured free-space reserve;
+  75 percent high-water mark with at least 200 GiB free;
 - alert-store `/metrics` reports no sustained ingest errors or stale durable
-  AI/enrichment/PCAP work;
-- Security Onion's restricted export wrapper and 24-hour PCAP export retention
-  timer are enabled;
+  AI/enrichment/PCAP work, its `pipeline` stages expose bounded queue age and
+  throughput, and known backlog does not project Mac disk use to 75 percent;
+- Security Onion's restricted read-only export wrapper is enabled, the obsolete
+  Onion Sentinel retention timer is disabled, no Onion Sentinel packet artifact
+  exists under `/nsm`, and the latest Zeek capture-loss interval remains below
+  the configured protection threshold during a controlled export;
 - System Health records recent successful beacons and exposes historical gaps;
 - desktop and mobile SOC Alerts can sort, expand details, reload without stale
   row expansion, and open the suppression modal without viewport zoom.

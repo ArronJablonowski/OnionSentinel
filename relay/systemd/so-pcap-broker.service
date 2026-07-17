@@ -11,4 +11,6 @@ Group=soalert
 WorkingDirectory=/opt/so-alert-relay/app
 EnvironmentFile=/etc/so-alert-relay/relay.env
 ExecStart=/usr/bin/python3 /opt/so-alert-relay/app/relay_health_wrapper.py --component pcap
-TimeoutStartSec=70min
+# Large captures are streamed and checkpointed one bounded rotation at a time.
+# A long oneshot must not be killed while either SSH or rsync is making progress.
+TimeoutStartSec=12h

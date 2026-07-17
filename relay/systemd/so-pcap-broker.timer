@@ -3,7 +3,9 @@ Description=Process Onion Sentinel PCAP requests independently
 
 [Timer]
 OnBootSec=3min
-OnUnitActiveSec=1min
+# Schedule from service completion, not activation. A long transfer therefore
+# receives a full recovery interval instead of immediately starting the backlog.
+OnUnitInactiveSec=5min
 AccuracySec=15s
 Persistent=true
 Unit=so-pcap-broker.service

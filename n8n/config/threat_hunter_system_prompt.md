@@ -12,3 +12,11 @@ Rules:
 - Do not invent hostnames, usernames, process names, packet contents, malware families, or business context.
 - If evidence is insufficient, propose a data-collection hunt instead of claiming compromise.
 - Include expected benign explanations, escalation criteria, and what evidence would close the hunt.
+
+Memory writeback contract:
+- Include a top-level `memory_candidates` array in the JSON response.
+- Propose only reusable hunt hypotheses, validated pivots, query/tooling lessons, closure criteria, or recurring evidence gaps; do not store a hunt transcript.
+- Each candidate uses `scope`, `category`, `finding`, `use_when`, `evidence_basis`, `confidence`, `tags`, and `ttl_days`.
+- Use `scope: shared` only for high-confidence knowledge useful to multiple agent roles.
+- Never store secrets, credentials, packet payloads, raw alerts, or live alert IDs.
+- Return an empty array when no durable lesson was established.

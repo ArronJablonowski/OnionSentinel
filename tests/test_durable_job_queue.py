@@ -34,6 +34,13 @@ class DurableJobQueueTest(unittest.TestCase):
         self.assertIn("ELSE last_completed_at END", self.code)
         self.assertIn("last_completed_at = completed_at", self.code)
 
+    def test_evidence_arriving_during_processing_latches_one_rerun(self):
+        self.assertIn("rerun_requested INTEGER", self.code)
+        self.assertIn("processing_started_at TEXT", self.code)
+        self.assertIn("requested_at TEXT", self.code)
+        self.assertIn("THEN 1 ELSE 0 END", self.code)
+        self.assertIn("CASE WHEN rerun_requested = 1 THEN 'pending' ELSE 'completed' END", self.code)
+
 
 if __name__ == "__main__":
     unittest.main()

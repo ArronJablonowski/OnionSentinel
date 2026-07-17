@@ -1,5 +1,5 @@
 [Unit]
-Description=Security Onion alert poll and durable webhook delivery
+Description=Security Onion alert poll and durable alert delivery
 Wants=network-online.target
 After=network-online.target
 

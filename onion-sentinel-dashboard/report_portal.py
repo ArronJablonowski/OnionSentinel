@@ -76,8 +76,16 @@ SIEM_ENGINEER_PROMPT_FILE = HOME / "n8n-local" / "config" / "siem_engineer_syste
 THREAT_HUNTER_PROMPT_FILE = HOME / "n8n-local" / "config" / "threat_hunter_system_prompt.md"
 CYBER_THREAT_INTEL_PROMPT_FILE = HOME / "n8n-local" / "config" / "cyber_threat_intel_system_prompt.md"
 INCIDENT_RESPONDER_PROMPT_FILE = HOME / "n8n-local" / "config" / "incident_responder_system_prompt.md"
+AGENT_MEMORY_DIR = HOME / "n8n-local" / "soc-alerts" / "agent-memory"
+SOC_ANALYST_MEMORY_FILE = AGENT_MEMORY_DIR / "soc-analyst-memory.md"
+INCIDENT_RESPONDER_MEMORY_FILE = AGENT_MEMORY_DIR / "incident-responder-memory.md"
+SIEM_ENGINEER_MEMORY_FILE = AGENT_MEMORY_DIR / "siem-engineer-memory.md"
+CYBER_THREAT_INTEL_MEMORY_FILE = AGENT_MEMORY_DIR / "cyber-threat-intel-memory.md"
+THREAT_HUNTER_MEMORY_FILE = AGENT_MEMORY_DIR / "threat-hunter-memory.md"
+SHARED_AGENT_MEMORY_FILE = AGENT_MEMORY_DIR / "shared-agent-memory.md"
 SOC_AI_SETTINGS_FILE = HOME / "n8n-local" / "config" / "ai_model_settings.json"
 SOC_ANALYST_PROMPT_MAX_BYTES = 20000
+AGENT_MEMORY_VIEW_MAX_BYTES = 256 * 1024
 SOC_ALERT_API_MAX_LIMIT = 500
 SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS = 30
 SOC_ALERT_DB_BUSY_TIMEOUT_MS = SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS * 1000
@@ -95,6 +103,7 @@ SOC_ALERT_TEST_PREFIXES = ("phase", "config-", "internal-test-", "sqlite-", "pol
 SOC_ALERT_ARTIFACT_CACHE_TTL_SECONDS = 5.0
 SOC_ALERT_ARTIFACT_CACHE = ArtifactCache(SOC_ALERT_ARTIFACT_CACHE_TTL_SECONDS)
 SOC_ALERT_RESPONSE_CACHE = ResponseCache(1.0)
+SOC_ALERT_EVENTS_CACHE = ResponseCache(4.0, max_entries=2, lock_stripes=1)
 HERMES_DR_BACKUP_DIR = HOME / "Hermes_DR_Backups"
 HERMES_DR_REMOTE_DEST = "aj_lab@10.77.7.222"
 HERMES_DR_REMOTE_DIR = "/Users/aj_lab/Hermes_DR_Backups"
@@ -232,6 +241,22 @@ def parse_iso_timestamp(value: object) -> dt.datetime:
     cleaned = str(value).strip()
     cleaned = ISO_DATE_TIME_SEPARATOR_RE.sub(r"\1T", cleaned).replace("Z", "+00:00")
     return dt.datetime.fromisoformat(cleaned)
+
+
+def pcap_transfer_duration_seconds(
+    row: sqlite3.Row, *, has_transfer_duration: bool
+) -> int | None:
+    """Return persisted PCAP transfer time, deriving legacy rows when possible."""
+    if has_transfer_duration and row["transfer_duration_seconds"] is not None:
+        return max(0, int(row["transfer_duration_seconds"]))
+    if not row["claimed_at"] or not row["completed_at"]:
+        return None
+    try:
+        started = parse_iso_timestamp(row["claimed_at"])
+        completed = parse_iso_timestamp(row["completed_at"])
+        return max(0, round((completed - started).total_seconds()))
+    except (TypeError, ValueError):
+        return None
 
 
 def format_timestamp_text(value: object, *, fallback: str = "unknown time") -> str:
@@ -377,6 +402,14 @@ def n8n_beacon_history_response(query: dict[str, list[str]]) -> dict[str, object
                     "status": "open",
                 })
 
+    pipeline: dict[str, object] = {"available": False, "stages": [], "disk": {}}
+    try:
+        metrics_payload = alert_store_get_json("/metrics", timeout=2.0)
+        pipeline = dict((metrics_payload.get("metrics") or {}).get("pipeline") or {})
+        pipeline["available"] = True
+    except RuntimeError as exc:
+        pipeline["error"] = str(exc)
+
     return {
         "ok": True,
         "window_hours": hours,
@@ -385,6 +418,7 @@ def n8n_beacon_history_response(query: dict[str, list[str]]) -> dict[str, object
         "entries": entries,
         "gaps": gaps,
         "pcap": pcap_workflow_health_response(),
+        "pipeline": pipeline,
         "summary": {
             "total": len(entries),
             "successful": len(successful_entries),
@@ -406,6 +440,7 @@ def pcap_workflow_health_response() -> dict[str, object]:
         "storage": {},
         "warning_count": 0,
         "warnings": [],
+        "active_transfers": [],
         "recent_requests": [],
         "latest_request": None,
         "analysis_count": 0,
@@ -418,6 +453,7 @@ def pcap_workflow_health_response() -> dict[str, object]:
                 if sqlite_table_exists(conn, "pcap_requests"):
                     pcap_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(pcap_requests)")}
                     has_outcome = "outcome" in pcap_columns
+                    has_transfer_duration = "transfer_duration_seconds" in pcap_columns
                     counts = {
                         str(row["status"] or "unknown").lower(): int(row["count"] or 0)
                         for row in conn.execute("SELECT status, COUNT(*) AS count FROM pcap_requests GROUP BY status")
@@ -471,21 +507,75 @@ def pcap_workflow_health_response() -> dict[str, object]:
                             continue
                         if failure_at.astimezone(dt.timezone.utc) >= failure_cutoff:
                             unexpected_failure_count += 1
-                    stale_cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=20)
+                    now_utc = dt.datetime.now(dt.timezone.utc)
+                    stale_cutoff = now_utc - dt.timedelta(minutes=20)
+                    has_transfer_progress = {
+                        "transfer_stage", "transfer_bytes", "transfer_total_bytes", "transfer_progress_at"
+                    }.issubset(pcap_columns)
+                    active_transfers: list[dict[str, object]] = []
+                    if has_transfer_progress:
+                        progress_rows = conn.execute(
+                            """
+                            SELECT request_id, transfer_stage, transfer_bytes,
+                                   transfer_total_bytes, transfer_progress_at
+                            FROM pcap_requests
+                            WHERE status = 'claimed' AND transfer_progress_at IS NOT NULL
+                            """
+                        ).fetchall()
+                        progress_cutoff = now_utc - dt.timedelta(minutes=2)
+                        for progress_row in progress_rows:
+                            try:
+                                progress_at = parse_iso_timestamp(progress_row["transfer_progress_at"])
+                            except Exception:
+                                continue
+                            if progress_at.astimezone(dt.timezone.utc) < progress_cutoff:
+                                continue
+                            total_bytes = int(progress_row["transfer_total_bytes"] or 0)
+                            transferred_bytes = int(progress_row["transfer_bytes"] or 0)
+                            active_transfers.append({
+                                "request_id": progress_row["request_id"] or "",
+                                "stage": progress_row["transfer_stage"] or "",
+                                "transferred_bytes": transferred_bytes,
+                                "total_bytes": total_bytes,
+                                "progress_at": progress_row["transfer_progress_at"] or "",
+                            })
+                    summary["active_transfers"] = active_transfers
+                    # A serial broker can legitimately leave queued work older
+                    # than 20 minutes behind a multi-gigabyte transfer. Use a
+                    # deliberately pessimistic 4 MiB/s floor, 1.5x headroom,
+                    # and a bounded queue multiplier. Fresh heartbeats are
+                    # required; a silent transfer immediately loses this grace.
+                    pending_grace = dt.timedelta(minutes=20)
+                    if active_transfers:
+                        largest_active = max(int(item["total_bytes"] or 0) for item in active_transfers)
+                        transfer_seconds = min(
+                            6 * 60 * 60,
+                            max(20 * 60, int(largest_active / (4 * 1024 * 1024) * 1.5) + 10 * 60),
+                        )
+                        pending_total = int(summary["request_counts"]["pending"] or 0)
+                        pending_grace = dt.timedelta(
+                            seconds=min(12 * 60 * 60, 20 * 60 + transfer_seconds * max(1, pending_total))
+                        )
                     stale_rows = conn.execute(
-                        """
+                        f"""
                         SELECT status, updated_at, created_at
-                        FROM pcap_requests
-                        WHERE status IN ('pending', 'claimed')
+                               {', transfer_progress_at' if has_transfer_progress else ''}
+                        FROM pcap_requests WHERE status IN ('pending', 'claimed')
                         """
                     ).fetchall()
                     stale_counts: dict[str, int] = {}
                     for row in stale_rows:
                         try:
-                            updated_at = parse_iso_timestamp(row["updated_at"] or row["created_at"])
+                            freshness_value = (
+                                row["transfer_progress_at"]
+                                if has_transfer_progress and row["status"] == "claimed" and row["transfer_progress_at"]
+                                else row["updated_at"] or row["created_at"]
+                            )
+                            updated_at = parse_iso_timestamp(freshness_value)
                         except Exception:
                             continue
-                        if updated_at.astimezone(dt.timezone.utc) < stale_cutoff:
+                        row_cutoff = now_utc - pending_grace if row["status"] == "pending" else stale_cutoff
+                        if updated_at.astimezone(dt.timezone.utc) < row_cutoff:
                             status = str(row["status"] or "unknown")
                             stale_counts[status] = stale_counts.get(status, 0) + 1
                     warnings: list[str] = []
@@ -497,7 +587,9 @@ def pcap_workflow_health_response() -> dict[str, object]:
                     summary["warning_count"] = len(warnings)
                     latest = conn.execute(
                         f"""
-                        SELECT request_id, status, error, group_id, updated_at, completed_at{', outcome' if has_outcome else ''}
+                        SELECT request_id, status, error, group_id, claimed_at, updated_at, completed_at
+                               {', outcome' if has_outcome else ''}
+                               {', transfer_duration_seconds' if has_transfer_duration else ''}
                         FROM pcap_requests
                         ORDER BY COALESCE(completed_at, updated_at, created_at) DESC
                         LIMIT 1
@@ -511,13 +603,19 @@ def pcap_workflow_health_response() -> dict[str, object]:
                             "error": latest["error"] or "",
                             "group_id": latest["group_id"] or "",
                             "updated_at": latest["completed_at"] or latest["updated_at"] or "",
+                            "transfer_duration_seconds": pcap_transfer_duration_seconds(
+                                latest, has_transfer_duration=has_transfer_duration
+                            ),
                         }
                     recent = conn.execute(
                         f"""
-                        SELECT request_id, status, error, group_id, artifact_size_bytes, updated_at, completed_at, created_at{', outcome' if has_outcome else ''}
+                        SELECT request_id, status, error, group_id, artifact_size_bytes, claimed_at,
+                               updated_at, completed_at, created_at
+                               {', outcome' if has_outcome else ''}
+                               {', transfer_duration_seconds' if has_transfer_duration else ''}
                         FROM pcap_requests
                         ORDER BY COALESCE(completed_at, updated_at, created_at) DESC
-                        LIMIT 12
+                        LIMIT 250
                         """
                     ).fetchall()
                     summary["recent_requests"] = [
@@ -528,6 +626,9 @@ def pcap_workflow_health_response() -> dict[str, object]:
                             "error": row["error"] or "",
                             "group_id": row["group_id"] or "",
                             "artifact_size_bytes": int(row["artifact_size_bytes"] or 0),
+                            "transfer_duration_seconds": pcap_transfer_duration_seconds(
+                                row, has_transfer_duration=has_transfer_duration
+                            ),
                             "updated_at": row["completed_at"] or row["updated_at"] or row["created_at"] or "",
                         }
                         for row in recent
@@ -972,6 +1073,59 @@ def read_incident_responder_prompt() -> dict:
     except Exception as exc:
         return {"ok": False, "error": f"Could not read Incident Responder prompt: {exc}", "path": str(INCIDENT_RESPONDER_PROMPT_FILE)}
     return {"ok": True, "prompt": prompt, "path": str(INCIDENT_RESPONDER_PROMPT_FILE)}
+
+
+def agent_memory_files() -> dict[str, tuple[str, Path]]:
+    """Return the only agent memory files the read-only Settings API may expose."""
+    return {
+        "soc-analyst": ("SOC Analyst Memory", SOC_ANALYST_MEMORY_FILE),
+        "incident-responder": ("Incident Responder Memory", INCIDENT_RESPONDER_MEMORY_FILE),
+        "siem-engineer": ("SIEM Engineer Memory", SIEM_ENGINEER_MEMORY_FILE),
+        "cyber-threat-intel": ("Cyber Threat Intel Memory", CYBER_THREAT_INTEL_MEMORY_FILE),
+        "threat-hunter": ("Threat Hunter Memory", THREAT_HUNTER_MEMORY_FILE),
+        "shared": ("Shared Agent Memory", SHARED_AGENT_MEMORY_FILE),
+    }
+
+
+def read_agent_memory(memory_key: object) -> tuple[int, dict]:
+    """Read one allowlisted Markdown memory file without permitting path input."""
+    key = str(memory_key or "").strip().lower()
+    entry = agent_memory_files().get(key)
+    if entry is None:
+        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Unknown agent memory key."}
+
+    label, path = entry
+    try:
+        resolved_dir = AGENT_MEMORY_DIR.resolve(strict=True)
+        resolved_path = path.resolve(strict=True)
+        resolved_path.relative_to(resolved_dir)
+        stat = resolved_path.stat()
+        if not resolved_path.is_file():
+            raise FileNotFoundError(str(resolved_path))
+        if stat.st_size > AGENT_MEMORY_VIEW_MAX_BYTES:
+            return HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {
+                "ok": False,
+                "error": f"{label} exceeds the {AGENT_MEMORY_VIEW_MAX_BYTES}-byte viewer limit.",
+            }
+        content = resolved_path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return HTTPStatus.NOT_FOUND, {"ok": False, "error": f"{label} does not exist."}
+    except ValueError:
+        return HTTPStatus.FORBIDDEN, {"ok": False, "error": "Agent memory path escaped the configured memory directory."}
+    except Exception as exc:
+        return HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": f"Could not read {label}: {exc}"}
+
+    modified_at = dt.datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="seconds").replace("T", "  ")
+    return HTTPStatus.OK, {
+        "ok": True,
+        "key": key,
+        "label": label,
+        "path": str(path),
+        "content": content,
+        "bytes": stat.st_size,
+        "modified_at": modified_at,
+        "read_only": True,
+    }
 
 
 def save_prompt_file(prompt: object, path: Path, label: str) -> tuple[bool, dict]:
@@ -3454,6 +3608,7 @@ def render_home(reports: list[Report], host: str, port: int) -> bytes:
     llm_dashboard = next((r for r in reports if "Local LLM Benchmark Dashboard" in r.title or "Local LLM Benchmark Dashboard" in r.rel), None)
     athf_dashboard = next((r for r in reports if "Threat Hunt Command Center" in r.title or "Threat Hunting/ATHF/index.html" in r.rel), None)
     daily_threat_dashboard = next((r for r in reports if "Daily Threat Brief Dashboard" in r.title or "Threat Intel/index.html" in r.rel), None)
+    event_radar = next((r for r in reports if r.title == "Cyber Security Event Radar" or "Cybersecurity/Cyber Security Event Radar/index.html" in r.rel), None)
     osquery_dashboard = next((r for r in reports if "Elastic Osquery Threat Hunting Cheatsheet" in r.title or "Elastic Osquery Threat Hunting Cheatsheet" in r.rel), None)
     kql_oql_mitre_dashboard = next((r for r in reports if "Elastic KQL and Security Onion OQL MITRE ATT&CK Mapping" in r.title or "KQL_OQL_Mapped_to_Mitre/MITRE_KQL_Mapping_Portable.html" in r.rel), None)
     soc_alerts_dashboard = soc_alerts_report(reports)
@@ -3481,6 +3636,12 @@ def render_home(reports: list[Report], host: str, port: int) -> bytes:
       <a class="app-card" href="/view/{daily_threat_dashboard.rid}/" target="_blank" rel="noopener">
         <span class="app-card-icon">🛰️</span>
         <span><b>Daily Threat Briefs</b><span>Standalone CTI dashboard and searchable brief archive</span></span>
+      </a>''')
+    if event_radar:
+        cyber_cards.append(f'''
+      <a class="app-card" data-permanent-artifact="cyber-security-event-radar" href="/view/{event_radar.rid}/" target="_blank" rel="noopener">
+        <span class="app-card-icon">📡</span>
+        <span><b>Cyber Security Event Radar</b><span>Denver metro cybersecurity events over the next six months</span></span>
       </a>''')
     if osquery_dashboard:
         cyber_cards.append(f'''
@@ -4135,14 +4296,69 @@ def soc_alert_pcap_summary_html(record: dict) -> str:
     return "\n".join(parts)
 
 
+SOC_ALERT_DETAIL_LAYOUT_VERSION = "2026-07-15.1"
+SOC_ALERT_DETAIL_LAYOUT_MARKERS = (
+    ("alert identity", "<h2>["),
+    ("triage reasons", "detail-section-triage-reasons"),
+    ("duplicate alert timeline", "alert-timeline-section"),
+    ("ai analysis output", "detail-section-ai-analysis-output"),
+    ("ai model used", "detail-section-ai-model-used"),
+    ("enriched alert details", "detail-section-enriched-alert-details"),
+    ("alert summary", "detail-section-alert-summary"),
+    ("analyst notes", "detail-section-analyst-notes"),
+    ("parsed pcap evidence", "detail-section-parsed-pcap-evidence"),
+    ("network and flow details", "detail-section-network-and-flow-details"),
+    ("protocol details", "detail-section-protocol-details"),
+    ("host and sensor details", "detail-section-host-and-sensor-details"),
+    ("threat context", "detail-section-threat-context"),
+    ("security onion detail fields", "detail-section-security-onion-detail-fields"),
+    ("raw logs", "detail-section-raw-logs"),
+)
+
+
+def soc_alert_validate_detail_layout_html(detail_html: str) -> list[str]:
+    """Validate the immutable analyst-facing layout before the API serves it."""
+    issues: list[str] = []
+    version_match = re.search(r'data-layout-version="([^"]+)"', detail_html or "")
+    version = version_match.group(1) if version_match else "missing"
+    if version != SOC_ALERT_DETAIL_LAYOUT_VERSION:
+        issues.append(
+            f"Report layout version is {version}; expected {SOC_ALERT_DETAIL_LAYOUT_VERSION}. "
+            "The dashboard must be rebuilt from the current report template."
+        )
+    positions: list[int] = []
+    for label, marker in SOC_ALERT_DETAIL_LAYOUT_MARKERS:
+        count = (detail_html or "").count(marker)
+        if count != 1:
+            issues.append(f'Required section "{label}" appeared {count} time(s); exactly one is required.')
+        positions.append((detail_html or "").find(marker))
+    present_positions = [position for position in positions if position >= 0]
+    if present_positions != sorted(present_positions):
+        issues.append("Required report sections are not in the canonical order.")
+    return list(dict.fromkeys(issues))
+
+
+def soc_alert_layout_error_html(issues: list[str]) -> str:
+    """Return an escaped error payload that the dashboard promotes to a modal."""
+    items = "".join(f"<li>{html.escape(issue)}</li>" for issue in issues)
+    return (
+        f'<section class="detail-layout-error" role="alert" data-layout-version="{SOC_ALERT_DETAIL_LAYOUT_VERSION}">'
+        "<strong>Detailed Alert Report layout error</strong>"
+        "<p>Historical or malformed report data could not be mapped to the required layout. "
+        "The report is shown for recovery context, but it does not satisfy the current standard.</p>"
+        f"<ul>{items}</ul></section>"
+    )
+
+
 def soc_alert_append_live_pcap_detail(group_id: str, detail_html: str) -> str:
-    """Append current parsed PCAP evidence when a static detail fragment is stale."""
-    if "Parsed PCAP Evidence" in detail_html:
-        return detail_html
-    record = soc_alert_pcap_analysis_record(group_id)
-    if not record:
-        return detail_html
-    return f"{detail_html.rstrip()}\n{soc_alert_pcap_summary_html(record)}\n"
+    """Preserve the canonical fragment; late evidence must never append a new section.
+
+    PCAP status is queried live for the alert row, while the scheduled dashboard
+    rebuild refreshes the canonical Parsed PCAP Evidence body. Appending here
+    used to place PCAP evidence after Raw Logs and silently broke the contract.
+    """
+    _ = group_id
+    return detail_html
 
 
 SOC_ALERT_COLLAPSIBLE_DETAIL_SECTIONS = {
@@ -4461,6 +4677,26 @@ def alert_store_post_json(path: str, payload: dict, timeout: float = 5.0) -> dic
         raise RuntimeError(str(exc)) from exc
     if not isinstance(result, dict) or not result.get("ok"):
         raise RuntimeError(str(result.get("reason") or result.get("error") or "alert-store rejected request"))
+    return result
+
+
+def alert_store_get_json(path: str, timeout: float = 5.0) -> dict:
+    """Read a bounded, non-secret alert-store operational endpoint."""
+    if not SOC_ALERT_STORE_API_URL:
+        raise RuntimeError("alert-store API URL is not configured")
+    try:
+        req = urllib_request.Request(f"{SOC_ALERT_STORE_API_URL}{path}", method="GET")
+    except ValueError as exc:
+        raise RuntimeError(f"invalid alert-store API URL: {exc}") from exc
+    try:
+        with urllib_request.urlopen(req, timeout=timeout) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib_error.HTTPError as exc:
+        raise RuntimeError(f"HTTP {exc.code}: {exc.reason}") from exc
+    except (OSError, urllib_error.URLError, json.JSONDecodeError) as exc:
+        raise RuntimeError(str(exc)) from exc
+    if not isinstance(result, dict) or not result.get("ok"):
+        raise RuntimeError(str(result.get("reason") or result.get("error") or "alert-store returned invalid metrics"))
     return result
 
 
@@ -5839,10 +6075,16 @@ def soc_alert_detail_fragment_response(group_id: str) -> tuple[int, dict]:
         return soc_alert_api_error(str(exc), 503)
     detail_html = soc_alert_append_live_pcap_detail(group_id, detail_html)
     detail_html = soc_alert_collapse_detail_sections(detail_html)
+    layout_issues = soc_alert_validate_detail_layout_html(detail_html)
+    if layout_issues and "detail-layout-error" not in detail_html:
+        detail_html = soc_alert_layout_error_html(layout_issues) + detail_html
     return 200, {
         "ok": True,
         "source": "detail-fragment",
         "group_id": group_id,
+        "layout_version": SOC_ALERT_DETAIL_LAYOUT_VERSION,
+        "layout_valid": not layout_issues,
+        "layout_issues": layout_issues,
         "detail_html": detail_html,
     }
 
@@ -5987,6 +6229,11 @@ def soc_alert_events_snapshot() -> dict:
     }
 
 
+def cached_soc_alert_events_snapshot() -> dict:
+    """Share one bounded-cost live snapshot across concurrent SSE clients."""
+    return SOC_ALERT_EVENTS_CACHE.get_or_compute("soc-alert-events", soc_alert_events_snapshot)
+
+
 def ack_soc_alert_store_id(alert_id: str, payload: dict) -> tuple[int, dict]:
     alert_id = valid_soc_alert_store_id(alert_id)
     if not alert_id:
@@ -6055,9 +6302,9 @@ class PortalHandler(BaseHTTPRequestHandler):
         last_digest = ""
         # Recycle the stream periodically so browser EventSource reconnect logic
         # can recover from stale LAN connections without user interaction.
-        for _ in range(150):
+        for _ in range(60):
             try:
-                payload = soc_alert_events_snapshot()
+                payload = cached_soc_alert_events_snapshot()
                 raw = json.dumps(payload, separators=(",", ":"), sort_keys=True)
                 digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()
                 if digest != last_digest:
@@ -6067,7 +6314,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 else:
                     self.wfile.write(b": keepalive\n\n")
                 self.wfile.flush()
-                time.sleep(2)
+                time.sleep(5)
             except (BrokenPipeError, ConnectionResetError, OSError):
                 return
 
@@ -6092,7 +6339,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/cyber-threat-intel-prompt", "/api/soc-settings/incident-responder-prompt", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith("/ack")):
+        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/cyber-threat-intel-prompt", "/api/soc-settings/incident-responder-prompt", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith("/ack")):
             if parsed.path == "/admin" and not self._admin_authenticated():
                 self.send_response(HTTPStatus.FOUND)
                 self.send_header("Location", "/admin/login")
@@ -6342,6 +6589,9 @@ class PortalHandler(BaseHTTPRequestHandler):
         if path == "/api/soc-settings/incident-responder-prompt":
             data = read_incident_responder_prompt()
             return self._send(HTTPStatus.OK if data.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if path == "/api/soc-settings/agent-memory":
+            status, data = read_agent_memory((query.get("key") or [""])[0])
+            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/soc-settings/ai-model":
             data = read_soc_ai_settings()
             return self._send(HTTPStatus.OK if data.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")

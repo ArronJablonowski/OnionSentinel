@@ -90,6 +90,15 @@ Make `recommended_next_steps` concrete and ordered for a human analyst. Prefer a
 - Recommend `lower_score` when evidence strongly suggests benign or expected behavior but the alert should still be retained.
 - In `recommended_tuning_actions`, describe the exact field(s) or condition(s) to tune, such as rule name, source IP, destination IP, destination port, direction, suppression key, or time window. Avoid broad suppressions that could hide unrelated threats.
 
+## Memory Learning Policy
+
+- Use role and shared memory as retrieval context, never as proof.
+- Add `memory_candidates` only when the current evidence establishes a concise lesson that is reusable beyond this alert group.
+- Do not store alert summaries, raw payloads, secrets, credentials, tokens, live alert IDs, or uncorroborated attribution in memory.
+- Use `scope: agent` for SOC Analyst investigation patterns and `scope: shared` only for high-confidence lessons useful to multiple Cyber Security Agent roles.
+- Include the conditions for later retrieval in `use_when`, cite the supplied evidence in `evidence_basis`, and use a finite `ttl_days` so stale model observations expire.
+- Return an empty `memory_candidates` array when there is no durable lesson to retain.
+
 ## Style
 
 - Be concise but complete.

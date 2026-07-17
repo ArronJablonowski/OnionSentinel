@@ -9,8 +9,16 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `docker-compose.yml` | Runs n8n and an `alert-store` Docker-network proxy. |
 | `.env.example` | Placeholder Telegram and enrichment settings. Copy to runtime `.env`; never commit live `.env`. |
 | `workflows/security-onion-configurable-scoring.workflow.json` | n8n alert intake workflow export. |
+| `workflows/code/` | Reviewable JavaScript sources rendered into the alert workflow export. |
+| `bin/sync-alert-intake-workflow.py` | Deterministically syncs node source and durable post-commit connections into the portable workflow JSON. |
+| `bin/onion-sentinel-alert-intake.py` | Mac forced-command SSH wrapper for bounded relay batches and per-item alert-store acknowledgements. |
+| `bin/install-alert-intake-authorized-key.py` | Backup-first, newline-safe installer for the dedicated forced-command relay key. |
+| `ssh/authorized_keys.alert-intake.example` | Least-privilege authorized-key template for the relay alert-intake key. |
 | `workflows/onion-sentinel-pcap-broker.workflow.json` | n8n PCAP broker proxy workflow export. |
+| `bin/sync-pcap-broker-workflow.py` | Deterministically renders and checks the metadata-only PCAP broker proxy routes. |
 | `alert_store/` | Host-native SQLite-backed alert scoring, suppression, notification, and report logic. |
+| `alert_store/lib/correlation_context.js` | Bounded observable normalization shared by alert ingestion and correlation retrieval. |
+| `alert_store/lib/pipeline_metrics.js` | Bounded stage throughput, queue-age, backlog, drain-ETA, and disk-projection observability. |
 | `alert_store/config/scoring_rules.json` | Tunable local filtering/scoring policy. |
 | `bin/` | Local AI prompt, analysis, scheduler, rollup, and stack management scripts. |
 | `bin/maintain-alert-store-sqlite.zsh` | Hourly SQLite `quick_check`, verified backup, and recovery-candidate maintenance. |
@@ -18,6 +26,10 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `bin/report-production-soak.py` | Read-only 48-hour SLO coverage and acceptance reporter. |
 | `bin/run-recovery-restore-drill.py` | Full SQLite and network-isolated disposable PostgreSQL restore qualification. |
 | `bin/maintain-pcap-evidence.py` | Runtime-only PCAP artifact and derived-analysis retention helper; dry-run by default. |
+| `bin/backfill-ai-correlation-context.py` | Idempotently indexes historical AI artifacts through alert-store without writing SQLite directly. |
+| `bin/agent_memory.py` | Shared role-aware Markdown memory library with relevance retrieval, validation, locking, deduplication, and expiry. |
+| `bin/manage-agent-memory.py` | Query/writeback CLI adapter for SOC Analyst, Incident Responder, SIEM Engineer, Cyber Threat Intel, and Threat Hunter workflows. |
+| `bin/verify-agent-memory.py` | Read-only deployment verifier for every agent prompt, role memory, shared memory, permissions, and retrieval contract. |
 | `config/soc_analyst_system_prompt.md` | SOC analyst system prompt used for alert analysis. |
 | `config/siem_engineer_system_prompt.md` | SIEM engineering prompt used for periodic tuning and detection recommendations. |
 | `config/threat_hunter_system_prompt.md` | Threat hunter prompt used for hunt hypothesis and query recommendation work. |
@@ -43,6 +55,52 @@ The installer creates or updates:
 - LaunchAgents under `~/Library/LaunchAgents`
 
 It does not overwrite an existing `$HOME/n8n-local/.env`.
+
+Agent memory is not a replacement for SQLite analysis history or the Markdown
+report corpus. The active SOC Analyst retrieves a small set of relevant role
+and shared records for each alert, then may propose reusable `memory_candidates`
+after a successful analysis. Deterministic code validates and atomically writes
+accepted candidates. Medium/high-confidence role lessons are eligible;
+cross-agent shared lessons require high confidence. Entries carry provenance,
+reinforcement counts, and expiry dates, and model-observed memory is always
+treated as context rather than proof.
+
+The same memory interface is available to every agent role:
+
+```bash
+$HOME/n8n-local/bin/manage-agent-memory.py \
+  --agent threat-hunter prepare --evidence-json /path/to/bounded-evidence.json
+
+$HOME/n8n-local/bin/manage-agent-memory.py \
+  --agent siem-engineer writeback \
+  --response-json /path/to/agent-response.json \
+  --analysis-id <analysis-id>
+```
+
+`prepare` returns the system prompt, relevant individual memory, relevant shared
+memory, canonical file paths, and writeback contract as one bounded execution
+package. Agent harnesses should use this operation rather than assembling those
+inputs independently. `query` remains available for read-only memory inspection.
+
+The non-SOC agent workflows remain manual/planned, but their prompts and the CLI
+now use the same read/write contract so future harnesses do not create separate
+memory formats.
+
+Verify the complete five-agent memory contract after installation or prompt
+maintenance:
+
+```bash
+$HOME/n8n-local/bin/verify-agent-memory.py
+```
+
+The command is read-only and exits nonzero if any prompt, individual memory,
+shared memory, managed Markdown section, file permission, or retrieval path is
+missing. Agent filenames are defined once in `bin/agent_memory.py`; the query,
+writeback, tests, and verifier all consume that same registry.
+
+The installer runs the verifier with `--initialize`. This idempotently creates
+missing memory files or adds managed boundaries to legacy files while preserving
+all operator-authored Markdown. It refuses partially malformed boundaries.
 
 ## Timestamp Format
 
@@ -71,10 +129,76 @@ Set:
 - `TELEGRAM_CHAT_ID`
 - `TELEGRAM_ALERT_LEVELS=critical,high`
 
-Create an n8n variable named `RELAY_WEBHOOK_TOKEN` and set it to the same value
-as `/etc/so-alert-relay/relay.env` on the Raspberry Pi. The alert intake
-workflow reads this value from `$vars.RELAY_WEBHOOK_TOKEN`, which keeps live
-token material out of workflow JSON, workflow history, and execution snapshots.
+Create an n8n variable named `RELAY_WEBHOOK_TOKEN`. Set the runtime-only
+`N8N_POST_COMMIT_TOKEN` in `$HOME/n8n-local/.env` to the same value. The
+committed-alert webhook reads `$vars.RELAY_WEBHOOK_TOKEN`; alert-store sends the
+matching header only after the alert transaction commits. This keeps live token
+material out of workflow JSON, workflow history, and execution snapshots.
+
+## Durable Alert Intake And Report Handoff
+
+The production ordering is:
+
+```text
+Pi outbox -> forced SSH intake -> alert-store commit -> durable n8n_post_commit job -> n8n Markdown report
+```
+
+Render and verify the workflow export before importing it:
+
+```bash
+python3 n8n/bin/sync-alert-intake-workflow.py
+python3 n8n/bin/sync-alert-intake-workflow.py --check
+```
+
+The legacy `Security Onion Alert Webhook` path remains import-compatible for
+rollback, but it ends at `Acknowledge Durable Alert Commit`; it must not write a
+report. Only `Committed Alert Webhook -> Validate Committed Alert -> Write SOC
+Markdown Report` reaches the writer. This prevents a rolling deployment from
+creating reports both before and after the durable database commit.
+
+The writer derives a deterministic filename from `committed_at` and
+`report_job_id`, writes a temporary file in the destination directory, and
+atomically renames it. If n8n writes the report but its response is lost, the
+retry replaces that same file rather than creating another report.
+
+Post-commit worker settings are runtime-only:
+
+- `N8N_POST_COMMIT_URL=http://127.0.0.1:5678/webhook/onion-sentinel-committed-alert`
+- `N8N_POST_COMMIT_TOKEN=<same value as the n8n RELAY_WEBHOOK_TOKEN variable>`
+- `N8N_POST_COMMIT_INTERVAL_MS=5000`
+- `N8N_POST_COMMIT_TIMEOUT_MS=30000`
+- `N8N_POST_COMMIT_MAX_ATTEMPTS=12`
+- `N8N_POST_COMMIT_BASE_RETRY_SECONDS=15`
+
+Configure these live-only values without exposing the token in process
+arguments or output:
+
+```bash
+printf '%s' "$RUNTIME_TOKEN" | python3 bin/configure-post-commit-env.py \
+  --env-file "$HOME/n8n-local/.env"
+```
+
+Do not put the real token in Git or a literal shell command.
+
+Install the dedicated relay public key with the newline-safe helper:
+
+```bash
+cat /path/to/macstudio-alert-ingest_ed25519.pub |
+  "$HOME/n8n-local/bin/install-alert-intake-authorized-key.py"
+```
+
+Do not construct or append this entry with escaped `\\n` shell strings. The
+helper validates one Ed25519 public key, preserves existing admin and forced
+entries, creates a mode-0600 backup, and writes one real newline-delimited
+record per key. The identity must be separate from admin, Security Onion, and
+PCAP keys. The forced wrapper accepts only
+`onion-sentinel-alert-intake batch`, limits batch bytes and item count, calls
+only `127.0.0.1:8787/alert`, and returns a bounded acknowledgement per item.
+
+Run `tests/test_alert_store_post_commit.py` before deployment. It starts an
+isolated alert-store and mock n8n endpoint, proves that an n8n outage cannot
+roll back alert persistence, then proves recovery and duplicate replay produce
+exactly one successful report handoff.
 
 Import `workflows/onion-sentinel-pcap-broker.workflow.json` when PCAP request
 fulfillment is enabled. Create an n8n variable named `PCAP_BROKER_TOKEN` and
@@ -88,9 +212,16 @@ use `requests_method: "POST"`, and map:
 {
   "requests": "/pcap-requests",
   "claim": "/pcap-claim",
+  "progress": "/pcap/progress",
+  "retry": "/pcap-retry",
   "complete": "/pcap-complete"
 }
 ```
+
+Run `python3 n8n/bin/sync-pcap-broker-workflow.py --check` before import. The
+retry route carries only request id, failed stage, bounded error text, and retry
+delay. Alert-store stores the attempt count and next-attempt timestamp; no PCAP
+bytes pass through n8n.
 
 The n8n proxy keeps alert-store private to Docker while exposing only the
 relay-safe PCAP broker metadata operations to the relay VLAN. PCAP tar files
@@ -136,15 +267,28 @@ output, or direct/manual `--pcap` input preserves the raw file. Use
 remain available to the SOC Analyst and dashboard after raw deletion.
 
 Use `n8n/bin/maintain-pcap-evidence.py` for runtime retention. Its
-`--analyzed-only --apply` mode is the daily safety net for a crash between
+`--analyzed-only --apply` mode is the five-minute safety net for a crash between
 analysis publication and raw deletion. It requires validated successful Zeek
 and TShark command records and refuses cleanup paths outside
 `$HOME/n8n-local`. It also reconciles exact request directories associated with
 terminal no-packet, expired, or oversize database outcomes. Age-based cleanup
 remains dry-run unless explicitly applied.
 
-`launchd/com.arron.soc.pcap-retention.plist` installs a daily 03:20
+`launchd/com.arron.soc.pcap-retention.plist` installs a five-minute
 analyzed-only cleanup. It cannot delete an unparsed or partially parsed request.
+
+Mac disk-heavy jobs share `bin/disk_capacity.py`. New PCAP intake, archive
+extraction, AI analysis, and runtime backups stop at 75 percent projected use
+or when the 50 GiB reserve would be consumed. The hard operational ceiling is
+80 percent. Restricted PCAP intake records the expected artifact size before
+rsync and rechecks remaining capacity on every retry. A failed size/SHA-256
+verification triggers cleanup of only that request directory and one fresh
+checksum-forced retry from the relay's verified SSD copy.
+
+Alert-store applies the same policy at the new-write boundary. `/alert` and
+`/enrich` return HTTP 507 before a write can consume the reserve. Relay
+heartbeats remain accepted, while analysis, PCAP completion, and cleanup state
+can still be recorded so the system can drain safely.
 
 Optional enrichment keys are also set in `$HOME/n8n-local/.env`. Blank or
 placeholder values are treated as disabled, so a source can be enabled or
@@ -233,6 +377,8 @@ Alert-store ingestion safety knob:
 - `ALERT_STORE_SQLITE_JOURNAL_MODE=DELETE`
 - `ALERT_STORE_SQLITE_SYNCHRONOUS=FULL`
 - `ALERT_STORE_SQLITE_TEMP_STORE=DEFAULT`
+- `PIPELINE_EVENT_RETENTION_HOURS=168`
+- `PIPELINE_DISK_SAMPLE_INTERVAL_SECONDS=300`
 
 `ALERT_STORE_MAX_REQUEST_BYTES` caps each `/alert` and `/enrich` POST body
 before Node buffers it in memory. Keep it high enough for full-fidelity Security
@@ -245,6 +391,15 @@ the Mac Studio host-native alert-store database. `WAL` is not safe on the old
 Docker Desktop bind-mounted writer path because it can produce `SQLITE_IOERR`
 restart loops. Dashboard builders should open the database read-only, and write
 paths should use the same busy timeout.
+
+Pipeline observability records compact transition rows instead of copying alert
+payloads. `/metrics` derives 15-minute, 1-hour, and 24-hour rates; queue ages;
+known and unknown byte backlog; drain ETAs; and projected disk pressure from
+those rows plus current durable queue state. Retention is bounded by
+`PIPELINE_EVENT_RETENTION_HOURS`. Disk sampling is rate-limited by
+`PIPELINE_DISK_SAMPLE_INTERVAL_SECONDS` so health polling cannot create a write
+storm. A null ETA while work is queued means the stage has no usable recent
+completion rate; operators and monitors must not interpret it as zero delay.
 
 ## SQLite Durability Maintenance
 
@@ -263,6 +418,11 @@ The maintenance job:
   stale;
 - creates a verified SQLite `.backup` copy under
   `$HOME/n8n-local/alert_store_backups`;
+- waits through normal writer contention with a 60-second SQLite busy timeout
+  and bounded backup retries instead of treating a transient lock as database
+  corruption;
+- removes abandoned `.backup.tmp` files only after they are 30 minutes old and
+  atomically promotes a temporary backup only after its own `quick_check`;
 - keeps the newest 48 verified backups by default;
 - if corruption is detected, preserves the malformed DB and writes a recovered
   candidate with SQLite `.recover`;
@@ -306,9 +466,12 @@ relay claims so stale `claimed` rows do not strand PCAP work forever.
 
 `PCAP_AUTO_REQUEST_LEVELS` controls server-side automatic PCAP request
 creation during `/alert` ingest. The production default queues PCAP evidence
-for every newly stored, non-suppressed alert with a known triage level. Set it
-to an empty value during maintenance to disable auto-queueing without changing
-dashboard/manual request behavior.
+for every newly stored, non-suppressed alert with a known triage level. Pending
+work coalesces by stable alert-group identity and is selected
+critical-to-informational; retention urgency and newest creation time order
+requests within the same severity. Set the variable to an empty value during
+maintenance to disable auto-queueing without changing dashboard/manual request
+behavior.
 
 PCAP bytes are not posted through n8n. The broker workflow is metadata-only:
 it accepts requests, lets the relay claim work, and records completion
@@ -337,6 +500,8 @@ validates, claims, and records fulfillment metadata through:
 - `POST /pcap/request`
 - `GET /pcap/requests?status=pending`
 - `POST /pcap/claim`
+- `POST /pcap/progress` (proxied as `/webhook/pcap/progress`)
+- `POST /pcap/retry` (proxied as `/webhook/pcap-retry`)
 - `POST /pcap/complete`
 
 Alert-store never connects directly to Security Onion and never shells out for
@@ -386,10 +551,11 @@ Example request body:
 }
 ```
 
-The n8n workflow includes a dedicated `Enrich Alert` handoff between relay
-validation and alert-store persistence. It marks enrichment as queued and
-forwards the item to `POST /alert`. Alert-store atomically stores the alert and
-a durable enrichment job; a background worker then extracts only public
+The preferred forced-SSH intake submits directly to alert-store. Alert-store
+atomically stores the alert and a durable enrichment job before acknowledging
+the relay. The legacy n8n rollback route retains an `Enrich Alert` marker before
+its own `POST /alert`, but it is not the production commit boundary. A
+background worker then extracts only public
 indicators, redacts URL query strings and credentials, skips private
 IPs/internal hostnames, checks configured sources, writes normalized records
 into `alerts.enrichment_json`, and caches results in SQLite. Provider latency
@@ -439,6 +605,12 @@ The scheduler picks unanalyzed grouped alerts by severity first, newest first wi
 4. Low
 5. Informational
 
+Durable AI work is keyed by `stable_group_id`. The scheduler preserves that
+identity in its selected row and uses it for `processing`, `completed`, and
+`failed` callbacks. Alert-store accepts legacy dashboard group IDs during a
+rolling upgrade by resolving `alert_group_alias` before updating the stable
+queue row; new workers must always send the stable ID directly.
+
 Run a dry check:
 
 ```bash
@@ -450,3 +622,28 @@ Artifacts:
 - prompts: `$HOME/n8n-local/soc-alerts/ai-prompts`
 - analysis JSON/Markdown: `$HOME/n8n-local/soc-alerts/ai-analysis`
 - daily rollups: `$HOME/n8n-local/soc-alerts/daily-rollups`
+
+The prompt builder retrieves a bounded set of cross-alert correlation
+candidates from `alert_observables`. Strong shared facts and temporal proximity
+rank above common ports, protocols, datasets, and rule names. Prior model
+assessments are included only as hypotheses that the current run must validate
+against current evidence.
+
+Completed runs are indexed through alert-store's idempotent
+`POST /analysis/result` endpoint. The AI worker does not write SQLite. If that
+endpoint is temporarily unavailable after a successful inference, a compact
+pending payload is retained under
+`$HOME/n8n-local/soc-alerts/llm-analysis-logs/analysis-index-pending` and retried
+before the next model call.
+
+After restoring historical AI artifacts, dry-run and then apply the correlation
+history backfill:
+
+```bash
+$HOME/n8n-local/bin/backfill-ai-correlation-context.py --dry-run
+$HOME/n8n-local/bin/backfill-ai-correlation-context.py
+```
+
+The backfill is idempotent by `analysis_id`. Artifacts whose source alert has
+aged out of the operational database are reported as skipped because no trusted
+stable group identity remains to attach them to.

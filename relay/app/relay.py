@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Pull Security Onion alerts over restricted SSH and forward new ones to n8n.
+"""Pull Security Onion alerts over restricted SSH and deliver them durably.
 
 The relay is deliberately small: it pulls a sanitized JSON batch from Security
 Onion, deduplicates alert IDs locally for retry safety, saves evidence files,
-and POSTs new alerts to the Mac Studio webhook. Rule filtering, suppression,
-routing, reporting, and notification policy live in Mac Studio n8n/alert-store.
+and sends new alerts to the Mac Studio intake. Rule filtering, suppression,
+routing, reporting, and notification policy live in Mac Studio alert-store/n8n.
 Troubleshooting usually starts with the final JSON summary printed by this
 script.
 """
@@ -19,6 +19,8 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import tarfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +38,17 @@ except ModuleNotFoundError:
         raise
     alert_outbox = importlib.util.module_from_spec(_outbox_spec)
     _outbox_spec.loader.exec_module(alert_outbox)
+
+try:
+    import alert_delivery
+except ModuleNotFoundError:
+    _delivery_spec = importlib.util.spec_from_file_location(
+        "alert_delivery", Path(__file__).with_name("alert_delivery.py")
+    )
+    if _delivery_spec is None or _delivery_spec.loader is None:
+        raise
+    alert_delivery = importlib.util.module_from_spec(_delivery_spec)
+    _delivery_spec.loader.exec_module(alert_delivery)
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -140,15 +153,21 @@ class PcapExportError(RuntimeError):
         self.diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
 
 
-def run_ssh_pcap_export(config: dict, pcap_request: dict) -> dict:
-    # PCAP export uses a separate forced-command key when configured. The
-    # request JSON is sent over stdin; the Security Onion wrapper validates it
-    # again before touching any pcap files.
+class PcapCaptureProtectionDeferred(RuntimeError):
+    """A read was paused to protect Security Onion live packet capture."""
+
+    def __init__(self, message: str, diagnostics: dict | None = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+
+
+def pcap_ssh_command(config: dict) -> list[str]:
+    """Build the forced-command SSH client invocation used for PCAP control/data."""
     so = config["security_onion"]
     relay = config["relay"]
     key_path = resolve_path(so.get("pcap_ssh_key") or so["ssh_key"])
     target = f"{so['ssh_user']}@{so['host']}"
-    command = [
+    return [
         "ssh",
         "-i",
         str(key_path),
@@ -162,6 +181,14 @@ def run_ssh_pcap_export(config: dict, pcap_request: dict) -> dict:
         target,
         "pcap",
     ]
+
+
+def run_ssh_pcap_export(config: dict, pcap_request: dict) -> dict:
+    # PCAP export uses a separate forced-command key when configured. The
+    # request JSON is sent over stdin; the Security Onion wrapper validates it
+    # again before touching any pcap files.
+    command = pcap_ssh_command(config)
+    relay = config["relay"]
     result = subprocess.run(
         command,
         input=json.dumps(pcap_request, sort_keys=True),
@@ -198,6 +225,51 @@ def save_batch(config: dict, batch: dict) -> Path:
         json.dump(batch, handle, indent=2, sort_keys=True)
         handle.write("\n")
     return output_path
+
+
+def prune_runtime_evidence(config: dict) -> int:
+    """Bound relay-owned JSON evidence without touching durable queue state."""
+    relay = config.get("relay", {})
+    retention_days = max(1, int(relay.get("runtime_evidence_retention_days", 7) or 7))
+    cutoff = time.time() - retention_days * 86400
+    removed = 0
+    for key in ("batch_dir", "alerts_dir"):
+        raw_path = relay.get(key)
+        if not raw_path:
+            continue
+        directory = resolve_path(raw_path)
+        if not directory.exists() or not directory.is_dir():
+            continue
+        for path in directory.glob("*.json"):
+            try:
+                if path.is_file() and not path.is_symlink() and path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                continue
+    return removed
+
+
+def require_relay_root_capacity(config: dict) -> dict:
+    """Stop new relay writes at 75 percent, leaving a hard 80 percent ceiling."""
+    relay = config.get("relay", {})
+    path = resolve_path(relay.get("batch_dir") or "/opt/so-alert-relay/state/batches")
+    anchor = path
+    while not anchor.exists() and anchor != anchor.parent:
+        anchor = anchor.parent
+    usage = shutil.disk_usage(anchor)
+    used_percent = (usage.used / usage.total * 100) if usage.total else 100.0
+    hard_limit = max(2.0, min(80.0, float(relay.get("root_hard_max_used_percent", 80) or 80)))
+    start_limit = max(1.0, min(hard_limit - 0.1, float(relay.get("root_start_max_used_percent", 75) or 75)))
+    min_free = max(0, int(relay.get("root_min_free_bytes", 2 * 1024**3) or 0))
+    if used_percent >= hard_limit:
+        raise RuntimeError(f"relay root disk reached hard limit: {used_percent:.1f}% >= {hard_limit:.1f}%")
+    if used_percent >= start_limit or usage.free < min_free:
+        raise RuntimeError(
+            f"relay root disk admission guard active: used={used_percent:.1f}% "
+            f"start_limit={start_limit:.1f}% free={usage.free} reserve={min_free}"
+        )
+    return {"used_percent": round(used_percent, 1), "free_bytes": usage.free}
 
 
 def connect_db(config: dict) -> sqlite3.Connection:
@@ -505,14 +577,85 @@ def broker_request(config: dict, method: str, path: str, payload_data: dict | No
     return parsed
 
 
-def upload_pcap_artifact(config: dict, pcap_request: dict, export_result: dict) -> dict | None:
+class PcapProgressReporter:
+    """Renew a PCAP claim while a long export or transfer is demonstrably active.
+
+    Progress reporting is advisory: an unavailable health callback must never
+    interrupt resumable evidence transfer. The broker's transfer timeout still
+    bounds a process that is alive but no longer useful.
+    """
+
+    def __init__(self, config: dict, request_id: str):
+        self.config = config
+        self.request_id = safe_transfer_id(request_id)
+        broker = config.get("pcap_broker", {})
+        self.interval = max(10.0, float(broker.get("progress_interval_seconds", 30) or 30))
+        self.stage = "claimed"
+        self.total_bytes = 0
+        self._probe = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def update(self, stage: str, total_bytes: int = 0, probe=None) -> None:
+        self.stage = stage
+        self.total_bytes = max(0, int(total_bytes or 0))
+        self._probe = probe
+        self.report()
+
+    def report(self) -> None:
+        transferred = 0
+        try:
+            if self._probe is not None:
+                transferred = max(0, int(self._probe() or 0))
+            broker_request(
+                self.config,
+                "POST",
+                broker_path(self.config, "progress", "/pcap/progress"),
+                {
+                    "request_id": self.request_id,
+                    "stage": self.stage,
+                    "transferred_bytes": transferred,
+                    "total_bytes": self.total_bytes,
+                },
+            )
+        except Exception as exc:
+            print(
+                json.dumps(
+                    {"event": "pcap_progress_report_failed", "request_id": self.request_id, "error": str(exc)[:300]},
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            self.report()
+
+    def __enter__(self):
+        self.report()
+        self._thread = threading.Thread(target=self._run, name=f"pcap-progress-{self.request_id}", daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=min(5.0, self.interval))
+
+
+def upload_pcap_artifact(
+    config: dict,
+    pcap_request: dict,
+    export_result: dict,
+    progress: PcapProgressReporter | None = None,
+) -> dict | None:
     broker = config.get("pcap_broker", {})
-    upload_mode = str(broker.get("artifact_upload_mode") or "spooled_rsync").strip().lower()
-    if upload_mode in {"spooled_rsync", "rsync"}:
-        return upload_pcap_artifact_via_rsync(config, pcap_request, export_result)
+    upload_mode = str(broker.get("artifact_upload_mode") or "streamed_chunks").strip().lower()
+    if upload_mode in {"streamed_chunks", "streaming", "relay_stream"}:
+        return upload_pcap_artifact_via_rsync(config, pcap_request, export_result, progress)
     raise RuntimeError(
         f"unsupported PCAP artifact_upload_mode {upload_mode!r}; "
-        "inline n8n artifact transfer has been removed, use spooled_rsync"
+        "Security Onion PCAP transfer must use read-only streamed_chunks"
     )
 
 
@@ -551,7 +694,7 @@ def require_spool_capacity(config: dict, artifact_size: int) -> None:
     broker = config.get("pcap_broker", {})
     max_bytes = int(broker.get("artifact_spool_max_bytes", 32 * 1024 * 1024 * 1024) or 0)
     min_free_bytes = int(broker.get("artifact_spool_min_free_bytes", 100 * 1024 * 1024 * 1024) or 0)
-    max_used_percent = max(1.0, min(99.0, float(broker.get("artifact_spool_max_used_percent", 95) or 95)))
+    max_used_percent = max(1.0, min(75.0, float(broker.get("artifact_spool_max_used_percent", 75) or 75)))
     if max_bytes > 0 and artifact_size > max_bytes:
         raise RuntimeError(f"PCAP artifact exceeds relay spool limit: {artifact_size} > {max_bytes}")
     spool_dir = pcap_spool_dir(config)
@@ -600,7 +743,7 @@ def cleanup_stale_spool_partials(config: dict) -> int:
         return 0
     cutoff = time.time() - ttl_seconds
     removed = 0
-    for path in spool_dir.glob("*.part"):
+    for path in spool_dir.rglob("*.part"):
         try:
             if path.is_file() and path.stat().st_mtime < cutoff:
                 path.unlink()
@@ -633,6 +776,14 @@ def cleanup_stale_spool_artifacts(config: dict) -> int:
         try:
             if path.is_file() and path.stat().st_mtime < cutoff:
                 path.unlink()
+                path.with_suffix(".stream.json").unlink(missing_ok=True)
+                removed += 1
+        except OSError:
+            continue
+    for path in spool_dir.iterdir():
+        try:
+            if path.is_dir() and path.stat().st_mtime < cutoff:
+                shutil.rmtree(path)
                 removed += 1
         except OSError:
             continue
@@ -647,96 +798,360 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def security_onion_transfer_config(config: dict) -> dict:
-    so = config.get("security_onion", {})
-    transfer = so.get("pcap_artifact_transfer") if isinstance(so.get("pcap_artifact_transfer"), dict) else {}
-    return transfer
+def atomic_json_write(path: Path, payload: dict) -> None:
+    """Persist a relay checkpoint without exposing a partially-written file."""
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
 
 
-def security_onion_rsync_ssh(config: dict) -> tuple[list[str], str]:
-    so = config["security_onion"]
-    relay = config["relay"]
-    transfer = security_onion_transfer_config(config)
-    host = str(transfer.get("host") or so.get("host") or "").strip()
-    user = str(transfer.get("ssh_user") or "").strip()
-    key = str(transfer.get("ssh_key") or "").strip()
-    if not host or not user or not key:
-        raise RuntimeError("security_onion.pcap_artifact_transfer requires host, ssh_user, and ssh_key")
-    ssh_args = [
-        "ssh",
-        "-i",
-        str(resolve_path(key)),
-        "-o",
-        "IdentitiesOnly=yes",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
-        f"ConnectTimeout={relay.get('ssh_timeout_seconds', 20)}",
-    ]
-    return ssh_args, f"{user}@{host}"
+def load_json_file(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
-def validate_security_onion_artifact_path(path_value: object, request_id: str) -> str:
-    path = str(path_value or "").strip()
-    expected_name = f"{safe_transfer_id(request_id)}.tar"
-    if not path.startswith("/nsm/pcapout/onion-sentinel/"):
-        raise RuntimeError("Security Onion artifact path is outside the approved PCAP output root")
-    if Path(path).name != expected_name:
-        raise RuntimeError("Security Onion artifact path does not match the requested artifact name")
-    if any(char in path for char in "\n\r\t*?[]{}'\""):
-        raise RuntimeError("Security Onion artifact path contains unsafe characters")
-    return path
+def streamed_chunk_mode(config: dict) -> bool:
+    mode = str(config.get("pcap_broker", {}).get("artifact_upload_mode") or "streamed_chunks").strip().lower()
+    if mode not in {"streamed_chunks", "streaming", "relay_stream"}:
+        raise RuntimeError(
+            "Security Onion PCAP transfer must use read-only streamed_chunks; "
+            "Security Onion staging modes have been removed"
+        )
+    return True
 
 
-def spool_pcap_artifact_from_security_onion(config: dict, pcap_request: dict, export_result: dict) -> Path:
-    request_id = safe_transfer_id(export_result.get("request_id") or pcap_request.get("request_id"))
-    expected_size = int(export_result.get("artifact_size_bytes") or 0)
-    expected_sha256 = str(export_result.get("artifact_sha256") or "").lower()
-    if not expected_size or not expected_sha256:
-        raise RuntimeError("spooled PCAP transfer requires artifact size and sha256 metadata")
-    remote_artifact = validate_security_onion_artifact_path(export_result.get("artifact_path"), request_id)
+def security_onion_storage_status(config: dict) -> dict:
+    """Read non-blocking `/nsm` telemetry through the restricted wrapper."""
+    payload = run_ssh_pcap_export(config, {"mode": "storage_status"})
+    if payload.get("status") != "storage_status":
+        raise RuntimeError("Security Onion PCAP wrapper returned invalid storage status")
+    return payload
+
+
+def capture_protection_decision(config: dict, status: dict | None) -> dict:
+    """Decide whether the relay may start another Security Onion PCAP read.
+
+    The restricted wrapper always permits valid read-only requests. Scheduling
+    policy lives on the relay so capture telemetry can pause background evidence
+    work without changing or blocking Security Onion's native retention logic.
+    """
+    broker = config.get("pcap_broker", {})
+    if not bool(broker.get("capture_protection_enabled", True)):
+        return {"deferred": False, "reason": "disabled"}
+    require_telemetry = bool(broker.get("capture_protection_require_telemetry", True))
+    threshold = max(0.0, min(100.0, float(broker.get("capture_loss_threshold_percent", 0.1) or 0.1)))
+    packet_loss_threshold = max(
+        0.0,
+        min(100.0, float(broker.get("sensor_packet_loss_threshold_percent", 0.1) or 0.1)),
+    )
+    freshness = max(60, min(3600, int(broker.get("capture_loss_freshness_seconds", 900) or 900)))
+    if not isinstance(status, dict) or not status.get("zeek_capture_loss_available"):
+        return {
+            "deferred": require_telemetry,
+            "reason": "Zeek capture-loss telemetry is unavailable",
+            "threshold_percent": threshold,
+        }
+    age = max(0, int(status.get("zeek_capture_loss_age_seconds") or 0))
+    maximum = max(0.0, float(status.get("zeek_capture_loss_max_percent") or 0.0))
+    if age > freshness:
+        return {
+            "deferred": require_telemetry,
+            "reason": f"Zeek capture-loss telemetry is stale ({age}s)",
+            "observed_percent": maximum,
+            "threshold_percent": threshold,
+            "age_seconds": age,
+        }
+    for prefix, label in (("zeek", "Zeek"), ("suricata", "Suricata")):
+        available = bool(status.get(f"{prefix}_packet_loss_available"))
+        packet_age = max(0, int(status.get(f"{prefix}_packet_loss_age_seconds") or 0))
+        packet_loss = max(0.0, float(status.get(f"{prefix}_packet_loss_percent") or 0.0))
+        if available and packet_age <= freshness and packet_loss > packet_loss_threshold:
+            return {
+                "deferred": True,
+                "reason": (
+                    f"{label} packet loss {packet_loss:.4f}% exceeds "
+                    f"{packet_loss_threshold:.4f}%"
+                ),
+                "observed_percent": packet_loss,
+                "threshold_percent": packet_loss_threshold,
+                "age_seconds": packet_age,
+                "metric": f"{prefix}_packet_loss",
+            }
+    if maximum > threshold:
+        return {
+            "deferred": True,
+            "reason": f"Zeek capture loss {maximum:.4f}% exceeds {threshold:.4f}%",
+            "observed_percent": maximum,
+            "threshold_percent": threshold,
+            "age_seconds": age,
+        }
+    return {
+        "deferred": False,
+        "reason": "capture telemetry is healthy",
+        "observed_percent": maximum,
+        "threshold_percent": threshold,
+        "age_seconds": age,
+    }
+
+
+def require_capture_safe(config: dict, status: dict | None = None) -> dict:
+    """Raise a retryable deferral when live-capture telemetry is unhealthy."""
+    current = status if isinstance(status, dict) else security_onion_storage_status(config)
+    decision = capture_protection_decision(config, current)
+    if decision.get("deferred"):
+        raise PcapCaptureProtectionDeferred(str(decision.get("reason")), decision)
+    return current
+
+
+def stream_chunk_idle_timeout(config: dict) -> int:
+    """Return the no-progress timeout without limiting total read duration."""
+    broker = config.get("pcap_broker", {})
+    configured = int(broker.get("stream_chunk_idle_timeout_seconds", 300) or 300)
+    return max(60, min(3600, configured))
+
+
+def wait_for_stream_progress(proc: subprocess.Popen, temporary: Path, idle_timeout: int) -> bytes:
+    """Wait while bytes advance, terminating only a genuinely idle stream.
+
+    A fixed total timeout can truncate a healthy large read. The destination
+    file is the authoritative progress signal because stdout is written there
+    directly without buffering packet data in relay memory.
+    """
+    last_size = -1
+    last_progress = time.monotonic()
+    while proc.poll() is None:
+        try:
+            current_size = temporary.stat().st_size
+        except OSError:
+            current_size = 0
+        now = time.monotonic()
+        if current_size != last_size:
+            last_size = current_size
+            last_progress = now
+        elif now - last_progress >= idle_timeout:
+            proc.kill()
+            proc.wait()
+            raise RuntimeError(
+                f"Security Onion PCAP chunk stream made no progress for {idle_timeout} seconds"
+            )
+        time.sleep(1)
+    return proc.stderr.read() if proc.stderr is not None else b""
+
+
+def transfer_timeout(config: dict, artifact_size: int) -> int:
+    transfer = mac_transfer_config(config)
+    floor = max(300, int(transfer.get("rsync_timeout_seconds") or 1800))
+    minimum_bps = max(256 * 1024, int(transfer.get("minimum_bytes_per_second", 2 * 1024 * 1024) or 1))
+    # The relay-to-Mac leg crosses the monitored LAN. Its bandwidth ceiling is
+    # deliberately part of timeout sizing so a safe low-rate transfer is not
+    # mistaken for a stalled job merely because the artifact is large.
+    maximum_bps = rsync_max_bytes_per_second(config)
+    estimate_bps = min(minimum_bps, maximum_bps)
+    estimate = int(artifact_size / estimate_bps) + 600
+    return min(12 * 3600, max(floor, estimate))
+
+
+def rsync_max_bytes_per_second(config: dict) -> int:
+    """Return the enforced relay-to-Mac ceiling for monitored LAN traffic."""
+    transfer = mac_transfer_config(config)
+    configured = int(transfer.get("max_bytes_per_second", 4 * 1024 * 1024) or 1)
+    return max(1024 * 1024, min(8 * 1024 * 1024, configured))
+
+
+def stream_one_security_onion_chunk(
+    config: dict,
+    request_payload: dict,
+    destination: Path,
+    source_size: int,
+) -> int:
+    """Stream one filtered capture directly from Security Onion to relay SSD."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    temporary.unlink(missing_ok=True)
+    command = pcap_ssh_command(config)
+    encoded = json.dumps(request_payload, sort_keys=True).encode("utf-8")
+    try:
+        with temporary.open("wb") as handle:
+            proc = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=handle,
+                stderr=subprocess.PIPE,
+            )
+            if proc.stdin is None:
+                proc.kill()
+                proc.wait()
+                raise RuntimeError("Security Onion PCAP chunk stream stdin is unavailable")
+            proc.stdin.write(encoded)
+            proc.stdin.close()
+            stderr = wait_for_stream_progress(proc, temporary, stream_chunk_idle_timeout(config))
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    if proc.returncode != 0:
+        temporary.unlink(missing_ok=True)
+        detail = (stderr or b"").decode("utf-8", errors="replace")[-500:].strip()
+        raise RuntimeError(detail or f"Security Onion PCAP chunk stream exited {proc.returncode}")
+    size = temporary.stat().st_size
+    # tcpdump writes a 24-byte global header even when the filter matches no
+    # packets. Empty variants are expected because VLAN encapsulation differs.
+    if size <= 24:
+        temporary.unlink(missing_ok=True)
+        return 0
+    maximum = source_size + (16 * 1024 * 1024)
+    if size > maximum:
+        temporary.unlink(missing_ok=True)
+        raise RuntimeError(f"Security Onion PCAP chunk exceeded source ceiling: {size} > {maximum}")
+    temporary.replace(destination)
+    destination.chmod(0o600)
+    return size
+
+
+def streamed_spool_artifact(
+    config: dict,
+    pcap_request: dict,
+    progress: PcapProgressReporter | None = None,
+) -> dict:
+    """Build a resumable tar on relay SSD from stateless Security Onion streams.
+
+    Security Onion never creates an Onion Sentinel PCAP file in this mode. The
+    only durable state is under the externally mounted relay spool.
+    """
+    request_id = safe_transfer_id(pcap_request.get("request_id"))
     spool_dir = pcap_spool_dir(config)
     spool_dir.mkdir(parents=True, exist_ok=True)
-    final_path = spool_dir / f"{request_id}.tar"
-    temp_path = spool_dir / f"{request_id}.tar.part"
+    artifact = spool_dir / f"{request_id}.tar"
+    sidecar = spool_dir / f"{request_id}.stream.json"
+    prior = load_json_file(sidecar)
+    if artifact.is_file() and prior.get("artifact_sha256") and prior.get("artifact_size_bytes") == artifact.stat().st_size:
+        if sha256_file(artifact) == str(prior["artifact_sha256"]):
+            return {
+                "ok": True,
+                "status": "relay_stream_artifact",
+                "request_id": request_id,
+                "relay_spool_path": str(artifact),
+                "artifact_path": f"{request_id}.tar",
+                "artifact_sha256": prior["artifact_sha256"],
+                "artifact_size_bytes": artifact.stat().st_size,
+                "part_count": int(prior.get("part_count") or 0),
+                "source_mode": "streamed_chunks",
+                "security_onion_staging_bytes": 0,
+                "reused_existing_artifact": True,
+            }
 
-    # A failed Mac upload leaves the verified relay artifact in place. Reuse it
-    # on retry instead of requiring enough free space for a duplicate pull.
-    if final_path.is_file():
-        if final_path.stat().st_size == expected_size and sha256_file(final_path) == expected_sha256:
-            final_path.chmod(0o600)
-            return final_path
-        final_path.unlink(missing_ok=True)
+    manifest_request = {**pcap_request, "mode": "stream_manifest"}
+    manifest = run_ssh_pcap_export(config, manifest_request)
+    require_capture_safe(config, manifest.get("storage_status"))
+    chunks = manifest.get("chunks") if isinstance(manifest.get("chunks"), list) else []
+    if not chunks:
+        raise PcapExportError("no matching packet capture files found", {"candidate_count": 0, "streamed": True})
+    request_dir = spool_dir / request_id
+    request_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    checkpoint_path = request_dir / "checkpoint.json"
+    checkpoint = load_json_file(checkpoint_path)
+    if checkpoint.get("manifest_id") != manifest.get("manifest_id"):
+        for path in request_dir.glob("part-*.pcap*"):
+            if path.is_file():
+                path.unlink()
+        checkpoint = {"manifest_id": manifest.get("manifest_id"), "completed": {}}
+        atomic_json_write(checkpoint_path, checkpoint)
+    completed = checkpoint.setdefault("completed", {})
+    source_upper_bound = sum(max(0, int(item.get("source_size_bytes") or 0)) for item in chunks)
+    if progress:
+        progress.update(
+            "security_onion_to_relay",
+            source_upper_bound,
+            lambda: sum(path.stat().st_size for path in request_dir.glob("part-*.pcap") if path.is_file()),
+        )
 
-    require_spool_capacity(config, expected_size)
-    ssh_args, target = security_onion_rsync_ssh(config)
-    transfer = security_onion_transfer_config(config)
-    command = [
-        "rsync",
-        "-av",
-        "--partial",
-        "--append-verify",
-        "-e",
-        " ".join(remote_shell_quote(part) for part in ssh_args),
-        f"{target}:{remote_artifact}",
-        str(temp_path),
-    ]
-    timeout = int(transfer.get("rsync_timeout_seconds") or config.get("relay", {}).get("pcap_timeout_seconds", 1800) or 1800)
-    proc = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
-    if proc.returncode != 0:
-        temp_path.unlink(missing_ok=True)
-        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or f"Security Onion rsync exited {proc.returncode}")
-    if temp_path.stat().st_size != expected_size:
-        temp_path.unlink(missing_ok=True)
-        raise RuntimeError("spooled PCAP artifact size did not match Security Onion metadata")
-    if sha256_file(temp_path) != expected_sha256:
-        temp_path.unlink(missing_ok=True)
-        raise RuntimeError("spooled PCAP artifact sha256 did not match Security Onion metadata")
-    temp_path.replace(final_path)
-    final_path.chmod(0o600)
-    return final_path
+    part_paths: list[Path] = []
+    total_bytes = 0
+    for chunk_index, item in enumerate(chunks):
+        if chunk_index:
+            # Re-check between bounded source rotations. A transfer already on
+            # the relay SSD is resumable, so pausing here does not discard work.
+            require_capture_safe(config)
+        chunk_id = safe_transfer_id(item.get("chunk_id"))
+        source_size = int(item.get("source_ceiling_bytes") or item.get("source_size_bytes") or 0)
+        if source_size <= 0:
+            continue
+        part = request_dir / f"part-{chunk_id}.pcap"
+        recorded = completed.get(chunk_id) if isinstance(completed.get(chunk_id), dict) else {}
+        if recorded.get("empty") is True:
+            continue
+        if part.is_file() and recorded.get("size") == part.stat().st_size and recorded.get("sha256") == sha256_file(part):
+            part_paths.append(part)
+            total_bytes += part.stat().st_size
+            continue
+        part.unlink(missing_ok=True)
+        require_spool_capacity(config, source_size)
+        stream_request = {
+            **pcap_request,
+            "mode": "stream_chunk",
+            "manifest_id": manifest.get("manifest_id"),
+            "chunk_id": chunk_id,
+            "capture_ref": item.get("capture_ref"),
+            "source_size_bytes": item.get("source_size_bytes"),
+            "source_device": item.get("source_device"),
+            "source_inode": item.get("source_inode"),
+            "bpf_variant": item.get("bpf_variant"),
+        }
+        size = stream_one_security_onion_chunk(config, stream_request, part, source_size)
+        if not size:
+            completed[chunk_id] = {"empty": True, "size": 0}
+        else:
+            digest = sha256_file(part)
+            completed[chunk_id] = {"size": size, "sha256": digest}
+            part_paths.append(part)
+            total_bytes += size
+        atomic_json_write(checkpoint_path, checkpoint)
+
+    if not part_paths:
+        raise PcapExportError(
+            "no matching packets found",
+            {"candidate_count": len(chunks), "search_strategy": "stateless-streamed-rotation-chunks"},
+        )
+    require_spool_capacity(config, total_bytes)
+    temporary_tar = artifact.with_suffix(".tar.part")
+    temporary_tar.unlink(missing_ok=True)
+    try:
+        with tarfile.open(temporary_tar, "w") as archive:
+            for part in sorted(part_paths):
+                archive.add(part, arcname=part.name, recursive=False)
+        temporary_tar.replace(artifact)
+        artifact.chmod(0o600)
+    except Exception:
+        temporary_tar.unlink(missing_ok=True)
+        raise
+    digest = sha256_file(artifact)
+    metadata = {
+        "manifest_id": manifest.get("manifest_id"),
+        "artifact_sha256": digest,
+        "artifact_size_bytes": artifact.stat().st_size,
+        "part_count": len(part_paths),
+        "source_chunk_count": len(chunks),
+    }
+    atomic_json_write(sidecar, metadata)
+    shutil.rmtree(request_dir, ignore_errors=True)
+    return {
+        "ok": True,
+        "status": "relay_stream_artifact",
+        "request_id": request_id,
+        "relay_spool_path": str(artifact),
+        "artifact_path": f"{request_id}.tar",
+        "artifact_sha256": digest,
+        "artifact_size_bytes": artifact.stat().st_size,
+        "part_count": len(part_paths),
+        "source_mode": "streamed_chunks",
+        "security_onion_staging_bytes": 0,
+    }
 
 
 def mac_transfer_config(config: dict) -> dict:
@@ -807,78 +1222,131 @@ def verify_remote_artifact(config: dict, remote_path: str, expected_size: int, e
         raise RuntimeError("Mac artifact sha256 did not match Security Onion metadata")
 
 
-def upload_pcap_artifact_via_rsync(config: dict, pcap_request: dict, export_result: dict) -> dict:
+def cleanup_remote_artifact(config: dict, request_id: str) -> None:
+    """Delete exactly one Mac intake request through the restricted SSH wrapper."""
+    request_id = safe_transfer_id(request_id)
+    proc = run_mac_ssh(
+        config,
+        f"onion-sentinel-pcap-intake cleanup {request_id}",
+        timeout=60,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"remote artifact cleanup exited {proc.returncode}")
+    payload = parse_last_json_object(proc.stdout)
+    if payload.get("status") != "cleaned" or payload.get("request_id") != request_id:
+        raise RuntimeError("Mac artifact cleanup returned an invalid response")
+
+
+def upload_pcap_artifact_via_rsync(
+    config: dict,
+    pcap_request: dict,
+    export_result: dict,
+    progress: PcapProgressReporter | None = None,
+) -> dict:
     request_id = safe_transfer_id(export_result.get("request_id") or pcap_request.get("request_id"))
     expected_size = int(export_result.get("artifact_size_bytes") or 0)
     expected_sha256 = str(export_result.get("artifact_sha256") or "").lower()
-    artifact_path = spool_pcap_artifact_from_security_onion(config, pcap_request, export_result)
+    relay_spool_path = str(export_result.get("relay_spool_path") or "").strip()
+    if relay_spool_path:
+        artifact_path = Path(relay_spool_path).resolve(strict=False)
+        spool_root = pcap_spool_dir(config).resolve(strict=False)
+        if artifact_path.parent != spool_root or artifact_path.name != f"{request_id}.tar":
+            raise RuntimeError("relay stream artifact escaped the configured spool")
+        if not artifact_path.is_file() or artifact_path.stat().st_size != expected_size:
+            raise RuntimeError("relay stream artifact is missing or incomplete")
+        if sha256_file(artifact_path) != expected_sha256:
+            raise RuntimeError("relay stream artifact sha256 did not match its checkpoint")
+    else:
+        raise RuntimeError("read-only streamed PCAP result is missing its relay spool path")
     transfer = mac_transfer_config(config)
     remote_dir = remote_artifact_dir(config, request_id)
     remote_name = Path(str(export_result.get("artifact_path") or artifact_path.name)).name
     remote_path = f"{remote_dir}/{remote_name}"
-    mkdir_proc = run_mac_ssh(config, f"onion-sentinel-pcap-intake prepare {request_id}", timeout=60)
-    if mkdir_proc.returncode != 0:
-        raise RuntimeError(mkdir_proc.stderr.strip() or f"failed to create Mac artifact dir {remote_dir}")
     rsync_ssh = " ".join(remote_shell_quote(part) for part in mac_ssh_base(config)[:-1])
     # remote_dir is already restricted to safe relative path segments. Avoid
     # shell quoting inside the rsync target because rsync passes it through to
     # the remote server and some implementations treat quotes as path bytes.
     target = f"{str(transfer.get('user')).strip()}@{str(transfer.get('host')).strip()}:{remote_dir}/"
+    maximum_bps = rsync_max_bytes_per_second(config)
+    # rsync expresses --bwlimit in KiB/s. Throttle the sending process on the
+    # relay so cached artifacts cannot burst at line rate across a mirrored
+    # VLAN and oversubscribe Security Onion's capture destination.
+    bwlimit_kib = max(1, maximum_bps // 1024)
     command = [
         "rsync",
         "-av",
+        "--checksum",
         "--partial",
+        "--append-verify",
+        f"--bwlimit={bwlimit_kib}",
         "-e",
         rsync_ssh,
         str(artifact_path),
         target,
     ]
-    timeout = int(transfer.get("rsync_timeout_seconds") or 1800)
-    proc = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or f"rsync exited {proc.returncode}")
-    verify_remote_artifact(config, remote_path, expected_size, expected_sha256)
-    if config.get("pcap_broker", {}).get("artifact_spool_delete_after_upload", True):
-        artifact_path.unlink(missing_ok=True)
+    timeout = transfer_timeout(config, expected_size)
+    for attempt in range(2):
+        mkdir_proc = run_mac_ssh(
+            config,
+            f"onion-sentinel-pcap-intake prepare {request_id} {expected_size}",
+            timeout=60,
+        )
+        if mkdir_proc.returncode != 0:
+            raise RuntimeError(mkdir_proc.stderr.strip() or f"failed to create Mac artifact dir {remote_dir}")
+        if progress:
+            progress.update("relay_to_mac", expected_size)
+        proc = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or f"rsync exited {proc.returncode}")
+        if progress:
+            progress.update("verifying", expected_size, lambda: expected_size)
+        try:
+            verify_remote_artifact(config, remote_path, expected_size, expected_sha256)
+            break
+        except RuntimeError as verify_error:
+            try:
+                cleanup_remote_artifact(config, request_id)
+            except RuntimeError as cleanup_error:
+                raise RuntimeError(f"{verify_error}; failed to clean rejected Mac artifact: {cleanup_error}") from verify_error
+            if attempt:
+                raise
+            if artifact_path.stat().st_size != expected_size or sha256_file(artifact_path) != expected_sha256:
+                raise RuntimeError("relay artifact changed after Mac verification failure") from verify_error
     return {
         "ok": True,
         "status": "artifact_rsynced",
         "path": remote_path,
         "artifact_size_bytes": expected_size,
         "artifact_sha256": expected_sha256,
+        "max_bytes_per_second": maximum_bps,
     }
 
 
-def cleanup_pcap_artifact(config: dict, request_id: str) -> bool:
+def cleanup_relay_spool_artifact(config: dict, request_id: str) -> bool:
+    """Delete only a committed request's relay-side resumable artifacts."""
+    if not config.get("pcap_broker", {}).get("artifact_spool_delete_after_upload", True):
+        return True
+    request_id = safe_transfer_id(request_id)
     try:
-        result = run_ssh_pcap_export(config, {"mode": "artifact_cleanup", "request_id": request_id})
+        spool_root = pcap_spool_dir(config).resolve(strict=False)
+        artifact = (spool_root / f"{request_id}.tar").resolve(strict=False)
+        if artifact.parent != spool_root:
+            raise RuntimeError("relay spool cleanup escaped the configured spool")
+        artifact.unlink(missing_ok=True)
+        artifact.with_suffix(".stream.json").unlink(missing_ok=True)
+        request_dir = (spool_root / request_id).resolve(strict=False)
+        if request_dir.parent == spool_root and request_dir.is_dir():
+            shutil.rmtree(request_dir)
+        return True
     except Exception as exc:
         print(
             json.dumps(
-                {
-                    "event": "pcap_artifact_cleanup_failed",
-                    "request_id": request_id,
-                    "error": str(exc)[:500],
-                },
+                {"event": "pcap_relay_spool_cleanup_failed", "request_id": request_id, "error": str(exc)[:500]},
                 sort_keys=True,
             ),
             file=sys.stderr,
         )
         return False
-    if not result.get("ok"):
-        print(
-            json.dumps(
-                {
-                    "event": "pcap_artifact_cleanup_failed",
-                    "request_id": request_id,
-                    "error": str(result.get("error") or result.get("status") or "cleanup rejected")[:500],
-                },
-                sort_keys=True,
-            ),
-            file=sys.stderr,
-        )
-        return False
-    return True
 
 
 def broker_path(config: dict, name: str, default_path: str) -> str:
@@ -919,9 +1387,42 @@ def complete_pcap_request(config: dict, request_id: str, status: str, payload: d
     return False
 
 
+def pcap_retry_delay_seconds(config: dict, attempt_count: int) -> int:
+    broker = config.get("pcap_broker", {})
+    base = max(1, min(600, int(broker.get("transfer_retry_base_seconds", 30) or 30)))
+    maximum = max(base, min(6 * 3600, int(broker.get("transfer_retry_max_seconds", 1800) or 1800)))
+    exponent = max(0, min(10, int(attempt_count or 1) - 1))
+    return min(maximum, base * (2 ** exponent))
+
+
+def retry_pcap_request(
+    config: dict,
+    request_id: str,
+    stage: str,
+    error: object,
+    attempt_count: int,
+    diagnostics: dict | None = None,
+) -> dict:
+    """Persist a bounded retry without discarding resumable transfer state."""
+    payload = {
+        "request_id": request_id,
+        "stage": stage,
+        "error": str(error)[:1000],
+        "retry_after_seconds": pcap_retry_delay_seconds(config, attempt_count),
+    }
+    if diagnostics:
+        payload["diagnostics"] = diagnostics
+    return broker_request(
+        config,
+        "POST",
+        broker_path(config, "retry", "/pcap-retry"),
+        payload,
+    )
+
+
 def pcap_outcome_from_error(error: object) -> str:
     detail = str(error or "").lower()
-    if "no matching packets" in detail:
+    if "no matching packet" in detail:
         return "no_packets_available"
     if "retention" in detail or "expired" in detail:
         return "expired"
@@ -931,6 +1432,8 @@ def pcap_outcome_from_error(error: object) -> str:
         return "timeout"
     if "sha256" in detail or "checksum" in detail:
         return "checksum_failed"
+    if "unsupported" in detail or "has been removed" in detail or "rejected" in detail:
+        return "rejected"
     if any(term in detail for term in ("rsync", "artifact upload", "connection", "ssh", "spool filesystem")):
         return "transport_failed"
     return "failed"
@@ -957,6 +1460,7 @@ def process_pcap_requests(config: dict) -> dict:
 
 def _process_pcap_requests_unlocked(config: dict) -> dict:
     broker = config.get("pcap_broker", {})
+    streamed_chunk_mode(config)
     stale_spool_partials_removed = cleanup_stale_spool_partials(config)
     stale_spool_artifacts_removed = cleanup_stale_spool_artifacts(config)
     spool_snapshot = spool_usage(config)
@@ -965,7 +1469,29 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
             "ok": False, "enabled": True, "processed": 0,
             "operational_failures": 1, "outcomes": {}, "spool": spool_snapshot,
         }
-    limit = max(1, min(10, int(broker.get("limit", 3) or 3)))
+    try:
+        security_onion_storage = security_onion_storage_status(config)
+    except Exception as exc:
+        security_onion_storage = {"available": False, "error": str(exc)[:300]}
+    capture_protection = capture_protection_decision(config, security_onion_storage)
+    if capture_protection.get("deferred"):
+        return {
+            "ok": True,
+            "enabled": True,
+            "processed": 0,
+            "deferred": True,
+            "defer_reason": capture_protection.get("reason"),
+            "capture_protection": capture_protection,
+            "operational_failures": 0,
+            "outcomes": {},
+            "stale_spool_partials_removed": stale_spool_partials_removed,
+            "stale_spool_artifacts_removed": stale_spool_artifacts_removed,
+            "spool": spool_snapshot,
+            "security_onion_storage": security_onion_storage,
+        }
+    # One request per invocation is a capture-protection invariant. The timer's
+    # post-run cooldown prevents a backlog from creating continuous SO reads.
+    limit = 1
     pending_path = f"{broker_path(config, 'requests', '/pcap/requests')}?status=pending&limit={limit}"
     requests_method = str(broker.get("requests_method") or "GET").strip().upper()
     if requests_method not in {"GET", "POST"}:
@@ -979,11 +1505,19 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
     artifact_upload_failed = 0
     artifact_cleanup_failed = 0
     artifact_cleanup_succeeded = 0
+    relay_spool_cleanup_failed = 0
+    relay_spool_cleanup_succeeded = 0
+    retry_scheduled = 0
+    retry_exhausted = 0
+    retry_callback_failed = 0
     outcomes: dict[str, int] = {}
     operational_failures = 0
-    for pcap_request in pending.get("requests", []):
-        if str(pcap_request.get("status") or "pending").lower() != "pending":
-            continue
+    pending_requests = pending.get("requests") if isinstance(pending.get("requests"), list) else []
+    eligible_requests = [
+        item for item in pending_requests
+        if isinstance(item, dict) and str(item.get("status") or "pending").lower() == "pending"
+    ][:limit]
+    for pcap_request in eligible_requests:
         request_id = pcap_request.get("request_id")
         claim = broker_request(
             config,
@@ -993,27 +1527,32 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
         )
         if not claim.get("claimed"):
             continue
+        claimed_request = claim.get("request") if isinstance(claim.get("request"), dict) else pcap_request
+        attempt_count = max(1, int(claimed_request.get("transfer_attempt_count") or 1))
+        progress: PcapProgressReporter | None = None
         try:
-            export_request = dict(claim["request"])
-            result = run_ssh_pcap_export(config, export_request)
-            upload = None
-            upload_error = ""
-            try:
-                upload = upload_pcap_artifact(config, claim["request"], result)
-            except Exception as exc:
-                artifact_upload_failed += 1
-                upload_error = str(exc)[:500]
-                print(
-                    json.dumps(
-                        {
-                            "event": "pcap_artifact_upload_failed",
-                            "request_id": request_id,
-                            "error": upload_error,
-                        },
-                        sort_keys=True,
-                    ),
-                    file=sys.stderr,
-                )
+            with PcapProgressReporter(config, str(request_id)) as progress:
+                progress.update("exporting")
+                export_request = dict(claimed_request)
+                result = streamed_spool_artifact(config, export_request, progress)
+                upload = None
+                upload_error = ""
+                try:
+                    upload = upload_pcap_artifact(config, claim["request"], result, progress)
+                except Exception as exc:
+                    artifact_upload_failed += 1
+                    upload_error = str(exc)[:500]
+                    print(
+                        json.dumps(
+                            {
+                                "event": "pcap_artifact_upload_failed",
+                                "request_id": request_id,
+                                "error": upload_error,
+                            },
+                            sort_keys=True,
+                        ),
+                        file=sys.stderr,
+                    )
             upload_ok = bool(upload and upload.get("ok"))
             if not upload_error and not upload_ok:
                 upload_error = "Mac artifact ingest did not confirm success"
@@ -1026,8 +1565,50 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
                 "artifact_ingest_error": upload_error,
             }
             if upload_error:
-                completion_payload["error"] = f"artifact upload failed: {upload_error}"
-                completion_payload["outcome"] = "transport_failed"
+                upload_outcome = pcap_outcome_from_error(upload_error)
+                if upload_outcome in {"timeout", "transport_failed", "checksum_failed", "failed"}:
+                    try:
+                        retry_result = retry_pcap_request(
+                            config,
+                            str(request_id),
+                            progress.stage,
+                            f"artifact upload failed: {upload_error}",
+                            attempt_count,
+                        )
+                        if retry_result.get("retry_scheduled"):
+                            retry_scheduled += 1
+                        elif retry_result.get("exhausted"):
+                            retry_exhausted += 1
+                            failed += 1
+                            outcomes[upload_outcome] = outcomes.get(upload_outcome, 0) + 1
+                            operational_failures += 1
+                            if cleanup_relay_spool_artifact(config, str(request_id)):
+                                relay_spool_cleanup_succeeded += 1
+                            else:
+                                relay_spool_cleanup_failed += 1
+                        else:
+                            retry_callback_failed += 1
+                            operational_failures += 1
+                    except Exception as retry_error:
+                        retry_callback_failed += 1
+                        operational_failures += 1
+                        print(
+                            json.dumps(
+                                {"event": "pcap_retry_schedule_failed", "request_id": request_id, "error": str(retry_error)[:500]},
+                                sort_keys=True,
+                            ),
+                            file=sys.stderr,
+                        )
+                else:
+                    completion_payload["error"] = f"artifact upload failed: {upload_error}"
+                    completion_payload["outcome"] = upload_outcome
+                    if complete_pcap_request(config, str(request_id), "failed", completion_payload):
+                        failed += 1
+                        outcomes[upload_outcome] = outcomes.get(upload_outcome, 0) + 1
+                    else:
+                        completion_failed += 1
+                processed += 1
+                continue
             else:
                 completion_payload["outcome"] = "captured"
             if complete_pcap_request(
@@ -1038,10 +1619,12 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
             ):
                 if completion_status == "fulfilled":
                     fulfilled += 1
-                    if cleanup_pcap_artifact(config, str(request_id)):
-                        artifact_cleanup_succeeded += 1
+                    if cleanup_relay_spool_artifact(config, str(request_id)):
+                        relay_spool_cleanup_succeeded += 1
                     else:
-                        artifact_cleanup_failed += 1
+                        relay_spool_cleanup_failed += 1
+                    # Read-only stream mode creates no Security Onion artifact,
+                    # so there is intentionally no source-side cleanup action.
                 else:
                     failed += 1
                     outcomes["transport_failed"] = outcomes.get("transport_failed", 0) + 1
@@ -1054,20 +1637,46 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
             diagnostics = getattr(exc, "diagnostics", None)
             if diagnostics:
                 completion_payload["diagnostics"] = diagnostics
-            completion_recorded = complete_pcap_request(config, request_id, "failed", completion_payload)
-            if not completion_recorded:
-                completion_failed += 1
-            elif outcome == "oversize":
-                # Oversize is terminal under the current guardrail, so keeping
-                # the source export cannot help a retry and only consumes /nsm.
-                if cleanup_pcap_artifact(config, str(request_id)):
-                    artifact_cleanup_succeeded += 1
-                else:
-                    artifact_cleanup_failed += 1
-            failed += 1
-            outcomes[outcome] = outcomes.get(outcome, 0) + 1
-            if outcome not in {"no_packets_available", "expired", "oversize"}:
-                operational_failures += 1
+            if outcome in {"timeout", "transport_failed", "checksum_failed", "failed"}:
+                try:
+                    retry_result = retry_pcap_request(
+                        config,
+                        str(request_id),
+                        progress.stage if progress else "claimed",
+                        exc,
+                        attempt_count,
+                        diagnostics,
+                    )
+                    if retry_result.get("retry_scheduled"):
+                        retry_scheduled += 1
+                    elif retry_result.get("exhausted"):
+                        retry_exhausted += 1
+                        failed += 1
+                        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+                        operational_failures += 1
+                        if cleanup_relay_spool_artifact(config, str(request_id)):
+                            relay_spool_cleanup_succeeded += 1
+                        else:
+                            relay_spool_cleanup_failed += 1
+                    else:
+                        retry_callback_failed += 1
+                        operational_failures += 1
+                except Exception as retry_error:
+                    retry_callback_failed += 1
+                    operational_failures += 1
+                    print(
+                        json.dumps(
+                            {"event": "pcap_retry_schedule_failed", "request_id": request_id, "error": str(retry_error)[:500]},
+                            sort_keys=True,
+                        ),
+                        file=sys.stderr,
+                    )
+            else:
+                completion_recorded = complete_pcap_request(config, request_id, "failed", completion_payload)
+                if not completion_recorded:
+                    completion_failed += 1
+                failed += 1
+                outcomes[outcome] = outcomes.get(outcome, 0) + 1
         processed += 1
     return {
         "ok": True,
@@ -1079,11 +1688,17 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
         "artifact_upload_failed": artifact_upload_failed,
         "artifact_cleanup_failed": artifact_cleanup_failed,
         "artifact_cleanup_succeeded": artifact_cleanup_succeeded,
+        "relay_spool_cleanup_failed": relay_spool_cleanup_failed,
+        "relay_spool_cleanup_succeeded": relay_spool_cleanup_succeeded,
+        "retry_scheduled": retry_scheduled,
+        "retry_exhausted": retry_exhausted,
+        "retry_callback_failed": retry_callback_failed,
         "outcomes": outcomes,
-        "operational_failures": operational_failures + completion_failed + artifact_cleanup_failed,
+        "operational_failures": operational_failures + completion_failed + artifact_cleanup_failed + relay_spool_cleanup_failed,
         "stale_spool_partials_removed": stale_spool_partials_removed,
         "stale_spool_artifacts_removed": stale_spool_artifacts_removed,
         "spool": spool_usage(config),
+        "security_onion_storage": security_onion_storage,
     }
 
 
@@ -1096,9 +1711,21 @@ def post_alerts_to_webhook(
     # return an acknowledgement for each alert. When conn is provided, each
     # alert is marked seen immediately after a successful POST, so a later
     # delivery failure resumes with only the unposted remainder next timer run.
-    webhook = config.get("webhook", {})
-    if not webhook.get("enabled"):
+    if not alert_delivery.delivery_enabled(config):
         return 0
+
+    if alert_delivery.delivery_mode(config) == "ssh_batch":
+        messages = [
+            {"delivery_id": str(alert.get("alert_id") or ""), "payload": alert}
+            for alert in alerts
+        ]
+        results = alert_delivery.deliver_ssh_messages(config, messages)
+        failures = [item for item in results if not item.get("ok")]
+        if failures:
+            raise RuntimeError(f"SSH alert intake rejected {len(failures)} alert(s)")
+        if conn is not None:
+            mark_seen(conn, alerts)
+        return len(results)
 
     posted_count = 0
     for alert in alerts:
@@ -1111,13 +1738,75 @@ def post_alerts_to_webhook(
 
 
 def drain_alert_outbox(config: dict, conn: sqlite3.Connection) -> int:
-    """Deliver durable queued alerts in fetch order and stop on first outage."""
+    """Deliver queued alerts, preserving per-alert acknowledgement state."""
     webhook = config.get("webhook", {})
-    if not webhook.get("enabled"):
+    if not alert_delivery.delivery_enabled(config):
         return 0
     posted_count = 0
     limit = max(1, min(int(webhook.get("outbox_drain_limit", 1000) or 1000), 10000))
-    for item in alert_outbox.pending(conn, limit):
+    pending = alert_outbox.pending(conn, limit)
+    if alert_delivery.delivery_mode(config) == "ssh_batch":
+        retryable_failures = 0
+        permanent_failures = 0
+        messages = [
+            {"delivery_id": item["alert_id"], "payload": item["payload"]}
+            for item in pending
+        ]
+        for batch in alert_delivery.split_batches(config, messages):
+            batch_by_id = {item["delivery_id"]: item for item in batch}
+            claimed = {
+                delivery_id: item
+                for delivery_id, item in batch_by_id.items()
+                if alert_outbox.claim(conn, delivery_id)
+            }
+            if not claimed:
+                continue
+            try:
+                response = alert_delivery.deliver_ssh_batch(config, list(claimed.values()))
+            except Exception as exc:
+                for delivery_id in claimed:
+                    alert_outbox.mark_failure(conn, delivery_id, str(exc))
+                raise RuntimeError(str(exc)) from exc
+            results = {
+                str(item.get("delivery_id") or ""): item
+                for item in response.get("results", [])
+                if isinstance(item, dict)
+            }
+            for delivery_id, message in claimed.items():
+                result = results.get(delivery_id, {
+                    "ok": False,
+                    "retryable": True,
+                    "reason": "missing per-alert acknowledgement",
+                })
+                if result.get("ok"):
+                    mark_seen(conn, [message["payload"]])
+                    alert_outbox.mark_delivered(conn, delivery_id)
+                    posted_count += 1
+                elif result.get("retryable", True):
+                    alert_outbox.mark_failure(
+                        conn,
+                        delivery_id,
+                        str(result.get("reason") or "retryable rejection"),
+                    )
+                    retryable_failures += 1
+                else:
+                    # A poison message is retained for inspection but cannot
+                    # hold every newer LAN alert behind it forever.
+                    alert_outbox.move_to_dead_letter(
+                        conn,
+                        delivery_id,
+                        str(result.get("reason") or "permanent rejection"),
+                    )
+                    mark_seen(conn, [message["payload"]])
+                    permanent_failures += 1
+        if retryable_failures or permanent_failures:
+            raise RuntimeError(
+                "SSH alert intake completed with "
+                f"{retryable_failures} retryable and {permanent_failures} permanent rejection(s)"
+            )
+        return posted_count
+
+    for item in pending:
         alert_id = item["alert_id"]
         if not alert_outbox.claim(conn, alert_id):
             continue
@@ -1159,9 +1848,18 @@ def build_relay_heartbeat(
 
 
 def post_relay_heartbeat(config: dict, heartbeat: dict) -> bool:
-    webhook = config.get("webhook", {})
-    if not webhook.get("enabled"):
+    if not alert_delivery.delivery_enabled(config):
         return False
+    if alert_delivery.delivery_mode(config) == "ssh_batch":
+        delivery_id = f"relay-heartbeat:{heartbeat.get('generated_at') or now_utc_iso()}"
+        results = alert_delivery.deliver_ssh_messages(
+            config,
+            [{"delivery_id": delivery_id, "payload": heartbeat}],
+        )
+        if len(results) != 1 or not results[0].get("ok"):
+            reason = results[0].get("reason") if results else "missing acknowledgement"
+            raise RuntimeError(f"SSH heartbeat intake failed: {reason}")
+        return True
     post_json_to_webhook(config, heartbeat)
     return True
 
@@ -1197,8 +1895,13 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_config(Path(args.config).resolve())
+    pruned_runtime_files = prune_runtime_evidence(config)
+    relay_root_storage = require_relay_root_capacity(config)
     if args.process_pcap_requests:
-        print(json.dumps(process_pcap_requests(config), sort_keys=True))
+        result = process_pcap_requests(config)
+        result["pruned_runtime_files"] = pruned_runtime_files
+        result["relay_root_storage"] = relay_root_storage
+        print(json.dumps(result, sort_keys=True))
         return 0
 
     if not args.pull_once:
@@ -1222,9 +1925,9 @@ def main() -> int:
         # Important order: filter -> dedupe -> durable queue -> post -> mark seen.
         new_alerts, duplicate_count = filter_unseen_alerts(conn, filtered_alerts)
         saved_alert_paths = save_new_alerts(config, new_alerts)
-        webhook_enabled = bool(config.get("webhook", {}).get("enabled"))
-        queued_count = alert_outbox.enqueue(conn, new_alerts) if webhook_enabled else 0
-        posted_count = drain_alert_outbox(config, conn) if webhook_enabled else 0
+        delivery_enabled = alert_delivery.delivery_enabled(config)
+        queued_count = alert_outbox.enqueue(conn, new_alerts) if delivery_enabled else 0
+        posted_count = drain_alert_outbox(config, conn) if delivery_enabled else 0
         outbox_counts = alert_outbox.counts(conn)
         alert_outbox.prune_delivered(
             conn,
@@ -1244,7 +1947,7 @@ def main() -> int:
                 first_rule=first_rule,
             )
             heartbeat_posted = post_relay_heartbeat(config, heartbeat)
-        if not webhook_enabled:
+        if not delivery_enabled:
             mark_seen(conn, new_alerts)
 
     print(
@@ -1262,8 +1965,12 @@ def main() -> int:
                 "posted_webhook_alerts": posted_count,
                 "queued_webhook_alerts": queued_count,
                 "outbox_pending_alerts": outbox_counts.get("pending", 0),
+                "outbox_dead_letter_alerts": outbox_counts.get("dead_letter", 0),
+                "alert_delivery_mode": alert_delivery.delivery_mode(config),
                 "posted_webhook_heartbeat": heartbeat_posted,
                 "first_rule": first_rule,
+                "pruned_runtime_files": pruned_runtime_files,
+                "relay_root_storage": relay_root_storage,
             },
             sort_keys=True,
         )

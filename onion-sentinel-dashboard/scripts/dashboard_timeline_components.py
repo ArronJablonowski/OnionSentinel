@@ -132,7 +132,7 @@ def alert_seen_timeline_html(row: Any) -> str:
             'point_ts': point_ts,
         })
     normalized.sort(key=lambda event: (event['point_ts'], str(event['alert_id'])))
-    if sum(safe_int(event['seen_count']) for event in normalized) <= 1:
+    if not normalized:
         return ''
     first_ts = float(normalized[0]['point_ts'])
     last_ts = float(normalized[-1]['point_ts'])
@@ -198,7 +198,10 @@ def alert_seen_timeline_html(row: Any) -> str:
             marker_classes.append('marker-first')
         if contains_last:
             marker_classes.append('marker-last')
-        label = 'First' if contains_first else ('Last' if contains_last else (f'x{event_count}' if event_count > 1 else ''))
+        if contains_first and contains_last:
+            label = 'Only'
+        else:
+            label = 'First' if contains_first else ('Last' if contains_last else (f'x{event_count}' if event_count > 1 else ''))
         title = (
             f"Events {bucket['first_index']}-{bucket['last_index']} | "
             f"observations {observation_count} | "

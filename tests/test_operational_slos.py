@@ -38,6 +38,46 @@ class OperationalSloTests(unittest.TestCase):
         failures, _ = self.slo.evaluate(metrics, health, now=now, disk_used_percent=90, sqlite_backup_age=None, postgres_backup_age=None, previous_ingest_errors=1)
         self.assertGreaterEqual(len(failures), 8)
 
+    def test_mac_disk_alerts_at_seventy_five_percent(self):
+        now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
+        metrics = {"metrics": {"process": {"ingest_errors": 0}, "oldest_pending_job_seconds": 0,
+                               "oldest_pending_jobs": [], "oldest_pending_pcap_seconds": 0}}
+        health = {"summary": {"latest": {"timestamp_utc": "2026-07-14T17:55:00Z"}}, "pcap": {"warning_count": 0}}
+        failures, snapshot = self.slo.evaluate(
+            metrics, health, now=now, disk_used_percent=75,
+            sqlite_backup_age=60, postgres_backup_age=60, previous_ingest_errors=0,
+        )
+        self.assertIn("Mac runtime disk is 75.0% used", failures)
+        self.assertEqual(snapshot["signals"]["disk_hard_limit_percent"], 80)
+
+    def test_known_pipeline_backlog_is_admitted_before_disk_ceiling(self):
+        now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
+        metrics = {"metrics": {
+            "process": {"ingest_errors": 0},
+            "oldest_pending_job_seconds": 0,
+            "oldest_pending_jobs": [],
+            "oldest_pending_pcap_seconds": 0,
+            "pipeline": {
+                "disk": {
+                    "known_pipeline_backlog_bytes": 50,
+                    "projected_used_percent_with_known_backlog": 76.2,
+                },
+                "stages": [{
+                    "stage": "pcap_transfer", "pending": 2, "processing": 1,
+                    "oldest_pending_seconds": 120, "backlog_bytes_known": 50,
+                    "backlog_bytes_unknown_items": 0, "drain_eta_seconds": 300,
+                    "byte_drain_eta_seconds": 240, "throughput": {"1h": {"completed": 5}},
+                }],
+            },
+        }}
+        health = {"summary": {"latest": {"timestamp_utc": "2026-07-14T17:55:00Z"}}, "pcap": {"warning_count": 0}}
+        failures, snapshot = self.slo.evaluate(
+            metrics, health, now=now, disk_used_percent=70,
+            sqlite_backup_age=60, postgres_backup_age=60, previous_ingest_errors=0,
+        )
+        self.assertIn("known pipeline backlog projects Mac runtime disk to 76.2% used", failures)
+        self.assertEqual(snapshot["signals"]["pipeline_stages"]["pcap_transfer"]["drain_eta_seconds"], 300)
+
     def test_pcap_blocked_ai_uses_sixty_minute_deadline(self):
         now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
         metrics = {"metrics": {
@@ -55,6 +95,35 @@ class OperationalSloTests(unittest.TestCase):
                                                previous_ingest_errors=0)
         self.assertEqual(failures, [])
         self.assertEqual(snapshot["signals"]["oldest_pending_ai_job_seconds"], 1800)
+
+    def test_fresh_active_pcap_transfer_suppresses_raw_backlog_age_failure(self):
+        now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
+        metrics = {"metrics": {
+            "process": {"ingest_errors": 0},
+            "oldest_pending_job_seconds": 0,
+            "oldest_pending_jobs": [],
+            "oldest_pending_pcap_seconds": 4 * 60 * 60,
+        }}
+        health = {
+            "summary": {"latest": {"timestamp_utc": "2026-07-14T17:55:00Z"}},
+            "pcap": {
+                "warning_count": 0,
+                "active_transfers": [{"request_id": "pcap-large", "progress_at": "2026-07-14T17:59:30Z"}],
+            },
+        }
+
+        failures, snapshot = self.slo.evaluate(
+            metrics,
+            health,
+            now=now,
+            disk_used_percent=55,
+            sqlite_backup_age=60,
+            postgres_backup_age=60,
+            previous_ingest_errors=0,
+        )
+
+        self.assertNotIn("PCAP backlog exceeds 60 minutes", failures)
+        self.assertEqual(snapshot["signals"]["active_pcap_transfer_count"], 1)
 
     def test_enrichment_keeps_fifteen_minute_deadline(self):
         now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
@@ -86,11 +155,37 @@ class OperationalSloTests(unittest.TestCase):
                                         previous_ingest_errors=0)
         self.assertEqual(failures, [])
 
-        metrics["metrics"]["latest_completed_jobs"][0]["seconds"] = 901
+        metrics["metrics"]["latest_completed_jobs"][0]["seconds"] = 1801
         failures, _ = self.slo.evaluate(metrics, health, now=now, disk_used_percent=55,
                                         sqlite_backup_age=60, postgres_backup_age=60,
                                         previous_ingest_errors=0)
-        self.assertIn("AI analysis has pending work but no completion within 15 minutes", failures)
+        self.assertIn("AI analysis has pending work but no completion within 30 minutes", failures)
+
+    def test_active_ai_processing_uses_processing_age(self):
+        now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
+        metrics = {"metrics": {
+            "process": {"ingest_errors": 0},
+            "durable_jobs": [
+                {"job_type": "ai_analysis", "status": "pending", "count": 4},
+                {"job_type": "ai_analysis", "status": "processing", "count": 1},
+            ],
+            "oldest_pending_jobs": [{"job_type": "ai_analysis", "seconds": 7200}],
+            "oldest_processing_jobs": [{"job_type": "ai_analysis", "seconds": 600}],
+            "latest_completed_jobs": [{"job_type": "ai_analysis", "seconds": 3600}],
+            "oldest_pending_pcap_seconds": 0,
+        }}
+        health = {"summary": {"latest": {"timestamp_utc": "2026-07-14T17:55:00Z"}}, "pcap": {"warning_count": 0}}
+        failures, snapshot = self.slo.evaluate(metrics, health, now=now, disk_used_percent=55,
+                                               sqlite_backup_age=60, postgres_backup_age=60,
+                                               previous_ingest_errors=0)
+        self.assertEqual(failures, [])
+        self.assertEqual(snapshot["signals"]["processing_ai_job_count"], 1)
+
+        metrics["metrics"]["oldest_processing_jobs"][0]["seconds"] = 901
+        failures, _ = self.slo.evaluate(metrics, health, now=now, disk_used_percent=55,
+                                        sqlite_backup_age=60, postgres_backup_age=60,
+                                        previous_ingest_errors=0)
+        self.assertIn("AI analysis has been processing without state progress for 15 minutes", failures)
 
     def test_soak_clock_continues_only_while_healthy(self):
         now = dt.datetime(2026, 7, 16, 18, tzinfo=dt.timezone.utc)

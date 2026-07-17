@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only relay SSD health check for systemd and Telegram escalation."""
+"""Read-only relay root and SSD health check for Telegram escalation."""
 from __future__ import annotations
 
 import json
@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 MOUNT = Path(os.environ.get("RELAY_SSD_MOUNT", "/mnt/onion-sentinel-pcap-spool"))
+ROOT_MOUNT = Path(os.environ.get("RELAY_ROOT_MOUNT", "/"))
 DEVICE = os.environ.get("RELAY_SSD_DEVICE", "/dev/sda")
 SMARTCTL = os.environ.get("RELAY_SMARTCTL", "/usr/sbin/smartctl")
 
@@ -22,10 +23,13 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
-MIN_FREE_BYTES = max(0, env_int("RELAY_SSD_MIN_FREE_BYTES", 100 * 1024**3))
-MAX_USED_PERCENT = min(99, max(1, env_int("RELAY_SSD_MAX_USED_PERCENT", 80)))
+MIN_FREE_BYTES = max(0, env_int("RELAY_SSD_MIN_FREE_BYTES", 200 * 1024**3))
+MAX_USED_PERCENT = min(75, max(1, env_int("RELAY_SSD_MAX_USED_PERCENT", 75)))
 MAX_TEMPERATURE_C = min(100, max(20, env_int("RELAY_SSD_MAX_TEMPERATURE_C", 70)))
 MAX_UNSAFE_SHUTDOWNS = max(0, env_int("RELAY_SSD_MAX_UNSAFE_SHUTDOWNS", 0))
+ROOT_MIN_FREE_BYTES = max(0, env_int("RELAY_ROOT_MIN_FREE_BYTES", 2 * 1024**3))
+ROOT_WARN_USED_PERCENT = min(79, max(1, env_int("RELAY_ROOT_WARN_USED_PERCENT", 75)))
+ROOT_HARD_USED_PERCENT = min(80, max(ROOT_WARN_USED_PERCENT + 1, env_int("RELAY_ROOT_HARD_USED_PERCENT", 80)))
 
 
 def run(command: list[str]) -> subprocess.CompletedProcess:
@@ -34,7 +38,26 @@ def run(command: list[str]) -> subprocess.CompletedProcess:
 
 def main() -> int:
     failures: list[str] = []
-    result: dict = {"ok": False, "mount": str(MOUNT), "device": DEVICE}
+    result: dict = {"ok": False, "mount": str(MOUNT), "root_mount": str(ROOT_MOUNT), "device": DEVICE}
+    try:
+        root_usage = shutil.disk_usage(ROOT_MOUNT)
+        root_percent = round((root_usage.used / root_usage.total) * 100, 2) if root_usage.total else 100.0
+        result["root_storage"] = {
+            "total_bytes": root_usage.total,
+            "used_bytes": root_usage.used,
+            "free_bytes": root_usage.free,
+            "used_percent": root_percent,
+            "warning_percent": ROOT_WARN_USED_PERCENT,
+            "hard_percent": ROOT_HARD_USED_PERCENT,
+        }
+        if root_usage.free < ROOT_MIN_FREE_BYTES:
+            failures.append(f"relay root free space is below {ROOT_MIN_FREE_BYTES} bytes")
+        if root_percent >= ROOT_HARD_USED_PERCENT:
+            failures.append(f"relay root usage reached the {ROOT_HARD_USED_PERCENT} percent hard limit")
+        elif root_percent >= ROOT_WARN_USED_PERCENT:
+            failures.append(f"relay root usage is at or above {ROOT_WARN_USED_PERCENT} percent")
+    except OSError as exc:
+        failures.append(f"relay root usage check failed: {exc}")
     findmnt = run(["/usr/bin/findmnt", "-J", "-T", str(MOUNT)])
     if findmnt.returncode != 0:
         failures.append("relay SSD mount is unavailable")

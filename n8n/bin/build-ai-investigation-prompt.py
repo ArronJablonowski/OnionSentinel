@@ -10,11 +10,19 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import ipaddress
 import json
 import re
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Iterable
+
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+from agent_memory import build_agent_memory_context
 
 
 HOME = Path.home()
@@ -41,6 +49,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--levels", default="critical,high,medium", help="Comma-separated levels when alert-id is omitted")
     parser.add_argument("--hours", type=int, default=24, help="Lookback when alert-id is omitted")
     parser.add_argument("--related-limit", type=int, default=15, help="Maximum related alerts to include")
+    parser.add_argument("--correlation-limit", type=int, default=8, help="Maximum scored correlation candidates to include")
+    parser.add_argument("--correlation-min-score", type=int, default=15, help="Minimum deterministic correlation score")
     parser.add_argument("--rollup-bytes", type=int, default=12000, help="Maximum bytes from latest daily rollup")
     parser.add_argument("--system-prompt-file", type=Path, default=DEFAULT_SYSTEM_PROMPT_FILE, help="Editable SOC Analyst system prompt file")
     parser.add_argument("--agent-memory-file", type=Path, default=DEFAULT_SOC_ANALYST_MEMORY_FILE, help="SOC Analyst Markdown memory file")
@@ -56,6 +66,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--hours must be positive")
     if args.related_limit <= 0:
         parser.error("--related-limit must be positive")
+    if args.correlation_limit <= 0:
+        parser.error("--correlation-limit must be positive")
+    if args.correlation_min_score < 0 or args.correlation_min_score > 100:
+        parser.error("--correlation-min-score must be between 0 and 100")
     if args.rollup_bytes <= 0:
         parser.error("--rollup-bytes must be positive")
     if args.memory_bytes <= 0:
@@ -225,20 +239,6 @@ def latest_rollup(rollup_dir: Path, limit_bytes: int) -> dict:
     latest = files[-1]
     data = latest.read_bytes()[:limit_bytes]
     return {"path": str(latest), "content": data.decode("utf-8", errors="replace")}
-
-
-def markdown_memory(path: Path, limit_bytes: int) -> dict:
-    """Load bounded Markdown agent memory as model evidence."""
-    try:
-        data = path.read_bytes()[:limit_bytes]
-    except FileNotFoundError:
-        return {"path": str(path), "exists": False, "content": ""}
-    return {
-        "path": str(path),
-        "exists": True,
-        "content": data.decode("utf-8", errors="replace"),
-        "max_bytes": limit_bytes,
-    }
 
 
 def compact_pcap_analysis(record: dict) -> dict:
@@ -516,6 +516,249 @@ def related_alerts(conn: sqlite3.Connection, selected: sqlite3.Row, limit: int, 
     return [dict(item) for item in found]
 
 
+CORRELATION_WEIGHTS = {
+    "hash": 50,
+    "url": 45,
+    "domain": 35,
+    "host": 35,
+    "user": 35,
+    "cve": 25,
+    "rule": 12,
+    "dataset": 4,
+    "port": 4,
+    "protocol": 3,
+}
+
+
+def parse_project_datetime(value: object) -> dt.datetime | None:
+    text = str(value or "").strip().replace("  ", "T", 1)
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+
+
+def correlation_observable_weight(observable_type: str, value: str) -> int:
+    if observable_type != "ip":
+        return CORRELATION_WEIGHTS.get(observable_type, 0)
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return 0
+    return 35 if address.is_private else 25
+
+
+def correlation_time_bonus(selected_last_seen: object, related_last_seen: object) -> tuple[int, str | None]:
+    selected_time = parse_project_datetime(selected_last_seen)
+    related_time = parse_project_datetime(related_last_seen)
+    if not selected_time or not related_time:
+        return 0, None
+    seconds = abs((selected_time - related_time).total_seconds())
+    if seconds <= 3600:
+        return 20, "detections occurred within one hour"
+    if seconds <= 86400:
+        return 10, "detections occurred within 24 hours"
+    if seconds <= 604800:
+        return 5, "detections occurred within seven days"
+    return 0, None
+
+
+def correlated_alert_context(
+    conn: sqlite3.Connection,
+    selected: sqlite3.Row,
+    limit: int,
+    min_score: int,
+) -> dict:
+    """Return bounded, deterministic cross-alert context with provenance.
+
+    SQLite observables generate candidates; prior model conclusions only
+    annotate those candidates and never create evidence on their own.
+    """
+    selected_group_id = str(sqlite_value(selected, "stable_group_id") or "").strip().lower()
+    if not selected_group_id:
+        return {
+            "selected_group_id": None,
+            "candidates": [],
+            "candidate_limit": limit,
+            "minimum_score": min_score,
+            "status": "stable group identity unavailable",
+        }
+    try:
+        matches = rows(
+            conn,
+            """
+            SELECT related.group_id,
+                   selected.observable_type,
+                   selected.observable_value,
+                   selected.role AS selected_role,
+                   related.role AS related_role
+            FROM alert_observables AS selected
+            JOIN alert_observables AS related
+              ON related.observable_type = selected.observable_type
+             AND related.observable_value = selected.observable_value
+             AND related.group_id != selected.group_id
+            WHERE selected.group_id = ?
+            LIMIT 4000
+            """,
+            [selected_group_id],
+        )
+        persisted = rows(
+            conn,
+            """
+            SELECT source_group_id, related_group_id, correlation_score,
+                   reasons_json, shared_observables_json, model_status,
+                   model_confidence, model_hypothesis, updated_at
+            FROM alert_correlations
+            WHERE source_group_id = ? OR related_group_id = ?
+            ORDER BY correlation_score DESC, updated_at DESC
+            LIMIT 100
+            """,
+            [selected_group_id, selected_group_id],
+        )
+    except sqlite3.Error:
+        return {
+            "selected_group_id": selected_group_id,
+            "candidates": [],
+            "candidate_limit": limit,
+            "minimum_score": min_score,
+            "status": "correlation index unavailable",
+        }
+
+    candidate_data: dict[str, dict] = {}
+    for match in matches:
+        group_id = str(match["group_id"] or "")
+        observable_type = str(match["observable_type"] or "")
+        observable_value = str(match["observable_value"] or "")
+        key = (
+            observable_type,
+            observable_value,
+            str(match["selected_role"] or ""),
+            str(match["related_role"] or ""),
+        )
+        candidate = candidate_data.setdefault(group_id, {"matches": {}, "persisted": None})
+        candidate["matches"][key] = correlation_observable_weight(observable_type, observable_value)
+
+    for item in persisted:
+        source_id = str(item["source_group_id"] or "")
+        related_id = str(item["related_group_id"] or "")
+        group_id = related_id if source_id == selected_group_id else source_id
+        if not group_id or group_id == selected_group_id:
+            continue
+        candidate = candidate_data.setdefault(group_id, {"matches": {}, "persisted": None})
+        candidate["persisted"] = dict(item)
+
+    ranked_ids = sorted(
+        candidate_data,
+        key=lambda group_id: max(
+            sum(candidate_data[group_id]["matches"].values()),
+            int(float((candidate_data[group_id]["persisted"] or {}).get("correlation_score") or 0)),
+        ),
+        reverse=True,
+    )[:100]
+    if not ranked_ids:
+        return {
+            "selected_group_id": selected_group_id,
+            "candidates": [],
+            "candidate_limit": limit,
+            "minimum_score": min_score,
+            "status": "no indexed correlation candidates",
+        }
+
+    placeholders = ",".join("?" for _ in ranked_ids)
+    candidate_rows = rows(
+        conn,
+        f"""
+        SELECT alert_id, stable_group_id, last_seen, first_seen, rule_name,
+               source_ip, destination_ip, destination_port, transport_protocol,
+               triage_level, triage_score, filter_status, seen_count
+        FROM alerts
+        WHERE stable_group_id IN ({placeholders})
+        ORDER BY replace(replace(COALESCE(last_seen, timestamp, first_seen), 'T', ' '), 'Z', '') DESC,
+                 alert_id DESC
+        """,
+        ranked_ids,
+    )
+    representative: dict[str, dict] = {}
+    for item in candidate_rows:
+        representative.setdefault(str(item["stable_group_id"] or ""), dict(item))
+
+    analysis_rows = rows(
+        conn,
+        f"""
+        SELECT analysis_id, group_id, generated_at, model, detection_outcome,
+               bluf, summary, confidence
+        FROM ai_analysis_runs
+        WHERE group_id IN ({placeholders})
+        ORDER BY generated_at DESC, analysis_id DESC
+        """,
+        ranked_ids,
+    )
+    prior_analysis: dict[str, dict] = {}
+    for item in analysis_rows:
+        prior_analysis.setdefault(str(item["group_id"] or ""), dict(item))
+
+    candidates = []
+    for group_id in ranked_ids:
+        item = representative.get(group_id)
+        if not item:
+            continue
+        data = candidate_data[group_id]
+        shared = [
+            {
+                "type": key[0],
+                "value": key[1],
+                "selected_role": key[2],
+                "related_role": key[3],
+                "weight": weight,
+            }
+            for key, weight in sorted(data["matches"].items(), key=lambda pair: (-pair[1], pair[0]))
+        ]
+        evidence_score = min(80, sum(match["weight"] for match in shared))
+        time_score, time_reason = correlation_time_bonus(sqlite_value(selected, "last_seen"), item.get("last_seen"))
+        persisted_item = data["persisted"] or {}
+        persisted_score = int(float(persisted_item.get("correlation_score") or 0))
+        score = min(100, max(evidence_score + time_score, persisted_score))
+        if score < min_score:
+            continue
+        reasons = [f"shared {match['type']}: {match['value']}" for match in shared[:8]]
+        if time_reason:
+            reasons.append(time_reason)
+        if persisted_item:
+            reasons.append("previous correlation record exists")
+        candidates.append({
+            "group_id": group_id,
+            "score": score,
+            "correlation_reasons": reasons,
+            "shared_observables": shared[:12],
+            "alert": item,
+            "prior_analysis": prior_analysis.get(group_id),
+            "previous_correlation": {
+                "model_status": persisted_item.get("model_status"),
+                "model_confidence": persisted_item.get("model_confidence"),
+                "model_hypothesis": persisted_item.get("model_hypothesis"),
+                "updated_at": persisted_item.get("updated_at"),
+            } if persisted_item else None,
+        })
+
+    candidates.sort(key=lambda item: (item["score"], str(item["alert"].get("last_seen") or "")), reverse=True)
+    return {
+        "selected_group_id": selected_group_id,
+        "candidates": candidates[:limit],
+        "candidate_count_before_limit": len(candidates),
+        "candidate_limit": limit,
+        "minimum_score": min_score,
+        "usage_guidance": (
+            "Treat candidates as correlation leads, not confirmed incidents. Shared observables and timestamps are facts; "
+            "prior_analysis and previous_correlation are earlier hypotheses. Require current evidence before asserting a relationship."
+        ),
+    }
+
+
 def grouped_alert_context(conn: sqlite3.Connection, selected: sqlite3.Row, limit: int, include_tests: bool) -> dict:
     """Summarize the dashboard duplicate group so AI weighs alert frequency."""
     filter_sql = ""
@@ -642,17 +885,30 @@ def model_policy(level: str | None) -> dict:
 def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argparse.Namespace) -> dict:
     rollup = latest_rollup(args.rollup_dir, args.rollup_bytes)
     group_context = grouped_alert_context(conn, selected, args.related_limit, args.include_tests)
-    memory_context = {
-        "role_memory": markdown_memory(args.agent_memory_file, args.memory_bytes),
-        "shared_memory": markdown_memory(args.shared_memory_file, args.memory_bytes),
-        "usage_guidance": (
-            "Use role_memory for SOC Analyst-specific lessons and shared_memory for cross-agent knowledge. "
-            "Treat memory as analyst context, not proof. Prefer current alert evidence when memory conflicts."
-        ),
-    }
     pcap_context = pcap_evidence_context(conn, selected, args.pcap_analysis_dir, args.pcap_analysis_limit)
     enrichment_context = public_enrichment_context(conn, selected, args.related_limit, args.include_tests)
     analyst_state = analyst_state_context(conn, selected)
+    correlation_context = correlated_alert_context(
+        conn,
+        selected,
+        args.correlation_limit,
+        args.correlation_min_score,
+    )
+    compact_selected = compact_alert(selected)
+    memory_context = build_agent_memory_context(
+        agent_role="soc-analyst",
+        role_memory_file=args.agent_memory_file,
+        shared_memory_file=args.shared_memory_file,
+        evidence={
+            "alert": compact_selected,
+            "grouped_alert_context": group_context,
+            "public_enrichment": enrichment_context,
+            "pcap_evidence": pcap_context,
+            "analyst_state": analyst_state,
+            "correlated_alert_context": correlation_context,
+        },
+        limit_bytes=args.memory_bytes,
+    )
     return {
         "package_type": "soc-ai-investigation-prompt",
         "generated_at": project_now(),
@@ -668,8 +924,13 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
                 "Use public_enrichment records when present; weigh verdicts, confidence, tags, and skipped/error notes in the overall assessment.",
                 "Use pcap_evidence.parsed_evidence when present; prefer Zeek summaries for flows/protocols and TShark summaries for packet-level corroboration.",
                 "If memory conflicts with current alert evidence, prefer the current alert evidence and mention the conflict.",
+                "Propose memory_candidates only for reusable lessons that are likely to help a later investigation. Do not use memory as a transcript or repeat the current alert summary.",
+                "A shared memory candidate must be high-confidence, useful to multiple agent roles, grounded in supplied evidence, and contain no secrets, raw payloads, or live alert IDs.",
+                "Return an empty memory_candidates array when no durable reusable lesson was established.",
                 "Use grouped_alert_context.total_observations and raw_alert_rows when judging urgency, repeat behavior, and tuning.",
                 "Use analyst_state and prior_analyses as context; do not treat an earlier conclusion as stronger than current evidence.",
+                "Evaluate correlated_alert_context candidates using only their shared observables, timing, current evidence, and provenance. Prior analysis is a hypothesis, not a fact.",
+                "Do not claim correlation from a common port, protocol, ASN, CDN, public resolver, or rule name alone. State evidence for and against every proposed relationship.",
                 "Start the assessment with a BLUF classification. Classify whether the detection outcome is true-positive malicious, true-positive suspicious, true-positive authorized/benign, false positive, duplicate, informational/no-action, or inconclusive based on whether the rule correctly identified the intended behavior and whether the behavior appears malicious, suspicious, authorized, benign, or unknown.",
                 "Do not invent packet contents, hostnames, users, process names, files, commands, or malware family names.",
                 "If evidence is missing, say what is missing.",
@@ -697,14 +958,36 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             "tuning_recommendation": "none|suppress|drop|raise_score|lower_score|needs_more_data",
             "tuning_reason": "string",
             "recommended_tuning_actions": ["string"],
+            "correlation_assessment": {
+                "correlation_found": "boolean",
+                "confidence": "low|medium|high",
+                "related_groups": [{"group_id": "string", "reason": "string"}],
+                "shared_evidence": ["string"],
+                "contradicting_evidence": ["string"],
+                "attack_chain_hypothesis": "string",
+                "recommended_pivots": ["string"],
+            },
+            "memory_candidates": [
+                {
+                    "scope": "agent|shared",
+                    "category": "benign_pattern|detection_pattern|environment_context|evidence_gap|investigation_pivot|response_lesson|threat_intel_lesson|tooling_lesson|tuning_decision",
+                    "finding": "Reusable lesson, not a copy of the current alert summary.",
+                    "use_when": "Conditions under which a later agent should retrieve this lesson.",
+                    "evidence_basis": ["Current supplied evidence that supports the lesson."],
+                    "confidence": "medium|high",
+                    "tags": ["short retrieval tag"],
+                    "ttl_days": "integer from 7 through 365",
+                }
+            ],
         },
-        "alert": compact_alert(selected),
+        "alert": compact_selected,
         "grouped_alert_context": group_context,
         "public_enrichment": enrichment_context,
         "pcap_evidence": pcap_context,
         "analyst_state": analyst_state,
         "prior_analyses": prior_analysis_context(args.analysis_dir, selected),
         "related_alerts": related_alerts(conn, selected, args.related_limit, args.include_tests),
+        "correlated_alert_context": correlation_context,
         "recent_notifications": notification_context(conn, selected),
         "agent_memory": memory_context,
         "latest_daily_rollup": rollup,

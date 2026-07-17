@@ -28,6 +28,11 @@ class SocSettingsPromptApiTest(unittest.TestCase):
         self.portal = load_portal()
         self.prompt_path = Path(self.tmp.name) / "config" / "incident_responder_system_prompt.md"
         self.portal.INCIDENT_RESPONDER_PROMPT_FILE = self.prompt_path
+        self.memory_dir = Path(self.tmp.name) / "agent-memory"
+        self.memory_dir.mkdir()
+        self.portal.AGENT_MEMORY_DIR = self.memory_dir
+        self.portal.SOC_ANALYST_MEMORY_FILE = self.memory_dir / "soc-analyst-memory.md"
+        self.portal.SHARED_AGENT_MEMORY_FILE = self.memory_dir / "shared-agent-memory.md"
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -49,6 +54,43 @@ class SocSettingsPromptApiTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("cannot be empty", payload["error"])
         self.assertFalse(self.prompt_path.exists())
+
+    def test_agent_memory_read_is_allowlisted_and_read_only(self) -> None:
+        self.portal.SOC_ANALYST_MEMORY_FILE.write_text("# SOC Analyst Memory\n\nKnown pattern.\n", encoding="utf-8")
+
+        status, payload = self.portal.read_agent_memory("soc-analyst")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["read_only"])
+        self.assertEqual(payload["label"], "SOC Analyst Memory")
+        self.assertIn("Known pattern.", payload["content"])
+        self.assertIn("  ", payload["modified_at"])
+
+    def test_agent_memory_rejects_unknown_and_path_like_keys(self) -> None:
+        for key in ("unknown", "../config/secrets", "/etc/passwd"):
+            status, payload = self.portal.read_agent_memory(key)
+            self.assertEqual(status, 400)
+            self.assertFalse(payload["ok"])
+
+    def test_agent_memory_rejects_symlink_escape(self) -> None:
+        outside = Path(self.tmp.name) / "outside.md"
+        outside.write_text("outside", encoding="utf-8")
+        self.portal.SOC_ANALYST_MEMORY_FILE.symlink_to(outside)
+
+        status, payload = self.portal.read_agent_memory("soc-analyst")
+
+        self.assertEqual(status, 403)
+        self.assertFalse(payload["ok"])
+
+    def test_agent_memory_enforces_view_size_limit(self) -> None:
+        self.portal.AGENT_MEMORY_VIEW_MAX_BYTES = 8
+        self.portal.SHARED_AGENT_MEMORY_FILE.write_text("too much memory", encoding="utf-8")
+
+        status, payload = self.portal.read_agent_memory("shared")
+
+        self.assertEqual(status, 413)
+        self.assertFalse(payload["ok"])
 
 
 if __name__ == "__main__":

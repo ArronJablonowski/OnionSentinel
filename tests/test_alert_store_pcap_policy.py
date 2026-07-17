@@ -1,5 +1,6 @@
 """Static regression checks for alert-store PCAP auto-request policy."""
 from pathlib import Path
+import json
 import unittest
 
 
@@ -9,6 +10,7 @@ COMPOSE = REPO_ROOT / "n8n" / "docker-compose.yml"
 ENV_EXAMPLE = REPO_ROOT / "n8n" / ".env.example"
 HOST_RUNNER = REPO_ROOT / "n8n" / "bin" / "run-alert-store-host.zsh"
 PCAP_WORKFLOW = REPO_ROOT / "n8n" / "workflows" / "onion-sentinel-pcap-broker.workflow.json"
+PCAP_WORKFLOW_SYNC = REPO_ROOT / "n8n" / "bin" / "sync-pcap-broker-workflow.py"
 
 
 class AlertStorePcapPolicyTest(unittest.TestCase):
@@ -96,6 +98,51 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
         self.assertIn("pcap_outcomes", code)
         self.assertIn("pcap_storage", code)
         self.assertIn("datetime(replace(p.last_seen, '  ', 'T'), '+' || ? || ' seconds')", code)
+
+    def test_singular_no_matching_packet_errors_are_normalized(self) -> None:
+        code = ALERT_STORE.read_text(encoding="utf-8")
+        self.assertIn("detail.includes('no matching packet')", code)
+        self.assertIn("outcome = 'failed'", code)
+        self.assertIn("requestedOutcome !== 'failed'", code)
+
+    def test_large_transfer_progress_renews_claim_lease(self) -> None:
+        code = ALERT_STORE.read_text(encoding="utf-8")
+        self.assertIn("ensureColumn('pcap_requests', 'transfer_progress_at', 'TEXT')", code)
+        self.assertIn("COALESCE(transfer_progress_at, claimed_at, updated_at, created_at)", code)
+        self.assertIn("parsedUrl.pathname === '/pcap/progress'", code)
+        workflow = json.loads(PCAP_WORKFLOW.read_text(encoding="utf-8"))
+        progress_webhook = next(node for node in workflow["nodes"] if node["name"] == "PCAP Progress Webhook")
+        self.assertEqual(progress_webhook["parameters"]["path"], "pcap/progress")
+
+    def test_pcap_transfer_duration_is_persisted_and_backfilled(self) -> None:
+        code = ALERT_STORE.read_text(encoding="utf-8")
+        self.assertIn("ensureColumn('pcap_requests', 'transfer_duration_seconds', 'INTEGER')", code)
+        self.assertIn("julianday(replace(completed_at, '  ', 'T'))", code)
+        self.assertIn("transfer_duration_seconds = CASE", code)
+
+    def test_pcap_transfer_retries_are_durable_bounded_and_stage_aware(self) -> None:
+        code = ALERT_STORE.read_text(encoding="utf-8")
+        for column in (
+            "transfer_attempt_count",
+            "transfer_retry_count",
+            "transfer_last_error",
+            "transfer_last_failed_stage",
+            "next_attempt_at",
+        ):
+            self.assertIn(f"ensureColumn('pcap_requests', '{column}'", code)
+        self.assertIn("PCAP_TRANSFER_MAX_ATTEMPTS", code)
+        self.assertIn("async function retryPcapRequest(payload)", code)
+        self.assertIn("parsedUrl.pathname === '/pcap/retry'", code)
+        self.assertIn("retry_scheduled: !exhausted", code)
+        self.assertIn("p.next_attempt_at IS NULL", code)
+
+    def test_pcap_proxy_workflow_includes_generated_retry_route(self) -> None:
+        workflow = json.loads(PCAP_WORKFLOW.read_text(encoding="utf-8"))
+        retry_webhook = next(node for node in workflow["nodes"] if node["name"] == "PCAP Retry Webhook")
+        retry_code = next(node for node in workflow["nodes"] if node["name"] == "Retry PCAP Request")
+        self.assertEqual(retry_webhook["parameters"]["path"], "pcap-retry")
+        self.assertIn("`/pcap/retry`", retry_code["parameters"]["jsCode"])
+        self.assertTrue(PCAP_WORKFLOW_SYNC.is_file())
 
 
 if __name__ == "__main__":

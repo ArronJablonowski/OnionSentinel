@@ -1,5 +1,11 @@
 # Security Onion AI Alert Relay Plan
 
+> Historical planning worksheet. It preserves early design decisions but is not
+> the deployment source of truth. Use
+> `docs/security-onion-relay-architecture.md` and
+> `docs/disaster-recovery-runbook.md` for the current forced-SSH alert commit
+> path, split relay timers, and post-commit n8n workflow.
+
 ## Goal
 
 - [ ] Confirm the goal and target architecture.
@@ -98,7 +104,8 @@ Recommended final VLAN 888 rules, top to bottom:
 Block IPv6 any -> any
 Allow admin network or admin Mac -> 10.88.8.8 TCP/22 for Pi administration
 Allow 10.88.8.8 -> 192.168.1.7 TCP/22
-Allow 10.88.8.8 -> 10.77.7.225 TCP/5678
+Allow 10.88.8.8 -> 10.77.7.225 TCP/22 for forced alert intake and artifact transport
+Allow 10.88.8.8 -> 10.77.7.225 TCP/5678 for PCAP control metadata and emergency rollback
 Allow 10.88.8.8 -> DNS server or This Firewall TCP/UDP 53
 Allow 10.88.8.8 -> NTP server or This Firewall UDP/123
 Allow 10.88.8.8 -> api.telegram.org or Internet TCP/443 for Telegram failure/recovery notices
@@ -114,7 +121,7 @@ Do not keep an `Allow ALL` rule on VLAN 888 after validation.
 Pre-reboot state:
 - so-alert-relay.timer enabled and active.
 - Last pre-reboot relay run completed successfully.
-- Last pre-reboot relay run posted 3 new alerts to n8n.
+- Last pre-reboot relay run delivered new alerts successfully.
 
 After issuing sudo reboot:
 - 10.88.8.1 remained reachable.
@@ -129,10 +136,9 @@ Local console finding:
 Validated after repair:
 - SSH to 10.88.8.8 returned.
 - so-alert-relay.timer is enabled and active after reboot.
-- First post-boot scheduled relay run posted 14 new alerts to Mac Studio n8n.
-- Follow-up relay run posted 2 new alerts and health_state.json reported status ok.
-- n8n alert-store review showed 49 alerts in the last hour.
-- New post-reboot alerts were not high/critical, so no new Telegram alert was expected.
+- Post-boot scheduled relay runs delivered new alerts to the Mac commit boundary.
+- health_state.json reported status ok.
+- alert-store review confirmed that post-reboot ingestion resumed.
 
 Follow-up:
 - Treat the SD card as suspect. If the Pi drops to recovery again, replace or reimage the card before trusting it as a production relay.

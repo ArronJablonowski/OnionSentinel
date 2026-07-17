@@ -31,12 +31,17 @@ BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 from pcap_lifecycle import analysis_completed, delete_request_artifacts
+from disk_capacity import require_runtime_capacity
 
 
 HOME = Path.home()
 DEFAULT_DB = HOME / "n8n-local" / "alert_store_data" / "alerts.sqlite3"
 DEFAULT_ARTIFACT_DIR = HOME / "n8n-local" / "pcap-evidence" / "artifacts"
 DEFAULT_OUT_DIR = HOME / "n8n-local" / "soc-alerts" / "pcap-analysis"
+DEFAULT_WAKE = Path(os.environ.get(
+    "PCAP_ANALYSIS_WAKE_PATH",
+    HOME / "n8n-local" / "run" / "pcap-analysis.wake",
+))
 PCAP_SUFFIXES = {".pcap", ".pcapng", ".cap"}
 LOG_LIMIT = 2000
 SUMMARY_LIMIT = 20
@@ -50,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="Alert-store SQLite DB")
     parser.add_argument("--artifact-dir", type=Path, default=DEFAULT_ARTIFACT_DIR, help="Runtime-only copied PCAP artifact directory")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help="PCAP analysis JSON/Markdown output directory")
+    parser.add_argument("--wake-file", type=Path, default=DEFAULT_WAKE, help="Consumable launchd wake marker")
     parser.add_argument("--request-id", help="Process one PCAP broker request id")
     parser.add_argument("--pcap", type=Path, help="Parse a local PCAP directly, without reading pcap_requests")
     parser.add_argument("--alert-id", help="Alert id to attach when --pcap is used")
@@ -72,6 +78,24 @@ def parse_args() -> argparse.Namespace:
 
 def project_now() -> str:
     return dt.datetime.now().astimezone().replace(microsecond=0).isoformat().replace("T", "  ")
+
+
+def consume_wake_marker(path: Path) -> None:
+    """Remove the current event so arrivals during parsing trigger a rerun."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as error:
+        print(f"PCAP wake marker could not be consumed: {error}", file=sys.stderr)
+
+
+def signal_follow_up(path: Path) -> None:
+    """Request another bounded pass when this run filled its batch."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_text(f"{project_now()} pcap-batch-remains\n", encoding="utf-8")
+        path.chmod(0o600)
+    except OSError as error:
+        print(f"PCAP follow-up wake failed: {error}", file=sys.stderr)
 
 
 def safe_filename(value: object) -> str:
@@ -232,6 +256,11 @@ def safe_extract_tar(path: Path, destination: Path) -> None:
         expanded_bytes = sum(max(0, int(member.size or 0)) for member in members if member.isfile())
         if expanded_bytes > MAX_EXTRACTED_BYTES:
             raise ValueError(f"archive expands beyond limit: {expanded_bytes} > {MAX_EXTRACTED_BYTES}")
+        require_runtime_capacity(
+            destination,
+            expanded_bytes,
+            label="PCAP archive extraction",
+        )
         for member in members:
             if member.issym() or member.islnk() or member.isdev() or member.isfifo():
                 raise ValueError(f"unsupported archive member type: {member.name}")
@@ -253,11 +282,16 @@ def materialize_pcap_files(request: dict[str, Any], args: argparse.Namespace, wo
         )
         if not fetched.get("ok"):
             return [], f"artifact-fetch-failed: {fetched.get('reason')}"
-    for candidate in candidate_artifact_paths(request, args.artifact_dir):
+    candidates = candidate_artifact_paths(request, args.artifact_dir)
+    direct_candidates = [candidate for candidate in candidates if candidate.exists() and candidate.suffix.lower() in PCAP_SUFFIXES]
+    if direct_candidates:
+        pcaps = list(dict.fromkeys(direct_candidates))
+        if len(pcaps) > MAX_PCAP_FILES:
+            raise ValueError(f"artifact directory contains too many PCAP files: {len(pcaps)} > {MAX_PCAP_FILES}")
+        return sorted(pcaps), "copied-artifact"
+    for candidate in candidates:
         if not candidate.exists():
             continue
-        if candidate.suffix.lower() in PCAP_SUFFIXES:
-            return [candidate], "copied-artifact"
         if candidate.suffix.lower() == ".tar" or candidate.name.endswith((".tar.gz", ".tgz")):
             extract_dir = work_dir / "extract"
             extract_dir.mkdir(parents=True, exist_ok=True)
@@ -553,6 +587,8 @@ def process_one(request: dict[str, Any], args: argparse.Namespace, direct_pcap: 
 
 def main() -> int:
     args = parse_args()
+    require_runtime_capacity(args.out_dir, 0, label="PCAP analysis")
+    consume_wake_marker(args.wake_file)
     failed_count = 0
     if args.pcap:
         request = {
@@ -586,6 +622,11 @@ def main() -> int:
                 except Exception as status_exc:
                     print(f"status update failed for {request_id}: {status_exc}", file=sys.stderr)
                 print(f"PCAP analysis failed for {request_id}: {exc}", file=sys.stderr)
+        if not args.request_id and len(requests) >= args.limit:
+            # A full batch may have more durable work behind it. Recreate the
+            # consumed marker so launchd drains the next bounded batch without
+            # waiting for the five-minute recovery timer.
+            signal_follow_up(args.wake_file)
     if args.stdout:
         print(json.dumps(processed, indent=2, sort_keys=True))
     else:

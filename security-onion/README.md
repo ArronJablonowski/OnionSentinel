@@ -7,16 +7,10 @@ This directory contains the Security Onion-side pieces for Onion Sentinel.
 | File | Destination | Purpose |
 | --- | --- | --- |
 | `bin/export-recent-alerts` | `/usr/local/sbin/export-recent-alerts` | Restricted wrapper that exports recent alerts as JSON. |
-| `bin/export-pcap-window` | `/usr/local/sbin/export-pcap-window` | Restricted wrapper that exports bounded PCAP artifacts from validated JSON requests. |
-| `bin/onion-sentinel-rsync-pcapout` | `/usr/local/sbin/onion-sentinel-rsync-pcapout` | Read-only forced-command wrapper for rsyncing prepared PCAP artifacts to the relay SSD spool. |
-| `bin/prune-onion-sentinel-pcapout` | `/usr/local/sbin/prune-onion-sentinel-pcapout` | Safety-net cleanup for stale Onion Sentinel PCAP export artifacts. |
-| `systemd/onion-sentinel-pcapout-retention.service` | `/etc/systemd/system/onion-sentinel-pcapout-retention.service` | One-shot Security Onion PCAP export retention cleanup. |
-| `systemd/onion-sentinel-pcapout-retention.timer` | `/etc/systemd/system/onion-sentinel-pcapout-retention.timer` | Hourly timer for stale PCAP export cleanup. |
+| `bin/export-pcap-window` | `/usr/local/sbin/export-pcap-window` | Restricted wrapper that streams one bounded, filtered rotation directly to the relay SSD without Security Onion staging. |
 | `sudoers/90-so-ai-relay-export` | `/etc/sudoers.d/90-so-ai-relay-export` | Allows only the wrapper to run passwordless for `so-ai-relay`. |
 | `ssh/authorized_keys.example` | `/home/so-ai-relay/.ssh/authorized_keys` | Forced-command SSH template restricted to the relay source IP. |
 | `ssh/authorized_keys.pcap.example` | `/home/so-ai-relay/.ssh/authorized_keys` | Separate forced-command SSH template for PCAP fulfillment. |
-| `ssh/authorized_keys.pcap-rsync.example` | `/home/so-ai-relay-pcap-rsync/.ssh/authorized_keys` | Separate read-only rsync template for PCAP artifact transfer. |
-| `ssh/99-onion-sentinel-pcap-rsync.conf` | `/etc/ssh/sshd_config.d/99-onion-sentinel-pcap-rsync.conf` | Disables the SSH banner only for the rsync transfer account so rsync protocol negotiation is clean. |
 | `bin/install-security-onion-wrapper.sh` | run with `sudo` on Security Onion | Installs wrapper, sudoers, and service account scaffolding. |
 
 ## Install
@@ -40,59 +34,58 @@ Replace `REPLACE_WITH_PUBLIC_KEY` with the Raspberry Pi relay public key. Keep t
 
 PCAP fulfillment should use a separate key entry based on
 `security-onion/ssh/authorized_keys.pcap.example`. The wrapper reads a bounded
-JSON request from stdin and writes artifacts only under
-`/nsm/pcapout/onion-sentinel`.
+JSON request from stdin. `stream_manifest` returns only validated source
+metadata. `stream_chunk` runs a low-priority tuple-filtered `tcpdump` against one
+bounded Security Onion rotation and writes the PCAP stream to SSH stdout. The
+relay writes stdout directly to its external SSD and checkpoints each completed
+chunk. No Onion Sentinel tar, filtered PCAP, or work directory is created under
+`/nsm`.
 
-PCAP artifact transfer should use a third, read-only key based on
-`security-onion/ssh/authorized_keys.pcap-rsync.example`. Install
-`security-onion/bin/onion-sentinel-rsync-pcapout` to
-`/usr/local/sbin/onion-sentinel-rsync-pcapout` and force that command for the
-transfer key. This key does not run the export wrapper and cannot open a shell;
-it only permits rsync sender mode for existing tar files under
-`/nsm/pcapout/onion-sentinel`.
+Each manifest chunk is authorized by a Security Onion-local HMAC key at
+`/etc/onion-sentinel/pcap-stream-token.key` (root-owned, mode `0600`). The later
+`stream_chunk` call validates that signed source inode, initial size, request
+window, and BPF variant directly. It does not rebuild the manifest from the
+live capture directory, so normal Security Onion rotation cannot invalidate a
+long transfer. Never copy this runtime key into the repository or relay.
 
-If Security Onion has a global SSH banner, install
-`security-onion/ssh/99-onion-sentinel-pcap-rsync.conf` and reload `sshd`. rsync
-requires a clean protocol stream, so the banner must be disabled for only the
-dedicated rsync account.
+The former staged-artifact and Security Onion rsync path is removed from the
+production data plane. The relay rejects every non-stream transfer mode, and
+the installer removes prior retention units and an empty Onion Sentinel staging
+directory. The live restricted rsync account must remain locked or absent.
 
-The export wrapper grants the transfer group read/traverse access to
-`/nsm/pcapout/onion-sentinel` and generated tar artifacts. The default group is
-`so-ai-relay-pcap-rsync`; set `ONION_SENTINEL_PCAP_TRANSFER_GROUP` before the
-forced command if you choose a different transfer account/group.
+`install-security-onion-wrapper.sh` removes the deprecated rsync wrapper and
+SSH match configuration, locks any existing legacy account, and moves its
+authorized key to a root-only disabled-key directory. A DR rebuild therefore
+cannot silently restore the disk-staging data plane.
 
-`export-pcap-window` treats a validated `capture_file` as a preferred hint,
-then ranks bounded candidates by the capture epoch nearest the alert window.
-This prevents historical requests from accidentally searching only the newest
-captures. The wrapper defaults to using the destination service port as the
-BPF port discriminator; request JSON may set `require_source_port: true` for
-controlled validation or rare cases where an ephemeral source port is the only
-safe discriminator. `ONION_SENTINEL_PCAP_MAX_ARTIFACT_BYTES` defaults to 32 GiB
-and is applied to `tcpdump` itself, so an unusually dense flow cannot fill the
-Security Onion export directory before the relay SSD limit is enforced. Keep
-this bound below available Security Onion and Mac Studio capacity; the live
-1 TB relay spool reserves 100 GiB and stops accepting work at 80 percent used.
+`export-pcap-window` treats a validated `capture_file` as a preferred hint and
+otherwise selects only rotations whose capture epochs overlap the bounded alert
+window. Each source rotation must be at most 1.1 GiB by default, no more than 12
+rotations are considered, and only one Onion Sentinel stream may run at once.
+Tagged and untagged tuple filters are combined into one BPF expression so each
+rotation is scanned only once. Source reads are capped at 4 MiB/s by default;
+`ionice -c3` plus a positive niceness keeps the optional read behind Security
+Onion's primary work. `/nsm` utilization is exposed as telemetry but never
+blocks a read-only export. Fresh Zeek capture-loss telemetry is returned to the
+relay, which defers new PCAP work when the latest worker interval exceeds 1%.
+Security Onion owns native retention and capacity.
+There is no total wall-clock cutoff for an active read; relay-side progress
+monitoring ends only a stream that stops producing bytes.
+The relay independently reserves 200 GiB on its 1 TB SSD and refuses projected
+usage above 75 percent.
 
-After a relay upload has been accepted by the Mac Studio and the PCAP broker
-completion callback succeeds, the relay calls `export-pcap-window` with
-`mode: artifact_cleanup`. That restricted mode accepts only a request id and
-removes only `/nsm/pcapout/onion-sentinel/<request_id>.tar` plus the matching
-work directory.
+The destination service port is the normal BPF discriminator; request JSON may
+set `require_source_port: true` only when an ephemeral source port is required.
+Both VLAN-aware and plain BPF variants are attempted because capture
+encapsulation differs by sensor.
 
-Install the retention timer as a safety net for artifacts that survive relay
-cleanup, for example during interrupted transfers or node outages:
-
-```bash
-sudo install -o root -g root -m 0755 security-onion/bin/prune-onion-sentinel-pcapout /usr/local/sbin/prune-onion-sentinel-pcapout
-sudo install -o root -g root -m 0644 security-onion/systemd/onion-sentinel-pcapout-retention.service /etc/systemd/system/onion-sentinel-pcapout-retention.service
-sudo install -o root -g root -m 0644 security-onion/systemd/onion-sentinel-pcapout-retention.timer /etc/systemd/system/onion-sentinel-pcapout-retention.timer
-sudo systemctl daemon-reload
-sudo systemctl enable --now onion-sentinel-pcapout-retention.timer
-```
-
-The prune helper defaults to dry-run when run manually. The systemd service runs
-it with `--apply` and removes only top-level tar files or request directories
-older than 24 hours under `/nsm/pcapout/onion-sentinel`.
+Onion Sentinel does not run a retention writer on Security Onion. The stream
+path reads native rotating captures through the restricted wrapper, writes no
+archive under `/nsm`, and leaves native capture lifecycle management entirely
+to Security Onion. The installer erases obsolete retention units from older
+staged deployments. Runtime writes are limited to an advisory lock under
+`/run`; the signing key is provisioned by the installer and the restricted
+runtime wrapper cannot create or repair persistent files.
 
 ## Validate
 

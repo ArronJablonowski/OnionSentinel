@@ -151,7 +151,7 @@ requests.
 
 Alert delivery and PCAP fulfillment must remain failure-isolated. The relay
 timer should attempt both subpaths every cycle and report component status for
-each path. A failed alert webhook POST must not skip PCAP broker processing, and
+each path. A failed alert delivery attempt must not skip PCAP broker processing, and
 a PCAP broker error must not block normal alert delivery.
 
 Future roadmap: increase supported PCAP pull size through the relay SSD spool

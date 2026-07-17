@@ -47,6 +47,21 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             )
             """
         )
+        self.conn.execute(
+            """
+            CREATE TABLE alert_group_summary (
+                group_id TEXT PRIMARY KEY
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE alert_group_alias (
+                legacy_group_id TEXT PRIMARY KEY,
+                stable_group_id TEXT NOT NULL
+            )
+            """
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             self.args = SimpleNamespace(
                 levels="critical,high,medium,low,informational",
@@ -116,6 +131,154 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                 "low-newest",
             ],
         )
+
+    def test_orphaned_pending_jobs_are_reconciled_without_touching_active_groups(self) -> None:
+        self.insert_alert(
+            "active-alert",
+            "high",
+            "2026-07-03  01:00:00Z",
+            rule_name="Active detection",
+            source_ip="192.0.2.10",
+            destination_ip="198.51.100.10",
+        )
+        active_row = self.conn.execute("SELECT * FROM alerts WHERE alert_id = 'active-alert'").fetchone()
+        active_id = self.scheduler.alert_group_id(self.scheduler.alert_group_key(active_row))
+        self.conn.execute("INSERT INTO alert_group_summary (group_id) VALUES (?)", (active_id,))
+        self.conn.execute(
+            """
+            CREATE TABLE durable_jobs (
+                job_type TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                status TEXT NOT NULL
+            )
+            """
+        )
+        self.conn.executemany(
+            "INSERT INTO durable_jobs (job_type, dedupe_key, status) VALUES ('ai_analysis', ?, 'pending')",
+            [(active_id,), ("orphaned-group-id",)],
+        )
+        self.conn.commit()
+
+        orphaned = self.scheduler.orphaned_pending_ai_job_ids(self.conn)
+
+        self.assertEqual(orphaned, {"orphaned-group-id"})
+
+    def test_stable_queue_identity_remains_active_through_legacy_alias(self) -> None:
+        self.conn.execute("INSERT INTO alert_group_summary (group_id) VALUES ('legacy-group')")
+        self.conn.execute(
+            "INSERT INTO alert_group_alias (legacy_group_id, stable_group_id) VALUES (?, ?)",
+            ("legacy-group", "stable-group"),
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE durable_jobs (
+                job_type TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                status TEXT NOT NULL
+            )
+            """
+        )
+        self.conn.executemany(
+            "INSERT INTO durable_jobs (job_type, dedupe_key, status) VALUES ('ai_analysis', ?, 'pending')",
+            [("stable-group",), ("orphaned-group",)],
+        )
+        self.conn.commit()
+
+        orphaned = self.scheduler.orphaned_pending_ai_job_ids(self.conn)
+
+        self.assertEqual(orphaned, {"orphaned-group"})
+
+    def test_selected_alert_preserves_stable_queue_identity(self) -> None:
+        self.conn.execute("ALTER TABLE alerts ADD COLUMN stable_group_id TEXT")
+        self.insert_alert(
+            "stable-alert",
+            "high",
+            "2026-07-03  01:00:00Z",
+            rule_name="Stable identity detection",
+        )
+        self.conn.execute(
+            "UPDATE alerts SET stable_group_id = ? WHERE alert_id = ?",
+            ("stable-v2-group", "stable-alert"),
+        )
+        self.conn.commit()
+
+        selected = self.scheduler.select_next_alert(self.conn, self.args, set(), set())
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["stable_group_id"], "stable-v2-group")
+
+    def test_pending_durable_intent_forces_reanalysis_of_current_artifact(self) -> None:
+        self.insert_alert(
+            "durable-rerun-alert",
+            "high",
+            "2026-07-03  01:00:00Z",
+            rule_name="Durable rerun detection",
+            source_ip="192.0.2.20",
+            destination_ip="198.51.100.20",
+        )
+        row = self.conn.execute("SELECT * FROM alerts WHERE alert_id = ?", ("durable-rerun-alert",)).fetchone()
+        group_id = self.scheduler.alert_group_id(self.scheduler.alert_group_key(row))
+        self.conn.execute(
+            """
+            CREATE TABLE durable_jobs (
+                job_type TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                processing_started_at TEXT,
+                rerun_requested INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        self.conn.execute(
+            "INSERT INTO durable_jobs (job_type, dedupe_key, status) VALUES ('ai_analysis', ?, 'pending')",
+            (group_id,),
+        )
+        self.conn.commit()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            analysis_dir = Path(tmpdir)
+            (analysis_dir / "current-local-ai-analysis.json").write_text(
+                json.dumps({"alert_id": "durable-rerun-alert"}),
+                encoding="utf-8",
+            )
+            self.args.analysis_dir = analysis_dir
+            analyzed = self.scheduler.analyzed_alert_ids(analysis_dir)
+            selected = self.scheduler.select_next_alert(self.conn, self.args, analyzed, set())
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["alert_id"], "durable-rerun-alert")
+
+    def test_artifact_reconciliation_does_not_erase_fresh_pending_intent(self) -> None:
+        self.conn.execute(
+            """
+            CREATE TABLE durable_jobs (
+                job_type TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                processing_started_at TEXT,
+                rerun_requested INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        self.conn.executemany(
+            """
+            INSERT INTO durable_jobs (
+                job_type, dedupe_key, status, processing_started_at, rerun_requested
+            ) VALUES ('ai_analysis', ?, 'pending', ?, ?)
+            """,
+            [
+                ("fresh-evidence", None, 0),
+                ("missed-completion-callback", "2026-07-03  00:00:00Z", 0),
+                ("latched-rerun", "2026-07-03  00:00:00Z", 1),
+            ],
+        )
+        self.conn.commit()
+
+        reconciled = self.scheduler.reconcilable_completed_ai_job_ids(
+            self.conn,
+            {"fresh-evidence", "missed-completion-callback", "latched-rerun"},
+        )
+
+        self.assertEqual(reconciled, {"missed-completion-callback"})
 
     def test_duplicate_groups_use_newest_representative_before_next_group(self) -> None:
         for alert_id, last_seen in (

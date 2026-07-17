@@ -1,10 +1,19 @@
 # Security Onion Restricted SSH Alert Polling Runbook
 
+> The Security Onion polling wrapper in this runbook remains current. Early
+> relay-to-n8n forwarding notes and completion checklists below are historical;
+> current forwarding is Raspberry Pi outbox -> forced SSH Mac intake ->
+> alert-store commit. Use `docs/security-onion-relay-architecture.md` for the
+> production downstream path.
+
 ## Purpose
 
 This note documents the restricted SSH wrapper polling setup for Security Onion Community Edition.
 
-The goal is to let a Raspberry Pi pull recent alert data from Security Onion without exposing the official SOC API, Elasticsearch, or unrestricted shell access. The Pi can then forward full-fidelity alerts to n8n or a local AI analysis workflow.
+The goal is to let a Raspberry Pi pull recent alert data from Security Onion
+without exposing the official SOC API, Elasticsearch, or unrestricted shell
+access. The Pi then commits full-fidelity alerts through the Mac Studio's
+restricted forced-command intake.
 
 ## Current Status
 

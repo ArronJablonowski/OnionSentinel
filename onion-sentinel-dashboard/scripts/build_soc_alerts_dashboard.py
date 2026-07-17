@@ -89,6 +89,14 @@ ASSET_SOURCE_DIRS = (
 )
 SUPPORTED_SUFFIXES = {'.md', '.markdown'}
 MARKDOWN_SOURCES = (SOURCE_DIR, ALT_SOURCE_DIR)
+DERIVED_REPORT_DIRECTORIES = {
+    'agent-memory',
+    'ai-analysis',
+    'ai-prompts',
+    'daily-rollups',
+    'llm-analysis-logs',
+    'pcap-analysis',
+}
 PAGE_DEFS = [
     ('home', 'home.html', 'Home', 'Executive SOC metrics and trends'),
     ('alerts', 'index.html', 'SOC Alerts', 'AI-powered triage and investigation'),
@@ -129,6 +137,57 @@ GROUP_FALLBACK_VALUES = {
     'source_ip': 'unknown-source',
     'destination_ip': 'unknown-destination',
     'filter_status': 'accepted',
+}
+
+# Detailed Alert Reports are an analyst-facing contract, not a reflection of
+# whichever headings happened to exist in an older Markdown artifact. Keep the
+# order centralized so historical data, PCAP availability, and AI state cannot
+# silently add, remove, or rearrange UI sections.
+DETAIL_REPORT_LAYOUT_VERSION = '2026-07-15.1'
+DETAIL_REPORT_SECTION_ORDER = (
+    'triage reasons',
+    'ai analysis output',
+    'ai model used',
+    'enriched alert details',
+    'alert summary',
+    'analyst notes',
+    'parsed pcap evidence',
+    'network and flow details',
+    'protocol details',
+    'host and sensor details',
+    'threat context',
+    'security onion detail fields',
+    'raw logs',
+)
+DETAIL_REPORT_RENDER_ORDER = (
+    'alert identity',
+    'triage reasons',
+    'duplicate alert timeline',
+    *DETAIL_REPORT_SECTION_ORDER[1:],
+)
+DETAIL_REPORT_SECTION_LABELS = {
+    'triage reasons': 'Triage Reasons',
+    'ai analysis output': 'AI Analysis Output',
+    'ai model used': 'AI Model Used',
+    'enriched alert details': 'Enriched Alert Details',
+    'alert summary': 'Alert Summary',
+    'analyst notes': 'Analyst Notes',
+    'parsed pcap evidence': 'Parsed PCAP Evidence',
+    'network and flow details': 'Network And Flow Details',
+    'protocol details': 'Protocol Details',
+    'host and sensor details': 'Host And Sensor Details',
+    'threat context': 'Threat Context',
+    'security onion detail fields': 'Security Onion Detail Fields',
+    'raw logs': 'Raw Logs',
+}
+DETAIL_REPORT_SOURCE_ALIASES = {
+    'public enrichment': 'enriched alert details',
+    'tshark corroboration': 'tshark findings',
+}
+DETAIL_REPORT_REPLACED_SOURCE_SECTIONS = {
+    'raw alert',
+    'complete alert json',
+    'complete ai response json',
 }
 
 
@@ -495,6 +554,14 @@ class AlertReport:
     recommended_tuning_actions: list[str]
 
 
+@dataclass(frozen=True)
+class DetailLayoutResult:
+    """Canonical report Markdown plus any legacy-data contract violations."""
+
+    markdown: str
+    issues: tuple[str, ...]
+
+
 def clean_title_from_markdown(text: str, path: Path) -> str:
     # Used only for legacy Markdown fallback and attached report titles.
     for line in text.splitlines():
@@ -744,17 +811,22 @@ def markdown_to_html(text: str) -> str:
     code_lines: list[str] = []
     table_lines: list[str] = []
     in_code = False
-    collapsible_section_open = False
-    collapsible_section_level = 0
+    # Collapsible sections can be nested (for example TShark Findings inside
+    # Parsed PCAP Evidence). Track every open heading level so closing a nested
+    # accordion cannot lose the parent and capture later top-level sections.
+    collapsible_section_levels: list[int] = []
     report_section_open = False
     report_section_level = 0
 
-    def close_collapsible_section_if_open() -> None:
-        nonlocal collapsible_section_open, collapsible_section_level
-        if collapsible_section_open:
+    def close_collapsible_sections_for_heading(heading_level: int) -> None:
+        while collapsible_section_levels and heading_level <= collapsible_section_levels[-1]:
             blocks.append('</div></details>')
-            collapsible_section_open = False
-            collapsible_section_level = 0
+            collapsible_section_levels.pop()
+
+    def close_all_collapsible_sections() -> None:
+        while collapsible_section_levels:
+            blocks.append('</div></details>')
+            collapsible_section_levels.pop()
 
     def close_report_section_if_open() -> None:
         nonlocal report_section_open, report_section_level
@@ -816,9 +888,11 @@ def markdown_to_html(text: str) -> str:
             flush_paragraph(); flush_list()
             heading_level = len(heading.group(1))
             heading_text = heading.group(2).strip()
-            if collapsible_section_open and heading_level <= collapsible_section_level:
-                close_collapsible_section_if_open()
-            if report_section_open and heading_level <= report_section_level:
+            close_collapsible_sections_for_heading(heading_level)
+            # H1 identity and H2 report sections are peer cards in the UI.
+            # Markdown would normally nest H2 under H1, but retaining that
+            # semantic nesting lets one legacy heading wrap the entire report.
+            if report_section_open and heading_level <= 2:
                 close_report_section_if_open()
             normalized_heading = re.sub(r'[^a-z0-9]+', ' ', re.sub(r'[`*_]+', '', heading_text.lower())).strip()
             collapsible_labels = {
@@ -842,8 +916,7 @@ def markdown_to_html(text: str) -> str:
             }
             if normalized_heading in collapsible_labels:
                 details_class, body_class, summary_label = collapsible_labels[normalized_heading]
-                collapsible_section_open = True
-                collapsible_section_level = heading_level
+                collapsible_section_levels.append(heading_level)
                 blocks.append(f'<details class="{details_class}"><summary>{summary_label}</summary><div class="{body_class}">')
                 continue
             level = min(6, heading_level + 1)  # keep report h1 below page h1
@@ -876,7 +949,7 @@ def markdown_to_html(text: str) -> str:
     flush_paragraph(); flush_list(); flush_table()
     if in_code and code_lines:
         blocks.append('<pre><code>' + html.escape('\n'.join(code_lines)) + '</code></pre>')
-    close_collapsible_section_if_open()
+    close_all_collapsible_sections()
     close_report_section_if_open()
     return '\n'.join(blocks) or '<p>No markdown content available.</p>'
 
@@ -900,13 +973,27 @@ def extract_markdown_alert_id(text: str) -> str | None:
 
 
 def load_markdown_reports_by_alert_id() -> dict[str, tuple[Path, str, os.stat_result]]:
-    # Index Markdown reports so accepted alerts can still show rich LLM notes.
+    # Index only primary alert reports. Derived AI/PCAP artifacts often repeat
+    # the same alert_id and are newer than the source report; allowing them into
+    # this index makes the newest artifact silently replace the standardized
+    # Detailed Alert Report.
     SOURCE_DIR.mkdir(parents=True, exist_ok=True)
     by_alert_id: dict[str, tuple[Path, str, os.stat_result]] = {}
+    visited_sources: set[Path] = set()
     for source_dir in MARKDOWN_SOURCES:
         source_dir.mkdir(parents=True, exist_ok=True)
+        resolved_source = source_dir.resolve()
+        if resolved_source in visited_sources:
+            continue
+        visited_sources.add(resolved_source)
         for path in sorted(source_dir.rglob('*'), key=lambda p: str(p).lower()):
             if not path.is_file() or path.suffix.lower() not in SUPPORTED_SUFFIXES or path.name.startswith('.'):
+                continue
+            try:
+                relative_parts = path.resolve().relative_to(resolved_source).parts
+            except (OSError, ValueError):
+                continue
+            if relative_parts and relative_parts[0].lower() in DERIVED_REPORT_DIRECTORIES:
                 continue
             try:
                 text = path.read_text(encoding='utf-8')
@@ -978,13 +1065,13 @@ def running_ai_prompt_alert_ids(ai_prompts_by_alert_id: dict[str, dict]) -> set[
     return running
 
 
-def severity_label_from_row(row: sqlite3.Row) -> str:
+def severity_label_from_row(row: sqlite3.Row | dict) -> str:
     # Prefer deterministic triage level because it is what alert-store routed
     # on. Fall back to raw Security Onion severity if triage is absent.
-    raw = (row['triage_level'] or row['severity_label'] or '').strip().lower()
+    raw = str(row_value(row, 'triage_level') or row_value(row, 'severity_label') or '').strip().lower()
     if raw in CRITICALITY_LABELS:
         return CRITICALITY_LABELS[raw]
-    severity = row['severity']
+    severity = row_value(row, 'severity')
     if severity == 1:
         return 'Critical'
     if severity == 2:
@@ -1288,11 +1375,25 @@ def insert_timeline_after_alert_identity(rendered_html: str, timeline_html: str)
     return timeline_html + rendered_html
 
 
-def raw_logs_markdown(raw: dict, fallback_json: str | None = None, analysis: dict | None = None) -> str:
+def raw_logs_markdown(
+    raw: dict,
+    fallback_json: str | None = None,
+    analysis: dict | None = None,
+    legacy_sections: list[tuple[str, str]] | None = None,
+) -> str:
     sections = [
         complete_alert_json_markdown(raw),
         raw_alert_markdown(raw, fallback_json),
     ]
+    if legacy_sections:
+        legacy_lines = [
+            '### Legacy Source Content',
+            '',
+            'These sections came from an older report schema and were moved here so they cannot change the standard analyst layout.',
+        ]
+        for title, body in legacy_sections:
+            legacy_lines.extend(['', f'#### {title}', '', body.strip() or 'No content was recorded.'])
+        sections.insert(0, '\n'.join(legacy_lines))
     ai_response_json = complete_ai_response_json_markdown(analysis)
     if ai_response_json:
         sections.append(ai_response_json)
@@ -1464,6 +1565,17 @@ def ai_analysis_output_markdown(analysis: dict | None) -> str:
     generated_at = normalize_iso_display_text(analysis.get('generated_at') or 'unknown')
     outcome = str(response.get('detection_outcome') or 'Inconclusive')
     bluf = str(response.get('bluf') or 'Inconclusive - Needs More Data: No BLUF classification was found in this analysis artifact.')
+    correlation = response.get('correlation_assessment') if isinstance(response.get('correlation_assessment'), dict) else {}
+    related_groups = []
+    for item in correlation.get('related_groups', []) if isinstance(correlation.get('related_groups'), list) else []:
+        if isinstance(item, dict):
+            group_id = str(item.get('group_id') or '').strip()
+            reason = str(item.get('reason') or '').strip()
+        else:
+            group_id = str(item or '').strip()
+            reason = ''
+        if group_id:
+            related_groups.append(f"{group_id}: {reason or 'relationship requires analyst validation'}")
     lines = [
         '## AI Analysis Output',
         '',
@@ -1490,6 +1602,28 @@ def ai_analysis_output_markdown(analysis: dict | None) -> str:
         '### Frequency',
         '',
         str(response.get('alert_frequency_assessment') or 'n/a'),
+        '',
+        '### Correlation Assessment',
+        '',
+        f"- **Correlation found:** {correlation.get('correlation_found') if 'correlation_found' in correlation else 'n/a'}",
+        f"- **Confidence:** {correlation.get('confidence') or 'n/a'}",
+        f"- **Attack-chain hypothesis:** {correlation.get('attack_chain_hypothesis') or 'n/a'}",
+        '',
+        '#### Related Alert Groups',
+        '',
+        markdown_bullets(related_groups),
+        '',
+        '#### Shared Evidence',
+        '',
+        markdown_bullets(correlation.get('shared_evidence')),
+        '',
+        '#### Contradicting Evidence',
+        '',
+        markdown_bullets(correlation.get('contradicting_evidence')),
+        '',
+        '#### Recommended Correlation Pivots',
+        '',
+        markdown_bullets(correlation.get('recommended_pivots')),
         '',
         '### Public Enrichment Findings',
         '',
@@ -1562,64 +1696,94 @@ def passthrough_markdown_report_text(text: str) -> str:
     return text
 
 
-def alert_detail_markdown(raw: dict) -> str:
+def detail_section_markdown(
+    title: str,
+    rows: list[tuple[str, object]],
+    empty_message: str,
+    max_len: int = 420,
+) -> str:
+    """Render one required report section, including an explicit empty state."""
+    lines = detail_table(title, rows, max_len=max_len)
+    if lines:
+        return '\n'.join(lines).strip()
+    return f'## {title}\n\n{empty_message}'
+
+
+def present_values(*values: object) -> list[object]:
+    """Keep compound detail cells empty unless at least one value exists."""
+    return [value for value in values if value not in (None, '', [], {})]
+
+
+def standard_alert_detail_sections(raw: dict) -> dict[str, str]:
+    """Build the fixed structured-evidence sections from normalized/raw data."""
     event = raw_event_for_details(raw)
-    sections: list[str] = []
-    sections.extend(detail_table('Security Onion Detail Fields', [
-        ('Message', raw.get('message') or event.get('message')),
-        ('Tags', raw.get('tags') or event.get('tags')),
-        ('Event action', nested_object(event, 'event', 'action')),
-        ('Event kind', nested_object(event, 'event', 'kind')),
-        ('Event type', nested_object(event, 'event', 'type')),
-        ('Event outcome', nested_object(event, 'event', 'outcome')),
-        ('Module', raw.get('event_module') or nested_object(event, 'event', 'module')),
-        ('Dataset', raw.get('event_dataset') or nested_object(event, 'event', 'dataset')),
-        ('Rule category', raw.get('rule_category') or nested_object(event, 'rule', 'category')),
-        ('Rule action', raw.get('rule_action') or nested_object(event, 'rule', 'action')),
-        ('Rule ruleset', raw.get('rule_ruleset') or nested_object(event, 'rule', 'ruleset')),
-        ('Rule reference', raw.get('rule_reference') or nested_object(event, 'rule', 'reference')),
-        ('Rule metadata', raw.get('rule_metadata') or nested_object(event, 'rule', 'metadata')),
-    ]))
-    sections.extend(detail_table('Network And Flow Details', [
-        ('Transport', nested_object(raw, 'network', 'transport') or nested_object(event, 'network', 'transport')),
-        ('Community ID', nested_object(raw, 'network', 'community_id') or nested_object(event, 'network', 'community_id')),
-        ('VLAN', nested_object(raw, 'network', 'vlan') or nested_object(event, 'network', 'vlan')),
-        ('Direction', nested_object(event, 'network', 'direction')),
-        ('Protocol', nested_object(event, 'network', 'protocol') or nested_object(event, 'suricata', 'eve', 'proto')),
-        ('Application protocol', nested_object(event, 'suricata', 'eve', 'app_proto')),
-        ('Source ASN/org', [nested_object(raw, 'source', 'asn'), nested_object(raw, 'source', 'org')]),
-        ('Source geo', nested_object(event, 'source', 'geo')),
-        ('Destination ASN/org', [nested_object(raw, 'destination', 'asn'), nested_object(raw, 'destination', 'org')]),
-        ('Destination geo', nested_object(event, 'destination', 'geo')),
-        ('Flow', nested_object(event, 'suricata', 'eve', 'flow')),
-        ('Flow ID', nested_object(event, 'suricata', 'eve', 'flow_id')),
-        ('Related IPs', nested_object(event, 'related', 'ip') or nested_object(raw, 'related', 'ip')),
-    ]))
-    sections.extend(detail_table('Protocol Details', [
-        ('DNS', raw.get('dns') or event.get('dns') or nested_object(event, 'suricata', 'eve', 'dns')),
-        ('HTTP', raw.get('http') or event.get('http') or nested_object(event, 'suricata', 'eve', 'http')),
-        ('URL', raw.get('url') or event.get('url')),
-        ('TLS', raw.get('tls') or event.get('tls') or nested_object(event, 'suricata', 'eve', 'tls')),
-    ], max_len=700))
-    sections.extend(detail_table('Host And Sensor Details', [
-        ('Host', raw.get('host') or event.get('host')),
-        ('Observer', raw.get('observer') or event.get('observer')),
-        ('Agent', raw.get('agent') or event.get('agent')),
-        ('Log', raw.get('log') or event.get('log')),
-        ('User', raw.get('user') or event.get('user')),
-        ('Process', raw.get('process') or event.get('process')),
-        ('File', raw.get('file') or event.get('file')),
-    ], max_len=700))
-    sections.extend(detail_table('Threat Context', [
-        ('Threat', raw.get('threat') or event.get('threat')),
-        ('Related hosts', nested_object(event, 'related', 'hosts') or nested_object(raw, 'related', 'hosts')),
-        ('Related hashes', nested_object(event, 'related', 'hash') or nested_object(raw, 'related', 'hash')),
-        ('Suricata alert', nested_object(event, 'suricata', 'eve', 'alert')),
-        ('Security Onion enrichment note', nested_value(raw, 'security_onion', 'enrichment_note')),
-    ], max_len=700))
-    if not sections:
-        return ''
-    return '\n'.join(['## Enriched Alert Details', '', *sections]).strip()
+    return {
+        'security onion detail fields': detail_section_markdown('Security Onion Detail Fields', [
+            ('Message', raw.get('message') or event.get('message')),
+            ('Tags', raw.get('tags') or event.get('tags')),
+            ('Event action', nested_object(event, 'event', 'action')),
+            ('Event kind', nested_object(event, 'event', 'kind')),
+            ('Event type', nested_object(event, 'event', 'type')),
+            ('Event outcome', nested_object(event, 'event', 'outcome')),
+            ('Module', raw.get('event_module') or nested_object(event, 'event', 'module')),
+            ('Dataset', raw.get('event_dataset') or nested_object(event, 'event', 'dataset')),
+            ('Rule category', raw.get('rule_category') or nested_object(event, 'rule', 'category')),
+            ('Rule action', raw.get('rule_action') or nested_object(event, 'rule', 'action')),
+            ('Rule ruleset', raw.get('rule_ruleset') or nested_object(event, 'rule', 'ruleset')),
+            ('Rule reference', raw.get('rule_reference') or nested_object(event, 'rule', 'reference')),
+            ('Rule metadata', raw.get('rule_metadata') or nested_object(event, 'rule', 'metadata')),
+        ], 'No additional Security Onion detail fields were recorded for this alert.'),
+        'network and flow details': detail_section_markdown('Network And Flow Details', [
+            ('Transport', nested_object(raw, 'network', 'transport') or nested_object(event, 'network', 'transport')),
+            ('Community ID', nested_object(raw, 'network', 'community_id') or nested_object(event, 'network', 'community_id')),
+            ('VLAN', nested_object(raw, 'network', 'vlan') or nested_object(event, 'network', 'vlan')),
+            ('Direction', nested_object(event, 'network', 'direction')),
+            ('Protocol', nested_object(event, 'network', 'protocol') or nested_object(event, 'suricata', 'eve', 'proto')),
+            ('Application protocol', nested_object(event, 'suricata', 'eve', 'app_proto')),
+            ('Source ASN/org', present_values(nested_object(raw, 'source', 'asn'), nested_object(raw, 'source', 'org'))),
+            ('Source geo', nested_object(event, 'source', 'geo')),
+            ('Destination ASN/org', present_values(nested_object(raw, 'destination', 'asn'), nested_object(raw, 'destination', 'org'))),
+            ('Destination geo', nested_object(event, 'destination', 'geo')),
+            ('Flow', nested_object(event, 'suricata', 'eve', 'flow')),
+            ('Flow ID', nested_object(event, 'suricata', 'eve', 'flow_id')),
+            ('Related IPs', nested_object(event, 'related', 'ip') or nested_object(raw, 'related', 'ip')),
+        ], 'No additional network or flow fields were recorded for this alert.'),
+        'protocol details': detail_section_markdown('Protocol Details', [
+            ('DNS', raw.get('dns') or event.get('dns') or nested_object(event, 'suricata', 'eve', 'dns')),
+            ('HTTP', raw.get('http') or event.get('http') or nested_object(event, 'suricata', 'eve', 'http')),
+            ('URL', raw.get('url') or event.get('url')),
+            ('TLS', raw.get('tls') or event.get('tls') or nested_object(event, 'suricata', 'eve', 'tls')),
+        ], 'No additional protocol fields were recorded for this alert.', max_len=700),
+        'host and sensor details': detail_section_markdown('Host And Sensor Details', [
+            ('Host', raw.get('host') or event.get('host')),
+            ('Observer', raw.get('observer') or event.get('observer')),
+            ('Agent', raw.get('agent') or event.get('agent')),
+            ('Log', raw.get('log') or event.get('log')),
+            ('User', raw.get('user') or event.get('user')),
+            ('Process', raw.get('process') or event.get('process')),
+            ('File', raw.get('file') or event.get('file')),
+        ], 'No additional host or sensor fields were recorded for this alert.', max_len=700),
+        'threat context': detail_section_markdown('Threat Context', [
+            ('Threat', raw.get('threat') or event.get('threat')),
+            ('Related hosts', nested_object(event, 'related', 'hosts') or nested_object(raw, 'related', 'hosts')),
+            ('Related hashes', nested_object(event, 'related', 'hash') or nested_object(raw, 'related', 'hash')),
+            ('Suricata alert', nested_object(event, 'suricata', 'eve', 'alert')),
+            ('Security Onion enrichment note', nested_value(raw, 'security_onion', 'enrichment_note')),
+        ], 'No additional threat-context fields were recorded for this alert.', max_len=700),
+    }
+
+
+def alert_detail_markdown(raw: dict) -> str:
+    """Compatibility helper returning the fixed structured-evidence sequence."""
+    sections = standard_alert_detail_sections(raw)
+    order = (
+        'network and flow details',
+        'protocol details',
+        'host and sensor details',
+        'threat context',
+        'security onion detail fields',
+    )
+    return '\n\n'.join(sections[title] for title in order)
 
 
 def public_enrichment_markdown(raw: dict, enrichment_json: object = None) -> str:
@@ -1684,6 +1848,266 @@ def public_enrichment_markdown(raw: dict, enrichment_json: object = None) -> str
             )
         lines.append('')
     return '\n'.join(lines).strip()
+
+
+def split_detail_source_sections(text: str) -> tuple[dict[str, str], list[tuple[str, str]], list[str]]:
+    """Parse legacy H2 sections without allowing them to control UI structure."""
+    issues: list[str] = []
+    source = text or ''
+    lines = source.splitlines()
+    if lines and lines[0].strip() == '---':
+        closing = next((index for index, line in enumerate(lines[1:], start=1) if line.strip() == '---'), None)
+        if closing is None:
+            issues.append('Legacy Markdown front matter is not closed with a second `---` line.')
+        else:
+            lines = lines[closing + 1:]
+
+    sections: dict[str, str] = {}
+    legacy_sections: list[tuple[str, str]] = []
+    current_title = ''
+    current_label = ''
+    current_lines: list[str] = []
+    in_code = False
+
+    def flush() -> None:
+        nonlocal current_title, current_label, current_lines
+        if not current_title:
+            current_lines = []
+            return
+        body = '\n'.join(current_lines).strip()
+        canonical = DETAIL_REPORT_SOURCE_ALIASES.get(current_title, current_title)
+        known = canonical in DETAIL_REPORT_SECTION_ORDER or canonical in DETAIL_REPORT_REPLACED_SOURCE_SECTIONS
+        if not known:
+            legacy_sections.append((current_label or current_title.title(), demote_markdown_headings(body)))
+            issues.append(
+                f'Legacy top-level section "{current_label or current_title}" is not part of '
+                f'Detailed Alert Report layout {DETAIL_REPORT_LAYOUT_VERSION}; it was moved to Raw Logs.'
+            )
+        elif canonical in sections:
+            legacy_sections.append((f'Duplicate {current_label or current_title.title()}', demote_markdown_headings(body)))
+            issues.append(
+                f'Legacy data contains duplicate "{DETAIL_REPORT_SECTION_LABELS.get(canonical, current_label)}" sections; '
+                'the first section was retained and the duplicate was moved to Raw Logs.'
+            )
+        else:
+            label = DETAIL_REPORT_SECTION_LABELS.get(canonical, current_label or canonical.title())
+            sections[canonical] = f'## {label}\n\n{body}'.rstrip()
+        current_title = ''
+        current_label = ''
+        current_lines = []
+
+    for line in lines:
+        if line.strip().startswith('```'):
+            in_code = not in_code
+        heading = normalized_heading_text(line) if not in_code else None
+        if heading and heading[0] == 2:
+            flush()
+            current_title = heading[1]
+            current_label = re.sub(r'^##\s+', '', line.strip()).strip()
+            continue
+        if current_title:
+            current_lines.append(line)
+    flush()
+    if in_code:
+        issues.append('Legacy Markdown contains an unclosed fenced code block; affected content may be incomplete.')
+    return sections, legacy_sections, issues
+
+
+def demote_markdown_headings(text: str) -> str:
+    """Keep relocated legacy content inside Raw Logs instead of creating peers."""
+    output: list[str] = []
+    in_code = False
+    for line in (text or '').splitlines():
+        if line.strip().startswith('```'):
+            in_code = not in_code
+            output.append(line)
+            continue
+        heading = re.match(r'^(#{1,6})(\s+.+)$', line) if not in_code else None
+        if heading:
+            level = min(6, len(heading.group(1)) + 2)
+            output.append('#' * level + heading.group(2))
+        else:
+            output.append(line)
+    return '\n'.join(output)
+
+
+def alert_identity_markdown(row: sqlite3.Row | dict, source_text: str = '') -> str:
+    """Generate the fixed identity card from authoritative SQLite state."""
+    generated_match = re.search(
+        r'^(?:generated_at:\s*|[-*]\s+\*\*Generated:\*\*\s*)([^\n]+)',
+        source_text or '',
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    generated = generated_match.group(1).strip().strip('"\'') if generated_match else (
+        row_value(row, 'timestamp') or row_value(row, 'last_seen') or 'n/a'
+    )
+    source_ip = row_value(row, 'source_ip') or 'n/a'
+    source_port = row_value(row, 'source_port')
+    destination_ip = row_value(row, 'destination_ip') or 'n/a'
+    destination_port = row_value(row, 'destination_port')
+    source_endpoint = f'{source_ip}:{source_port}' if source_port not in (None, '', 'n/a') else str(source_ip)
+    destination_endpoint = (
+        f'{destination_ip}:{destination_port}' if destination_port not in (None, '', 'n/a') else str(destination_ip)
+    )
+    status = row_value(row, 'filter_status') or 'accepted'
+    return '\n'.join([
+        f'# [{severity_label_from_row(row).upper()}] {row_value(row, "rule_name") or "Security Onion Alert"}',
+        '',
+        f'- **Generated:** {normalize_iso_display_text(generated)}',
+        f'- **Alert ID:** {row_value(row, "alert_id") or "n/a"}',
+        f'- **Workflow status:** {status}',
+        f'- **Filter status:** {status}',
+        f'- **Route:** {row_value(row, "routing") or "n/a"}',
+        f'- **Score:** {row_value(row, "triage_score", "n/a")}',
+        f'- **Direction:** {row_value(row, "traffic_direction") or "unknown"}',
+        f'- **Traffic:** {source_endpoint} -> {destination_endpoint}',
+    ])
+
+
+def triage_reasons_markdown(raw: dict, source_sections: dict[str, str]) -> str:
+    existing = source_sections.get('triage reasons')
+    if existing:
+        return existing
+    triage = nested_object(raw, 'triage')
+    reasons = triage.get('reasons') if isinstance(triage, dict) and isinstance(triage.get('reasons'), list) else []
+    if not reasons and isinstance(raw.get('triage_reasons'), list):
+        reasons = raw.get('triage_reasons')
+    cleaned = list(dict.fromkeys(str(reason).strip() for reason in reasons if str(reason).strip()))
+    if not cleaned:
+        cleaned = ['No scoring reasons were recorded for this alert.']
+    return '\n'.join(['## Triage Reasons', '', *(f'- [ ] {reason}' for reason in cleaned)])
+
+
+def analyst_notes_markdown(source_sections: dict[str, str]) -> str:
+    existing = source_sections.get('analyst notes')
+    if existing:
+        return existing
+    return '\n'.join([
+        '## Analyst Notes',
+        '',
+        '- [ ] Confirm whether the source and destination are expected for this asset or VLAN.',
+        '- [ ] Record the investigation outcome, tuning decision, or escalation rationale.',
+    ])
+
+
+def canonical_detail_report_markdown(
+    source_text: str,
+    row: sqlite3.Row | dict,
+    raw: dict,
+    ai_analysis: dict | None,
+    pcap_details: str,
+) -> DetailLayoutResult:
+    """Compose every report from the versioned layout contract in one pass."""
+    source_sections, legacy_sections, issues = split_detail_source_sections(source_text)
+    structured = standard_alert_detail_sections(raw)
+    enrichment = public_enrichment_markdown(raw, row_value(row, 'enrichment_json')) or '\n'.join([
+        '## Enriched Alert Details',
+        '',
+        'No public enrichment records were stored for this alert group.',
+    ])
+    ai_output = ai_analysis_output_markdown(ai_analysis)
+    ai_model = ai_model_used_markdown(ai_analysis)
+    if not ai_analysis and source_sections.get('ai analysis output'):
+        ai_output = source_sections['ai analysis output']
+    if not ai_analysis and source_sections.get('ai model used'):
+        ai_model = source_sections['ai model used']
+    sections = {
+        'triage reasons': triage_reasons_markdown(raw, source_sections),
+        'ai analysis output': ai_output,
+        'ai model used': ai_model,
+        'enriched alert details': enrichment,
+        'alert summary': alert_summary_markdown(row),
+        'analyst notes': analyst_notes_markdown(source_sections),
+        'parsed pcap evidence': pcap_details or '\n'.join([
+            '## Parsed PCAP Evidence',
+            '',
+            'No parsed Zeek/TShark PCAP summary is available for this alert group yet.',
+        ]),
+        **structured,
+        'raw logs': raw_logs_markdown(
+            raw,
+            row_value(row, 'alert_json'),
+            ai_analysis,
+            legacy_sections=legacy_sections,
+        ),
+    }
+    markdown = '\n\n'.join([
+        alert_identity_markdown(row, source_text),
+        *(sections[title] for title in DETAIL_REPORT_SECTION_ORDER),
+    ]).strip()
+    actual_order = [
+        title
+        for line in markdown.splitlines()
+        if (heading := normalized_heading_text(line)) and heading[0] == 2
+        for title in [DETAIL_REPORT_SOURCE_ALIASES.get(heading[1], heading[1])]
+    ]
+    if tuple(actual_order) != DETAIL_REPORT_SECTION_ORDER:
+        issues.append(
+            'The generated section sequence did not match the canonical contract: '
+            + ', '.join(actual_order or ['no H2 sections found'])
+        )
+    return DetailLayoutResult(markdown=markdown, issues=tuple(dict.fromkeys(issues)))
+
+
+def validate_rendered_detail_layout(rendered_html: str) -> list[str]:
+    """Verify the required rendered sections exist once and in fixed order."""
+    markers = (
+        ('alert identity', '<h2>['),
+        ('triage reasons', 'detail-section-triage-reasons'),
+        ('duplicate alert timeline', 'alert-timeline-section'),
+        ('ai analysis output', 'detail-section-ai-analysis-output'),
+        ('ai model used', 'detail-section-ai-model-used'),
+        ('enriched alert details', 'detail-section-enriched-alert-details'),
+        ('alert summary', 'detail-section-alert-summary'),
+        ('analyst notes', 'detail-section-analyst-notes'),
+        ('parsed pcap evidence', 'detail-section-parsed-pcap-evidence'),
+        ('network and flow details', 'detail-section-network-and-flow-details'),
+        ('protocol details', 'detail-section-protocol-details'),
+        ('host and sensor details', 'detail-section-host-and-sensor-details'),
+        ('threat context', 'detail-section-threat-context'),
+        ('security onion detail fields', 'detail-section-security-onion-detail-fields'),
+        ('raw logs', 'detail-section-raw-logs'),
+    )
+    issues: list[str] = []
+    positions: list[int] = []
+    for label, marker in markers:
+        count = rendered_html.count(marker)
+        if count != 1:
+            issues.append(f'Rendered section "{label}" appeared {count} time(s); exactly one is required.')
+        positions.append(rendered_html.find(marker))
+    present_positions = [position for position in positions if position >= 0]
+    if present_positions != sorted(present_positions):
+        issues.append('Rendered report sections are out of canonical order.')
+    return issues
+
+
+def detail_layout_error_html(issues: tuple[str, ...] | list[str]) -> str:
+    if not issues:
+        return ''
+    items = ''.join(f'<li>{html.escape(issue)}</li>' for issue in issues)
+    return (
+        f'<section class="detail-layout-error" role="alert" data-layout-version="{DETAIL_REPORT_LAYOUT_VERSION}">'
+        '<strong>Detailed Alert Report layout error</strong>'
+        f'<p>Legacy or malformed data could not be mapped cleanly to layout {DETAIL_REPORT_LAYOUT_VERSION}.</p>'
+        f'<ul>{items}</ul></section>'
+    )
+
+
+def finalize_detail_report_html(
+    rendered_html: str,
+    timeline_html: str,
+    source_issues: tuple[str, ...] | list[str] = (),
+) -> str:
+    """Insert the timeline, validate the DOM contract, and expose violations."""
+    rendered = insert_timeline_after_alert_identity(rendered_html, timeline_html)
+    issues = list(source_issues)
+    issues.extend(validate_rendered_detail_layout(rendered))
+    issues = list(dict.fromkeys(issues))
+    valid = 'false' if issues else 'true'
+    return (
+        f'<div class="detail-layout-contract" data-layout-version="{DETAIL_REPORT_LAYOUT_VERSION}" '
+        f'data-layout-valid="{valid}">{detail_layout_error_html(issues)}{rendered}</div>'
+    )
 
 
 def public_enrichment_has_content(enrichment_json: object) -> bool:
@@ -1925,57 +2349,40 @@ def report_from_sqlite_row(
         pcap_analysis,
         normalize_iso_display_text((pcap_analysis or {}).get('generated_at') or ''),
     )
-    ai_details = ai_analysis_report_markdown(ai_analysis)
     timeline_html = alert_seen_timeline_html(row)
     if markdown:
-        source, text, stat = markdown
-        text = passthrough_markdown_report_text(text)
-        text = remove_markdown_sections(text, {
-            'raw alert',
-            'complete alert json',
-            'complete ai response json',
-            'public enrichment',
-            'enriched alert details',
-            'alert summary',
-            'raw logs',
-        }).rstrip()
+        source, source_text, stat = markdown
+        source_text = passthrough_markdown_report_text(source_text)
         rel_source = source.name
         for source_dir in MARKDOWN_SOURCES:
             if source_dir in source.parents or source == source_dir:
                 rel_source = str(source.relative_to(source_dir))
                 break
-        if '## AI Model Used' not in text:
-            text = f'{text.rstrip()}\n\n{ai_details}\n'
-        public_enrichment = public_enrichment_markdown(raw, row['enrichment_json'])
-        if public_enrichment and '## Enriched Alert Details' not in text:
-            text = f'{text.rstrip()}\n\n{public_enrichment}\n'
-        if pcap_details and '## Parsed PCAP Evidence' not in text:
-            text = f'{text.rstrip()}\n\n{pcap_details}\n'
-        text = f'{text.rstrip()}\n\n{alert_summary_markdown(row)}'
-        text = f'{text.rstrip()}\n\n{raw_logs_markdown(raw, row["alert_json"], ai_analysis)}'
-        text = f'{text.rstrip()}\n'
-        text = move_ai_output_before_model(text)
-        text = move_ai_report_after_initial_context(text)
-        text = normalize_iso_display_text(text)
-        rendered_html = markdown_to_html(text)
-        rendered_html = insert_timeline_after_alert_identity(rendered_html, timeline_html)
         size = stat.st_size
     else:
         source = DB_PATH
         rel_source = 'SQLite alert-store'
-        row_for_markdown = dict(row)
-        row_for_markdown['first_seen'] = row_first_seen
-        row_for_markdown['last_seen'] = row_last_seen
-        row_for_markdown['seen_count'] = repeat_count
-        row_for_markdown['raw_alert_count'] = raw_alert_count
-        row_for_markdown['member_timeline'] = row.get('member_timeline') if isinstance(row, dict) else []
-        text = sqlite_report_markdown(row_for_markdown, raw, ai_analysis, pcap_status, pcap_analysis)
-        text = move_ai_output_before_model(text)
-        text = move_ai_report_after_initial_context(text)
-        text = normalize_iso_display_text(text)
-        rendered_html = markdown_to_html(text)
-        rendered_html = insert_timeline_after_alert_identity(rendered_html, timeline_html)
+        source_text = ''
         size = len(row['alert_json'] or '')
+
+    layout_row = dict(row)
+    layout_row['first_seen'] = row_first_seen
+    layout_row['last_seen'] = row_last_seen
+    layout_row['seen_count'] = repeat_count
+    layout_row['raw_alert_count'] = raw_alert_count
+    layout_result = canonical_detail_report_markdown(
+        source_text,
+        layout_row,
+        raw,
+        ai_analysis,
+        pcap_details,
+    )
+    text = normalize_iso_display_text(layout_result.markdown)
+    rendered_html = finalize_detail_report_html(
+        markdown_to_html(text),
+        timeline_html,
+        layout_result.issues,
+    )
 
     criticality = severity_label_from_row(row)
     criticality_rank = CRITICALITY_ORDER.get(criticality.lower(), CRITICALITY_ORDER['informational'])
@@ -2493,7 +2900,7 @@ def llm_log_table_row(log: dict[str, object]) -> str:
       <tr>
         <td>{html.escape(started)}</td>
         <td>{html.escape(str(count))}</td>
-        <td><strong>{html.escape(str(alert.get('rule_name') or 'Security Onion Alert'))}</strong><code>{html.escape(route)}</code></td>
+        <td><strong title="{html.escape(str(alert.get('rule_name') or 'Security Onion Alert'), quote=True)}">{html.escape(str(alert.get('rule_name') or 'Security Onion Alert'))}</strong><code title="{html.escape(route, quote=True)}">{html.escape(route)}</code></td>
         <td>{html.escape(llm_log_runtime(log))}</td>
         <td>{html.escape(llm_log_gpu(log))}</td>
         <td>{html.escape(llm_log_gpu_utilization(log))}</td>
@@ -2616,10 +3023,10 @@ REPORTS_PAGE_ASSETS = '''
 .llm-log-toolbar label{display:flex;align-items:center;gap:8px;color:#9fb0c4;font-size:12px;font-weight:850}
 .llm-log-toolbar select{min-height:44px;border:1px solid rgba(34,211,238,.32);border-radius:8px;background:#0a141e;color:#e8f1fb;padding:8px 28px 8px 10px;font-weight:850}
 .llm-log-table-wrap{max-width:100%;overflow:auto;border:1px solid rgba(148,163,184,.12);border-radius:10px;box-shadow:inset -18px 0 18px -18px rgba(143,244,255,.38)}
-.llm-log-table{width:100%;border-collapse:collapse;min-width:1640px;table-layout:fixed}
+.llm-log-table{width:100%;border-collapse:collapse;min-width:1880px;table-layout:fixed}
 .llm-log-started{width:205px}
 .llm-log-count{width:64px}
-.llm-log-alerts{width:auto}
+.llm-log-alerts{width:400px}
 .llm-log-runtime{width:88px}
 .llm-log-gpu{width:80px}
 .llm-log-gpu-util{width:82px}
@@ -2638,12 +3045,13 @@ REPORTS_PAGE_ASSETS = '''
 .llm-log-table td code{display:block;margin-top:4px;color:#aebbd0;background:transparent;font-size:12px;line-height:1.2;white-space:normal;overflow-wrap:normal;word-break:normal}
 .llm-log-table th:nth-child(2),.llm-log-table td:nth-child(2){text-align:center}
 .llm-log-table td:nth-child(1),.llm-log-table td:nth-child(2),.llm-log-table td:nth-child(4),.llm-log-table td:nth-child(5),.llm-log-table td:nth-child(6),.llm-log-table td:nth-child(7),.llm-log-table td:nth-child(8),.llm-log-table td:nth-child(9),.llm-log-table td:nth-child(10),.llm-log-table td:nth-child(11),.llm-log-table td:nth-child(12),.llm-log-table td:nth-child(13),.llm-log-table td:nth-child(14){white-space:nowrap}
-.llm-log-table td:nth-child(3) strong,.llm-log-table td:nth-child(3) code{max-width:100%}
+.llm-log-table td:nth-child(3) strong{display:-webkit-box;max-width:100%;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2}
+.llm-log-table td:nth-child(3) code{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .llm-log-table td:nth-child(14) code{white-space:nowrap;overflow-wrap:normal}
 .llm-empty-row{text-align:center;color:#91a4ba!important;padding:28px!important}
 .llm-log-footer{display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-top:12px;color:#91a4ba;font-size:12px;font-weight:850}
 @media(max-width:900px){.llm-current-card{grid-template-columns:1fr}.llm-current-meta{grid-template-columns:1fr 1fr}.llm-log-toolbar{align-items:flex-start;flex-direction:column}.llm-log-page-size select{min-height:44px}.llm-log-table{min-width:1320px}.llm-log-started{width:190px}.llm-log-alerts{width:360px}.llm-log-detail{width:200px}}
-@media(max-width:720px){.llm-log-table-wrap{overflow:visible;box-shadow:none}.llm-log-table{display:block;min-width:0;table-layout:auto}.llm-log-table thead{display:none}.llm-log-table tbody,.llm-log-table tr,.llm-log-table td{display:block;width:100%;box-sizing:border-box}.llm-log-table tr{padding:12px 14px;border-top:1px solid rgba(148,163,184,.12)}.llm-log-table td{display:grid;grid-template-columns:104px minmax(0,1fr);gap:8px;border:0;padding:5px 0;white-space:normal!important}.llm-log-table td::before{color:#8ff4ff;font-size:10px;font-weight:950;letter-spacing:.08em;text-transform:uppercase}.llm-log-table td:nth-child(1)::before{content:"Started"}.llm-log-table td:nth-child(2)::before{content:"Count"}.llm-log-table td:nth-child(3)::before{content:"Alert(s)"}.llm-log-table td:nth-child(4)::before{content:"Runtime"}.llm-log-table td:nth-child(5)::before{content:"GPU °C"}.llm-log-table td:nth-child(6)::before{content:"GPU %"}.llm-log-table td:nth-child(7)::before{content:"CPU °C"}.llm-log-table td:nth-child(8)::before{content:"SOC °C"}.llm-log-table td:nth-child(9)::before{content:"Memory"}.llm-log-table td:nth-child(10)::before{content:"Power"}.llm-log-table td:nth-child(11)::before{content:"CPU"}.llm-log-table td:nth-child(12)::before{content:"PCAP Size"}.llm-log-table td:nth-child(13)::before{content:"Alert Data"}.llm-log-table td:nth-child(14)::before{content:"Model"}.llm-log-table td:nth-child(15)::before{content:"Detail"}.llm-log-alerts,.llm-log-detail{width:auto}}@media(max-width:360px){.content,.topbar,.toggle-refresh-group,.reports-view,.llm-current-card,.llm-log-section{max-width:100%;min-width:0;overflow:hidden}.toggle-stack{min-width:0}.toggle-wrap{min-width:0}}
+@media(max-width:720px){.llm-log-table-wrap{overflow:visible;box-shadow:none}.llm-log-table{display:block;min-width:0;table-layout:auto}.llm-log-table thead{display:none}.llm-log-table tbody,.llm-log-table tr,.llm-log-table td{display:block;width:100%;box-sizing:border-box}.llm-log-table tr{padding:12px 14px;border-top:1px solid rgba(148,163,184,.12)}.llm-log-table td{display:grid;grid-template-columns:104px minmax(0,1fr);gap:8px;border:0;padding:5px 0;white-space:normal!important}.llm-log-table td::before{color:#8ff4ff;font-size:10px;font-weight:950;letter-spacing:.08em;text-transform:uppercase}.llm-log-table td:nth-child(1)::before{content:"Started"}.llm-log-table td:nth-child(2)::before{content:"Count"}.llm-log-table td:nth-child(3)::before{content:"Alert(s)"}.llm-log-table td:nth-child(4)::before{content:"Runtime"}.llm-log-table td:nth-child(5)::before{content:"GPU °C"}.llm-log-table td:nth-child(6)::before{content:"GPU %"}.llm-log-table td:nth-child(7)::before{content:"CPU °C"}.llm-log-table td:nth-child(8)::before{content:"SOC °C"}.llm-log-table td:nth-child(9)::before{content:"Memory"}.llm-log-table td:nth-child(10)::before{content:"Power"}.llm-log-table td:nth-child(11)::before{content:"CPU"}.llm-log-table td:nth-child(12)::before{content:"PCAP Size"}.llm-log-table td:nth-child(13)::before{content:"Alert Data"}.llm-log-table td:nth-child(14)::before{content:"Model"}.llm-log-table td:nth-child(15)::before{content:"Detail"}.llm-log-table td:nth-child(3) strong{display:block;overflow:visible;-webkit-line-clamp:unset;line-clamp:unset}.llm-log-table td:nth-child(3) code{overflow:visible;text-overflow:clip;white-space:normal}.llm-log-alerts,.llm-log-detail{width:auto}}@media(max-width:360px){.content,.topbar,.toggle-refresh-group,.reports-view,.llm-current-card,.llm-log-section{max-width:100%;min-width:0;overflow:hidden}.toggle-stack{min-width:0}.toggle-wrap{min-width:0}}
 </style>
 <script>
 (() => {
@@ -2711,7 +3119,9 @@ REPORTS_PAGE_ASSETS = '''
     const power = log.power_watts_max != null ? `${Number(log.power_watts_max).toFixed(1)} W` : 'Unavailable';
     const cpu = log.cpu_used_percent_max != null ? `${Number(log.cpu_used_percent_max).toFixed(1)}%` : 'Unavailable';
     const detail = log.error || alert.primary_alert_id || '';
-    return `<tr><td>${esc(log.started_at || '')}</td><td>${esc(alert.alert_count || 0)}</td><td><strong>${esc(alert.rule_name || 'Security Onion Alert')}</strong><code>${esc(route || 'n/a')}</code></td><td>${esc(runtime(log.runtime_seconds))}</td><td>${esc(gpu)}</td><td>${esc(gpuUtil)}</td><td>${esc(cpuTemp)}</td><td>${esc(socTemp)}</td><td>${esc(memory)}</td><td>${esc(power)}</td><td>${esc(cpu)}</td><td>${esc(bytes(log.pcap_total_size_bytes))}</td><td>${esc(bytes(log.alert_context_size_bytes))}</td><td><code>${esc(log.model || 'unknown')}</code></td><td>${esc(detail)}</td></tr>`;
+    const ruleName = alert.rule_name || 'Security Onion Alert';
+    const routeText = route || 'n/a';
+    return `<tr><td>${esc(log.started_at || '')}</td><td>${esc(alert.alert_count || 0)}</td><td><strong title="${esc(ruleName)}">${esc(ruleName)}</strong><code title="${esc(routeText)}">${esc(routeText)}</code></td><td>${esc(runtime(log.runtime_seconds))}</td><td>${esc(gpu)}</td><td>${esc(gpuUtil)}</td><td>${esc(cpuTemp)}</td><td>${esc(socTemp)}</td><td>${esc(memory)}</td><td>${esc(power)}</td><td>${esc(cpu)}</td><td>${esc(bytes(log.pcap_total_size_bytes))}</td><td>${esc(bytes(log.alert_context_size_bytes))}</td><td><code>${esc(log.model || 'unknown')}</code></td><td>${esc(detail)}</td></tr>`;
   };
   const renderCurrent = current => {
     currentAnalysisState = current || {};
@@ -2902,6 +3312,177 @@ html.alerts-scroll-stable,.alerts-scroll-stable body{max-width:100%;overflow-x:h
   window.addEventListener('scroll', () => { if (expandedGroup()) rememberExpandedPosition(); }, { passive: true });
   window.addEventListener('resize', () => { if (expandedGroup()) rememberExpandedPosition(); }, { passive: true });
   tableCard?.addEventListener('scroll', () => { if (expandedGroup()) rememberExpandedPosition(); }, { passive: true });
+  }
+  init();
+})();
+</script>
+'''
+
+
+PINNED_ALERT_ROW_SCROLL_SYNC = '''
+<style>
+.pinned-alert-viewport{
+  overflow-x:auto!important;
+  overflow-y:hidden!important;
+  overscroll-behavior-x:contain;
+  scrollbar-width:thin;
+  scrollbar-color:rgba(143,244,255,.45) rgba(7,16,24,.72);
+  touch-action:pan-x;
+}
+.pinned-alert-viewport::-webkit-scrollbar{height:7px}
+.pinned-alert-viewport::-webkit-scrollbar-track{background:rgba(7,16,24,.72)}
+.pinned-alert-viewport::-webkit-scrollbar-thumb{border-radius:999px;background:rgba(143,244,255,.38)}
+.pinned-alert-row{min-width:max-content;transform:none!important;will-change:auto!important}
+.pinned-alert-cell{width:auto!important;min-width:0!important}
+.pinned-alert-cell.port-cell{margin-left:0!important}
+.pinned-alert-cell.action-cell{display:flex;gap:6px;min-width:max-content;white-space:nowrap}
+.pinned-alert-cell.action-cell .ack-button{flex:0 0 auto;margin-left:0}
+</style>
+<script>
+(() => {
+  function init(attempt = 0) {
+    const viewport = document.querySelector('.pinned-alert-viewport');
+    const pinnedRow = document.querySelector('.pinned-alert-row');
+    const tableCard = document.querySelector('.table-card');
+    if (!viewport || !pinnedRow || !tableCard) {
+      if (attempt < 50) window.setTimeout(() => init(attempt + 1), 100);
+      return;
+    }
+    if (viewport.dataset.horizontalSync === 'true') return;
+    viewport.dataset.horizontalSync = 'true';
+    let frame = 0;
+
+    const visibleSourceCells = () => {
+      const row = document.querySelector('tbody.report-row-group.expanded .report-row');
+      if (!row) return [];
+      return [...row.children].filter(cell => getComputedStyle(cell).display !== 'none');
+    };
+
+    function alignPinnedColumns() {
+      frame = 0;
+      const sourceCells = visibleSourceCells();
+      const cloneCells = [...pinnedRow.children];
+      if (!sourceCells.length || sourceCells.length !== cloneCells.length) return;
+      const widths = sourceCells.map(cell => Math.max(1, Math.ceil(cell.getBoundingClientRect().width)));
+      pinnedRow.style.setProperty('grid-template-columns', widths.map(width => `${width}px`).join(' '), 'important');
+      pinnedRow.style.setProperty('width', `${widths.reduce((sum, width) => sum + width, 0)}px`, 'important');
+      pinnedRow.style.setProperty('transform', 'none', 'important');
+      if (Math.abs(viewport.scrollLeft - tableCard.scrollLeft) > 1) viewport.scrollLeft = tableCard.scrollLeft;
+    }
+
+    function scheduleAlignment() {
+      if (frame) return;
+      frame = window.requestAnimationFrame(alignPinnedColumns);
+    }
+
+    function synchronize(source, target) {
+      if (Math.abs(target.scrollLeft - source.scrollLeft) <= 1) return;
+      target.scrollLeft = source.scrollLeft;
+    }
+
+    tableCard.addEventListener('scroll', () => {
+      synchronize(tableCard, viewport);
+      scheduleAlignment();
+    }, { passive: true });
+    viewport.addEventListener('scroll', () => synchronize(viewport, tableCard), { passive: true });
+    viewport.addEventListener('wheel', event => {
+      if (viewport.scrollWidth <= viewport.clientWidth + 1) return;
+      const delta = Math.abs(event.deltaX) >= Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+      if (!delta) return;
+      event.preventDefault();
+      viewport.scrollLeft += delta;
+      synchronize(viewport, tableCard);
+      scheduleAlignment();
+    }, { passive: false });
+    new MutationObserver(scheduleAlignment).observe(pinnedRow, { childList: true, subtree: true });
+    document.addEventListener('soc:alert-column-width-changed', scheduleAlignment);
+    window.addEventListener('resize', scheduleAlignment, { passive: true });
+    window.addEventListener('scroll', scheduleAlignment, { passive: true });
+    scheduleAlignment();
+  }
+  init();
+})();
+</script>
+'''
+
+
+ALERT_COLUMN_SINGLE_WRAP_CONTRACT = '''
+<style>
+:root{--soc-alert-title-column-width:420px}
+.alert-table th:nth-child(5),
+.alert-table td.alert-cell{
+  width:var(--soc-alert-title-column-width)!important;
+  min-width:var(--soc-alert-title-column-width)!important;
+}
+.alert-table .alert-cell strong,
+.pinned-alert-row .alert-cell strong{
+  display:-webkit-box!important;
+  overflow:hidden;
+  color:#f2f7ff;
+  font-size:13px;
+  line-height:1.35;
+  overflow-wrap:normal;
+  word-break:normal;
+  hyphens:none;
+  -webkit-box-orient:vertical;
+  -webkit-line-clamp:2;
+  line-clamp:2;
+}
+</style>
+<script>
+(() => {
+  function init(attempt = 0) {
+    const table = document.querySelector('.alert-table');
+    if (!table) {
+      if (attempt < 50) window.setTimeout(() => init(attempt + 1), 100);
+      return;
+    }
+    if (table.dataset.dynamicAlertWidth === 'true') return;
+    table.dataset.dynamicAlertWidth = 'true';
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    let frame = 0;
+    let currentWidth = 0;
+
+    function minimumTwoLineWidth(text) {
+      const words = String(text || '').trim().split(/\\s+/).filter(Boolean);
+      if (!words.length || !context) return 0;
+      if (words.length === 1) return context.measureText(words[0]).width;
+      let best = context.measureText(words.join(' ')).width;
+      for (let split = 1; split < words.length; split += 1) {
+        const first = context.measureText(words.slice(0, split).join(' ')).width;
+        const second = context.measureText(words.slice(split).join(' ')).width;
+        best = Math.min(best, Math.max(first, second));
+      }
+      return best;
+    }
+
+    function updateAlertColumnWidth() {
+      frame = 0;
+      const titles = [...table.querySelectorAll('.report-row .alert-cell strong')];
+      if (!titles.length || !context) return;
+      const style = getComputedStyle(titles[0]);
+      context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+      const contentWidth = titles.reduce(
+        (largest, title) => Math.max(largest, minimumTwoLineWidth(title.textContent)),
+        0,
+      );
+      const nextWidth = Math.max(420, Math.min(960, Math.ceil(contentWidth + 28)));
+      if (Math.abs(nextWidth - currentWidth) <= 1) return;
+      currentWidth = nextWidth;
+      document.documentElement.style.setProperty('--soc-alert-title-column-width', `${nextWidth}px`);
+      document.dispatchEvent(new CustomEvent('soc:alert-column-width-changed', { detail: { width: nextWidth } }));
+    }
+
+    function scheduleUpdate() {
+      if (frame) return;
+      frame = window.requestAnimationFrame(updateAlertColumnWidth);
+    }
+
+    new MutationObserver(scheduleUpdate).observe(table, { childList: true, subtree: true });
+    window.addEventListener('resize', scheduleUpdate, { passive: true });
+    document.fonts?.ready?.then(scheduleUpdate);
+    scheduleUpdate();
   }
   init();
 })();
@@ -3217,7 +3798,7 @@ def build_html(reports: list[AlertReport]) -> str:
             <td class="endpoint-cell count-cell"><span class="alert-repeat-count">{r.repeat_count}</span></td>
             <td class="severity-cell"><span class="severity-label severity-text-{html.escape(criticality_class(r.criticality))}">{html.escape(r.criticality)}</span></td>
             <td class="last-seen-cell" data-last-seen-utc="{html.escape(last_seen_iso_for(r), quote=True)}">{html.escape(last_seen_iso_for(r))}</td>
-            <td class="alert-cell"><strong>{html.escape(r.title)}</strong></td>
+            <td class="alert-cell"><strong title="{html.escape(r.title, quote=True)}">{html.escape(r.title)}</strong></td>
             <td class="endpoint-cell ip-cell"><code>{html.escape(r.source_ip)}</code></td>
             <td class="endpoint-cell ip-cell"><code>{html.escape(r.destination_ip)}</code></td>
             <td class="endpoint-cell port-cell"><code>{html.escape(r.destination_port)}</code></td>
@@ -3367,7 +3948,7 @@ def build_html(reports: list[AlertReport]) -> str:
     selected_size = human_size(first.size) if first else '—'
     selected_source = html.escape(first.rel_source) if first else '—'
     selected_body = first.rendered_html if first else '<p>No report selected.</p>'
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>SOC Alerts</title><link rel="icon" type="image/png" href="assets/onion-sentinel-logo.png"/><link rel="apple-touch-icon" href="assets/onion-sentinel-logo.png"/><style>
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>SOC Alerts</title><link rel="icon" type="image/png" sizes="64x64" href="assets/onion-sentinel-favicon.png?v=20260715"/><link rel="apple-touch-icon" href="assets/onion-sentinel-logo.png"/><style>
 .suppression-network-context{{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:-2px 0 10px;padding:0 2px;max-width:100%;color:#c8d5e4;font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;overflow-wrap:anywhere}}
 .suppression-network-context::before{{content:"Route";flex:0 0 auto;border:1px solid rgba(34,211,238,.24);border-radius:999px;padding:2px 7px;color:#8ff4ff;font:10px/1 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-weight:950;text-transform:uppercase;letter-spacing:.08em}}
 .suppression-network-context[hidden]{{display:none!important}}
@@ -3440,7 +4021,7 @@ def build_html(reports: list[AlertReport]) -> str:
 .detail-section-ai-analysis-output>ul{{display:grid;max-width:92ch;gap:6px;margin-top:6px!important;margin-bottom:10px!important;padding-left:34px;color:#dbe7f6;line-height:1.5}}
 .detail-section-ai-analysis-output>ul li::marker{{color:#8ff4ff}}
 .detail-section-ai-analysis-output>ul li strong{{color:#f4f8ff}}
-.detail-collapsible-section{{display:block}}
+.detail-collapsible-section{{display:block;margin:6px 0}}
 .detail-collapsible-section>summary{{display:flex;align-items:center;gap:10px;margin:0!important;padding:13px 16px!important;border-bottom:1px solid rgba(148,163,184,.11);background:rgba(16,27,38,.76);color:#f4f8ff!important;font-size:17px!important;font-weight:900!important;line-height:1.2!important;letter-spacing:-.01em!important;cursor:pointer;list-style:none}}
 .detail-collapsible-section>summary::-webkit-details-marker{{display:none}}
 .detail-collapsible-section>summary:before{{content:'';display:inline-block;width:0;height:0;border-top:5px solid transparent;border-bottom:5px solid transparent;border-left:7px solid #8ff4ff;filter:drop-shadow(0 0 8px rgba(34,211,238,.34));transition:transform .14s ease;flex:0 0 auto}}
@@ -3470,10 +4051,42 @@ def build_html(reports: list[AlertReport]) -> str:
 @media(min-width:701px){{.sort-header{{min-width:36px!important;min-height:36px!important;display:inline-flex!important;align-items:center!important}}.api-page-button,.api-page-size select,.api-page-controls select{{min-height:36px!important}}}}
 @media(min-width:701px) and (max-width:1180px){{.toggle-refresh-group.alerts-only{{display:grid!important;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 44px;width:100%;min-width:0;gap:10px}}.toggle-refresh-group.alerts-only .toggle-stack{{grid-column:1 / -1;min-width:0}}.toggle-refresh-group.alerts-only .time-filter{{width:auto;min-width:0}}}}
 @media(max-width:720px){{.severity-chip{{min-height:44px!important}}.api-page-button{{min-height:44px!important}}}}
+@media(max-width:1180px),(max-height:599px){{.pinned-alert-viewport,.pinned-alert-viewport.visible{{display:none!important}}}}
+@media(max-width:1180px){{.search,.sort-header,.api-page-button,.api-page-size select,.api-page-controls select,.ack-button{{min-height:44px!important}}.toggle-wrap{{min-height:44px!important}}}}
+@media(max-width:960px) and (max-height:560px){{.topbar{{grid-template-columns:minmax(0,1fr);grid-template-areas:'title';gap:8px;padding-bottom:8px}}.title-row{{justify-content:space-between;min-width:0}}.title h1{{font-size:25px}}.subtitle,.avatar{{display:none}}.mobile-controls-toggle{{display:inline-flex;width:44px;height:44px;min-width:44px;min-height:44px;flex:0 0 44px}}.search-wrap.alerts-only,.toggle-refresh-group.alerts-only{{display:none!important}}.app-shell.mobile-menu-open .topbar{{grid-template-areas:'title' 'search' 'toggles'}}.app-shell.mobile-menu-open .search-wrap.alerts-only{{display:block!important;grid-area:search}}.app-shell.mobile-menu-open .toggle-refresh-group.alerts-only{{display:grid!important;grid-area:toggles;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 44px;width:100%;min-width:0;gap:8px}}.app-shell.mobile-menu-open .toggle-stack{{grid-column:1/-1;grid-template-columns:repeat(2,minmax(0,max-content));gap:8px 12px}}.app-shell.mobile-menu-open .toggle-refresh-group .time-filter{{width:auto;min-width:0}}.metrics,.metrics.verbose-metrics{{display:flex!important;gap:8px!important;max-width:100%;margin-bottom:8px;overflow-x:auto;overflow-y:hidden;scroll-snap-type:x proximity;scrollbar-width:thin;-webkit-overflow-scrolling:touch}}.metrics .metric-card{{flex:0 0 220px!important;width:220px!important;min-width:220px!important;min-height:126px!important;padding:11px 12px!important;scroll-snap-align:start}}.mobile-triage-bar{{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;margin-bottom:8px}}.severity-chip-row{{min-width:0}}.mobile-sort-label{{margin-top:0;gap:6px}}.mobile-sort-label select{{min-height:44px}}.mobile-alert-list{{display:grid;gap:10px;width:100%;max-width:100%;overflow:hidden}}.table-card{{display:none}}}}
+@media(max-width:700px){{.mobile-controls-toggle,.alerts-refresh{{width:44px!important;height:44px!important;min-width:44px!important;min-height:44px!important;flex-basis:44px!important}}.mobile-sort-label select,.mobile-card-actions .ack-button{{min-height:44px!important}}}}
 @media(max-width:360px){{.severity-chip-row{{flex-wrap:wrap!important;overflow:visible!important;gap:6px!important}}.severity-chip{{padding:7px 9px!important;font-size:11px!important}}}}
+.detail-layout-contract{{display:grid;gap:14px}}.detail-layout-error{{border:1px solid rgba(251,113,133,.45);border-radius:10px;padding:14px 16px;background:rgba(251,113,133,.09);color:#f9d7df}}.detail-layout-error strong{{display:block;color:#fb7185;font-size:14px}}.detail-layout-error p{{margin:6px 0 8px;color:#e8bdc7;font-size:12px}}.detail-layout-error ul{{margin:0;padding-left:20px;color:#f4d4dc;font-size:12px;line-height:1.5}}.detail-layout-error-modal .modal-card{{border-color:rgba(251,113,133,.48)}}.detail-layout-error-modal .modal-card h2{{color:#fb7185}}.detail-layout-error-modal .modal-card ul{{margin:0 0 16px;padding-left:20px;color:#e8c6ce;font-size:13px;line-height:1.5}}.detail-layout-error-modal .modal-actions{{display:flex;justify-content:flex-end}}
 </style><link rel="stylesheet" href="assets/dashboard-metrics.css?v=20260707-metric-card-spacing"></head><body><div class="app-shell" data-view="overview"><aside class="sidebar" aria-label="Onion Sentinel navigation"><div class="brand"><button id="sidebar-toggle" class="brand-shield logo-toggle" type="button" aria-label="Collapse sidebar" aria-expanded="true" title="Collapse sidebar"><img class="brand-logo" src="assets/onion-sentinel-logo.png" alt="Onion Sentinel logo"></button><span class="brand-text">Onion <span>Sentinel</span></span></div>{build_nav_html('home', active_count)}<div class="sidebar-bottom"><div class="health" id="system-health-tile" data-health-state="unknown"><b>System Health</b><span><i class="status-dot"></i><span id="system-health-text">Checking n8n beacon...</span></span></div><div class="analyst byline"><span>by <a href="https://www.linkedin.com/in/arronjablonowski" target="_blank" rel="noopener noreferrer">Arron Jablonowski</a></span></div></div></aside><main class="content" id="top"><header class="topbar" aria-label="SOC alert controls"><div class="title"><div class="title-row"><h1 id="page-title">SOC Overview</h1><button id="mobile-controls-toggle" class="mobile-controls-toggle alerts-only" type="button" aria-label="Open alert controls" aria-expanded="false" title="Alert controls"><span></span><span></span><span></span></button></div><div id="page-subtitle" class="subtitle">Autonomous SIEM alert enrichment data flow</div></div><div class="search-wrap alerts-only"><input id="search" class="search" type="search" placeholder="Search alerts..."><span class="kbd">⌘K</span></div><div class="toggle-refresh-group alerts-only"><div class="toggle-stack"><label class="toggle-wrap"><input id="show-acknowledged" type="checkbox"><span class="toggle-slider"></span><span>Show acknowledged</span></label><label class="toggle-wrap"><input id="show-suppressed" type="checkbox"><span class="toggle-slider"></span><span>Show suppressed</span></label></div><label class="time-filter last-seen-filter"><span>Last Seen</span><select id="last-seen-window" aria-label="Filter alerts by last seen time"><option value="all">All time</option><option value="30">Last 30 min</option><option value="60">Last 1 hour</option><option value="120">Last 2 hours</option><option value="180">Last 3 hours</option><option value="240">Last 4 hours</option><option value="300">Last 5 hours</option><option value="360">Last 6 hours</option><option value="720">Last 12 hours</option><option value="1440">Last 24 hours</option><option value="2160">Last 36 hours</option><option value="4320">Last 72 hours</option><option value="10080">Last 7 days</option></select></label><label class="time-filter sort-default-filter"><span>Sorting Default</span><select id="sorting-default" aria-label="Choose default alert table sorting"><option value="last_seen">Newest Alerts First</option><option value="severity">Highest Severity First</option></select></label><button id="alerts-refresh" class="alerts-refresh" type="button" aria-label="Refresh SOC Alerts table" title="Refresh SOC Alerts table" aria-busy="false"><span class="alerts-refresh-icon" aria-hidden="true">↻</span></button></div><div class="avatar"><div class="avatar-bubble">SO</div><span>⌄</span></div></header>{overview_html}<section id="alerts-view" class="view-section alerts-view" aria-label="SOC alert table"><section class="metrics" aria-label="SOC alert report metrics">{soc_metrics_html}</section><div id="pinned-alert-viewport" class="pinned-alert-viewport" aria-hidden="true"><div id="pinned-alert-row" class="pinned-alert-row"></div></div><section class="workspace" aria-label="SOC alert workspace">{table_html}</section></section><div class="footer">Generated {html.escape(now)} from {html.escape(str(DB_PATH).replace(str(HOME), '~'))}; Markdown corpus remains {html.escape(str(SOURCE_DIR).replace(str(HOME), '~'))}.</div></main></div><div id="suppress-modal" class="modal-backdrop" hidden><div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="suppress-modal-title"><h2 id="suppress-modal-title">Suppress alert</h2><p>Enter a short reason. This will hide the current detection and matching future detections until it is exposed again.</p><div id="suppress-network-context" class="suppression-network-context" hidden></div><textarea id="suppress-reason" maxlength="140" placeholder="Reason for suppression"></textarea><div class="modal-meta"><span>Suppression reason is saved with this alert.</span><span id="suppress-char-count">0 / 140</span></div><div class="modal-actions"><button id="cancel-suppression" class="modal-button" type="button">Cancel</button><button id="confirm-suppression" class="modal-button primary" type="button" disabled>Confirm Suppression</button></div></div></div><script>
 (() => {{
-let search=document.querySelector('#search'),showAcknowledged=document.querySelector('#show-acknowledged'),showSuppressed=document.querySelector('#show-suppressed'),lastSeenWindow=document.querySelector('#last-seen-window'),sortingDefault=document.querySelector('#sorting-default'),visibleCount=document.querySelector('#visible-count'),navVisibleCount=document.querySelector('#soc-alerts-nav-count'),socRefreshButton=document.querySelector('#alerts-refresh'),mobileControlsToggle=document.querySelector('#mobile-controls-toggle'),topbar=document.querySelector('.topbar'),tableCard=document.querySelector('.table-card'),pinnedViewport=document.querySelector('#pinned-alert-viewport'),pinnedRow=document.querySelector('#pinned-alert-row'),appShell=document.querySelector('.app-shell'),sidebarToggle=document.querySelector('#sidebar-toggle'),pageTitle=document.querySelector('#page-title'),pageSubtitle=document.querySelector('#page-subtitle'),viewButtons=[...document.querySelectorAll('[data-view-target]')],viewSections=[...document.querySelectorAll('.view-section')],groups=[...document.querySelectorAll('.report-row-group')],mobileCards=[...document.querySelectorAll('.mobile-alert-card')],severityFilterButtons=[...document.querySelectorAll('[data-severity-filter]')],sortHeaders=[...document.querySelectorAll('[data-sort-key]')],mobileSort=document.querySelector('#mobile-sort'),suppressModal=document.querySelector('#suppress-modal'),suppressReasonInput=document.querySelector('#suppress-reason'),suppressNetworkContext=document.querySelector('#suppress-network-context'),suppressCharCount=document.querySelector('#suppress-char-count'),confirmSuppressionButton=document.querySelector('#confirm-suppression'),cancelSuppressionButton=document.querySelector('#cancel-suppression'),statusStorageKey='soc-alerts-triage-status-v2',legacyAckStorageKey='soc-alerts-acknowledged-v1',sidebarStorageKey='soc-alerts-sidebar-collapsed-v1',sortDefaultStorageKey='soc-alerts-sort-default-v1';let selectedGroup=null,severityFilter='all',apiSortKey='last_seen',apiSortDirection='desc',pendingSuppressGroup=null,pendingStatusUpdate=null;function pad2(value){{return String(value).padStart(2,'0')}}function localOffset(date){{const minutes=-date.getTimezoneOffset(),sign=minutes>=0?'+':'-',absolute=Math.abs(minutes);return `${{sign}}${{pad2(Math.floor(absolute/60))}}:${{pad2(absolute%60)}}`}}function formatDateAsProjectIso(date){{const ms=date.getMilliseconds(),fraction=ms?`.${{String(ms).padStart(3,'0')}}`:'';return `${{date.getFullYear()}}-${{pad2(date.getMonth()+1)}}-${{pad2(date.getDate())}}  ${{pad2(date.getHours())}}:${{pad2(date.getMinutes())}}:${{pad2(date.getSeconds())}}${{fraction}}${{localOffset(date)}}`}}function parseProjectDate(value){{const text=String(value||'').trim();if(!text)return null;const parseable=text.replace(/(\\d{{4}}-\\d{{2}}-\\d{{2}})(?:T|\\s+)(?=\\d{{2}}:\\d{{2}}:\\d{{2}})/,'$1T');const hasOffset=/(?:Z|[+-]\\d{{2}}:?\\d{{2}})$/.test(parseable);const date=new Date(hasOffset?parseable:`${{parseable}}Z`);return Number.isFinite(date.getTime())?date:null}}function formatProjectIso(value){{const date=parseProjectDate(value);if(date)return formatDateAsProjectIso(date);return String(value||'').trim().replace(/(\\d{{4}}-\\d{{2}}-\\d{{2}})(?:T|\\s+)(?=\\d{{2}}:\\d{{2}}:\\d{{2}})/,'$1  ')}}function formatLocalIsoFromUtc(value){{return formatProjectIso(value)}}function projectNowIso(){{return formatDateAsProjectIso(new Date())}}function renderLocalLastSeen(){{document.querySelectorAll('[data-last-seen-utc]').forEach(element=>{{const raw=element.dataset.lastSeenUtc||element.textContent;const normalized=formatProjectIso(raw);element.textContent=normalized;element.setAttribute('title',normalized)}})}}function setView(view){{const normalized=view==='alerts'?'alerts':'overview';if(appShell)appShell.dataset.view=normalized;viewSections.forEach(section=>section.classList.toggle('active',section.id===`${{normalized}}-view`));viewButtons.forEach(button=>button.classList.toggle('active',button.dataset.viewTarget===normalized));if(pageTitle)pageTitle.textContent=normalized==='alerts'?'SOC Alerts':'SOC Overview';if(pageSubtitle)pageSubtitle.textContent=normalized==='alerts'?'AI-powered triage and investigation':'Autonomous SIEM alert enrichment data flow';if(normalized!=='alerts')pinnedViewport?.classList.remove('visible');setTimeout(updatePinnedRow,80)}}function isMobileNavLayout(){{return window.matchMedia('(max-width: 1180px)').matches}}function setSidebarCollapsed(collapsed){{if(isMobileNavLayout()){{appShell?.classList.toggle('mobile-nav-open',!collapsed);appShell?.classList.add('sidebar-collapsed');if(sidebarToggle){{sidebarToggle.setAttribute('aria-expanded',String(!collapsed));sidebarToggle.setAttribute('aria-label',collapsed?'Open navigation menu':'Close navigation menu');sidebarToggle.setAttribute('title',collapsed?'Open navigation menu':'Close navigation menu')}}setTimeout(updatePinnedRow,210);return}}appShell?.classList.toggle('sidebar-collapsed',collapsed);appShell?.classList.remove('mobile-nav-open');if(sidebarToggle){{sidebarToggle.setAttribute('aria-expanded',String(!collapsed));sidebarToggle.setAttribute('aria-label',collapsed?'Expand sidebar':'Collapse sidebar');sidebarToggle.setAttribute('title',collapsed?'Expand sidebar':'Collapse sidebar')}}try{{localStorage.setItem(sidebarStorageKey,collapsed?'1':'0')}}catch(_){{}}setTimeout(updatePinnedRow,210)}}function currentRepeatCount(group){{return Number(group?.dataset.repeatCount||0)||0}}function normalizeStatusMeta(meta){{if(!meta||typeof meta!=='object')return null;const status=String(meta.status||'open').toLowerCase();if(!['open','acknowledged','suppressed'].includes(status))return null;return {{status,repeat_count:Number(meta.repeat_count||meta.acknowledged_count||0)||0,reason:String(meta.reason||'').slice(0,140),updated_at:meta.updated_at||null}}}}function loadStoredStatuses(){{const statuses={{}};try{{const parsed=JSON.parse(localStorage.getItem(statusStorageKey)||'{{}}');if(parsed&&typeof parsed==='object'){{Object.entries(parsed).forEach(([id,meta])=>{{const normalized=normalizeStatusMeta(meta);if(normalized&&normalized.status!=='open')statuses[id]=normalized}})}}}}catch(_){{}}try{{const legacy=JSON.parse(localStorage.getItem(legacyAckStorageKey)||'[]');if(Array.isArray(legacy))legacy.forEach(id=>{{if(!statuses[id])statuses[id]={{status:'acknowledged',repeat_count:0,updated_at:null}}}})}}catch(_){{}}return statuses}}let alertStatuses={{}};function statusForGroup(group){{const id=group?.dataset.reportId,meta=alertStatuses[id];if(!id||!meta)return {{status:'open',repeat_count:0}};if(meta.status==='acknowledged'&&currentRepeatCount(group)>Number(meta.repeat_count||0)){{delete alertStatuses[id];persistStatusesLocally();return {{status:'open',repeat_count:0}}}}return meta}}function persistStatusesLocally(){{try{{localStorage.setItem(statusStorageKey,JSON.stringify(alertStatuses));localStorage.removeItem(legacyAckStorageKey)}}catch(_){{}}}}function saveStatuses(){{persistStatusesLocally();if(!pendingStatusUpdate)return;fetch('/api/soc-alerts/status',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(pendingStatusUpdate)}}).then(r=>r.ok?r.json():null).then(data=>{{pendingStatusUpdate=null;if(data&&data.statuses){{mergeServerStatuses(data.statuses);hydrateTriageStatuses();applyFilter()}}}}).catch(()=>{{pendingStatusUpdate=null}})}}function mergeServerStatuses(statuses){{const next={{}};Object.entries(statuses||{{}}).forEach(([id,meta])=>{{const normalized=normalizeStatusMeta(meta);if(normalized&&normalized.status!=='open')next[id]=normalized}});alertStatuses=next;persistStatusesLocally()}}async function loadServerStatuses(){{try{{const response=await fetch('/api/soc-alerts/status',{{cache:'no-store'}});if(!response.ok)return;const data=await response.json();if(!data||!data.statuses)return;mergeServerStatuses(data.statuses);hydrateTriageStatuses();applyFilter()}}catch(_){{}}}}function setAiStatusPill(pill,status){{if(!pill||!status)return;const key=status.ai_status_key||'queued',label=status.ai_status_label||'Queued',detail=status.ai_status_detail||'';pill.className=`ai-status-pill ai-status-${{key}}`;pill.textContent=label;pill.title=detail}}function renderAiActivityExtra(counts,model){{const active=Number(counts?.analyzing||0),queued=Number(counts?.queued||0),analyzed=Number(counts?.analyzed||0),skipped=Number(counts?.not_queued||counts?.skipped||0),safeModel=String(model||'devstral:latest').replace(/[&<>]/g,char=>({{'&':'&amp;','<':'&lt;','>':'&gt;'}}[char]));return `<span class="metric-detail-row"><b>Model</b><span>${{safeModel}}</span></span><span class="metric-detail-row"><b>Active</b><span>${{active}}</span></span><span class="metric-detail-row"><b>Queued</b><span>${{queued}}</span></span><span class="metric-detail-row"><b>Analyzed</b><span>${{analyzed}}</span></span><span class="metric-detail-row"><b>Skipped</b><span>${{skipped}}</span></span>`}}function updateAiActivityCounts(counts){{const set=(id,value)=>{{const el=document.querySelector(id);if(el)el.textContent=String(Number(value||0))}};set('#ai-analyzed-count',counts?.analyzed);set('#ai-queued-count',counts?.queued);set('#ai-skipped-count',counts?.not_queued??counts?.skipped)}}function renderBeaconExtra(beacon){{const esc=value=>String(value??'—').replace(/[&<>]/g,char=>({{'&':'&amp;','<':'&lt;','>':'&gt;'}}[char]));const alert=beacon.rule_name||beacon.alert_id||'Webhook received';const source=[beacon.source_ip,beacon.destination_ip].filter(Boolean).join(' -> ')||'n8n webhook';const status=beacon.status||beacon.stage||'received';return `<span class="metric-detail-row"><b>Alert</b><span>${{esc(alert)}}</span></span><span class="metric-detail-row"><b>Source</b><span>${{esc(source)}}</span></span><span class="metric-detail-row"><b>Status</b><span>${{esc(status)}}</span></span>`}}async function pollN8nBeacon(){{try{{const response=await fetch('n8n-beacon.json?ts='+Date.now(),{{cache:'no-store'}});if(!response.ok)return;const beacon=await response.json();updateN8nBeaconFromPayload(beacon)}}catch(_){{}}}}function beaconEpochMs(value){{if(!value)return NaN;const normalized=String(value).replace(/(\\d{{4}}-\\d{{2}}-\\d{{2}})(?:T|\\s+)(?=\\d{{2}}:\\d{{2}}:\\d{{2}})/,'$1T');const parsed=Date.parse(normalized);return Number.isFinite(parsed)?parsed:NaN}}function updateSystemHealthFromBeacon(beacon){{const tile=document.querySelector('#system-health-tile'),label=document.querySelector('#system-health-text');if(!tile||!label)return;const timestamp=beacon?.generated_at||beacon?.last_seen||beacon?.timestamp,epoch=beaconEpochMs(timestamp),ageMs=Number.isFinite(epoch)?Date.now()-epoch:NaN,ok=Number.isFinite(ageMs)&&ageMs>=0&&ageMs<=20*60*1000;tile.dataset.healthState=ok?'ok':'stale';label.textContent=ok?'n8n beacon healthy':'n8n beacon stale';tile.title=Number.isFinite(ageMs)?`Last n8n beacon ${{Math.max(0,Math.round(ageMs/60000))}} minutes ago`:'No valid n8n beacon timestamp'}}function updateN8nBeaconFromPayload(beacon){{const time=document.querySelector('#n8n-beacon-time'),extra=document.querySelector('#n8n-beacon-extra');if(time&&beacon?.generated_at)time.textContent=formatLocalIsoFromUtc(beacon.generated_at);if(extra&&beacon)extra.innerHTML=renderBeaconExtra(beacon);updateSystemHealthFromBeacon(beacon)}}function updateLatestAlertMetric(metrics){{if(!metrics)return;const pcapIngest=document.querySelector('#pcap-ingest-size');if(pcapIngest)pcapIngest.textContent=formatApiBytes(metrics.pcap_ingest_size_bytes||0);if(!metrics.latest_seen)return;const time=document.querySelector('#latest-alert-time'),extra=document.querySelector('#latest-alert-extra'),card=document.querySelector('#latest-alert-card');if(time)time.textContent=formatLocalIsoFromUtc(metrics.latest_seen);if(extra)extra.innerHTML=`<span class="metric-detail-row"><b>Groups</b><span>${{Number(metrics.grouped_total||0)}}</span></span><span class="metric-detail-row"><b>Observations</b><span>${{Number(metrics.grouped_observations||metrics.total||0)}}</span></span>`;}}async function pollSocAlertMetrics(){{try{{const response=await fetch('/api/soc-alerts/metrics?since=7d&ts='+Date.now(),{{cache:'no-store'}});if(!response.ok)return;const metrics=await response.json();updateLatestAlertMetric(metrics)}}catch(_){{}}}}function statusPayloadAlertCount(data){{const open=Number(data?.counts?.open);if(Number.isFinite(open))return open;const total=Number(data?.counts?.total);const acknowledged=Number(data?.counts?.acknowledged||0),suppressed=Number(data?.counts?.suppressed||0);if(Number.isFinite(total))return Math.max(0,total-acknowledged-suppressed);return Number.NaN}}function setActiveAlertCount(count){{const active=Number(count);if(!Number.isFinite(active))return;if(navVisibleCount)navVisibleCount.textContent=String(active);document.querySelectorAll('#api-visible-total,#top-api-visible-total,#visible-count').forEach(el=>el.textContent=String(active))}}function updateNavAlertCountFromStatus(data){{const count=statusPayloadAlertCount(data);if(!Number.isFinite(count))return;setActiveAlertCount(count)}}function updateAiStatusFromPayload(data){{if(!data||!data.ai)return;updateNavAlertCountFromStatus(data);const aiCard=document.querySelector('#ai-activity-card'),aiLabel=document.querySelector('#ai-activity-label'),aiDetail=document.querySelector('#ai-activity-detail'),aiExtra=document.querySelector('#ai-activity-extra');aiCard?.classList.toggle('ai-activity-active',Boolean(data.ai.active));if(aiLabel)aiLabel.textContent=data.ai.label||'AI Alert Triage';if(aiDetail)aiDetail.textContent=data.ai.detail||`Model: ${{data.ai.model||'devstral:latest'}}`;if(aiExtra)aiExtra.innerHTML=renderAiActivityExtra(data.ai.counts||{{}},data.ai.model);updateAiActivityCounts(data.ai.counts||{{}});Object.entries(data.reports||{{}}).forEach(([id,status])=>{{const selectorId=CSS.escape(id);document.querySelectorAll(`.report-row-group[data-report-id="${{selectorId}}"]`).forEach(group=>{{group.dataset.aiStatus=status.ai_status_key||'queued';setAiStatusPill(group.querySelector('.ai-status-cell .ai-status-pill'),status)}});document.querySelectorAll(`[data-mobile-report-id="${{selectorId}}"] .ai-status-pill`).forEach(pill=>setAiStatusPill(pill,status))}});if(selectedGroup)syncPinnedContent(selectedGroup);updatePinnedRow()}}function socEventsTableSignature(data){{return JSON.stringify({{counts:data?.counts||{{}},metrics:{{grouped_total:data?.metrics?.grouped_total,total:data?.metrics?.total,latest_seen:data?.metrics?.latest_seen}},ai:data?.ai?.counts||{{}},beacon:data?.beacon?.generated_at||''}})}}function scheduleSocEventApiReload(){{if(appShell?.dataset.view!=='alerts'||!socApiTableEnabled)return;if(document.querySelector('tbody.report-row-group.expanded'))return;clearTimeout(socEventsReloadTimer);socEventsReloadTimer=setTimeout(()=>loadApiAlerts(true),650)}}function handleSocEventPayload(data){{if(!data||!data.ok)return;if(data.statuses){{mergeServerStatuses(data.statuses);hydrateTriageStatuses();applyFilter()}}if(data.ai)updateAiStatusFromPayload(data);if(data.metrics)updateLatestAlertMetric(data.metrics);if(data.beacon)updateN8nBeaconFromPayload(data.beacon);const nextSignature=socEventsTableSignature(data);if(socEventsSignature&&nextSignature!==socEventsSignature)scheduleSocEventApiReload();socEventsSignature=nextSignature}}function connectSocAlertEvents(){{if(!window.EventSource)return false;try{{socEventsSource?.close();socEventsSource=new EventSource('/api/soc-alerts/events');window.__socEventsConnected=false;socEventsSource.addEventListener('open',()=>{{window.__socEventsConnected=true}});socEventsSource.addEventListener('soc-alerts',event=>{{window.__socEventsConnected=true;try{{handleSocEventPayload(JSON.parse(event.data))}}catch(_){{}}}});socEventsSource.onerror=()=>{{window.__socEventsConnected=false;socEventsSource?.close();socEventsSource=null;setTimeout(connectSocAlertEvents,5000)}};return true}}catch(_){{window.__socEventsConnected=false;return false}}}}async function pollSocAlertStatus(){{try{{const response=await fetch('soc-alerts-status.json?ts='+Date.now(),{{cache:'no-store'}});if(!response.ok)return;const data=await response.json();updateAiStatusFromPayload(data)}}catch(_){{}}}}function severityLabel(level){{return ({{critical:'Crit',high:'High',medium:'Med',low:'Low',informational:'Info',info:'Info'}})[level]||level.charAt(0).toUpperCase()+level.slice(1)}}function buildSeverityBreakdownFromCounts(counts){{const levels=['critical','high','medium','low','informational'];const source=counts||{{}};return levels.map(level=>{{const value=Number(source[level]||0);return `<span class="sev-chip sev-${{level}}${{value===0?' sev-zero':''}}"><b>${{value}}</b> ${{severityLabel(level)}}</span>`}}).join('')}}function buildSeverityBreakdown(groupsToCount){{const levels=['critical','high','medium','low','informational'],counts=Object.fromEntries(levels.map(level=>[level,0]));groupsToCount.forEach(group=>{{const level=group.dataset.criticality||'informational';counts[level]=(counts[level]||0)+1}});return buildSeverityBreakdownFromCounts(counts)}}function setVerboseMode(enabled){{document.querySelector('.metrics')?.classList.toggle('verbose-metrics',enabled)}}function stickyTop(){{const rect=topbar?.getBoundingClientRect();const top=Math.ceil(rect?.height||76);document.documentElement.style.setProperty('--sticky-row-top',`${{top}}px`);return top}}function updateDetailViewport(){{if(!tableCard)return;const visibleWidth=Math.max(320,Math.floor(tableCard.clientWidth-36)),offset=Math.max(0,Math.floor(tableCard.scrollLeft));document.querySelectorAll('.report-row-group.expanded .detail-template').forEach(detail=>{{detail.style.setProperty('--detail-visible-width',`${{visibleWidth}}px`);detail.style.setProperty('--detail-visible-x',`${{offset}}px`)}})}}function syncPinnedContent(group){{if(!pinnedRow||!group)return;const row=group.querySelector('.report-row');const visibleCells=[...row.children].filter(cell=>getComputedStyle(cell).display!=='none');pinnedRow.innerHTML=visibleCells.map(cell=>`<div class="pinned-alert-cell ${{cell.className||''}}">${{cell.innerHTML}}</div>`).join('')}}function updatePinnedRow(){{if(!pinnedRow||!pinnedViewport||appShell?.dataset.view!=='alerts')return;const group=selectedGroup;if(!group||!group.classList.contains('expanded')||getComputedStyle(group).display==='none'){{pinnedViewport.classList.remove('visible');return}}const row=group.querySelector('.report-row'),detail=group.querySelector('.detail-template-row'),table=tableCard?.querySelector('.alert-table');if(!row||!detail||!tableCard||!table){{pinnedViewport.classList.remove('visible');return}}const top=stickyTop();const rowRect=row.getBoundingClientRect(),detailRect=detail.getBoundingClientRect(),cardRect=tableCard.getBoundingClientRect();const withinReport=rowRect.top<=top&&detailRect.bottom>top+rowRect.height+16;if(withinReport){{syncPinnedContent(group);pinnedViewport.style.left=`${{Math.max(0,cardRect.left)}}px`;pinnedViewport.style.width=`${{Math.max(0,cardRect.width)}}px`;pinnedViewport.style.top=`${{top}}px`;pinnedRow.style.width=`${{Math.max(table.scrollWidth,cardRect.width)}}px`;pinnedRow.style.transform=`translateX(${{-tableCard.scrollLeft}}px)`;pinnedViewport.classList.add('visible')}}else{{pinnedViewport.classList.remove('visible')}}}}function scrollPinnedRowIntoPlace(group){{const row=group?.querySelector('.report-row');if(!row)return;const top=stickyTop();const target=window.scrollY+row.getBoundingClientRect().top-top;window.scrollTo({{top:Math.max(0,target),behavior:'smooth'}});setTimeout(updatePinnedRow,180);setTimeout(updatePinnedRow,520)}}function visibleGroups(){{return groups.filter(g=>getComputedStyle(g).display!=='none')}}function sortMobileCards(){{const list=document.querySelector('.mobile-alert-list');if(!list||!mobileSort)return;const mode=mobileSort.value;const byId=new Map(groups.map(g=>[g.dataset.reportId,g]));mobileCards.sort((a,b)=>{{const ga=byId.get(a.dataset.mobileReportId),gb=byId.get(b.dataset.mobileReportId);if(!ga||!gb)return 0;if(mode==='newest')return Number(gb.dataset.mtime||0)-Number(ga.dataset.mtime||0);if(mode==='risk')return Number(gb.dataset.riskScore||0)-Number(ga.dataset.riskScore||0);const rank={{critical:5,high:4,medium:3,low:2,informational:1}};return (rank[gb.dataset.criticality]||0)-(rank[ga.dataset.criticality]||0)||Number(gb.dataset.mtime||0)-Number(ga.dataset.mtime||0)}});mobileCards.forEach(card=>list.appendChild(card))}}function collapseGroup(group,clearState=true){{if(!group)return;const id=group.dataset.reportId||'';group.classList.remove('expanded');const row=group.querySelector('.report-row');row?.classList.remove('selected');row?.setAttribute('aria-selected','false');row?.setAttribute('aria-expanded','false');if(id){{document.querySelectorAll(`[data-mobile-report-id="${{CSS.escape(id)}}"]`).forEach(card=>{{card.classList.remove('mobile-expanded');const pill=card.querySelector('.mobile-alert-pill'),detail=card.querySelector('.mobile-pill-details');pill?.setAttribute('aria-expanded','false');if(detail)detail.hidden=true}})}}if(clearState)window.__socAlertScrollStabilizer?.clear?.();if(selectedGroup===group){{pinnedViewport?.classList.remove('visible')}}}}async function loadGroupDetail(group){{const id=group?.dataset.reportId;if(!id)return;const targets=[...group.querySelectorAll('.api-detail-content'),...document.querySelectorAll(`[data-mobile-report-id="${{CSS.escape(id)}}"] .api-detail-content`)];if(!targets.length||targets.every(target=>target.dataset.detailLoaded==='true'||target.dataset.detailLoading==='true'))return;targets.forEach(target=>{{target.dataset.detailLoading='true';target.insertAdjacentHTML('afterbegin','<p class="api-detail-loading">Loading full Detailed Alert Report...</p>')}});try{{const response=await fetch(`/api/soc-alerts/${{encodeURIComponent(id)}}/detail`,{{cache:'no-store'}});if(!response.ok)throw new Error(`HTTP ${{response.status}}`);const data=await response.json();if(!data.ok||!data.detail_html)throw new Error(data.error||'Detail unavailable');targets.forEach(target=>{{target.innerHTML=data.detail_html;target.dataset.detailLoaded='true';delete target.dataset.detailLoading}});hydrateTriageStatuses();renderLocalLastSeen();updateDetailViewport();if(group===selectedGroup)syncPinnedContent(group)}}catch(error){{targets.forEach(target=>{{target.dataset.detailLoading='false';target.querySelector('.api-detail-loading')?.remove();target.insertAdjacentHTML('afterbegin',`<p class="api-detail-error">Full detail load failed: ${{escapeHtml(error.message||error)}}</p>`)}})}}}}
+const detailLayoutErrorsShown=new Set();
+function showDetailLayoutContractError(root,id){{
+  const error=root?.querySelector('.detail-layout-error');
+  if(!error||detailLayoutErrorsShown.has(id))return;
+  detailLayoutErrorsShown.add(id);
+  const title=error.querySelector('strong')?.textContent||'Detailed Alert Report layout error';
+  const intro=error.querySelector('p')?.textContent||'Legacy data could not be mapped to the required layout.';
+  const items=[...error.querySelectorAll('li')].map(item=>item.textContent||'').filter(Boolean);
+  const modal=document.createElement('div');
+  modal.className='modal-backdrop detail-layout-error-modal';
+  modal.setAttribute('role','presentation');
+  modal.innerHTML=`<div class="modal-card" role="alertdialog" aria-modal="true" aria-labelledby="detail-layout-error-title"><h2 id="detail-layout-error-title">${{escapeHtml(title)}}</h2><p>${{escapeHtml(intro)}}</p><ul>${{items.map(item=>`<li>${{escapeHtml(item)}}</li>`).join('')}}</ul><div class="modal-actions"><button class="modal-button primary" type="button">Close</button></div></div>`;
+  const close=()=>modal.remove();
+  modal.querySelector('button')?.addEventListener('click',close);
+  modal.addEventListener('click',event=>{{if(event.target===modal)close()}});
+  document.body.appendChild(modal);
+  modal.querySelector('button')?.focus();
+}}
+const detailLayoutObserver=new MutationObserver(mutations=>{{
+  mutations.forEach(mutation=>{{
+    const root=mutation.target?.closest?.('.api-detail-content');
+    if(!root?.querySelector('.detail-layout-error'))return;
+    const group=root.closest('[data-report-id]');
+    showDetailLayoutContractError(root,group?.dataset.reportId||'unknown-report');
+  }});
+}});
+detailLayoutObserver.observe(document.documentElement,{{childList:true,subtree:true}});
+let search=document.querySelector('#search'),showAcknowledged=document.querySelector('#show-acknowledged'),showSuppressed=document.querySelector('#show-suppressed'),lastSeenWindow=document.querySelector('#last-seen-window'),sortingDefault=document.querySelector('#sorting-default'),visibleCount=document.querySelector('#visible-count'),navVisibleCount=document.querySelector('#soc-alerts-nav-count'),socRefreshButton=document.querySelector('#alerts-refresh'),mobileControlsToggle=document.querySelector('#mobile-controls-toggle'),topbar=document.querySelector('.topbar'),tableCard=document.querySelector('.table-card'),pinnedViewport=document.querySelector('#pinned-alert-viewport'),pinnedRow=document.querySelector('#pinned-alert-row'),appShell=document.querySelector('.app-shell'),sidebarToggle=document.querySelector('#sidebar-toggle'),pageTitle=document.querySelector('#page-title'),pageSubtitle=document.querySelector('#page-subtitle'),viewButtons=[...document.querySelectorAll('[data-view-target]')],viewSections=[...document.querySelectorAll('.view-section')],groups=[...document.querySelectorAll('.report-row-group')],mobileCards=[...document.querySelectorAll('.mobile-alert-card')],severityFilterButtons=[...document.querySelectorAll('[data-severity-filter]')],sortHeaders=[...document.querySelectorAll('[data-sort-key]')],mobileSort=document.querySelector('#mobile-sort'),suppressModal=document.querySelector('#suppress-modal'),suppressReasonInput=document.querySelector('#suppress-reason'),suppressNetworkContext=document.querySelector('#suppress-network-context'),suppressCharCount=document.querySelector('#suppress-char-count'),confirmSuppressionButton=document.querySelector('#confirm-suppression'),cancelSuppressionButton=document.querySelector('#cancel-suppression'),statusStorageKey='soc-alerts-triage-status-v2',legacyAckStorageKey='soc-alerts-acknowledged-v1',sidebarStorageKey='soc-alerts-sidebar-collapsed-v1',sortDefaultStorageKey='soc-alerts-sort-default-v1';let selectedGroup=null,severityFilter='all',apiSortKey='last_seen',apiSortDirection='desc',pendingSuppressGroup=null,pendingStatusUpdate=null;function pad2(value){{return String(value).padStart(2,'0')}}function localOffset(date){{const minutes=-date.getTimezoneOffset(),sign=minutes>=0?'+':'-',absolute=Math.abs(minutes);return `${{sign}}${{pad2(Math.floor(absolute/60))}}:${{pad2(absolute%60)}}`}}function formatDateAsProjectIso(date){{const ms=date.getMilliseconds(),fraction=ms?`.${{String(ms).padStart(3,'0')}}`:'';return `${{date.getFullYear()}}-${{pad2(date.getMonth()+1)}}-${{pad2(date.getDate())}}  ${{pad2(date.getHours())}}:${{pad2(date.getMinutes())}}:${{pad2(date.getSeconds())}}${{fraction}}${{localOffset(date)}}`}}function parseProjectDate(value){{const text=String(value||'').trim();if(!text)return null;const parseable=text.replace(/(\\d{{4}}-\\d{{2}}-\\d{{2}})(?:T|\\s+)(?=\\d{{2}}:\\d{{2}}:\\d{{2}})/,'$1T');const hasOffset=/(?:Z|[+-]\\d{{2}}:?\\d{{2}})$/.test(parseable);const date=new Date(hasOffset?parseable:`${{parseable}}Z`);return Number.isFinite(date.getTime())?date:null}}function formatProjectIso(value){{const date=parseProjectDate(value);if(date)return formatDateAsProjectIso(date);return String(value||'').trim().replace(/(\\d{{4}}-\\d{{2}}-\\d{{2}})(?:T|\\s+)(?=\\d{{2}}:\\d{{2}}:\\d{{2}})/,'$1  ')}}function formatLocalIsoFromUtc(value){{return formatProjectIso(value)}}function projectNowIso(){{return formatDateAsProjectIso(new Date())}}function renderLocalLastSeen(){{document.querySelectorAll('[data-last-seen-utc]').forEach(element=>{{const raw=element.dataset.lastSeenUtc||element.textContent;const normalized=formatProjectIso(raw);element.textContent=normalized;element.setAttribute('title',normalized)}})}}function setView(view){{const normalized=view==='alerts'?'alerts':'overview';if(appShell)appShell.dataset.view=normalized;viewSections.forEach(section=>section.classList.toggle('active',section.id===`${{normalized}}-view`));viewButtons.forEach(button=>button.classList.toggle('active',button.dataset.viewTarget===normalized));if(pageTitle)pageTitle.textContent=normalized==='alerts'?'SOC Alerts':'SOC Overview';if(pageSubtitle)pageSubtitle.textContent=normalized==='alerts'?'AI-powered triage and investigation':'Autonomous SIEM alert enrichment data flow';if(normalized!=='alerts')pinnedViewport?.classList.remove('visible');setTimeout(updatePinnedRow,80)}}function isMobileNavLayout(){{return window.matchMedia('(max-width: 1180px)').matches}}function setSidebarCollapsed(collapsed){{if(isMobileNavLayout()){{appShell?.classList.toggle('mobile-nav-open',!collapsed);appShell?.classList.add('sidebar-collapsed');if(sidebarToggle){{sidebarToggle.setAttribute('aria-expanded',String(!collapsed));sidebarToggle.setAttribute('aria-label',collapsed?'Open navigation menu':'Close navigation menu');sidebarToggle.setAttribute('title',collapsed?'Open navigation menu':'Close navigation menu')}}setTimeout(updatePinnedRow,210);return}}appShell?.classList.toggle('sidebar-collapsed',collapsed);appShell?.classList.remove('mobile-nav-open');if(sidebarToggle){{sidebarToggle.setAttribute('aria-expanded',String(!collapsed));sidebarToggle.setAttribute('aria-label',collapsed?'Expand sidebar':'Collapse sidebar');sidebarToggle.setAttribute('title',collapsed?'Expand sidebar':'Collapse sidebar')}}try{{localStorage.setItem(sidebarStorageKey,collapsed?'1':'0')}}catch(_){{}}setTimeout(updatePinnedRow,210)}}function currentRepeatCount(group){{return Number(group?.dataset.repeatCount||0)||0}}function normalizeStatusMeta(meta){{if(!meta||typeof meta!=='object')return null;const status=String(meta.status||'open').toLowerCase();if(!['open','acknowledged','suppressed'].includes(status))return null;return {{status,repeat_count:Number(meta.repeat_count||meta.acknowledged_count||0)||0,reason:String(meta.reason||'').slice(0,140),updated_at:meta.updated_at||null}}}}function loadStoredStatuses(){{const statuses={{}};try{{const parsed=JSON.parse(localStorage.getItem(statusStorageKey)||'{{}}');if(parsed&&typeof parsed==='object'){{Object.entries(parsed).forEach(([id,meta])=>{{const normalized=normalizeStatusMeta(meta);if(normalized&&normalized.status!=='open')statuses[id]=normalized}})}}}}catch(_){{}}try{{const legacy=JSON.parse(localStorage.getItem(legacyAckStorageKey)||'[]');if(Array.isArray(legacy))legacy.forEach(id=>{{if(!statuses[id])statuses[id]={{status:'acknowledged',repeat_count:0,updated_at:null}}}})}}catch(_){{}}return statuses}}let alertStatuses={{}};function statusForGroup(group){{const id=group?.dataset.reportId,meta=alertStatuses[id];if(!id||!meta)return {{status:'open',repeat_count:0}};if(meta.status==='acknowledged'&&currentRepeatCount(group)>Number(meta.repeat_count||0)){{delete alertStatuses[id];persistStatusesLocally();return {{status:'open',repeat_count:0}}}}return meta}}function persistStatusesLocally(){{try{{localStorage.setItem(statusStorageKey,JSON.stringify(alertStatuses));localStorage.removeItem(legacyAckStorageKey)}}catch(_){{}}}}function saveStatuses(){{persistStatusesLocally();if(!pendingStatusUpdate)return;fetch('/api/soc-alerts/status',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(pendingStatusUpdate)}}).then(r=>r.ok?r.json():null).then(data=>{{pendingStatusUpdate=null;if(data&&data.statuses){{mergeServerStatuses(data.statuses);hydrateTriageStatuses();applyFilter()}}}}).catch(()=>{{pendingStatusUpdate=null}})}}function mergeServerStatuses(statuses){{const next={{}};Object.entries(statuses||{{}}).forEach(([id,meta])=>{{const normalized=normalizeStatusMeta(meta);if(normalized&&normalized.status!=='open')next[id]=normalized}});alertStatuses=next;persistStatusesLocally()}}async function loadServerStatuses(){{try{{const response=await fetch('/api/soc-alerts/status',{{cache:'no-store'}});if(!response.ok)return;const data=await response.json();if(!data||!data.statuses)return;mergeServerStatuses(data.statuses);hydrateTriageStatuses();applyFilter()}}catch(_){{}}}}function setAiStatusPill(pill,status){{if(!pill||!status)return;const key=status.ai_status_key||'queued',label=status.ai_status_label||'Queued',detail=status.ai_status_detail||'';pill.className=`ai-status-pill ai-status-${{key}}`;pill.textContent=label;pill.title=detail}}function renderAiActivityExtra(counts,model){{const active=Number(counts?.analyzing||0),queued=Number(counts?.queued||0),analyzed=Number(counts?.analyzed||0),skipped=Number(counts?.not_queued||counts?.skipped||0),safeModel=String(model||'devstral:latest').replace(/[&<>]/g,char=>({{'&':'&amp;','<':'&lt;','>':'&gt;'}}[char]));return `<span class="metric-detail-row"><b>Model</b><span>${{safeModel}}</span></span><span class="metric-detail-row"><b>Active</b><span>${{active}}</span></span><span class="metric-detail-row"><b>Queued</b><span>${{queued}}</span></span><span class="metric-detail-row"><b>Analyzed</b><span>${{analyzed}}</span></span><span class="metric-detail-row"><b>Skipped</b><span>${{skipped}}</span></span>`}}function updateAiActivityCounts(counts){{const set=(id,value)=>{{const el=document.querySelector(id);if(el)el.textContent=String(Number(value||0))}};set('#ai-analyzed-count',counts?.analyzed);set('#ai-queued-count',counts?.queued);set('#ai-skipped-count',counts?.not_queued??counts?.skipped)}}function renderBeaconExtra(beacon){{const esc=value=>String(value??'—').replace(/[&<>]/g,char=>({{'&':'&amp;','<':'&lt;','>':'&gt;'}}[char]));const alert=beacon.rule_name||beacon.alert_id||'Webhook received';const source=[beacon.source_ip,beacon.destination_ip].filter(Boolean).join(' -> ')||'n8n webhook';const status=beacon.status||beacon.stage||'received';return `<span class="metric-detail-row"><b>Alert</b><span>${{esc(alert)}}</span></span><span class="metric-detail-row"><b>Source</b><span>${{esc(source)}}</span></span><span class="metric-detail-row"><b>Status</b><span>${{esc(status)}}</span></span>`}}async function pollN8nBeacon(){{try{{const response=await fetch('n8n-beacon.json?ts='+Date.now(),{{cache:'no-store'}});if(!response.ok)return;const beacon=await response.json();updateN8nBeaconFromPayload(beacon)}}catch(_){{}}}}function beaconEpochMs(value){{if(!value)return NaN;const normalized=String(value).replace(/(\\d{{4}}-\\d{{2}}-\\d{{2}})(?:T|\\s+)(?=\\d{{2}}:\\d{{2}}:\\d{{2}})/,'$1T');const parsed=Date.parse(normalized);return Number.isFinite(parsed)?parsed:NaN}}function updateSystemHealthFromBeacon(beacon){{const tile=document.querySelector('#system-health-tile'),label=document.querySelector('#system-health-text');if(!tile||!label)return;const timestamp=beacon?.generated_at||beacon?.last_seen||beacon?.timestamp,epoch=beaconEpochMs(timestamp),ageMs=Number.isFinite(epoch)?Date.now()-epoch:NaN,ok=Number.isFinite(ageMs)&&ageMs>=0&&ageMs<=20*60*1000;tile.dataset.healthState=ok?'ok':'stale';label.textContent=ok?'n8n beacon healthy':'n8n beacon stale';tile.title=Number.isFinite(ageMs)?`Last n8n beacon ${{Math.max(0,Math.round(ageMs/60000))}} minutes ago`:'No valid n8n beacon timestamp'}}function updateN8nBeaconFromPayload(beacon){{const time=document.querySelector('#n8n-beacon-time'),extra=document.querySelector('#n8n-beacon-extra');if(time&&beacon?.generated_at)time.textContent=formatLocalIsoFromUtc(beacon.generated_at);if(extra&&beacon)extra.innerHTML=renderBeaconExtra(beacon);updateSystemHealthFromBeacon(beacon)}}function updateLatestAlertMetric(metrics){{if(!metrics)return;const pcapIngest=document.querySelector('#pcap-ingest-size');if(pcapIngest)pcapIngest.textContent=formatApiBytes(metrics.pcap_ingest_size_bytes||0);if(!metrics.latest_seen)return;const time=document.querySelector('#latest-alert-time'),extra=document.querySelector('#latest-alert-extra'),card=document.querySelector('#latest-alert-card');if(time)time.textContent=formatLocalIsoFromUtc(metrics.latest_seen);if(extra)extra.innerHTML=`<span class="metric-detail-row"><b>Groups</b><span>${{Number(metrics.grouped_total||0)}}</span></span><span class="metric-detail-row"><b>Observations</b><span>${{Number(metrics.grouped_observations||metrics.total||0)}}</span></span>`;}}async function pollSocAlertMetrics(){{try{{const response=await fetch('/api/soc-alerts/metrics?since=7d&ts='+Date.now(),{{cache:'no-store'}});if(!response.ok)return;const metrics=await response.json();updateLatestAlertMetric(metrics)}}catch(_){{}}}}function statusPayloadAlertCount(data){{const open=Number(data?.counts?.open);if(Number.isFinite(open))return open;const total=Number(data?.counts?.total);const acknowledged=Number(data?.counts?.acknowledged||0),suppressed=Number(data?.counts?.suppressed||0);if(Number.isFinite(total))return Math.max(0,total-acknowledged-suppressed);return Number.NaN}}function setActiveAlertCount(count){{const active=Number(count);if(!Number.isFinite(active))return;if(navVisibleCount)navVisibleCount.textContent=String(active);document.querySelectorAll('#api-visible-total,#top-api-visible-total,#visible-count').forEach(el=>el.textContent=String(active))}}function updateNavAlertCountFromStatus(data){{const count=statusPayloadAlertCount(data);if(!Number.isFinite(count))return;setActiveAlertCount(count)}}function updateAiStatusFromPayload(data){{if(!data||!data.ai)return;updateNavAlertCountFromStatus(data);const aiCard=document.querySelector('#ai-activity-card'),aiLabel=document.querySelector('#ai-activity-label'),aiDetail=document.querySelector('#ai-activity-detail'),aiExtra=document.querySelector('#ai-activity-extra');aiCard?.classList.toggle('ai-activity-active',Boolean(data.ai.active));if(aiLabel)aiLabel.textContent=data.ai.label||'AI Alert Triage';if(aiDetail)aiDetail.textContent=data.ai.detail||`Model: ${{data.ai.model||'devstral:latest'}}`;if(aiExtra)aiExtra.innerHTML=renderAiActivityExtra(data.ai.counts||{{}},data.ai.model);updateAiActivityCounts(data.ai.counts||{{}});Object.entries(data.reports||{{}}).forEach(([id,status])=>{{const selectorId=CSS.escape(id);document.querySelectorAll(`.report-row-group[data-report-id="${{selectorId}}"]`).forEach(group=>{{group.dataset.aiStatus=status.ai_status_key||'queued';setAiStatusPill(group.querySelector('.ai-status-cell .ai-status-pill'),status)}});document.querySelectorAll(`[data-mobile-report-id="${{selectorId}}"] .ai-status-pill`).forEach(pill=>setAiStatusPill(pill,status))}});if(selectedGroup)syncPinnedContent(selectedGroup);updatePinnedRow()}}function socEventsTableSignature(data){{return JSON.stringify({{counts:data?.counts||{{}},metrics:{{grouped_total:data?.metrics?.grouped_total,total:data?.metrics?.total,latest_seen:data?.metrics?.latest_seen}},ai:data?.ai?.counts||{{}},beacon:data?.beacon?.generated_at||''}})}}function scheduleSocEventApiReload(){{if(appShell?.dataset.view!=='alerts'||!socApiTableEnabled)return;if(document.querySelector('tbody.report-row-group.expanded'))return;clearTimeout(socEventsReloadTimer);socEventsReloadTimer=setTimeout(()=>loadApiAlerts(true),650)}}function handleSocEventPayload(data){{if(!data||!data.ok)return;if(data.statuses){{mergeServerStatuses(data.statuses);hydrateTriageStatuses();applyFilter()}}if(data.ai)updateAiStatusFromPayload(data);if(data.metrics)updateLatestAlertMetric(data.metrics);if(data.beacon)updateN8nBeaconFromPayload(data.beacon);const nextSignature=socEventsTableSignature(data);if(socEventsSignature&&nextSignature!==socEventsSignature)scheduleSocEventApiReload();socEventsSignature=nextSignature}}function connectSocAlertEvents(){{if(!window.EventSource)return false;try{{socEventsSource?.close();socEventsSource=new EventSource('/api/soc-alerts/events');window.__socEventsConnected=false;socEventsSource.addEventListener('open',()=>{{window.__socEventsConnected=true}});socEventsSource.addEventListener('soc-alerts',event=>{{window.__socEventsConnected=true;try{{handleSocEventPayload(JSON.parse(event.data))}}catch(_){{}}}});socEventsSource.onerror=()=>{{window.__socEventsConnected=false;socEventsSource?.close();socEventsSource=null;setTimeout(connectSocAlertEvents,5000)}};return true}}catch(_){{window.__socEventsConnected=false;return false}}}}async function pollSocAlertStatus(){{try{{const response=await fetch('soc-alerts-status.json?ts='+Date.now(),{{cache:'no-store'}});if(!response.ok)return;const data=await response.json();updateAiStatusFromPayload(data)}}catch(_){{}}}}function severityLabel(level){{return ({{critical:'Crit',high:'High',medium:'Med',low:'Low',informational:'Info',info:'Info'}})[level]||level.charAt(0).toUpperCase()+level.slice(1)}}function buildSeverityBreakdownFromCounts(counts){{const levels=['critical','high','medium','low','informational'];const source=counts||{{}};return levels.map(level=>{{const value=Number(source[level]||0);return `<span class="sev-chip sev-${{level}}${{value===0?' sev-zero':''}}"><b>${{value}}</b> ${{severityLabel(level)}}</span>`}}).join('')}}function buildSeverityBreakdown(groupsToCount){{const levels=['critical','high','medium','low','informational'],counts=Object.fromEntries(levels.map(level=>[level,0]));groupsToCount.forEach(group=>{{const level=group.dataset.criticality||'informational';counts[level]=(counts[level]||0)+1}});return buildSeverityBreakdownFromCounts(counts)}}function setVerboseMode(enabled){{document.querySelector('.metrics')?.classList.toggle('verbose-metrics',enabled)}}function stickyTop(){{const rect=topbar?.getBoundingClientRect();const headerVisible=Boolean(rect&&rect.bottom>0&&rect.top<=1);const top=headerVisible?Math.max(0,Math.ceil(rect.bottom)):0;document.documentElement.style.setProperty('--sticky-row-top',`${{top}}px`);return top}}function updateDetailViewport(){{if(!tableCard)return;const visibleWidth=Math.max(320,Math.floor(tableCard.clientWidth-36)),offset=Math.max(0,Math.floor(tableCard.scrollLeft));document.querySelectorAll('.report-row-group.expanded .detail-template').forEach(detail=>{{detail.style.setProperty('--detail-visible-width',`${{visibleWidth}}px`);detail.style.setProperty('--detail-visible-x',`${{offset}}px`)}})}}function syncPinnedContent(group){{if(!pinnedRow||!group)return;const row=group.querySelector('.report-row');const visibleCells=[...row.children].filter(cell=>getComputedStyle(cell).display!=='none');pinnedRow.innerHTML=visibleCells.map(cell=>`<div class="pinned-alert-cell ${{cell.className||''}}">${{cell.innerHTML}}</div>`).join('')}}function updatePinnedRow(){{if(!pinnedRow||!pinnedViewport||appShell?.dataset.view!=='alerts')return;const group=selectedGroup;if(!group||!group.classList.contains('expanded')||getComputedStyle(group).display==='none'){{pinnedViewport.classList.remove('visible');return}}const row=group.querySelector('.report-row'),detail=group.querySelector('.detail-template-row'),table=tableCard?.querySelector('.alert-table');if(!row||!detail||!tableCard||!table){{pinnedViewport.classList.remove('visible');return}}const top=stickyTop();const rowRect=row.getBoundingClientRect(),detailRect=detail.getBoundingClientRect(),cardRect=tableCard.getBoundingClientRect();const withinReport=rowRect.top<=top&&detailRect.bottom>top+rowRect.height+16;if(withinReport){{syncPinnedContent(group);pinnedViewport.style.left=`${{Math.max(0,cardRect.left)}}px`;pinnedViewport.style.width=`${{Math.max(0,cardRect.width)}}px`;pinnedViewport.style.top=`${{top}}px`;pinnedRow.style.width=`${{Math.max(table.scrollWidth,cardRect.width)}}px`;pinnedRow.style.transform=`translateX(${{-tableCard.scrollLeft}}px)`;pinnedViewport.classList.add('visible')}}else{{pinnedViewport.classList.remove('visible')}}}}function scrollPinnedRowIntoPlace(group){{const row=group?.querySelector('.report-row');if(!row)return;const top=stickyTop();const target=window.scrollY+row.getBoundingClientRect().top-top;window.scrollTo({{top:Math.max(0,target),behavior:'smooth'}});setTimeout(updatePinnedRow,180);setTimeout(updatePinnedRow,520)}}function visibleGroups(){{return groups.filter(g=>getComputedStyle(g).display!=='none')}}function sortMobileCards(){{const list=document.querySelector('.mobile-alert-list');if(!list||!mobileSort)return;const mode=mobileSort.value;const byId=new Map(groups.map(g=>[g.dataset.reportId,g]));mobileCards.sort((a,b)=>{{const ga=byId.get(a.dataset.mobileReportId),gb=byId.get(b.dataset.mobileReportId);if(!ga||!gb)return 0;if(mode==='newest')return Number(gb.dataset.mtime||0)-Number(ga.dataset.mtime||0);if(mode==='risk')return Number(gb.dataset.riskScore||0)-Number(ga.dataset.riskScore||0);const rank={{critical:5,high:4,medium:3,low:2,informational:1}};return (rank[gb.dataset.criticality]||0)-(rank[ga.dataset.criticality]||0)||Number(gb.dataset.mtime||0)-Number(ga.dataset.mtime||0)}});mobileCards.forEach(card=>list.appendChild(card))}}function collapseGroup(group,clearState=true){{if(!group)return;const id=group.dataset.reportId||'';group.classList.remove('expanded');const row=group.querySelector('.report-row');row?.classList.remove('selected');row?.setAttribute('aria-selected','false');row?.setAttribute('aria-expanded','false');if(id){{document.querySelectorAll(`[data-mobile-report-id="${{CSS.escape(id)}}"]`).forEach(card=>{{card.classList.remove('mobile-expanded');const pill=card.querySelector('.mobile-alert-pill'),detail=card.querySelector('.mobile-pill-details');pill?.setAttribute('aria-expanded','false');if(detail)detail.hidden=true}})}}if(clearState)window.__socAlertScrollStabilizer?.clear?.();if(selectedGroup===group){{pinnedViewport?.classList.remove('visible')}}}}async function loadGroupDetail(group){{const id=group?.dataset.reportId;if(!id)return;const targets=[...group.querySelectorAll('.api-detail-content'),...document.querySelectorAll(`[data-mobile-report-id="${{CSS.escape(id)}}"] .api-detail-content`)];if(!targets.length||targets.every(target=>target.dataset.detailLoaded==='true'||target.dataset.detailLoading==='true'))return;targets.forEach(target=>{{target.dataset.detailLoading='true';target.insertAdjacentHTML('afterbegin','<p class="api-detail-loading">Loading full Detailed Alert Report...</p>')}});try{{const response=await fetch(`/api/soc-alerts/${{encodeURIComponent(id)}}/detail`,{{cache:'no-store'}});if(!response.ok)throw new Error(`HTTP ${{response.status}}`);const data=await response.json();if(!data.ok||!data.detail_html)throw new Error(data.error||'Detail unavailable');targets.forEach(target=>{{target.innerHTML=data.detail_html;target.dataset.detailLoaded='true';delete target.dataset.detailLoading}});hydrateTriageStatuses();renderLocalLastSeen();updateDetailViewport();if(group===selectedGroup)syncPinnedContent(group)}}catch(error){{targets.forEach(target=>{{target.dataset.detailLoading='false';target.querySelector('.api-detail-loading')?.remove();target.insertAdjacentHTML('afterbegin',`<p class="api-detail-error">Full detail load failed: ${{escapeHtml(error.message||error)}}</p>`)}})}}}}
 function expandGroup(group){{if(!group)return;loadGroupDetail(group);if(selectedGroup&&selectedGroup!==group)collapseGroup(selectedGroup,false);selectedGroup=group;stickyTop();group.classList.add('expanded');updateDetailViewport();group.querySelector('.report-row')?.classList.add('selected');group.querySelector('.report-row')?.setAttribute('aria-selected','true');group.querySelector('.report-row')?.setAttribute('aria-expanded','true');syncPinnedContent(group);requestAnimationFrame(()=>scrollPinnedRowIntoPlace(group))}}function toggleGroup(group){{if(group?.classList.contains('expanded')){{collapseGroup(group);if(selectedGroup===group)selectedGroup=null;updatePinnedRow()}}else{{expandGroup(group)}}}}function escapeHtml(value){{return String(value??'').replace(/[&<>"']/g,char=>({{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}}[char]))}}async function setTriageStatus(group,status,reason=''){{const id=group?.dataset.reportId;if(!id)return;const cleanReason=String(reason||'').trim().slice(0,140),repeatCount=currentRepeatCount(group),previousStatus=alertStatuses[id]||null;if(status==='open')delete alertStatuses[id];else alertStatuses[id]={{status,repeat_count:repeatCount,reason:cleanReason,updated_at:projectNowIso()}};hydrateTriageStatuses();applyFilter();try{{const response=await fetch(`/api/soc-alerts/${{encodeURIComponent(id)}}/ack`,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{status,repeat_count:repeatCount,reason:cleanReason}})}});if(!response.ok)throw new Error(`HTTP ${{response.status}}`);const data=await response.json();if(data&&data.statuses)mergeServerStatuses(data.statuses);hydrateTriageStatuses();applyFilter();if(socApiTableEnabled)loadApiAlerts(true)}}catch(error){{if(previousStatus)alertStatuses[id]=previousStatus;else delete alertStatuses[id];hydrateTriageStatuses();applyFilter();loadServerStatuses();if(socApiTableEnabled)loadApiAlerts(true);console.error('SOC alert status update failed',error)}}}}function hydrateTriageStatuses(){{groups.forEach(group=>{{const id=group.dataset.reportId,meta=statusForGroup(group),isAck=meta.status==='acknowledged',isSuppressed=meta.status==='suppressed';group.dataset.acknowledged=isAck?'true':'false';group.dataset.suppressed=isSuppressed?'true':'false';document.querySelectorAll(`[data-acknowledge="${{CSS.escape(id)}}"]`).forEach(button=>button.textContent=isAck?'Unacknowledge':'Acknowledge');document.querySelectorAll(`[data-suppress="${{CSS.escape(id)}}"]`).forEach(button=>button.textContent=isSuppressed?'Expose':'Suppress');document.querySelectorAll(`[data-mobile-report-id="${{CSS.escape(id)}}"]`).forEach(card=>{{card.dataset.acknowledged=isAck?'true':'false';card.dataset.suppressed=isSuppressed?'true':'false'}});const noteText=meta.reason||'';group.querySelectorAll('.suppression-note').forEach(note=>{{note.hidden=!isSuppressed;const text=note.querySelector('.suppression-note-text'),metaEl=note.querySelector('.suppression-note-meta');if(text)text.textContent=noteText||'No reason provided.';if(metaEl)metaEl.textContent=meta.updated_at?`Suppressed ${{meta.updated_at}}`:''}});if(group===selectedGroup)syncPinnedContent(group)}})}}function refreshDynamicCollections(){{groups=[...document.querySelectorAll('.report-row-group')];mobileCards=[...document.querySelectorAll('.mobile-alert-card')]}}
 const apiPageStatus=document.querySelector('#api-alert-page-status'),apiPageSize=document.querySelector('#api-page-size'),apiPageSelect=document.querySelector('#api-page-select'),apiPrevPage=document.querySelector('#api-prev-page'),apiNextPage=document.querySelector('#api-next-page');
 let apiAlertCursor=null,apiAlertLoading=false,socApiTableEnabled=true,apiAlertReloadTimer=null,socEventsSource=null,socEventsSignature='',socEventsReloadTimer=null,apiCurrentPage=1,apiTotalPages=1,apiTotalMatching=0,apiHighestSeverity='none',apiSeverityCounts=null;
@@ -3496,7 +4109,7 @@ function apiBuildUrl(){{const params=new URLSearchParams();params.set('limit',St
 function apiAiPill(alert){{const key=alert.ai_status_key||'not-queued',label=alert.ai_status_label||'Not queued';return `<span class="ai-status-pill ai-status-${{key}}">${{escapeHtml(label)}}</span>`}}
 function apiEnrichmentPill(alert){{const key=alert.enrichment_status_key||'none',label=alert.enrichment_status_label||'None',detail=alert.enrichment_status_detail||'No public enrichment data recorded';return `<span class="enrichment-status-pill enrichment-status-${{escapeHtml(key)}}" title="${{escapeHtml(detail)}}">${{escapeHtml(label)}}</span>`}}
 function apiPcapPill(alert){{const key=alert.pcap_status_key||'none',label=alert.pcap_status_label||'None',detail=alert.pcap_status_detail||'No parsed PCAP analysis is available';return `<span class="pcap-status-pill pcap-status-${{escapeHtml(key)}}" title="${{escapeHtml(detail)}}">${{escapeHtml(label)}}</span>`}}
-function setGroupPcapQueued(group){{if(!group)return;group.dataset.pcapStatus='queued';group.querySelectorAll('.pcap-status-cell').forEach(cell=>cell.innerHTML='<span class="pcap-status-pill pcap-status-queued" title="PCAP request is pending broker fulfillment">Queued</span>');document.querySelectorAll(`[data-mobile-report-id="${{CSS.escape(group.dataset.reportId)}}"] .pcap-status-pill`).forEach(pill=>{{pill.className='pcap-status-pill pcap-status-queued';pill.title='PCAP request is pending broker fulfillment';pill.textContent='Queued'}})}}
+function setGroupPcapQueued(group){{if(!group)return;const id=group.dataset.reportId||'';const currentGroups=id?[...document.querySelectorAll(`tbody.report-row-group[data-report-id="${{CSS.escape(id)}}"]`)]:[];const targets=new Set([group,...currentGroups]);targets.forEach(target=>{{target.dataset.pcapStatus='queued';target.querySelectorAll('.pcap-status-cell').forEach(cell=>cell.innerHTML='<span class="pcap-status-pill pcap-status-queued" title="PCAP request is pending broker fulfillment">Queued</span>')}});if(id)document.querySelectorAll(`[data-mobile-report-id="${{CSS.escape(id)}}"] .pcap-status-pill`).forEach(pill=>{{pill.className='pcap-status-pill pcap-status-queued';pill.title='PCAP request is pending broker fulfillment';pill.textContent='Queued'}})}}
 async function requestAnalysisForGroup(group){{if(!group)return;const id=group.dataset.reportId||'';if(!id)return;const buttons=[...document.querySelectorAll(`[data-analyze="${{CSS.escape(id)}}"]`)];buttons.forEach(button=>{{button.disabled=true;button.textContent='Queuing'}});try{{const response=await fetch(`/api/soc-alerts/${{encodeURIComponent(id)}}/analyze`,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{reason:'SOC analyst requested fresh AI analysis',requested_by:'dashboard'}})}});const payload=await response.json().catch(()=>({{}}));if(!response.ok||payload.ok===false)throw new Error(payload.error||`HTTP ${{response.status}}`);const status={{ai_status_key:payload.ai_status_key||'queued',ai_status_label:payload.ai_status_label||'Queued',ai_status_detail:payload.ai_status_detail||'Manual SOC Analyst reanalysis queued'}};group.dataset.aiStatus=status.ai_status_key;setAiStatusPill(group.querySelector('.ai-status-cell .ai-status-pill'),status);document.querySelectorAll(`[data-mobile-report-id="${{CSS.escape(id)}}"] .ai-status-pill`).forEach(pill=>setAiStatusPill(pill,status));if(selectedGroup===group)syncPinnedContent(group);updatePinnedRow();scheduleApiReload()}}catch(error){{buttons.forEach(button=>{{button.textContent='Analyze';button.title=`AI analysis queue failed: ${{error.message}}`}})}}finally{{buttons.forEach(button=>{{button.disabled=false;if(button.textContent==='Queuing')button.textContent='Analyze'}})}}}}
 async function requestPcapForGroup(group){{if(!group)return;const id=group.dataset.reportId||'';if(!id)return;const buttons=[...document.querySelectorAll(`[data-pcap="${{CSS.escape(id)}}"]`)];buttons.forEach(button=>{{button.disabled=true;button.textContent='Queuing'}});try{{const response=await fetch(`/api/soc-alerts/${{encodeURIComponent(id)}}/pcap`,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{reason:'SOC analyst requested PCAP evidence',requested_by:'dashboard'}})}});const payload=await response.json().catch(()=>({{}}));if(!response.ok||payload.ok===false)throw new Error(payload.error||`HTTP ${{response.status}}`);setGroupPcapQueued(group);scheduleApiReload()}}catch(error){{buttons.forEach(button=>{{button.textContent='PCAP';button.title=`PCAP request failed: ${{error.message}}`}})}}finally{{buttons.forEach(button=>{{button.disabled=false;if(button.textContent==='Queuing')button.textContent='PCAP'}})}}}}
 function formatApiBytes(value){{const bytes=Number(value||0);if(!Number.isFinite(bytes)||bytes<=0)return '0 B';const units=['B','KB','MB','GB'];let amount=bytes,index=0;while(amount>=1024&&index<units.length-1){{amount/=1024;index+=1}}const digits=index===0?0:amount>=10?1:1;return `${{amount.toFixed(digits).replace(/\\.0$/,'')}} ${{units[index]}}`}}
@@ -4238,9 +4851,9 @@ def settings_page_section() -> str:
             </span>
           </span>
           <span class="settings-path-stack" aria-label="SOC Analyst files">
-            <span><b>Prompt</b><code>{prompt_path}</code></span>
-            <span><b>Memory</b><code>{analyst_memory_path}</code></span>
-            <span><b>Shared</b><code>{shared_memory_path}</code></span>
+            <button class="settings-path-row settings-file-link settings-prompt-link" type="button" data-prompt-target="soc-analyst-prompt" aria-label="Open SOC Analyst system prompt"><b>Prompt</b><code>{prompt_path}</code></button>
+            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="soc-analyst" aria-label="View SOC Analyst memory file"><b>Memory</b><code>{analyst_memory_path}</code></button>
+            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="shared" aria-label="View shared agent memory file"><b>Shared</b><code>{shared_memory_path}</code></button>
           </span>
         </summary>
         <div class="settings-panel-top">
@@ -4266,9 +4879,9 @@ def settings_page_section() -> str:
             </span>
           </span>
           <span class="settings-path-stack" aria-label="Incident Responder files">
-            <span><b>Prompt</b><code>{incident_prompt_path}</code></span>
-            <span><b>Memory</b><code>{incident_memory_path}</code></span>
-            <span><b>Shared</b><code>{shared_memory_path}</code></span>
+            <button class="settings-path-row settings-file-link settings-prompt-link" type="button" data-prompt-target="incident-responder-prompt" aria-label="Open Incident Responder system prompt"><b>Prompt</b><code>{incident_prompt_path}</code></button>
+            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="incident-responder" aria-label="View Incident Responder memory file"><b>Memory</b><code>{incident_memory_path}</code></button>
+            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="shared" aria-label="View shared agent memory file"><b>Shared</b><code>{shared_memory_path}</code></button>
           </span>
         </summary>
         <div class="settings-panel-top">
@@ -4295,9 +4908,9 @@ def settings_page_section() -> str:
             </span>
           </span>
           <span class="settings-path-stack" aria-label="SIEM Engineer files">
-            <span><b>Prompt</b><code>{engineer_prompt_path}</code></span>
-            <span><b>Memory</b><code>{engineer_memory_path}</code></span>
-            <span><b>Shared</b><code>{shared_memory_path}</code></span>
+            <button class="settings-path-row settings-file-link settings-prompt-link" type="button" data-prompt-target="siem-engineer-prompt" aria-label="Open SIEM Engineer system prompt"><b>Prompt</b><code>{engineer_prompt_path}</code></button>
+            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="siem-engineer" aria-label="View SIEM Engineer memory file"><b>Memory</b><code>{engineer_memory_path}</code></button>
+            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="shared" aria-label="View shared agent memory file"><b>Shared</b><code>{shared_memory_path}</code></button>
           </span>
         </summary>
         <div class="settings-panel-top">
@@ -4316,7 +4929,7 @@ def settings_page_section() -> str:
       <details class="settings-panel settings-details" aria-labelledby="cyber-threat-intel-prompt-title">
         <summary>
           <span class="settings-summary-main">
-            <span class="settings-summary-icon" aria-hidden="true"><img src="assets/settings-cyber-threat-intel-prompt.svg" alt=""></span>
+            <span class="settings-summary-icon" aria-hidden="true"><img src="assets/settings-cyber-threat-intel-prompt.png" alt=""></span>
             <span class="settings-summary-copy">
               <span class="settings-kicker">Cyber threat intel prompt</span>
               <strong id="cyber-threat-intel-prompt-title">Cyber Threat Intel Analyst</strong>
@@ -4324,9 +4937,9 @@ def settings_page_section() -> str:
             </span>
           </span>
           <span class="settings-path-stack" aria-label="Cyber Threat Intel Analyst files">
-            <span><b>Prompt</b><code>{intel_prompt_path}</code></span>
-            <span><b>Memory</b><code>{intel_memory_path}</code></span>
-            <span><b>Shared</b><code>{shared_memory_path}</code></span>
+            <button class="settings-path-row settings-file-link settings-prompt-link" type="button" data-prompt-target="cyber-threat-intel-prompt" aria-label="Open Cyber Threat Intel system prompt"><b>Prompt</b><code>{intel_prompt_path}</code></button>
+            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="cyber-threat-intel" aria-label="View Cyber Threat Intel memory file"><b>Memory</b><code>{intel_memory_path}</code></button>
+            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="shared" aria-label="View shared agent memory file"><b>Shared</b><code>{shared_memory_path}</code></button>
           </span>
         </summary>
         <div class="settings-panel-top">
@@ -4352,9 +4965,9 @@ def settings_page_section() -> str:
             </span>
           </span>
           <span class="settings-path-stack" aria-label="Threat Hunter files">
-            <span><b>Prompt</b><code>{hunter_prompt_path}</code></span>
-            <span><b>Memory</b><code>{hunter_memory_path}</code></span>
-            <span><b>Shared</b><code>{shared_memory_path}</code></span>
+            <button class="settings-path-row settings-file-link settings-prompt-link" type="button" data-prompt-target="threat-hunter-prompt" aria-label="Open Threat Hunter system prompt"><b>Prompt</b><code>{hunter_prompt_path}</code></button>
+            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="threat-hunter" aria-label="View Threat Hunter memory file"><b>Memory</b><code>{hunter_memory_path}</code></button>
+            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="shared" aria-label="View shared agent memory file"><b>Shared</b><code>{shared_memory_path}</code></button>
           </span>
         </summary>
         <div class="settings-panel-top">
@@ -4370,6 +4983,24 @@ def settings_page_section() -> str:
         </div>
       </details>
       </section>
+      <div id="settings-memory-modal" class="settings-memory-modal" hidden>
+        <button class="settings-memory-backdrop" type="button" data-memory-close aria-label="Close memory viewer"></button>
+        <section class="settings-memory-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-memory-title" tabindex="-1">
+          <header class="settings-memory-header">
+            <div>
+              <span class="settings-kicker">Read-only memory</span>
+              <h2 id="settings-memory-title">Agent Memory</h2>
+            </div>
+            <button class="settings-memory-close" type="button" data-memory-close aria-label="Close memory viewer" title="Close">×</button>
+          </header>
+          <div class="settings-memory-meta">
+            <code id="settings-memory-path"></code>
+            <span id="settings-memory-stats"></span>
+          </div>
+          <p id="settings-memory-status" class="settings-memory-status" role="status" aria-live="polite">Select a memory file to view it.</p>
+          <pre id="settings-memory-content" class="settings-memory-content" tabindex="0" aria-label="Read-only agent memory content"></pre>
+        </section>
+      </div>
     </section>'''
 
 
@@ -4383,8 +5014,12 @@ EXECUTIVE_HOME_CSS = '''
 
 SETTINGS_PAGE_CSS = '''
 <style>
-.settings-view{display:grid;gap:18px;padding-top:10px}.settings-agent-section{display:grid;gap:18px;max-width:1180px;margin-top:30px}.settings-agent-heading{padding:0 4px 2px}.settings-agent-heading h2{margin:7px 0 0;color:#f4f8ff;font-size:24px;line-height:1;letter-spacing:-.03em}.settings-panel{max-width:1180px;border:1px solid rgba(34,211,238,.18);border-radius:16px;padding:22px;background:linear-gradient(180deg,#0d1620,#09111a);box-shadow:0 22px 48px rgba(0,0,0,.24),inset 0 1px 0 rgba(255,255,255,.035)}.settings-panel-top{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:18px}.settings-kicker{display:inline-block;color:#8ff4ff;font-size:11px;font-weight:950;text-transform:uppercase;letter-spacing:.13em}.settings-panel h2{margin:8px 0 6px;color:#f4f8ff;font-size:26px;letter-spacing:-.035em}.settings-panel h3{margin:5px 0 5px;color:#f4f8ff;font-size:18px;letter-spacing:-.025em}.settings-panel p{max-width:76ch;margin:0;color:#9aa8b8;font-size:13px;line-height:1.55}.settings-panel code{max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid rgba(148,163,184,.14);border-radius:10px;padding:8px 10px;color:#8ff4ff;background:#071018;font-size:12px}.settings-panel:not(.settings-details){position:relative}.settings-panel:not(.settings-details):before{content:'';position:absolute;left:43px;top:132px;bottom:84px;width:1px;background:linear-gradient(180deg,rgba(34,211,238,.45),rgba(34,211,238,.08));pointer-events:none}.settings-subsection{position:relative;border:1px solid rgba(148,163,184,.14);border-radius:15px;padding:18px 18px 18px 54px;margin-top:16px;background:linear-gradient(180deg,rgba(11,24,34,.74),rgba(7,16,24,.56));box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}.settings-subsection-primary{border-color:rgba(34,211,238,.36);background:linear-gradient(180deg,rgba(34,211,238,.09),rgba(7,16,24,.62));box-shadow:0 0 0 1px rgba(34,211,238,.035),inset 0 1px 0 rgba(255,255,255,.035)}.settings-subsection:after{content:'';position:absolute;left:25px;bottom:-17px;width:1px;height:17px;background:rgba(34,211,238,.22)}.settings-subsection:last-of-type:after{display:none}.settings-step-badge{position:absolute;left:18px;top:20px;display:grid;place-items:center;width:32px;height:32px;border:1px solid rgba(34,211,238,.45);border-radius:999px;color:#071018;background:#8ff4ff;font-size:13px;font-weight:950;box-shadow:0 0 22px rgba(34,211,238,.20)}.settings-subsection-head{display:grid;grid-template-columns:1fr;gap:8px;margin-bottom:16px}.settings-subsection-head p{max-width:68ch;color:#9fb0c4}.settings-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:0}.settings-grid-two{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-field{display:grid;gap:7px;min-width:0;color:#c9d6e6;font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:.08em}.settings-field-wide{grid-column:span 3}.settings-subsection-primary .settings-field-wide{grid-column:1 / -1}.settings-field input,.settings-field select{width:100%;min-width:0;border:1px solid rgba(34,211,238,.22);border-radius:12px;padding:12px 13px;color:#dce9f8;background:#071018;font:13px/1.3 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;outline:none;box-shadow:inset 0 0 18px rgba(34,211,238,.03);text-transform:none;letter-spacing:0}.settings-field input:focus,.settings-field select:focus{border-color:rgba(34,211,238,.70);box-shadow:0 0 0 3px rgba(34,211,238,.10),inset 0 0 20px rgba(34,211,238,.055)}.settings-note{margin-top:14px;border:1px solid rgba(246,199,109,.16);border-radius:12px;padding:12px 13px;color:#b8c6d8;background:rgba(246,199,109,.045);font-size:12px;line-height:1.5}.settings-note code{padding:2px 6px;max-width:none}.settings-details{padding:0;overflow:hidden}.settings-details summary{list-style:none;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 20px;cursor:pointer}.settings-details summary::-webkit-details-marker{display:none}.settings-summary-main{display:grid;grid-template-columns:56px minmax(0,1fr);align-items:center;gap:16px;min-width:0;flex:1}.settings-summary-icon{width:56px;height:56px;display:grid;place-items:center;flex:0 0 56px}.settings-summary-icon img{display:block;width:56px;height:56px;object-fit:contain;filter:drop-shadow(0 0 10px rgba(34,211,238,.24))}.settings-summary-copy{min-width:0}.settings-summary-copy .settings-kicker{display:block}.settings-trigger-line{display:block;margin-top:6px;color:#91a4ba;font-size:12px;font-weight:750;line-height:1.35;letter-spacing:0;overflow-wrap:anywhere}.settings-path-stack{display:grid;gap:7px;min-width:280px;max-width:520px;flex:0 1 520px}.settings-path-stack span{display:grid;grid-template-columns:58px minmax(0,1fr);align-items:center;gap:8px;min-width:0}.settings-path-stack b{color:#91a4ba;font-size:10px;font-weight:950;text-transform:uppercase;letter-spacing:.1em;text-align:right}.settings-path-stack code{max-width:100%;min-width:0}.settings-details summary:before{content:'▸';color:#8ff4ff;font-size:14px;transition:transform .16s ease}.settings-details[open] summary:before{transform:rotate(90deg)}.settings-details summary strong{display:block;margin-top:7px;color:#f4f8ff;font-size:20px;letter-spacing:-.025em}.settings-details[open]{padding-bottom:20px}.settings-details[open] .settings-panel-top,.settings-details[open] .prompt-editor-label,.settings-details[open] .prompt-editor,.settings-details[open] .settings-actions{margin-left:20px;margin-right:20px}.prompt-editor-label{display:block;margin:18px 0 8px;color:#c9d6e6;font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:.08em}.prompt-editor{display:block;width:calc(100% - 40px);min-height:520px;resize:vertical;border:1px solid rgba(34,211,238,.22);border-radius:12px;padding:16px 18px;color:#dce9f8;background:#071018;font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;outline:none;box-shadow:inset 0 0 24px rgba(34,211,238,.035)}.prompt-editor:focus{border-color:rgba(34,211,238,.70);box-shadow:0 0 0 3px rgba(34,211,238,.10),inset 0 0 24px rgba(34,211,238,.055)}.settings-actions{display:flex;align-items:center;gap:12px;margin-top:16px}.settings-save-button{border:1px solid rgba(34,211,238,.55);border-radius:12px;padding:10px 18px;color:#061018;background:#8ff4ff;font-weight:950;cursor:pointer;box-shadow:0 0 18px rgba(34,211,238,.18)}.settings-save-button:hover{background:#b8fbff;box-shadow:0 0 26px rgba(34,211,238,.34)}.settings-save-button:disabled{cursor:wait;opacity:.72}.settings-save-status{color:#9fb0c4;font-size:13px}.settings-save-status.ok{color:#8ff4ff}.settings-save-status.error{color:#fb7185}@media(max-width:980px){.settings-grid,.settings-grid-two{grid-template-columns:1fr}.settings-field-wide{grid-column:auto}.settings-panel:not(.settings-details):before{display:none}.settings-subsection{padding-left:18px;padding-top:60px}.settings-step-badge{left:18px;top:18px}.settings-subsection:after{display:none}}@media(max-width:760px){.settings-panel-top,.settings-details summary{display:grid}.settings-details summary{grid-template-columns:auto minmax(0,1fr);align-items:center}.settings-details summary code,.settings-path-stack{grid-column:1 / -1}.settings-summary-main{grid-template-columns:44px minmax(0,1fr);gap:12px}.settings-summary-icon,.settings-summary-icon img{width:44px;height:44px}.settings-panel code{max-width:100%}.settings-path-stack{max-width:100%;width:100%}.settings-path-stack b{text-align:left}.prompt-editor{min-height:420px}}.settings-path-stack code,.settings-panel code{white-space:normal;overflow-wrap:anywhere}
+.settings-view{display:grid;gap:18px;padding-top:10px}.settings-agent-section{display:grid;gap:18px;max-width:1180px;margin-top:30px}.settings-agent-heading{padding:0 4px 2px}.settings-agent-heading h2{margin:7px 0 0;color:#f4f8ff;font-size:24px;line-height:1;letter-spacing:-.03em}.settings-panel{max-width:1180px;border:1px solid rgba(34,211,238,.18);border-radius:16px;padding:22px;background:linear-gradient(180deg,#0d1620,#09111a);box-shadow:0 22px 48px rgba(0,0,0,.24),inset 0 1px 0 rgba(255,255,255,.035)}.settings-panel-top{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:18px}.settings-kicker{display:inline-block;color:#8ff4ff;font-size:11px;font-weight:950;text-transform:uppercase;letter-spacing:.13em}.settings-panel h2{margin:8px 0 6px;color:#f4f8ff;font-size:26px;letter-spacing:-.035em}.settings-panel h3{margin:5px 0 5px;color:#f4f8ff;font-size:18px;letter-spacing:-.025em}.settings-panel p{max-width:76ch;margin:0;color:#9aa8b8;font-size:13px;line-height:1.55}.settings-panel code{max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid rgba(148,163,184,.14);border-radius:10px;padding:8px 10px;color:#8ff4ff;background:#071018;font-size:12px}.settings-panel:not(.settings-details){position:relative}.settings-panel:not(.settings-details):before{content:'';position:absolute;left:43px;top:132px;bottom:84px;width:1px;background:linear-gradient(180deg,rgba(34,211,238,.45),rgba(34,211,238,.08));pointer-events:none}.settings-subsection{position:relative;border:1px solid rgba(148,163,184,.14);border-radius:15px;padding:18px 18px 18px 54px;margin-top:16px;background:linear-gradient(180deg,rgba(11,24,34,.74),rgba(7,16,24,.56));box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}.settings-subsection-primary{border-color:rgba(34,211,238,.36);background:linear-gradient(180deg,rgba(34,211,238,.09),rgba(7,16,24,.62));box-shadow:0 0 0 1px rgba(34,211,238,.035),inset 0 1px 0 rgba(255,255,255,.035)}.settings-subsection:after{content:'';position:absolute;left:25px;bottom:-17px;width:1px;height:17px;background:rgba(34,211,238,.22)}.settings-subsection:last-of-type:after{display:none}.settings-step-badge{position:absolute;left:18px;top:20px;display:grid;place-items:center;width:32px;height:32px;border:1px solid rgba(34,211,238,.45);border-radius:999px;color:#071018;background:#8ff4ff;font-size:13px;font-weight:950;box-shadow:0 0 22px rgba(34,211,238,.20)}.settings-subsection-head{display:grid;grid-template-columns:1fr;gap:8px;margin-bottom:16px}.settings-subsection-head p{max-width:68ch;color:#9fb0c4}.settings-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:0}.settings-grid-two{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-field{display:grid;gap:7px;min-width:0;color:#c9d6e6;font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:.08em}.settings-field-wide{grid-column:span 3}.settings-subsection-primary .settings-field-wide{grid-column:1 / -1}.settings-field input,.settings-field select{width:100%;min-width:0;border:1px solid rgba(34,211,238,.22);border-radius:12px;padding:12px 13px;color:#dce9f8;background:#071018;font:13px/1.3 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;outline:none;box-shadow:inset 0 0 18px rgba(34,211,238,.03);text-transform:none;letter-spacing:0}.settings-field input:focus,.settings-field select:focus{border-color:rgba(34,211,238,.70);box-shadow:0 0 0 3px rgba(34,211,238,.10),inset 0 0 20px rgba(34,211,238,.055)}.settings-note{margin-top:14px;border:1px solid rgba(246,199,109,.16);border-radius:12px;padding:12px 13px;color:#b8c6d8;background:rgba(246,199,109,.045);font-size:12px;line-height:1.5}.settings-note code{padding:2px 6px;max-width:none}.settings-details{padding:0;overflow:hidden}.settings-details summary{list-style:none;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 20px;cursor:pointer}.settings-details summary::-webkit-details-marker{display:none}.settings-summary-main{display:grid;grid-template-columns:56px minmax(0,1fr);align-items:center;gap:16px;min-width:0;flex:1}.settings-summary-icon{width:56px;height:56px;display:grid;place-items:center;flex:0 0 56px}.settings-summary-icon img{display:block;width:56px;height:56px;object-fit:contain;filter:drop-shadow(0 0 10px rgba(34,211,238,.24))}.settings-summary-copy{min-width:0}.settings-summary-copy .settings-kicker{display:block}.settings-trigger-line{display:block;margin-top:6px;color:#91a4ba;font-size:12px;font-weight:750;line-height:1.35;letter-spacing:0;overflow-wrap:anywhere}.settings-path-stack{display:grid;gap:7px;min-width:280px;max-width:520px;flex:0 1 520px}.settings-path-row{display:grid;grid-template-columns:58px minmax(0,1fr);align-items:center;gap:8px;min-width:0}.settings-memory-link{width:100%;margin:0;padding:0;border:0;border-radius:10px;color:inherit;background:transparent;font:inherit;text-align:left;cursor:pointer}.settings-memory-link:hover code{border-color:rgba(34,211,238,.48);background:rgba(34,211,238,.07)}.settings-memory-link:focus-visible{outline:2px solid #8ff4ff;outline-offset:2px}.settings-path-stack b{color:#91a4ba;font-size:10px;font-weight:950;text-transform:uppercase;letter-spacing:.1em;text-align:right}.settings-path-stack code{max-width:100%;min-width:0}.settings-details summary:before{content:'▸';color:#8ff4ff;font-size:14px;transition:transform .16s ease}.settings-details[open] summary:before{transform:rotate(90deg)}.settings-details summary strong{display:block;margin-top:7px;color:#f4f8ff;font-size:20px;letter-spacing:-.025em}.settings-details[open]{padding-bottom:20px}.settings-details[open] .settings-panel-top,.settings-details[open] .prompt-editor-label,.settings-details[open] .prompt-editor,.settings-details[open] .settings-actions{margin-left:20px;margin-right:20px}.prompt-editor-label{display:block;margin:18px 0 8px;color:#c9d6e6;font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:.08em}.prompt-editor{display:block;width:calc(100% - 40px);min-height:520px;resize:vertical;border:1px solid rgba(34,211,238,.22);border-radius:12px;padding:16px 18px;color:#dce9f8;background:#071018;font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;outline:none;box-shadow:inset 0 0 24px rgba(34,211,238,.035)}.prompt-editor:focus{border-color:rgba(34,211,238,.70);box-shadow:0 0 0 3px rgba(34,211,238,.10),inset 0 0 24px rgba(34,211,238,.055)}.settings-actions{display:flex;align-items:center;gap:12px;margin-top:16px}.settings-save-button{border:1px solid rgba(34,211,238,.55);border-radius:12px;padding:10px 18px;color:#061018;background:#8ff4ff;font-weight:950;cursor:pointer;box-shadow:0 0 18px rgba(34,211,238,.18)}.settings-save-button:hover{background:#b8fbff;box-shadow:0 0 26px rgba(34,211,238,.34)}.settings-save-button:disabled{cursor:wait;opacity:.72}.settings-save-status{color:#9fb0c4;font-size:13px}.settings-save-status.ok{color:#8ff4ff}.settings-save-status.error{color:#fb7185}.settings-memory-modal[hidden]{display:none}.settings-memory-modal{position:fixed;inset:0;z-index:10000;display:grid;place-items:center;padding:24px}.settings-memory-backdrop{position:absolute;inset:0;width:100%;height:100%;border:0;background:rgba(1,7,12,.82);backdrop-filter:blur(5px);cursor:default}.settings-memory-dialog{position:relative;display:grid;grid-template-rows:auto auto auto minmax(180px,1fr);width:min(960px,100%);max-height:calc(100dvh - 48px);overflow:hidden;border:1px solid rgba(34,211,238,.35);border-radius:14px;padding:20px;background:#09131d;box-shadow:0 28px 80px rgba(0,0,0,.58)}.settings-memory-header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}.settings-memory-header h2{margin:7px 0 0;color:#f4f8ff;font-size:24px}.settings-memory-close{display:grid;place-items:center;width:44px;height:44px;flex:0 0 44px;border:1px solid rgba(148,163,184,.24);border-radius:8px;color:#dce9f8;background:#0c1722;font-size:28px;line-height:1;cursor:pointer}.settings-memory-close:hover,.settings-memory-close:focus-visible{border-color:#8ff4ff;color:#8ff4ff;outline:none}.settings-memory-meta{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px}.settings-memory-meta code{min-width:0;overflow-wrap:anywhere;color:#8ff4ff;font-size:12px}.settings-memory-meta span{flex:0 0 auto;color:#91a4ba;font-size:12px}.settings-memory-status{margin:14px 0 10px;color:#91a4ba;font-size:13px}.settings-memory-status.error{color:#fb7185}.settings-memory-content{min-height:280px;margin:0;overflow:auto;border:1px solid rgba(148,163,184,.16);border-radius:10px;padding:16px;color:#dce9f8;background:#050c13;font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;white-space:pre-wrap;overflow-wrap:anywhere;tab-size:2}.settings-memory-content:focus-visible{outline:2px solid rgba(143,244,255,.65);outline-offset:-2px}body.settings-memory-open{overflow:hidden}@media(max-width:980px){.settings-grid,.settings-grid-two{grid-template-columns:1fr}.settings-field-wide{grid-column:auto}.settings-panel:not(.settings-details):before{display:none}.settings-subsection{padding-left:18px;padding-top:60px}.settings-step-badge{left:18px;top:18px}.settings-subsection:after{display:none}}@media(max-width:760px){.settings-panel-top,.settings-details summary{display:grid}.settings-details summary{grid-template-columns:auto minmax(0,1fr);align-items:center}.settings-details summary code,.settings-path-stack{grid-column:1 / -1}.settings-summary-main{grid-template-columns:44px minmax(0,1fr);gap:12px}.settings-summary-icon,.settings-summary-icon img{width:44px;height:44px}.settings-panel code{max-width:100%}.settings-path-stack{max-width:100%;width:100%}.settings-path-stack b{text-align:left}.prompt-editor{min-height:420px}.settings-memory-modal{padding:10px}.settings-memory-dialog{max-height:calc(100dvh - 20px);padding:16px}.settings-memory-meta{display:grid}.settings-memory-content{min-height:220px}}
 @media(max-width:980px){.settings-details summary{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center}.settings-details summary code,.settings-path-stack{grid-column:1 / -1}.settings-summary-main{grid-template-columns:48px minmax(0,1fr);gap:12px}.settings-summary-icon,.settings-summary-icon img{width:48px;height:48px}.settings-summary-copy,.settings-summary-main{min-width:0}.settings-panel code{max-width:100%}.settings-path-stack{max-width:100%;width:100%;min-width:0}.settings-path-stack b{text-align:left}.settings-trigger-line{overflow-wrap:anywhere}}
+.settings-file-link{width:100%;min-height:44px;margin:0;padding:0;border:0;border-radius:10px;color:inherit;background:transparent;font:inherit;text-align:left;cursor:pointer}
+.settings-file-link:hover code{border-color:rgba(34,211,238,.48);background:rgba(34,211,238,.07)}
+.settings-file-link:focus-visible{outline:2px solid #8ff4ff;outline-offset:2px}
+.settings-memory-link{min-height:44px}
 .settings-save-button{min-height:44px}
 .settings-field input,.settings-field select{min-height:44px}
 </style>
@@ -4416,6 +5051,15 @@ SETTINGS_PAGE_JS = '''
   const hybridPolicy = document.querySelector('#ai-hybrid-policy');
   const saveAiButton = document.querySelector('#save-ai-model-settings');
   const aiStatus = document.querySelector('#ai-model-settings-status');
+  const memoryModal = document.querySelector('#settings-memory-modal');
+  const memoryDialog = memoryModal?.querySelector('.settings-memory-dialog');
+  const memoryTitle = document.querySelector('#settings-memory-title');
+  const memoryPath = document.querySelector('#settings-memory-path');
+  const memoryStats = document.querySelector('#settings-memory-stats');
+  const memoryStatus = document.querySelector('#settings-memory-status');
+  const memoryContent = document.querySelector('#settings-memory-content');
+  if (memoryModal) document.body.appendChild(memoryModal);
+  let memoryReturnFocus = null;
   function setStatus(message, kind = '') {
     if (!status) return;
     status.textContent = message;
@@ -4445,6 +5089,53 @@ SETTINGS_PAGE_JS = '''
     if (!incidentStatus) return;
     incidentStatus.textContent = message;
     incidentStatus.className = `settings-save-status ${kind}`.trim();
+  }
+  function closeMemoryViewer() {
+    if (!memoryModal || memoryModal.hidden) return;
+    memoryModal.hidden = true;
+    document.body.classList.remove('settings-memory-open');
+    memoryReturnFocus?.focus();
+    memoryReturnFocus = null;
+  }
+  async function openMemoryViewer(memoryKey, trigger) {
+    if (!memoryModal || !memoryDialog || !memoryTitle || !memoryPath || !memoryStats || !memoryStatus || !memoryContent) return;
+    memoryReturnFocus = trigger;
+    memoryModal.hidden = false;
+    document.body.classList.add('settings-memory-open');
+    memoryTitle.textContent = 'Agent Memory';
+    memoryPath.textContent = trigger.querySelector('code')?.textContent || '';
+    memoryStats.textContent = '';
+    memoryStatus.textContent = 'Loading memory file...';
+    memoryStatus.className = 'settings-memory-status';
+    memoryContent.textContent = '';
+    memoryDialog.focus();
+    try {
+      const response = await fetch(`/api/soc-settings/agent-memory?key=${encodeURIComponent(memoryKey)}`, {cache: 'no-store'});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.error || `Memory read failed with HTTP ${response.status}`);
+      memoryTitle.textContent = data.label || 'Agent Memory';
+      memoryPath.textContent = data.path || memoryPath.textContent;
+      memoryStats.textContent = `${Number(data.bytes || 0).toLocaleString()} bytes · Updated ${data.modified_at || 'unknown'}`;
+      memoryStatus.textContent = data.content ? 'Read-only view' : 'This memory file is empty.';
+      memoryContent.textContent = data.content || '';
+    } catch (error) {
+      memoryStatus.textContent = String(error.message || error);
+      memoryStatus.className = 'settings-memory-status error';
+      memoryContent.textContent = '';
+    }
+  }
+  function openPromptEditor(promptId, trigger) {
+    const promptEditor = document.getElementById(promptId);
+    const panel = trigger.closest('details.settings-details');
+    if (!promptEditor || !panel) return;
+    panel.open = true;
+    window.requestAnimationFrame(() => {
+      promptEditor.focus({preventScroll: true});
+      promptEditor.scrollIntoView({
+        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+        block: 'center'
+      });
+    });
   }
   function currentAiSettings() {
     return {
@@ -4731,6 +5422,24 @@ SETTINGS_PAGE_JS = '''
   saveHunterButton?.addEventListener('click', saveHunterPrompt);
   saveIntelButton?.addEventListener('click', saveIntelPrompt);
   saveIncidentButton?.addEventListener('click', saveIncidentPrompt);
+  document.querySelectorAll('.settings-prompt-link').forEach(button => {
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      openPromptEditor(button.dataset.promptTarget || '', button);
+    });
+  });
+  document.querySelectorAll('.settings-memory-link').forEach(button => {
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      openMemoryViewer(button.dataset.memoryKey || '', button);
+    });
+  });
+  memoryModal?.querySelectorAll('[data-memory-close]').forEach(button => button.addEventListener('click', closeMemoryViewer));
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && memoryModal && !memoryModal.hidden) closeMemoryViewer();
+  });
   refreshAiSettings().then(refreshOllamaModels);
   if (ollamaModel) {
     setInterval(refreshOllamaModels, 60000);
@@ -5030,6 +5739,10 @@ def render_static_page(shell_html: str, page_key: str, reports: list[AlertReport
         rendered = rendered.replace(alerts_marker, '<section id="alerts-view" class="view-section alerts-view active" aria-label="SOC alert table">', 1)
         if ALERTS_PAGE_SCROLL_STABILIZER not in rendered:
             rendered = rendered.replace('</body>', ALERTS_PAGE_SCROLL_STABILIZER + '</body>', 1)
+        if PINNED_ALERT_ROW_SCROLL_SYNC not in rendered:
+            rendered = rendered.replace('</body>', PINNED_ALERT_ROW_SCROLL_SYNC + '</body>', 1)
+        if ALERT_COLUMN_SINGLE_WRAP_CONTRACT not in rendered:
+            rendered = rendered.replace('</body>', ALERT_COLUMN_SINGLE_WRAP_CONTRACT + '</body>', 1)
     elif page_key == 'system_health':
         rendered = replace_main_page_content(rendered, system_health_page_section())
         rendered = inject_system_health_assets(rendered)

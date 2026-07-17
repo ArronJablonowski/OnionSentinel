@@ -14,15 +14,18 @@ import fcntl
 import hashlib
 import json
 import os
-import shutil
 import sqlite3
 import subprocess
 import urllib.error
 import urllib.request
 import sys
-import time
 from pathlib import Path
 from typing import Iterable
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+from disk_capacity import require_runtime_capacity
 
 
 HOME = Path.home()
@@ -31,10 +34,14 @@ DEFAULT_PROMPT_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-prompts"
 DEFAULT_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-analysis"
 DEFAULT_PCAP_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "pcap-analysis"
 DEFAULT_LOCK = HOME / "n8n-local" / "run" / "ai-analysis.lock"
-DEFAULT_PORTAL_BUILDER = HOME / ".hermes" / "scripts" / "build_soc_alerts_dashboard.py"
-DEFAULT_PORTAL_SYNC = HOME / "n8n-local" / "bin" / "sync-soc-alerts-portal.py"
-DEFAULT_SOC_WEB_DIR = HOME / "SOC Alerts Web"
-DEFAULT_SOC_PORTAL_DIR = HOME / "report_portal" / "library" / "Cybersecurity" / "SOC Alerts"
+DEFAULT_WAKE = Path(os.environ.get(
+    "AI_ANALYSIS_WAKE_PATH",
+    HOME / "n8n-local" / "run" / "ai-analysis.wake",
+))
+DEFAULT_DASHBOARD_WAKE = Path(os.environ.get(
+    "SOC_DASHBOARD_WAKE_PATH",
+    HOME / "n8n-local" / "run" / "dashboard-refresh.wake",
+))
 DEFAULT_MODEL = os.environ.get("SOC_AI_MODEL", "")
 DEFAULT_LEVELS = "critical,high,medium,low,informational"
 SEVERITY_PRIORITY = ("critical", "high", "medium", "low", "informational")
@@ -80,15 +87,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analysis-dir", type=Path, default=DEFAULT_ANALYSIS_DIR, help="AI analysis output directory")
     parser.add_argument("--pcap-analysis-dir", type=Path, default=DEFAULT_PCAP_ANALYSIS_DIR, help="Parsed PCAP evidence directory")
     parser.add_argument("--lock-file", type=Path, default=DEFAULT_LOCK, help="Non-overlap lock file")
+    parser.add_argument("--wake-file", type=Path, default=DEFAULT_WAKE, help="Consumable launchd wake marker")
     parser.add_argument("--levels", default=DEFAULT_LEVELS, help="Comma-separated triage levels to analyze")
     parser.add_argument("--hours", type=int, default=87600, help="Lookback window for eligible alerts")
     parser.add_argument("--max-per-run", type=int, default=0, help="Maximum unique alert groups to analyze per scheduler run; 0 drains the queue until no eligible alerts remain")
     parser.add_argument("--related-limit", type=int, default=8, help="Related alert count passed to prompt builder")
+    parser.add_argument("--correlation-limit", type=int, default=8, help="Scored correlation candidates passed to prompt builder")
+    parser.add_argument("--correlation-min-score", type=int, default=15, help="Minimum deterministic correlation score")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Optional Ollama model override; defaults to Settings page AI model routing config")
     parser.add_argument("--timeout", type=int, default=600, help="Ollama request timeout in seconds")
-    parser.add_argument("--portal-builder", type=Path, default=DEFAULT_PORTAL_BUILDER, help="Dashboard builder to run after successful analysis")
-    parser.add_argument("--portal-sync", type=Path, default=DEFAULT_PORTAL_SYNC, help="Dashboard sync script to run after successful analysis")
-    parser.add_argument("--no-portal-refresh", action="store_true", help="Do not rebuild/sync the SOC portal after analysis")
+    parser.add_argument("--portal-wake-file", type=Path, default=DEFAULT_DASHBOARD_WAKE, help="Wake file for the independent dashboard refresh worker")
+    parser.add_argument("--no-portal-refresh", action="store_true", help="Do not signal the independent dashboard refresh worker")
     parser.add_argument("--alert-store-url", default=os.environ.get("ALERT_STORE_URL", "http://127.0.0.1:8787"), help="Alert-store URL for durable AI job status")
     parser.add_argument("--include-tests", action="store_true", help="Allow test/validation alert IDs")
     parser.add_argument("--dry-run", action="store_true", help="Print the selected alert without calling Ollama")
@@ -99,6 +108,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--timeout must be positive")
     if args.max_per_run < 0:
         parser.error("--max-per-run must be zero or positive")
+    if args.correlation_limit <= 0:
+        parser.error("--correlation-limit must be positive")
+    if args.correlation_min_score < 0 or args.correlation_min_score > 100:
+        parser.error("--correlation-min-score must be between 0 and 100")
     return args
 
 
@@ -420,6 +433,112 @@ def completed_analysis_group_ids(
     return completed_ids
 
 
+def orphaned_pending_ai_job_ids(conn: sqlite3.Connection) -> set[str]:
+    """Return pending AI queue keys that no longer map to an alert group.
+
+    Stable group identities can be replaced when legacy rows are normalized or
+    grouping policy changes. Those old durable intents are not actionable, but
+    leaving them pending makes queue health report a worker stall forever.
+    """
+    tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "durable_jobs" not in tables:
+        return set()
+    pending_ids = {
+        str(row[0] or "").strip()
+        for row in conn.execute(
+            "SELECT dedupe_key FROM durable_jobs WHERE job_type = 'ai_analysis' AND status = 'pending'"
+        ).fetchall()
+        if str(row[0] or "").strip()
+    }
+    if not pending_ids:
+        return set()
+    # alert_group_summary is the authoritative set of currently actionable
+    # groups. Raw alert rows can retain superseded identities after a recovery
+    # or grouping-policy migration, which otherwise leaves queue intents that
+    # no scheduler selection can ever satisfy.
+    active_ids = {
+        str(row[0] or "").strip()
+        for row in conn.execute("SELECT group_id FROM alert_group_summary").fetchall()
+        if str(row[0] or "").strip()
+    }
+    tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "alert_group_alias" in tables:
+        for legacy_id, stable_id in conn.execute(
+            "SELECT legacy_group_id, stable_group_id FROM alert_group_alias"
+        ).fetchall():
+            # Summaries retain the legacy dashboard identifier while durable
+            # AI jobs use the V2 stable identity. Follow the alias in that
+            # direction so both forms remain actionable.
+            if str(legacy_id or "").strip() in active_ids:
+                active_ids.add(str(stable_id or "").strip())
+    return pending_ids - active_ids
+
+
+def pending_ai_job_ids(conn: sqlite3.Connection) -> set[str]:
+    """Return coalesced durable AI intents that still require a model run."""
+    tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "durable_jobs" not in tables:
+        return set()
+    return {
+        str(row[0] or "").strip()
+        for row in conn.execute(
+            "SELECT dedupe_key FROM durable_jobs WHERE job_type = 'ai_analysis' AND status = 'pending'"
+        ).fetchall()
+        if str(row[0] or "").strip()
+    }
+
+
+def reconcilable_completed_ai_job_ids(conn: sqlite3.Connection, group_ids: set[str]) -> set[str]:
+    """Keep artifact reconciliation from erasing newly queued evidence.
+
+    A pending job is artifact-reconcilable only when a worker previously began
+    processing it. Fresh alert, enrichment, and PCAP intents deliberately have
+    no processing start and must reach the scheduler even when an older report
+    artifact exists for the same duplicate group.
+    """
+    if not group_ids:
+        return set()
+    tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "durable_jobs" not in tables:
+        return set()
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(durable_jobs)").fetchall()}
+    if "processing_started_at" not in columns or "rerun_requested" not in columns:
+        return group_ids
+    placeholders = ", ".join("?" for _ in group_ids)
+    return {
+        str(row[0] or "").strip()
+        for row in conn.execute(
+            f"""
+            SELECT dedupe_key FROM durable_jobs
+            WHERE job_type = 'ai_analysis' AND status = 'pending'
+              AND COALESCE(rerun_requested, 0) = 0
+              AND processing_started_at IS NOT NULL
+              AND dedupe_key IN ({placeholders})
+            """,
+            sorted(group_ids),
+        ).fetchall()
+        if str(row[0] or "").strip()
+    }
+
+
+def reconcilable_ai_job_ids(
+    conn: sqlite3.Connection,
+    analyzed_ids: set[str],
+    analysis_dir: Path,
+    pcap_analysis_dir: Path,
+    prompt_dir: Path,
+) -> set[str]:
+    """Combine artifact-complete and obsolete durable AI queue intents."""
+    completed = completed_analysis_group_ids(
+        conn,
+        analyzed_ids,
+        analysis_dir,
+        pcap_analysis_dir,
+        prompt_dir,
+    )
+    return reconcilable_completed_ai_job_ids(conn, completed) | orphaned_pending_ai_job_ids(conn)
+
+
 def select_next_alert(
     conn: sqlite3.Connection,
     args: argparse.Namespace,
@@ -457,6 +576,7 @@ def select_next_alert(
         getattr(args, "pcap_analysis_dir", None),
         getattr(args, "prompt_dir", None),
     )
+    pending_group_ids = pending_ai_job_ids(conn)
     skipped_groups = set(already_selected_groups or set())
     alert_columns = {str(item[1]) for item in conn.execute("PRAGMA table_info(alerts)").fetchall()}
     stable_group_select = "stable_group_id" if "stable_group_id" in alert_columns else "NULL AS stable_group_id"
@@ -494,7 +614,7 @@ def select_next_alert(
         )
         SELECT alert_id, first_seen, last_seen, timestamp, rule_name,
                source_ip, destination_ip, triage_level, triage_score,
-               filter_status, routing, suppression_key, queue_time,
+               filter_status, stable_group_id, routing, suppression_key, queue_time,
                queue_group_key
         FROM ranked_groups
         WHERE group_row_rank = 1
@@ -519,7 +639,13 @@ def select_next_alert(
         # order. Python only filters groups already analyzed or selected during
         # this same continuous-drain run.
         group_key = candidate["queue_group_key"] or alert_group_key(candidate)
-        if candidate["alert_id"] not in already_analyzed and group_key not in analyzed_groups and group_key not in skipped_groups:
+        stable_id = str(candidate["stable_group_id"] or "").strip()
+        queue_group_id = stable_id or alert_group_id(str(group_key))
+        if group_key in skipped_groups:
+            continue
+        if queue_group_id in pending_group_ids:
+            return candidate
+        if candidate["alert_id"] not in already_analyzed and group_key not in analyzed_groups:
             return candidate
     return None
 
@@ -587,6 +713,10 @@ def build_prompt(alert_id: str, args: argparse.Namespace) -> Path:
         str(args.prompt_dir),
         "--related-limit",
         str(args.related_limit),
+        "--correlation-limit",
+        str(args.correlation_limit),
+        "--correlation-min-score",
+        str(args.correlation_min_score),
     ]
     if args.include_tests:
         cmd.append("--include-tests")
@@ -612,6 +742,8 @@ def analysis_command(prompt_path: Path, args: argparse.Namespace) -> list[str]:
         str(args.analysis_dir),
         "--timeout",
         str(args.timeout),
+        "--alert-store-url",
+        args.alert_store_url,
     ]
     if args.model:
         cmd.extend(["--model", args.model])
@@ -620,60 +752,45 @@ def analysis_command(prompt_path: Path, args: argparse.Namespace) -> list[str]:
 
 def run_analysis(prompt_path: Path, args: argparse.Namespace) -> subprocess.CompletedProcess[str]:
     cmd = analysis_command(prompt_path, args)
+    print("running:", " ".join(cmd), flush=True)
     return run_command(cmd)
 
 
-def run_analysis_with_activity_refresh(prompt_path: Path, args: argparse.Namespace) -> subprocess.CompletedProcess[str]:
-    cmd = analysis_command(prompt_path, args)
-    print("running:", " ".join(cmd), flush=True)
-    proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    # Give the process table a moment to include run-local-ai-analysis.py with
-    # its prompt package path, then rebuild the static dashboard while the job is
-    # active so the SOC Alerts page can show its animated Analyzing metric.
-    if not args.no_portal_refresh:
-        time.sleep(1)
-        refresh_portal(args)
-    stdout, stderr = proc.communicate()
-    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+def signal_dashboard_refresh(args: argparse.Namespace) -> None:
+    """Wake the independent portal worker without delaying local inference.
 
-
-def refresh_portal(args: argparse.Namespace) -> None:
+    The Web UI polls fast-changing AI state from the API. Static dashboard
+    generation is therefore eventual presentation work and must never sit on
+    the alert-analysis critical path.
+    """
     if args.no_portal_refresh:
         return
-    for script in (args.portal_builder, args.portal_sync):
-        if not script.exists():
-            print(f"portal refresh skipped missing script: {script}", file=sys.stderr)
-            return
-    for script in (args.portal_builder, args.portal_sync):
-        proc = run_command(["/usr/bin/python3", str(script)])
-        if proc.stdout:
-            print(proc.stdout, end="")
-        if proc.stderr:
-            print(proc.stderr, file=sys.stderr, end="")
-        if proc.returncode != 0:
-            print(f"portal refresh command failed rc={proc.returncode}: {script}", file=sys.stderr)
-            if script == args.portal_sync:
-                copy_soc_dashboard_fallback()
-            return
+    try:
+        args.portal_wake_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        args.portal_wake_file.write_text(f"{project_now()} ai-analysis-complete\n", encoding="utf-8")
+        args.portal_wake_file.chmod(0o600)
+    except OSError as error:
+        # Durable AI completion remains authoritative even if presentation
+        # refresh signaling is temporarily unavailable.
+        print(f"dashboard refresh signal failed: {error}", file=sys.stderr)
 
 
-def copy_soc_dashboard_fallback() -> None:
-    """Keep the SOC dashboard fresh even if an unrelated portal builder fails."""
-    if not DEFAULT_SOC_WEB_DIR.exists():
-        print(f"SOC portal fallback skipped missing source: {DEFAULT_SOC_WEB_DIR}", file=sys.stderr)
-        return
-    DEFAULT_SOC_PORTAL_DIR.mkdir(parents=True, exist_ok=True)
-    for item in DEFAULT_SOC_WEB_DIR.iterdir():
-        destination = DEFAULT_SOC_PORTAL_DIR / item.name
-        if item.is_dir():
-            shutil.copytree(item, destination, dirs_exist_ok=True)
-        elif item.is_file():
-            shutil.copy2(item, destination)
-    print(f"SOC portal fallback copied {DEFAULT_SOC_WEB_DIR} -> {DEFAULT_SOC_PORTAL_DIR}")
+def consume_wake_marker(path: Path) -> None:
+    """Clear the event that launched this run so later work is not lost.
+
+    If durable work arrives while the worker is active, alert-store recreates
+    the marker. launchd then observes a pending path event and starts another
+    pass after this process exits.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as error:
+        print(f"AI wake marker could not be consumed: {error}", file=sys.stderr)
 
 
 def main() -> int:
     args = parse_args()
+    require_runtime_capacity(args.analysis_dir, 0, label="AI analysis")
     if not args.db.exists():
         print(f"{project_now()} SQLite DB not found: {args.db}", file=sys.stderr)
         return 2
@@ -686,13 +803,14 @@ def main() -> int:
             print(f"{project_now()} another AI analysis run is already active")
             return 0
 
+        consume_wake_marker(args.wake_file)
         args.prompt_dir.mkdir(parents=True, exist_ok=True)
         args.analysis_dir.mkdir(parents=True, exist_ok=True)
         current_analyzed_ids = analyzed_alert_ids(args.analysis_dir, args.pcap_analysis_dir, args.prompt_dir)
         conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         try:
-            completed_group_ids = completed_analysis_group_ids(
+            completed_group_ids = reconcilable_ai_job_ids(
                 conn,
                 current_analyzed_ids,
                 args.analysis_dir,
@@ -751,7 +869,7 @@ def main() -> int:
             if not selected_group_id:
                 selected_group_id = alert_group_id(str(selected["queue_group_key"] or alert_group_key(selected)))
             report_ai_job_status(args.alert_store_url, selected_group_id, "processing")
-            proc = run_analysis_with_activity_refresh(prompt_path, args)
+            proc = run_analysis(prompt_path, args)
             if proc.stdout:
                 print(proc.stdout, end="")
             if proc.stderr:
@@ -764,7 +882,27 @@ def main() -> int:
 
         if analyzed_count:
             print(f"{project_now()} analyzed {analyzed_count} unique alert group(s)")
-        refresh_portal(args)
+            signal_dashboard_refresh(args)
+        # Reconcile again before exit because alerts can enqueue durable intent
+        # while a long-running inference is active. This prevents a completed
+        # artifact from waiting for the next five-minute scheduler invocation
+        # before queue/SLO state becomes accurate.
+        current_analyzed_ids = analyzed_alert_ids(args.analysis_dir, args.pcap_analysis_dir, args.prompt_dir)
+        conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            completed_group_ids = reconcilable_ai_job_ids(
+                conn,
+                current_analyzed_ids,
+                args.analysis_dir,
+                args.pcap_analysis_dir,
+                args.prompt_dir,
+            )
+        finally:
+            conn.close()
+        reconciled = reconcile_completed_ai_jobs(args.alert_store_url, completed_group_ids)
+        if reconciled:
+            print(f"{project_now()} reconciled {reconciled} completed durable AI job(s) before exit", flush=True)
         return 0
 
 

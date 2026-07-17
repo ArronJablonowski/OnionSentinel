@@ -92,6 +92,35 @@ in JSON:
 These columns are additive derived fields. `alert_json`, `raw_event_json`, and
 `enrichment_json` remain the evidence source of truth.
 
+### Correlation and analysis history tables
+
+Alert-store owns three additive tables used by SOC Analyst cross-alert
+correlation:
+
+| Table | Purpose |
+| --- | --- |
+| `alert_observables` | Normalized, bounded facts extracted from each alert group for deterministic retrieval. |
+| `ai_analysis_runs` | Compact history of completed model assessments keyed by idempotent `analysis_id`. |
+| `alert_correlations` | Scored group-to-group candidates and the latest model assessment of each edge. |
+
+Alert ingestion and enrichment refresh the observable index inside the same
+alert-store write boundary as the alert update. On first startup after this
+schema is installed, alert-store atomically indexes retained alerts that do not
+yet have observable rows. Provider raw responses, model prose, raw packet
+payloads, and PCAP files are not indexed as observables.
+
+The prompt builder joins shared observables and applies deterministic type and
+time weights before asking an LLM to assess correlation. This retrieval layer
+is the evidence boundary: model output can annotate a retrieved edge but cannot
+invent a new edge without shared indexed facts. Candidate counts and evidence
+are bounded before they enter a prompt.
+
+AI workers never open SQLite for writes. They submit compact results to the
+idempotent local `POST /analysis/result` endpoint. Historical artifacts are
+indexed through `n8n/bin/backfill-ai-correlation-context.py`, which uses the
+same endpoint and safely skips artifacts whose operational alert row has
+already expired.
+
 As of 2026-07-13, `enrichment_json` carries public enrichment records produced
 asynchronously by alert-store. The n8n `Enrich Alert` node is an explicit
 handoff marker; `/alert` commits both the alert and a durable enrichment job.
@@ -411,6 +440,47 @@ onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py
 The UI should request only the visible page of rows, then fetch detail content
 on demand. This keeps the interface fast as alert volume grows.
 
+### Detailed Alert Report layout contract
+
+Layout contract `2026-07-15.1` makes the report structure independent of the
+age or shape of stored Markdown. The builder must render every section exactly
+once and in this order:
+
+1. Alert identity and workflow metadata
+2. Triage Reasons
+3. Duplicate Alert Timeline
+4. AI Analysis Output
+5. AI Model Used
+6. Enriched Alert Details
+7. Alert Summary
+8. Analyst Notes
+9. Parsed PCAP Evidence
+10. Network And Flow Details
+11. Protocol Details
+12. Host And Sensor Details
+13. Threat Context
+14. Security Onion Detail Fields
+15. Raw Logs
+
+Missing evidence produces an explicit empty-state message; it must never remove
+or move a section. Unknown historical H2 sections are demoted and preserved
+under `Raw Logs > Legacy Source Content` so old data cannot create new top-level
+layout elements. `Alert Summary`, `Analyst Notes`, `Parsed PCAP Evidence`, and
+`Raw Logs` remain independent top-level accordions.
+
+The generated fragment carries `data-layout-version` and
+`data-layout-valid`. Both the builder and LAN Portal validate section count and
+order. A malformed or older fragment receives a visible
+`Detailed Alert Report layout error`; the alert page promotes that error to a
+modal explaining the missing, duplicate, or out-of-order section and the
+expected contract version. The portal must not append late PCAP sections after
+generation. Live row status may update independently, while evidence content
+is refreshed in place by the next dashboard rebuild.
+
+Cross-alert correlation is a subsection of item 4, `AI Analysis Output`. It is
+not a sixteenth top-level section and therefore cannot change the versioned
+layout contract.
+
 ## Live Update Channel
 
 Implemented 2026-07-03.
@@ -486,15 +556,16 @@ of the deployed data flow before they move into other SOC pages. The current
 diagram is an ordered operational map:
 
 ```text
-Security Onion -> Raspberry Pi Relay -> Docker -> n8n Workflow
-n8n Workflow -> alert-store /alert plus durable enrichment handoff
+Security Onion -> Raspberry Pi Relay -> forced SSH intake -> alert-store /alert
+alert-store commit -> SQLite alert/state rows plus durable downstream jobs
+alert-store n8n_post_commit worker -> n8n committed-alert report workflow
 alert-store enrichment worker -> configured public enrichment services
 alert-store -> SQLite alert_json, enrichment_json, raw_event_json
 SQLite + Mac Studio AI Lab + Ollama + AI Reports + Telegram -> Onion Sentinel
 ```
 
-The enrichment lane is part of the diagram because n8n now calls alert-store's
-dedicated `/enrich` endpoint before alert storage. alert-store owns API-key
+The enrichment lane is part of the diagram because alert-store queues provider
+work in the same transaction that commits an eligible alert. alert-store owns API-key
 gating, privacy checks, SQLite caching, source-specific rate limits, and
 normalization into the `enrichment.external_intel` bundle. The Flow page lists
 the supported enrichment sources as service tiles: AbuseIPDB, GreyNoise, Shodan
@@ -592,11 +663,17 @@ Settings page behavior:
 - Shows the collapsed shared memory path:
   `$HOME/n8n-local/soc-alerts/agent-memory/shared-agent-memory.md`.
 - Saves through `/api/soc-settings/threat-hunter-prompt`.
-- As of this version, no Cyber Security Agent automatically appends to its
-  memory file. The files are durable Markdown locations for operator or future
-  agent workflow writes.
-- SOC Analyst prompt packages include both the SOC Analyst role memory and the
-  shared Cyber Security Agent memory as bounded evidence for model reasoning.
+- SOC Analyst prompt packages retrieve a bounded, evidence-relevant selection
+  from SOC Analyst and shared memory rather than injecting the whole file.
+- Successful SOC Analyst runs may write reusable model-observed lessons through
+  the deterministic memory service. It rejects low-confidence or secret-like
+  content, preserves operator notes, uses atomic file locks, reinforces
+  duplicates, expires stale observations, and caps role/shared record counts.
+- SQLite `ai_analysis_runs` and the Markdown/JSON report corpus remain the full
+  investigation history. Memory contains only compact reusable lessons.
+- `manage-agent-memory.py` exposes the same query/writeback boundary for the
+  manual/planned Incident Responder, SIEM Engineer, Cyber Threat Intel, and
+  Threat Hunter workflows.
 - The SIEM Engineer prompt is for a 6 hour engineering review that runs only
   after all eligible alerts/detections have finished AI analysis. It reviews
   alerts, enrichments, notes, acknowledgments, suppressions, and related context
@@ -608,12 +685,13 @@ Settings page behavior:
 Current Flow page model:
 
 ```text
-Security Onion -> Raspberry Pi relay -> Docker -> n8n Workflow
-n8n Workflow -> alert-store /alert -> SQLite grouped detection store plus durable job
+Security Onion -> Raspberry Pi relay -> forced SSH intake -> alert-store /alert
+alert-store -> SQLite grouped detection store plus durable jobs
+alert-store n8n_post_commit worker -> n8n committed-alert report workflow
 alert-store enrichment worker -> public enrichment services -> enrichment_json
 SQLite -> Mac Studio AI Lab -> Ollama current local model -> AI Reports
 SQLite + AI Reports -> Onion Sentinel dashboard
-SQLite/n8n notification policy -> Telegram high/critical notifications
+alert-store notification policy -> Telegram high/critical notifications
 ```
 
 The implementation lives in:
@@ -667,15 +745,16 @@ Critical, High, Medium, Low, or Informational colors shown in the table.
 PCAP evidence is intentionally request/broker based rather than coupled to
 normal alert ingest. The dashboard and alert-store may queue a bounded PCAP
 request, the Pi relay claims pending requests through n8n, Security Onion
-exports only a bounded artifact through its forced-command wrapper, the relay
-uses a separate read-only rsync key to spool the artifact to its SSD, and rsync moves it to the Mac Studio runtime
+streams one bounded filtered rotation at a time through its forced-command
+wrapper, the relay checkpoints each stream directly on its external SSD, and
+rsync moves the relay-built artifact to the Mac Studio runtime
 evidence directory. n8n remains the control plane, not the bulk artifact data
 plane. No-packet results and oversize artifacts are useful broker outcomes and
 are counted separately from active System Health warnings. The only supported
-artifact data plane is SSD-backed `spooled_rsync` with hash/size verification,
+artifact data plane is SSD-backed `streamed_chunks` with hash/size verification,
 keeping Zeek-first and TShark-corroborated parsing on the Mac Studio. PCAP
 artifact bytes must not be carried inline in n8n or in the
-Security Onion-to-relay transfer path.
+Security Onion filesystem; SSH stdout lands directly on the relay SSD.
 
 PCAP requests for grouped alerts must be built from a concrete alert row, not
 from aggregate group timestamps alone. The portal and alert-store prefer the
@@ -845,6 +924,10 @@ When parsed evidence exists, the Detailed Alert Report adds a `Parsed PCAP
 Evidence` section after public enrichment. That section renders bounded Zeek
 summaries and TShark corroboration only; raw packet captures stay in runtime
 artifact storage and are not copied into dashboard HTML, prompts, or Git.
+`Alert Summary` and `Raw Logs` are separate, closed-by-default top-level
+accordions; they must never be nested inside `Parsed PCAP Evidence`. The
+Markdown renderer therefore tracks nested accordion heading levels as a stack,
+so an inner TShark section cannot consume the closing boundary of its parent.
 Current guardrails keep PCAP pulls intentionally small: dashboard and
 alert-store request windows are clamped to 30-300 seconds, with 120 seconds as
 the default. PCAP artifacts are not accepted through n8n or alert-store JSON

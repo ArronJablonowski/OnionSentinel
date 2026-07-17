@@ -42,6 +42,8 @@ class DashboardSystemHealthComponentTest(unittest.TestCase):
 
         self.assertIn("beaconPageSize = 25", html)
         self.assertIn("pcapPageSize = 25", html)
+        self.assertIn("health-pipeline-details", html)
+        self.assertIn("renderPipelineHealth", html)
 
     def test_system_health_javascript_is_syntax_valid(self) -> None:
         javascript = self.component.SYSTEM_HEALTH_JS.replace("<script>", "").replace("</script>", "")
@@ -51,6 +53,15 @@ class DashboardSystemHealthComponentTest(unittest.TestCase):
             result = subprocess.run(["node", "--check", handle.name], capture_output=True, text=True, check=False)
 
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_beacon_result_badges_never_wrap(self) -> None:
+        css = self.component.SYSTEM_HEALTH_CSS
+
+        self.assertIn(".system-health-table th:nth-child(2),.system-health-table td:nth-child(2)", css)
+        self.assertIn("min-width:126px", css)
+        self.assertIn(".health-result{box-sizing:border-box;min-width:104px", css)
+        self.assertIn("white-space:nowrap", css)
+        self.assertIn("word-break:keep-all", css)
 
 
 if __name__ == "__main__":

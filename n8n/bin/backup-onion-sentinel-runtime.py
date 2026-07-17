@@ -14,7 +14,13 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tarfile
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+from disk_capacity import require_runtime_capacity
 
 
 def sha256_file(path: Path) -> str:
@@ -71,6 +77,13 @@ def archive_runtime_secrets(stack_dir: Path, destination: Path) -> list[str]:
 
 
 def create_bundle(stack_dir: Path, backup_root: Path, docker: str) -> Path:
+    sqlite_source = stack_dir / "alert_store_data/alerts.sqlite3"
+    estimated_bytes = max(2 * 1024**3, sqlite_source.stat().st_size * 2 if sqlite_source.exists() else 0)
+    require_runtime_capacity(
+        backup_root,
+        estimated_bytes,
+        label="runtime recovery backup",
+    )
     stamp = dt.datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
     staging = backup_root / f".staging-{stamp}"
     final = backup_root / stamp

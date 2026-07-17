@@ -14,5 +14,7 @@ Important documents:
 - `reliability-and-slo-runbook.md`: durable workflow, SLO, soak, and recovery
   operations.
 - `soc-daily-rollups.md`: daily summary generation.
+- `frontend-ui-qa-runbook.md`: responsive Playwright crawl, chaos interaction,
+  and visual regression workflow.
 
 The top-level node READMEs are the fastest path for rebuilds. These documents preserve design history and deeper operational context.

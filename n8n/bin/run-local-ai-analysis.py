@@ -25,12 +25,19 @@ from pathlib import Path
 from typing import Any
 
 
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+from agent_memory import normalize_memory_candidates, persist_memory_candidates
+
+
 HOME = Path.home()
 DEFAULT_PROMPT_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-prompts"
 DEFAULT_OUT_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-analysis"
 DEFAULT_LLM_LOG_DIR = HOME / "n8n-local" / "soc-alerts" / "llm-analysis-logs"
 DEFAULT_LLM_LOG_FILE = DEFAULT_LLM_LOG_DIR / "llm-analysis-log.jsonl"
 DEFAULT_LLM_CURRENT_FILE = DEFAULT_LLM_LOG_DIR / "current-analysis.json"
+DEFAULT_ANALYSIS_INDEX_QUEUE_DIR = DEFAULT_LLM_LOG_DIR / "analysis-index-pending"
 DEFAULT_SYSTEM_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system_prompt.md"
 DEFAULT_AI_SETTINGS_FILE = HOME / "n8n-local" / "config" / "ai_model_settings.json"
 DEFAULT_OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
@@ -60,6 +67,8 @@ REQUIRED_KEYS = {
     "tuning_recommendation",
     "tuning_reason",
     "recommended_tuning_actions",
+    "correlation_assessment",
+    "memory_candidates",
 }
 DEFAULT_RESPONSE_VALUES = {
     "detection_outcome": "Inconclusive",
@@ -77,6 +86,16 @@ DEFAULT_RESPONSE_VALUES = {
     "tuning_recommendation": "needs_more_data",
     "tuning_reason": "The local model did not provide a tuning reason.",
     "recommended_tuning_actions": ["Review grouped alert count and disposition before changing tuning rules."],
+    "correlation_assessment": {
+        "correlation_found": False,
+        "confidence": "low",
+        "related_groups": [],
+        "shared_evidence": [],
+        "contradicting_evidence": [],
+        "attack_chain_hypothesis": "No supported cross-alert correlation was identified.",
+        "recommended_pivots": [],
+    },
+    "memory_candidates": [],
 }
 LIST_KEYS = {
     "false_positive_possibilities",
@@ -125,12 +144,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--levels", default="critical,high,medium,low,informational", help="Levels passed to prompt generation")
     parser.add_argument("--hours", type=int, default=24, help="Lookback hours passed to prompt generation")
     parser.add_argument("--related-limit", type=int, default=8, help="Related alert limit passed to prompt generation")
+    parser.add_argument("--correlation-limit", type=int, default=8, help="Correlation candidate limit passed to prompt generation")
+    parser.add_argument("--correlation-min-score", type=int, default=15, help="Minimum deterministic correlation score")
+    parser.add_argument("--alert-store-url", default=os.environ.get("ALERT_STORE_URL", "http://127.0.0.1:8787"), help="Alert-store URL for durable analysis indexing")
     parser.add_argument("--stdout", action="store_true", help="Print paths and response JSON after writing files")
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
     if args.max_predict_tokens <= 0:
         parser.error("--max-predict-tokens must be positive")
+    if args.correlation_limit <= 0:
+        parser.error("--correlation-limit must be positive")
+    if args.correlation_min_score < 0 or args.correlation_min_score > 100:
+        parser.error("--correlation-min-score must be between 0 and 100")
     return args
 
 
@@ -433,6 +459,72 @@ def append_jsonl(path: Path, data: dict[str, Any]) -> None:
         handle.write(json.dumps(data, sort_keys=True) + "\n")
 
 
+def analysis_index_payload(
+    analysis_id: str,
+    prompt_package: dict[str, Any],
+    response: dict[str, Any],
+    generated_at: str,
+    artifact_path: Path,
+) -> dict[str, Any]:
+    alert = prompt_package.get("alert") if isinstance(prompt_package.get("alert"), dict) else {}
+    correlation = prompt_package.get("correlated_alert_context")
+    candidates = correlation.get("candidates", []) if isinstance(correlation, dict) else []
+    evidence_hash = hashlib.sha256(
+        json.dumps(prompt_package, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {
+        "analysis_id": analysis_id,
+        "alert_id": alert.get("alert_id"),
+        "generated_at": generated_at,
+        "model": response.get("_analysis_model"),
+        "model_path": response.get("_analysis_model_path"),
+        "artifact_path": str(artifact_path),
+        "evidence_hash": evidence_hash,
+        "response": response,
+        "correlation_candidates": candidates,
+    }
+
+
+def post_analysis_index(payload: dict[str, Any], alert_store_url: str, timeout: int = 10) -> None:
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    request = urllib.request.Request(
+        alert_store_url.rstrip("/") + "/analysis/result",
+        data=body,
+        headers={"Content-Type": "application/json", "User-Agent": "Onion-Sentinel-AI/1.0"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        result = json.loads(response.read().decode("utf-8", errors="replace"))
+    if not result.get("ok"):
+        raise RuntimeError(result.get("reason") or "alert-store rejected analysis result")
+
+
+def queue_analysis_index(payload: dict[str, Any], queue_dir: Path = DEFAULT_ANALYSIS_INDEX_QUEUE_DIR) -> Path:
+    path = queue_dir / f"{safe_filename(payload.get('analysis_id'))}.json"
+    atomic_write_json(path, payload)
+    return path
+
+
+def flush_analysis_index_queue(
+    alert_store_url: str,
+    queue_dir: Path = DEFAULT_ANALYSIS_INDEX_QUEUE_DIR,
+    limit: int = 100,
+) -> tuple[int, int]:
+    if not queue_dir.exists():
+        return 0, 0
+    completed = 0
+    failed = 0
+    for path in sorted(queue_dir.glob("*.json"))[:limit]:
+        try:
+            post_analysis_index(load_json(path), alert_store_url)
+            path.unlink(missing_ok=True)
+            completed += 1
+        except Exception:
+            failed += 1
+            break
+    return completed, failed
+
+
 def build_llm_log_record(
     *,
     run_id: str,
@@ -502,6 +594,10 @@ def generate_prompt(args: argparse.Namespace) -> Path:
         str(args.hours),
         "--related-limit",
         str(args.related_limit),
+        "--correlation-limit",
+        str(args.correlation_limit),
+        "--correlation-min-score",
+        str(args.correlation_min_score),
         "--out-dir",
         str(args.prompt_dir),
     ]
@@ -625,6 +721,7 @@ def ollama_chat(prompt_package: dict[str, Any], args: argparse.Namespace, settin
             "Analyze this Security Onion alert and return JSON matching response_schema exactly. "
             "Use public_enrichment records and parsed pcap_evidence when present. "
             "Use agent_memory.role_memory and agent_memory.shared_memory when relevant, "
+            "evaluate correlated_alert_context candidates without treating prior model conclusions as facts, "
             "but prefer current alert evidence if memory conflicts."
         ),
         "prompt_package": prompt_package,
@@ -672,7 +769,10 @@ def cloud_cli_chat(prompt_package: dict[str, Any], args: argparse.Namespace, set
     if cloud_model and "{model}" not in command_text and "--model" not in cmd:
         cmd.extend(["--model", cloud_model])
     stdin_payload = {
-        "task": "Analyze this Security Onion alert and return one valid JSON object matching response_schema exactly.",
+        "task": (
+            "Analyze this Security Onion alert and return one valid JSON object matching response_schema exactly. "
+            "Evaluate bounded correlated_alert_context candidates and distinguish shared facts from prior hypotheses."
+        ),
         "system_prompt": load_system_prompt(args.system_prompt_file),
         "prompt_package": prompt_package,
         "local_response": local_response,
@@ -736,6 +836,33 @@ def coerce_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+def normalize_correlation_assessment(value: Any) -> dict[str, Any]:
+    assessment = value if isinstance(value, dict) else {}
+    related_groups = []
+    for item in assessment.get("related_groups", []) if isinstance(assessment.get("related_groups"), list) else []:
+        if isinstance(item, str):
+            group_id, reason = item, ""
+        elif isinstance(item, dict):
+            group_id, reason = item.get("group_id"), item.get("reason")
+        else:
+            continue
+        group_id = str(group_id or "").strip().lower()[:64]
+        if group_id:
+            related_groups.append({"group_id": group_id, "reason": str(reason or "")[:1000]})
+    confidence = str(assessment.get("confidence") or "low").lower()
+    if confidence not in CONFIDENCE_VALUES:
+        confidence = "low"
+    return {
+        "correlation_found": bool(assessment.get("correlation_found")) and bool(related_groups),
+        "confidence": confidence,
+        "related_groups": related_groups[:20],
+        "shared_evidence": coerce_list(assessment.get("shared_evidence"))[:20],
+        "contradicting_evidence": coerce_list(assessment.get("contradicting_evidence"))[:20],
+        "attack_chain_hypothesis": str(assessment.get("attack_chain_hypothesis") or "")[:4000],
+        "recommended_pivots": coerce_list(assessment.get("recommended_pivots"))[:20],
+    }
+
+
 def validate_response(response: dict[str, Any]) -> dict[str, Any]:
     """Normalize a model response without letting minor schema drift jam the queue.
 
@@ -765,6 +892,8 @@ def validate_response(response: dict[str, Any]) -> dict[str, Any]:
     normalized["tuning_recommendation"] = str(normalized["tuning_recommendation"]).lower()
     normalized["escalation_needed"] = bool(normalized["escalation_needed"])
     normalized["hosted_second_opinion_recommended"] = bool(normalized["hosted_second_opinion_recommended"])
+    normalized["correlation_assessment"] = normalize_correlation_assessment(normalized.get("correlation_assessment"))
+    normalized["memory_candidates"] = normalize_memory_candidates(normalized.get("memory_candidates"))
 
     if normalized["confidence"] not in CONFIDENCE_VALUES:
         normalized["_invalid_confidence"] = normalized["confidence"]
@@ -799,6 +928,11 @@ def render_markdown(prompt_package: dict[str, Any], response: dict[str, Any], ge
     raw_alert_rows = grouped_context.get("raw_alert_rows", 1)
     first_seen = grouped_context.get("first_seen", alert.get("first_seen", ""))
     last_seen = grouped_context.get("last_seen", alert.get("last_seen", ""))
+    correlation = normalize_correlation_assessment(response.get("correlation_assessment"))
+    correlation_groups = [
+        f"{item['group_id']}: {item['reason'] or 'relationship requires analyst validation'}"
+        for item in correlation["related_groups"]
+    ]
 
     lines = [
         "---",
@@ -849,6 +983,28 @@ def render_markdown(prompt_package: dict[str, Any], response: dict[str, Any], ge
         "",
         response["alert_frequency_assessment"],
         "",
+        "## Correlation Assessment",
+        "",
+        f"- **Correlation found:** {correlation['correlation_found']}",
+        f"- **Confidence:** {correlation['confidence']}",
+        f"- **Attack-chain hypothesis:** {correlation['attack_chain_hypothesis'] or 'n/a'}",
+        "",
+        "### Related Alert Groups",
+        "",
+        markdown_list(correlation_groups),
+        "",
+        "### Shared Evidence",
+        "",
+        markdown_list(correlation["shared_evidence"]),
+        "",
+        "### Contradicting Evidence",
+        "",
+        markdown_list(correlation["contradicting_evidence"]),
+        "",
+        "### Recommended Correlation Pivots",
+        "",
+        markdown_list(correlation["recommended_pivots"]),
+        "",
         "## Public Enrichment Findings",
         "",
         markdown_list(response["public_enrichment_findings"]),
@@ -892,7 +1048,13 @@ def render_markdown(prompt_package: dict[str, Any], response: dict[str, Any], ge
     return "\n".join(lines)
 
 
-def write_outputs(prompt_path: Path, prompt_package: dict[str, Any], response: dict[str, Any], args: argparse.Namespace) -> tuple[Path, Path]:
+def write_outputs(
+    prompt_path: Path,
+    prompt_package: dict[str, Any],
+    response: dict[str, Any],
+    args: argparse.Namespace,
+    analysis_id: str,
+) -> tuple[Path, Path, str]:
     generated_at = project_now()
     alert = prompt_package.get("alert", {})
     alert_id = safe_filename(alert.get("alert_id"))
@@ -903,6 +1065,7 @@ def write_outputs(prompt_path: Path, prompt_package: dict[str, Any], response: d
     md_path = args.out_dir / f"{base}.md"
 
     enriched = {
+        "analysis_id": analysis_id,
         "analysis_type": str(response.get("_analysis_model_path") or "ollama"),
         "generated_at": generated_at,
         "prompt_package": str(prompt_path),
@@ -916,7 +1079,7 @@ def write_outputs(prompt_path: Path, prompt_package: dict[str, Any], response: d
     }
     json_path.write_text(json.dumps(enriched, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     md_path.write_text(render_markdown(prompt_package, response, generated_at, json_path), encoding="utf-8")
-    return json_path, md_path
+    return json_path, md_path, generated_at
 
 
 def main() -> int:
@@ -936,6 +1099,10 @@ def main() -> int:
     monitor_started = False
 
     try:
+        # Retry compact analysis-index submissions before spending resources on
+        # another inference. A failed local API call never requires rerunning
+        # the LLM because the completed result remains in this durable spool.
+        flush_analysis_index_queue(args.alert_store_url)
         if args.generate_prompt:
             prompt_path = generate_prompt(args)
         if prompt_path is None:
@@ -969,7 +1136,26 @@ def main() -> int:
         else:
             response = analyze_with_config(prompt_package, args)
         response = validate_response(response)
-        json_path, md_path = write_outputs(prompt_path, prompt_package, response, args)
+        try:
+            response["_memory_writeback"] = persist_memory_candidates(
+                agent_role="soc-analyst",
+                role_memory_file=Path(str(prompt_package.get("agent_memory_file") or "")),
+                shared_memory_file=Path(str(prompt_package.get("shared_memory_file") or "")),
+                candidates=response.get("memory_candidates", []),
+                analysis_id=run_id,
+                source_artifact=str(prompt_path),
+            )
+        except Exception as exc:
+            # Memory is supplemental context. A writeback failure must remain
+            # visible in the artifact without discarding a completed analysis.
+            response["_memory_writeback"] = {"ok": False, "error": str(exc)[:500]}
+        json_path, md_path, generated_at = write_outputs(prompt_path, prompt_package, response, args, run_id)
+        index_payload = analysis_index_payload(run_id, prompt_package, response, generated_at, json_path)
+        try:
+            post_analysis_index(index_payload, args.alert_store_url)
+        except Exception as exc:
+            pending_path = queue_analysis_index(index_payload)
+            print(f"analysis index deferred to {pending_path}: {exc}", file=sys.stderr)
         status = "success"
 
         print(md_path)

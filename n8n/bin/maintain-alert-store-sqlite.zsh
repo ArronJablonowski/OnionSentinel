@@ -15,6 +15,8 @@ BACKUP_DIR="${ALERT_STORE_BACKUP_DIR:-$STACK_DIR/alert_store_backups}"
 LOG_DIR="${ALERT_STORE_MAINTENANCE_LOG_DIR:-$STACK_DIR/logs}"
 KEEP_BACKUPS="${ALERT_STORE_BACKUP_KEEP:-48}"
 AUTO_RECOVER="${ALERT_STORE_AUTO_RECOVER:-0}"
+SQLITE_BUSY_TIMEOUT_MS="${ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS:-60000}"
+BACKUP_ATTEMPTS="${ALERT_STORE_BACKUP_ATTEMPTS:-5}"
 ENV_FILE="${ALERT_STORE_ENV_FILE:-$STACK_DIR/.env}"
 STATE_FILE="$LOG_DIR/alert-store-sqlite-maintenance-state.json"
 REFRESH_GROUPS_URL="${ALERT_STORE_REFRESH_GROUPS_URL:-http://127.0.0.1:8787/refresh-groups}"
@@ -22,7 +24,14 @@ REFRESH_GROUPS_TIMEOUT="${ALERT_STORE_REFRESH_GROUPS_TIMEOUT:-60}"
 STAMP="$(date '+%Y%m%dT%H%M%S%z')"
 LOG_FILE="$LOG_DIR/alert-store-sqlite-maintenance.log"
 
+[[ "$SQLITE_BUSY_TIMEOUT_MS" == <-> ]] || SQLITE_BUSY_TIMEOUT_MS=60000
+[[ "$BACKUP_ATTEMPTS" == <-> ]] || BACKUP_ATTEMPTS=5
+(( BACKUP_ATTEMPTS >= 1 )) || BACKUP_ATTEMPTS=5
+
 mkdir -p "$BACKUP_DIR" "$LOG_DIR"
+# Interrupted or lock-failed runs can leave an empty temporary target. Never
+# touch a current run, but remove stale partials before evaluating retention.
+find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.backup.tmp' -mmin +30 -delete 2>/dev/null || true
 
 log() {
   print -r -- "[$(date '+%Y-%m-%d  %H:%M:%S%z')] $*" | tee -a "$LOG_FILE"
@@ -141,13 +150,27 @@ require_sqlite() {
 
 quick_check() {
   local db="$1"
-  sqlite3 "$db" 'PRAGMA quick_check;' 2>&1
+  sqlite3 -cmd ".timeout $SQLITE_BUSY_TIMEOUT_MS" "$db" 'PRAGMA quick_check;' 2>&1
 }
 
 verified_backup() {
   local backup_tmp="$BACKUP_DIR/alerts.sqlite3.$STAMP.backup.tmp"
   local backup="$BACKUP_DIR/alerts.sqlite3.$STAMP.backup"
-  sqlite3 "$DB_PATH" ".backup '$backup_tmp'"
+  local attempt=1
+  local backup_error=""
+  rm -f "$backup_tmp"
+  while (( attempt <= BACKUP_ATTEMPTS )); do
+    if backup_error="$(sqlite3 -cmd ".timeout $SQLITE_BUSY_TIMEOUT_MS" "$DB_PATH" ".backup '$backup_tmp'" 2>&1)"; then
+      break
+    fi
+    rm -f "$backup_tmp"
+    log "backup_busy attempt=$attempt/$BACKUP_ATTEMPTS detail=${backup_error//$'\n'/ }"
+    if (( attempt == BACKUP_ATTEMPTS )); then
+      fail "backup remained unavailable after $BACKUP_ATTEMPTS attempts: $backup_error"
+    fi
+    sleep $((attempt * 2))
+    (( attempt += 1 ))
+  done
   local backup_check
   backup_check="$(quick_check "$backup_tmp")"
   if [[ "$backup_check" != "ok" ]]; then
@@ -165,7 +188,8 @@ import sqlite3
 import sys
 
 db_path = sys.argv[1]
-conn = sqlite3.connect(db_path)
+conn = sqlite3.connect(db_path, timeout=60)
+conn.execute("PRAGMA busy_timeout = 60000")
 conn.row_factory = sqlite3.Row
 bad_alert_filters = conn.execute(
     """

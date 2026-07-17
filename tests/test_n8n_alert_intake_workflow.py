@@ -33,3 +33,31 @@ def test_enrichment_stage_is_a_fast_durable_queue_handoff():
     assert "enrichment_status: 'queued_by_alert_store'" in code
     assert "http.request" not in code
     assert "public APIs" in code
+
+
+def test_post_commit_path_is_the_only_markdown_writer_path():
+    workflow = json.loads(WORKFLOW_PATH.read_text())
+    connections = workflow["connections"]
+
+    assert connections["Route Report Decision"]["main"][0][0]["node"] == (
+        "Acknowledge Durable Alert Commit"
+    )
+    assert connections["Committed Alert Webhook"]["main"][0][0]["node"] == (
+        "Validate Committed Alert"
+    )
+    assert connections["Validate Committed Alert"]["main"][0][0]["node"] == (
+        "Write SOC Markdown Report"
+    )
+
+
+def test_post_commit_validation_and_report_write_are_replay_safe():
+    workflow = json.loads(WORKFLOW_PATH.read_text())
+    validate = _node_code(workflow, "Validate Committed Alert")
+    writer = _node_code(workflow, "Write SOC Markdown Report")
+
+    assert "RELAY_WEBHOOK_TOKEN" in validate
+    assert "missing report_job_id" in validate
+    assert "missing committed_at" in validate
+    assert "stableReportPart" in writer
+    assert "item.committed_at" in writer
+    assert "fs.renameSync(temporaryPath, fullPath)" in writer

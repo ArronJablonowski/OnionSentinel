@@ -74,10 +74,15 @@ admin-state/
 .DS_Store
 __pycache__/
 *.py[cod]
+.venv/
 .pytest_cache/
 node_modules/
+playwright-report/
+test-results/
+.playwright-artifacts/
 coverage/
 dist/
 build/
 tmp/
 *.log
+*.md.lock

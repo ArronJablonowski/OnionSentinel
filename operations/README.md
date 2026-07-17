@@ -24,3 +24,10 @@ operations/secret-scan.zsh
 ```
 
 Run before every commit and before every push.
+
+## Frontend UI QA
+
+The Playwright chaos/regression suites are documented in
+`../docs/frontend-ui-qa-runbook.md` and live in `qa/`. The live track is
+read-only; the mutation track builds a temporary zero-data dashboard and uses
+TEST-NET fixtures on a loopback server.

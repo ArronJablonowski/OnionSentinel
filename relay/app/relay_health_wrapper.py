@@ -168,8 +168,21 @@ def config_webhook_token() -> str:
     return str(config.get("webhook", {}).get("token") or "").strip()
 
 
+def config_delivery_mode() -> str:
+    try:
+        config = json.loads(RELAY_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return "http"
+    ingest = config.get("alert_ingest", {})
+    return str(ingest.get("mode") or config.get("webhook", {}).get("transport") or "http").strip().lower()
+
+
 def validate_webhook_token_sources() -> str | None:
     """Catch config/env token drift before a quiet heartbeat is silently lost."""
+    if config_delivery_mode() == "ssh_batch":
+        # The dedicated forced-command SSH identity authenticates direct intake;
+        # the legacy n8n webhook token is irrelevant on this transport.
+        return None
     config_token = config_webhook_token()
     if not config_token or not RELAY_WEBHOOK_TOKEN:
         return None
@@ -243,6 +256,24 @@ def run_pcap_broker() -> subprocess.CompletedProcess:
             "outcomes": summary.get("outcomes", {}),
             "spool": summary.get("spool", {}),
         }, sort_keys=True)
+        # Keep the bounded root-cause event emitted by relay.py. Previously the
+        # health wrapper replaced stderr with counters, making rsync/SSH failures
+        # impossible to distinguish after the process exited.
+        failure_detail = ""
+        for line in reversed((result.stderr or "").splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                failure_detail = line
+                break
+            if isinstance(event, dict) and event.get("error"):
+                failure_detail = str(event["error"])
+                break
+        if failure_detail:
+            detail = f"{detail}; root_cause={failure_detail[:500]}"
         return subprocess.CompletedProcess(result.args, 2, result.stdout, detail)
     return result
 

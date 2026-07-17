@@ -65,7 +65,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Write Markdown only for accepted alerts.\n// The dashboard reads SQLite, while these files remain the local LLM corpus.\nconst fs = require('fs');\nconst path = require('path');\nconst reportDir = '/soc-alerts';\n\nfunction firstValue(...values) {\n  for (const value of values) {\n    if (value !== undefined && value !== null && value !== '') return value;\n  }\n  return null;\n}\n\nfunction safePart(value) {\n  const cleaned = String(value || 'unknown')\n    .replace(/[^A-Za-z0-9_.-]+/g, '-')\n    .replace(/^-+|-+$/g, '')\n    .slice(0, 90);\n  return cleaned || 'unknown';\n}\n\nfunction shortAlertId(value) {\n  const text = String(value || 'alert');\n  return text.length <= 18 ? text : text.slice(0, 18);\n}\n\nfunction md(value) {\n  if (Array.isArray(value)) return value.join(', ');\n  if (value && typeof value === 'object') return JSON.stringify(value);\n  return value === undefined || value === null || value === '' ? 'n/a' : String(value);\n}\n\nfunction cell(value) {\n  return md(value).replace(/\\|/g, '\\\\|').replace(/\\r?\\n/g, ' ');\n}\n\nfunction table(rows) {\n  const out = ['| Field | Value |', '| --- | --- |'];\n  for (const [key, value] of rows) out.push(`| ${cell(key)} | ${cell(value)} |`);\n  return out.join('\\n');\n}\n\nfunction renderReport(item) {\n  const originalAlert = item.original_alert || {};\n  const alertId = firstValue(item.alert_id, originalAlert.alert_id);\n  const ruleName = firstValue(item.rule_name, originalAlert.rule_name, 'Security Onion Alert');\n  const level = String(firstValue(item.triage_level, item.severity_label, originalAlert.severity_label, 'unknown')).toUpperCase();\n  const score = item.triage_score;\n  const routing = firstValue(item.routing, 'unknown');\n  const sourceIp = firstValue(item.source_ip, originalAlert.source?.ip);\n  const sourcePort = firstValue(originalAlert.source?.port);\n  const destIp = firstValue(item.destination_ip, originalAlert.destination?.ip);\n  const destPort = firstValue(originalAlert.destination?.port);\n  const direction = item.traffic_direction;\n  const reasons = Array.isArray(item.triage_reasons) && item.triage_reasons.length ? item.triage_reasons : ['No scoring reasons returned by alert-store.'];\n  const generatedAt = (() => { const date = new Date(); const pad = (value, length = 2) => String(value).padStart(length, '0'); const offsetMinutes = -date.getTimezoneOffset(); const sign = offsetMinutes >= 0 ? '+' : '-'; const absolute = Math.abs(offsetMinutes); const offset = `${sign}${pad(Math.floor(absolute / 60))}:${pad(absolute % 60)}`; return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}  ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}${offset}`; })();\n\n  const lines = [];\n  lines.push('---');\n  lines.push('type: soc-alert-report');\n  lines.push(`generated_at: ${generatedAt}`);\n  lines.push(`alert_id: ${JSON.stringify(alertId || '')}`);\n  lines.push(`triage_level: ${JSON.stringify(level.toLowerCase())}`);\n  lines.push(`triage_score: ${score ?? ''}`);\n  lines.push(`status: ${JSON.stringify(item.status || '')}`);\n  lines.push(`filter_status: ${JSON.stringify(item.filter_status || '')}`);\n  lines.push(`source_ip: ${JSON.stringify(sourceIp || '')}`);\n  lines.push(`destination_ip: ${JSON.stringify(destIp || '')}`);\n  lines.push('tags:');\n  lines.push('  - security-onion');\n  lines.push('  - soc-alert');\n  lines.push('  - n8n-generated');\n  lines.push('---');\n  lines.push('');\n  lines.push(`# [${level}] ${ruleName}`);\n  lines.push('');\n  lines.push(`- **Generated:** ${generatedAt}`);\n  lines.push(`- **Alert ID:** ${md(alertId)}`);\n  lines.push(`- **Workflow status:** ${md(item.status)}`);\n  lines.push(`- **Filter status:** ${md(item.filter_status)}`);\n  lines.push(`- **Route:** ${md(routing)}`);\n  lines.push(`- **Score:** ${md(score)}`);\n  lines.push(`- **Direction:** ${md(direction)}`);\n  lines.push(`- **Traffic:** ${md(sourceIp)}${sourcePort ? ':' + sourcePort : ''} -> ${md(destIp)}${destPort ? ':' + destPort : ''}`);\n  lines.push('');\n  lines.push('## Triage Reasons');\n  lines.push('');\n  for (const reason of reasons) lines.push(`- [ ] ${md(reason)}`);\n  lines.push('');\n  lines.push('## Alert Summary');\n  lines.push('');\n  lines.push(table([\n    ['Rule name', ruleName],\n    ['Event dataset', item.event_dataset],\n    ['Severity', item.severity],\n    ['Severity label', item.severity_label],\n    ['Rule category', originalAlert.rule_category],\n    ['Timestamp', originalAlert.timestamp],\n    ['First seen', item.first_seen],\n    ['Last seen', item.last_seen],\n    ['Seen count', item.seen_count],\n    ['Filter status', item.filter_status],\n    ['Filter reason', item.filter_reason],\n    ['Suppression rule', item.suppression_rule],\n    ['Telegram notification', item.notification_status],\n  ]));\n  lines.push('');\n  lines.push('## Analyst Notes');\n  lines.push('');\n  lines.push('- [ ] Confirm whether source and destination are expected for this VLAN or host role.');\n  lines.push('- [ ] Pivot in Security Onion for related source, destination, DNS, HTTP, TLS, and connection events.');\n  lines.push('- [ ] Decide whether this should become a tuning rule, an escalation, or a documented benign pattern.');\n  lines.push('');\n  lines.push('## Raw Alert');\n  lines.push('');\n  lines.push('```json');\n  lines.push(JSON.stringify(originalAlert, null, 2));\n  lines.push('```');\n  lines.push('');\n  return lines.join('\\n');\n}\n\nif (!$json.should_write_report) {\n  return [{\n    json: {\n      ...$json,\n      stage: 'write-soc-markdown-report',\n      report_written: false,\n      report_path: null,\n      report_filename: null,\n    }\n  }];\n}\n\nfs.mkdirSync(reportDir, {recursive: true});\nconst generatedAt = (() => { const date = new Date(); const pad = (value, length = 2) => String(value).padStart(length, '0'); const offsetMinutes = -date.getTimezoneOffset(); const sign = offsetMinutes >= 0 ? '+' : '-'; const absolute = Math.abs(offsetMinutes); const offset = `${sign}${pad(Math.floor(absolute / 60))}:${pad(absolute % 60)}`; return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}  ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}${offset}`; })();\nconst filenameTs = generatedAt.replace(/[-:]/g, '').replace(/\\s+/, '-').replace('Z', 'Z');\nconst filename = `${filenameTs}-${safePart($json.triage_level)}-${safePart(shortAlertId($json.alert_id))}-${safePart($json.rule_name)}.md`;\nconst fullPath = path.join(reportDir, filename);\nfs.writeFileSync(fullPath, renderReport($json), 'utf8');\n\nreturn [{\n  json: {\n    ...$json,\n    stage: 'write-soc-markdown-report',\n    report_written: true,\n    report_path: fullPath,\n    report_filename: filename,\n  }\n}];"
+        "jsCode": "// Write one deterministic Markdown report for a durably committed alert.\n// The dashboard reads SQLite; this file remains the local LLM/Obsidian corpus.\nconst fs = require('fs');\nconst path = require('path');\nconst reportDir = '/soc-alerts';\n\nfunction firstValue(...values) {\n  for (const value of values) {\n    if (value !== undefined && value !== null && value !== '') return value;\n  }\n  return null;\n}\n\nfunction localTimestamp() {\n  const date = new Date();\n  const pad = (value, length = 2) => String(value).padStart(length, '0');\n  const offsetMinutes = -date.getTimezoneOffset();\n  const sign = offsetMinutes >= 0 ? '+' : '-';\n  const absolute = Math.abs(offsetMinutes);\n  const offset = `${sign}${pad(Math.floor(absolute / 60))}:${pad(absolute % 60)}`;\n  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}  ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}${offset}`;\n}\n\nfunction safePart(value, limit = 90) {\n  const cleaned = String(value || 'unknown')\n    .replace(/[^A-Za-z0-9_.-]+/g, '-')\n    .replace(/^-+|-+$/g, '');\n  return (cleaned || 'unknown').slice(0, limit);\n}\n\nfunction stableReportPart(item) {\n  const value = String(item.report_job_id || item.alert_id || 'alert');\n  // Security Onion IDs share long prefixes; retain the unique tail when a\n  // bounded filename is needed.\n  return safePart(value.length > 72 ? value.slice(-72) : value, 72);\n}\n\nfunction md(value) {\n  if (Array.isArray(value)) return value.join(', ');\n  if (value && typeof value === 'object') return JSON.stringify(value);\n  return value === undefined || value === null || value === '' ? 'n/a' : String(value);\n}\n\nfunction cell(value) {\n  return md(value).replace(/\\|/g, '\\\\|').replace(/\\r?\\n/g, ' ');\n}\n\nfunction table(rows) {\n  const out = ['| Field | Value |', '| --- | --- |'];\n  for (const [key, value] of rows) out.push(`| ${cell(key)} | ${cell(value)} |`);\n  return out.join('\\n');\n}\n\nfunction renderReport(item) {\n  const originalAlert = item.original_alert || {};\n  const alertId = firstValue(item.alert_id, originalAlert.alert_id);\n  const ruleName = firstValue(item.rule_name, originalAlert.rule_name, 'Security Onion Alert');\n  const level = String(firstValue(item.triage_level, item.severity_label, originalAlert.severity_label, 'unknown')).toUpperCase();\n  const score = item.triage_score;\n  const routing = firstValue(item.routing, 'unknown');\n  const sourceIp = firstValue(item.source_ip, originalAlert.source?.ip);\n  const sourcePort = firstValue(originalAlert.source?.port);\n  const destIp = firstValue(item.destination_ip, originalAlert.destination?.ip);\n  const destPort = firstValue(originalAlert.destination?.port);\n  const direction = item.traffic_direction;\n  const reasons = Array.isArray(item.triage_reasons) && item.triage_reasons.length\n    ? item.triage_reasons\n    : ['No scoring reasons returned by alert-store.'];\n  // The commit timestamp is stable across retries, so rewriting the same job\n  // produces byte-for-byte equivalent report metadata.\n  const generatedAt = firstValue(item.committed_at, localTimestamp());\n\n  const lines = [];\n  lines.push('---');\n  lines.push('type: soc-alert-report');\n  lines.push(`generated_at: ${generatedAt}`);\n  lines.push(`alert_id: ${JSON.stringify(alertId || '')}`);\n  lines.push(`triage_level: ${JSON.stringify(level.toLowerCase())}`);\n  lines.push(`triage_score: ${score ?? ''}`);\n  lines.push(`status: ${JSON.stringify(item.status || '')}`);\n  lines.push(`filter_status: ${JSON.stringify(item.filter_status || '')}`);\n  lines.push(`source_ip: ${JSON.stringify(sourceIp || '')}`);\n  lines.push(`destination_ip: ${JSON.stringify(destIp || '')}`);\n  lines.push('tags:');\n  lines.push('  - security-onion');\n  lines.push('  - soc-alert');\n  lines.push('  - n8n-generated');\n  lines.push('---');\n  lines.push('');\n  lines.push(`# [${level}] ${ruleName}`);\n  lines.push('');\n  lines.push(`- **Generated:** ${generatedAt}`);\n  lines.push(`- **Alert ID:** ${md(alertId)}`);\n  lines.push(`- **Workflow status:** ${md(item.status)}`);\n  lines.push(`- **Filter status:** ${md(item.filter_status)}`);\n  lines.push(`- **Route:** ${md(routing)}`);\n  lines.push(`- **Score:** ${md(score)}`);\n  lines.push(`- **Direction:** ${md(direction)}`);\n  lines.push(`- **Traffic:** ${md(sourceIp)}${sourcePort ? ':' + sourcePort : ''} -> ${md(destIp)}${destPort ? ':' + destPort : ''}`);\n  lines.push('');\n  lines.push('## Triage Reasons');\n  lines.push('');\n  for (const reason of reasons) lines.push(`- [ ] ${md(reason)}`);\n  lines.push('');\n  lines.push('## Alert Summary');\n  lines.push('');\n  lines.push(table([\n    ['Rule name', ruleName],\n    ['Event dataset', item.event_dataset],\n    ['Severity', item.severity],\n    ['Severity label', item.severity_label],\n    ['Rule category', originalAlert.rule_category],\n    ['Timestamp', originalAlert.timestamp],\n    ['First seen', item.first_seen],\n    ['Last seen', item.last_seen],\n    ['Seen count', item.seen_count],\n    ['Filter status', item.filter_status],\n    ['Filter reason', item.filter_reason],\n    ['Suppression rule', item.suppression_rule],\n    ['Telegram notification', item.notification_status],\n  ]));\n  lines.push('');\n  lines.push('## Analyst Notes');\n  lines.push('');\n  lines.push('- [ ] Confirm whether source and destination are expected for this VLAN or host role.');\n  lines.push('- [ ] Pivot in Security Onion for related source, destination, DNS, HTTP, TLS, and connection events.');\n  lines.push('- [ ] Decide whether this should become a tuning rule, an escalation, or a documented benign pattern.');\n  lines.push('');\n  lines.push('## Raw Alert');\n  lines.push('');\n  lines.push('```json');\n  lines.push(JSON.stringify(originalAlert, null, 2));\n  lines.push('```');\n  lines.push('');\n  return lines.join('\\n');\n}\n\nif (!$json.should_write_report) {\n  return [{json: {\n    ...$json,\n    stage: 'write-soc-markdown-report',\n    report_written: false,\n    report_path: null,\n    report_filename: null,\n  }}];\n}\n\nfs.mkdirSync(reportDir, {recursive: true});\nconst filenameTimestamp = String(firstValue($json.committed_at, localTimestamp()))\n  .replace(/[-:]/g, '')\n  .replace(/\\s+/, '-')\n  .replace('Z', 'Z');\nconst filename = `${filenameTimestamp}-${safePart($json.triage_level)}-${stableReportPart($json)}-${safePart($json.rule_name)}.md`;\nconst fullPath = path.join(reportDir, filename);\nconst temporaryPath = `${fullPath}.tmp`;\nfs.writeFileSync(temporaryPath, renderReport($json), 'utf8');\nfs.renameSync(temporaryPath, fullPath);\n\nreturn [{json: {\n  ...$json,\n  stage: 'write-soc-markdown-report',\n  report_written: true,\n  report_path: fullPath,\n  report_filename: filename,\n}}];"
       },
       "id": "soc-relay-report",
       "name": "Write SOC Markdown Report",
@@ -87,6 +87,49 @@
       "position": [
         520,
         200
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "onion-sentinel-committed-alert",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "onion-sentinel-committed-alert-webhook",
+      "name": "Committed Alert Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        800,
+        520
+      ],
+      "webhookId": "onion-sentinel-committed-alert"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Authenticate post-commit work before n8n touches the Markdown corpus.\n// alert-store owns retries, so rejected payloads return a structured result\n// that leaves the durable job pending instead of silently losing work.\nconst expectedToken = String($vars.RELAY_WEBHOOK_TOKEN || '').trim();\nconst headers = $json.headers || {};\nconst body = $json.body || $json;\nconst suppliedToken = String(headers['x-relay-token'] || headers['X-Relay-Token'] || '').trim();\nconst errors = [];\n\nif (!expectedToken || expectedToken === 'REPLACE_WITH_RELAY_TOKEN') {\n  errors.push('RELAY_WEBHOOK_TOKEN is not configured in n8n');\n} else if (suppliedToken !== expectedToken) {\n  errors.push('invalid or missing X-Relay-Token');\n}\nif (!body || typeof body !== 'object' || Array.isArray(body)) {\n  errors.push('body must be a JSON object');\n} else {\n  if (!body.alert_id) errors.push('missing alert_id');\n  if (!body.report_job_id) errors.push('missing report_job_id');\n  if (!body.committed_at) errors.push('missing committed_at');\n  if (!body.original_alert || typeof body.original_alert !== 'object' || Array.isArray(body.original_alert)) {\n    errors.push('missing original_alert object');\n  }\n  if (body.should_write_report !== true) errors.push('should_write_report must be true');\n}\n\nif (errors.length) {\n  return [{json: {\n    ok: false,\n    status: 'rejected',\n    stage: 'validate-committed-alert',\n    reason: errors.join('; '),\n    alert_id: body?.alert_id || null,\n    report_written: false,\n  }}];\n}\n\nreturn [{json: {\n  ...body,\n  ok: true,\n  status: body.status || 'accepted',\n  stage: 'validate-committed-alert',\n}}];"
+      },
+      "id": "validate-committed-alert",
+      "name": "Validate Committed Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1080,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The legacy/rollback webhook still validates and commits alerts through\n// alert-store, but Markdown generation is intentionally deferred to the\n// durable post-commit queue. This response keeps relay acknowledgement fast.\nreturn [{json: {\n  ...$json,\n  stage: 'acknowledge-durable-alert-commit',\n  report_written: false,\n  report_deferred_to_post_commit: $json.status === 'accepted',\n}}];"
+      },
+      "id": "acknowledge-durable-alert-commit",
+      "name": "Acknowledge Durable Alert Commit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        360
       ]
     }
   ],
@@ -128,7 +171,7 @@
       "main": [
         [
           {
-            "node": "Write SOC Markdown Report",
+            "node": "Acknowledge Durable Alert Commit",
             "type": "main",
             "index": 0
           }
@@ -140,6 +183,28 @@
         [
           {
             "node": "Store Score And Filter Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Committed Alert Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Committed Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Committed Alert": {
+      "main": [
+        [
+          {
+            "node": "Write SOC Markdown Report",
             "type": "main",
             "index": 0
           }

@@ -62,5 +62,23 @@ Expected output shape:
       "reason": "string"
     }
   ],
-  "evidence_gaps": ["string"]
+  "evidence_gaps": ["string"],
+  "memory_candidates": [
+    {
+      "scope": "agent|shared",
+      "category": "tuning_decision|detection_pattern|benign_pattern|evidence_gap|tooling_lesson",
+      "finding": "reusable engineering lesson",
+      "use_when": "future detection conditions where this lesson applies",
+      "evidence_basis": ["supplied evidence"],
+      "confidence": "medium|high",
+      "tags": ["retrieval tag"],
+      "ttl_days": 180
+    }
+  ]
 }
+
+Memory writeback policy:
+- Store reusable tuning rationale, validation results, rollback lessons, and detection gaps; do not store a review transcript.
+- Never store secrets, credentials, packet payloads, raw alerts, or live alert IDs.
+- Shared candidates require high confidence and clear usefulness to multiple agent roles.
+- Return an empty `memory_candidates` array when no durable lesson was established.

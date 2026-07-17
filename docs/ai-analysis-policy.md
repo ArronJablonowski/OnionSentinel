@@ -129,11 +129,60 @@ As of 2026-07-02, prompt packages also include `grouped_alert_context` with the 
   skipped sources, and provider errors. Raw provider API responses are not
   included in prompt packages.
 - Related alerts from SQLite.
+- Deterministic cross-alert correlation candidates from indexed observables and
+  persisted correlation history.
 - Recent Telegram notification context.
 - Latest daily SOC rollup excerpt.
 - Parsed PCAP evidence summaries when available.
 - Local-first/hosted-escalation policy.
 - Strict JSON response schema.
+
+## Cross-Alert Correlation Context
+
+The SOC Analyst does not search every historical report or send the entire
+alert corpus to the model. Alert-store maintains a bounded observable index for
+IP addresses, domains, URLs, hashes, CVEs, ports, rules, datasets, protocols,
+hosts, and users. The prompt builder retrieves candidates that share indexed
+facts with the selected stable alert group, adds a bounded temporal-proximity
+score, and returns only the highest-scoring candidates.
+
+High-specificity evidence such as hashes, URLs, domains, hosts, users, and IPs
+receives more weight than common ports, protocols, datasets, or rule names.
+Port/protocol-only overlap does not meet the default candidate threshold. This
+reduces false correlation between unrelated HTTPS, DNS, and other common
+traffic. Default controls are:
+
+```text
+--correlation-limit 8
+--correlation-min-score 15
+```
+
+Each candidate can include its latest prior AI assessment. Prior model output
+is explicitly labeled as a hypothesis, not evidence. The current model must
+confirm or contradict it using the current alert, timeline, enrichment, PCAP,
+analyst state, notes, and shared deterministic observables. A common ASN, CDN,
+public resolver, rule, port, or protocol alone is never sufficient evidence of
+an attack chain.
+
+After a successful model run, `run-local-ai-analysis.py` writes the normal
+Markdown/JSON artifacts and posts a compact result to alert-store:
+
+```text
+POST http://127.0.0.1:8787/analysis/result
+```
+
+Alert-store is the sole SQLite writer. It upserts analysis history by
+`analysis_id` and records deterministic candidate edges plus the model's
+assessment. If alert-store is temporarily unavailable after inference, the
+runner writes a bounded pending payload under:
+
+```text
+$HOME/n8n-local/soc-alerts/llm-analysis-logs/analysis-index-pending
+```
+
+The runner retries those payloads before the next inference. This avoids
+repeating an expensive model call merely because the durable index endpoint was
+temporarily unavailable.
 
 ## Response Contract
 
@@ -158,9 +207,22 @@ The model must return valid JSON with these fields:
   "hosted_second_opinion_recommended": false,
   "tuning_recommendation": "none|suppress|drop|raise_score|lower_score|needs_more_data",
   "tuning_reason": "string",
-  "recommended_tuning_actions": ["string"]
+  "recommended_tuning_actions": ["string"],
+  "correlation_assessment": {
+    "correlation_found": false,
+    "confidence": "low|medium|high",
+    "related_groups": [{"group_id": "stable group id", "reason": "string"}],
+    "shared_evidence": ["string"],
+    "contradicting_evidence": ["string"],
+    "attack_chain_hypothesis": "string",
+    "recommended_pivots": ["string"]
+  }
 }
 ```
+
+The dashboard renders this object as `Correlation Assessment` inside the
+existing `AI Analysis Output` section. It does not add or reorder a Detailed
+Alert Report top-level section.
 
 The BLUF fields use SOC detection outcome taxonomy:
 
@@ -347,12 +409,67 @@ $HOME/n8n-local/soc-alerts/agent-memory/threat-hunter-memory.md
 $HOME/n8n-local/soc-alerts/agent-memory/shared-agent-memory.md
 ```
 
-The Settings page shows each role memory path plus the shared memory path in
-the collapsed agent row. These files are durable Markdown storage for previous
-findings, known patterns, learned information, and future agent workflow writes.
-SOC Analyst prompt packages include both the SOC Analyst role memory and shared
-memory as bounded model evidence. Current automation does not yet append agent
-findings to these files automatically.
+The Settings page makes each displayed Prompt path open and focus its matching
+editable agent prompt panel. It shows each role memory path plus the shared memory path in
+the collapsed agent row. Selecting `Memory` or `Shared` opens the current live
+Markdown in a non-editable viewer. The portal accepts only a logical allowlisted
+memory key, rejects path input and symlink escapes, and limits a displayed file
+to 256 KiB. There is intentionally no memory write API in Settings; managed
+agent-memory tooling remains the only write boundary. These files are durable
+Markdown storage for previous findings, known patterns, and learned information.
+They do not replace the full SQLite analysis history or Markdown report corpus.
+
+SOC Analyst prompt packages use relevance retrieval rather than copying the
+first bytes of each file. Current alert, grouped timeline, enrichment, parsed
+PCAP, analyst state, and bounded correlation evidence supply retrieval terms.
+The package includes at most a small bounded set of matching role/shared records
+plus bounded operator-authored notes. Memory remains context, not proof, and
+current evidence wins when they conflict.
+
+After a successful SOC Analyst run, the model may return `memory_candidates`.
+Deterministic code rejects malformed, low-confidence, secret-like, ungrounded,
+or oversized candidates before writing. Role memory accepts reusable medium or
+high-confidence lessons. Shared memory requires high confidence and explicit
+cross-role value. Accepted records are labeled `model-observed`, include
+evidence basis, retrieval conditions, provenance, confidence, reinforcement
+count, and expiry, and are written atomically under a file lock. Equivalent
+records reinforce one entry instead of growing the file with duplicates.
+
+Operator notes remain outside the delimited managed section and are preserved
+on every write. Managed role files retain at most 200 records and shared memory
+at most 300; expired model observations are removed during later writes.
+Secrets, credentials, raw packet payloads, live alert IDs, and report
+transcripts must never be stored in memory.
+
+`$HOME/n8n-local/bin/manage-agent-memory.py` provides the same query and
+writeback contract for Incident Responder, SIEM Engineer, Cyber Threat Intel,
+and Threat Hunter workflows. Those workflows are still manual/planned; the
+adapter is the required memory boundary when they become executable.
+
+Agent harnesses must call `manage-agent-memory.py <role> prepare` before model
+reasoning. That operation returns the role system prompt, bounded relevant role
+memory, bounded relevant shared memory, canonical paths, and writeback contract
+as one execution package. Keeping those inputs together prevents an execution
+path from silently omitting memory. After reasoning, the harness passes the
+response through the adapter's `writeback` operation.
+
+All five roles are defined in one canonical registry consumed by the query,
+writeback, tests, and deployment verification paths. Run the following read-only
+check after deployment or prompt maintenance:
+
+```bash
+$HOME/n8n-local/bin/verify-agent-memory.py
+```
+
+The command exits nonzero if any agent prompt, individual memory file, shared
+memory file, managed Markdown section, permission, or retrieval contract is
+missing. This prevents a newly added or renamed agent from silently bypassing
+memory.
+
+The Mac Studio installer invokes the verifier with `--initialize`. Initialization
+preserves all operator-authored Markdown and only adds the bounded managed
+section required for deterministic writeback. It is idempotent and refuses to
+rewrite a partially malformed managed section.
 
 Manual run using the newest prompt package:
 

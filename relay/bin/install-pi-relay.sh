@@ -27,6 +27,7 @@ install -o root -g soalert -m 0750 -d /etc/so-alert-relay
 
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay.py" /opt/so-alert-relay/app/relay.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/alert_outbox.py" /opt/so-alert-relay/app/alert_outbox.py
+install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/alert_delivery.py" /opt/so-alert-relay/app/alert_delivery.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay_health_wrapper.py" /opt/so-alert-relay/app/relay_health_wrapper.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/storage_health.py" /opt/so-alert-relay/app/storage_health.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/config/config.example.json" /opt/so-alert-relay/app/config.json
@@ -66,8 +67,10 @@ Required manual steps:
 1. Put the Security Onion private key at /opt/so-alert-relay/keys/so-ai-relay_ed25519.
 2. chown soalert:soalert /opt/so-alert-relay/keys/so-ai-relay_ed25519
 3. chmod 0600 /opt/so-alert-relay/keys/so-ai-relay_ed25519
-4. Edit /etc/so-alert-relay/relay.env and replace placeholder tokens.
-5. Verify /opt/so-alert-relay/app/config.json host/path values.
+4. Create the dedicated Mac alert-intake key and verified macstudio_known_hosts pin.
+5. Install its forced-command public key on the Mac Studio.
+6. Edit /etc/so-alert-relay/relay.env and replace placeholder tokens.
+7. Verify /opt/so-alert-relay/app/config.json host/path values, then enable alert_ingest.
 
 Test:
   sudo -u soalert /usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/so-alert-relay/app/config.json --pull-once

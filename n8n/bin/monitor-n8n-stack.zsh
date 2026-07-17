@@ -120,7 +120,7 @@ else
   write_status failed "$detail"
   if [[ "$previous" != failed ]]; then
     # First failure notification only; repeated failures stay in logs/state.
-    send_telegram "[FAILURE] Mac Studio n8n stack failed at $(date -u '+%Y-%m-%d  %H:%M:%SZ')\n$detail" >/dev/null || true
+    send_telegram "[FAILURE] Mac Studio n8n stack failed at $(date -u '+%Y-%m-%d  %H:%M:%SZ')"$'\n'"$detail" >/dev/null || true
   fi
   echo "health_status=failed detail=$detail"
   exit 1

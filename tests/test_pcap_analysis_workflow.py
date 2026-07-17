@@ -35,8 +35,17 @@ class PcapAnalysisWorkflowTest(unittest.TestCase):
         self.worker = load_module("process_pcap_evidence", PCAP_WORKER_PATH)
         self.prompt_builder = load_module("build_ai_investigation_prompt", PROMPT_BUILDER_PATH)
         self.ai_runner = load_module("run_local_ai_analysis", AI_RUNNER_PATH)
+        # Archive safety tests should be deterministic even when the host that
+        # runs pytest is above the production new-work disk threshold.
+        self.capacity_patch = mock.patch.object(
+            self.worker,
+            "require_runtime_capacity",
+            return_value={"used_percent": 10.0, "projected_used_percent": 10.0},
+        )
+        self.capacity_patch.start()
 
     def tearDown(self) -> None:
+        self.capacity_patch.stop()
         self.tmp.cleanup()
 
     def test_ai_runner_extracts_first_complete_json_object(self) -> None:

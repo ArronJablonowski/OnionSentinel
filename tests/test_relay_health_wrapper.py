@@ -121,6 +121,22 @@ class RelayHealthWrapperTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn('"operational_failures": 1', result.stderr)
 
+    def test_pcap_operational_failure_preserves_root_cause(self) -> None:
+        error = '{"event":"pcap_artifact_upload_failed","error":"rsync connection reset"}\n'
+        with mock.patch.object(
+            self.wrapper,
+            "run_shell_command",
+            return_value=completed(
+                0,
+                stdout='{"ok": true, "processed": 1, "operational_failures": 1}\n',
+                stderr=error,
+            ),
+        ):
+            result = self.wrapper.run_pcap_broker()
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("root_cause=rsync connection reset", result.stderr)
+
     def test_expected_no_packet_outcome_does_not_fail_component(self) -> None:
         with mock.patch.object(
             self.wrapper,

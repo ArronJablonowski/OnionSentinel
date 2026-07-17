@@ -17,6 +17,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   alert-store:
     # Docker-network compatibility proxy only. The real alert-store runs as a
@@ -37,6 +42,11 @@ services:
       - /tmp:size=16m,mode=1777
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   n8n:
     # n8n hosts the webhook workflow and forwards accepted alerts to alert-store
@@ -82,3 +92,8 @@ services:
       # Hermes and Obsidian see the reports without Docker needing a protected
       # Documents-folder mount.
       - ./soc-alerts:/soc-alerts
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

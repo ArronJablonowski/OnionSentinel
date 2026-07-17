@@ -1,34 +1,57 @@
 #!/usr/bin/env python3
-"""Bounded PCAP extraction wrapper for Onion Sentinel.
+"""Restricted, read-only PCAP stream wrapper for Onion Sentinel.
 
-Reads one JSON request from stdin, validates network tuple and time bounds, and
-writes a tar artifact containing tcpdump-filtered pcap parts under
-/nsm/pcapout/onion-sentinel. The wrapper prints metadata JSON only; packet
-contents never go to stdout/stderr.
+The wrapper emits one tuple-filtered capture stream to stdout at a time. The
+relay writes that stream directly to its external SSD; this process never
+creates an Onion Sentinel archive or extraction directory on Security Onion.
+Source reads are deliberately rate-limited and run at idle I/O priority so an
+investigation cannot compete aggressively with live packet capture.
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import re
-import resource
 import shutil
 import subprocess
 import sys
-import tarfile
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
 PCAP_ROOT = Path(os.environ.get("ONION_SENTINEL_PCAP_ROOT", "/nsm/suripcap"))
-OUTPUT_ROOT = Path(os.environ.get("ONION_SENTINEL_PCAP_OUTPUT_ROOT", "/nsm/pcapout/onion-sentinel"))
 MAX_WINDOW_SECONDS = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_WINDOW_SECONDS", "300"))
 MAX_LOOKBACK_HOURS = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_LOOKBACK_HOURS", "24"))
 MAX_CANDIDATE_FILES = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_CANDIDATE_FILES", "80"))
-MAX_ARTIFACT_BYTES = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_ARTIFACT_BYTES", str(32 * 1024 * 1024 * 1024)))
-TRANSFER_GROUP = os.environ.get("ONION_SENTINEL_PCAP_TRANSFER_GROUP", "so-ai-relay-pcap-rsync")
+MAX_STREAM_CANDIDATES = int(os.environ.get("ONION_SENTINEL_PCAP_MAX_STREAM_CANDIDATES", "12"))
+MAX_STREAM_SOURCE_BYTES = int(
+    os.environ.get("ONION_SENTINEL_PCAP_MAX_STREAM_SOURCE_BYTES", str(1100 * 1024 * 1024))
+)
+MAX_SOURCE_READ_BPS = max(
+    1024 * 1024,
+    min(32 * 1024 * 1024, int(os.environ.get("ONION_SENTINEL_PCAP_MAX_SOURCE_READ_BPS", str(4 * 1024 * 1024)))),
+)
+STREAM_LOCK = Path(os.environ.get("ONION_SENTINEL_PCAP_STREAM_LOCK", "/run/onion-sentinel-pcap-stream.lock"))
+STREAM_TOKEN_KEY_PATH = Path(
+    os.environ.get("ONION_SENTINEL_PCAP_STREAM_TOKEN_KEY", "/etc/onion-sentinel/pcap-stream-token.key")
+)
+ZEEK_CAPTURE_LOSS_LOG = Path(
+    os.environ.get("ONION_SENTINEL_ZEEK_CAPTURE_LOSS_LOG", "/nsm/zeek/logs/current/capture_loss.log")
+)
+ZEEK_PACKET_LOSS_LOG = Path(
+    os.environ.get("ONION_SENTINEL_ZEEK_PACKET_LOSS_LOG", "/nsm/zeek/logs/packetloss.log")
+)
+SURICATA_STATS_LOG = Path(
+    os.environ.get("ONION_SENTINEL_SURICATA_STATS_LOG", "/opt/so/log/suricata/stats.log")
+)
+
+
 def fail(reason: str, code: int = 1, diagnostics: dict | None = None) -> None:
     """Return a bounded failure record without exposing packet contents."""
     payload = {"ok": False, "status": "failed", "error": reason}
@@ -88,6 +111,18 @@ def bpf_for_request(req: dict, vlan: bool = False) -> str:
         parts.append(f"port {dst_port}")
     bpf = " and ".join(parts)
     return f"vlan and {bpf}" if vlan else bpf
+
+
+def stream_bpf_for_request(req: dict) -> str:
+    """Match tagged and untagged packets in one source-file scan.
+
+    Earlier versions ran the same Security Onion rotation through tcpdump twice,
+    once per encapsulation. Combining the filters halves worst-case source reads
+    without reducing tuple coverage.
+    """
+    plain = bpf_for_request(req)
+    tagged = bpf_for_request(req, vlan=True)
+    return f"(({tagged}) or ({plain}))"
 
 
 def requested_capture_file(req: dict) -> Path | None:
@@ -163,108 +198,522 @@ def candidate_files(start: datetime, end: datetime, req: dict | None = None) -> 
     return candidates
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def stream_candidate_files(start: datetime, end: datetime, req: dict | None = None) -> list[Path]:
+    """Select only rotations that can overlap the bounded request window.
 
-
-def output_child(path: Path) -> Path:
-    resolved = path.resolve(strict=False)
-    output_root = OUTPUT_ROOT.resolve(strict=False)
-    if not str(resolved).startswith(str(output_root) + os.sep):
-        fail("artifact path escaped output root")
-    return resolved
-
-
-def prepare_output_root() -> None:
-    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-    try:
-        shutil.chown(OUTPUT_ROOT, group=TRANSFER_GROUP)
-    except (LookupError, PermissionError, OSError):
-        # Export can still run in isolated test/dev environments that have not
-        # created the transfer group. Production installs should create it.
-        pass
-    OUTPUT_ROOT.chmod(0o750)
-
-
-def reusable_artifact_payload(request_id: str) -> dict | None:
-    """Return metadata for a complete prior export without touching rolling PCAP.
-
-    Relay retries must survive source-PCAP retention. Only regular, bounded tar
-    files containing the wrapper's flat `part-*.pcap` members are reusable.
+    Security Onion filenames encode the capture start epoch. Within each
+    sensor directory, the following file's epoch provides the best available
+    end boundary for a rotation. Including the predecessor handles packets at
+    the beginning of the window without pulling dozens of unrelated files.
     """
-    artifact = OUTPUT_ROOT / f"{request_id}.tar"
-    if not artifact.is_file() or artifact.is_symlink():
-        return None
-    size = artifact.stat().st_size
-    if size <= 0 or size > MAX_ARTIFACT_BYTES:
-        return None
+    # Suricata records the exact full-packet-capture rotation that contained an
+    # alert. Trust that validated hint while it remains in retention so the
+    # common path reads one file instead of enumerating and scanning every
+    # worker's overlapping rotation.
+    if req:
+        preferred = requested_capture_file(req)
+        if preferred and preferred.exists():
+            return [preferred]
+
+    find_cmd = [
+        "find",
+        str(PCAP_ROOT),
+        "-type",
+        "f",
+        "-name",
+        "so-pcap.*",
+        "-printf",
+        "%f\t%p\n",
+    ]
+    result = subprocess.run(find_cmd, check=False, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        fail("failed to enumerate pcap files")
+
+    by_parent: dict[Path, list[tuple[int, Path]]] = {}
+    for line in result.stdout.splitlines():
+        try:
+            name, raw_path = line.split("\t", 1)
+        except ValueError:
+            continue
+        epoch = capture_epoch(Path(name))
+        if epoch is None:
+            continue
+        path = Path(raw_path)
+        by_parent.setdefault(path.parent, []).append((epoch, path))
+
+    start_epoch = int(start.timestamp())
+    end_epoch = int(end.timestamp())
+    overlap: list[tuple[int, Path]] = []
+    for rotations in by_parent.values():
+        rotations.sort(key=lambda item: item[0])
+        for index, (epoch, path) in enumerate(rotations):
+            next_epoch = rotations[index + 1][0] if index + 1 < len(rotations) else epoch + 3600
+            if epoch <= end_epoch + 60 and next_epoch >= start_epoch - 60:
+                overlap.append((epoch, path))
+
+    overlap.sort(key=lambda item: (abs(item[0] - end_epoch), -item[0], str(item[1])))
+    candidates = [path for _, path in overlap[: max(1, MAX_STREAM_CANDIDATES)]]
+    return candidates
+
+
+def _tail_bytes(path: Path, maximum: int = 128 * 1024) -> bytes:
+    """Read a bounded file tail without loading a full operational log."""
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        handle.seek(max(0, size - maximum), os.SEEK_SET)
+        data = handle.read(maximum)
+    return data
+
+
+def zeek_capture_loss_status(now_epoch: float | None = None) -> dict:
+    """Summarize only the most recent Zeek capture-loss worker interval."""
     try:
-        with tarfile.open(artifact, "r") as archive:
-            members = [member for member in archive.getmembers() if member.isfile()]
-            if not members:
-                return None
-            for member in members:
-                name = Path(member.name)
-                if name.name != member.name or not re.fullmatch(r"part-[0-9]{3}\.pcap", member.name):
-                    return None
-    except (OSError, tarfile.TarError):
-        return None
+        records = []
+        for raw_line in _tail_bytes(ZEEK_CAPTURE_LOSS_LOG).decode("utf-8", errors="replace").splitlines():
+            try:
+                record = json.loads(raw_line)
+                observed = float(record.get("ts"))
+                lost = max(0.0, float(record.get("percent_lost")))
+            except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            records.append((observed, lost))
+    except OSError:
+        return {"zeek_capture_loss_available": False}
+    if not records:
+        return {"zeek_capture_loss_available": False}
+
+    latest_epoch = max(observed for observed, _ in records)
+    latest_interval = [lost for observed, lost in records if latest_epoch - observed <= 10.0]
+    current_epoch = time.time() if now_epoch is None else float(now_epoch)
     return {
-        "ok": True,
-        "status": "fulfilled",
-        "request_id": request_id,
-        "artifact_path": str(artifact),
-        "artifact_sha256": sha256_file(artifact),
-        "artifact_size_bytes": size,
-        "part_count": len(members),
-        "reused_existing_artifact": True,
+        "zeek_capture_loss_available": True,
+        "zeek_capture_loss_max_percent": round(max(latest_interval), 4),
+        "zeek_capture_loss_avg_percent": round(sum(latest_interval) / len(latest_interval), 4),
+        "zeek_capture_loss_sample_count": len(latest_interval),
+        "zeek_capture_loss_observed_at": datetime.fromtimestamp(latest_epoch, timezone.utc).strftime(
+            "%Y-%m-%d  %H:%M:%SZ"
+        ),
+        "zeek_capture_loss_age_seconds": max(0, int(current_epoch - latest_epoch)),
     }
 
 
-def limit_output_file_size(max_bytes: int) -> None:
-    """Prevent tcpdump from filling Security Onion export storage on a dense flow."""
-    safe_limit = max(1, int(max_bytes))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (safe_limit, safe_limit))
+def zeek_packet_loss_status(now_epoch: float | None = None) -> dict:
+    """Calculate Zeek's local AF_PACKET loss over the latest sample interval."""
+    pattern = re.compile(r"rcvd:\s*(\d+)\s+dropped:\s*(\d+)\s+total:\s*(\d+)")
+    try:
+        snapshots = [
+            tuple(int(value) for value in match.groups())
+            for match in pattern.finditer(_tail_bytes(ZEEK_PACKET_LOSS_LOG).decode("utf-8", errors="replace"))
+        ]
+        observed_epoch = ZEEK_PACKET_LOSS_LOG.stat().st_mtime
+    except OSError:
+        return {"zeek_packet_loss_available": False}
+    if len(snapshots) < 2:
+        return {"zeek_packet_loss_available": False}
+
+    previous_received, previous_dropped, previous_total = snapshots[-2]
+    current_received, current_dropped, current_total = snapshots[-1]
+    counters_reset = current_total < previous_total or current_dropped < previous_dropped
+    if counters_reset:
+        received_delta = current_received
+        dropped_delta = current_dropped
+        total_delta = current_total
+    else:
+        received_delta = max(0, current_received - previous_received)
+        dropped_delta = max(0, current_dropped - previous_dropped)
+        total_delta = max(0, current_total - previous_total)
+    percent = (dropped_delta / total_delta) * 100.0 if total_delta else 0.0
+    current_epoch = time.time() if now_epoch is None else float(now_epoch)
+    return {
+        "zeek_packet_loss_available": True,
+        "zeek_packet_loss_percent": round(percent, 6),
+        "zeek_packet_loss_received_delta": received_delta,
+        "zeek_packet_loss_dropped_delta": dropped_delta,
+        "zeek_packet_loss_total_delta": total_delta,
+        "zeek_packet_loss_observed_at": datetime.fromtimestamp(observed_epoch, timezone.utc).strftime(
+            "%Y-%m-%d  %H:%M:%SZ"
+        ),
+        "zeek_packet_loss_age_seconds": max(0, int(current_epoch - observed_epoch)),
+    }
 
 
-def remove_request_outputs(request_id: str) -> list[str]:
-    """Remove only one request's tar and work directory."""
-    artifact = output_child(OUTPUT_ROOT / f"{request_id}.tar")
-    work_dir = output_child(OUTPUT_ROOT / request_id)
-    removed: list[str] = []
+def suricata_packet_loss_status(now_epoch: float | None = None) -> dict:
+    """Calculate Suricata AF_PACKET loss from its two latest stats blocks."""
+    packet_pattern = re.compile(r"^capture\.kernel_packets\s+\|[^\n]*\|\s*(\d+)\s*$", re.MULTILINE)
+    drop_pattern = re.compile(r"^capture\.kernel_drops\s+\|[^\n]*\|\s*(\d+)\s*$", re.MULTILINE)
+    try:
+        text = _tail_bytes(SURICATA_STATS_LOG, maximum=512 * 1024).decode("utf-8", errors="replace")
+        packet_values = [int(value) for value in packet_pattern.findall(text)]
+        drop_values = [int(value) for value in drop_pattern.findall(text)]
+        observed_epoch = SURICATA_STATS_LOG.stat().st_mtime
+    except OSError:
+        return {"suricata_packet_loss_available": False}
+    if len(packet_values) < 2 or len(drop_values) < 2:
+        return {"suricata_packet_loss_available": False}
 
-    if artifact.exists():
-        if not artifact.is_file():
-            fail("artifact cleanup target is not a file")
-        artifact.unlink()
-        removed.append(str(artifact))
-    if work_dir.exists():
-        if not work_dir.is_dir():
-            fail("artifact work target is not a directory")
-        shutil.rmtree(work_dir)
-        removed.append(str(work_dir))
-    return removed
+    counters_reset = packet_values[-1] < packet_values[-2] or drop_values[-1] < drop_values[-2]
+    packets_delta = packet_values[-1] if counters_reset else max(0, packet_values[-1] - packet_values[-2])
+    dropped_delta = drop_values[-1] if counters_reset else max(0, drop_values[-1] - drop_values[-2])
+    total_delta = packets_delta + dropped_delta
+    percent = (dropped_delta / total_delta) * 100.0 if total_delta else 0.0
+    current_epoch = time.time() if now_epoch is None else float(now_epoch)
+    return {
+        "suricata_packet_loss_available": True,
+        "suricata_packet_loss_percent": round(percent, 6),
+        "suricata_packet_loss_packets_delta": packets_delta,
+        "suricata_packet_loss_dropped_delta": dropped_delta,
+        "suricata_packet_loss_observed_at": datetime.fromtimestamp(observed_epoch, timezone.utc).strftime(
+            "%Y-%m-%d  %H:%M:%SZ"
+        ),
+        "suricata_packet_loss_age_seconds": max(0, int(current_epoch - observed_epoch)),
+    }
 
 
-def cleanup_artifact(req: dict) -> int:
+def pcap_root_status() -> dict:
+    """Return read-only capture telemetry without gating valid reads."""
+    capture_loss = zeek_capture_loss_status()
+    zeek_packet_loss = zeek_packet_loss_status()
+    suricata_packet_loss = suricata_packet_loss_status()
+    try:
+        usage = shutil.disk_usage(PCAP_ROOT)
+    except OSError:
+        return {
+            "storage_telemetry_available": False,
+            "read_only_export": True,
+            "disk_read_gate_enabled": False,
+            **capture_loss,
+            **zeek_packet_loss,
+            **suricata_packet_loss,
+        }
+    used_percent = (usage.used / usage.total) * 100 if usage.total else 100.0
+    return {
+        "storage_telemetry_available": True,
+        "pcap_root_used_percent": round(used_percent, 1),
+        "pcap_root_free_bytes": usage.free,
+        "read_only_export": True,
+        "disk_read_gate_enabled": False,
+        "max_source_read_bytes_per_second": MAX_SOURCE_READ_BPS,
+        **capture_loss,
+        **zeek_packet_loss,
+        **suricata_packet_loss,
+    }
+
+
+def request_window(req: dict) -> tuple[datetime, datetime]:
+    """Return the bounded alert window used by both legacy and stream modes."""
+    first_seen = parse_time(req.get("first_seen"))
+    last_seen = parse_time(req.get("last_seen"))
+    requested_window = parse_port(req.get("max_window_seconds")) or 120
+    window_seconds = max(30, min(MAX_WINDOW_SECONDS, requested_window))
+    duration = max(0, int((last_seen - first_seen).total_seconds()))
+    if duration > window_seconds:
+        return last_seen - timedelta(seconds=window_seconds), last_seen
+    pad = max(0, (window_seconds - duration) // 2)
+    return first_seen - timedelta(seconds=pad), last_seen + timedelta(seconds=pad)
+
+
+def stream_token_key() -> bytes:
+    """Load the installer-provisioned key that signs stream chunks.
+
+    Manifest and chunk requests use separate restricted SSH processes. A
+    host-local key lets a later process validate the exact source rotation and
+    BPF variant authorized by the manifest without rescanning a directory that
+    Security Onion continuously rotates. Runtime export is deliberately unable
+    to create or repair this persistent file; a missing key is an installation
+    failure, not permission to write from the data plane.
+    """
+    try:
+        key = STREAM_TOKEN_KEY_PATH.read_bytes()
+    except OSError:
+        fail("Security Onion PCAP stream token key is unavailable")
+    if len(key) < 32:
+        fail("Security Onion PCAP stream token key is invalid")
+    return key
+
+
+def stream_chunk_token(descriptor: dict) -> str:
+    """Sign one immutable stream descriptor without exposing the signing key."""
+    encoded = json.dumps(descriptor, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hmac.new(stream_token_key(), encoded, hashlib.sha256).hexdigest()
+
+
+def positive_integer(value: object, field: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        fail(f"invalid {field}")
+    if parsed <= 0:
+        fail(f"invalid {field}")
+    return parsed
+
+
+def stream_manifest(req: dict) -> dict:
+    """Describe bounded, stateless PCAP streams without creating export files.
+
+    Each source capture is a Security Onion rotation file. Production rotation
+    files are bounded independently by Security Onion, and this wrapper applies
+    a second ceiling before allowing the file to be read. The relay requests
+    one tuple-filtered source/encapsulation variant at a time and writes the
+    stream directly to its external SSD.
+    """
     request_id = safe_request_id(req.get("request_id"))
-    removed = remove_request_outputs(request_id)
-
-    print(
-        json.dumps(
-            {
-                "ok": True,
-                "status": "artifact_cleaned",
+    storage = pcap_root_status()
+    start, end = request_window(req)
+    variants = [stream_bpf_for_request(req)]
+    candidates = stream_candidate_files(start, end, req)
+    chunks: list[dict] = []
+    root = PCAP_ROOT.resolve(strict=False)
+    for candidate in candidates:
+        resolved = candidate.resolve(strict=False)
+        if not str(resolved).startswith(str(root) + os.sep):
+            continue
+        try:
+            source_stat = resolved.stat()
+        except OSError:
+            continue
+        source_size = source_stat.st_size
+        if source_size <= 24 or source_size > MAX_STREAM_SOURCE_BYTES:
+            continue
+        capture_ref = str(resolved.relative_to(root))
+        for variant_index, bpf in enumerate(variants):
+            descriptor = {
                 "request_id": request_id,
-                "removed": removed,
-            },
-            sort_keys=True,
-        )
+                "window_start": start.strftime("%Y-%m-%d  %H:%M:%S%z"),
+                "window_end": end.strftime("%Y-%m-%d  %H:%M:%S%z"),
+                "capture_ref": capture_ref,
+                "source_size_bytes": source_size,
+                "source_device": source_stat.st_dev,
+                "source_inode": source_stat.st_ino,
+                "bpf_variant": variant_index,
+            }
+            chunks.append(
+                {
+                    **descriptor,
+                    "chunk_id": stream_chunk_token(descriptor),
+                    "source_ceiling_bytes": MAX_STREAM_SOURCE_BYTES,
+                    "bpf": bpf,
+                }
+            )
+    stable = {
+        "request_id": request_id,
+        "window_start": start.strftime("%Y-%m-%d  %H:%M:%S%z"),
+        "window_end": end.strftime("%Y-%m-%d  %H:%M:%S%z"),
+        "chunks": chunks,
+    }
+    manifest_id = hashlib.sha256(json.dumps(stable, sort_keys=True).encode("utf-8")).hexdigest()
+    return {
+        "ok": True,
+        "status": "stream_manifest",
+        **stable,
+        "manifest_id": manifest_id,
+        "chunk_count": len(chunks),
+        "max_stream_source_bytes": MAX_STREAM_SOURCE_BYTES,
+        "max_source_read_bytes_per_second": MAX_SOURCE_READ_BPS,
+        "security_onion_staging_bytes": 0,
+        "storage_status": storage,
+    }
+
+
+def _drain_bounded(stream, destination: bytearray, limit: int = 8192) -> None:
+    """Drain a child stderr pipe while retaining only a safe diagnostic tail."""
+    try:
+        while True:
+            chunk = stream.read(1024)
+            if not chunk:
+                break
+            destination.extend(chunk)
+            if len(destination) > limit:
+                del destination[:-limit]
+    except OSError:
+        pass
+
+
+def _rate_limited_feed(source, destination, byte_limit: int, bytes_per_second: int, errors: list[str]) -> None:
+    """Feed a capture through a pipe while bounding source-disk read rate."""
+    copied = 0
+    started = time.monotonic()
+    try:
+        while copied < byte_limit:
+            chunk = source.read(min(1024 * 1024, byte_limit - copied))
+            if not chunk:
+                break
+            destination.write(chunk)
+            destination.flush()
+            copied += len(chunk)
+            delay = (started + (copied / bytes_per_second)) - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+        if copied != byte_limit:
+            errors.append(f"capture source ended early: {copied} of {byte_limit} bytes")
+    except (BrokenPipeError, OSError) as exc:
+        errors.append(str(exc))
+    finally:
+        try:
+            destination.close()
+        except OSError:
+            pass
+
+
+def stream_filtered_capture(source: Path, source_size: int, bpf: str) -> tuple[int, str]:
+    """Rate-limit the source read and stream filtered packets to stdout.
+
+    ``head`` is placed under idle I/O priority and backpressured by the Python
+    feeder. This limits reads of the live capture filesystem itself; limiting
+    only tcpdump output would not protect Zeek when a sparse filter scans a large
+    source rotation.
+    """
+    tcpdump = shutil.which("tcpdump")
+    head = shutil.which("head")
+    if not tcpdump or not head:
+        return 5, "required tcpdump/head executable is unavailable"
+    ionice = shutil.which("ionice")
+    source_command = [head, "-c", str(source_size), str(source)]
+    filter_command = [tcpdump, "-n", "-r", "-", "-w", "-", bpf]
+    if ionice:
+        source_command = [ionice, "-c", "3", *source_command]
+        filter_command = [ionice, "-c", "3", *filter_command]
+
+    source_stderr = bytearray()
+    filter_stderr = bytearray()
+    feeder_errors: list[str] = []
+    source_proc = subprocess.Popen(source_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    filter_proc = subprocess.Popen(
+        filter_command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
+    if not source_proc.stdout or not source_proc.stderr or not filter_proc.stdin or not filter_proc.stdout or not filter_proc.stderr:
+        source_proc.kill()
+        filter_proc.kill()
+        return 5, "PCAP stream pipe initialization failed"
+
+    source_error_thread = threading.Thread(
+        target=_drain_bounded, args=(source_proc.stderr, source_stderr), daemon=True
+    )
+    filter_error_thread = threading.Thread(
+        target=_drain_bounded, args=(filter_proc.stderr, filter_stderr), daemon=True
+    )
+    feeder_thread = threading.Thread(
+        target=_rate_limited_feed,
+        args=(source_proc.stdout, filter_proc.stdin, source_size, MAX_SOURCE_READ_BPS, feeder_errors),
+        daemon=True,
+    )
+    source_error_thread.start()
+    filter_error_thread.start()
+    feeder_thread.start()
+
+    try:
+        while True:
+            chunk = filter_proc.stdout.read(1024 * 1024)
+            if not chunk:
+                break
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+    except (BrokenPipeError, OSError) as exc:
+        feeder_errors.append(str(exc))
+        filter_proc.terminate()
+    finally:
+        feeder_thread.join()
+        if feeder_errors and source_proc.poll() is None:
+            source_proc.terminate()
+        try:
+            source_return = source_proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            source_proc.kill()
+            source_return = source_proc.wait()
+            feeder_errors.append("capture reader did not exit after stream termination")
+        try:
+            filter_return = filter_proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            filter_proc.kill()
+            filter_return = filter_proc.wait()
+            feeder_errors.append("tcpdump did not exit after stream termination")
+        source_error_thread.join(timeout=2)
+        filter_error_thread.join(timeout=2)
+
+    diagnostics = []
+    if source_return != 0:
+        diagnostics.append(f"capture reader exited {source_return}")
+    if filter_return not in (0, 1):
+        diagnostics.append(f"tcpdump exited {filter_return}")
+    diagnostics.extend(feeder_errors)
+    stderr_tail = bytes(source_stderr + filter_stderr).decode("utf-8", errors="replace").strip()
+    if stderr_tail and (source_return != 0 or filter_return not in (0, 1)):
+        diagnostics.append(stderr_tail[-500:])
+    return (0 if not diagnostics else (filter_return or source_return or 5)), "; ".join(diagnostics)[-800:]
+
+
+def stream_chunk(req: dict) -> int:
+    """Write one validated filtered PCAP directly to stdout.
+
+    stdout is intentionally binary in this mode. Diagnostics are bounded and
+    written only to stderr. No packet bytes or temporary artifacts are written
+    to Security Onion storage.
+    """
+    request_id = safe_request_id(req.get("request_id"))
+    start, end = request_window(req)
+    capture_ref = clean_token(req.get("capture_ref"), 512)
+    relative = Path(capture_ref)
+    if not capture_ref or relative.is_absolute() or ".." in relative.parts:
+        print("invalid stream source reference", file=sys.stderr)
+        return 3
+    source_size = positive_integer(req.get("source_size_bytes"), "source_size_bytes")
+    source_device = positive_integer(req.get("source_device"), "source_device")
+    source_inode = positive_integer(req.get("source_inode"), "source_inode")
+    try:
+        variant_index = int(req.get("bpf_variant"))
+    except (TypeError, ValueError):
+        print("invalid stream BPF variant", file=sys.stderr)
+        return 3
+    variants = [stream_bpf_for_request(req)]
+    if variant_index < 0 or variant_index >= len(variants):
+        print("invalid stream BPF variant", file=sys.stderr)
+        return 3
+    descriptor = {
+        "request_id": request_id,
+        "window_start": start.strftime("%Y-%m-%d  %H:%M:%S%z"),
+        "window_end": end.strftime("%Y-%m-%d  %H:%M:%S%z"),
+        "capture_ref": capture_ref,
+        "source_size_bytes": source_size,
+        "source_device": source_device,
+        "source_inode": source_inode,
+        "bpf_variant": variant_index,
+    }
+    supplied_token = clean_token(req.get("chunk_id"), 80)
+    if not hmac.compare_digest(supplied_token, stream_chunk_token(descriptor)):
+        print("invalid or expired stream chunk", file=sys.stderr)
+        return 3
+
+    source = (PCAP_ROOT / relative).resolve(strict=False)
+    root = PCAP_ROOT.resolve(strict=False)
+    if not str(source).startswith(str(root) + os.sep) or not source.is_file() or source.is_symlink():
+        print("stream source is unavailable", file=sys.stderr)
+        return 3
+    source_stat = source.stat()
+    if source_stat.st_dev != source_device or source_stat.st_ino != source_inode:
+        print("stream source identity changed", file=sys.stderr)
+        return 3
+    if source_stat.st_size < source_size or source_stat.st_size > MAX_STREAM_SOURCE_BYTES:
+        print("stream source exceeds configured ceiling", file=sys.stderr)
+        return 3
+
+    STREAM_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with STREAM_LOCK.open("a+", encoding="utf-8") as lock_handle:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("another Onion Sentinel PCAP stream is active", file=sys.stderr)
+            return 4
+        try:
+            os.nice(10)
+        except OSError:
+            pass
+        return_code, detail = stream_filtered_capture(source, source_size, variants[variant_index])
+        if return_code:
+            print(detail or f"PCAP stream exited {return_code}", file=sys.stderr)
+            return return_code
     return 0
 
 
@@ -276,119 +725,16 @@ def main() -> int:
     if not isinstance(req, dict):
         fail("request must be a JSON object")
     mode = clean_token(req.get("mode"), 40)
-    if mode == "artifact_cleanup":
-        return cleanup_artifact(req)
-    if mode:
-        fail(f"unsupported mode: {mode}")
-
-    request_id = safe_request_id(req.get("request_id"))
-    first_seen = parse_time(req.get("first_seen"))
-    last_seen = parse_time(req.get("last_seen"))
-    requested_window = parse_port(req.get("max_window_seconds")) or 120
-    window_seconds = max(30, min(MAX_WINDOW_SECONDS, requested_window))
-    duration = max(0, int((last_seen - first_seen).total_seconds()))
-    if duration > window_seconds:
-        start = last_seen - timedelta(seconds=window_seconds)
-        end = last_seen
-    else:
-        pad = max(0, (window_seconds - duration) // 2)
-        start = first_seen - timedelta(seconds=pad)
-        end = last_seen + timedelta(seconds=pad)
-
-    bpf_variants = [bpf_for_request(req)]
-    vlan_bpf = bpf_for_request(req, vlan=True)
-    if vlan_bpf not in bpf_variants:
-        bpf_variants.insert(0, vlan_bpf)
-    prepare_output_root()
-    existing = reusable_artifact_payload(request_id)
-    if existing:
-        print(json.dumps(existing, sort_keys=True))
+    if mode == "storage_status":
+        storage = pcap_root_status()
+        print(json.dumps({"ok": True, "status": "storage_status", **storage}, sort_keys=True))
         return 0
-    work_dir = OUTPUT_ROOT / request_id
-    if work_dir.exists():
-        shutil.rmtree(work_dir)
-    work_dir.mkdir(mode=0o750)
-
-    candidates = candidate_files(start, end, req)
-    diagnostics = {
-        "search_strategy": "capture-epoch-near-window",
-        "window_start": start.strftime("%Y-%m-%d  %H:%M:%S%z"),
-        "window_end": end.strftime("%Y-%m-%d  %H:%M:%S%z"),
-        "candidate_count": len(candidates),
-        "candidate_files": [path.name for path in candidates[:20]],
-        "requested_capture_file": requested_capture_file(req).name if requested_capture_file(req) else None,
-        "bpf_variants": bpf_variants,
-    }
-    part_paths: list[Path] = []
-    part_bytes = 0
-    size_limit_hit = False
-    part_index = 1
-    for pcap in candidates:
-        for bpf in bpf_variants:
-            remaining_bytes = MAX_ARTIFACT_BYTES - part_bytes
-            if remaining_bytes <= 24:
-                size_limit_hit = True
-                break
-            part = work_dir / f"part-{part_index:03d}.pcap"
-            part_index += 1
-            cmd = ["tcpdump", "-r", str(pcap), "-w", str(part), bpf]
-            result = subprocess.run(
-                cmd,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                preexec_fn=lambda: limit_output_file_size(remaining_bytes),
-            )
-            if result.returncode not in (0, 1):
-                if part.exists() and part.stat().st_size >= remaining_bytes:
-                    size_limit_hit = True
-                    part.unlink()
-                continue
-            if part.exists() and part.stat().st_size > 24:
-                part_size = part.stat().st_size
-                if part_size > remaining_bytes:
-                    size_limit_hit = True
-                    part.unlink()
-                    continue
-                part_paths.append(part)
-                part_bytes += part_size
-                break
-            elif part.exists():
-                part.unlink()
-
-    if not part_paths:
-        reason = "PCAP extraction exceeded artifact size limit" if size_limit_hit else "no matching packets found"
-        remove_request_outputs(request_id)
-        fail(reason, code=2, diagnostics=diagnostics)
-
-    artifact = OUTPUT_ROOT / f"{request_id}.tar"
-    with tarfile.open(artifact, "w") as tar:
-        for part in part_paths:
-            tar.add(part, arcname=part.name)
-
-    artifact_size = artifact.stat().st_size
-    if artifact_size > MAX_ARTIFACT_BYTES:
-        remove_request_outputs(request_id)
-        fail("PCAP artifact exceeds configured size limit", diagnostics=diagnostics)
-    try:
-        shutil.chown(artifact, group=TRANSFER_GROUP)
-        artifact.chmod(0o640)
-    except (LookupError, PermissionError, OSError):
-        artifact.chmod(0o600)
-    payload = {
-        "ok": True,
-        "status": "fulfilled",
-        "request_id": request_id,
-        "artifact_path": str(artifact),
-        "artifact_sha256": sha256_file(artifact),
-        "artifact_size_bytes": artifact_size,
-        "part_count": len(part_paths),
-        "window_start": start.strftime("%Y-%m-%d  %H:%M:%S%z"),
-        "window_end": end.strftime("%Y-%m-%d  %H:%M:%S%z"),
-    }
-    print(json.dumps(payload, sort_keys=True))
-    return 0
+    if mode == "stream_manifest":
+        print(json.dumps(stream_manifest(req), sort_keys=True))
+        return 0
+    if mode == "stream_chunk":
+        return stream_chunk(req)
+    fail(f"unsupported mode: {mode or 'missing'}; allowed modes are storage_status, stream_manifest, stream_chunk")
 
 
 if __name__ == "__main__":

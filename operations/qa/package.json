@@ -1,0 +1,14 @@
+{
+  "name": "onion-sentinel-ui-qa",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test dashboard-ui-chaos.spec.mjs dashboard-ui-mutations.spec.mjs",
+    "test:read-only": "playwright test dashboard-ui-chaos.spec.mjs",
+    "test:mutations": "playwright test dashboard-ui-mutations.spec.mjs",
+    "test:headed": "playwright test dashboard-ui-chaos.spec.mjs dashboard-ui-mutations.spec.mjs --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1"
+  }
+}

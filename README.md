@@ -9,11 +9,13 @@ This repository is designed to be safe for a private GitHub repo. It contains so
 ```mermaid
 flowchart LR
   SO["Security Onion\n192.168.1.7"] -->|restricted SSH export| PI["Raspberry Pi Relay\n10.88.8.8"]
-  PI -->|webhook POST| N8N["n8n + alert-store\nMac Studio 10.77.7.225"]
-  N8N --> ENRICH["Public enrichment + PCAP broker metadata"]
-  ENRICH --> DB["SQLite alert store"]
+  PI -->|bounded forced SSH batch| INTAKE["Restricted alert intake\nMac Studio 10.77.7.225"]
+  INTAKE --> STORE["alert-store commit boundary"]
+  STORE --> DB["SQLite alert store"]
+  STORE --> ENRICH["Durable public enrichment jobs"]
+  STORE --> N8N["Durable post-commit n8n report handoff"]
   N8N --> MD["Markdown + JSON reports"]
-  N8N --> TG["Telegram high/critical alerts"]
+  STORE --> TG["Telegram high/critical alerts"]
   DB --> UI["Onion Sentinel Dashboard"]
   MD --> UI
   SO -->|bounded PCAP export on request| PI
@@ -28,8 +30,8 @@ flowchart LR
 | Directory | Node / Layer | Purpose |
 | --- | --- | --- |
 | `security-onion/` | Security Onion | Restricted alert export wrapper, sudoers drop-in, SSH forced-command template. |
-| `relay/` | Raspberry Pi relay | Pulls Security Onion alerts over restricted SSH and POSTs new alerts plus quiet-cycle heartbeats to n8n. Includes systemd timer/service and install script. |
-| `relay/n8n-docker/` | Relay-facing n8n handoff | Notes for the webhook target that the relay posts to. The actual n8n stack lives in `n8n/`. |
+| `relay/` | Raspberry Pi relay | Pulls Security Onion alerts over restricted SSH and durably batches alerts plus quiet-cycle heartbeats into the Mac forced-command intake. Includes split systemd timers/services and install scripts. |
+| `relay/n8n-docker/` | Relay-facing Mac handoffs | Notes for the forced alert intake and n8n PCAP-control/rollback endpoints. The actual Mac stack lives in `n8n/`. |
 | `n8n/` | Mac Studio Docker n8n + alert-store | Docker Compose, n8n workflow export, alert-store code, local AI scripts, model settings, launchd jobs. |
 | `onion-sentinel-dashboard/` | Mac Studio dashboard | LAN portal backend and SOC dashboard builder/assets. |
 | `mac-studio/` | Mac Studio host orchestration | Host-level restore order and service ownership. |

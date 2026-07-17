@@ -20,6 +20,22 @@
   <key>StartInterval</key>
   <integer>300</integer>
 
+  <!-- A fulfilled transfer wakes parsing immediately; the interval prevents a
+       missed event or interrupted deployment from stranding durable work. -->
+  <key>WatchPaths</key>
+  <array>
+    <string>__HOME__/n8n-local/run/pcap-analysis.wake</string>
+  </array>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>PathState</key>
+    <dict>
+      <key>__HOME__/n8n-local/run/pcap-analysis.wake</key>
+      <true/>
+    </dict>
+  </dict>
+
   <key>RunAtLoad</key>
   <false/>
 

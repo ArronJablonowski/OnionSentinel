@@ -81,6 +81,13 @@ def evaluate(
     summary = dict(health_payload.get("summary") or {})
     latest = dict(summary.get("latest") or {})
     pcap = dict(health_payload.get("pcap") or {})
+    pipeline = dict(metrics.get("pipeline") or {})
+    pipeline_disk = dict(pipeline.get("disk") or {})
+    pipeline_stages = {
+        str(item.get("stage") or ""): dict(item)
+        for item in (pipeline.get("stages") or [])
+        if isinstance(item, dict)
+    }
     failures: list[str] = []
     pending_job_ages = {
         str(item.get("job_type") or ""): int(item.get("seconds") or 0)
@@ -92,10 +99,20 @@ def evaluate(
         for item in (metrics.get("latest_completed_jobs") or [])
         if isinstance(item, dict)
     }
+    processing_job_ages = {
+        str(item.get("job_type") or ""): int(item.get("seconds") or 0)
+        for item in (metrics.get("oldest_processing_jobs") or [])
+        if isinstance(item, dict)
+    }
     pending_job_counts = {
         str(item.get("job_type") or ""): int(item.get("count") or 0)
         for item in (metrics.get("durable_jobs") or [])
         if isinstance(item, dict) and str(item.get("status") or "") == "pending"
+    }
+    processing_job_counts = {
+        str(item.get("job_type") or ""): int(item.get("count") or 0)
+        for item in (metrics.get("durable_jobs") or [])
+        if isinstance(item, dict) and str(item.get("status") or "") == "processing"
     }
     # Older alert-store versions expose only the aggregate age. Preserve that
     # signal during rolling deployment, then use type-specific deadlines once
@@ -104,6 +121,7 @@ def evaluate(
     enrichment_job_age = pending_job_ages.get("public_enrichment", aggregate_job_age if not pending_job_ages else 0)
     ai_job_age = pending_job_ages.get("ai_analysis", aggregate_job_age if not pending_job_ages else 0)
     ai_completion_age = latest_completion_ages.get("ai_analysis")
+    ai_processing_age = processing_job_ages.get("ai_analysis")
 
     heartbeat_age = age_seconds(latest.get("timestamp_utc") or latest.get("timestamp"), now)
     if heartbeat_age is None or heartbeat_age > 20 * 60:
@@ -113,17 +131,31 @@ def evaluate(
     # The scheduler intentionally favors severity over age, so an old low job
     # can remain pending while newer higher-severity groups are completed. When
     # work exists, detect a stuck worker by lack of forward progress instead.
-    if pending_job_counts.get("ai_analysis", 0) and (ai_completion_age is None or ai_completion_age > 15 * 60):
-        failures.append("AI analysis has pending work but no completion within 15 minutes")
-    if int(metrics.get("oldest_pending_pcap_seconds") or 0) > 60 * 60:
+    ai_pending_count = pending_job_counts.get("ai_analysis", 0)
+    ai_processing_count = processing_job_counts.get("ai_analysis", 0)
+    if ai_processing_count and (ai_processing_age is None or ai_processing_age > 15 * 60):
+        failures.append("AI analysis has been processing without state progress for 15 minutes")
+    elif ai_pending_count and not ai_processing_count and (ai_completion_age is None or ai_completion_age > 30 * 60):
+        # One inference may legitimately consume the configured ten-minute
+        # timeout and retry on the next five-minute scheduler tick. Alert only
+        # after two complete retry windows have passed without forward progress.
+        failures.append("AI analysis has pending work but no completion within 30 minutes")
+    active_pcap_transfers = [
+        item for item in (pcap.get("active_transfers") or [])
+        if isinstance(item, dict) and item.get("progress_at")
+    ]
+    if int(metrics.get("oldest_pending_pcap_seconds") or 0) > 60 * 60 and not active_pcap_transfers:
         failures.append("PCAP backlog exceeds 60 minutes")
     if int(pcap.get("warning_count") or 0) > 0:
         failures.append(f"PCAP workflow has {int(pcap.get('warning_count') or 0)} warning(s)")
     ingest_errors = int(process.get("ingest_errors") or 0)
     if previous_ingest_errors is not None and ingest_errors > previous_ingest_errors:
         failures.append(f"alert ingest errors increased by {ingest_errors - previous_ingest_errors}")
-    if disk_used_percent >= 85:
+    if disk_used_percent >= 75:
         failures.append(f"Mac runtime disk is {disk_used_percent:.1f}% used")
+    projected_disk_percent = float(pipeline_disk.get("projected_used_percent_with_known_backlog") or 0)
+    if disk_used_percent < 75 and projected_disk_percent >= 75:
+        failures.append(f"known pipeline backlog projects Mac runtime disk to {projected_disk_percent:.1f}% used")
     if sqlite_backup_age is None or sqlite_backup_age > 2 * 60 * 60:
         failures.append("verified SQLite backup is missing or older than 2 hours")
     if postgres_backup_age is None or postgres_backup_age > 26 * 60 * 60:
@@ -139,10 +171,33 @@ def evaluate(
             "oldest_pending_enrichment_job_seconds": enrichment_job_age,
             "oldest_pending_ai_job_seconds": ai_job_age,
             "latest_ai_completion_age_seconds": ai_completion_age,
+            "oldest_ai_processing_seconds": ai_processing_age,
+            "pending_ai_job_count": ai_pending_count,
+            "processing_ai_job_count": ai_processing_count,
             "oldest_pending_pcap_seconds": int(metrics.get("oldest_pending_pcap_seconds") or 0),
             "pcap_warning_count": int(pcap.get("warning_count") or 0),
+            "active_pcap_transfer_count": len(active_pcap_transfers),
             "ingest_errors": ingest_errors,
             "disk_used_percent": round(disk_used_percent, 1),
+            "disk_new_work_limit_percent": 75,
+            "disk_hard_limit_percent": 80,
+            "pipeline_stages": {
+                stage: {
+                    "pending": int(values.get("pending") or 0),
+                    "processing": int(values.get("processing") or 0),
+                    "oldest_pending_seconds": int(values.get("oldest_pending_seconds") or 0),
+                    "backlog_bytes_known": int(values.get("backlog_bytes_known") or 0),
+                    "backlog_bytes_unknown_items": int(values.get("backlog_bytes_unknown_items") or 0),
+                    "drain_eta_seconds": values.get("drain_eta_seconds"),
+                    "byte_drain_eta_seconds": values.get("byte_drain_eta_seconds"),
+                    "throughput_1h": dict(values.get("throughput") or {}).get("1h", {}),
+                }
+                for stage, values in pipeline_stages.items()
+            },
+            "pipeline_known_backlog_bytes": int(pipeline_disk.get("known_pipeline_backlog_bytes") or 0),
+            "pipeline_unknown_backlog_items": int(pipeline_disk.get("unknown_pipeline_backlog_items") or 0),
+            "pipeline_projected_disk_used_percent": projected_disk_percent,
+            "pipeline_disk_growth_1h": dict(pipeline_disk.get("net_growth") or {}).get("1h", {}),
             "sqlite_backup_age_seconds": sqlite_backup_age,
             "postgres_backup_age_seconds": postgres_backup_age,
         },

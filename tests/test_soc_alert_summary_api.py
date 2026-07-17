@@ -7,6 +7,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 import datetime as dt
 from concurrent.futures import ThreadPoolExecutor
@@ -135,6 +136,11 @@ class SocAlertSummaryApiTest(unittest.TestCase):
               created_at TEXT NOT NULL,
               claimed_at TEXT,
               completed_at TEXT,
+              transfer_stage TEXT,
+              transfer_bytes INTEGER NOT NULL DEFAULT 0,
+              transfer_total_bytes INTEGER NOT NULL DEFAULT 0,
+              transfer_progress_at TEXT,
+              transfer_duration_seconds INTEGER,
               updated_at TEXT NOT NULL
             );
             """
@@ -295,7 +301,7 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["alerts"][0]["pcap_status_key"], "analyzed")
         self.assertEqual(payload["alerts"][0]["pcap_status_label"], "Analyzed")
 
-    def test_detail_fragment_appends_current_pcap_when_static_fragment_is_stale(self) -> None:
+    def test_detail_fragment_rejects_legacy_layout_instead_of_appending_pcap(self) -> None:
         newest_group_id = self.portal.soc_alert_group_id(
             "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
         )
@@ -327,10 +333,13 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         status, payload = self.portal.soc_alert_detail_fragment_response(newest_group_id)
 
         self.assertEqual(status, 200)
+        self.assertFalse(payload["layout_valid"])
+        self.assertTrue(payload["layout_issues"])
+        self.assertIn("Detailed Alert Report layout error", payload["detail_html"])
         self.assertIn("PCAP Analysis Findings", payload["detail_html"])
-        self.assertIn("Parsed PCAP Evidence", payload["detail_html"])
-        self.assertIn("Top Connections", payload["detail_html"])
-        self.assertIn("192.0.2.10", payload["detail_html"])
+        self.assertNotIn("Parsed PCAP Evidence", payload["detail_html"])
+        self.assertNotIn("Top Connections", payload["detail_html"])
+        self.assertNotIn("192.0.2.10", payload["detail_html"])
 
     def test_pcap_request_endpoint_queues_group_for_broker(self) -> None:
         newest_group_id = self.portal.soc_alert_group_id(
@@ -656,6 +665,27 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["pcap"]["recent_requests"][0]["request_id"], "pcap-health-test")
         self.assertEqual(payload["pcap"]["recent_requests"][0]["status"], "failed")
 
+    def test_system_health_derives_legacy_pcap_transfer_duration(self) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO pcap_requests (
+              request_id, status, reason, max_window_seconds, request_json,
+              created_at, claimed_at, completed_at, updated_at
+            ) VALUES (
+              'pcap-duration-test', 'fulfilled', 'unit test', 120, '{}',
+              '2026-07-03  12:00:00Z', '2026-07-03  12:01:00Z',
+              '2026-07-03  12:03:05Z', '2026-07-03  12:03:05Z'
+            )
+            """
+        )
+        self.conn.commit()
+
+        payload = self.portal.n8n_beacon_history_response({"hours": ["24"]})
+
+        request = payload["pcap"]["recent_requests"][0]
+        self.assertEqual(request["request_id"], "pcap-duration-test")
+        self.assertEqual(request["transfer_duration_seconds"], 125)
+
     def test_system_health_warns_on_stale_or_unexpected_pcap_work(self) -> None:
         fresh_failure_at = self.portal.format_iso_timestamp(
             dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=30),
@@ -713,6 +743,38 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertTrue(any("pending PCAP request" in item for item in payload["pcap"]["warnings"]))
         self.assertTrue(any("1 PCAP request failure(s) need review" in item for item in payload["pcap"]["warnings"]))
 
+    def test_system_health_does_not_flag_queue_behind_fresh_large_transfer(self) -> None:
+        old_at = self.portal.format_iso_timestamp(
+            dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1),
+            timespec="seconds",
+        )
+        fresh_at = self.portal.format_iso_timestamp(dt.datetime.now(dt.timezone.utc), timespec="seconds")
+        self.conn.executemany(
+            """
+            INSERT INTO pcap_requests (
+              request_id, status, reason, max_window_seconds, request_json,
+              created_at, claimed_at, transfer_stage, transfer_bytes,
+              transfer_total_bytes, transfer_progress_at, updated_at
+            ) VALUES (?, ?, 'unit test', 120, '{}', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "pcap-active-large", "claimed", old_at, old_at,
+                    "security_onion_to_relay", 8 * 1024**3, 24 * 1024**3, fresh_at, fresh_at,
+                ),
+                (
+                    "pcap-queued-behind-large", "pending", old_at, None,
+                    None, 0, 0, None, old_at,
+                ),
+            ],
+        )
+        self.conn.commit()
+
+        payload = self.portal.n8n_beacon_history_response({"hours": ["24"]})
+
+        self.assertEqual(payload["pcap"]["warning_count"], 0)
+        self.assertEqual(payload["pcap"]["active_transfers"][0]["request_id"], "pcap-active-large")
+
     def test_event_snapshot_uses_consistent_status_and_metrics_counts(self) -> None:
         payload = self.portal.soc_alert_events_snapshot()
 
@@ -722,6 +784,21 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["metrics"]["by_analyst_status"]["open"], 2)
         self.assertEqual(payload["metrics"]["by_analyst_status"]["suppressed"], 1)
         self.assertEqual(payload["metrics"]["by_analyst_status"]["total"], payload["counts"]["total"])
+
+    def test_event_snapshot_cache_coalesces_concurrent_browser_clients(self) -> None:
+        self.portal.SOC_ALERT_EVENTS_CACHE.clear()
+        payload = {"ok": True, "event": "soc-alerts"}
+
+        def slow_snapshot() -> dict:
+            time.sleep(0.05)
+            return payload
+
+        with mock.patch.object(self.portal, "soc_alert_events_snapshot", side_effect=slow_snapshot) as snapshot:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(lambda _: self.portal.cached_soc_alert_events_snapshot(), range(16)))
+
+        self.assertEqual(results, [payload] * 16)
+        self.assertEqual(snapshot.call_count, 1)
 
     def test_acknowledged_group_is_hidden_from_open_slice(self) -> None:
         newest_group_id = self.portal.soc_alert_group_id(

@@ -80,6 +80,14 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn(".slice(0, 2000)", self.code)
         self.assertIn("durableJobs.completePendingByDedupeKeys", self.code)
 
+    def test_ai_status_callback_resolves_legacy_group_alias(self) -> None:
+        self.assertIn("async function transitionDurableJobStatus", self.code)
+        self.assertIn(
+            "SELECT stable_group_id FROM alert_group_alias WHERE legacy_group_id = ?",
+            self.code,
+        )
+        self.assertIn("transitionDurableJobStatus(", self.code)
+
     def test_summary_rebuild_uses_one_windowed_scan(self) -> None:
         rebuild = self.code.split("async function rebuildAlertGroupSummariesUnlocked()", 1)[1].split(
             "async function rebuildAlertGroupSummaries()", 1
@@ -93,6 +101,45 @@ class AlertStoreResilienceTest(unittest.TestCase):
         )[0]
         self.assertIn("error.statusCode = 413", parser)
         self.assertNotIn("request.destroy", parser)
+
+    def test_new_intake_stops_before_the_eighty_percent_disk_ceiling(self) -> None:
+        self.assertIn("function assertDiskWriteAdmission", self.code)
+        self.assertIn("Math.min(80", self.code)
+        self.assertIn("assertDiskWriteAdmission('alert ingestion')", self.code)
+        self.assertIn("assertDiskWriteAdmission('alert enrichment')", self.code)
+        self.assertIn("error.statusCode = 507", self.code)
+        self.assertIn("disk_capacity: diskCapacitySnapshot()", self.code)
+
+    def test_heartbeats_are_accepted_before_disk_admission_is_checked(self) -> None:
+        route = self.code.split("if (request.method === 'POST' && request.url === '/alert')", 1)[1]
+        heartbeat_index = route.index("if (isRelayHeartbeat(alert))")
+        admission_index = route.index("assertDiskWriteAdmission('alert ingestion')")
+        self.assertLess(heartbeat_index, admission_index)
+
+    def test_pipeline_observability_is_bounded_and_outside_network_paths(self) -> None:
+        self.assertIn("require('./lib/pipeline_metrics')", self.code)
+        self.assertIn("PIPELINE_EVENT_RETENTION_HOURS", self.code)
+        self.assertIn("pipelineMetrics.snapshot()", self.code)
+        self.assertIn("pipelineMetrics.captureDiskSample", self.code)
+
+    def test_n8n_report_work_is_enqueued_inside_commit_and_delivered_afterward(self) -> None:
+        store = self.code.split("async function storeAlert(rawAlert)", 1)[1].split(
+            "async function transitionDurableJobStatus", 1
+        )[0]
+        transaction, after_commit = store.split("if (!result.ok) return result;", 1)
+        self.assertIn("durableJobs.enqueue(\n          'n8n_post_commit'", transaction)
+        self.assertNotIn("requestJson({", transaction)
+        self.assertIn("void drainN8nPostCommitJobs();", after_commit)
+        self.assertIn("N8N_POST_COMMIT_MAX_ATTEMPTS", self.code)
+        self.assertIn("N8N_POST_COMMIT_BASE_RETRY_SECONDS", self.code)
+
+    def test_committed_evidence_wakes_local_workers_without_owning_durability(self) -> None:
+        self.assertIn("async function signalWorker", self.code)
+        self.assertIn("AI_ANALYSIS_WAKE_PATH", self.code)
+        self.assertIn("PCAP_ANALYSIS_WAKE_PATH", self.code)
+        self.assertIn("void signalWorker(aiAnalysisWakePath, 'enrichment-completed')", self.code)
+        self.assertIn("void signalWorker(pcapAnalysisWakePath, 'pcap-transfer-completed')", self.code)
+        self.assertIn("void signalWorker(aiAnalysisWakePath, 'pcap-analysis-completed')", self.code)
 
 
 if __name__ == "__main__":

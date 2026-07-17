@@ -59,5 +59,23 @@ Expected output shape:
   ],
   "escalation_criteria": ["string"],
   "evidence_gaps": ["string"],
-  "follow_up_hunts_or_tuning": ["string"]
+  "follow_up_hunts_or_tuning": ["string"],
+  "memory_candidates": [
+    {
+      "scope": "agent|shared",
+      "category": "response_lesson|investigation_pivot|evidence_gap|environment_context|tooling_lesson",
+      "finding": "reusable response lesson",
+      "use_when": "future incident conditions where this lesson applies",
+      "evidence_basis": ["supplied evidence"],
+      "confidence": "medium|high",
+      "tags": ["retrieval tag"],
+      "ttl_days": 90
+    }
+  ]
 }
+
+Memory writeback policy:
+- Propose only reusable response lessons, never a case transcript.
+- Never store secrets, credentials, raw host artifacts, packet payloads, or live alert IDs.
+- Shared candidates require high confidence and clear usefulness to multiple agent roles.
+- Return an empty `memory_candidates` array when no durable lesson was established.

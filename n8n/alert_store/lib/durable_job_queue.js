@@ -23,6 +23,9 @@ function createDurableJobQueue({run, get, all, now}) {
         updated_at TEXT NOT NULL,
         completed_at TEXT,
         last_completed_at TEXT,
+        requested_at TEXT NOT NULL,
+        processing_started_at TEXT,
+        rerun_requested INTEGER NOT NULL DEFAULT 0,
         UNIQUE(job_type, dedupe_key)
       )
     `);
@@ -30,7 +33,18 @@ function createDurableJobQueue({run, get, all, now}) {
     if (!columns.has('last_completed_at')) {
       await run('ALTER TABLE durable_jobs ADD COLUMN last_completed_at TEXT');
     }
+    if (!columns.has('requested_at')) {
+      await run('ALTER TABLE durable_jobs ADD COLUMN requested_at TEXT');
+    }
+    if (!columns.has('processing_started_at')) {
+      await run('ALTER TABLE durable_jobs ADD COLUMN processing_started_at TEXT');
+    }
+    if (!columns.has('rerun_requested')) {
+      await run('ALTER TABLE durable_jobs ADD COLUMN rerun_requested INTEGER NOT NULL DEFAULT 0');
+    }
     await run('UPDATE durable_jobs SET last_completed_at = completed_at WHERE last_completed_at IS NULL AND completed_at IS NOT NULL');
+    await run('UPDATE durable_jobs SET requested_at = COALESCE(requested_at, created_at) WHERE requested_at IS NULL');
+    await run("UPDATE durable_jobs SET processing_started_at = COALESCE(processing_started_at, updated_at) WHERE status = 'processing' AND processing_started_at IS NULL");
     await run('CREATE INDEX IF NOT EXISTS idx_durable_jobs_due ON durable_jobs(status, job_type, next_attempt_at, priority DESC, id)');
     await run('CREATE INDEX IF NOT EXISTS idx_durable_jobs_lease ON durable_jobs(status, lease_expires_at)');
     await run(
@@ -45,19 +59,23 @@ function createDurableJobQueue({run, get, all, now}) {
     await run(
       `INSERT INTO durable_jobs (
          job_type, dedupe_key, payload_json, status, priority, max_attempts,
-         next_attempt_at, created_at, updated_at
-       ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+         next_attempt_at, created_at, updated_at, requested_at
+       ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
        ON CONFLICT(job_type, dedupe_key) DO UPDATE SET
          payload_json = excluded.payload_json,
          priority = MAX(durable_jobs.priority, excluded.priority),
          max_attempts = excluded.max_attempts,
          status = CASE WHEN durable_jobs.status = 'processing' THEN 'processing' ELSE 'pending' END,
          next_attempt_at = CASE WHEN durable_jobs.status = 'processing' THEN durable_jobs.next_attempt_at ELSE excluded.next_attempt_at END,
+         attempt_count = CASE WHEN durable_jobs.status = 'processing' THEN durable_jobs.attempt_count ELSE 0 END,
          completed_at = CASE WHEN durable_jobs.status = 'processing' THEN durable_jobs.completed_at ELSE NULL END,
          last_error = CASE WHEN durable_jobs.status = 'processing' THEN durable_jobs.last_error ELSE NULL END,
+         requested_at = excluded.requested_at,
+         processing_started_at = CASE WHEN durable_jobs.status = 'processing' THEN durable_jobs.processing_started_at ELSE NULL END,
+         rerun_requested = CASE WHEN durable_jobs.status = 'processing' THEN 1 ELSE 0 END,
          updated_at = excluded.updated_at`,
       [jobType, dedupeKey, JSON.stringify(payload || {}), Number(options.priority || 0),
-        Math.max(1, Number(options.maxAttempts || 8)), timestamp, timestamp, timestamp],
+        Math.max(1, Number(options.maxAttempts || 8)), timestamp, timestamp, timestamp, timestamp],
     );
   }
 
@@ -75,8 +93,9 @@ function createDurableJobQueue({run, get, all, now}) {
     const lease = new Date(Date.now() + Math.max(30, Number(leaseSeconds)) * 1000).toISOString();
     const result = await run(
       `UPDATE durable_jobs SET status = 'processing', attempt_count = attempt_count + 1,
-         lease_expires_at = ?, updated_at = ? WHERE id = ? AND status = 'pending'`,
-      [lease, timestamp, candidate.id],
+         lease_expires_at = ?, processing_started_at = ?, rerun_requested = 0,
+         updated_at = ? WHERE id = ? AND status = 'pending'`,
+      [lease, timestamp, timestamp, candidate.id],
     );
     if (result.changes !== 1) return null;
     return {...candidate, attempt_count: Number(candidate.attempt_count || 0) + 1,
@@ -86,8 +105,19 @@ function createDurableJobQueue({run, get, all, now}) {
   async function complete(id) {
     const timestamp = now();
     await run(
-      "UPDATE durable_jobs SET status = 'completed', lease_expires_at = NULL, last_error = NULL, completed_at = ?, last_completed_at = ?, updated_at = ? WHERE id = ?",
-      [timestamp, timestamp, timestamp, id],
+      `UPDATE durable_jobs SET
+         status = CASE WHEN rerun_requested = 1 THEN 'pending' ELSE 'completed' END,
+         next_attempt_at = CASE WHEN rerun_requested = 1 THEN ? ELSE next_attempt_at END,
+         attempt_count = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempt_count END,
+         lease_expires_at = NULL,
+         last_error = NULL,
+         completed_at = CASE WHEN rerun_requested = 1 THEN NULL ELSE ? END,
+         last_completed_at = ?,
+         processing_started_at = CASE WHEN rerun_requested = 1 THEN NULL ELSE processing_started_at END,
+         rerun_requested = 0,
+         updated_at = ?
+       WHERE id = ?`,
+      [timestamp, timestamp, timestamp, timestamp, id],
     );
   }
 
@@ -134,17 +164,40 @@ function createDurableJobQueue({run, get, all, now}) {
       throw new Error('invalid durable job status');
     }
     const timestamp = now();
-    const result = await run(
-      `UPDATE durable_jobs SET status = ?,
-         attempt_count = attempt_count + CASE WHEN ? = 'processing' THEN 1 ELSE 0 END,
-         lease_expires_at = CASE WHEN ? = 'processing' THEN ? ELSE NULL END,
-         last_error = ?, completed_at = CASE WHEN ? = 'completed' THEN ? ELSE NULL END,
-         last_completed_at = CASE WHEN ? = 'completed' THEN ? ELSE last_completed_at END,
-         updated_at = ? WHERE job_type = ? AND dedupe_key = ?`,
-      [status, status, status, new Date(Date.now() + 3600 * 1000).toISOString(),
-        String(error || '').slice(0, 1000) || null, status, timestamp, status, timestamp,
-        timestamp, jobType, dedupeKey],
-    );
+    let result;
+    if (status === 'processing') {
+      result = await run(
+        `UPDATE durable_jobs SET status = 'processing', attempt_count = attempt_count + 1,
+           lease_expires_at = ?, processing_started_at = ?, rerun_requested = 0,
+           last_error = NULL, updated_at = ? WHERE job_type = ? AND dedupe_key = ?`,
+        [new Date(Date.now() + 3600 * 1000).toISOString(), timestamp, timestamp, jobType, dedupeKey],
+      );
+    } else if (status === 'completed' || status === 'failed') {
+      result = await run(
+        `UPDATE durable_jobs SET
+           status = CASE WHEN rerun_requested = 1 THEN 'pending' ELSE ? END,
+           next_attempt_at = CASE WHEN rerun_requested = 1 THEN ? ELSE next_attempt_at END,
+           attempt_count = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempt_count END,
+           lease_expires_at = NULL,
+           last_error = CASE WHEN rerun_requested = 1 THEN NULL ELSE ? END,
+           completed_at = CASE WHEN rerun_requested = 1 THEN NULL WHEN ? = 'completed' THEN ? ELSE NULL END,
+           last_completed_at = CASE WHEN ? = 'completed' THEN ? ELSE last_completed_at END,
+           processing_started_at = CASE WHEN rerun_requested = 1 THEN NULL ELSE processing_started_at END,
+           rerun_requested = 0,
+           updated_at = ?
+         WHERE job_type = ? AND dedupe_key = ?`,
+        [status, timestamp, String(error || '').slice(0, 1000) || null,
+          status, timestamp, status, timestamp, timestamp, jobType, dedupeKey],
+      );
+    } else {
+      result = await run(
+        `UPDATE durable_jobs SET status = 'pending', attempt_count = 0,
+           next_attempt_at = ?, lease_expires_at = NULL, last_error = ?,
+           processing_started_at = NULL, rerun_requested = 0, updated_at = ?
+         WHERE job_type = ? AND dedupe_key = ?`,
+        [timestamp, String(error || '').slice(0, 1000) || null, timestamp, jobType, dedupeKey],
+      );
+    }
     return result.changes === 1;
   }
 

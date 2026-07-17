@@ -19,3 +19,10 @@ Purpose: durable Markdown memory for hunt hypotheses, useful pivots, validated b
 ## Closed Hunts
 
 - None recorded yet.
+
+## Managed Memory Records
+
+Records below are written atomically by Onion Sentinel. Keep operator-authored notes above this section.
+
+<!-- ONION_SENTINEL_MANAGED_MEMORY_START -->
+<!-- ONION_SENTINEL_MANAGED_MEMORY_END -->

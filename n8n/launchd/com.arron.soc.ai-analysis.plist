@@ -28,6 +28,25 @@
   <key>StartInterval</key>
   <integer>300</integer>
 
+  <!-- Committed alert/evidence state touches this file for low-latency work.
+       StartInterval remains the recovery path for a missed filesystem event. -->
+  <key>WatchPaths</key>
+  <array>
+    <string>__HOME__/n8n-local/run/ai-analysis.wake</string>
+  </array>
+
+  <!-- WatchPaths can coalesce a change that occurs while the worker is still
+       running. PathState makes a marker left at process exit authoritative, so
+       evidence committed during inference always receives a follow-up run. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>PathState</key>
+    <dict>
+      <key>__HOME__/n8n-local/run/ai-analysis.wake</key>
+      <true/>
+    </dict>
+  </dict>
+
   <key>RunAtLoad</key>
   <false/>
 

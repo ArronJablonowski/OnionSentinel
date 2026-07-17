@@ -1,0 +1,35 @@
+from pathlib import Path
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class PostgresQueueMigrationTest(unittest.TestCase):
+    def test_schema_has_concurrent_idempotent_queue_primitives(self):
+        schema = (ROOT / "n8n/postgres/alert-store-queue-schema.sql").read_text(encoding="utf-8")
+        self.assertIn("UNIQUE (job_type, dedupe_key)", schema)
+        self.assertIn("JSONB", schema)
+        self.assertIn("FOR UPDATE SKIP LOCKED", schema)
+        self.assertIn("rerun_requested", schema)
+        self.assertIn("release_expired_leases", schema)
+        self.assertIn("ON CONFLICT (job_type, dedupe_key)", schema)
+
+    def test_verifier_is_network_isolated_and_uses_pinned_image(self):
+        verifier = (ROOT / "operations/verify-postgres-queue-schema.zsh").read_text(encoding="utf-8")
+        self.assertIn("--network none", verifier)
+        self.assertIn("postgres@sha256:", verifier)
+        self.assertIn("trap cleanup", verifier)
+        self.assertIn("processing:true", verifier)
+        self.assertNotIn("10.77.7.225", verifier)
+
+    def test_plan_forbids_unsafe_queue_only_dual_write(self):
+        plan = (ROOT / "docs/postgresql-alert-store-queue-migration.md").read_text(encoding="utf-8")
+        self.assertIn("dual-write window", plan)
+        self.assertIn("transactional outbox", plan)
+        self.assertIn("least-privilege role", plan)
+        self.assertIn("127.0.0.1", plan)
+
+
+if __name__ == "__main__":
+    unittest.main()

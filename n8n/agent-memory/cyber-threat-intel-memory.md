@@ -23,3 +23,10 @@ Purpose: durable Markdown memory for intelligence findings, recurring indicators
 ## Intelligence Gaps
 
 - None recorded yet.
+
+## Managed Memory Records
+
+Records below are written atomically by Onion Sentinel. Keep operator-authored notes above this section.
+
+<!-- ONION_SENTINEL_MANAGED_MEMORY_START -->
+<!-- ONION_SENTINEL_MANAGED_MEMORY_END -->
