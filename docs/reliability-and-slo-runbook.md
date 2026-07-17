@@ -35,7 +35,7 @@ ingest transaction closes.
 | Unit | Schedule | Responsibility |
 | --- | --- | --- |
 | `so-alert-poll.service` | `so-alert-poll.timer`, every 5 minutes | Restricted export, durable outbox delivery, heartbeat. |
-| `so-pcap-broker.service` | `so-pcap-broker.timer`, every minute | Sample `/nsm` telemetry, claim one request, stream bounded chunks to SSD, checksum, Mac transfer, completion. |
+| `so-pcap-broker.service` | `so-pcap-broker.timer`, five minutes after the prior run completes | Sample `/nsm` telemetry, claim one request, stream bounded chunks to SSD, checksum, Mac transfer, completion. |
 | `so-storage-health.service` | `so-storage-health.timer`, hourly | External-mount identity, capacity, temperature, and read-only SMART health. |
 
 The legacy combined `so-alert-relay.timer` is disabled by the current installer
@@ -97,11 +97,13 @@ may be reused, but a leased request is never mutated. The parser reports to
 `/pcap/analysis-status` and deletes raw broker-managed artifacts only after
 validated Zeek and TShark evidence is durable.
 
-The broker queue is intentionally serial at the relay and severity ordered at
-alert-store: critical, high, medium, low, then informational. Within one
-severity, the request closest to the configured Security Onion capture-retention
-deadline runs first; creation time breaks any remaining tie newest-first. This
-keeps urgent work ahead of routine captures while reducing avoidable expiry.
+The broker queue is intentionally serial at the relay. Critical and high work
+is always preemptive. Medium, low, and informational requests receive bounded
+aging: after `PCAP_PRIORITY_MAX_WAIT_SECONDS` (20 minutes by default), they are
+selected oldest-first across those tiers. Fresh work remains severity ordered,
+then closest-to-retention-expiry, with creation time as the final tie breaker.
+This preserves urgent response while preventing a continuous medium-alert
+stream from starving older low-priority packet evidence.
 
 ## Alert Identity
 
@@ -180,6 +182,8 @@ Run `operations/verify-stack.zsh` with `PCAP_TIMER_EXPECTED_STATE=safety-hold`
 when controlled transfer qualification has breached the capture-loss target and
 the relay PCAP timer is intentionally disabled. The default remains `active` so
 an unexplained stopped timer still fails normal deployment verification.
+The verifier opens alert-store SQLite read-only and waits through bounded live
+writer locks; a transient WAL commit must not be reported as corruption.
 
 The stream manifest uses Security Onion-local signed chunk capabilities. A
 normal capture rotation cannot invalidate an in-flight manifest merely because

@@ -90,6 +90,10 @@ const pcapRequestDefaultWindowSeconds = Math.min(
 );
 const pcapClaimLeaseSeconds = Math.max(300, Number(process.env.PCAP_CLAIM_LEASE_SECONDS || 1800));
 const pcapCaptureRetentionSeconds = Math.max(0, Number(process.env.PCAP_CAPTURE_RETENTION_SECONDS || 0));
+const pcapPriorityMaxWaitSeconds = Math.max(
+  60,
+  Number(process.env.PCAP_PRIORITY_MAX_WAIT_SECONDS || 1200),
+);
 const pcapTransferMaxAttempts = Math.max(1, Math.min(20, Number(process.env.PCAP_TRANSFER_MAX_ATTEMPTS || 5)));
 const pcapTransferMaxRetrySeconds = Math.max(
   30,
@@ -3747,6 +3751,25 @@ async function listPcapRequests(query = new URLSearchParams()) {
         WHERE p.status = ?
           AND (p.status <> 'pending' OR p.next_attempt_at IS NULL OR datetime(p.next_attempt_at) <= datetime(?))
         ORDER BY
+          -- Critical and high packet evidence remains preemptive. Below that
+          -- tier, bounded aging prevents a steady medium-alert stream from
+          -- starving older low/informational captures forever.
+          CASE lower(COALESCE(g.triage_level, ''))
+            WHEN 'critical' THEN 2
+            WHEN 'high' THEN 1
+            ELSE 0
+          END DESC,
+          CASE WHEN lower(COALESCE(g.triage_level, '')) NOT IN ('critical', 'high')
+            AND CAST(strftime('%s', replace(?, '  ', 'T')) AS INTEGER)
+              - CAST(strftime('%s', replace(p.created_at, '  ', 'T')) AS INTEGER) >= ?
+            THEN 1 ELSE 0
+          END DESC,
+          CASE WHEN lower(COALESCE(g.triage_level, '')) NOT IN ('critical', 'high')
+            AND CAST(strftime('%s', replace(?, '  ', 'T')) AS INTEGER)
+              - CAST(strftime('%s', replace(p.created_at, '  ', 'T')) AS INTEGER) >= ?
+            THEN datetime(replace(p.created_at, '  ', 'T'))
+            ELSE NULL
+          END ASC,
           CASE lower(COALESCE(g.triage_level, ''))
             WHEN 'critical' THEN 4
             WHEN 'high' THEN 3
@@ -3763,7 +3786,9 @@ async function listPcapRequests(query = new URLSearchParams()) {
           p.created_at DESC
         LIMIT ?
       `,
-      [status, nowUtc(), pcapCaptureRetentionSeconds, pcapCaptureRetentionSeconds, limit],
+      [status, nowUtc(), nowUtc(), pcapPriorityMaxWaitSeconds,
+        nowUtc(), pcapPriorityMaxWaitSeconds,
+        pcapCaptureRetentionSeconds, pcapCaptureRetentionSeconds, limit],
     )
     : await all('SELECT * FROM pcap_requests ORDER BY created_at DESC LIMIT ?', [limit]);
   return {ok: true, status: status || 'all', requests: rows.map(pcapRequestFromRow)};

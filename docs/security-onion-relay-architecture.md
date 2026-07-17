@@ -1209,9 +1209,12 @@ Safety controls:
   a short bounded delay. A failed callback never stops the alert relay or later
   PCAP work; the claim lease remains the final recovery path if every retry
   fails.
-- Pending PCAP work is ordered by current group severity and then newest-first.
-  This prevents a historical backfill from delaying a newly detected critical
-  or high alert. The internal `/pcap/requeue` recovery route accepts an explicit
+- Critical and high PCAP work remains preemptive. Medium, low, and
+  informational requests older than `PCAP_PRIORITY_MAX_WAIT_SECONDS` are
+  selected oldest-first; fresh requests retain severity and capture-retention
+  ordering. This bounded aging prevents starvation without allowing a
+  historical backfill to delay newly detected critical or high alerts. The
+  internal `/pcap/requeue` recovery route accepts an explicit
   reviewed list of failed request IDs after a broker or selector repair; it is
   not an automatic retry of every `No Packets` result.
 - Set `PCAP_CAPTURE_RETENTION_SECONDS` to Security Onion's verified rolling

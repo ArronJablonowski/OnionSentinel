@@ -11,6 +11,17 @@ artifacts remain on their designated hosts and out of Git.
 This document is a roadmap, not a statement that these harnesses are authorized
 for production alert handling today.
 
+## Current Promotion Gate
+
+No harness, adapter, policy-broker, or investigation-runtime phase may begin on
+the production path until the existing direct-Ollama deployment has completed
+its current qualification cycle. The gate requires a clear protected PCAP
+backlog, green operational SLO evaluation, a successful recovery drill, and a
+continuous 48-hour production soak with no unresolved ingestion, analysis,
+notification, disk-capacity, or PCAP-flow warning. Experimental work before
+that point must remain synthetic, isolated, disabled by default, and unable to
+reach live evidence or mutate production state.
+
 ## Current Production Boundary
 
 - The scheduled SOC Analyst pipeline uses the selected local Ollama model and

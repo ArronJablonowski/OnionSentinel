@@ -36,6 +36,7 @@ cp "$REPO_DIR/n8n/docker-compose.yml" "$STACK_DIR/docker-compose.yml"
 cp "$REPO_DIR/n8n/alert_store/alert_store.js" "$STACK_DIR/alert_store/alert_store.js"
 cp "$REPO_DIR/n8n/alert_store/alert_store_proxy.js" "$STACK_DIR/alert_store/alert_store_proxy.js"
 cp "$REPO_DIR/n8n/alert_store/package.json" "$STACK_DIR/alert_store/package.json"
+cp "$REPO_DIR/n8n/alert_store/package-lock.json" "$STACK_DIR/alert_store/package-lock.json"
 cp "$REPO_DIR/n8n/alert_store/review_alerts.js" "$STACK_DIR/alert_store/review_alerts.js"
 cp "$REPO_DIR/n8n/alert_store/investigation_notes.js" "$STACK_DIR/alert_store/investigation_notes.js"
 cp "$REPO_DIR/n8n/alert_store/lib/provider_scheduler.js" "$STACK_DIR/alert_store/lib/provider_scheduler.js"
@@ -162,7 +163,14 @@ Path(destination).write_text(Path(source).read_text().replace("__HOME__", home))
 PY
 done
 
-/opt/homebrew/bin/npm --prefix "$STACK_DIR/alert_store" install --omit=dev
+/opt/homebrew/bin/node -e '
+const [major, minor] = process.versions.node.split(".").map(Number);
+if (major < 20 || (major === 20 && minor < 17)) {
+  console.error(`Onion Sentinel alert-store requires Node.js >=20.17.0; found ${process.versions.node}`);
+  process.exit(1);
+}
+'
+PATH="/opt/homebrew/bin:$PATH" /opt/homebrew/bin/npm --prefix "$STACK_DIR/alert_store" ci --omit=dev
 
 /usr/local/bin/docker compose -f "$STACK_DIR/docker-compose.yml" --project-directory "$STACK_DIR" up -d
 # Reload LaunchAgents so Docker/n8n are monitored after future reboots.

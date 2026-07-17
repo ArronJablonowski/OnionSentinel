@@ -9,6 +9,6 @@
     "check": "node --check alert_store.js"
   },
   "dependencies": {
-    "sqlite3": "^5.1.7"
+    "sqlite3": "6.0.1"
   }
 }

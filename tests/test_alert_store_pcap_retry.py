@@ -68,6 +68,7 @@ class AlertStorePcapRetryTest(unittest.TestCase):
             "ENRICHMENT_WORKER_INTERVAL_MS": "600000",
             "PIPELINE_DISK_SAMPLE_INTERVAL_SECONDS": "3600",
             "PCAP_CAPTURE_RETENTION_SECONDS": "0",
+            "PCAP_PRIORITY_MAX_WAIT_SECONDS": "1200",
             "PCAP_TRANSFER_MAX_ATTEMPTS": "2",
             "PCAP_TRANSFER_MAX_RETRY_SECONDS": "300",
             "AI_ANALYSIS_WAKE_PATH": str(self.ai_wake_path),
@@ -209,6 +210,51 @@ class AlertStorePcapRetryTest(unittest.TestCase):
         self.assertEqual(
             [item["request_id"] for item in pending["requests"]],
             [requests["critical"], requests["high"], requests["low"]],
+        )
+
+    def test_aged_low_priority_request_precedes_fresh_medium_without_preempting_high(self) -> None:
+        requests: dict[str, str] = {}
+        with sqlite3.connect(self.db_path, timeout=3) as connection:
+            for level in ("low", "medium", "high"):
+                group_id = f"synthetic-aged-{level}-group"
+                connection.execute(
+                    """
+                    INSERT INTO alert_group_summary (
+                      group_id, group_key, triage_level, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (group_id, f"synthetic-aged-{level}-key", level, "2026-07-16  08:00:00-06:00"),
+                )
+            connection.commit()
+
+        for level in ("low", "medium", "high"):
+            created = self.post(
+                "/pcap/request",
+                {
+                    "alert_id": f"synthetic-aged-{level}-alert",
+                    "group_id": f"synthetic-aged-{level}-group",
+                    "first_seen": "2026-07-16  08:00:00-06:00",
+                    "last_seen": "2026-07-16  08:01:00-06:00",
+                    "source_ip": "192.0.2.10",
+                    "destination_ip": "198.51.100.20",
+                    "destination_port": 443,
+                    "transport_protocol": "tcp",
+                    "reason": f"synthetic aged {level} scheduling validation",
+                },
+            )
+            requests[level] = created["request"]["request_id"]
+
+        with sqlite3.connect(self.db_path, timeout=3) as connection:
+            connection.execute(
+                "UPDATE pcap_requests SET created_at = datetime('now', '-1 hour') WHERE request_id = ?",
+                (requests["low"],),
+            )
+            connection.commit()
+
+        _, pending = request_json(f"{self.base_url}/pcap/requests?status=pending&limit=10")
+        self.assertEqual(
+            [item["request_id"] for item in pending["requests"]],
+            [requests["high"], requests["low"], requests["medium"]],
         )
 
     def test_fulfilled_transfer_wakes_parser_and_completed_parse_requeues_ai(self) -> None:

@@ -46,6 +46,11 @@ cd /path/to/OnionSentinel
 n8n/bin/install-macstudio-stack.zsh
 ```
 
+The host-native alert-store requires Node.js 20.17 or newer. The installer
+copies the committed lockfile and runs `npm ci --omit=dev`; do not replace this
+with an unlocked production install. The locked `sqlite3` runtime has no known
+production dependency advisories at the time of this release.
+
 The installer creates or updates:
 
 - `$HOME/n8n-local`
@@ -455,6 +460,7 @@ PCAP request broker safety knobs:
 - `PCAP_REQUEST_DEFAULT_WINDOW_SECONDS=120`
 - `PCAP_REQUEST_MAX_WINDOW_SECONDS=300`
 - `PCAP_CLAIM_LEASE_SECONDS=1800`
+- `PCAP_PRIORITY_MAX_WAIT_SECONDS=1200`
 - `PCAP_AUTO_REQUEST_LEVELS=critical,high,medium,low,informational`
 
 `PCAP_REQUEST_MAX_WINDOW_SECONDS` caps the requested packet window before any
@@ -468,10 +474,12 @@ relay claims so stale `claimed` rows do not strand PCAP work forever.
 creation during `/alert` ingest. The production default queues PCAP evidence
 for every newly stored, non-suppressed alert with a known triage level. Pending
 work coalesces by stable alert-group identity and is selected
-critical-to-informational; retention urgency and newest creation time order
-requests within the same severity. Set the variable to an empty value during
-maintenance to disable auto-queueing without changing dashboard/manual request
-behavior.
+with critical and high requests always preemptive. Medium, low, and
+informational requests older than `PCAP_PRIORITY_MAX_WAIT_SECONDS` switch to
+oldest-first selection, preventing continuous medium traffic from starving
+older captures. Fresh work remains severity ordered, then retention ordered.
+Set `PCAP_AUTO_REQUEST_LEVELS` to an empty value during maintenance to disable
+auto-queueing without changing dashboard/manual request behavior.
 
 PCAP bytes are not posted through n8n. The broker workflow is metadata-only:
 it accepts requests, lets the relay claim work, and records completion

@@ -54,6 +54,11 @@ cd /path/to/OnionSentinel
 ./n8n/bin/install-macstudio-stack.zsh
 ```
 
+The installer requires Homebrew Node.js 20.17 or newer and restores the
+alert-store dependency tree with the committed `package-lock.json` via
+`npm ci --omit=dev`. Treat a Node version-gate or lockfile failure as a blocked
+restore; do not fall back to an unlocked `npm install`.
+
 Create the SOC report directory used by n8n and expose it through the
 Hermes/Obsidian-facing Documents path:
 

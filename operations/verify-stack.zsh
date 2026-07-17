@@ -45,7 +45,10 @@ ssh "$MAC_HOST" 'curl -fsS http://127.0.0.1:8787/health | python3 -c '"'"'import
 echo
 echo "== Mac Studio alert-store SQLite =="
 # Confirms the alert-store DB is readable and the maintenance LaunchAgent exists.
-ssh "$MAC_HOST" 'sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "PRAGMA quick_check; SELECT COUNT(*) FROM alerts; SELECT COUNT(*) FROM alert_group_summary;"'
+# The live alert-store writes continuously. A read-only verification must wait
+# through short writer/schema locks instead of reporting a healthy WAL DB as
+# failed merely because the probe landed on a commit boundary.
+ssh "$MAC_HOST" 'sqlite3 -readonly -cmd ".timeout 60000" "$HOME/n8n-local/alert_store_data/alerts.sqlite3" "PRAGMA quick_check; SELECT COUNT(*) FROM alerts; SELECT COUNT(*) FROM alert_group_summary;"'
 ssh "$MAC_HOST" 'launchctl print gui/$(id -u)/com.arron.soc.alert-store-maintenance | grep -E "state =|last exit code|run interval|path ="'
 
 echo
