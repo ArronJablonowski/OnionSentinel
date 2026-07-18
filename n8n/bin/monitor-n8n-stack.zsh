@@ -9,6 +9,7 @@ STATE_FILE="$LOG_DIR/monitor-n8n-stack-state.json"
 DOCKER="/usr/local/bin/docker"
 ENV_FILE="$STACK_DIR/.env"
 SLO_EVALUATOR="$STACK_DIR/bin/evaluate-operational-slos.py"
+WEB_GUARD="$STACK_DIR/bin/ensure-onion-sentinel-web.py"
 
 mkdir -p "$LOG_DIR"
 
@@ -102,6 +103,8 @@ check_stack() {
   "$DOCKER" inspect -f "{{.State.Status}}" alert-store 2>/dev/null | grep -qx running || { echo "alert-store proxy container is not running"; return 1; }
   /usr/bin/curl -fsS --max-time 5 http://127.0.0.1:5678/healthz >/dev/null || { echo "n8n healthz failed"; return 1; }
   /usr/bin/curl -fsS --max-time 5 http://127.0.0.1:8787/health >/dev/null || { echo "host alert-store health failed"; return 1; }
+  [[ -x "$WEB_GUARD" ]] || { echo "Onion Sentinel web identity guard is missing"; return 1; }
+  /usr/bin/python3 "$WEB_GUARD" --check-only >/dev/null || { echo "Onion Sentinel web service identity failed"; return 1; }
   "$DOCKER" exec n8n node -e '(async()=>{const r=await fetch("http://alert-store:8787/health"); if(!r.ok) process.exit(1); const j=await r.json(); if(!j.ok) process.exit(1);})().catch(()=>process.exit(1))' || { echo "alert-store proxy health failed"; return 1; }
   [[ -x "$SLO_EVALUATOR" ]] || { echo "operational SLO evaluator is missing"; return 1; }
   /usr/bin/python3 "$SLO_EVALUATOR" --stack-dir "$STACK_DIR" || return 1

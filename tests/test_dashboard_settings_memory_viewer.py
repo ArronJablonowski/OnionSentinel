@@ -44,6 +44,8 @@ class DashboardSettingsMemoryViewerTest(unittest.TestCase):
 
         self.assertIn("memoryContent.textContent = data.content || '';", dashboard_source)
         self.assertIn("/api/soc-settings/agent-memory?key=", dashboard_source)
+        self.assertIn("'shared': 'Shared Agent Memory'", dashboard_source)
+        self.assertIn("memoryLabels[memoryKey] || 'Agent Memory'", dashboard_source)
         self.assertIn('if path == "/api/soc-settings/agent-memory":', portal_source)
         self.assertNotIn('if parsed.path == "/api/soc-settings/agent-memory":', portal_source)
 

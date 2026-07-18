@@ -85,7 +85,7 @@ THREAT_HUNTER_MEMORY_FILE = AGENT_MEMORY_DIR / "threat-hunter-memory.md"
 SHARED_AGENT_MEMORY_FILE = AGENT_MEMORY_DIR / "shared-agent-memory.md"
 SOC_AI_SETTINGS_FILE = HOME / "n8n-local" / "config" / "ai_model_settings.json"
 SOC_ANALYST_PROMPT_MAX_BYTES = 20000
-AGENT_MEMORY_VIEW_MAX_BYTES = 256 * 1024
+AGENT_MEMORY_VIEW_MAX_BYTES = 1024 * 1024
 SOC_ALERT_API_MAX_LIMIT = 500
 SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS = 30
 SOC_ALERT_DB_BUSY_TIMEOUT_MS = SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS * 1000
@@ -1141,6 +1141,11 @@ def read_agent_memory(memory_key: object) -> tuple[int, dict]:
         if stat.st_size > AGENT_MEMORY_VIEW_MAX_BYTES:
             return HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {
                 "ok": False,
+                "key": key,
+                "label": label,
+                "path": str(path),
+                "bytes": stat.st_size,
+                "read_only": True,
                 "error": f"{label} exceeds the {AGENT_MEMORY_VIEW_MAX_BYTES}-byte viewer limit.",
             }
         content = resolved_path.read_text(encoding="utf-8", errors="replace")

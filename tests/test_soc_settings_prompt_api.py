@@ -91,6 +91,11 @@ class SocSettingsPromptApiTest(unittest.TestCase):
 
         self.assertEqual(status, 413)
         self.assertFalse(payload["ok"])
+        self.assertEqual(payload["key"], "shared")
+        self.assertEqual(payload["label"], "Shared Agent Memory")
+        self.assertEqual(payload["path"], str(self.portal.SHARED_AGENT_MEMORY_FILE))
+        self.assertEqual(payload["bytes"], len("too much memory"))
+        self.assertTrue(payload["read_only"])
 
 
 if __name__ == "__main__":

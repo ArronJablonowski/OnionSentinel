@@ -5076,6 +5076,14 @@ SETTINGS_PAGE_JS = '''
   const memoryStats = document.querySelector('#settings-memory-stats');
   const memoryStatus = document.querySelector('#settings-memory-status');
   const memoryContent = document.querySelector('#settings-memory-content');
+  const memoryLabels = {
+    'soc-analyst': 'SOC Analyst Memory',
+    'incident-responder': 'Incident Responder Memory',
+    'siem-engineer': 'SIEM Engineer Memory',
+    'cyber-threat-intel': 'Cyber Threat Intel Memory',
+    'threat-hunter': 'Threat Hunter Memory',
+    'shared': 'Shared Agent Memory'
+  };
   if (memoryModal) document.body.appendChild(memoryModal);
   let memoryReturnFocus = null;
   function setStatus(message, kind = '') {
@@ -5120,7 +5128,7 @@ SETTINGS_PAGE_JS = '''
     memoryReturnFocus = trigger;
     memoryModal.hidden = false;
     document.body.classList.add('settings-memory-open');
-    memoryTitle.textContent = 'Agent Memory';
+    memoryTitle.textContent = memoryLabels[memoryKey] || 'Agent Memory';
     memoryPath.textContent = trigger.querySelector('code')?.textContent || '';
     memoryStats.textContent = '';
     memoryStatus.textContent = 'Loading memory file...';
@@ -5130,9 +5138,12 @@ SETTINGS_PAGE_JS = '''
     try {
       const response = await fetch(`/api/soc-settings/agent-memory?key=${encodeURIComponent(memoryKey)}`, {cache: 'no-store'});
       const data = await response.json().catch(() => ({}));
-      if (!response.ok || !data.ok) throw new Error(data.error || `Memory read failed with HTTP ${response.status}`);
-      memoryTitle.textContent = data.label || 'Agent Memory';
+      memoryTitle.textContent = data.label || memoryTitle.textContent;
       memoryPath.textContent = data.path || memoryPath.textContent;
+      if (Number.isFinite(Number(data.bytes))) {
+        memoryStats.textContent = `${Number(data.bytes).toLocaleString()} bytes${data.modified_at ? ` · Updated ${data.modified_at}` : ''}`;
+      }
+      if (!response.ok || !data.ok) throw new Error(data.error || `Memory read failed with HTTP ${response.status}`);
       memoryStats.textContent = `${Number(data.bytes || 0).toLocaleString()} bytes · Updated ${data.modified_at || 'unknown'}`;
       memoryStatus.textContent = data.content ? 'Read-only view' : 'This memory file is empty.';
       memoryContent.textContent = data.content || '';

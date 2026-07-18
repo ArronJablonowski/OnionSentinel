@@ -11,10 +11,18 @@ runtime, or cleanup ownership.
 | Onion Sentinel source | Onion Sentinel | `$HOME/n8n-local/onion-sentinel-dashboard` | n/a |
 | Onion Sentinel generated UI | Onion Sentinel | `$HOME/SOC Alerts Web` | `8766` |
 | Onion Sentinel web/API service | Onion Sentinel | `com.arron.onion-sentinel.web` | `http://10.77.7.225:8766/` |
+| Onion Sentinel listener guard | Onion Sentinel | `com.arron.onion-sentinel.web-guard` | Verifies port `8766` every 60 seconds |
 | Hermes LAN Portal | Hermes | `$HOME/report_portal` and `$HOME/.hermes` | `http://10.77.7.225:8765/` |
 
 The only supported relationship is a normal external link from the Hermes LAN
 Portal to `http://10.77.7.225:8766/`.
+
+The listener guard validates the JSON service identity rather than accepting a
+generic HTTP success. It can terminate only the exact current-user
+`python -m http.server 8766` collision and then kickstart Onion Sentinel's own
+LaunchAgent. It refuses to kill an unknown listener and lets the stack monitor
+raise an operator-visible failure instead. This keeps self-healing narrow and
+prevents an unrelated process from being terminated automatically.
 
 ## Required Isolation
 
@@ -65,6 +73,9 @@ The verifier requires:
 
 - independent healthy listeners on ports `8765` and `8766`;
 - a running `com.arron.onion-sentinel.web` LaunchAgent;
+- a successful one-minute `com.arron.onion-sentinel.web-guard` check;
+- an `onion_sentinel_server.py` process, rather than a generic directory
+  server, owning port `8766`;
 - no active Onion Sentinel reference to `.hermes` or `report_portal`;
 - no legacy Onion Sentinel portal-copy helper or copied portal subtree;
 - no Onion Sentinel builder/copy mapping in the Hermes sync job;

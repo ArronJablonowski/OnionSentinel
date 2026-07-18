@@ -15,7 +15,9 @@ for file_path in \
   "$ROOT/n8n/bin/run-alert-store-host.zsh" \
   "$ROOT/n8n/bin/maintain-alert-store-sqlite.zsh" \
   "$ROOT/onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py" \
-  "$ROOT/n8n/launchd/com.arron.onion-sentinel.web.plist"
+  "$ROOT/n8n/launchd/com.arron.onion-sentinel.web.plist" \
+  "$ROOT/n8n/launchd/com.arron.onion-sentinel.web-guard.plist" \
+  "$ROOT/n8n/bin/ensure-onion-sentinel-web.py"
 do
   [[ -f "$file_path" ]] || fail "missing $file_path"
   if grep -Eq '(\.hermes|report_portal)' "$file_path"; then
@@ -36,12 +38,20 @@ grep -q 'com.arron.onion-sentinel.web' \
 grep -q '<string>8766</string>' \
   "$ROOT/n8n/launchd/com.arron.onion-sentinel.web.plist" || \
   fail "dedicated web LaunchAgent is not pinned to port 8766"
+grep -q '<integer>60</integer>' \
+  "$ROOT/n8n/launchd/com.arron.onion-sentinel.web-guard.plist" || \
+  fail "web identity guard is not scheduled every 60 seconds"
 
 if [[ -n "${MAC_HOST:-}" ]]; then
   ssh -o BatchMode=yes -o ConnectTimeout=8 "$MAC_HOST" 'set -eu
     curl -fsS http://127.0.0.1:8766/healthz | python3 -c '"'"'import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if d.get("ok") is True and d.get("service") == "onion-sentinel" else 1)'"'"'
+    python3 "$HOME/n8n-local/bin/ensure-onion-sentinel-web.py" --check-only >/dev/null
     curl -fsS -o /dev/null http://127.0.0.1:8765/
     launchctl print "gui/$(id -u)/com.arron.onion-sentinel.web" | grep -q "state = running"
+    launchctl print "gui/$(id -u)/com.arron.onion-sentinel.web-guard" >/dev/null
+    listener_pid="$(lsof -nP -t -iTCP:8766 -sTCP:LISTEN | head -1)"
+    test -n "$listener_pid"
+    ps -p "$listener_pid" -o command= | grep -q "onion_sentinel_server.py"
     launchctl print "gui/$(id -u)/com.arron.reportportal" | grep -q "state = running"
     test ! -e "$HOME/n8n-local/bin/sync-soc-alerts-portal.py"
     ! grep -Eq "(\\.hermes|report_portal)" \
