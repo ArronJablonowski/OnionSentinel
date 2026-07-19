@@ -17,7 +17,6 @@ import os
 import re
 import shutil
 import sqlite3
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -32,6 +31,8 @@ if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 from pcap_lifecycle import analysis_completed, delete_request_artifacts
 from disk_capacity import require_runtime_capacity
+from bounded_http import BoundedHttpError, read_bounded_json
+from bounded_process import BoundedProcessError, run_bounded_command, run_bounded_command_to_file
 
 
 HOME = Path.home()
@@ -45,9 +46,18 @@ DEFAULT_WAKE = Path(os.environ.get(
 PCAP_SUFFIXES = {".pcap", ".pcapng", ".cap"}
 LOG_LIMIT = 2000
 SUMMARY_LIMIT = 20
+MAX_TOOL_STDOUT_BYTES = max(64 * 1024, int(os.environ.get("PCAP_TOOL_MAX_STDOUT_BYTES", str(2 * 1024 * 1024))))
+MAX_TOOL_STDERR_BYTES = max(16 * 1024, int(os.environ.get("PCAP_TOOL_MAX_STDERR_BYTES", str(512 * 1024))))
+TSHARK_SUMMARY_PACKET_LIMIT = max(200, int(os.environ.get("PCAP_TSHARK_SUMMARY_PACKET_LIMIT", "5000")))
 MAX_ARCHIVE_MEMBERS = max(1, int(os.environ.get("PCAP_MAX_ARCHIVE_MEMBERS", "2048")))
 MAX_EXTRACTED_BYTES = max(1, int(os.environ.get("PCAP_MAX_EXTRACTED_BYTES", str(40 * 1024 * 1024 * 1024))))
 MAX_PCAP_FILES = max(1, int(os.environ.get("PCAP_MAX_FILES", "256")))
+MAX_REMOTE_ARTIFACT_BYTES = max(
+    1,
+    int(os.environ.get("PCAP_MAX_REMOTE_ARTIFACT_BYTES", str(40 * 1024 * 1024 * 1024))),
+)
+REMOTE_FETCH_TIMEOUT_SECONDS = max(30, int(os.environ.get("PCAP_REMOTE_FETCH_TIMEOUT_SECONDS", "3600")))
+MAX_CONTROL_RESPONSE_BYTES = 64 * 1024
 
 
 def parse_args() -> argparse.Namespace:
@@ -127,18 +137,17 @@ def tool_path(env_name: str, executable: str) -> str | None:
 
 def run_command(command: list[str], cwd: Path | None = None, timeout: int = 120) -> dict[str, Any]:
     try:
-        proc = subprocess.run(
+        proc = run_bounded_command(
             command,
-            cwd=str(cwd) if cwd else None,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
+            timeout_seconds=timeout,
+            max_stdout_bytes=MAX_TOOL_STDOUT_BYTES,
+            max_stderr_bytes=MAX_TOOL_STDERR_BYTES,
+            cwd=cwd,
         )
     except FileNotFoundError:
         return {"ok": False, "returncode": 127, "stdout": "", "stderr": f"not found: {command[0]}", "command": command}
-    except subprocess.TimeoutExpired as exc:
-        return {"ok": False, "returncode": 124, "stdout": exc.stdout or "", "stderr": f"timeout after {timeout}s", "command": command}
+    except BoundedProcessError as exc:
+        return {"ok": False, "returncode": 124, "stdout": "", "stderr": str(exc), "command": command}
     return {
         "ok": proc.returncode == 0,
         "returncode": proc.returncode,
@@ -225,19 +234,39 @@ def fetch_remote_artifact(request: dict[str, Any], artifact_dir: Path, ssh_targe
     expected_size = request.get("artifact_size_bytes")
     if not artifact_path or not ssh_target:
         return {"ok": False, "reason": "remote fetch not configured"}
-    if not artifact_path.startswith("/nsm/pcapout/onion-sentinel/"):
+    if not re.fullmatch(r"/nsm/pcapout/onion-sentinel/[A-Za-z0-9._/-]+", artifact_path):
         return {"ok": False, "reason": "remote artifact path is outside the Onion Sentinel PCAP output directory"}
+    if ".." in Path(artifact_path).parts:
+        return {"ok": False, "reason": "remote artifact path contains traversal components"}
+
+    try:
+        expected_size_int = int(expected_size) if expected_size not in (None, "") else None
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "remote artifact size metadata is invalid"}
+    if expected_size_int is not None and (expected_size_int < 0 or expected_size_int > MAX_REMOTE_ARTIFACT_BYTES):
+        return {"ok": False, "reason": "remote artifact exceeds the configured transfer ceiling"}
 
     destination = local_artifact_path(request, artifact_dir)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp_path = destination.with_suffix(destination.suffix + ".tmp")
     command = [ssh_bin, "-o", "BatchMode=yes", "-T", ssh_target, "sudo", "-n", "cat", artifact_path]
-    with temp_path.open("wb") as handle:
-        proc = subprocess.run(command, stdout=handle, stderr=subprocess.PIPE, timeout=180)
+    transfer_ceiling = expected_size_int if expected_size_int is not None else MAX_REMOTE_ARTIFACT_BYTES
+    require_runtime_capacity(destination.parent, max(1, transfer_ceiling), label="remote PCAP artifact fetch")
+    try:
+        proc = run_bounded_command_to_file(
+            command,
+            temp_path,
+            timeout_seconds=REMOTE_FETCH_TIMEOUT_SECONDS,
+            max_stdout_bytes=max(1, transfer_ceiling),
+            max_stderr_bytes=MAX_TOOL_STDERR_BYTES,
+        )
+    except (BoundedProcessError, OSError) as error:
+        temp_path.unlink(missing_ok=True)
+        return {"ok": False, "reason": str(error)[:240]}
     if proc.returncode != 0:
         temp_path.unlink(missing_ok=True)
-        return {"ok": False, "reason": proc.stderr.decode("utf-8", errors="replace")[:240] or f"ssh exited {proc.returncode}"}
-    if expected_size not in (None, "") and temp_path.stat().st_size != int(expected_size):
+        return {"ok": False, "reason": proc.stderr[:240] or f"ssh exited {proc.returncode}"}
+    if expected_size_int is not None and temp_path.stat().st_size != expected_size_int:
         temp_path.unlink(missing_ok=True)
         return {"ok": False, "reason": "downloaded artifact size did not match broker metadata"}
     if expected_sha256 and sha256_file(temp_path) != expected_sha256:
@@ -303,20 +332,47 @@ def materialize_pcap_files(request: dict[str, Any], args: argparse.Namespace, wo
     return [], "artifact-not-copied-to-mac"
 
 
-def load_json_lines(path: Path, limit: int = LOG_LIMIT) -> list[dict[str, Any]]:
+def scan_json_lines(path: Path, limit: int = LOG_LIMIT) -> dict[str, Any]:
+    """Stream a Zeek JSONL log while retaining only a bounded sample.
+
+    Record counts remain exact, but the retained objects are capped before
+    aggregation. This keeps memory proportional to ``limit`` even when an
+    offline capture produces millions of Zeek records.
+    """
     records: list[dict[str, Any]] = []
+    valid_records = 0
+    invalid_lines = 0
     if not path.exists():
-        return records
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        if len(records) >= limit:
-            break
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            records.append(parsed)
-    return records
+        return {
+            "records": records,
+            "valid_records": valid_records,
+            "invalid_lines": invalid_lines,
+            "truncated": False,
+        }
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                invalid_lines += 1
+                continue
+            if not isinstance(parsed, dict):
+                invalid_lines += 1
+                continue
+            valid_records += 1
+            if len(records) < max(0, limit):
+                records.append(parsed)
+    return {
+        "records": records,
+        "valid_records": valid_records,
+        "invalid_lines": invalid_lines,
+        "truncated": valid_records > len(records),
+    }
+
+
+def load_json_lines(path: Path, limit: int = LOG_LIMIT) -> list[dict[str, Any]]:
+    """Compatibility wrapper for callers that only need the bounded sample."""
+    return scan_json_lines(path, limit)["records"]
 
 
 def top_values(records: list[dict[str, Any]], *fields: str) -> list[dict[str, Any]]:
@@ -337,38 +393,60 @@ def run_zeek(pcap_files: list[Path], work_dir: Path) -> dict[str, Any]:
         return {"available": False, "reason": "zeek executable not found on PATH or ZEEK_BIN"}
     zeek_dir = work_dir / "zeek"
     zeek_dir.mkdir(parents=True, exist_ok=True)
-    commands = []
-    for pcap in pcap_files:
-        result = run_command([zeek, "-C", "LogAscii::use_json=T", "-r", str(pcap)], cwd=zeek_dir, timeout=300)
+    commands: list[dict[str, Any]] = []
+    log_names = {
+        "conn": ("conn.log",),
+        "dns": ("dns.log",),
+        "tls": ("ssl.log", "tls.log"),
+        "http": ("http.log",),
+        "files": ("files.log",),
+        "notice": ("notice.log",),
+        "weird": ("weird.log",),
+    }
+    samples: dict[str, list[dict[str, Any]]] = {key: [] for key in log_names}
+    record_counts: Counter[str] = Counter()
+    invalid_lines: Counter[str] = Counter()
+
+    for index, pcap in enumerate(pcap_files):
+        # Zeek uses fixed output names. A distinct workspace per capture keeps
+        # one run from overwriting or silently mixing another capture's logs.
+        capture_dir = zeek_dir / f"{index:04d}-{safe_filename(pcap.stem)}"
+        capture_dir.mkdir(parents=True, exist_ok=False)
+        result = run_command(
+            [zeek, "-C", "LogAscii::use_json=T", "-r", str(pcap)],
+            cwd=capture_dir,
+            timeout=300,
+        )
         commands.append({key: result[key] for key in ("ok", "returncode", "stderr", "command")})
+        for log_key, candidates in log_names.items():
+            path = next((capture_dir / name for name in candidates if (capture_dir / name).exists()), None)
+            if path is None:
+                continue
+            remaining = max(0, LOG_LIMIT - len(samples[log_key]))
+            scan = scan_json_lines(path, remaining)
+            samples[log_key].extend(scan["records"])
+            record_counts[log_key] += int(scan["valid_records"])
+            invalid_lines[log_key] += int(scan["invalid_lines"])
+        shutil.rmtree(capture_dir, ignore_errors=True)
         if not result["ok"]:
             break
-    conn = load_json_lines(zeek_dir / "conn.log")
-    dns = load_json_lines(zeek_dir / "dns.log")
-    tls = load_json_lines(zeek_dir / "ssl.log") or load_json_lines(zeek_dir / "tls.log")
-    http = load_json_lines(zeek_dir / "http.log")
-    files = load_json_lines(zeek_dir / "files.log")
-    notices = load_json_lines(zeek_dir / "notice.log")
-    weird = load_json_lines(zeek_dir / "weird.log")
     return {
         "available": True,
         "commands": commands,
-        "record_counts": {
-            "conn": len(conn),
-            "dns": len(dns),
-            "tls": len(tls),
-            "http": len(http),
-            "files": len(files),
-            "notice": len(notices),
-            "weird": len(weird),
+        "record_counts": {key: record_counts[key] for key in log_names},
+        "sampling": {
+            "sample_limit_per_log": LOG_LIMIT,
+            "sampled_records": {key: len(samples[key]) for key in log_names},
+            "records_truncated": {key: record_counts[key] > len(samples[key]) for key in log_names},
+            "invalid_json_lines": {key: invalid_lines[key] for key in log_names},
         },
-        "top_connections": top_values(conn, "id.orig_h", "id.resp_h", "id.resp_p", "proto", "service"),
-        "dns_queries": top_values(dns, "query", "qtype_name", "rcode_name"),
-        "tls_sni": top_values(tls, "server_name", "id.orig_h", "id.resp_h"),
-        "http_hosts": top_values(http, "host", "uri", "method", "status_code"),
-        "files": top_values(files, "mime_type", "filename", "seen_bytes"),
-        "notices": top_values(notices, "note", "msg"),
-        "weird": top_values(weird, "name", "addl"),
+        "top_connections": top_values(samples["conn"], "id.orig_h", "id.resp_h", "id.resp_p", "proto", "service"),
+        "dns_queries": top_values(samples["dns"], "query", "qtype_name", "rcode_name"),
+        "tls_sni": top_values(samples["tls"], "server_name", "id.orig_h", "id.resp_h"),
+        "http_hosts": top_values(samples["http"], "host", "uri", "method", "status_code"),
+        "files": top_values(samples["files"], "mime_type", "filename", "seen_bytes"),
+        "notices": top_values(samples["notice"], "note", "msg"),
+        "weird": top_values(samples["weird"], "name", "addl"),
     }
 
 
@@ -379,8 +457,25 @@ def run_tshark(pcap_files: list[Path]) -> dict[str, Any]:
     commands = []
     packet_samples = []
     for pcap in pcap_files[:3]:
-        hierarchy = run_command([tshark, "-r", str(pcap), "-q", "-z", "io,phs"], timeout=180)
-        conversations = run_command([tshark, "-r", str(pcap), "-q", "-z", "conv,tcp", "-z", "conv,udp"], timeout=180)
+        hierarchy = run_command(
+            [tshark, "-r", str(pcap), "-c", str(TSHARK_SUMMARY_PACKET_LIMIT), "-q", "-z", "io,phs"],
+            timeout=180,
+        )
+        conversations = run_command(
+            [
+                tshark,
+                "-r",
+                str(pcap),
+                "-c",
+                str(TSHARK_SUMMARY_PACKET_LIMIT),
+                "-q",
+                "-z",
+                "conv,tcp",
+                "-z",
+                "conv,udp",
+            ],
+            timeout=180,
+        )
         fields = run_command(
             [
                 tshark,
@@ -434,7 +529,13 @@ def run_tshark(pcap_files: list[Path]) -> dict[str, Any]:
             "conversations": conversations["stdout"][:12000],
             "field_sample_tsv": fields["stdout"][:12000],
         })
-    return {"available": True, "commands": commands, "samples": packet_samples}
+    return {
+        "available": True,
+        "commands": commands,
+        "summary_packet_limit": TSHARK_SUMMARY_PACKET_LIMIT,
+        "pcap_file_limit": 3,
+        "samples": packet_samples,
+    }
 
 
 def build_markdown(analysis: dict[str, Any]) -> str:
@@ -531,6 +632,12 @@ def report_analysis_status(base_url: str, request_id: str, status: str, error: s
     with urllib.request.urlopen(request, timeout=10) as response:
         if response.status < 200 or response.status >= 300:
             raise RuntimeError(f"alert-store analysis status returned HTTP {response.status}")
+        try:
+            result = read_bounded_json(response, max_bytes=MAX_CONTROL_RESPONSE_BYTES)
+        except BoundedHttpError as exc:
+            raise RuntimeError(f"invalid alert-store analysis status response: {exc}") from exc
+        if not result.get("ok", False):
+            raise RuntimeError(str(result.get("reason") or "alert-store rejected analysis status"))
 
 
 def process_one(request: dict[str, Any], args: argparse.Namespace, direct_pcap: Path | None = None) -> dict[str, Any]:

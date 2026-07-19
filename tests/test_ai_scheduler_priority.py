@@ -105,6 +105,189 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             ),
         )
 
+    def enable_indexed_scheduler(self) -> None:
+        self.conn.execute("ALTER TABLE alerts ADD COLUMN stable_group_id TEXT")
+        self.conn.execute("ALTER TABLE alerts ADD COLUMN stable_group_key TEXT")
+        self.conn.execute(
+            """
+            CREATE TABLE durable_jobs (
+                id INTEGER PRIMARY KEY,
+                job_type TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                priority INTEGER NOT NULL DEFAULT 0,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 8,
+                next_attempt_at TEXT NOT NULL,
+                processing_started_at TEXT,
+                rerun_requested INTEGER NOT NULL DEFAULT 0,
+                requested_at TEXT NOT NULL
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE ai_analysis_runs (
+                id INTEGER PRIMARY KEY,
+                group_id TEXT NOT NULL,
+                alert_id TEXT,
+                generated_at TEXT NOT NULL
+            )
+            """
+        )
+
+    def set_stable_group(self, alert_id: str, group_id: str) -> None:
+        self.conn.execute(
+            "UPDATE alerts SET stable_group_id = ?, stable_group_key = ? WHERE alert_id = ?",
+            (group_id, f"key:{group_id}", alert_id),
+        )
+
+    def insert_indexed_job(
+        self,
+        group_id: str,
+        *,
+        payload: dict | None = None,
+        status: str = "pending",
+        next_attempt_at: str = "2020-01-01  00:00:00Z",
+        processing_started_at: str | None = None,
+        rerun_requested: int = 0,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO durable_jobs (
+                job_type, dedupe_key, status, payload_json, priority,
+                attempt_count, max_attempts, next_attempt_at,
+                processing_started_at, rerun_requested, requested_at
+            ) VALUES ('ai_analysis', ?, ?, ?, 0, 0, 8, ?, ?, ?, ?)
+            """,
+            (
+                group_id,
+                status,
+                json.dumps(payload or {}),
+                next_attempt_at,
+                processing_started_at,
+                rerun_requested,
+                next_attempt_at,
+            ),
+        )
+
+    def test_indexed_contract_rejects_partial_schema(self) -> None:
+        self.conn.execute("ALTER TABLE alerts ADD COLUMN stable_group_id TEXT")
+        self.conn.execute("ALTER TABLE alerts ADD COLUMN stable_group_key TEXT")
+        self.conn.execute("CREATE TABLE durable_jobs (id INTEGER)")
+        self.conn.execute("CREATE TABLE ai_analysis_runs (id INTEGER)")
+
+        self.assertFalse(self.scheduler.indexed_scheduler_available(self.conn))
+
+    def test_indexed_manual_rerun_preempts_backlog_and_prior_analysis(self) -> None:
+        self.enable_indexed_scheduler()
+        self.insert_alert("manual-low", "low", "2020-01-01  00:00:00Z", 10)
+        self.insert_alert("automatic-critical", "critical", "2026-07-19  11:00:00Z", 99)
+        self.set_stable_group("manual-low", "manual-group")
+        self.set_stable_group("automatic-critical", "critical-group")
+        self.conn.execute(
+            "UPDATE alerts SET filter_status = 'suppressed' WHERE alert_id = 'manual-low'"
+        )
+        self.conn.execute(
+            "INSERT INTO ai_analysis_runs (group_id, alert_id, generated_at) VALUES (?, ?, ?)",
+            ("manual-group", "manual-low", "2026-07-19  10:00:00Z"),
+        )
+        self.insert_indexed_job("manual-group", payload={"manual_reanalysis": True})
+        self.args.hours = 1
+        self.args.levels = "critical"
+        self.conn.commit()
+
+        selected = self.scheduler.select_next_alert_indexed(self.conn, self.args)
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["alert_id"], "manual-low")
+        self.assertEqual(selected["request_bucket"], 0)
+
+    def test_indexed_pending_rerun_is_not_hidden_by_prior_selection(self) -> None:
+        self.enable_indexed_scheduler()
+        self.insert_alert("rerun-alert", "high", "2026-07-19  11:00:00Z", 90)
+        self.set_stable_group("rerun-alert", "rerun-group")
+        self.insert_indexed_job("rerun-group", payload={"manual_reanalysis": True})
+        self.conn.commit()
+
+        selected = self.scheduler.select_next_alert_indexed(
+            self.conn,
+            self.args,
+            {"rerun-group"},
+        )
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["alert_id"], "rerun-alert")
+
+    def test_indexed_queue_preserves_severity_and_due_time(self) -> None:
+        self.enable_indexed_scheduler()
+        self.insert_alert("critical-old", "critical", "2026-07-19  09:00:00Z", 50)
+        self.insert_alert("high-new", "high", "2026-07-19  11:00:00Z", 100)
+        self.insert_alert("future-manual", "low", "2026-07-19  11:30:00Z", 100)
+        for alert_id, group_id in (
+            ("critical-old", "critical-group"),
+            ("high-new", "high-group"),
+            ("future-manual", "future-group"),
+        ):
+            self.set_stable_group(alert_id, group_id)
+        self.insert_indexed_job("critical-group")
+        self.insert_indexed_job("high-group")
+        self.insert_indexed_job(
+            "future-group",
+            payload={"manual_reanalysis": True},
+            next_attempt_at="2999-01-01  00:00:00Z",
+        )
+        self.conn.commit()
+
+        first = self.scheduler.select_next_alert_indexed(self.conn, self.args)
+        self.conn.execute(
+            "UPDATE durable_jobs SET status = 'completed' WHERE dedupe_key = ?",
+            ("critical-group",),
+        )
+        self.conn.commit()
+        second = self.scheduler.select_next_alert_indexed(
+            self.conn, self.args, {"critical-group"},
+        )
+
+        self.assertEqual(first["alert_id"], "critical-old")
+        self.assertEqual(second["alert_id"], "high-new")
+
+    def test_indexed_reconciliation_requires_current_run_and_no_rerun(self) -> None:
+        self.enable_indexed_scheduler()
+        for alert_id, group_id in (
+            ("current", "current-group"),
+            ("stale", "stale-group"),
+            ("rerun", "rerun-group"),
+        ):
+            self.insert_alert(alert_id, "high", "2026-07-19  11:00:00Z")
+            self.set_stable_group(alert_id, group_id)
+        self.insert_indexed_job(
+            "current-group", processing_started_at="2026-07-19  10:00:00Z",
+        )
+        self.insert_indexed_job(
+            "stale-group", processing_started_at="2026-07-19  10:00:00Z",
+        )
+        self.insert_indexed_job(
+            "rerun-group", processing_started_at="2026-07-19  10:00:00Z", rerun_requested=1,
+        )
+        self.insert_indexed_job(
+            "orphan-group", processing_started_at="2026-07-19  10:00:00Z",
+        )
+        self.conn.executemany(
+            "INSERT INTO ai_analysis_runs (group_id, generated_at) VALUES (?, ?)",
+            [
+                ("current-group", "2026-07-19  10:01:00Z"),
+                ("stale-group", "2026-07-19  09:59:00Z"),
+                ("rerun-group", "2026-07-19  10:01:00Z"),
+            ],
+        )
+        self.conn.commit()
+
+        reconciled = self.scheduler.indexed_reconcilable_ai_job_ids(self.conn)
+
+        self.assertEqual(reconciled, {"current-group", "orphan-group"})
+
     def test_drains_each_severity_newest_first_before_lower_severity(self) -> None:
         self.insert_alert("medium-newest", "medium", "2026-07-03  00:50:00Z", 90)
         self.insert_alert("high-newer-than-critical", "high", "2026-07-03  00:55:00Z", 90)

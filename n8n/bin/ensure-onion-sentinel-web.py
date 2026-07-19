@@ -16,16 +16,23 @@ from pathlib import Path
 import shlex
 import signal
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
 from typing import Optional, Tuple
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+from bounded_http import BoundedHttpError, read_bounded_json
 
 
 DEFAULT_PORT = 8766
 DEFAULT_LABEL = "com.arron.onion-sentinel.web"
 DEFAULT_HEALTH_URL = "http://127.0.0.1:8766/healthz"
 DEFAULT_HOLD_MAX_AGE_SECONDS = 15 * 60
+MAX_HEALTH_RESPONSE_BYTES = 64 * 1024
 
 
 def command_kind(command: str, port: int) -> str:
@@ -48,8 +55,8 @@ def probe_health(url: str, timeout: float = 3.0) -> Tuple[bool, str]:
 
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (OSError, ValueError, urllib.error.URLError) as exc:
+            payload = read_bounded_json(response, max_bytes=MAX_HEALTH_RESPONSE_BYTES)
+    except (BoundedHttpError, OSError, ValueError, urllib.error.URLError) as exc:
         return False, type(exc).__name__
     if payload.get("ok") is True and payload.get("service") == "onion-sentinel":
         return True, "onion-sentinel"

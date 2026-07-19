@@ -13,6 +13,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -132,9 +133,13 @@ class AlertStorePostCommitTest(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=5)
+            if self.process.stdout:
+                self.process.stdout.close()
         if hasattr(self, "n8n"):
             self.n8n.shutdown()
             self.n8n.server_close()
+        if hasattr(self, "n8n_thread"):
+            self.n8n_thread.join(timeout=5)
         if hasattr(self, "tempdir"):
             self.tempdir.cleanup()
 
@@ -154,7 +159,7 @@ class AlertStorePostCommitTest(unittest.TestCase):
         self.fail(f"condition not met before timeout; last_error={last_error}; alert-store={output}")
 
     def durable_job(self) -> sqlite3.Row | None:
-        with sqlite3.connect(self.db_path, timeout=3) as connection:
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
             connection.row_factory = sqlite3.Row
             return connection.execute(
                 "SELECT * FROM durable_jobs WHERE job_type = 'n8n_post_commit'"
@@ -189,7 +194,7 @@ class AlertStorePostCommitTest(unittest.TestCase):
                 and job["attempt_count"] >= 1
             )
         )
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             self.assertEqual(
                 connection.execute(
                     "SELECT COUNT(*) FROM alerts WHERE alert_id = ?",

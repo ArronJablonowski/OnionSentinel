@@ -1,9 +1,35 @@
 'use strict';
 
+const {randomUUID} = require('node:crypto');
+
 // Small, storage-backed work queue shared by asynchronous alert-store jobs.
 // The caller supplies DB helpers so this module stays independent of sqlite3's
 // callback API and can be exercised with the same transaction gate as ingest.
-function createDurableJobQueue({run, get, all, now}) {
+function createDurableJobQueue({run, get, all, now, transitionLeaseSeconds = 900}) {
+  const externalLeaseSeconds = Math.max(60, Number(transitionLeaseSeconds) || 900);
+
+  async function recoverExpired() {
+    const timestamp = now();
+    const expired = await all(
+      `SELECT * FROM durable_jobs
+       WHERE status = 'processing'
+         AND (lease_token IS NULL
+           OR lease_expires_at IS NULL
+           OR datetime(replace(lease_expires_at, '  ', 'T')) <= datetime(replace(?, '  ', 'T')))`,
+      [timestamp],
+    );
+    const summary = {recovered: 0, failed: 0, job_types: {}};
+    for (const job of expired) {
+      const updated = await fail(job, job.last_error || 'worker lease expired before completion');
+      if (!updated) continue;
+      const terminal = Number(job.attempt_count || 0) >= Number(job.max_attempts || 8);
+      summary[terminal ? 'failed' : 'recovered'] += 1;
+      const jobType = String(job.job_type || 'unknown');
+      summary.job_types[jobType] = (summary.job_types[jobType] || 0) + 1;
+    }
+    return summary;
+  }
+
   async function install() {
     await run(`
       CREATE TABLE IF NOT EXISTS durable_jobs (
@@ -18,6 +44,7 @@ function createDurableJobQueue({run, get, all, now}) {
         max_attempts INTEGER NOT NULL DEFAULT 8,
         next_attempt_at TEXT NOT NULL,
         lease_expires_at TEXT,
+        lease_token TEXT,
         last_error TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -42,16 +69,15 @@ function createDurableJobQueue({run, get, all, now}) {
     if (!columns.has('rerun_requested')) {
       await run('ALTER TABLE durable_jobs ADD COLUMN rerun_requested INTEGER NOT NULL DEFAULT 0');
     }
+    if (!columns.has('lease_token')) {
+      await run('ALTER TABLE durable_jobs ADD COLUMN lease_token TEXT');
+    }
     await run('UPDATE durable_jobs SET last_completed_at = completed_at WHERE last_completed_at IS NULL AND completed_at IS NOT NULL');
     await run('UPDATE durable_jobs SET requested_at = COALESCE(requested_at, created_at) WHERE requested_at IS NULL');
     await run("UPDATE durable_jobs SET processing_started_at = COALESCE(processing_started_at, updated_at) WHERE status = 'processing' AND processing_started_at IS NULL");
     await run('CREATE INDEX IF NOT EXISTS idx_durable_jobs_due ON durable_jobs(status, job_type, next_attempt_at, priority DESC, id)');
     await run('CREATE INDEX IF NOT EXISTS idx_durable_jobs_lease ON durable_jobs(status, lease_expires_at)');
-    await run(
-      "UPDATE durable_jobs SET status = 'pending', lease_expires_at = NULL, updated_at = ? " +
-      "WHERE status = 'processing' AND (lease_expires_at IS NULL OR datetime(replace(lease_expires_at, '  ', 'T')) <= datetime(replace(?, '  ', 'T')))",
-      [now(), now()],
-    );
+    await recoverExpired();
   }
 
   async function enqueue(jobType, dedupeKey, payload, options = {}) {
@@ -91,34 +117,38 @@ function createDurableJobQueue({run, get, all, now}) {
     );
     if (!candidate) return null;
     const lease = new Date(Date.now() + Math.max(30, Number(leaseSeconds)) * 1000).toISOString();
+    const leaseToken = randomUUID();
     const result = await run(
       `UPDATE durable_jobs SET status = 'processing', attempt_count = attempt_count + 1,
-         lease_expires_at = ?, processing_started_at = ?, rerun_requested = 0,
+         lease_expires_at = ?, lease_token = ?, processing_started_at = ?, rerun_requested = 0,
          updated_at = ? WHERE id = ? AND status = 'pending'`,
-      [lease, timestamp, timestamp, candidate.id],
+      [lease, leaseToken, timestamp, timestamp, candidate.id],
     );
     if (result.changes !== 1) return null;
     return {...candidate, attempt_count: Number(candidate.attempt_count || 0) + 1,
+      processing_started_at: timestamp, lease_token: leaseToken,
       payload: JSON.parse(candidate.payload_json || '{}')};
   }
 
-  async function complete(id) {
+  async function complete(job) {
     const timestamp = now();
-    await run(
+    const result = await run(
       `UPDATE durable_jobs SET
          status = CASE WHEN rerun_requested = 1 THEN 'pending' ELSE 'completed' END,
          next_attempt_at = CASE WHEN rerun_requested = 1 THEN ? ELSE next_attempt_at END,
          attempt_count = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempt_count END,
          lease_expires_at = NULL,
+         lease_token = NULL,
          last_error = NULL,
          completed_at = CASE WHEN rerun_requested = 1 THEN NULL ELSE ? END,
          last_completed_at = ?,
          processing_started_at = CASE WHEN rerun_requested = 1 THEN NULL ELSE processing_started_at END,
          rerun_requested = 0,
          updated_at = ?
-       WHERE id = ?`,
-      [timestamp, timestamp, timestamp, timestamp, id],
+       WHERE id = ? AND status = 'processing' AND lease_token IS ?`,
+      [timestamp, timestamp, timestamp, timestamp, job.id, job.lease_token],
     );
+    return Number(result.changes || 0) === 1;
   }
 
   async function completePendingByDedupeKeys(jobType, dedupeKeys) {
@@ -133,7 +163,8 @@ function createDurableJobQueue({run, get, all, now}) {
       const placeholders = chunk.map(() => '?').join(', ');
       const result = await run(
         `UPDATE durable_jobs SET status = 'completed', lease_expires_at = NULL,
-           last_error = NULL, completed_at = ?, last_completed_at = ?, updated_at = ?
+           lease_token = NULL, last_error = NULL, completed_at = ?, last_completed_at = ?,
+           processing_started_at = NULL, rerun_requested = 0, updated_at = ?
          WHERE job_type = ? AND status = 'pending'
            AND dedupe_key IN (${placeholders})`,
         [timestamp, timestamp, timestamp, jobType, ...chunk],
@@ -147,11 +178,14 @@ function createDurableJobQueue({run, get, all, now}) {
     const terminal = Number(job.attempt_count || 0) >= Number(job.max_attempts || 8);
     const delay = Math.min(3600, Math.max(5, Number(baseRetrySeconds)) * (2 ** Math.max(0, Number(job.attempt_count || 1) - 1)));
     const retryAt = new Date(Date.now() + delay * 1000).toISOString();
-    await run(
+    const result = await run(
       `UPDATE durable_jobs SET status = ?, next_attempt_at = ?, lease_expires_at = NULL,
-         last_error = ?, updated_at = ? WHERE id = ?`,
-      [terminal ? 'failed' : 'pending', retryAt, String(error || 'job failed').slice(0, 1000), now(), job.id],
+         lease_token = NULL, last_error = ?, updated_at = ?
+       WHERE id = ? AND status = 'processing' AND lease_token IS ?`,
+      [terminal ? 'failed' : 'pending', retryAt, String(error || 'job failed').slice(0, 1000),
+        now(), job.id, job.lease_token],
     );
+    return Number(result.changes || 0) === 1;
   }
 
   async function stats() {
@@ -159,49 +193,84 @@ function createDurableJobQueue({run, get, all, now}) {
     return rows;
   }
 
-  async function transition(jobType, dedupeKey, status, error = '') {
+  async function transition(jobType, dedupeKey, status, error = '', suppliedLeaseToken = '') {
     if (!['pending', 'processing', 'completed', 'failed'].includes(status)) {
       throw new Error('invalid durable job status');
     }
     const timestamp = now();
     let result;
+    let leaseToken = suppliedLeaseToken;
     if (status === 'processing') {
-      result = await run(
-        `UPDATE durable_jobs SET status = 'processing', attempt_count = attempt_count + 1,
-           lease_expires_at = ?, processing_started_at = ?, rerun_requested = 0,
-           last_error = NULL, updated_at = ? WHERE job_type = ? AND dedupe_key = ?`,
-        [new Date(Date.now() + 3600 * 1000).toISOString(), timestamp, timestamp, jobType, dedupeKey],
+      const leaseExpiry = new Date(Date.now() + externalLeaseSeconds * 1000).toISOString();
+      if (suppliedLeaseToken) {
+        // A heartbeat may only extend the exact lease it owns. It must not
+        // clear rerun_requested because evidence can arrive concurrently.
+        result = await run(
+          `UPDATE durable_jobs SET lease_expires_at = ?, updated_at = ?
+           WHERE job_type = ? AND dedupe_key = ? AND status = 'processing'
+             AND lease_token = ?`,
+          [leaseExpiry, timestamp, jobType, dedupeKey, suppliedLeaseToken],
+        );
+      } else {
+        leaseToken = randomUUID();
+        result = await run(
+          `UPDATE durable_jobs SET status = 'processing', attempt_count = attempt_count + 1,
+             lease_expires_at = ?, lease_token = ?, processing_started_at = ?, rerun_requested = 0,
+             last_error = NULL, updated_at = ?
+           WHERE job_type = ? AND dedupe_key = ? AND status = 'pending'
+             AND datetime(replace(next_attempt_at, '  ', 'T')) <= datetime(replace(?, '  ', 'T'))
+             AND attempt_count < max_attempts`,
+          [leaseExpiry, leaseToken, timestamp, timestamp, jobType, dedupeKey, timestamp],
+        );
+      }
+    } else if (status === 'failed') {
+      const job = await get(
+        'SELECT * FROM durable_jobs WHERE job_type = ? AND dedupe_key = ?',
+        [jobType, dedupeKey],
       );
-    } else if (status === 'completed' || status === 'failed') {
+      if (!job) return {updated: false, leaseToken: null};
+      if (Number(job.rerun_requested || 0) === 1) {
+        result = await run(
+          `UPDATE durable_jobs SET status = 'pending', attempt_count = 0,
+             next_attempt_at = ?, lease_expires_at = NULL, lease_token = NULL, last_error = NULL,
+             processing_started_at = NULL, rerun_requested = 0, updated_at = ?
+           WHERE id = ? AND status = 'processing' AND lease_token IS ?`,
+          [timestamp, timestamp, job.id, suppliedLeaseToken],
+        );
+      } else {
+        return {updated: await fail({...job, lease_token: suppliedLeaseToken}, error), leaseToken: null};
+      }
+    } else if (status === 'completed') {
       result = await run(
         `UPDATE durable_jobs SET
            status = CASE WHEN rerun_requested = 1 THEN 'pending' ELSE ? END,
            next_attempt_at = CASE WHEN rerun_requested = 1 THEN ? ELSE next_attempt_at END,
            attempt_count = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempt_count END,
            lease_expires_at = NULL,
+           lease_token = NULL,
            last_error = CASE WHEN rerun_requested = 1 THEN NULL ELSE ? END,
            completed_at = CASE WHEN rerun_requested = 1 THEN NULL WHEN ? = 'completed' THEN ? ELSE NULL END,
            last_completed_at = CASE WHEN ? = 'completed' THEN ? ELSE last_completed_at END,
            processing_started_at = CASE WHEN rerun_requested = 1 THEN NULL ELSE processing_started_at END,
            rerun_requested = 0,
            updated_at = ?
-         WHERE job_type = ? AND dedupe_key = ?`,
+         WHERE job_type = ? AND dedupe_key = ? AND status = 'processing' AND lease_token IS ?`,
         [status, timestamp, String(error || '').slice(0, 1000) || null,
-          status, timestamp, status, timestamp, timestamp, jobType, dedupeKey],
+          status, timestamp, status, timestamp, timestamp, jobType, dedupeKey, suppliedLeaseToken],
       );
     } else {
       result = await run(
         `UPDATE durable_jobs SET status = 'pending', attempt_count = 0,
-           next_attempt_at = ?, lease_expires_at = NULL, last_error = ?,
+           next_attempt_at = ?, lease_expires_at = NULL, lease_token = NULL, last_error = ?,
            processing_started_at = NULL, rerun_requested = 0, updated_at = ?
-         WHERE job_type = ? AND dedupe_key = ?`,
+         WHERE job_type = ? AND dedupe_key = ? AND status = 'failed'`,
         [timestamp, String(error || '').slice(0, 1000) || null, timestamp, jobType, dedupeKey],
       );
     }
-    return result.changes === 1;
+    return {updated: result.changes === 1, leaseToken: result.changes === 1 ? leaseToken : null};
   }
 
-  return {install, enqueue, claim, complete, completePendingByDedupeKeys, fail, stats, transition};
+  return {install, enqueue, claim, complete, completePendingByDedupeKeys, fail, stats, transition, recoverExpired};
 }
 
 module.exports = {createDurableJobQueue};

@@ -1,4 +1,5 @@
 import importlib
+from email.message import Message
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,24 @@ server = importlib.import_module("onion_sentinel_server")
 
 
 class OnionSentinelServerTests(unittest.TestCase):
+    def test_mutating_soc_api_requires_same_origin_json(self):
+        headers = Message()
+        headers["Content-Type"] = "application/json; charset=utf-8"
+        headers["Host"] = "10.77.7.225:8766"
+        headers["Origin"] = "http://10.77.7.225:8766"
+        self.assertTrue(server.is_same_origin_json_request(headers)[0])
+
+        headers.replace_header("Origin", "http://attacker.invalid")
+        valid, status, _message = server.is_same_origin_json_request(headers)
+        self.assertFalse(valid)
+        self.assertEqual(status, 403)
+
+        headers.replace_header("Origin", "http://10.77.7.225:8766")
+        headers.replace_header("Content-Type", "text/plain")
+        valid, status, _message = server.is_same_origin_json_request(headers)
+        self.assertFalse(valid)
+        self.assertEqual(status, 415)
+
     def test_static_resolution_is_rooted_and_rejects_dot_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

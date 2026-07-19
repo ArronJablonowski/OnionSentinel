@@ -22,6 +22,7 @@ import sys
 import tarfile
 import threading
 import time
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from re import sub
@@ -49,6 +50,18 @@ except ModuleNotFoundError:
         raise
     alert_delivery = importlib.util.module_from_spec(_delivery_spec)
     _delivery_spec.loader.exec_module(alert_delivery)
+
+try:
+    import process_io
+except ModuleNotFoundError:
+    _process_spec = importlib.util.spec_from_file_location(
+        "process_io", Path(__file__).with_name("process_io.py")
+    )
+    if _process_spec is None or _process_spec.loader is None:
+        raise
+    process_io = importlib.util.module_from_spec(_process_spec)
+    sys.modules.setdefault("process_io", process_io)
+    _process_spec.loader.exec_module(process_io)
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -106,23 +119,24 @@ def run_ssh_pull(config: dict) -> dict:
     ]
 
     # BatchMode prevents a broken key or sudo prompt from hanging systemd.
-    result = subprocess.run(
+    result = process_io.run_bounded_command(
         command,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=relay.get("ssh_timeout_seconds", 20) + 10,
+        timeout_seconds=relay.get("ssh_timeout_seconds", 20) + 10,
+        max_stdout_bytes=int(relay.get("ssh_pull_max_response_bytes", 16 * 1024 * 1024)),
+        max_stderr_bytes=int(relay.get("ssh_control_max_stderr_bytes", 256 * 1024)),
     )
+    stdout = result.stdout.decode("utf-8", errors="replace")
+    stderr = result.stderr.decode("utf-8", errors="replace")
     if result.returncode != 0:
         raise RuntimeError(
-            f"SSH pull failed with exit code {result.returncode}: {result.stderr.strip()}"
+            f"SSH pull failed with exit code {result.returncode}: {stderr.strip()}"
         )
 
     try:
-        return json.loads(result.stdout)
+        return json.loads(stdout)
     except json.JSONDecodeError as exc:
         # A short preview makes banner/shell/JSON issues diagnosable in logs.
-        preview = result.stdout[:500]
+        preview = stdout[:500]
         raise RuntimeError(f"SSH pull returned invalid JSON: {exc}; preview={preview!r}") from exc
 
 
@@ -189,25 +203,26 @@ def run_ssh_pcap_export(config: dict, pcap_request: dict) -> dict:
     # again before touching any pcap files.
     command = pcap_ssh_command(config)
     relay = config["relay"]
-    result = subprocess.run(
+    result = process_io.run_bounded_command(
         command,
-        input=json.dumps(pcap_request, sort_keys=True),
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=relay.get("pcap_timeout_seconds", 180),
+        input_bytes=json.dumps(pcap_request, sort_keys=True).encode("utf-8"),
+        timeout_seconds=relay.get("pcap_timeout_seconds", 180),
+        max_stdout_bytes=int(relay.get("ssh_control_max_response_bytes", 1024 * 1024)),
+        max_stderr_bytes=int(relay.get("ssh_control_max_stderr_bytes", 256 * 1024)),
     )
+    stdout = result.stdout.decode("utf-8", errors="replace")
+    stderr = result.stderr.decode("utf-8", errors="replace")
     try:
-        payload = parse_last_json_object(result.stdout)
+        payload = parse_last_json_object(stdout)
     except json.JSONDecodeError as exc:
-        preview = result.stdout[:500]
-        stderr_preview = result.stderr[:500]
+        preview = stdout[:500]
+        stderr_preview = stderr[:500]
         raise RuntimeError(
             f"PCAP export returned invalid JSON: {exc}; stdout_preview={preview!r}; stderr_preview={stderr_preview!r}"
         ) from exc
     if result.returncode != 0 or not payload.get("ok"):
         raise PcapExportError(
-            payload.get("error") or result.stderr.strip() or f"PCAP export failed with exit code {result.returncode}",
+            payload.get("error") or stderr.strip() or f"PCAP export failed with exit code {result.returncode}",
             payload.get("diagnostics"),
         )
     return payload
@@ -425,6 +440,31 @@ def webhook_float(webhook: dict, key: str, default: float) -> float:
     return max(value, 0.0)
 
 
+def read_bounded_http_body(response, max_bytes: int) -> bytes:
+    """Read a small control-plane response without trusting the peer.
+
+    Alert and PCAP payloads use dedicated bounded transports. HTTP responses
+    here are only acknowledgements/control JSON, so a response above this
+    ceiling is a protocol failure rather than useful data. Reading one byte
+    beyond the limit detects chunked responses that omit Content-Length while
+    keeping memory use deterministic.
+    """
+    limit = max(1024, min(int(max_bytes or 0), 16 * 1024 * 1024))
+    headers = getattr(response, "headers", None)
+    declared_value = headers.get("Content-Length") if headers is not None else None
+    if declared_value not in (None, ""):
+        try:
+            declared = int(declared_value)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("HTTP response has invalid Content-Length") from exc
+        if declared < 0 or declared > limit:
+            raise RuntimeError(f"HTTP response exceeds {limit} byte limit")
+    body = response.read(limit + 1)
+    if len(body) > limit:
+        raise RuntimeError(f"HTTP response exceeds {limit} byte limit")
+    return body
+
+
 def is_retryable_http_status(status_code: int) -> bool:
     return status_code in {408, 409, 425, 429} or status_code >= 500
 
@@ -480,7 +520,10 @@ def post_json_to_webhook_once(config: dict, payload_data: dict) -> None:
     req = request.Request(url, data=payload, headers=headers, method="POST")
     try:
         with request.urlopen(req, timeout=timeout) as response:
-            body = response.read().decode("utf-8", errors="replace")
+            body = read_bounded_http_body(
+                response,
+                webhook_int(webhook, "response_max_bytes", 1024 * 1024),
+            ).decode("utf-8", errors="replace")
             if response.status < 200 or response.status >= 300:
                 raise WebhookPostError(
                     f"Webhook returned HTTP {response.status}",
@@ -563,7 +606,10 @@ def broker_request(config: dict, method: str, path: str, payload_data: dict | No
     )
     try:
         with request.urlopen(req, timeout=timeout) as response:
-            body = response.read().decode("utf-8")
+            body = read_bounded_http_body(
+                response,
+                webhook_int(broker, "response_max_bytes", 1024 * 1024),
+            ).decode("utf-8")
     except HTTPError as exc:
         raise RuntimeError(f"PCAP broker returned HTTP {exc.code}: {exc.reason}") from exc
     except URLError as exc:
@@ -1196,12 +1242,17 @@ def mac_ssh_base(config: dict) -> list[str]:
 
 
 def run_mac_ssh(config: dict, command: str, timeout: int = 60) -> subprocess.CompletedProcess:
-    return subprocess.run(
+    proc = process_io.run_bounded_command(
         [*mac_ssh_base(config), command],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
+        timeout_seconds=timeout,
+        max_stdout_bytes=1024 * 1024,
+        max_stderr_bytes=256 * 1024,
+    )
+    return subprocess.CompletedProcess(
+        proc.args,
+        proc.returncode,
+        proc.stdout.decode("utf-8", errors="replace"),
+        proc.stderr.decode("utf-8", errors="replace"),
     )
 
 
@@ -1295,9 +1346,16 @@ def upload_pcap_artifact_via_rsync(
             raise RuntimeError(mkdir_proc.stderr.strip() or f"failed to create Mac artifact dir {remote_dir}")
         if progress:
             progress.update("relay_to_mac", expected_size)
-        proc = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
-        if proc.returncode != 0:
-            raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or f"rsync exited {proc.returncode}")
+        raw_proc = process_io.run_bounded_command(
+            command,
+            timeout_seconds=timeout,
+            max_stdout_bytes=1024 * 1024,
+            max_stderr_bytes=1024 * 1024,
+        )
+        stdout = raw_proc.stdout.decode("utf-8", errors="replace")
+        stderr = raw_proc.stderr.decode("utf-8", errors="replace")
+        if raw_proc.returncode != 0:
+            raise RuntimeError(stderr.strip() or stdout.strip() or f"rsync exited {raw_proc.returncode}")
         if progress:
             progress.update("verifying", expected_size, lambda: expected_size)
         try:
@@ -1921,7 +1979,7 @@ def main() -> int:
     output_path = save_batch(config, batch)
     all_alerts = batch.get("alerts", [])
     filtered_alerts, dropped_count = filter_dropped_alerts(config, all_alerts)
-    with connect_db(config) as conn:
+    with closing(connect_db(config)) as conn:
         # Important order: filter -> dedupe -> durable queue -> post -> mark seen.
         new_alerts, duplicate_count = filter_unseen_alerts(conn, filtered_alerts)
         saved_alert_paths = save_new_alerts(config, new_alerts)

@@ -13,6 +13,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from contextlib import closing
 from pathlib import Path
 
 
@@ -102,6 +103,8 @@ class AlertStorePcapRetryTest(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=5)
+            if self.process.stdout:
+                self.process.stdout.close()
         if hasattr(self, "tempdir"):
             self.tempdir.cleanup()
 
@@ -154,7 +157,7 @@ class AlertStorePcapRetryTest(unittest.TestCase):
 
         _, delayed = request_json(f"{self.base_url}/pcap/requests?status=pending&limit=10")
         self.assertEqual(delayed["requests"], [])
-        with sqlite3.connect(self.db_path, timeout=3) as connection:
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
             connection.execute(
                 "UPDATE pcap_requests SET next_attempt_at = '2000-01-01T00:00:00Z' WHERE request_id = ?",
                 (request_id,),
@@ -176,7 +179,7 @@ class AlertStorePcapRetryTest(unittest.TestCase):
 
     def test_pending_requests_are_scheduled_by_severity(self) -> None:
         requests: dict[str, str] = {}
-        with sqlite3.connect(self.db_path, timeout=3) as connection:
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
             for level in ("low", "critical", "high"):
                 group_id = f"synthetic-{level}-group"
                 connection.execute(
@@ -214,7 +217,7 @@ class AlertStorePcapRetryTest(unittest.TestCase):
 
     def test_aged_low_priority_request_precedes_fresh_medium_without_preempting_high(self) -> None:
         requests: dict[str, str] = {}
-        with sqlite3.connect(self.db_path, timeout=3) as connection:
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
             for level in ("low", "medium", "high"):
                 group_id = f"synthetic-aged-{level}-group"
                 connection.execute(
@@ -244,7 +247,7 @@ class AlertStorePcapRetryTest(unittest.TestCase):
             )
             requests[level] = created["request"]["request_id"]
 
-        with sqlite3.connect(self.db_path, timeout=3) as connection:
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
             connection.execute(
                 "UPDATE pcap_requests SET created_at = datetime('now', '-1 hour') WHERE request_id = ?",
                 (requests["low"],),
@@ -258,7 +261,7 @@ class AlertStorePcapRetryTest(unittest.TestCase):
         )
 
     def test_fulfilled_transfer_wakes_parser_and_completed_parse_requeues_ai(self) -> None:
-        with sqlite3.connect(self.db_path, timeout=3) as connection:
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
             connection.execute(
                 """
                 INSERT INTO alert_group_summary (
@@ -309,7 +312,7 @@ class AlertStorePcapRetryTest(unittest.TestCase):
             time.sleep(0.02)
         self.assertTrue(self.ai_wake_path.exists())
         self.assertIn("pcap-analysis-completed", self.ai_wake_path.read_text(encoding="utf-8"))
-        with sqlite3.connect(self.db_path, timeout=3) as connection:
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
             queued = connection.execute(
                 "SELECT status, priority FROM durable_jobs WHERE job_type = 'ai_analysis' AND dedupe_key = ?",
                 ("synthetic-wake-group",),
@@ -318,16 +321,22 @@ class AlertStorePcapRetryTest(unittest.TestCase):
 
         # A second evidence completion while inference is active must survive
         # the first run's completion callback as exactly one coalesced rerun.
-        self.post(
+        claimed = self.post(
             "/jobs/status",
             {"job_type": "ai_analysis", "dedupe_key": "synthetic-wake-group", "status": "processing"},
         )
+        lease_token = claimed["lease_token"]
         self.post("/pcap/analysis-status", {"request_id": request_id, "status": "completed"})
         self.post(
             "/jobs/status",
-            {"job_type": "ai_analysis", "dedupe_key": "synthetic-wake-group", "status": "completed"},
+            {
+                "job_type": "ai_analysis",
+                "dedupe_key": "synthetic-wake-group",
+                "status": "completed",
+                "lease_token": lease_token,
+            },
         )
-        with sqlite3.connect(self.db_path, timeout=3) as connection:
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
             rerun = connection.execute(
                 """
                 SELECT status, rerun_requested, processing_started_at
@@ -337,15 +346,20 @@ class AlertStorePcapRetryTest(unittest.TestCase):
             ).fetchone()
         self.assertEqual(rerun, ("pending", 0, None))
 
-        self.post(
+        claimed = self.post(
             "/jobs/status",
             {"job_type": "ai_analysis", "dedupe_key": "synthetic-wake-group", "status": "processing"},
         )
         self.post(
             "/jobs/status",
-            {"job_type": "ai_analysis", "dedupe_key": "synthetic-wake-group", "status": "completed"},
+            {
+                "job_type": "ai_analysis",
+                "dedupe_key": "synthetic-wake-group",
+                "status": "completed",
+                "lease_token": claimed["lease_token"],
+            },
         )
-        with sqlite3.connect(self.db_path, timeout=3) as connection:
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
             completed = connection.execute(
                 "SELECT status FROM durable_jobs WHERE job_type = 'ai_analysis' AND dedupe_key = ?",
                 ("synthetic-wake-group",),

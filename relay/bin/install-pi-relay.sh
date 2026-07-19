@@ -28,6 +28,7 @@ install -o root -g soalert -m 0750 -d /etc/so-alert-relay
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay.py" /opt/so-alert-relay/app/relay.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/alert_outbox.py" /opt/so-alert-relay/app/alert_outbox.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/alert_delivery.py" /opt/so-alert-relay/app/alert_delivery.py
+install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/process_io.py" /opt/so-alert-relay/app/process_io.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay_health_wrapper.py" /opt/so-alert-relay/app/relay_health_wrapper.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/storage_health.py" /opt/so-alert-relay/app/storage_health.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/config/config.example.json" /opt/so-alert-relay/app/config.json

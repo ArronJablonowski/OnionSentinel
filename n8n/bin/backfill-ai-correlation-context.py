@@ -10,15 +10,23 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
 
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+from bounded_http import read_bounded_body, read_bounded_json
+
 
 HOME = Path.home()
 DEFAULT_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-analysis"
 DEFAULT_ALERT_STORE_URL = os.environ.get("ALERT_STORE_URL", "http://127.0.0.1:8787")
+MAX_ALERT_STORE_RESPONSE_BYTES = 1024 * 1024
+MAX_ALERT_STORE_ERROR_BYTES = 64 * 1024
 
 
 class HistoricalAlertMissing(RuntimeError):
@@ -91,9 +99,15 @@ def post_payload(url: str, payload: dict[str, Any]) -> None:
     )
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
-            result = json.loads(response.read().decode("utf-8", errors="replace"))
+            result = read_bounded_json(
+                response,
+                max_bytes=MAX_ALERT_STORE_RESPONSE_BYTES,
+            )
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
+        body = read_bounded_body(
+            exc,
+            max_bytes=MAX_ALERT_STORE_ERROR_BYTES,
+        ).decode("utf-8", errors="replace")
         try:
             reason = str(json.loads(body).get("reason") or "")
         except json.JSONDecodeError:

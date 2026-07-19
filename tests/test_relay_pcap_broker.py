@@ -349,9 +349,9 @@ class RelayPcapBrokerTest(unittest.TestCase):
             ]
             with mock.patch.object(self.relay, "run_mac_ssh", side_effect=remote_calls) as remote:
                 with mock.patch.object(
-                    self.relay.subprocess,
-                    "run",
-                    side_effect=[completed(), completed()],
+                    self.relay.process_io,
+                    "run_bounded_command",
+                    side_effect=[completed(stdout=b"", stderr=b""), completed(stdout=b"", stderr=b"")],
                 ) as rsync:
                     result = self.relay.upload_pcap_artifact_via_rsync(config, {}, export_result)
 
@@ -361,6 +361,7 @@ class RelayPcapBrokerTest(unittest.TestCase):
             self.assertEqual(rsync.call_count, 2)
             self.assertTrue(all("--checksum" in call.args[0] for call in rsync.call_args_list))
             self.assertTrue(all("--bwlimit=4096" in call.args[0] for call in rsync.call_args_list))
+            self.assertTrue(all(call.kwargs["max_stdout_bytes"] == 1024 * 1024 for call in rsync.call_args_list))
             self.assertEqual(result["max_bytes_per_second"], 4 * 1024 * 1024)
             self.assertTrue(artifact.exists(), "verified relay evidence must survive until the durable completion callback")
             self.assertTrue(self.relay.cleanup_relay_spool_artifact(config, "pcap-mac-retry"))
@@ -659,9 +660,13 @@ class RelayPcapBrokerTest(unittest.TestCase):
                 '"zeek_capture_loss_max_percent": 0.0}',
             ]
         )
-        completed = self.relay.subprocess.CompletedProcess(["ssh"], 0, stdout, "")
+        completed = self.relay.subprocess.CompletedProcess(
+            ["ssh"], 0, stdout.encode("utf-8"), b""
+        )
 
-        with mock.patch.object(self.relay.subprocess, "run", return_value=completed):
+        with mock.patch.object(
+            self.relay.process_io, "run_bounded_command", return_value=completed
+        ):
             result = self.relay.run_ssh_pcap_export(config, {"request_id": "pcap-unit-test"})
 
         self.assertEqual(result["status"], "storage_status")

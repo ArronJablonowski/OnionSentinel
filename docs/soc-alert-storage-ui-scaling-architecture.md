@@ -1151,6 +1151,19 @@ write of the final grouped rows. It does not rescan the complete alerts table
 once for every distinct group. Routine ingestion continues to refresh only the
 affected old/new group keys.
 
+The fallback group expression is backed by the versioned
+`idx_alerts_group_key_expr_v2` expression index. Startup alias and stable-group
+repairs execute in explicit transactions, while normal mutations use the
+process-wide SQLite write gate. Keep `DELETE` journal mode and `FULL`
+synchronous durability on the current Docker Desktop bind-mount architecture;
+the earlier WAL layout caused I/O errors and index damage under load.
+
+Dashboard generation no longer constructs unused per-alert desktop/mobile
+markup or a second flow page. The static shell contains only API-backed table
+containers, and detailed fragments are published atomically. This removes
+build-time work proportional to the combined size of every rendered report and
+keeps concurrent browser sessions isolated to paginated API responses.
+
 On the Mac Studio deployment, the SQLite-writing alert-store process runs as the
 host LaunchAgent `com.arron.soc.alert-store`. The Docker Compose service named
 `alert-store` is intentionally only a TCP proxy so existing n8n workflow nodes
@@ -1210,6 +1223,13 @@ AI and parsed-PCAP artifact indexes are cached for a short five-second window
 and invalidated when the runtime artifact directory changes. This bounds
 repeated filesystem parsing when multiple dashboard sessions poll the same API
 without making new analysis artifacts slow to appear.
+
+AI scheduling uses indexed SQLite selection and validates the expected schema
+before draining work. Manual reruns and newly coalesced evidence remain eligible
+within the same drain; durable queue state, rather than a process-local exclusion
+set, is the source of truth. Prompt construction reads bounded current-group,
+correlation, enrichment, memory, and PCAP evidence and rejects packages above
+`SOC_AI_MAX_PROMPT_PACKAGE_BYTES` instead of buffering arbitrary artifacts.
 
 Manual repair command from the Mac Studio:
 

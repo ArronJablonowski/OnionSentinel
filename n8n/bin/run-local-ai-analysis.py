@@ -15,7 +15,6 @@ import json
 import os
 import re
 import shlex
-import subprocess
 import sys
 import threading
 import time
@@ -28,7 +27,9 @@ from typing import Any
 BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
-from agent_memory import normalize_memory_candidates, persist_memory_candidates
+from agent_memory import normalize_memory_candidates, persist_memory_candidates  # noqa: E402
+from bounded_http import BoundedHttpError, read_bounded_json  # noqa: E402
+from bounded_process import BoundedProcessError, run_bounded_command  # noqa: E402
 
 
 HOME = Path.home()
@@ -43,10 +44,33 @@ DEFAULT_AI_SETTINGS_FILE = HOME / "n8n-local" / "config" / "ai_model_settings.js
 DEFAULT_OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 DEFAULT_MODEL = os.environ.get("SOC_AI_MODEL", "")
 FALLBACK_OLLAMA_MODEL = "devstral:latest"
+DEFAULT_OLLAMA_MAX_RESPONSE_BYTES = int(os.environ.get("SOC_AI_MAX_RESPONSE_BYTES", str(8 * 1024 * 1024)))
+DEFAULT_MAX_PROMPT_BYTES = max(
+    256 * 1024,
+    int(os.environ.get("SOC_AI_MAX_PROMPT_PACKAGE_BYTES", str(4 * 1024 * 1024))),
+)
+DEFAULT_MAX_JSON_ARTIFACT_BYTES = max(
+    DEFAULT_MAX_PROMPT_BYTES,
+    int(os.environ.get("SOC_AI_MAX_JSON_ARTIFACT_BYTES", str(16 * 1024 * 1024))),
+)
+DEFAULT_MAX_SYSTEM_PROMPT_BYTES = max(
+    4096,
+    int(os.environ.get("SOC_AI_MAX_SYSTEM_PROMPT_BYTES", str(64 * 1024))),
+)
+DEFAULT_MAX_SETTINGS_BYTES = max(
+    4096,
+    int(os.environ.get("SOC_AI_MAX_SETTINGS_BYTES", str(256 * 1024))),
+)
+ANALYSIS_INDEX_MAX_RESPONSE_BYTES = 1024 * 1024
+DEFAULT_CLOUD_MAX_STDERR_BYTES = int(os.environ.get("SOC_AI_CLOUD_MAX_STDERR_BYTES", str(1024 * 1024)))
 DEFAULT_SYSTEM_PROMPT = (
     "You are a careful SOC analyst. Use only the supplied evidence. "
     "Return one valid JSON object and no prose outside JSON."
 )
+
+
+class RuntimeArtifactError(RuntimeError):
+    """A local runtime artifact violated its type, size, or encoding contract."""
 
 REQUIRED_KEYS = {
     "detection_outcome",
@@ -133,6 +157,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--system-prompt-file", type=Path, default=DEFAULT_SYSTEM_PROMPT_FILE, help="Editable SOC Analyst system prompt file")
     parser.add_argument("--timeout", type=int, default=600, help="Ollama request timeout in seconds")
     parser.add_argument(
+        "--max-response-bytes",
+        type=int,
+        default=DEFAULT_OLLAMA_MAX_RESPONSE_BYTES,
+        help="Maximum bytes accepted from one local or cloud model response",
+    )
+    parser.add_argument(
+        "--max-prompt-bytes",
+        type=int,
+        default=DEFAULT_MAX_PROMPT_BYTES,
+        help="Maximum serialized prompt-package bytes admitted to a model call",
+    )
+    parser.add_argument(
         "--max-predict-tokens",
         type=int,
         default=4096,
@@ -147,12 +183,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--correlation-limit", type=int, default=8, help="Correlation candidate limit passed to prompt generation")
     parser.add_argument("--correlation-min-score", type=int, default=15, help="Minimum deterministic correlation score")
     parser.add_argument("--alert-store-url", default=os.environ.get("ALERT_STORE_URL", "http://127.0.0.1:8787"), help="Alert-store URL for durable analysis indexing")
+    parser.add_argument(
+        "--flush-index-only",
+        action="store_true",
+        help="Publish deferred analysis indexes and exit without invoking a model",
+    )
     parser.add_argument("--stdout", action="store_true", help="Print paths and response JSON after writing files")
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
     if args.max_predict_tokens <= 0:
         parser.error("--max-predict-tokens must be positive")
+    if args.max_response_bytes <= 0:
+        parser.error("--max-response-bytes must be positive")
+    if args.max_prompt_bytes < 256 * 1024:
+        parser.error("--max-prompt-bytes must be at least 262144")
     if args.correlation_limit <= 0:
         parser.error("--correlation-limit must be positive")
     if args.correlation_min_score < 0 or args.correlation_min_score > 100:
@@ -337,17 +382,16 @@ def read_mactop_system_sample() -> tuple[
     if not command:
         return None, None, None, None, None, None, None, "mactop not found"
     try:
-        proc = subprocess.run(
+        proc = run_bounded_command(
             [*command, "--headless", "--format", "json", "--count", "1"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=8,
+            timeout_seconds=8,
+            max_stdout_bytes=2 * 1024 * 1024,
+            max_stderr_bytes=256 * 1024,
         )
     except FileNotFoundError:
         return None, None, None, None, None, None, None, f"{command[0]} not found"
-    except subprocess.TimeoutExpired:
-        return None, None, None, None, None, None, None, f"{command[0]} timed out"
+    except BoundedProcessError as exc:
+        return None, None, None, None, None, None, None, f"{command[0]} unavailable: {exc}"
     except Exception as exc:
         return None, None, None, None, None, None, None, f"{command[0]} failed: {exc}"
     if proc.returncode != 0 and not proc.stdout.strip():
@@ -372,12 +416,17 @@ def read_gpu_temperature_celsius() -> tuple[float | None, str]:
     notes: list[str] = []
     for command in commands:
         try:
-            proc = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=4)
+            proc = run_bounded_command(
+                command,
+                timeout_seconds=4,
+                max_stdout_bytes=2 * 1024 * 1024,
+                max_stderr_bytes=256 * 1024,
+            )
         except FileNotFoundError:
             notes.append(f"{command[0]} not found")
             continue
-        except subprocess.TimeoutExpired:
-            notes.append(f"{command[0]} timed out")
+        except BoundedProcessError as exc:
+            notes.append(f"{command[0]} unavailable: {exc}")
             continue
         except Exception as exc:
             notes.append(f"{command[0]} failed: {exc}")
@@ -494,7 +543,7 @@ def post_analysis_index(payload: dict[str, Any], alert_store_url: str, timeout: 
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        result = json.loads(response.read().decode("utf-8", errors="replace"))
+        result = read_bounded_json(response, max_bytes=ANALYSIS_INDEX_MAX_RESPONSE_BYTES)
     if not result.get("ok"):
         raise RuntimeError(result.get("reason") or "alert-store rejected analysis result")
 
@@ -598,10 +647,20 @@ def generate_prompt(args: argparse.Namespace) -> Path:
         str(args.correlation_limit),
         "--correlation-min-score",
         str(args.correlation_min_score),
+        "--max-package-bytes",
+        str(args.max_prompt_bytes),
         "--out-dir",
         str(args.prompt_dir),
     ]
-    proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        proc = run_bounded_command(
+            cmd,
+            timeout_seconds=min(max(30, args.timeout), 300),
+            max_stdout_bytes=16 * 1024,
+            max_stderr_bytes=256 * 1024,
+        )
+    except BoundedProcessError as exc:
+        raise SystemExit(f"prompt builder exceeded its runtime contract: {exc}") from exc
     if proc.returncode != 0:
         if proc.stderr:
             print(proc.stderr, file=sys.stderr, end="")
@@ -613,25 +672,42 @@ def generate_prompt(args: argparse.Namespace) -> Path:
     return prompt_path
 
 
-def load_json(path: Path) -> dict[str, Any]:
+def read_bytes_bounded(path: Path, max_bytes: int) -> bytes:
+    """Read a runtime file only while it remains inside its admission limit."""
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"invalid JSON in {path}: {exc}") from exc
+        size = path.stat().st_size
+    except OSError as exc:
+        raise RuntimeArtifactError(f"cannot stat {path}: {exc}") from exc
+    if size > max_bytes:
+        raise RuntimeArtifactError(f"runtime artifact exceeds {max_bytes} byte limit: {path}")
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(max_bytes + 1)
+    except OSError as exc:
+        raise RuntimeArtifactError(f"cannot read {path}: {exc}") from exc
+    if len(data) > max_bytes:
+        raise RuntimeArtifactError(f"runtime artifact grew beyond {max_bytes} byte limit: {path}")
+    return data
+
+
+def load_json(path: Path, max_bytes: int = DEFAULT_MAX_JSON_ARTIFACT_BYTES) -> dict[str, Any]:
+    try:
+        value = json.loads(read_bytes_bounded(path, max_bytes).decode("utf-8", errors="strict"))
+    except (RuntimeArtifactError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeArtifactError(f"invalid JSON in {path}: {exc}") from exc
     if not isinstance(value, dict):
-        raise SystemExit(f"JSON root must be an object: {path}")
+        raise RuntimeArtifactError(f"JSON root must be an object: {path}")
     return value
 
 
 def load_system_prompt(path: Path) -> str:
     """Read the editable SOC Analyst prompt, falling back to a safe default."""
-    try:
-        prompt = path.read_text(encoding="utf-8").strip()
-        if prompt:
-            return prompt
-    except Exception:
-        pass
-    return DEFAULT_SYSTEM_PROMPT
+    if not path.exists():
+        return DEFAULT_SYSTEM_PROMPT
+    prompt = read_bytes_bounded(path, DEFAULT_MAX_SYSTEM_PROMPT_BYTES).decode(
+        "utf-8", errors="replace"
+    ).strip()
+    return prompt or DEFAULT_SYSTEM_PROMPT
 
 
 def default_ai_settings() -> dict[str, Any]:
@@ -650,14 +726,14 @@ def default_ai_settings() -> dict[str, Any]:
 def load_ai_settings(path: Path) -> dict[str, Any]:
     """Load model routing settings written by the SOC Settings page."""
     settings = default_ai_settings()
+    if not path.exists():
+        return settings
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return settings
-    except Exception:
-        return settings
+        data = json.loads(read_bytes_bounded(path, DEFAULT_MAX_SETTINGS_BYTES).decode("utf-8", errors="strict"))
+    except (RuntimeArtifactError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeArtifactError(f"invalid AI settings in {path}: {exc}") from exc
     if not isinstance(data, dict):
-        return settings
+        raise RuntimeArtifactError(f"AI settings root must be an object: {path}")
     for key, value in data.items():
         if key in settings and value is not None:
             settings[key] = str(value).strip() if isinstance(value, str) else value
@@ -746,10 +822,9 @@ def ollama_chat(prompt_package: dict[str, Any], args: argparse.Namespace, settin
     request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=args.timeout) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-    except urllib.error.URLError as exc:
+            payload = read_bounded_json(response, max_bytes=args.max_response_bytes)
+    except (urllib.error.URLError, BoundedHttpError) as exc:
         raise SystemExit(f"Ollama request failed at {url}: {exc}") from exc
-    payload = json.loads(raw)
     content = payload.get("message", {}).get("content", "")
     if not content:
         raise SystemExit("Ollama returned no message content")
@@ -778,18 +853,17 @@ def cloud_cli_chat(prompt_package: dict[str, Any], args: argparse.Namespace, set
         "local_response": local_response,
     }
     try:
-        proc = subprocess.run(
+        proc = run_bounded_command(
             cmd,
-            input=json.dumps(stdin_payload, separators=(",", ":")),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=args.timeout,
+            stdin_text=json.dumps(stdin_payload, separators=(",", ":")),
+            timeout_seconds=args.timeout,
+            max_stdout_bytes=args.max_response_bytes,
+            max_stderr_bytes=DEFAULT_CLOUD_MAX_STDERR_BYTES,
         )
     except FileNotFoundError as exc:
         raise SystemExit(f"Cloud analysis command not found: {cmd[0]}") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise SystemExit(f"Cloud analysis command timed out after {args.timeout} seconds: {' '.join(cmd)}") from exc
+    except BoundedProcessError as exc:
+        raise SystemExit(f"Cloud analysis command failed: {exc}") from exc
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or f"exit code {proc.returncode}"
         raise SystemExit(f"Cloud analysis command failed: {detail}")
@@ -1084,6 +1158,10 @@ def write_outputs(
 
 def main() -> int:
     args = parse_args()
+    if args.flush_index_only:
+        completed, failed = flush_analysis_index_queue(args.alert_store_url)
+        print(json.dumps({"ok": failed == 0, "published": completed, "remaining_failures": failed}))
+        return 0 if failed == 0 else 1
     prompt_path: Path | None = args.prompt_package
     prompt_package: dict[str, Any] = {}
     settings: dict[str, Any] = {}
@@ -1108,7 +1186,7 @@ def main() -> int:
         if prompt_path is None:
             prompt_path = latest_prompt(args.prompt_dir)
 
-        prompt_package = load_json(prompt_path)
+        prompt_package = load_json(prompt_path, args.max_prompt_bytes)
         if prompt_package.get("package_type") != "soc-ai-investigation-prompt":
             raise SystemExit(f"unexpected prompt package type in {prompt_path}")
 
@@ -1132,7 +1210,7 @@ def main() -> int:
         resource_monitor.start()
         monitor_started = True
         if args.response_json:
-            response = load_json(args.response_json)
+            response = load_json(args.response_json, args.max_response_bytes)
         else:
             response = analyze_with_config(prompt_package, args)
         response = validate_response(response)
@@ -1155,7 +1233,11 @@ def main() -> int:
             post_analysis_index(index_payload, args.alert_store_url)
         except Exception as exc:
             pending_path = queue_analysis_index(index_payload)
-            print(f"analysis index deferred to {pending_path}: {exc}", file=sys.stderr)
+            # The model output is safely retained, but the durable queue must
+            # remain pending until alert-store commits this result. The next
+            # scheduler pass publishes the compact spool before any new model
+            # call, then reconciles the original job without duplicate GPU work.
+            raise RuntimeError(f"analysis index deferred to {pending_path}: {exc}") from exc
         status = "success"
 
         print(md_path)

@@ -12,6 +12,7 @@ import argparse
 import json
 import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -167,8 +168,8 @@ def main() -> int:
         print(f"ERROR db not found: {args.db}", file=sys.stderr)
         return 2
 
-    conn = sqlite3.connect(args.db)
-    state, alert_to_group, group_members = db_state(conn)
+    with closing(sqlite3.connect(args.db)) as conn:
+        state, alert_to_group, group_members = db_state(conn)
     analysis_mtimes, _analysis_paths = artifact_index(args.analysis_dir, ".json")
     prompt_mtimes, prompt_paths = artifact_index(args.prompt_dir, "-ai-prompt.json", prompt_mode=True)
 

@@ -12,6 +12,7 @@ import datetime as dt
 import hashlib
 import ipaddress
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -38,6 +39,10 @@ DEFAULT_SHARED_AGENT_MEMORY_FILE = DEFAULT_AGENT_MEMORY_DIR / "shared-agent-memo
 DEFAULT_SYSTEM_PROMPT = "You are a careful SOC analyst assisting with Security Onion alerts."
 TEST_PREFIXES = ("phase%", "config-%", "internal-test-%", "sqlite-%", "policy-%", "codex-%")
 ESCALATE_LEVELS = {"critical", "high"}
+DEFAULT_MAX_PACKAGE_BYTES = max(256 * 1024, int(os.environ.get("SOC_AI_MAX_PROMPT_PACKAGE_BYTES", str(4 * 1024 * 1024))))
+MAX_ARTIFACT_JSON_BYTES = max(64 * 1024, int(os.environ.get("SOC_AI_MAX_ARTIFACT_JSON_BYTES", str(2 * 1024 * 1024))))
+MAX_SYSTEM_PROMPT_BYTES = max(8 * 1024, int(os.environ.get("SOC_AI_MAX_SYSTEM_PROMPT_BYTES", str(64 * 1024))))
+LEGACY_ARTIFACT_SCAN_LIMIT = max(10, int(os.environ.get("SOC_AI_LEGACY_ARTIFACT_SCAN_LIMIT", "200")))
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,6 +64,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analysis-dir", type=Path, default=DEFAULT_AI_ANALYSIS_DIR, help="Prior local AI analysis directory")
     parser.add_argument("--memory-bytes", type=int, default=8000, help="Maximum bytes to include from each agent memory file")
     parser.add_argument("--pcap-analysis-limit", type=int, default=3, help="Maximum parsed PCAP evidence artifacts to include")
+    parser.add_argument(
+        "--max-package-bytes",
+        type=int,
+        default=DEFAULT_MAX_PACKAGE_BYTES,
+        help="Hard serialized prompt-package limit",
+    )
     parser.add_argument("--include-tests", action="store_true", help="Include validation/test alerts")
     parser.add_argument("--stdout", action="store_true", help="Print package JSON instead of writing a file")
     args = parser.parse_args()
@@ -76,6 +87,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--memory-bytes must be positive")
     if args.pcap_analysis_limit <= 0:
         parser.error("--pcap-analysis-limit must be positive")
+    if args.max_package_bytes < 256 * 1024:
+        parser.error("--max-package-bytes must be at least 262144")
     return args
 
 
@@ -144,10 +157,29 @@ def safe_int(value: object, default: int = 0) -> int:
         return default
 
 
+def read_bytes_bounded(path: Path, max_bytes: int) -> bytes:
+    """Read a trusted runtime artifact only when it satisfies its size contract."""
+    size = path.stat().st_size
+    if size > max_bytes:
+        raise ValueError(f"artifact exceeds {max_bytes} byte limit: {path.name}")
+    with path.open("rb") as handle:
+        data = handle.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError(f"artifact grew beyond {max_bytes} byte limit: {path.name}")
+    return data
+
+
+def load_json_bounded(path: Path, max_bytes: int = MAX_ARTIFACT_JSON_BYTES) -> dict:
+    parsed = json.loads(read_bytes_bounded(path, max_bytes).decode("utf-8", errors="strict"))
+    if not isinstance(parsed, dict):
+        raise ValueError(f"JSON artifact root must be an object: {path.name}")
+    return parsed
+
+
 def load_system_prompt(path: Path) -> str:
     """Load the analyst-editable system prompt used by the AI runner."""
     try:
-        prompt = path.read_text(encoding="utf-8").strip()
+        prompt = read_bytes_bounded(path, MAX_SYSTEM_PROMPT_BYTES).decode("utf-8", errors="replace").strip()
         if prompt:
             return prompt
     except Exception:
@@ -179,6 +211,74 @@ def alert_group_id(group_key: str) -> str:
     return hashlib.sha1(str(group_key or "").encode("utf-8")).hexdigest()[:12]
 
 
+def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {str(item["name"]) for item in rows(conn, f"PRAGMA table_info({table})")}
+    except sqlite3.Error:
+        return set()
+
+
+def alert_group_rows(
+    conn: sqlite3.Connection,
+    selected: sqlite3.Row,
+    *,
+    include_tests: bool,
+    extra_columns: Iterable[str] = (),
+) -> list[sqlite3.Row]:
+    """Fetch one duplicate group through indexed identity columns.
+
+    Older disaster-recovery databases may predate ``stable_group_id``. The
+    exact-column fallback preserves compatibility without scanning every alert
+    in Python for each model invocation.
+    """
+    available = table_columns(conn, "alerts")
+    base_columns = [
+        "alert_id", "first_seen", "last_seen", "seen_count", "rule_name",
+        "source_ip", "destination_ip", "destination_port", "triage_level",
+        "triage_score", "filter_status", "suppression_key", "stable_group_id",
+    ]
+    selected_columns = [name for name in [*base_columns, *extra_columns] if name in available]
+    if not selected_columns:
+        return [selected]
+
+    params: list[object] = []
+    stable_group_id = str(sqlite_value(selected, "stable_group_id") or "").strip()
+    suppression_key = str(sqlite_value(selected, "suppression_key") or "").strip()
+    if stable_group_id and "stable_group_id" in available:
+        identity_sql = "stable_group_id = ?"
+        params.append(stable_group_id)
+    elif suppression_key and "suppression_key" in available:
+        identity_sql = "suppression_key = ?"
+        params.append(suppression_key)
+    else:
+        identity_columns = [
+            name for name in ("triage_level", "rule_name", "source_ip", "destination_ip", "filter_status")
+            if name in available
+        ]
+        identity_sql = " AND ".join(f"COALESCE({name}, '') = ?" for name in identity_columns)
+        params.extend(str(sqlite_value(selected, name) or "") for name in identity_columns)
+    if not identity_sql:
+        return [selected]
+
+    conditions = [identity_sql]
+    if "filter_status" in available:
+        conditions.append("COALESCE(filter_status, 'accepted') IN ('accepted', 'escalated', 'unknown', 'suppressed')")
+    if not include_tests and "alert_id" in available:
+        test_sql, test_params = test_filter_sql("alert_id")
+        conditions.append(test_sql)
+        params.extend(test_params)
+    try:
+        return rows(
+            conn,
+            f"SELECT {', '.join(selected_columns)} FROM alerts "
+            f"WHERE {' AND '.join(f'({item})' for item in conditions)} "
+            "ORDER BY last_seen DESC, alert_id DESC",
+            params,
+        ) or [selected]
+    except sqlite3.Error:
+        return [selected]
+
+
 def analyst_state_context(conn: sqlite3.Connection, selected: sqlite3.Row) -> dict:
     group_key = alert_group_key(selected)
     group_id = alert_group_id(group_key)
@@ -203,15 +303,52 @@ def analyst_state_context(conn: sqlite3.Connection, selected: sqlite3.Row) -> di
     }
 
 
-def prior_analysis_context(analysis_dir: Path, selected: sqlite3.Row, limit: int = 3) -> list[dict]:
+def prior_analysis_context(
+    conn: sqlite3.Connection,
+    analysis_dir: Path,
+    selected: sqlite3.Row,
+    limit: int = 3,
+) -> list[dict]:
     alert_id = str(selected["alert_id"] or "")
     found: list[dict] = []
+    stable_group_id = str(sqlite_value(selected, "stable_group_id") or "").strip()
+    try:
+        indexed = rows(
+            conn,
+            """
+            SELECT analysis_id, generated_at, model, model_path,
+                   detection_outcome, bluf, summary, confidence, artifact_path
+            FROM ai_analysis_runs
+            WHERE alert_id = ? OR (? <> '' AND group_id = ?)
+            ORDER BY generated_at DESC
+            LIMIT ?
+            """,
+            [alert_id, stable_group_id, stable_group_id, limit],
+        )
+    except sqlite3.Error:
+        indexed = []
+    for item in indexed:
+        found.append({
+            "analysis_id": item["analysis_id"],
+            "artifact": item["artifact_path"],
+            "generated_at": item["generated_at"],
+            "model": item["model"],
+            "model_path": item["model_path"],
+            "detection_outcome": item["detection_outcome"],
+            "bluf": item["bluf"],
+            "summary": item["summary"],
+            "confidence": item["confidence"],
+        })
+    if found:
+        return found
     if not analysis_dir.exists():
         return found
-    for path in sorted(analysis_dir.glob("*-local-ai-analysis.json"), reverse=True):
+    # Compatibility path for pre-index artifacts. The scan and each file read
+    # are bounded so a large historical corpus cannot monopolize one worker.
+    for path in sorted(analysis_dir.glob("*-local-ai-analysis.json"), reverse=True)[:LEGACY_ARTIFACT_SCAN_LIMIT]:
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            payload = load_json_bounded(path)
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
             continue
         text = json.dumps(payload, sort_keys=True)
         if alert_id not in text:
@@ -237,7 +374,8 @@ def latest_rollup(rollup_dir: Path, limit_bytes: int) -> dict:
     if not files:
         return {"path": None, "content": ""}
     latest = files[-1]
-    data = latest.read_bytes()[:limit_bytes]
+    with latest.open("rb") as handle:
+        data = handle.read(limit_bytes)
     return {"path": str(latest), "content": data.decode("utf-8", errors="replace")}
 
 
@@ -267,6 +405,7 @@ def compact_pcap_analysis(record: dict) -> dict:
             "available": bool(zeek.get("available")),
             "reason": zeek.get("reason"),
             "record_counts": zeek.get("record_counts") if isinstance(zeek.get("record_counts"), dict) else {},
+            "sampling": zeek.get("sampling") if isinstance(zeek.get("sampling"), dict) else {},
             "top_connections": zeek.get("top_connections") if isinstance(zeek.get("top_connections"), list) else [],
             "dns_queries": zeek.get("dns_queries") if isinstance(zeek.get("dns_queries"), list) else [],
             "tls_sni": zeek.get("tls_sni") if isinstance(zeek.get("tls_sni"), list) else [],
@@ -308,30 +447,12 @@ def compact_public_enrichment_record(record: dict) -> dict:
 
 def public_enrichment_context(conn: sqlite3.Connection, selected: sqlite3.Row, limit: int, include_tests: bool) -> dict:
     """Collect normalized public enrichment for the selected duplicate group."""
-    filter_sql = ""
-    filter_params: list[object] = []
-    if not include_tests:
-        test_sql, filter_params = test_filter_sql("alert_id")
-        filter_sql = f"AND {test_sql}"
-    try:
-        candidates = rows(
-            conn,
-            f"""
-            SELECT alert_id, first_seen, last_seen, seen_count, rule_name, source_ip,
-                   destination_ip, destination_port, triage_level, triage_score,
-                   filter_status, suppression_key, enrichment_json
-            FROM alerts
-            WHERE COALESCE(filter_status, 'accepted') IN ('accepted', 'escalated', 'unknown', 'suppressed')
-              {filter_sql}
-            ORDER BY last_seen DESC, alert_id DESC
-            """,
-            filter_params,
-        )
-    except sqlite3.Error:
-        candidates = [selected]
-
-    selected_group_key = alert_group_key(selected)
-    group_rows = [item for item in candidates if alert_group_key(item) == selected_group_key] or [selected]
+    group_rows = alert_group_rows(
+        conn,
+        selected,
+        include_tests=include_tests,
+        extra_columns=("enrichment_json",),
+    )
     records: list[dict] = []
     skipped: list[dict] = []
     errors: list[dict] = []
@@ -413,11 +534,35 @@ def pcap_evidence_context(conn: sqlite3.Connection, selected: sqlite3.Row, analy
     request_ids = {str(item.get("request_id") or "") for item in requests}
     alert_id = str(selected["alert_id"])
     evidence = []
+    loaded_paths: set[Path] = set()
     if analysis_dir.exists():
-        for path in sorted(analysis_dir.glob("*-pcap-analysis.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        # Broker artifacts use request_id-derived names, so normal lookups are
+        # direct and O(number of requests) instead of O(all historical PCAPs).
+        direct_paths = [
+            analysis_dir / f"{re.sub(r'[^A-Za-z0-9_.-]+', '-', request_id).strip('-')[:140]}-pcap-analysis.json"
+            for request_id in request_ids
+            if request_id
+        ]
+        candidates = [path for path in direct_paths if path.exists()]
+        # A bounded legacy scan retains compatibility with manually named or
+        # pre-request-id artifacts without reintroducing an unbounded walk.
+        if len(candidates) < limit:
             try:
-                record = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
+                legacy = sorted(
+                    analysis_dir.glob("*-pcap-analysis.json"),
+                    key=lambda item: item.stat().st_mtime,
+                    reverse=True,
+                )[:LEGACY_ARTIFACT_SCAN_LIMIT]
+            except OSError:
+                legacy = []
+            candidates.extend(path for path in legacy if path not in candidates)
+        for path in candidates:
+            if path in loaded_paths:
+                continue
+            loaded_paths.add(path)
+            try:
+                record = load_json_bounded(path)
+            except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
                 continue
             if not isinstance(record, dict):
                 continue
@@ -761,28 +906,8 @@ def correlated_alert_context(
 
 def grouped_alert_context(conn: sqlite3.Connection, selected: sqlite3.Row, limit: int, include_tests: bool) -> dict:
     """Summarize the dashboard duplicate group so AI weighs alert frequency."""
-    filter_sql = ""
-    filter_params: list[object] = []
-    if not include_tests:
-        test_sql, filter_params = test_filter_sql("alert_id")
-        filter_sql = f"AND {test_sql}"
-    candidates = rows(
-        conn,
-        f"""
-        SELECT alert_id, first_seen, last_seen, seen_count, rule_name, source_ip,
-               destination_ip, destination_port, triage_level, triage_score,
-               filter_status, suppression_key
-        FROM alerts
-        WHERE COALESCE(filter_status, 'accepted') IN ('accepted', 'escalated', 'unknown', 'suppressed')
-          {filter_sql}
-        ORDER BY last_seen DESC, alert_id DESC
-        """,
-        filter_params,
-    )
     selected_group_key = alert_group_key(selected)
-    group_rows = [item for item in candidates if alert_group_key(item) == selected_group_key]
-    if not group_rows:
-        group_rows = [selected]
+    group_rows = alert_group_rows(conn, selected, include_tests=include_tests)
     total_observations = sum(max(1, safe_int(sqlite_value(item, "seen_count"))) for item in group_rows)
     first_seen_values = [str(sqlite_value(item, "first_seen") or "") for item in group_rows if sqlite_value(item, "first_seen")]
     last_seen_values = [str(sqlite_value(item, "last_seen") or "") for item in group_rows if sqlite_value(item, "last_seen")]
@@ -985,13 +1110,101 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
         "public_enrichment": enrichment_context,
         "pcap_evidence": pcap_context,
         "analyst_state": analyst_state,
-        "prior_analyses": prior_analysis_context(args.analysis_dir, selected),
+        "prior_analyses": prior_analysis_context(conn, args.analysis_dir, selected),
         "related_alerts": related_alerts(conn, selected, args.related_limit, args.include_tests),
         "correlated_alert_context": correlation_context,
         "recent_notifications": notification_context(conn, selected),
         "agent_memory": memory_context,
         "latest_daily_rollup": rollup,
     }
+
+
+def compact_package_to_budget(package: dict, max_bytes: int) -> tuple[dict, str]:
+    """Apply deterministic evidence reductions before rejecting an oversized prompt.
+
+    The compacted package keeps current-alert facts and response instructions.
+    Historical samples are reduced first because they are supporting context,
+    not permission to exceed the model admission contract.
+    """
+    package["package_budget"] = {
+        "max_bytes": max_bytes,
+        "compacted": False,
+        "compaction_steps": [],
+    }
+
+    def serialize() -> str:
+        return json.dumps(package, indent=2, sort_keys=True)
+
+    output = serialize()
+    if len(output.encode("utf-8")) <= max_bytes:
+        # The size field changes the serialized size. Iterate until the value
+        # is self-consistent, then enforce the hard admission ceiling again.
+        for _ in range(3):
+            package["package_budget"]["serialized_bytes"] = len(output.encode("utf-8"))
+            output = serialize()
+        if len(output.encode("utf-8")) > max_bytes:
+            raise ValueError(f"prompt package exceeds {max_bytes} bytes after budget metadata")
+        return package, output
+
+    steps: list[str] = package["package_budget"]["compaction_steps"]
+    package["package_budget"]["compacted"] = True
+    rollup = package.get("latest_daily_rollup")
+    if isinstance(rollup, dict) and len(str(rollup.get("content") or "")) > 2000:
+        rollup["content"] = str(rollup["content"])[:2000]
+        rollup["truncated_for_package_budget"] = True
+        steps.append("daily_rollup")
+    for key, retain in (("prior_analyses", 1), ("related_alerts", 5), ("recent_notifications", 5)):
+        value = package.get(key)
+        if isinstance(value, list) and len(value) > retain:
+            package[key] = value[:retain]
+            steps.append(key)
+    grouped = package.get("grouped_alert_context")
+    if isinstance(grouped, dict) and isinstance(grouped.get("timeline_sample"), list):
+        grouped["timeline_sample"] = grouped["timeline_sample"][:8]
+        grouped["timeline_sample_truncated_for_package_budget"] = True
+        steps.append("grouped_alert_timeline")
+    correlation = package.get("correlated_alert_context")
+    if isinstance(correlation, dict) and isinstance(correlation.get("candidates"), list):
+        correlation["candidates"] = correlation["candidates"][:4]
+        steps.append("correlation_candidates")
+    enrichment = package.get("public_enrichment")
+    if isinstance(enrichment, dict):
+        for key, retain in (("records", 10), ("skipped", 5), ("errors", 5)):
+            if isinstance(enrichment.get(key), list):
+                enrichment[key] = enrichment[key][:retain]
+        steps.append("public_enrichment")
+    pcap = package.get("pcap_evidence")
+    if isinstance(pcap, dict):
+        if isinstance(pcap.get("pcap_requests"), list):
+            pcap["pcap_requests"] = pcap["pcap_requests"][:3]
+        if isinstance(pcap.get("parsed_evidence"), list):
+            pcap["parsed_evidence"] = pcap["parsed_evidence"][:1]
+            for evidence in pcap["parsed_evidence"]:
+                tshark = evidence.get("tshark") if isinstance(evidence, dict) else None
+                if isinstance(tshark, dict) and isinstance(tshark.get("samples"), list):
+                    tshark["samples"] = tshark["samples"][:1]
+                    for sample in tshark["samples"]:
+                        if isinstance(sample, dict):
+                            for key in ("protocol_hierarchy", "conversations", "field_sample_tsv"):
+                                sample[key] = str(sample.get(key) or "")[:1200]
+        steps.append("pcap_evidence")
+    memory = package.get("agent_memory")
+    if isinstance(memory, dict):
+        for key in ("role_memory", "shared_memory"):
+            value = memory.get(key)
+            if isinstance(value, str) and len(value) > 2500:
+                memory[key] = value[:2500] + "\n[truncated for prompt package budget]"
+        steps.append("agent_memory")
+
+    output = serialize()
+    for _ in range(3):
+        package["package_budget"]["serialized_bytes"] = len(output.encode("utf-8"))
+        output = serialize()
+    if len(output.encode("utf-8")) > max_bytes:
+        raise ValueError(
+            f"prompt package remains above {max_bytes} bytes after deterministic compaction"
+        )
+    return package, output
 
 
 def main() -> int:
@@ -1006,7 +1219,7 @@ def main() -> int:
     finally:
         conn.close()
 
-    output = json.dumps(package, indent=2, sort_keys=True)
+    package, output = compact_package_to_budget(package, args.max_package_bytes)
     if args.stdout:
         print(output)
         return 0

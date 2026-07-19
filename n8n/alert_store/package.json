@@ -6,7 +6,8 @@
   "main": "alert_store.js",
   "scripts": {
     "start": "node alert_store.js",
-    "check": "node --check alert_store.js"
+    "check": "node --check alert_store.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "sqlite3": "6.0.1"

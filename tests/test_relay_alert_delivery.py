@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
-import io
 import json
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -68,29 +66,31 @@ class AlertDeliveryTransportTest(unittest.TestCase):
             "protocol": self.delivery.PROTOCOL,
             "results": [{"delivery_id": "alert-1", "ok": True}],
         }
-        completed = subprocess.CompletedProcess(
+        completed = self.delivery.process_io.subprocess.CompletedProcess(
             args=["ssh"],
             returncode=0,
             stdout=(json.dumps(response) + "\n").encode(),
             stderr=b"",
         )
-        with mock.patch.object(self.delivery.subprocess, "run", return_value=completed) as runner:
+        with mock.patch.object(
+            self.delivery.process_io, "run_bounded_command", return_value=completed
+        ) as runner:
             result = self.delivery.deliver_ssh_batch(self.config, messages)
         self.assertTrue(result["results"][0]["ok"])
-        self.assertIn(b"onion-sentinel-alert-batch/v1", runner.call_args.kwargs["input"])
+        self.assertIn(b"onion-sentinel-alert-batch/v1", runner.call_args.kwargs["input_bytes"])
         command = runner.call_args.args[0]
         self.assertIn("StrictHostKeyChecking=yes", command)
         self.assertIn(f"UserKnownHostsFile={self.known_hosts}", command)
         self.assertIn("GlobalKnownHostsFile=/dev/null", command)
 
     def test_missing_acknowledgement_retries_entire_batch(self) -> None:
-        completed = subprocess.CompletedProcess(
+        completed = self.delivery.process_io.subprocess.CompletedProcess(
             args=["ssh"],
             returncode=0,
             stdout=json.dumps({"protocol": self.delivery.PROTOCOL, "results": []}).encode(),
             stderr=b"",
         )
-        with mock.patch.object(self.delivery.subprocess, "run", return_value=completed):
+        with mock.patch.object(self.delivery.process_io, "run_bounded_command", return_value=completed):
             with self.assertRaisesRegex(self.delivery.AlertDeliveryError, "omitted"):
                 self.delivery.deliver_ssh_batch(
                     self.config,
@@ -104,17 +104,26 @@ class AlertDeliveryTransportTest(unittest.TestCase):
 
     def test_missing_ssh_key_file_is_rejected_before_invoking_ssh(self) -> None:
         self.ssh_key.unlink()
-        with mock.patch.object(self.delivery.subprocess, "run") as runner:
+        with mock.patch.object(self.delivery.process_io, "run_bounded_command") as runner:
             with self.assertRaisesRegex(self.delivery.AlertDeliveryError, "key does not exist"):
                 self.delivery.deliver_ssh_batch(self.config, [])
         runner.assert_not_called()
 
     def test_missing_known_hosts_file_is_rejected_before_invoking_ssh(self) -> None:
         self.known_hosts.unlink()
-        with mock.patch.object(self.delivery.subprocess, "run") as runner:
+        with mock.patch.object(self.delivery.process_io, "run_bounded_command") as runner:
             with self.assertRaisesRegex(self.delivery.AlertDeliveryError, "known_hosts file does not exist"):
                 self.delivery.deliver_ssh_batch(self.config, [])
         runner.assert_not_called()
+
+    def test_split_batches_uses_exact_encoded_byte_ceiling(self) -> None:
+        message = {"delivery_id": "alert-1", "payload": {"text": "x" * 128}}
+        exact_size = len(self.delivery._encoded_batch([message]))
+        self.config["alert_ingest"]["batch_max_bytes"] = exact_size
+        self.assertEqual(self.delivery.split_batches(self.config, [message]), [[message]])
+        self.config["alert_ingest"]["batch_max_bytes"] = exact_size - 1
+        with self.assertRaisesRegex(self.delivery.AlertDeliveryError, "exceeds"):
+            self.delivery.split_batches(self.config, [message])
 
 
 class AlertOutboxDeadLetterTest(unittest.TestCase):

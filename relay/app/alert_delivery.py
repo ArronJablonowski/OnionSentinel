@@ -8,9 +8,22 @@ to replay and one malformed alert cannot block unrelated alerts behind it.
 from __future__ import annotations
 
 import json
-import subprocess
+import importlib.util
+import sys
 from pathlib import Path
 from typing import Iterable
+
+try:
+    import process_io
+except ModuleNotFoundError:
+    _process_spec = importlib.util.spec_from_file_location(
+        "process_io", Path(__file__).with_name("process_io.py")
+    )
+    if _process_spec is None or _process_spec.loader is None:
+        raise
+    process_io = importlib.util.module_from_spec(_process_spec)
+    sys.modules.setdefault("process_io", process_io)
+    _process_spec.loader.exec_module(process_io)
 
 
 PROTOCOL = "onion-sentinel-alert-batch/v1"
@@ -105,16 +118,24 @@ def split_batches(config: dict, messages: Iterable[dict]) -> list[list[dict]]:
     max_bytes = _positive_int(ingest.get("batch_max_bytes"), DEFAULT_BATCH_BYTES, 32 * 1024 * 1024)
     batches: list[list[dict]] = []
     current: list[dict] = []
+    empty_batch_bytes = len(_encoded_batch([]))
+    current_bytes = empty_batch_bytes
     for message in messages:
-        candidate = [*current, message]
-        if current and (len(candidate) > max_items or len(_encoded_batch(candidate)) > max_bytes):
-            batches.append(current)
-            current = [message]
-        else:
-            current = candidate
-        if len(_encoded_batch(current)) > max_bytes:
+        encoded_item_bytes = len(
+            json.dumps(message, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        )
+        item_batch_bytes = empty_batch_bytes + encoded_item_bytes
+        if item_batch_bytes > max_bytes:
             delivery_id = str(message.get("delivery_id") or "unknown")
             raise AlertDeliveryError(f"alert intake item {delivery_id} exceeds batch_max_bytes")
+        candidate_bytes = current_bytes + encoded_item_bytes + (1 if current else 0)
+        if current and (len(current) >= max_items or candidate_bytes > max_bytes):
+            batches.append(current)
+            current = [message]
+            current_bytes = item_batch_bytes
+        else:
+            current.append(message)
+            current_bytes = candidate_bytes
     if current:
         batches.append(current)
     return batches
@@ -139,12 +160,12 @@ def deliver_ssh_batch(config: dict, messages: list[dict]) -> dict:
     ingest = config.get("alert_ingest", {})
     process_timeout = _positive_int(ingest.get("request_timeout_seconds"), 180, 1800)
     payload = _encoded_batch(messages)
-    result = subprocess.run(
+    result = process_io.run_bounded_command(
         command,
-        input=payload,
-        check=False,
-        capture_output=True,
-        timeout=max(process_timeout, connect_timeout + 10),
+        input_bytes=payload,
+        timeout_seconds=max(process_timeout, connect_timeout + 10),
+        max_stdout_bytes=2 * 1024 * 1024,
+        max_stderr_bytes=256 * 1024,
     )
     if result.returncode != 0:
         detail = result.stderr.decode("utf-8", errors="replace").strip()[-500:]

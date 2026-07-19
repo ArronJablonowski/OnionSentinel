@@ -109,6 +109,20 @@ class RelayWebhookRetryTest(unittest.TestCase):
 
         sleep.assert_called_once()
 
+    def test_control_plane_response_is_bounded_with_or_without_content_length(self) -> None:
+        response = mock.MagicMock()
+        response.headers = {"Content-Length": "2049"}
+        with self.assertRaisesRegex(RuntimeError, "exceeds 2048 byte limit"):
+            self.relay.read_bounded_http_body(response, 2048)
+        response.read.assert_not_called()
+
+        response = mock.MagicMock()
+        response.headers = {}
+        response.read.return_value = b"x" * 2049
+        with self.assertRaisesRegex(RuntimeError, "exceeds 2048 byte limit"):
+            self.relay.read_bounded_http_body(response, 2048)
+        response.read.assert_called_once_with(2049)
+
     def test_partial_batch_marks_successfully_posted_alerts_seen(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.execute(

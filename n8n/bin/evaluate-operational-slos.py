@@ -13,6 +13,14 @@ import sys
 import urllib.error
 import urllib.request
 
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+from bounded_http import BoundedHttpError, read_bounded_json
+
+
+MAX_PROBE_RESPONSE_BYTES = 8 * 1024 * 1024
+
 
 class ProbeError(RuntimeError):
     """A concise, operator-safe failure from a local read-only health probe."""
@@ -216,11 +224,9 @@ def evaluate(
 def fetch_json(url: str, name: str) -> dict[str, object]:
     try:
         with urllib.request.urlopen(url, timeout=8) as response:
-            payload = json.load(response)
-    except (OSError, ValueError, urllib.error.URLError) as exc:
+            payload = read_bounded_json(response, max_bytes=MAX_PROBE_RESPONSE_BYTES)
+    except (BoundedHttpError, OSError, ValueError, urllib.error.URLError) as exc:
         raise ProbeError(f"{name} probe unavailable ({type(exc).__name__})") from None
-    if not isinstance(payload, dict):
-        raise ProbeError(f"{name} probe returned a non-object payload")
     return payload
 
 

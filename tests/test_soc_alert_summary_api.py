@@ -385,11 +385,13 @@ class SocAlertSummaryApiTest(unittest.TestCase):
             "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
         )
         response = mock.MagicMock()
-        response.read.return_value = json.dumps({
+        response_body = json.dumps({
             "ok": True,
             "status": "pending",
             "request": {"request_id": "synthetic-request", "group_id": group_id},
         }).encode("utf-8")
+        response.read.return_value = response_body
+        response.headers = {"Content-Length": str(len(response_body))}
         context = mock.MagicMock()
         context.__enter__.return_value = response
         self.portal.SOC_ALERT_STORE_API_URL = "http://127.0.0.1:8787"
@@ -558,29 +560,24 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         group_id = self.portal.soc_alert_group_id(
             "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
         )
-        prompt_path = Path(self.tmp.name) / "prompt.json"
-        prompt_path.write_text("{}", encoding="utf-8")
-        builder_path = Path(self.tmp.name) / "build-ai-investigation-prompt.py"
-        builder_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-        self.portal.SOC_ALERT_AI_PROMPT_BUILDER = builder_path
-        self.portal.SOC_ALERT_AI_PROMPT_DIR = Path(self.tmp.name) / "ai-prompts"
-
-        completed = mock.Mock(returncode=0, stdout=f"{prompt_path}\n", stderr="")
         with (
-            mock.patch.object(self.portal, "soc_alert_group_representative_alert_id", return_value="newest-alert"),
-            mock.patch.object(self.portal.subprocess, "run", return_value=completed) as run_mock,
+            mock.patch.object(
+                self.portal,
+                "alert_store_post_json",
+                return_value={"ok": True, "job": {"status": "pending"}},
+            ) as post_mock,
         ):
             status, payload = self.portal.soc_alert_queue_analysis_response(group_id, {})
 
         self.assertEqual(status, 202)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["ai_status_key"], "queued")
-        command = run_mock.call_args.args[0]
-        self.assertIn("--alert-id", command)
-        self.assertEqual(command[command.index("--alert-id") + 1], "newest-alert")
-        self.assertIn("--related-limit", command)
-        self.assertEqual(command[command.index("--related-limit") + 1], "250")
-        self.assertIn("--pcap-analysis-limit", command)
+        path, request_payload = post_mock.call_args.args
+        self.assertEqual(path, "/ai/request")
+        self.assertEqual(request_payload["group_id"], group_id)
+        self.assertEqual(request_payload["related_limit"], 250)
+        self.assertEqual(request_payload["pcap_analysis_limit"], 8)
+        self.assertEqual(post_mock.call_args.kwargs["timeout"], 10.0)
 
     def test_top_endpoint_metrics_use_visible_alert_volume(self) -> None:
         self.insert_summary(
@@ -977,10 +974,12 @@ class SocAlertSummaryApiTest(unittest.TestCase):
             "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
         )
         response = mock.MagicMock()
-        response.read.return_value = json.dumps({
+        response_body = json.dumps({
             "ok": True,
             "statuses": {group_id: {"status": "acknowledged", "repeat_count": 5}},
         }).encode("utf-8")
+        response.read.return_value = response_body
+        response.headers = {"Content-Length": str(len(response_body))}
         context = mock.MagicMock()
         context.__enter__.return_value = response
         self.portal.SOC_ALERT_STORE_API_URL = "http://127.0.0.1:8787"

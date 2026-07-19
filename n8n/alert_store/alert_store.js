@@ -18,6 +18,8 @@ const {createDurableJobQueue} = require('./lib/durable_job_queue');
 const {createPipelineMetrics} = require('./lib/pipeline_metrics');
 const {stableGroupKey, stableGroupId} = require('./lib/group_identity');
 const {buildAlertObservables, compactCorrelationCandidates} = require('./lib/correlation_context');
+const {configureHttpServer, createRequestAdmission, readJsonObject} = require('./lib/http_runtime');
+const {requestJson: boundedRequestJson} = require('./lib/http_json_client');
 let sqlite3;
 try {
   // Host-native launchd deployments install sqlite3 beside this script.
@@ -40,11 +42,17 @@ const beaconHistoryPaths = (process.env.ALERT_STORE_BEACON_HISTORY_PATHS || '')
   .split(',')
   .map((value) => value.trim())
   .filter(Boolean);
-const host = process.env.ALERT_STORE_HOST || '0.0.0.0';
+const host = process.env.ALERT_STORE_HOST || '127.0.0.1';
 const port = Number(process.env.ALERT_STORE_PORT || 8787);
 const telegramBotToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const telegramChatId = (process.env.TELEGRAM_CHAT_ID || '').trim();
-const maxRequestBytes = Math.max(1024, Number(process.env.ALERT_STORE_MAX_REQUEST_BYTES || 5 * 1024 * 1024));
+const maxRequestBytes = Math.max(1024, Number(process.env.ALERT_STORE_MAX_REQUEST_BYTES || 10 * 1024 * 1024));
+const httpRequestTimeoutMs = Math.max(1000, Number(process.env.ALERT_STORE_REQUEST_TIMEOUT_MS || 30000));
+const httpHeadersTimeoutMs = Math.max(1000, Number(process.env.ALERT_STORE_HEADERS_TIMEOUT_MS || 10000));
+const httpKeepAliveTimeoutMs = Math.max(1000, Number(process.env.ALERT_STORE_KEEPALIVE_TIMEOUT_MS || 5000));
+const httpMaxRequestsPerSocket = Math.max(1, Number(process.env.ALERT_STORE_MAX_REQUESTS_PER_SOCKET || 100));
+const httpMaxConnections = Math.max(8, Number(process.env.ALERT_STORE_MAX_CONNECTIONS || 256));
+const httpMaxActivePosts = Math.max(1, Number(process.env.ALERT_STORE_MAX_ACTIVE_POSTS || 32));
 const diskHardMaxUsedPercent = Math.min(80, Math.max(
   2,
   Number(process.env.ALERT_STORE_DISK_HARD_MAX_USED_PERCENT || 80),
@@ -77,6 +85,10 @@ const telegramOutboxAutostart = !['0', 'false', 'no'].includes(
 const enrichmentCacheDefaultTtlSeconds = Number(process.env.ENRICHMENT_CACHE_TTL_SECONDS || 86400);
 const vulnerabilityCacheDefaultTtlSeconds = Number(process.env.ENRICHMENT_VULN_CACHE_TTL_SECONDS || 86400);
 const enrichmentTimeoutMs = Number(process.env.ENRICHMENT_TIMEOUT_MS || 5000);
+const httpJsonMaxResponseBytes = Math.max(
+  1024,
+  Number(process.env.ALERT_STORE_HTTP_JSON_MAX_RESPONSE_BYTES || 5 * 1024 * 1024),
+);
 const enrichmentCircuitFailureThreshold = Math.max(1, Number(process.env.ENRICHMENT_CIRCUIT_FAILURE_THRESHOLD || 3));
 const enrichmentCircuitResetMs = Math.max(10000, Number(process.env.ENRICHMENT_CIRCUIT_RESET_MS || 60000));
 const enrichmentWorkerIntervalMs = Math.max(1000, Number(process.env.ENRICHMENT_WORKER_INTERVAL_MS || 5000));
@@ -123,6 +135,14 @@ const n8nPostCommitMaxAttempts = Math.max(
 const n8nPostCommitBaseRetrySeconds = Math.max(
   5,
   Number(process.env.N8N_POST_COMMIT_BASE_RETRY_SECONDS || 15),
+);
+const durableJobRecoveryIntervalMs = Math.max(
+  5000,
+  Number(process.env.DURABLE_JOB_RECOVERY_INTERVAL_SECONDS || 60) * 1000,
+);
+const aiAnalysisLeaseSeconds = Math.max(
+  120,
+  Number(process.env.AI_ANALYSIS_JOB_LEASE_SECONDS || 1800),
 );
 const runtimeDir = String(
   process.env.ONION_SENTINEL_RUNTIME_DIR || path.join(os.homedir(), 'n8n-local'),
@@ -720,44 +740,11 @@ function hasUsableExternalIntel(alert) {
   );
 }
 
-function requestJson({method = 'GET', url, headers = {}, body = null, timeoutMs = enrichmentTimeoutMs}) {
-  return new Promise((resolve, reject) => {
-    const parsed = new URL(url);
-    const client = parsed.protocol === 'https:' ? require('https') : http;
-    const payload = body === null || body === undefined ? null : (typeof body === 'string' ? body : JSON.stringify(body));
-    const req = client.request(
-      {
-        hostname: parsed.hostname,
-        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
-        path: `${parsed.pathname}${parsed.search}`,
-        method,
-        headers: {
-          Accept: 'application/json',
-          'User-Agent': 'Onion-Sentinel/1.0',
-          ...(payload ? {'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload)} : {}),
-          ...headers,
-        },
-        timeout: timeoutMs,
-      },
-      (res) => {
-        let responseBody = '';
-        res.setEncoding('utf8');
-        res.on('data', (chunk) => responseBody += chunk);
-        res.on('end', () => {
-          let parsedBody = null;
-          try {
-            parsedBody = responseBody ? JSON.parse(responseBody) : null;
-          } catch {
-            parsedBody = {raw: responseBody.slice(0, 2000)};
-          }
-          resolve({statusCode: res.statusCode, headers: res.headers, body: parsedBody});
-        });
-      },
-    );
-    req.on('timeout', () => req.destroy(new Error(`request timed out: ${parsed.hostname}`)));
-    req.on('error', reject);
-    if (payload) req.write(payload);
-    req.end();
+function requestJson(options) {
+  return boundedRequestJson({
+    timeoutMs: enrichmentTimeoutMs,
+    maxResponseBytes: httpJsonMaxResponseBytes,
+    ...options,
   });
 }
 
@@ -782,6 +769,21 @@ function normalizedEnrichmentRecord(source, indicator, indicatorType, verdict, c
     raw_response: rawResponse ?? null,
     cached_at: nowUtc(),
   };
+}
+
+function notFoundEnrichmentRecord(source, indicator, indicatorType, rawResponse) {
+  // A provider having no record is absence of evidence, not evidence that an
+  // indicator is benign. Cache this normalized negative result to avoid quota
+  // churn while preserving an honest unknown verdict for analysts and models.
+  return normalizedEnrichmentRecord(
+    source,
+    indicator,
+    indicatorType,
+    'unknown',
+    0,
+    ['not_found'],
+    rawResponse || {status: 'not_found'},
+  );
 }
 
 function verdictFromStats(stats = {}) {
@@ -927,26 +929,46 @@ async function writeEnrichmentCache(record, ttlSeconds) {
   return {...record, cached_at: now};
 }
 
-async function waitForRateLimit(source) {
+async function reserveProviderRateLimitSlot(source) {
   const minimumMs = sourceRateLimitMs(source);
-  const row = await get('SELECT last_request_at FROM enrichment_rate_limit WHERE source = ?', [source]);
-  if (row?.last_request_at) {
-    const elapsed = epochMs() - epochMs(String(row.last_request_at).replace('  ', 'T'));
-    const waitMs = minimumMs - elapsed;
-    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
-  }
-  await run(
-    'INSERT INTO enrichment_rate_limit (source, last_request_at) VALUES (?, ?) ON CONFLICT(source) DO UPDATE SET last_request_at = excluded.last_request_at',
-    [source, nowUtc()],
-  );
+  return withSqliteWriteGate(() => withImmediateTransaction(async () => {
+    const row = await get('SELECT last_request_at FROM enrichment_rate_limit WHERE source = ?', [source]);
+    const currentMs = epochMs();
+    const parsedLastMs = row?.last_request_at
+      ? epochMs(String(row.last_request_at).replace('  ', 'T'))
+      : Number.NaN;
+
+    // Persist the reservation before releasing the gate. Different providers
+    // may run concurrently, but no cache/rate-limit statement can become part
+    // of an unrelated alert-ingest transaction on this shared connection.
+    // Implausibly future timestamps are ignored so clock corrections cannot
+    // stall enrichment indefinitely.
+    const maximumCredibleFutureMs = currentMs + Math.max(60000, minimumMs * 4);
+    const lastMs = Number.isFinite(parsedLastMs) && parsedLastMs <= maximumCredibleFutureMs
+      ? parsedLastMs
+      : currentMs - minimumMs;
+    const reservedMs = Math.max(currentMs, lastMs + minimumMs);
+    await run(
+      'INSERT INTO enrichment_rate_limit (source, last_request_at) VALUES (?, ?) ON CONFLICT(source) DO UPDATE SET last_request_at = excluded.last_request_at',
+      [source, isoFromMs(reservedMs).replace('T', '  ')],
+    );
+    return Math.max(0, reservedMs - currentMs);
+  }));
 }
 
 async function cachedLookup(source, indicatorType, indicator, lookup) {
-  const cached = await readEnrichmentCache(source, indicatorType, indicator);
+  const cached = await withSqliteWriteGate(
+    () => readEnrichmentCache(source, indicatorType, indicator),
+  );
   if (cached) return {record: cached, cached: true};
-  await waitForRateLimit(source);
+  const waitMs = await reserveProviderRateLimitSlot(source);
+  if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
   const record = await lookup();
-  const saved = await writeEnrichmentCache(record, sourceTtlSeconds(source));
+  const saved = await withSqliteWriteGate(
+    () => withImmediateTransaction(
+      () => writeEnrichmentCache(record, sourceTtlSeconds(source)),
+    ),
+  );
   return {record: saved, cached: false};
 }
 
@@ -965,7 +987,9 @@ async function lookupGreynoise(ip) {
   const response = await requestJson({
     url: `https://api.greynoise.io/v3/community/${encodeURIComponent(ip)}`,
     headers: {'key': enrichmentSecrets.greynoise},
+    allowedStatusCodes: [404],
   });
+  if (response.statusCode === 404) return notFoundEnrichmentRecord('greynoise', ip, 'ip', response.body);
   const body = response.body || {};
   const classification = String(body.classification || '').toLowerCase();
   const verdict = classification === 'malicious' ? 'malicious' : classification === 'benign' ? 'noise/scanner' : body.noise ? 'noise/scanner' : 'unknown';
@@ -973,8 +997,12 @@ async function lookupGreynoise(ip) {
 }
 
 async function lookupShodanInternetDb(ip) {
-  const response = await requestJson({url: `https://internetdb.shodan.io/${encodeURIComponent(ip)}`});
+  const response = await requestJson({
+    url: `https://internetdb.shodan.io/${encodeURIComponent(ip)}`,
+    allowedStatusCodes: [404],
+  });
   const body = response.statusCode === 404 ? {status: 'not_found'} : response.body || {};
+  if (response.statusCode === 404) return notFoundEnrichmentRecord('shodan_internetdb', ip, 'ip', body);
   const cves = Array.isArray(body.vulns) ? body.vulns : Object.keys(body.vulns || {});
   const verdict = cves.length ? 'suspicious' : Array.isArray(body.ports) && body.ports.length ? 'unknown' : 'benign';
   return normalizedEnrichmentRecord('shodan_internetdb', ip, 'ip', verdict, cves.length ? 65 : 30, [...(body.tags || []), ...cves.slice(0, 5)], body);
@@ -986,7 +1014,9 @@ async function lookupOtx(indicatorType, indicator) {
   const response = await requestJson({
     url: `https://otx.alienvault.com/api/v1/indicators/${otxType}/${encodeURIComponent(indicator)}/general`,
     headers: {'X-OTX-API-KEY': enrichmentSecrets.otx},
+    allowedStatusCodes: [404],
   });
+  if (response.statusCode === 404) return notFoundEnrichmentRecord('otx', indicator, indicatorType, response.body);
   const pulses = response.body?.pulse_info?.count || 0;
   const verdict = pulses > 0 ? 'suspicious' : 'unknown';
   return normalizedEnrichmentRecord('otx', indicator, indicatorType, verdict, pulses > 0 ? 55 : 0, [`pulses:${pulses}`], response.body);
@@ -1015,7 +1045,9 @@ async function lookupVirusTotal(indicatorType, indicator) {
   const response = await requestJson({
     url: `https://www.virustotal.com/api/v3/${pathMap[indicatorType]}`,
     headers: {'x-apikey': enrichmentSecrets.virustotal},
+    allowedStatusCodes: [404],
   });
+  if (response.statusCode === 404) return notFoundEnrichmentRecord('virustotal', indicator, indicatorType, response.body);
   const attrs = response.body?.data?.attributes || {};
   const stats = attrs.last_analysis_stats || attrs.last_http_response_content_sha256 ? attrs.last_analysis_stats : {};
   const verdict = verdictFromStats(stats);
@@ -1090,7 +1122,11 @@ async function lookupThreatFox(indicatorType, indicator) {
 }
 
 async function lookupShodan(ip) {
-  const response = await requestJson({url: `https://api.shodan.io/shodan/host/${encodeURIComponent(ip)}?key=${encodeURIComponent(enrichmentSecrets.shodan)}`});
+  const response = await requestJson({
+    url: `https://api.shodan.io/shodan/host/${encodeURIComponent(ip)}?key=${encodeURIComponent(enrichmentSecrets.shodan)}`,
+    allowedStatusCodes: [404],
+  });
+  if (response.statusCode === 404) return notFoundEnrichmentRecord('shodan', ip, 'ip', response.body);
   const body = response.body || {};
   const vulns = Array.isArray(body.vulns) ? body.vulns : Object.keys(body.vulns || {});
   return normalizedEnrichmentRecord('shodan', ip, 'ip', vulns.length ? 'suspicious' : 'unknown', vulns.length ? 70 : 25, [...(body.tags || []), ...vulns.slice(0, 5)], body, null, body.last_update || null);
@@ -1105,7 +1141,12 @@ async function lookupCensys(ip) {
     if (isConfiguredSecret(enrichmentSecrets.censysOrganizationId)) {
       headers['X-Organization-ID'] = enrichmentSecrets.censysOrganizationId;
     }
-    const response = await requestJson({url: `https://api.platform.censys.io/v3/global/asset/host/${encodeURIComponent(ip)}`, headers});
+    const response = await requestJson({
+      url: `https://api.platform.censys.io/v3/global/asset/host/${encodeURIComponent(ip)}`,
+      headers,
+      allowedStatusCodes: [404],
+    });
+    if (response.statusCode === 404) return notFoundEnrichmentRecord('censys', ip, 'ip', response.body);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       const detail = providerErrorDetail(response.body);
       throw new Error(`Censys Platform API returned HTTP ${response.statusCode}${detail ? `: ${detail}` : ''}`);
@@ -1113,11 +1154,16 @@ async function lookupCensys(ip) {
     const body = response.body || {};
     const services = body.result?.services || body.resource?.services || body.host?.services || [];
     const tags = services.map((service) => service.service_name || service.port || service.transport_protocol).filter(Boolean).slice(0, 10);
-    return normalizedEnrichmentRecord('censys', ip, 'ip', services.length ? 'unknown' : 'benign', services.length ? 35 : 55, tags, body);
+    return normalizedEnrichmentRecord('censys', ip, 'ip', 'unknown', services.length ? 35 : 0, tags, body);
   }
   const auth = Buffer.from(`${enrichmentSecrets.censysId}:${enrichmentSecrets.censysSecret}`).toString('base64');
   const headers = {Authorization: `Basic ${auth}`};
-  const response = await requestJson({url: `https://search.censys.io/api/v2/hosts/${encodeURIComponent(ip)}`, headers});
+  const response = await requestJson({
+    url: `https://search.censys.io/api/v2/hosts/${encodeURIComponent(ip)}`,
+    headers,
+    allowedStatusCodes: [404],
+  });
+  if (response.statusCode === 404) return notFoundEnrichmentRecord('censys', ip, 'ip', response.body);
   if (response.statusCode < 200 || response.statusCode >= 300) {
     const detail = providerErrorDetail(response.body);
     throw new Error(`Censys Search API returned HTTP ${response.statusCode}${detail ? `: ${detail}` : ''}`);
@@ -1125,7 +1171,7 @@ async function lookupCensys(ip) {
   const body = response.body || {};
   const services = body.result?.services || [];
   const tags = services.map((service) => service.service_name).filter(Boolean).slice(0, 10);
-  return normalizedEnrichmentRecord('censys', ip, 'ip', services.length ? 'unknown' : 'benign', services.length ? 35 : 55, tags, body);
+  return normalizedEnrichmentRecord('censys', ip, 'ip', 'unknown', services.length ? 35 : 0, tags, body);
 }
 
 async function lookupCisaKev(cve) {
@@ -1561,6 +1607,7 @@ const enrichmentScheduler = createProviderScheduler({
 let telegramOutboxDrainActive = false;
 let enrichmentDrainActive = false;
 let n8nPostCommitDrainActive = false;
+let durableJobRecoveryActive = false;
 let durableJobs;
 let pipelineMetrics;
 const serviceMetrics = {
@@ -1570,6 +1617,7 @@ const serviceMetrics = {
   ingest_latency_ms_total: 0,
   ingest_latency_ms_max: 0,
 };
+const postRequestAdmission = createRequestAdmission(httpMaxActivePosts);
 
 function withSqliteWriteGate(task) {
   // sqlite3 serializes individual statements, but HTTP handlers can still
@@ -1661,21 +1709,13 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_alerts_source_port ON alerts(source_port)');
   await run('CREATE INDEX IF NOT EXISTS idx_alerts_destination_port ON alerts(destination_port)');
   await run('CREATE INDEX IF NOT EXISTS idx_alerts_transport_protocol ON alerts(transport_protocol)');
-  // Group summary refreshes run on every stored alert. Keep the expression
-  // index in lockstep with alertGroupKeySql so inserts avoid table scans as
-  // alert_json and enrichment_json grow.
-  await run(`
-    CREATE INDEX IF NOT EXISTS idx_alerts_group_key_expr ON alerts(
-      COALESCE(
-        NULLIF(suppression_key, ''),
-        COALESCE(triage_level, 'unknown-level') || '|' ||
-        COALESCE(rule_name, 'unknown-rule') || '|' ||
-        COALESCE(source_ip, 'unknown-source') || '|' ||
-        COALESCE(destination_ip, 'unknown-destination') || '|' ||
-        COALESCE(filter_status, 'accepted')
-      )
-    )
-  `);
+  // Group summary refreshes run on every stored alert. SQLite only uses an
+  // expression index when its expression matches the query predicate, so
+  // interpolate the single canonical expression instead of maintaining a
+  // second hand-written variant. The versioned name repairs the earlier index
+  // once without rebuilding a large correct index on every restart.
+  await run('DROP INDEX IF EXISTS idx_alerts_group_key_expr');
+  await run(`CREATE INDEX IF NOT EXISTS idx_alerts_group_key_expr_v2 ON alerts(${alertGroupKeySql})`);
   await run(`
     CREATE TABLE IF NOT EXISTS alert_group_summary (
       group_id TEXT PRIMARY KEY,
@@ -1936,7 +1976,13 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_completed_at ON pcap_requests(completed_at)');
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_alert_id ON pcap_requests(alert_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_group_id ON pcap_requests(group_id)');
-  durableJobs = createDurableJobQueue({run, get, all, now: nowUtc});
+  durableJobs = createDurableJobQueue({
+    run,
+    get,
+    all,
+    now: nowUtc,
+    transitionLeaseSeconds: aiAnalysisLeaseSeconds,
+  });
   await durableJobs.install();
   pipelineMetrics = createPipelineMetrics({
     run,
@@ -1984,10 +2030,17 @@ async function persistStableIdentity(alertId, row, alert = {}) {
 
 async function backfillStableGroupIdentity() {
   const pending = await all("SELECT * FROM alerts WHERE stable_group_id IS NULL OR stable_group_id = ''");
-  for (const item of pending) {
-    const alert = parseJsonObject(item.alert_json);
-    await persistStableIdentity(item.alert_id, item, alert);
-  }
+  if (!pending.length) return 0;
+  // A restart must never expose a partially migrated identity index. Keeping
+  // the startup backfill in one transaction also avoids one fsync per row when
+  // DELETE/FULL durability is intentionally enabled.
+  await withImmediateTransaction(async () => {
+    for (const item of pending) {
+      const alert = parseJsonObject(item.alert_json);
+      await persistStableIdentity(item.alert_id, item, alert);
+    }
+  });
+  return pending.length;
 }
 
 async function indexAlertObservables(alert, row) {
@@ -2157,13 +2210,17 @@ async function refreshGroupAliases() {
     FROM alert_group_summary g JOIN alerts a ON a.alert_id = g.representative_alert_id
     WHERE a.stable_group_id IS NOT NULL AND a.stable_group_key IS NOT NULL
   `);
-  for (const item of groups) {
-    await run(`INSERT INTO alert_group_alias (legacy_group_id, stable_group_id, stable_group_key, updated_at)
-      VALUES (?, ?, ?, ?) ON CONFLICT(legacy_group_id) DO UPDATE SET
-      stable_group_id = excluded.stable_group_id, stable_group_key = excluded.stable_group_key,
-      updated_at = excluded.updated_at`,
-    [item.legacy_group_id, item.stable_group_id, item.stable_group_key, nowUtc()]);
-  }
+  if (!groups.length) return 0;
+  await withImmediateTransaction(async () => {
+    for (const item of groups) {
+      await run(`INSERT INTO alert_group_alias (legacy_group_id, stable_group_id, stable_group_key, updated_at)
+        VALUES (?, ?, ?, ?) ON CONFLICT(legacy_group_id) DO UPDATE SET
+        stable_group_id = excluded.stable_group_id, stable_group_key = excluded.stable_group_key,
+        updated_at = excluded.updated_at`,
+      [item.legacy_group_id, item.stable_group_id, item.stable_group_key, nowUtc()]);
+    }
+  });
+  return groups.length;
 }
 
 function alertGroupKeyFromRow(row) {
@@ -2573,9 +2630,10 @@ async function storeAlert(rawAlert) {
   return result;
 }
 
-async function transitionDurableJobStatus(jobType, dedupeKey, status, error = '') {
+async function transitionDurableJobStatus(jobType, dedupeKey, status, error = '', leaseToken = '') {
   let resolvedKey = dedupeKey;
-  let updated = await durableJobs.transition(jobType, resolvedKey, status, error);
+  let transition = await durableJobs.transition(jobType, resolvedKey, status, error, leaseToken);
+  let updated = Boolean(transition?.updated);
   if (!updated && jobType === 'ai_analysis') {
     // Workers deployed before stable V2 group identities report the legacy
     // dashboard key. Resolve that key at the write boundary so rolling
@@ -2586,7 +2644,8 @@ async function transitionDurableJobStatus(jobType, dedupeKey, status, error = ''
     );
     if (alias?.stable_group_id) {
       resolvedKey = String(alias.stable_group_id);
-      updated = await durableJobs.transition(jobType, resolvedKey, status, error);
+      transition = await durableJobs.transition(jobType, resolvedKey, status, error, leaseToken);
+      updated = Boolean(transition?.updated);
     }
   }
   if (updated && pipelineMetrics) {
@@ -2604,7 +2663,92 @@ async function transitionDurableJobStatus(jobType, dedupeKey, status, error = ''
       void signalWorker(aiAnalysisWakePath, 'ai-rerun-pending');
     }
   }
-  return {updated, resolvedKey};
+  return {updated, resolvedKey, leaseToken: transition?.leaseToken || null};
+}
+
+async function recoverExpiredDurableJobs() {
+  if (durableJobRecoveryActive || !durableJobs) return;
+  durableJobRecoveryActive = true;
+  try {
+    const summary = await withSqliteWriteGate(() => withImmediateTransaction(
+      () => durableJobs.recoverExpired(),
+    ));
+    if (!summary.recovered && !summary.failed) return;
+    console.warn(`${nowUtc()} durable job lease recovery: ${JSON.stringify(summary)}`);
+    if (summary.job_types.ai_analysis) {
+      void signalWorker(aiAnalysisWakePath, 'ai-lease-recovered');
+    }
+    if (summary.job_types.public_enrichment) void drainEnrichmentJobs();
+    if (summary.job_types.n8n_post_commit) void drainN8nPostCommitJobs();
+  } finally {
+    durableJobRecoveryActive = false;
+  }
+}
+
+async function requestAiReanalysis(payload) {
+  const dashboardGroupId = safeString(payload?.group_id, 64).toLowerCase();
+  if (!/^[a-f0-9]{12}$/.test(dashboardGroupId)) {
+    const error = new Error('valid dashboard group_id is required');
+    error.statusCode = 400;
+    throw error;
+  }
+  let representative = await get(
+    `SELECT a.alert_id, a.stable_group_id, a.stable_group_key
+     FROM alert_group_summary AS g
+     JOIN alerts AS a ON a.alert_id = g.representative_alert_id
+     WHERE g.group_id = ?`,
+    [dashboardGroupId],
+  );
+  if (!representative) {
+    representative = await get(
+      `SELECT a.alert_id, a.stable_group_id, a.stable_group_key
+       FROM alert_group_alias AS ga
+       JOIN alerts AS a ON a.stable_group_id = ga.stable_group_id
+       WHERE ga.legacy_group_id = ?
+       ORDER BY replace(replace(COALESCE(NULLIF(a.last_seen, ''), NULLIF(a.timestamp, ''), NULLIF(a.first_seen, '')), 'T', ' '), 'Z', '') DESC,
+                a.alert_id DESC LIMIT 1`,
+      [dashboardGroupId],
+    );
+  }
+  const stableGroupId = safeString(representative?.stable_group_id, 64).toLowerCase();
+  if (!representative?.alert_id || !stableGroupId) {
+    const error = new Error('SOC alert group was not found');
+    error.statusCode = 404;
+    throw error;
+  }
+  const requestedRelatedLimit = Number(payload?.related_limit ?? 250);
+  const requestedPcapLimit = Number(payload?.pcap_analysis_limit ?? 8);
+  if (!Number.isFinite(requestedRelatedLimit) || !Number.isFinite(requestedPcapLimit)) {
+    const error = new Error('AI analysis queue limits must be finite numbers');
+    error.statusCode = 400;
+    throw error;
+  }
+  const relatedLimit = Math.max(1, Math.min(500, Math.trunc(requestedRelatedLimit)));
+  const pcapAnalysisLimit = Math.max(1, Math.min(25, Math.trunc(requestedPcapLimit)));
+  const requestedBy = safeString(payload?.requested_by || 'dashboard', 100);
+  const requestedAt = nowUtc();
+  await durableJobs.enqueue('ai_analysis', stableGroupId, {
+    alert_id: representative.alert_id,
+    group_id: stableGroupId,
+    dashboard_group_id: dashboardGroupId,
+    manual_reanalysis: true,
+    requested_by: requestedBy,
+    requested_at: requestedAt,
+    reason: safeString(payload?.reason || 'SOC analyst requested fresh AI analysis', 500),
+    related_limit: relatedLimit,
+    pcap_analysis_limit: pcapAnalysisLimit,
+  }, {priority: 1000, maxAttempts: 12});
+  await pipelineMetrics.record('ai_analysis', 'enqueued', stableGroupId, {
+    eventKey: `ai_analysis:manual:${stableGroupId}:${requestedAt}`,
+  });
+  return {
+    ok: true,
+    status: 'queued',
+    group_id: dashboardGroupId,
+    queue_group_id: stableGroupId,
+    representative_alert_id: representative.alert_id,
+    requested_at: requestedAt,
+  };
 }
 
 async function drainEnrichmentJobs() {
@@ -2645,11 +2789,13 @@ async function drainEnrichmentJobs() {
           });
           wakeAi = true;
         }
-        await durableJobs.complete(job.id);
-        await pipelineMetrics.record('public_enrichment', 'completed', job.payload.alert_id, {
-          eventKey: `public_enrichment:completed:${job.id}:${job.attempt_count}`,
-          sizeBytes: Buffer.byteLength(JSON.stringify(enrichmentRecord(result.alert) || {})),
-        });
+        const completed = await durableJobs.complete(job);
+        if (completed) {
+          await pipelineMetrics.record('public_enrichment', 'completed', job.payload.alert_id, {
+            eventKey: `public_enrichment:completed:${job.id}:${job.attempt_count}`,
+            sizeBytes: Buffer.byteLength(JSON.stringify(enrichmentRecord(result.alert) || {})),
+          });
+        }
       }));
       if (wakeAi) void signalWorker(aiAnalysisWakePath, 'enrichment-completed');
     } catch (error) {
@@ -2703,11 +2849,13 @@ async function drainN8nPostCommitJobs() {
         throw new Error(result.reason || `n8n returned HTTP ${response.statusCode}`);
       }
       await withSqliteWriteGate(() => withImmediateTransaction(async () => {
-        await durableJobs.complete(job.id);
-        await pipelineMetrics.record('n8n_post_commit', 'completed', job.dedupe_key, {
-          eventKey: `n8n_post_commit:completed:${job.id}:${job.attempt_count}`,
-          sizeBytes: Buffer.byteLength(JSON.stringify(job.payload || {})),
-        });
+        const completed = await durableJobs.complete(job);
+        if (completed) {
+          await pipelineMetrics.record('n8n_post_commit', 'completed', job.dedupe_key, {
+            eventKey: `n8n_post_commit:completed:${job.id}:${job.attempt_count}`,
+            sizeBytes: Buffer.byteLength(JSON.stringify(job.payload || {})),
+          });
+        }
       }));
     } catch (error) {
       await withSqliteWriteGate(() => withImmediateTransaction(async () => {
@@ -3008,15 +3156,6 @@ async function applySuppressionPolicy(alert, now) {
     escalation_threshold: escalationThreshold || null,
     seen_count: nextSeenCount,
   };
-}
-
-function all(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (error, rows) => {
-      if (error) reject(error);
-      else resolve(rows);
-    });
-  });
 }
 
 async function rescoreAlertsUnlocked() {
@@ -4180,48 +4319,7 @@ async function completePcapAnalysis(payload) {
 }
 
 function readJsonBody(request) {
-  // n8n should POST one alert object per request. Arrays are rejected to avoid
-  // partial batch inserts that are harder to reason about.
-  return new Promise((resolve, reject) => {
-    const declaredLength = Number(request.headers['content-length'] || 0);
-    if (Number.isFinite(declaredLength) && declaredLength > maxRequestBytes) {
-      const error = new Error(`payload exceeds ${maxRequestBytes} byte limit`);
-      error.statusCode = 413;
-      request.resume();
-      reject(error);
-      return;
-    }
-    const chunks = [];
-    let bytes = 0;
-    let rejected = false;
-    request.on('data', (chunk) => {
-      if (rejected) return;
-      bytes += chunk.length;
-      if (bytes > maxRequestBytes) {
-        rejected = true;
-        chunks.length = 0;
-        const error = new Error(`payload exceeds ${maxRequestBytes} byte limit`);
-        error.statusCode = 413;
-        reject(error);
-        return;
-      }
-      chunks.push(chunk);
-    });
-    request.on('end', () => {
-      if (rejected) return;
-      try {
-        const body = Buffer.concat(chunks).toString('utf8');
-        const parsed = JSON.parse(body || '{}');
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          throw new Error('payload must be a JSON object');
-        }
-        resolve(parsed);
-      } catch (error) {
-        reject(error);
-      }
-    });
-    request.on('error', reject);
-  });
+  return readJsonObject(request, {maxBytes: maxRequestBytes});
 }
 
 function sendJson(response, code, payload) {
@@ -4265,6 +4363,7 @@ async function operationalMetricsSnapshot() {
     generated_at: nowUtc(),
     process: {
       ...serviceMetrics,
+      post_request_admission: postRequestAdmission.snapshot(),
       ingest_latency_ms_average: serviceMetrics.ingest_requests
         ? Math.round(serviceMetrics.ingest_latency_ms_total / serviceMetrics.ingest_requests) : 0,
     },
@@ -4362,6 +4461,18 @@ async function handleRequest(request, response) {
       sendJson(response, 200, result);
       return;
     }
+    if (request.method === 'POST' && parsedUrl.pathname === '/ai/request') {
+      // The dashboard records intent only. The worker builds a fresh bounded
+      // prompt at execution time so every rerun sees current alerts, public
+      // enrichment, parsed PCAP evidence, notes, memory, and prior analyses.
+      const payload = await readJsonBody(request);
+      const result = await withSqliteWriteGate(() => withImmediateTransaction(
+        () => requestAiReanalysis(payload),
+      ));
+      void signalWorker(aiAnalysisWakePath, 'manual-ai-reanalysis');
+      sendJson(response, 202, result);
+      return;
+    }
     if (request.method === 'POST' && parsedUrl.pathname === '/pcap/request') {
       // Queues a bounded PCAP evidence request. This endpoint never shells out
       // or contacts Security Onion; relay-side fulfillment will use its own
@@ -4386,15 +4497,17 @@ async function handleRequest(request, response) {
       const jobType = safeString(payload?.job_type, 64);
       const dedupeKey = safeString(payload?.dedupe_key, 256);
       const status = safeString(payload?.status, 32).toLowerCase();
+      const leaseToken = safeString(payload?.lease_token, 128);
       if (!jobType || !dedupeKey) throw new Error('job_type and dedupe_key are required');
       const transition = await withSqliteWriteGate(() => transitionDurableJobStatus(
-        jobType, dedupeKey, status, safeString(payload?.error, 1000),
+        jobType, dedupeKey, status, safeString(payload?.error, 1000), leaseToken,
       ));
       sendJson(response, transition.updated ? 200 : 404, {
         ok: transition.updated,
         job_type: jobType,
         dedupe_key: transition.resolvedKey,
         status,
+        lease_token: transition.leaseToken,
       });
       return;
     }
@@ -4491,8 +4604,40 @@ async function handleRequest(request, response) {
   }
 }
 
+async function dispatchRequest(request, response) {
+  if (request.method !== 'POST') {
+    await handleRequest(request, response);
+    return;
+  }
+  const release = postRequestAdmission.tryAcquire();
+  if (!release) {
+    request.resume();
+    response.setHeader('Retry-After', '1');
+    sendJson(response, 503, {ok: false, status: 'busy', reason: 'alert-store POST capacity is busy'});
+    return;
+  }
+  try {
+    await handleRequest(request, response);
+  } finally {
+    release();
+  }
+}
+
 initDb().then(() => {
-  http.createServer(handleRequest).listen(port, host, () => {
+  const server = configureHttpServer(http.createServer((request, response) => {
+    void dispatchRequest(request, response).catch((error) => {
+      console.error(`unhandled HTTP request failure: ${error.message}`);
+      if (!response.headersSent) sendJson(response, 500, {ok: false, status: 'error'});
+      else response.destroy(error);
+    });
+  }), {
+    requestTimeoutMs: httpRequestTimeoutMs,
+    headersTimeoutMs: httpHeadersTimeoutMs,
+    keepAliveTimeoutMs: httpKeepAliveTimeoutMs,
+    maxRequestsPerSocket: httpMaxRequestsPerSocket,
+    maxConnections: httpMaxConnections,
+  });
+  server.listen(port, host, () => {
     console.log(`alert-store listening on ${host}:${port}, db=${dbPath}`);
   });
   if (telegramOutboxAutostart) {
@@ -4503,6 +4648,10 @@ initDb().then(() => {
   void drainEnrichmentJobs();
   setInterval(() => void drainN8nPostCommitJobs(), n8nPostCommitIntervalMs).unref();
   void drainN8nPostCommitJobs();
+  setInterval(() => {
+    void recoverExpiredDurableJobs().catch((error) => console.error(`durable job lease recovery failed: ${error.message}`));
+  }, durableJobRecoveryIntervalMs).unref();
+  void recoverExpiredDurableJobs().catch((error) => console.error(`initial durable job lease recovery failed: ${error.message}`));
   setInterval(() => {
     void capturePipelineDiskSample().catch((error) => console.error(`pipeline disk sample failed: ${error.message}`));
   }, pipelineDiskSampleIntervalMs).unref();

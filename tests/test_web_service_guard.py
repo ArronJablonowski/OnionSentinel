@@ -33,13 +33,16 @@ class WebServiceGuardTests(unittest.TestCase):
     @mock.patch.object(WEB_GUARD.urllib.request, "urlopen")
     def test_health_requires_onion_sentinel_service_identity(self, urlopen):
         response = mock.MagicMock()
-        response.__enter__.return_value.read.return_value = json.dumps(
-            {"ok": True, "service": "onion-sentinel"}
-        ).encode()
+        entered = response.__enter__.return_value
+        entered.headers = {}
+        entered.read.side_effect = [
+            json.dumps({"ok": True, "service": "onion-sentinel"}).encode(),
+            b"",
+        ]
         urlopen.return_value = response
         self.assertEqual(WEB_GUARD.probe_health("http://127.0.0.1:8766/healthz"), (True, "onion-sentinel"))
 
-        response.__enter__.return_value.read.return_value = json.dumps({"ok": True}).encode()
+        entered.read.side_effect = [json.dumps({"ok": True}).encode(), b""]
         self.assertEqual(
             WEB_GUARD.probe_health("http://127.0.0.1:8766/healthz"),
             (False, "identity-mismatch"),

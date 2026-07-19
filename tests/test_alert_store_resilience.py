@@ -7,6 +7,8 @@ import unittest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALERT_STORE = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
 PROVIDER_SCHEDULER = REPO_ROOT / "n8n" / "alert_store" / "lib" / "provider_scheduler.js"
+HTTP_RUNTIME = REPO_ROOT / "n8n" / "alert_store" / "lib" / "http_runtime.js"
+HTTP_JSON_CLIENT = REPO_ROOT / "n8n" / "alert_store" / "lib" / "http_json_client.js"
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
@@ -14,6 +16,8 @@ class AlertStoreResilienceTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.code = ALERT_STORE.read_text(encoding="utf-8")
         cls.provider_scheduler = PROVIDER_SCHEDULER.read_text(encoding="utf-8")
+        cls.http_runtime = HTTP_RUNTIME.read_text(encoding="utf-8")
+        cls.http_json_client = HTTP_JSON_CLIENT.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
         self.assertIn("require('./lib/provider_scheduler')", self.code)
@@ -35,8 +39,19 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("ENRICHMENT_CIRCUIT_RESET_MS", self.code)
         self.assertIn("provider circuit open until", self.provider_scheduler)
 
+    def test_enrichment_cache_and_rate_limits_share_the_sqlite_write_boundary(self) -> None:
+        self.assertIn("async function reserveProviderRateLimitSlot(source)", self.code)
+        self.assertIn("return withSqliteWriteGate(() => withImmediateTransaction(async () =>", self.code)
+        cached_lookup = self.code.split("async function cachedLookup", 1)[1].split(
+            "async function lookupAbuseIpdb", 1
+        )[0]
+        self.assertIn("const cached = await withSqliteWriteGate(", cached_lookup)
+        self.assertIn("const waitMs = await reserveProviderRateLimitSlot(source)", cached_lookup)
+        self.assertIn("const record = await lookup();", cached_lookup)
+        self.assertIn("const saved = await withSqliteWriteGate(", cached_lookup)
+
     def test_enrichment_requests_identify_the_service_and_keep_safe_provider_errors(self) -> None:
-        self.assertIn("'User-Agent': 'Onion-Sentinel/1.0'", self.code)
+        self.assertIn("'User-Agent': 'Onion-Sentinel/1.0'", self.http_json_client)
         self.assertIn("function providerErrorDetail(body)", self.code)
         self.assertIn("Censys Platform API returned HTTP", self.code)
 
@@ -96,11 +111,17 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertNotIn("refreshAlertGroupSummary(", rebuild)
 
     def test_oversized_payload_returns_413_without_socket_destroy(self) -> None:
-        parser = self.code.split("function readJsonBody(request)", 1)[1].split(
-            "function sendJson", 1
-        )[0]
-        self.assertIn("error.statusCode = 413", parser)
-        self.assertNotIn("request.destroy", parser)
+        self.assertIn("readJsonObject(request, {maxBytes: maxRequestBytes})", self.code)
+        self.assertIn("statusError(`payload exceeds ${limit} byte limit`, 413)", self.http_runtime)
+        self.assertNotIn("request.destroy", self.http_runtime)
+
+    def test_http_runtime_has_explicit_request_and_connection_ceilings(self) -> None:
+        self.assertIn("configureHttpServer(http.createServer((request, response) =>", self.code)
+        self.assertIn("server.requestTimeout", self.http_runtime)
+        self.assertIn("server.headersTimeout", self.http_runtime)
+        self.assertIn("server.maxRequestsPerSocket", self.http_runtime)
+        self.assertIn("server.maxConnections", self.http_runtime)
+        self.assertIn("postRequestAdmission.tryAcquire()", self.code)
 
     def test_new_intake_stops_before_the_eighty_percent_disk_ceiling(self) -> None:
         self.assertIn("function assertDiskWriteAdmission", self.code)

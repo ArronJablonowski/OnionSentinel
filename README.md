@@ -62,6 +62,13 @@ The current reliability boundaries, durable queue behavior, service-level
 objectives, and recovery checks are in
 `docs/reliability-and-slo-runbook.md`.
 
+The production runtime enforces bounded HTTP bodies and responses, connection
+and mutation admission limits, bounded subprocess output, renewable
+token-owned worker leases, atomic provider-rate reservations, and indexed
+grouped-alert reads. These are safety contracts, not optional tuning hints; use
+the placeholder-safe controls in `n8n/.env.example` and
+`relay/config/config.example.json` when deploying or recovering the stack.
+
 The least-privilege migration plan for supported Security Onion APIs and
 policy-brokered OSQuery investigations is in
 `docs/security-onion-api-and-osquery-roadmap.md`. Restricted SSH remains the

@@ -10,13 +10,15 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import mimetypes
 import os
+import shutil
 from http import HTTPStatus
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 import report_portal as runtime
+from http_runtime import BoundedThreadingHTTPServer
 
 
 HOME = Path.home()
@@ -87,6 +89,29 @@ def is_soc_post_api(path: str) -> bool:
     return path.startswith("/api/soc-alerts/") and path.endswith(POST_ALERT_SUFFIXES)
 
 
+def is_same_origin_json_request(headers: object) -> tuple[bool, int, str]:
+    """Validate the browser contract for state-changing SOC API requests.
+
+    The service is intentionally LAN-only, but a browser can still be induced
+    to send cross-site requests. JSON-only mutations plus Origin/Fetch-Metadata
+    checks block ordinary CSRF while retaining support for trusted local CLI
+    clients, which normally omit both browser-specific headers.
+    """
+    get = getattr(headers, "get", lambda _name, _default=None: _default)
+    content_type = str(get("Content-Type", "")).split(";", 1)[0].strip().lower()
+    if content_type != "application/json":
+        return False, HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "SOC API mutations require application/json"
+    if str(get("Sec-Fetch-Site", "")).strip().lower() == "cross-site":
+        return False, HTTPStatus.FORBIDDEN, "Cross-site SOC API mutation rejected"
+    origin = str(get("Origin", "")).strip()
+    if origin:
+        parsed = urlparse(origin)
+        host = str(get("Host", "")).strip().lower()
+        if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != host:
+            return False, HTTPStatus.FORBIDDEN, "Origin did not match the Onion Sentinel service"
+    return True, HTTPStatus.OK, ""
+
+
 def resolve_dashboard_target(root: Path, request_path: str) -> Path | None:
     """Resolve a static request without allowing traversal or dot-file reads."""
     decoded = unquote(urlparse(request_path).path)
@@ -153,6 +178,36 @@ class OnionSentinelHandler(runtime.PortalHandler):
             headers.update(extra)
         return super()._send(status, body, content_type, headers)
 
+    def _serve_file(self, target: Path) -> None:
+        """Stream static assets so large generated pages do not double in RAM."""
+        try:
+            size = target.stat().st_size
+            source = target.open("rb")
+        except FileNotFoundError:
+            return self._send(HTTPStatus.NOT_FOUND, b"Asset not found", "text/plain; charset=utf-8")
+        except OSError:
+            return self._send(HTTPStatus.INTERNAL_SERVER_ERROR, b"Asset read failed", "text/plain; charset=utf-8")
+        try:
+            content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+            if target.suffix.lower() in (".html", ".htm"):
+                content_type = "text/html; charset=utf-8"
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            for key, value in self._security_headers().items():
+                self.send_header(key, value)
+            self.end_headers()
+            with source:
+                shutil.copyfileobj(source, self.wfile, length=64 * 1024)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except OSError:
+            # Headers may already be committed; closing the connection is the
+            # only protocol-safe response to a mid-stream filesystem failure.
+            self.close_connection = True
+
     def do_HEAD(self) -> None:
         path = urlparse(self.path).path
         target = resolve_dashboard_target(self.dashboard_root, self.path)
@@ -177,6 +232,7 @@ class OnionSentinelHandler(runtime.PortalHandler):
                 "dashboard_ready": (self.dashboard_root / "index.html").is_file(),
                 "alert_store_ready": runtime.SOC_ALERT_STORE_DB.is_file(),
                 "time": runtime.now_iso_local(),
+                "http_runtime": self.server.runtime_snapshot(),  # type: ignore[attr-defined]
             }
             status = HTTPStatus.OK if data["ok"] else HTTPStatus.SERVICE_UNAVAILABLE
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
@@ -218,17 +274,33 @@ class OnionSentinelHandler(runtime.PortalHandler):
             session_id = runtime.create_admin_session(self.client_address[0])
             return self._redirect("/admin", {"Set-Cookie": runtime.admin_session_cookie_header(session_id)})
         if is_soc_post_api(path):
+            valid, status, message = is_same_origin_json_request(self.headers)
+            if not valid:
+                return self._send(
+                    status,
+                    json.dumps({"ok": False, "error": message}).encode(),
+                    "application/json; charset=utf-8",
+                )
             return super().do_POST()
         return self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain; charset=utf-8")
 
 
-class OnionSentinelHTTPServer(ThreadingHTTPServer):
-    allow_reuse_address = True
-    daemon_threads = True
-
-    def __init__(self, address: tuple[str, int], dashboard_root: Path):
+class OnionSentinelHTTPServer(BoundedThreadingHTTPServer):
+    def __init__(
+        self,
+        address: tuple[str, int],
+        dashboard_root: Path,
+        *,
+        max_active_requests: int = 96,
+        request_timeout_seconds: float = 30.0,
+    ):
         self.dashboard_root = dashboard_root.expanduser().resolve()
-        super().__init__(address, OnionSentinelHandler)
+        super().__init__(
+            address,
+            OnionSentinelHandler,
+            max_active_requests=max_active_requests,
+            request_timeout_seconds=request_timeout_seconds,
+        )
 
 
 def main() -> None:
@@ -236,10 +308,17 @@ def main() -> None:
     parser.add_argument("--host", default=os.environ.get("ONION_SENTINEL_HOST", DEFAULT_HOST))
     parser.add_argument("--port", type=int, default=int(os.environ.get("ONION_SENTINEL_PORT", DEFAULT_PORT)))
     parser.add_argument("--dashboard-root", type=Path, default=Path(os.environ.get("ONION_SENTINEL_DASHBOARD_ROOT", DEFAULT_DASHBOARD_ROOT)))
+    parser.add_argument("--max-active-requests", type=int, default=int(os.environ.get("ONION_SENTINEL_MAX_ACTIVE_REQUESTS", "96")))
+    parser.add_argument("--request-timeout-seconds", type=float, default=float(os.environ.get("ONION_SENTINEL_REQUEST_TIMEOUT_SECONDS", "30")))
     args = parser.parse_args()
     configure_runtime_paths(args.dashboard_root)
     args.dashboard_root.mkdir(parents=True, exist_ok=True)
-    server = OnionSentinelHTTPServer((args.host, args.port), args.dashboard_root)
+    server = OnionSentinelHTTPServer(
+        (args.host, args.port),
+        args.dashboard_root,
+        max_active_requests=args.max_active_requests,
+        request_timeout_seconds=args.request_timeout_seconds,
+    )
     print(f"Onion Sentinel listening on http://{runtime.local_ip()}:{args.port}/", flush=True)
     server.serve_forever()
 

@@ -15,7 +15,6 @@ import hashlib
 import json
 import os
 import sqlite3
-import subprocess
 import urllib.error
 import urllib.request
 import sys
@@ -26,6 +25,8 @@ BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 from disk_capacity import require_runtime_capacity
+from bounded_http import BoundedHttpError, read_bounded_json
+from bounded_process import BoundedProcessError, run_bounded_command
 
 
 HOME = Path.home()
@@ -47,11 +48,19 @@ DEFAULT_LEVELS = "critical,high,medium,low,informational"
 SEVERITY_PRIORITY = ("critical", "high", "medium", "low", "informational")
 ELIGIBLE_FILTER_STATUSES = ("accepted", "escalated", "unknown", "suppressed")
 TEST_PREFIXES = ("phase%", "config-%", "internal-test-%", "sqlite-%", "policy-%", "codex-%")
+DEFAULT_MAX_PROMPT_BYTES = max(256 * 1024, int(os.environ.get("SOC_AI_MAX_PROMPT_PACKAGE_BYTES", 4 * 1024 * 1024)))
+DEFAULT_MAX_CHILD_STDOUT_BYTES = max(1024 * 1024, int(os.environ.get("SOC_AI_SCHEDULER_MAX_STDOUT_BYTES", 16 * 1024 * 1024)))
+DEFAULT_MAX_CHILD_STDERR_BYTES = max(256 * 1024, int(os.environ.get("SOC_AI_SCHEDULER_MAX_STDERR_BYTES", 2 * 1024 * 1024)))
+DEFAULT_MAX_CONTROL_RESPONSE_BYTES = 1024 * 1024
 
 
-def alert_time_sql() -> str:
+def alert_time_sql(alias: str = "") -> str:
     """Return the newest usable alert timestamp expression for queue priority."""
-    return "COALESCE(NULLIF(last_seen, ''), NULLIF(timestamp, ''), NULLIF(first_seen, ''))"
+    prefix = f"{alias}." if alias else ""
+    return (
+        f"COALESCE(NULLIF({prefix}last_seen, ''), "
+        f"NULLIF({prefix}timestamp, ''), NULLIF({prefix}first_seen, ''))"
+    )
 
 
 def alert_group_key_sql() -> str:
@@ -96,6 +105,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--correlation-min-score", type=int, default=15, help="Minimum deterministic correlation score")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Optional Ollama model override; defaults to Settings page AI model routing config")
     parser.add_argument("--timeout", type=int, default=600, help="Ollama request timeout in seconds")
+    parser.add_argument(
+        "--max-prompt-bytes",
+        type=int,
+        default=DEFAULT_MAX_PROMPT_BYTES,
+        help="Hard byte ceiling for each generated AI prompt package",
+    )
     parser.add_argument("--portal-wake-file", type=Path, default=DEFAULT_DASHBOARD_WAKE, help="Wake file for the independent dashboard refresh worker")
     parser.add_argument("--no-portal-refresh", action="store_true", help="Do not signal the independent dashboard refresh worker")
     parser.add_argument("--alert-store-url", default=os.environ.get("ALERT_STORE_URL", "http://127.0.0.1:8787"), help="Alert-store URL for durable AI job status")
@@ -106,6 +121,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--hours must be positive")
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
+    if args.max_prompt_bytes < 256 * 1024:
+        parser.error("--max-prompt-bytes must be at least 262144")
     if args.max_per_run < 0:
         parser.error("--max-per-run must be zero or positive")
     if args.correlation_limit <= 0:
@@ -123,12 +140,26 @@ def rows(conn: sqlite3.Connection, sql: str, params: Iterable[object] = ()) -> l
     return conn.execute(sql, tuple(params)).fetchall()
 
 
-def report_ai_job_status(base_url: str, group_id: str, status: str, error: str = "") -> None:
+def report_ai_job_status(
+    base_url: str,
+    group_id: str,
+    status: str,
+    error: str = "",
+    lease_token: str = "",
+) -> bool | str:
+    """Transition durable AI intent through a bounded local HTTP contract.
+
+    Returning ``False`` only represents a rolling-deployment 404. Network,
+    malformed-response, and oversized-response failures remain visible so the
+    worker never performs expensive inference without a durable processing
+    lease in the current indexed architecture.
+    """
     payload = json.dumps({
         "job_type": "ai_analysis",
         "dedupe_key": group_id,
         "status": status,
         "error": error[:1000],
+        "lease_token": lease_token,
     }).encode("utf-8")
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/jobs/status",
@@ -138,11 +169,23 @@ def report_ai_job_status(base_url: str, group_id: str, status: str, error: str =
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
-            if response.status not in range(200, 300) and response.status != 404:
+            if response.status not in range(200, 300):
                 raise RuntimeError(f"AI job status returned HTTP {response.status}")
+            result = read_bounded_json(response, max_bytes=DEFAULT_MAX_CONTROL_RESPONSE_BYTES)
+            if not result.get("ok", True):
+                raise RuntimeError(str(result.get("reason") or "AI job status was rejected"))
+            if status == "processing":
+                claimed_token = str(result.get("lease_token") or "")
+                if not claimed_token:
+                    raise RuntimeError("AI job processing transition did not return a lease token")
+                return claimed_token
+            return True
     except urllib.error.HTTPError as exc:
-        if exc.code != 404:
-            raise
+        if exc.code == 404:
+            return False
+        raise RuntimeError(f"AI job status returned HTTP {exc.code}") from exc
+    except (urllib.error.URLError, BoundedHttpError) as exc:
+        raise RuntimeError(f"AI job status request failed: {exc}") from exc
 
 
 def reconcile_completed_ai_jobs(base_url: str, group_ids: set[str]) -> int:
@@ -163,21 +206,23 @@ def reconcile_completed_ai_jobs(base_url: str, group_ids: set[str]) -> int:
         with urllib.request.urlopen(request, timeout=15) as response:
             if response.status not in range(200, 300):
                 raise RuntimeError(f"AI job reconciliation returned HTTP {response.status}")
-            result = json.load(response)
+            result = read_bounded_json(response, max_bytes=DEFAULT_MAX_CONTROL_RESPONSE_BYTES)
             return int(result.get("reconciled") or 0)
     except urllib.error.HTTPError as exc:
         # Older alert-store versions may not have the batch endpoint during a
         # rolling deployment. Analysis must continue and the next run retries.
         if exc.code == 404:
             return 0
-        raise
+        raise RuntimeError(f"AI job reconciliation returned HTTP {exc.code}") from exc
+    except (urllib.error.URLError, BoundedHttpError) as exc:
+        raise RuntimeError(f"AI job reconciliation failed: {exc}") from exc
 
 
-def test_filter_sql() -> tuple[str, list[object]]:
+def test_filter_sql(column: str = "alert_id") -> tuple[str, list[object]]:
     clauses = []
     params: list[object] = []
     for pattern in TEST_PREFIXES:
-        clauses.append("alert_id NOT LIKE ?")
+        clauses.append(f"{column} NOT LIKE ?")
         params.append(pattern)
     return " AND ".join(clauses), params
 
@@ -539,6 +584,169 @@ def reconcilable_ai_job_ids(
     return reconcilable_completed_ai_job_ids(conn, completed) | orphaned_pending_ai_job_ids(conn)
 
 
+def indexed_scheduler_available(conn: sqlite3.Connection) -> bool:
+    """Return whether durable jobs and analysis results can drive scheduling."""
+    tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if not {"alerts", "durable_jobs", "ai_analysis_runs"}.issubset(tables):
+        return False
+    alert_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(alerts)")}
+    job_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(durable_jobs)")}
+    run_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(ai_analysis_runs)")}
+    return {"stable_group_id", "stable_group_key"}.issubset(alert_columns) and {
+        "id", "job_type", "dedupe_key", "status", "payload_json", "priority",
+        "attempt_count", "max_attempts", "next_attempt_at", "processing_started_at",
+        "rerun_requested", "requested_at",
+    }.issubset(job_columns) and {"group_id", "generated_at"}.issubset(run_columns)
+
+
+def indexed_reconcilable_ai_job_ids(conn: sqlite3.Connection) -> set[str]:
+    """Find recovered jobs already satisfied by a committed analysis result.
+
+    A job is never reconciled merely because an old analysis exists. The
+    indexed run must be at least as new as the processing attempt that produced
+    it, which preserves fresh alert, enrichment, PCAP, and manual rerun intent.
+    """
+    if not indexed_scheduler_available(conn):
+        return set()
+    completed = {
+        str(row[0] or "").strip()
+        for row in conn.execute(
+            """
+            SELECT j.dedupe_key
+            FROM durable_jobs AS j
+            WHERE j.job_type = 'ai_analysis' AND j.status = 'pending'
+              AND COALESCE(j.rerun_requested, 0) = 0
+              AND j.processing_started_at IS NOT NULL
+              AND EXISTS (
+                SELECT 1 FROM ai_analysis_runs AS r
+                WHERE r.group_id = j.dedupe_key
+                  AND julianday(replace(r.generated_at, '  ', 'T')) >=
+                      julianday(replace(j.processing_started_at, '  ', 'T'))
+              )
+            """
+        ).fetchall()
+        if str(row[0] or "").strip()
+    }
+    orphaned = {
+        str(row[0] or "").strip()
+        for row in conn.execute(
+            """
+            SELECT j.dedupe_key
+            FROM durable_jobs AS j
+            WHERE j.job_type = 'ai_analysis' AND j.status = 'pending'
+              AND NOT EXISTS (
+                SELECT 1 FROM alerts AS a WHERE a.stable_group_id = j.dedupe_key
+              )
+            """
+        ).fetchall()
+        if str(row[0] or "").strip()
+    }
+    return completed | orphaned
+
+
+def select_next_alert_indexed(
+    conn: sqlite3.Connection,
+    args: argparse.Namespace,
+    already_selected_groups: set[str] | None = None,
+) -> sqlite3.Row | None:
+    """Select one group using only indexed SQLite state.
+
+    Durable intent overrides age, suppression, test, and prior-analysis filters.
+    Manual requests get their own priority bucket, then every bucket follows
+    strict severity/newest ordering. Re-running this query before every model
+    call preserves preemption when a more severe alert arrives mid-drain.
+    """
+    levels = [level.strip().lower() for level in args.levels.split(",") if level.strip()]
+    if not levels:
+        raise SystemExit("--levels must contain at least one level")
+    since = (dt.datetime.now().astimezone() - dt.timedelta(hours=args.hours)).replace(
+        microsecond=0,
+    ).isoformat().replace("T", "  ")
+    newest_alert_time = alert_time_sql("a")
+    eligible_alert_time = alert_time_sql("eligible")
+    level_placeholders = ", ".join("?" for _ in levels)
+    test_sql = ""
+    test_params: list[object] = []
+    if not args.include_tests:
+        clause, test_params = test_filter_sql("eligible.alert_id")
+        test_sql = f"AND {clause}"
+    # Indexed groups are guarded by durable job state. Do not apply the legacy
+    # per-process exclusion set: a request coalesced while inference is active
+    # becomes a fresh pending job and should be eligible immediately.
+    del already_selected_groups
+    candidate = conn.execute(
+        f"""
+        WITH due_jobs AS (
+          SELECT id, dedupe_key, payload_json, priority
+          FROM durable_jobs
+          WHERE job_type = 'ai_analysis' AND status = 'pending'
+            AND attempt_count < max_attempts
+            AND julianday(replace(next_attempt_at, '  ', 'T')) <=
+                julianday(replace(?, '  ', 'T'))
+        ),
+        ranked AS (
+          SELECT a.*,
+                 {newest_alert_time} AS queue_time,
+                 julianday(replace({newest_alert_time}, '  ', 'T')) AS queue_time_sort,
+                 {severity_priority_sql('a.triage_level')} AS severity_rank,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY a.stable_group_id
+                   ORDER BY julianday(replace({newest_alert_time}, '  ', 'T')) DESC,
+                            COALESCE(a.triage_score, 0) DESC, a.alert_id DESC
+                 ) AS group_row_rank
+          FROM alerts AS a
+          WHERE a.stable_group_id IS NOT NULL AND a.stable_group_id != ''
+        )
+        SELECT r.alert_id, r.first_seen, r.last_seen, r.timestamp, r.rule_name,
+               r.source_ip, r.destination_ip, r.triage_level, r.triage_score,
+               COALESCE(NULLIF(r.filter_status, ''), 'accepted') AS filter_status,
+               r.stable_group_id, r.routing, r.suppression_key, r.queue_time,
+               COALESCE(NULLIF(r.stable_group_key, ''), r.stable_group_id) AS queue_group_key,
+               p.payload_json AS durable_payload_json,
+               CASE WHEN p.id IS NOT NULL THEN 1 ELSE 0 END AS has_durable_intent,
+               CASE
+                 WHEN p.id IS NOT NULL
+                   AND instr(replace(p.payload_json, ' ', ''), '"manual_reanalysis":true') > 0 THEN 0
+                 WHEN p.id IS NOT NULL THEN 1
+                 ELSE 2
+               END AS request_bucket,
+               r.severity_rank, r.queue_time_sort
+        FROM ranked AS r
+        LEFT JOIN due_jobs AS p ON p.dedupe_key = r.stable_group_id
+        WHERE r.group_row_rank = 1
+          AND (
+            p.id IS NOT NULL
+            OR (
+              NOT EXISTS (
+                SELECT 1 FROM durable_jobs AS existing
+                WHERE existing.job_type = 'ai_analysis'
+                  AND existing.dedupe_key = r.stable_group_id
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM ai_analysis_runs AS ar
+                WHERE ar.group_id = r.stable_group_id
+              )
+              AND EXISTS (
+                SELECT 1 FROM alerts AS eligible
+                WHERE eligible.stable_group_id = r.stable_group_id
+                  AND julianday(replace({eligible_alert_time}, '  ', 'T')) >=
+                      julianday(replace(?, '  ', 'T'))
+                  AND eligible.triage_level IN ({level_placeholders})
+                  AND COALESCE(NULLIF(eligible.filter_status, ''), 'accepted')
+                      IN ({", ".join("?" for _ in ELIGIBLE_FILTER_STATUSES)})
+                  {test_sql}
+              )
+            )
+          )
+        ORDER BY request_bucket ASC, severity_rank ASC, queue_time_sort DESC,
+                 COALESCE(r.triage_score, 0) DESC, r.alert_id DESC
+        LIMIT 1
+        """,
+        [project_now(), since, *levels, *ELIGIBLE_FILTER_STATUSES, *test_params],
+    ).fetchone()
+    return candidate
+
+
 def select_next_alert(
     conn: sqlite3.Connection,
     args: argparse.Namespace,
@@ -697,13 +905,51 @@ def reusable_prompt_for_alert(prompt_dir: Path, selected: sqlite3.Row, pcap_anal
     return prompt
 
 
-def run_command(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+def durable_payload(selected: sqlite3.Row) -> dict[str, object]:
+    """Decode trusted queue metadata without letting corruption alter limits."""
+    if "durable_payload_json" not in selected.keys():
+        return {}
+    try:
+        payload = json.loads(str(selected["durable_payload_json"] or "{}"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def bounded_int(value: object, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def run_command(
+    cmd: list[str],
+    *,
+    timeout_seconds: float,
+    max_stdout_bytes: int = DEFAULT_MAX_CHILD_STDOUT_BYTES,
+    max_stderr_bytes: int = DEFAULT_MAX_CHILD_STDERR_BYTES,
+    progress_callback=None,
+    progress_interval_seconds: float = 30,
+):
+    """Run one trusted helper with bounded time, memory, and descendants."""
     print("running:", " ".join(cmd), flush=True)
-    return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return run_bounded_command(
+        cmd,
+        timeout_seconds=timeout_seconds,
+        max_stdout_bytes=max_stdout_bytes,
+        max_stderr_bytes=max_stderr_bytes,
+        progress_callback=progress_callback,
+        progress_interval_seconds=progress_interval_seconds,
+    )
 
 
-def build_prompt(alert_id: str, args: argparse.Namespace) -> Path:
+def build_prompt(alert_id: str, args: argparse.Namespace, job_payload: dict[str, object] | None = None) -> Path:
     builder = Path(__file__).with_name("build-ai-investigation-prompt.py")
+    job_payload = job_payload or {}
+    related_limit = bounded_int(job_payload.get("related_limit"), args.related_limit, 1, 500)
+    pcap_analysis_limit = bounded_int(job_payload.get("pcap_analysis_limit"), 8, 1, 25)
     cmd = [
         sys.executable,
         str(builder),
@@ -712,22 +958,40 @@ def build_prompt(alert_id: str, args: argparse.Namespace) -> Path:
         "--out-dir",
         str(args.prompt_dir),
         "--related-limit",
-        str(args.related_limit),
+        str(related_limit),
         "--correlation-limit",
         str(args.correlation_limit),
         "--correlation-min-score",
         str(args.correlation_min_score),
+        "--pcap-analysis-limit",
+        str(pcap_analysis_limit),
+        "--max-package-bytes",
+        str(args.max_prompt_bytes),
     ]
     if args.include_tests:
         cmd.append("--include-tests")
-    proc = run_command(cmd)
+    proc = run_command(
+        cmd,
+        timeout_seconds=180,
+        max_stdout_bytes=1024 * 1024,
+        max_stderr_bytes=DEFAULT_MAX_CHILD_STDERR_BYTES,
+    )
     if proc.returncode != 0:
         if proc.stderr:
             print(proc.stderr, file=sys.stderr, end="")
-        raise SystemExit(f"prompt builder failed rc={proc.returncode}")
-    prompt_path = Path(proc.stdout.strip().splitlines()[-1])
+        raise RuntimeError(f"prompt builder failed rc={proc.returncode}")
+    output_lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if not output_lines:
+        raise RuntimeError("prompt builder returned no output path")
+    prompt_path = Path(output_lines[-1])
     if not prompt_path.exists():
-        raise SystemExit(f"prompt builder did not create a prompt package: {prompt_path}")
+        raise RuntimeError(f"prompt builder did not create a prompt package: {prompt_path}")
+    try:
+        prompt_path.resolve().relative_to(args.prompt_dir.resolve())
+    except ValueError as exc:
+        raise RuntimeError("prompt builder returned a path outside the configured prompt directory") from exc
+    if prompt_path.stat().st_size > args.max_prompt_bytes:
+        raise RuntimeError(f"prompt package exceeded the {args.max_prompt_bytes}-byte worker limit")
     return prompt_path
 
 
@@ -750,10 +1014,36 @@ def analysis_command(prompt_path: Path, args: argparse.Namespace) -> list[str]:
     return cmd
 
 
-def run_analysis(prompt_path: Path, args: argparse.Namespace) -> subprocess.CompletedProcess[str]:
+def run_analysis(prompt_path: Path, args: argparse.Namespace, *, progress_callback=None):
     cmd = analysis_command(prompt_path, args)
-    print("running:", " ".join(cmd), flush=True)
-    return run_command(cmd)
+    return run_command(
+        cmd,
+        timeout_seconds=args.timeout + 120,
+        max_stdout_bytes=DEFAULT_MAX_CHILD_STDOUT_BYTES,
+        max_stderr_bytes=DEFAULT_MAX_CHILD_STDERR_BYTES,
+        progress_callback=progress_callback,
+        progress_interval_seconds=60,
+    )
+
+
+def flush_deferred_analysis_results(args: argparse.Namespace) -> None:
+    """Publish locally spooled result indexes before scheduling new GPU work."""
+    runner = Path(__file__).with_name("run-local-ai-analysis.py")
+    proc = run_command(
+        [
+            sys.executable,
+            str(runner),
+            "--flush-index-only",
+            "--alert-store-url",
+            args.alert_store_url,
+        ],
+        timeout_seconds=60,
+        max_stdout_bytes=1024 * 1024,
+        max_stderr_bytes=1024 * 1024,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or f"rc={proc.returncode}"
+        raise RuntimeError(f"deferred analysis index flush failed: {detail}")
 
 
 def signal_dashboard_refresh(args: argparse.Namespace) -> None:
@@ -788,6 +1078,27 @@ def consume_wake_marker(path: Path) -> None:
         print(f"AI wake marker could not be consumed: {error}", file=sys.stderr)
 
 
+def reconcile_worker_state(args: argparse.Namespace, indexed_mode: bool) -> int:
+    """Reconcile durable queue state without scanning artifacts in modern mode."""
+    conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        if indexed_mode:
+            completed_group_ids = indexed_reconcilable_ai_job_ids(conn)
+        else:
+            analyzed_ids = analyzed_alert_ids(args.analysis_dir, args.pcap_analysis_dir, args.prompt_dir)
+            completed_group_ids = reconcilable_ai_job_ids(
+                conn,
+                analyzed_ids,
+                args.analysis_dir,
+                args.pcap_analysis_dir,
+                args.prompt_dir,
+            )
+    finally:
+        conn.close()
+    return reconcile_completed_ai_jobs(args.alert_store_url, completed_group_ids)
+
+
 def main() -> int:
     args = parse_args()
     require_runtime_capacity(args.analysis_dir, 0, label="AI analysis")
@@ -806,37 +1117,40 @@ def main() -> int:
         consume_wake_marker(args.wake_file)
         args.prompt_dir.mkdir(parents=True, exist_ok=True)
         args.analysis_dir.mkdir(parents=True, exist_ok=True)
-        current_analyzed_ids = analyzed_alert_ids(args.analysis_dir, args.pcap_analysis_dir, args.prompt_dir)
         conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         try:
-            completed_group_ids = reconcilable_ai_job_ids(
-                conn,
-                current_analyzed_ids,
-                args.analysis_dir,
-                args.pcap_analysis_dir,
-                args.prompt_dir,
-            )
+            indexed_mode = indexed_scheduler_available(conn)
         finally:
             conn.close()
-        reconciled = reconcile_completed_ai_jobs(args.alert_store_url, completed_group_ids)
+
+        if indexed_mode:
+            # A model result is first written atomically to local disk, then
+            # indexed through alert-store. Publish any result left behind by a
+            # transient callback failure before considering another inference.
+            flush_deferred_analysis_results(args)
+        reconciled = reconcile_worker_state(args, indexed_mode)
         if reconciled:
             print(f"{project_now()} reconciled {reconciled} completed durable AI job(s)", flush=True)
         selected_groups: set[str] = set()
         analyzed_count = 0
-        while args.max_per_run == 0 or analyzed_count < args.max_per_run:
+        attempted_count = 0
+        while args.max_per_run == 0 or attempted_count < args.max_per_run:
             # Re-query before every selection so newly arrived higher-severity
             # alerts take priority over any lower-severity backlog.
             print(f"{project_now()} checking highest-priority unanalyzed alert queue", flush=True)
             conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
             try:
-                selected = select_next_alert(
-                    conn,
-                    args,
-                    analyzed_alert_ids(args.analysis_dir, args.pcap_analysis_dir, args.prompt_dir),
-                    selected_groups,
-                )
+                if indexed_mode:
+                    selected = select_next_alert_indexed(conn, args, selected_groups)
+                else:
+                    selected = select_next_alert(
+                        conn,
+                        args,
+                        analyzed_alert_ids(args.analysis_dir, args.pcap_analysis_dir, args.prompt_dir),
+                        selected_groups,
+                    )
             finally:
                 conn.close()
 
@@ -846,7 +1160,12 @@ def main() -> int:
                 break
 
             alert_id = selected["alert_id"]
-            selected_groups.add(alert_group_key(selected))
+            selected_group_id = str(selected["stable_group_id"] or "") if "stable_group_id" in selected.keys() else ""
+            if not selected_group_id:
+                selected_group_id = alert_group_id(str(selected["queue_group_key"] or alert_group_key(selected)))
+            selected_groups.add(selected_group_id)
+            selected_groups.add(str(selected["queue_group_key"] or alert_group_key(selected)))
+            attempted_count += 1
             print(
                 json.dumps(
                     {
@@ -862,23 +1181,90 @@ def main() -> int:
                 flush=True,
             )
             if args.dry_run:
-                continue
+                break
 
-            prompt_path = reusable_prompt_for_alert(args.prompt_dir, selected, args.pcap_analysis_dir) or build_prompt(alert_id, args)
-            selected_group_id = str(selected["stable_group_id"] or "") if "stable_group_id" in selected.keys() else ""
-            if not selected_group_id:
-                selected_group_id = alert_group_id(str(selected["queue_group_key"] or alert_group_key(selected)))
-            report_ai_job_status(args.alert_store_url, selected_group_id, "processing")
-            proc = run_analysis(prompt_path, args)
-            if proc.stdout:
-                print(proc.stdout, end="")
-            if proc.stderr:
-                print(proc.stderr, file=sys.stderr, end="")
-            if proc.returncode != 0:
-                report_ai_job_status(args.alert_store_url, selected_group_id, "failed", proc.stderr or f"rc={proc.returncode}")
-                raise SystemExit(f"local AI analysis failed rc={proc.returncode}")
-            report_ai_job_status(args.alert_store_url, selected_group_id, "completed")
-            analyzed_count += 1
+            processing_recorded = False
+            processing_lease_token = ""
+            try:
+                processing_transition = report_ai_job_status(
+                    args.alert_store_url,
+                    selected_group_id,
+                    "processing",
+                )
+                processing_recorded = bool(processing_transition)
+                processing_lease_token = (
+                    processing_transition if isinstance(processing_transition, str) else ""
+                )
+                durable_intent = bool(
+                    selected["has_durable_intent"]
+                    if "has_durable_intent" in selected.keys()
+                    else False
+                )
+                if indexed_mode and durable_intent and not processing_recorded:
+                    raise RuntimeError("durable AI job disappeared before its processing lease was recorded")
+                # Indexed work always builds a fresh bounded package at claim
+                # time. This guarantees manual reruns and newly coalesced alert,
+                # enrichment, PCAP, note, and memory evidence cannot reuse an
+                # obsolete prompt artifact.
+                prompt_path = (
+                    build_prompt(alert_id, args, durable_payload(selected))
+                    if indexed_mode
+                    else reusable_prompt_for_alert(args.prompt_dir, selected, args.pcap_analysis_dir)
+                    or build_prompt(alert_id, args)
+                )
+                def renew_processing_lease() -> None:
+                    renewed = report_ai_job_status(
+                        args.alert_store_url,
+                        selected_group_id,
+                        "processing",
+                        lease_token=processing_lease_token,
+                    )
+                    if renewed != processing_lease_token:
+                        raise RuntimeError("durable AI processing lease could not be renewed")
+
+                proc = run_analysis(
+                    prompt_path,
+                    args,
+                    progress_callback=renew_processing_lease if processing_recorded else None,
+                )
+                if proc.stdout:
+                    print(proc.stdout, end="")
+                if proc.stderr:
+                    print(proc.stderr, file=sys.stderr, end="")
+                if proc.returncode != 0:
+                    detail = proc.stderr or f"local AI analysis failed rc={proc.returncode}"
+                    if processing_recorded:
+                        report_ai_job_status(
+                            args.alert_store_url,
+                            selected_group_id,
+                            "failed",
+                            detail,
+                            processing_lease_token,
+                        )
+                    print(detail.strip(), file=sys.stderr)
+                    continue
+                if processing_recorded:
+                    report_ai_job_status(
+                        args.alert_store_url,
+                        selected_group_id,
+                        "completed",
+                        lease_token=processing_lease_token,
+                    )
+                analyzed_count += 1
+            except (BoundedProcessError, RuntimeError, OSError) as error:
+                if processing_recorded:
+                    try:
+                        report_ai_job_status(
+                            args.alert_store_url,
+                            selected_group_id,
+                            "failed",
+                            str(error),
+                            processing_lease_token,
+                        )
+                    except RuntimeError as status_error:
+                        print(f"AI failure callback also failed: {status_error}", file=sys.stderr)
+                print(f"{project_now()} AI group {selected_group_id} failed: {error}", file=sys.stderr)
+                continue
 
         if analyzed_count:
             print(f"{project_now()} analyzed {analyzed_count} unique alert group(s)")
@@ -887,20 +1273,7 @@ def main() -> int:
         # while a long-running inference is active. This prevents a completed
         # artifact from waiting for the next five-minute scheduler invocation
         # before queue/SLO state becomes accurate.
-        current_analyzed_ids = analyzed_alert_ids(args.analysis_dir, args.pcap_analysis_dir, args.prompt_dir)
-        conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
-        try:
-            completed_group_ids = reconcilable_ai_job_ids(
-                conn,
-                current_analyzed_ids,
-                args.analysis_dir,
-                args.pcap_analysis_dir,
-                args.prompt_dir,
-            )
-        finally:
-            conn.close()
-        reconciled = reconcile_completed_ai_jobs(args.alert_store_url, completed_group_ids)
+        reconciled = reconcile_worker_state(args, indexed_mode)
         if reconciled:
             print(f"{project_now()} reconciled {reconciled} completed durable AI job(s) before exit", flush=True)
         return 0

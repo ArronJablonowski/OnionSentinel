@@ -71,6 +71,19 @@ and n8n post-commit reports use unique `(job_type, dedupe_key)` jobs with
 priorities, attempts, leases, exponential retry, and terminal states. Restarts
 requeue expired leases.
 
+Every claim receives an opaque `lease_token`. Heartbeats, completion, and
+failure transitions use compare-and-set updates against that token, so a stale
+worker cannot complete work after a replacement worker has recovered the
+expired lease. The AI worker renews its lease every 60 seconds during legitimate
+long inference and terminates its process group if ownership is lost. Enqueueing
+new evidence while a job is processing sets one coalesced rerun instead of
+discarding the update or creating an unbounded duplicate queue.
+
+During rolling upgrades, any legacy `processing` row without a lease token is
+recovered immediately even when its old expiry timestamp is still in the
+future. A tokenless worker cannot prove ownership under the current protocol,
+so waiting for that timestamp would strand work without improving safety.
+
 ```bash
 curl -fsS http://127.0.0.1:8787/jobs/stats
 curl -fsS http://127.0.0.1:8787/jobs/status
@@ -84,6 +97,32 @@ After commit, the `n8n_post_commit` worker calls the committed-alert webhook.
 The workflow validates the shared token and committed payload before atomically
 writing one deterministic Markdown report. An n8n outage can delay reports but
 cannot lose or roll back alerts.
+
+## Bounded Runtime Resources
+
+All network and subprocess boundaries have explicit ceilings. Alert-store
+rejects request bodies over `ALERT_STORE_MAX_REQUEST_BYTES`, admits at most
+`ALERT_STORE_MAX_ACTIVE_POSTS` concurrent mutation requests, and configures
+header, request, keepalive, socket-request, and connection limits. Health reads
+remain available during mutation saturation. The Docker compatibility proxy
+has independent connect, idle, and connection limits.
+
+Relay SSH control output, webhook responses, and PCAP-control responses are
+bounded in memory. Packet bytes continue to stream directly to the relay SSD;
+diagnostic stdout and stderr never share that unbounded path. Alert batching
+tracks encoded bytes once per item, avoiding repeated serialization as a batch
+grows. On the Mac Studio, HTTP JSON reads, scheduler output, prompt packages,
+legacy SSH artifacts, Zeek/TShark output, and extracted archives all enforce
+size and timeout limits before entering memory or disk.
+
+Public-enrichment cache writes and provider rate reservations pass through the
+same serialized SQLite write gate. A provider slot is reserved atomically before
+the network call, preventing concurrent workers from exceeding free-tier limits
+or racing cache rows.
+
+The defaults and recovery-safe overrides are documented in `n8n/.env.example`
+and `relay/config/config.example.json`. Increase a limit only after measuring a
+valid production payload; never remove a ceiling to work around malformed input.
 
 PCAP requests retain broker state and separate parser state:
 

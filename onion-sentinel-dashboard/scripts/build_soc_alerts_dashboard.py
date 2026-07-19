@@ -23,20 +23,22 @@ import datetime as dt
 import hashlib
 import html
 import json
-import math
 import os
 import re
 import shutil
 import sqlite3
 import subprocess
 import sys
-import tempfile
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+RUNTIME_DIR = SCRIPT_DIR.parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+if str(RUNTIME_DIR) not in sys.path:
+    sys.path.insert(0, str(RUNTIME_DIR))
 
 from dashboard_metric_components import (  # noqa: E402
     render_active_alerts_metric,
@@ -45,12 +47,19 @@ from dashboard_metric_components import (  # noqa: E402
     render_latest_network_metric,
     render_size_metric as render_size_metric_card,
 )
+from atomic_io import atomic_write_json, atomic_write_text  # noqa: E402
 from dashboard_pcap_components import build_pcap_analysis_index, render_pcap_evidence_markdown  # noqa: E402
+from dashboard_pcap_request_index import (  # noqa: E402
+    build_pcap_request_index,
+    load_pcap_request_index,
+    request_for_alert,
+)
 from dashboard_timeline_components import alert_seen_timeline_html  # noqa: E402
 from dashboard_system_health_components import (  # noqa: E402
     inject_system_health_assets,
     system_health_page_section,
 )
+from jsonl_log import JsonlLogIndex  # noqa: E402
 
 HOME = Path.home()
 SOURCE_DIR = HOME / 'Documents' / 'SOC Alerts'
@@ -59,6 +68,7 @@ AI_PROMPT_DIR = HOME / 'n8n-local' / 'soc-alerts' / 'ai-prompts'
 AI_ANALYSIS_DIR = HOME / 'n8n-local' / 'soc-alerts' / 'ai-analysis'
 LLM_ANALYSIS_LOG_DIR = HOME / 'n8n-local' / 'soc-alerts' / 'llm-analysis-logs'
 LLM_ANALYSIS_LOG_FILE = LLM_ANALYSIS_LOG_DIR / 'llm-analysis-log.jsonl'
+LLM_ANALYSIS_LOG_INDEX = JsonlLogIndex(LLM_ANALYSIS_LOG_FILE)
 LLM_ANALYSIS_CURRENT_FILE = LLM_ANALYSIS_LOG_DIR / 'current-analysis.json'
 PCAP_ANALYSIS_DIR = HOME / 'n8n-local' / 'soc-alerts' / 'pcap-analysis'
 PCAP_ARTIFACT_DIR = HOME / 'n8n-local' / 'pcap-evidence' / 'artifacts'
@@ -485,7 +495,7 @@ def telegram_sent_counts() -> dict[str, int]:
     if not DB_PATH.exists():
         return counts
     try:
-        with sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True, timeout=30) as conn:
+        with closing(sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True, timeout=30)) as conn:
             rows = conn.execute(
                 """
                 SELECT lower(coalesce(triage_level, 'unknown')) AS level,
@@ -1539,7 +1549,7 @@ def ai_model_used_markdown(analysis: dict | None) -> str:
         '',
         '| Field | Value |',
         '| --- | --- |',
-        f'| Analysis status | Complete |',
+        '| Analysis status | Complete |',
         f'| Model path | {markdown_cell(model_path)} |',
         f'| Model | {markdown_cell(model)} |',
         f'| Generated at | {markdown_cell(generated_at)} |',
@@ -2168,44 +2178,20 @@ def pcap_analysis_index() -> dict[str, object]:
     return build_pcap_analysis_index(PCAP_ANALYSIS_DIR)
 
 
-def pcap_request_status_for_row(row: sqlite3.Row | dict) -> dict:
-    """Return the newest broker status for the row's group or representative alert."""
-    if not DB_PATH.exists():
-        return {}
+def pcap_request_status_for_row(
+    row: sqlite3.Row | dict,
+    index: dict[str, object] | None = None,
+) -> dict:
+    """Resolve broker state from a build-wide request index.
+
+    A direct call still works for tests and recovery utilities, but normal
+    dashboard generation passes the index loaded alongside the alert query so
+    the number of SQLite opens remains constant as alert volume grows.
+    """
     group_id = hashlib.sha1((row['alert_group_key'] or alert_group_key(row)).encode('utf-8')).hexdigest()[:12]
     alert_id = str(row['alert_id'] or '').strip()
-    try:
-        with sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True, timeout=2) as conn:
-            conn.row_factory = sqlite3.Row
-            exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pcap_requests'").fetchone()
-            if not exists:
-                return ''
-            found = conn.execute(
-                """
-                SELECT request_id, status, error, request_json, completed_at, updated_at
-                FROM pcap_requests
-                WHERE group_id = ? OR alert_id = ?
-                ORDER BY COALESCE(completed_at, updated_at, created_at) DESC
-                LIMIT 1
-                """,
-                (group_id, alert_id),
-            ).fetchone()
-    except sqlite3.Error:
-        return {}
-    if not found:
-        return {}
-    used_capture_file = False
-    try:
-        used_capture_file = bool(json.loads(str(found['request_json'] or '{}')).get('capture_file'))
-    except (TypeError, ValueError):
-        used_capture_file = False
-    return {
-        'request_id': str(found['request_id'] or '').strip(),
-        'status': str(found['status'] or '').strip().lower(),
-        'error': str(found['error'] or '').strip(),
-        'updated_at': str(found['completed_at'] or found['updated_at'] or '').strip(),
-        'used_capture_file': used_capture_file,
-    }
+    request_index = index or load_pcap_request_index(DB_PATH)
+    return request_for_alert(request_index, group_id=group_id, alert_id=alert_id)
 
 
 def pcap_status_for_row(row: sqlite3.Row | dict, index: dict[str, object] | None = None) -> tuple[str, str, str]:
@@ -2215,7 +2201,7 @@ def pcap_status_for_row(row: sqlite3.Row | dict, index: dict[str, object] | None
     alert_id = str(row['alert_id'] or '').strip()
     if group_id in pcap_index.get('group_ids', set()) or alert_id in pcap_index.get('alert_ids', set()):
         return ('analyzed', 'Analyzed', 'Parsed Zeek/TShark PCAP analysis is available for this detection group')
-    request_record = pcap_request_status_for_row(row)
+    request_record = pcap_request_status_for_row(row, pcap_index)
     request_status = str(request_record.get('status') or '').strip().lower()
     if request_status in {'pending', 'claimed', 'fulfilled'}:
         label = 'Queued' if request_status in {'pending', 'claimed'} else 'Parsing'
@@ -2243,7 +2229,7 @@ def pcap_analysis_for_row(row: sqlite3.Row | dict, index: dict[str, object] | No
         record = records.get(key)
         if isinstance(record, dict):
             return record
-    request_record = pcap_request_status_for_row(row)
+    request_record = pcap_request_status_for_row(row, pcap_index)
     request_id = str(request_record.get('request_id') or '').strip()
     records = pcap_index.get('records_by_request_id') if isinstance(pcap_index.get('records_by_request_id'), dict) else {}
     record = records.get(request_id)
@@ -2527,9 +2513,9 @@ def load_reports() -> list[AlertReport]:
         return load_markdown_only_reports()
 
     markdown_by_alert_id = load_markdown_reports_by_alert_id()
-    conn = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True, timeout=30)
-    conn.row_factory = sqlite3.Row
-    try:
+    pcap_request_index: dict[str, object] = {}
+    with closing(sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True, timeout=30)) as conn:
+        conn.row_factory = sqlite3.Row
         columns = {row[1] for row in conn.execute('PRAGMA table_info(alerts)').fetchall()}
         total_seen_expr = 'total_seen_count' if 'total_seen_count' in columns else '0'
         source_port_expr = 'source_port' if 'source_port' in columns else 'NULL'
@@ -2548,8 +2534,7 @@ def load_reports() -> list[AlertReport]:
             ORDER BY replace(replace(COALESCE(last_seen, timestamp, first_seen), 'T', ' '), 'Z', '') DESC, alert_id DESC
             '''
         ).fetchall()
-    finally:
-        conn.close()
+        pcap_request_index = build_pcap_request_index(conn)
     grouped_by_key: dict[str, list[sqlite3.Row]] = {}
     for row in rows:
         grouped_by_key.setdefault(alert_group_key(row), []).append(row)
@@ -2608,6 +2593,7 @@ def load_reports() -> list[AlertReport]:
     ai_prompts_by_alert_id = load_ai_prompts_by_alert_id()
     running_ai_alert_ids = running_ai_prompt_alert_ids(ai_prompts_by_alert_id)
     pcap_index = pcap_analysis_index()
+    pcap_index.update(pcap_request_index)
     reports = [report_from_sqlite_row(row, markdown_by_alert_id, ai_analysis_by_alert_id, ai_prompts_by_alert_id, running_ai_alert_ids, pcap_index) for row in aggregated_rows]
     return sorted(reports, key=lambda r: (r.criticality_rank, r.mtime, r.title.lower()), reverse=True)
 
@@ -2728,36 +2714,13 @@ def render_ai_activity_metric(state: dict[str, object]) -> str:
 
 def load_llm_analysis_logs(limit: int = 250) -> list[dict[str, object]]:
     """Read recent local LLM analysis audit rows from the runtime JSONL file."""
-    if not LLM_ANALYSIS_LOG_FILE.exists():
-        return []
-    rows: list[dict[str, object]] = []
-    try:
-        lines = LLM_ANALYSIS_LOG_FILE.read_text(encoding='utf-8').splitlines()
-    except OSError:
-        return []
-    for line in reversed(lines):
-        if not line.strip():
-            continue
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict):
-            rows.append(data)
-        if len(rows) >= limit:
-            break
-    return rows
+    return LLM_ANALYSIS_LOG_INDEX.tail(limit)
 
 
 def count_llm_analysis_logs() -> int:
     """Count local LLM analysis audit rows without parsing every JSON payload."""
-    if not LLM_ANALYSIS_LOG_FILE.exists():
-        return 0
-    try:
-        with LLM_ANALYSIS_LOG_FILE.open('r', encoding='utf-8') as handle:
-            return sum(1 for line in handle if line.strip())
-    except OSError:
-        return 0
+    total, _, _ = LLM_ANALYSIS_LOG_INDEX.page(page=1, limit=1)
+    return total
 
 
 def load_current_llm_analysis() -> dict[str, object]:
@@ -3671,7 +3634,7 @@ def write_status_json(reports: list[AlertReport]) -> Path:
             for report in reports
         },
     }
-    STATUS_JSON.write_text(json.dumps(payload, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+    atomic_write_json(STATUS_JSON, payload)
     return STATUS_JSON
 
 
@@ -3680,7 +3643,7 @@ def write_n8n_beacon_json(reports: list[AlertReport]) -> Path:
     if DB_BEACON_JSON.exists():
         try:
             payload = json.loads(DB_BEACON_JSON.read_text(encoding='utf-8'))
-            N8N_BEACON_JSON.write_text(json.dumps(payload, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+            atomic_write_json(N8N_BEACON_JSON, payload)
             return N8N_BEACON_JSON
         except Exception:
             pass
@@ -3700,7 +3663,7 @@ def write_n8n_beacon_json(reports: list[AlertReport]) -> Path:
         'notification_status': None,
         'error': None,
     }
-    N8N_BEACON_JSON.write_text(json.dumps(payload, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+    atomic_write_json(N8N_BEACON_JSON, payload)
     return N8N_BEACON_JSON
 
 
@@ -3710,11 +3673,11 @@ def write_n8n_beacon_history_json() -> Path:
         try:
             payload = json.loads(DB_BEACON_HISTORY_JSON.read_text(encoding='utf-8'))
             if isinstance(payload, list):
-                N8N_BEACON_HISTORY_JSON.write_text(json.dumps(payload, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+                atomic_write_json(N8N_BEACON_HISTORY_JSON, payload)
                 return N8N_BEACON_HISTORY_JSON
         except Exception:
             pass
-    N8N_BEACON_HISTORY_JSON.write_text('[]\n', encoding='utf-8')
+    atomic_write_json(N8N_BEACON_HISTORY_JSON, [])
     return N8N_BEACON_HISTORY_JSON
 
 
@@ -3736,17 +3699,7 @@ def write_detail_fragments(reports: list[AlertReport]) -> list[Path]:
             continue
         path = DETAIL_DIR / f'{report.digest}.html'
         body = f'<div class="markdown-body">{report.rendered_html}</div>\n'
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=f'.{path.name}.',
-            suffix='.tmp',
-            dir=DETAIL_DIR,
-        )
-        try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-                handle.write(body)
-            os.replace(temporary_name, path)
-        finally:
-            Path(temporary_name).unlink(missing_ok=True)
+        atomic_write_text(path, body)
         written.append(path)
         current_names.add(path.name)
     for stale_path in DETAIL_DIR.glob('*.html'):
@@ -3764,13 +3717,6 @@ def build_html(reports: list[AlertReport]) -> str:
     active_count = active_alert_count(reports)
     total_bytes = sum(r.size for r in reports)
     pcap_ingest_bytes = directory_size_bytes(PCAP_ARTIFACT_DIR)
-    latest_text = human_time(latest.mtime) if latest else 'No reports yet'
-    last_workflow_trigger = max(reports, key=lambda report: report.alert_ts) if reports else None
-    workflow_trigger_text = human_time(last_workflow_trigger.alert_ts) if last_workflow_trigger else 'No triggers yet'
-    workflow_trigger_extra_html = (
-        f'<span class="metric-detail-row"><b>Alert</b><span>{html.escape(last_workflow_trigger.title)}</span></span>'
-        f'<span class="metric-detail-row"><b>Source</b><span>{html.escape(last_workflow_trigger.rel_source)}</span></span>'
-    ) if last_workflow_trigger else '<span class="metric-detail-row"><b>Alert</b><span>—</span></span>'
     active_reports = active_alert_reports(reports)
     severity_levels = ['critical', 'high', 'medium', 'low', 'informational']
     severity_labels = {'critical': 'Crit', 'high': 'High', 'medium': 'Med', 'low': 'Low', 'informational': 'Info'}
@@ -3796,57 +3742,6 @@ def build_html(reports: list[AlertReport]) -> str:
             render_alert_status_metric(),
             render_size_metric_card(human_size(total_bytes), latest_alert_text, human_size(pcap_ingest_bytes)),
         ]
-    )
-    first = reports[0] if reports else None
-    repeat_next_minutes_by_digest: dict[str, int] = {}
-    reports_by_rule: dict[str, list[AlertReport]] = {}
-    for report in reports:
-        rule_key = report.rule_id if report.rule_id != '—' else report.rule_name.lower()
-        reports_by_rule.setdefault(rule_key, []).append(report)
-    for same_rule_reports in reports_by_rule.values():
-        ordered = sorted(same_rule_reports, key=lambda report: report.alert_ts)
-        for current, next_report in zip(ordered, ordered[1:]):
-            delta_minutes = max(0, round((next_report.alert_ts - current.alert_ts) / 60))
-            repeat_next_minutes_by_digest[current.digest] = delta_minutes
-    report_rows = '\n'.join(
-        f'''
-        <tbody class="report-row-group" data-report-id="{html.escape(r.digest)}" data-title="{html.escape(r.title.lower())}" data-source="{html.escape(r.rel_source.lower())}" data-body="{html.escape((r.criticality + ' ' + r.summary + ' ' + ai_summary_for(r) + ' ' + r.alert_source + ' ' + r.source_ip + ' ' + r.destination_ip + ' ' + r.destination_port + ' ' + r.rule_id + ' ' + r.rule_name + ' ' + r.alert_group_key + ' ' + str(r.repeat_count) + ' ' + r.ai_status_label + ' ' + r.enrichment_status_label + ' ' + r.pcap_status_label).lower())}" data-alert-group-key="{html.escape(r.alert_group_key)}" data-repeat-count="{r.repeat_count}" data-criticality="{html.escape(r.criticality.lower())}" data-ai-status="{html.escape(r.ai_status_key)}" data-enrichment-status="{html.escape(r.enrichment_status_key)}" data-pcap-status="{html.escape(r.pcap_status_key)}" data-risk-score="{risk_score_for(r)}" data-mtime="{int(last_seen_ts_for(r))}" data-alert-ts="{int(r.alert_ts)}" data-rule-id="{html.escape(r.rule_id, quote=True)}" data-rule-name="{html.escape(r.rule_name, quote=True)}" data-alert-source="{html.escape(r.alert_source, quote=True)}" data-source-ip="{html.escape(r.source_ip, quote=True)}" data-destination-ip="{html.escape(r.destination_ip, quote=True)}" data-destination-port="{html.escape(r.destination_port, quote=True)}" data-suppressed-next-minutes="{repeat_next_minutes_by_digest.get(r.digest, '')}" data-summary="{html.escape(ai_summary_for(r), quote=True)}" data-modified="{html.escape(last_seen_iso_for(r), quote=True)}" data-size="{human_size(r.size)}" data-size-bytes="{r.size}" data-source-label="{html.escape(r.rel_source, quote=True)}" data-acknowledged="false" data-suppressed="false">
-          <tr class="report-row" tabindex="0" aria-selected="false" aria-expanded="false">
-            <td class="select-cell"><span class="row-check">✓</span></td>
-            <td class="endpoint-cell count-cell"><span class="alert-repeat-count">{r.repeat_count}</span></td>
-            <td class="severity-cell"><span class="severity-label severity-text-{html.escape(criticality_class(r.criticality))}">{html.escape(r.criticality)}</span></td>
-            <td class="last-seen-cell" data-last-seen-utc="{html.escape(last_seen_iso_for(r), quote=True)}">{html.escape(last_seen_iso_for(r))}</td>
-            <td class="alert-cell"><strong title="{html.escape(r.title, quote=True)}">{html.escape(r.title)}</strong></td>
-            <td class="endpoint-cell ip-cell"><code>{html.escape(r.source_ip)}</code></td>
-            <td class="endpoint-cell ip-cell"><code>{html.escape(r.destination_ip)}</code></td>
-            <td class="endpoint-cell port-cell"><code>{html.escape(r.destination_port)}</code></td>
-            <td class="ai-status-cell">{ai_status_pill(r)}</td>
-            <td class="enrichment-status-cell">{enrichment_status_pill(r)}</td>
-            <td class="pcap-status-cell">{pcap_status_pill(r)}</td>
-            <td class="source-cell"><code>{html.escape(r.alert_source)}</code></td>
-            <td>{human_size(r.size)}</td><td class="wide-only">{risk_score_for(r)}</td>
-            <td class="action-cell"><button class="ack-button analyze-button" type="button" data-analyze="{html.escape(r.digest)}">Analyze</button><button class="ack-button" type="button" data-acknowledge="{html.escape(r.digest)}">Acknowledge</button><button class="ack-button suppress-button" type="button" data-suppress="{html.escape(r.digest)}">Suppress</button><button class="ack-button pcap-button" type="button" data-pcap="{html.escape(r.digest)}">PCAP</button></td><td class="menu-cell">⋮</td>
-          </tr><tr class="detail-template-row"><td colspan="16"><div class="detail-template"><div class="detail-label">Detailed Alert Report</div><div class="suppression-note" hidden><h3>Suppression Note</h3><p class="suppression-note-text"></p><small class="suppression-note-meta"></small></div><div class="markdown-body">{r.rendered_html}</div></div></td></tr>
-        </tbody>'''
-        for r in reports
-    )
-    mobile_cards = '\n'.join(
-        f'''
-        <article class="mobile-alert-card" data-mobile-report-id="{html.escape(r.digest)}" data-acknowledged="false" data-suppressed="false" data-rule-id="{html.escape(r.rule_id, quote=True)}" data-rule-name="{html.escape(r.rule_name, quote=True)}" data-suppressed-next-minutes="{repeat_next_minutes_by_digest.get(r.digest, '')}">
-          <button class="mobile-alert-pill" type="button" aria-expanded="false" aria-controls="mobile-detail-{html.escape(r.digest)}">
-            <span class="mobile-card-top"><span class="severity-label severity-text-{html.escape(criticality_class(r.criticality))}">{html.escape(r.criticality)}</span><span class="mobile-card-time">Last Seen <span data-last-seen-utc="{html.escape(last_seen_iso_for(r), quote=True)}">{html.escape(last_seen_iso_for(r))}</span></span></span>
-            <strong>{html.escape(r.title)}</strong>
-            <span class="mobile-card-summary">{html.escape(ai_summary_for(r))}</span>
-            <span class="mobile-endpoints"><span><b>Src</b><code>{html.escape(r.source_ip)}:{html.escape(r.source_port)}</code></span><span><b>Dst</b><code>{html.escape(r.destination_ip)}:{html.escape(r.destination_port)}</code></span></span>
-            <span class="mobile-card-meta"><span>Count <b>{r.repeat_count}</b></span><span>Risk <b>{risk_score_for(r)}</b></span><span>{ai_status_pill(r)}</span><span>{enrichment_status_pill(r)}</span><span>{pcap_status_pill(r)}</span><span>{human_size(r.size)}</span></span>
-          </button>
-          <div id="mobile-detail-{html.escape(r.digest)}" class="mobile-pill-details" hidden>
-            <div class="mobile-card-actions"><button class="ack-button analyze-button" type="button" data-analyze="{html.escape(r.digest)}">Analyze</button><button class="ack-button" type="button" data-acknowledge="{html.escape(r.digest)}">Acknowledge</button><button class="ack-button suppress-button" type="button" data-suppress="{html.escape(r.digest)}">Suppress</button><button class="ack-button pcap-button" type="button" data-pcap="{html.escape(r.digest)}">PCAP</button></div>
-            <div class="suppression-note" hidden><h3>Suppression Note</h3><p class="suppression-note-text"></p><small class="suppression-note-meta"></small></div>
-            <div class="markdown-body">{r.rendered_html}</div>
-          </div>
-        </article>'''
-        for r in reports
     )
     mobile_triage_controls = '''<div class="mobile-triage-bar" aria-label="Mobile alert triage controls"><div class="severity-chip-row"><button class="severity-chip active" type="button" data-severity-filter="all">All</button><button class="severity-chip sev-critical" type="button" data-severity-filter="critical">Critical</button><button class="severity-chip sev-high" type="button" data-severity-filter="high">High</button><button class="severity-chip sev-medium" type="button" data-severity-filter="medium">Medium</button><button class="severity-chip sev-low" type="button" data-severity-filter="low">Low</button><button class="severity-chip sev-informational" type="button" data-severity-filter="informational">Info</button></div><label class="mobile-sort-label">Sort <select id="mobile-sort"><option value="priority">Priority</option><option value="newest">Newest</option><option value="risk">Risk score</option></select></label></div>'''
     table_html = f'''{mobile_triage_controls}<div class="mobile-alert-list" aria-label="Mobile SOC alert cards"></div><div class="table-card"><table class="alert-table"><thead><tr><th></th><th><button class="sort-header" type="button" data-sort-key="count">Count<span class="sort-indicator"></span></button></th><th class="severity-header"><button class="sort-header" type="button" data-sort-key="severity">Severity<span class="sort-indicator"></span></button></th><th><button class="sort-header" type="button" data-sort-key="last_seen">Last Seen<span class="sort-indicator"></span></button></th><th><button class="sort-header" type="button" data-sort-key="alert">Alert<span class="sort-indicator"></span></button></th><th class="ip-header"><button class="sort-header" type="button" data-sort-key="source_ip">Source IP<span class="sort-indicator"></span></button></th><th class="ip-header"><button class="sort-header" type="button" data-sort-key="destination_ip">Destination IP<span class="sort-indicator"></span></button></th><th class="port-header"><button class="sort-header" type="button" data-sort-key="destination_port">Destination Port<span class="sort-indicator"></span></button></th><th class="ai-header"><button class="sort-header" type="button" data-sort-key="ai">AI<span class="sort-indicator"></span></button></th><th class="enrichment-header"><button class="sort-header" type="button" data-sort-key="enrichment">Enrichment<span class="sort-indicator"></span></button></th><th class="pcap-header"><button class="sort-header" type="button" data-sort-key="pcap">PCAP<span class="sort-indicator"></span></button></th><th><button class="sort-header" type="button" data-sort-key="log_source">Log Source<span class="sort-indicator"></span></button></th><th><button class="sort-header" type="button" data-sort-key="size">Size<span class="sort-indicator"></span></button></th><th class="wide-only"><button class="sort-header" type="button" data-sort-key="risk">Risk<span class="sort-indicator"></span></button></th><th>Action</th><th></th></tr></thead></table><div class="api-pagination"><div class="api-page-size"><span>Rows</span><select id="api-page-size" aria-label="Rows per page"><option value="25" selected>25</option><option value="50">50</option><option value="75">75</option><option value="100">100</option><option value="250">250</option></select></div><div class="api-page-controls" aria-label="Alert table pagination"><button id="api-prev-page" class="ack-button api-page-button" type="button">Previous</button><select id="api-page-select" aria-label="Alert table page"><option value="1">Page 1</option></select><button id="api-next-page" class="ack-button api-page-button" type="button">Next</button></div><span id="api-alert-page-status" class="api-page-status">Loading alerts from SQLite API...</span><div class="api-table-metrics" aria-label="Alert table totals"><span class="api-table-metric"><b id="api-visible-total">0</b> Active</span><span class="api-table-metric suppressed"><b id="api-suppressed-total">0</b> Suppressed</span><span class="api-table-metric acknowledged"><b id="api-acknowledged-total">0</b> Acknowledged</span></div></div></div>'''
@@ -3895,77 +3790,6 @@ def build_html(reports: list[AlertReport]) -> str:
         </section>
       </div>
     </section>'''
-    flow_html = f'''
-    <section id="overview-view" class="view-section overview-view flow-page-view" aria-label="Autonomous SIEM alert enrichment data flow">
-      <section class="flow-product-hero" aria-labelledby="flow-title">
-        <button class="flow-privacy-toggle" type="button" aria-pressed="false" aria-label="Show node IP addresses" title="Show node IP addresses">
-          <img src="assets/privacy-eye-button.png" alt="" aria-hidden="true">
-        </button>
-        <div class="flow-product-copy">
-          <h2 id="flow-title">Autonomous SIEM Alert Enrichment & Threat Investigation</h2>
-          <div class="flow-pulse-divider" aria-hidden="true"></div>
-          <p>Alerts move through an isolated relay, into a containerized n8n workflow, then into the Mac Studio analysis plane for SQLite storage, Markdown reports, local AI context, and high-signal Telegram notifications.</p>
-        </div>
-        <div class="flow-product-map" role="img" aria-label="Animated Security Onion alert pipeline">
-          <div class="flow-spine" aria-hidden="true">
-            <span class="flow-packet packet-one"></span>
-            <span class="flow-packet packet-two"></span>
-            <span class="flow-packet packet-three"></span>
-          </div>
-          <article class="flow-system-node node-security-onion">
-            <span class="flow-logo-ring"><img src="assets/brand/security-onion.svg" alt="Security Onion logo"></span>
-            <div><strong>Security Onion</strong><span class="flow-ip-address" data-ip="192.168.1.7">xxx.xxx.xxx.xxx</span></div>
-            <em>Alert source</em>
-          </article>
-          <div class="flow-connector connector-one"><span>restricted SSH poll</span></div>
-          <article class="flow-system-node node-raspberry-pi">
-            <span class="flow-logo-ring"><img src="assets/brand/raspberry-pi.svg" alt="Raspberry Pi logo"></span>
-            <div><strong>Raspberry Pi Relay</strong><span class="flow-ip-address" data-ip="10.88.8.8">xxx.xxx.xxx.xxx</span></div>
-            <em>VLAN 888 transport</em>
-          </article>
-          <div class="flow-connector connector-two"><span>webhook POST</span></div>
-          <article class="flow-system-node node-docker">
-            <span class="flow-logo-ring"><img src="assets/brand/docker.svg" alt="Docker logo"></span>
-            <div><strong>Docker</strong><span class="flow-ip-address" data-ip="10.77.7.225">xxx.xxx.xxx.xxx</span></div>
-            <em>Container runtime</em>
-          </article>
-          <div class="flow-connector connector-three"><span>container network</span></div>
-          <article class="flow-system-node node-n8n">
-            <span class="flow-logo-ring"><img src="assets/brand/n8n.svg" alt="n8n logo"></span>
-            <div><strong>n8n Workflow</strong><span>:5678 webhook</span></div>
-            <em>Scoring + routing</em>
-          </article>
-          <div class="flow-connector connector-four"><span>write + analyze</span></div>
-          <article class="flow-system-node node-mac">
-            <span class="flow-logo-ring"><img src="assets/brand/apple.svg" alt="Apple logo"></span>
-            <div><strong>Mac Studio AI Lab</strong><span class="flow-ip-address" data-ip="10.77.7.225">xxx.xxx.xxx.xxx</span></div>
-            <em>SQLite + local AI</em>
-          </article>
-          <div class="flow-output-grid">
-            <div class="flow-output-card"><b>SQLite</b><span>{len(reports)} grouped detections</span></div>
-            <div class="flow-output-card"><b>Markdown</b><span>SOC reports + rollups</span></div>
-            <div class="flow-output-card"><b>Local AI</b><span>Prompt packages + analysis</span></div>
-            <div class="flow-output-card"><b>Telegram</b><span>High and critical alerts</span></div>
-          </div>
-        </div>
-      </section>
-      <section class="flow-summary-grid" aria-label="Pipeline service summary">
-        <div class="flow-summary-card"><span>Source</span><strong>Security Onion</strong><em>Restricted export wrapper</em></div>
-        <div class="flow-summary-card"><span>Relay</span><strong>Raspberry Pi</strong><em>5 minute timer</em></div>
-        <div class="flow-summary-card"><span>Runtime</span><strong>Docker</strong><em>n8n container</em></div>
-        <div class="flow-summary-card"><span>Workflow</span><strong>n8n</strong><em>Scoring, storage, notify</em></div>
-        <div class="flow-summary-card"><span>Analyst plane</span><strong>Mac Studio</strong><em>SQLite, Markdown, local AI</em></div>
-      </section>
-    </section>'''
-    selected_title = html.escape(first.title) if first else 'No alert selected'
-    selected_summary = html.escape(ai_summary_for(first)) if first else 'Select an alert to inspect its generated report.'
-    selected_criticality = html.escape(first.criticality) if first else '—'
-    selected_criticality_class = criticality_class(first.criticality) if first else 'informational'
-    selected_score = risk_score_for(first) if first else 0
-    selected_modified = html.escape(human_time(first.mtime)) if first else '—'
-    selected_size = human_size(first.size) if first else '—'
-    selected_source = html.escape(first.rel_source) if first else '—'
-    selected_body = first.rendered_html if first else '<p>No report selected.</p>'
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>SOC Alerts</title><link rel="icon" type="image/png" sizes="64x64" href="assets/onion-sentinel-favicon.png?v=20260715"/><link rel="apple-touch-icon" href="assets/onion-sentinel-logo.png"/><style>
 .suppression-network-context{{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:-2px 0 10px;padding:0 2px;max-width:100%;color:#c8d5e4;font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;overflow-wrap:anywhere}}
 .suppression-network-context::before{{content:"Route";flex:0 0 auto;border:1px solid rgba(34,211,238,.24);border-radius:999px;padding:2px 7px;color:#8ff4ff;font:10px/1 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-weight:950;text-transform:uppercase;letter-spacing:.08em}}
@@ -5756,7 +5580,6 @@ def render_static_page(shell_html: str, page_key: str, reports: list[AlertReport
 
     overview_marker = '<section id="overview-view" class="view-section overview-view" aria-label="SOC Alerts overview">'
     alerts_marker = '<section id="alerts-view" class="view-section alerts-view" aria-label="SOC alert table">'
-    footer_marker = '<div class="footer">'
     if page_key == 'home':
         rendered = replace_main_page_content(rendered, executive_home_section(reports))
         rendered = inject_executive_home_assets(rendered)
@@ -5798,15 +5621,15 @@ def write_site_pages(reports: list[AlertReport]) -> list[Path]:
     written: list[Path] = [write_status_json(reports), write_n8n_beacon_json(reports), write_n8n_beacon_history_json(), *write_detail_fragments(reports)]
     for key, filename, _title, _subtitle in PAGE_DEFS:
         path = OUT_DIR / filename
-        path.write_text(render_static_page(shell_html, key, reports), encoding='utf-8')
+        atomic_write_text(path, render_static_page(shell_html, key, reports))
         written.append(path)
     # Keep a direct SOC Alerts route for bookmarks while making index.html the
     # default SOC Alerts page.
     soc_alerts_path = OUT_DIR / 'soc-alerts.html'
-    soc_alerts_path.write_text(render_static_page(shell_html, 'alerts', reports), encoding='utf-8')
+    atomic_write_text(soc_alerts_path, render_static_page(shell_html, 'alerts', reports))
     written.append(soc_alerts_path)
     siem_tuning_alias = OUT_DIR / 'siem-tuning.html'
-    siem_tuning_alias.write_text(render_static_page(shell_html, 'siem_engineering', reports), encoding='utf-8')
+    atomic_write_text(siem_tuning_alias, render_static_page(shell_html, 'siem_engineering', reports))
     written.append(siem_tuning_alias)
     return written
 

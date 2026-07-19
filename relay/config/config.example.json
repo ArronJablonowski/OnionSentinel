@@ -17,6 +17,9 @@
     "root_min_free_bytes": 2147483648,
     "db_path": "/opt/so-alert-relay/state/seen.sqlite3",
     "ssh_timeout_seconds": 45,
+    "ssh_pull_max_response_bytes": 16777216,
+    "ssh_control_max_response_bytes": 1048576,
+    "ssh_control_max_stderr_bytes": 262144,
     "pcap_timeout_seconds": 180
   },
   "webhook": {
@@ -28,6 +31,7 @@
     "retry_attempts": 3,
     "retry_backoff_seconds": 1.5,
     "retry_max_backoff_seconds": 10,
+    "response_max_bytes": 1048576,
     "outbox_drain_limit": 1000,
     "outbox_delivered_retention_days": 30
   },
@@ -84,6 +88,7 @@
     "transfer_retry_base_seconds": 30,
     "transfer_retry_max_seconds": 1800,
     "timeout_seconds": 20,
+    "response_max_bytes": 1048576,
     "limit": 1,
     "paths": {
       "requests": "/pcap-requests",

@@ -21,7 +21,6 @@ import subprocess
 import sys
 import time
 import uuid
-from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -37,6 +36,8 @@ if str(PORTAL_SOURCE_DIR) not in sys.path:
 
 import soc_alert_api
 from artifact_cache import ArtifactCache
+from http_runtime import BoundedResponseError, read_bounded_json
+from jsonl_log import JsonlLogIndex
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -71,6 +72,7 @@ SOC_ALERT_AI_PROMPT_BUILDER = HOME / "n8n-local" / "bin" / "build-ai-investigati
 SOC_ALERT_LLM_ANALYSIS_LOG_DIR = HOME / "n8n-local" / "soc-alerts" / "llm-analysis-logs"
 SOC_ALERT_LLM_ANALYSIS_LOG_FILE = SOC_ALERT_LLM_ANALYSIS_LOG_DIR / "llm-analysis-log.jsonl"
 SOC_ALERT_LLM_ANALYSIS_CURRENT_FILE = SOC_ALERT_LLM_ANALYSIS_LOG_DIR / "current-analysis.json"
+SOC_ALERT_LLM_ANALYSIS_LOG_INDEX = JsonlLogIndex(SOC_ALERT_LLM_ANALYSIS_LOG_FILE)
 SOC_ANALYST_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system_prompt.md"
 SIEM_ENGINEER_PROMPT_FILE = HOME / "n8n-local" / "config" / "siem_engineer_system_prompt.md"
 THREAT_HUNTER_PROMPT_FILE = HOME / "n8n-local" / "config" / "threat_hunter_system_prompt.md"
@@ -89,6 +91,8 @@ AGENT_MEMORY_VIEW_MAX_BYTES = 1024 * 1024
 SOC_ALERT_API_MAX_LIMIT = 500
 SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS = 30
 SOC_ALERT_DB_BUSY_TIMEOUT_MS = SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS * 1000
+SOC_ALERT_STORE_RESPONSE_MAX_BYTES = 1024 * 1024
+SOC_ALERT_DETAIL_FRAGMENT_MAX_BYTES = 32 * 1024 * 1024
 SOC_ALERT_LEVEL_RANK = {
     "critical": 5,
     "high": 4,
@@ -3748,9 +3752,6 @@ def render_home(reports: list[Report], host: str, port: int) -> bytes:
     <div class="app-strip">{''.join(cyber_cards)}
     </div>
   </section>'''
-    lan = f"http://{local_ip()}:{port}/"
-    local = f"http://127.0.0.1:{port}/"
-
     page = f'''<!doctype html>
 <html lang="en">
 <head>
@@ -4706,12 +4707,12 @@ def alert_store_post_json(path: str, payload: dict, timeout: float = 5.0) -> dic
     )
     try:
         with urllib_request.urlopen(req, timeout=timeout) as response:
-            result = json.loads(response.read().decode("utf-8"))
+            result = read_bounded_json(response, max_bytes=SOC_ALERT_STORE_RESPONSE_MAX_BYTES)
     except urllib_error.HTTPError as exc:
         try:
-            error_payload = json.loads(exc.read().decode("utf-8"))
+            error_payload = read_bounded_json(exc, max_bytes=SOC_ALERT_STORE_RESPONSE_MAX_BYTES)
             detail = str(error_payload.get("reason") or error_payload.get("error") or exc.reason)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, BoundedResponseError):
             detail = str(exc.reason)
         raise RuntimeError(detail) from exc
     except (OSError, urllib_error.URLError, json.JSONDecodeError) as exc:
@@ -4731,7 +4732,7 @@ def alert_store_get_json(path: str, timeout: float = 5.0) -> dict:
         raise RuntimeError(f"invalid alert-store API URL: {exc}") from exc
     try:
         with urllib_request.urlopen(req, timeout=timeout) as response:
-            result = json.loads(response.read().decode("utf-8"))
+            result = read_bounded_json(response, max_bytes=SOC_ALERT_STORE_RESPONSE_MAX_BYTES)
     except urllib_error.HTTPError as exc:
         raise RuntimeError(f"HTTP {exc.code}: {exc.reason}") from exc
     except (OSError, urllib_error.URLError, json.JSONDecodeError) as exc:
@@ -5078,25 +5079,8 @@ def llm_analysis_log_page(raw: object) -> int:
 
 
 def read_llm_analysis_logs(max_rows: int = 1000) -> list[dict]:
-    if not SOC_ALERT_LLM_ANALYSIS_LOG_FILE.exists():
-        return []
-    # Stream the JSONL file and retain only the requested tail. read_text()
-    # previously duplicated the complete growing log in memory on every poll.
-    logs: deque[dict] = deque(maxlen=max_rows)
-    try:
-        with SOC_ALERT_LLM_ANALYSIS_LOG_FILE.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(data, dict):
-                    logs.append(data)
-    except OSError:
-        return []
-    return list(reversed(logs))
+    """Read a bounded newest-first tail without retaining full history."""
+    return SOC_ALERT_LLM_ANALYSIS_LOG_INDEX.tail(max_rows)
 
 
 def current_llm_queue_size() -> int:
@@ -5139,18 +5123,15 @@ def llm_analysis_process_active(prompt_package: str) -> bool:
 def llm_analysis_logs_response(query: dict[str, list[str]]) -> dict:
     page = llm_analysis_log_page((query.get("page") or ["1"])[0])
     limit = llm_analysis_log_limit((query.get("limit") or ["25"])[0])
-    logs = read_llm_analysis_logs()
-    total = len(logs)
+    total, page, logs = SOC_ALERT_LLM_ANALYSIS_LOG_INDEX.page(page=page, limit=limit)
     total_pages = max(1, math.ceil(total / limit)) if total else 1
-    page = min(page, total_pages)
-    start = (page - 1) * limit
     return {
         "ok": True,
         "page": page,
         "limit": limit,
         "total": total,
         "total_pages": total_pages,
-        "logs": logs[start:start + limit],
+        "logs": logs,
     }
 
 
@@ -5704,66 +5685,32 @@ def soc_alert_group_representative_alert_id(group_id: str) -> str:
 
 
 def soc_alert_queue_analysis_response(group_id: str, payload: dict | None = None) -> tuple[int, dict]:
-    """Create a fresh SOC Analyst prompt package so the scheduler re-analyzes a group."""
+    """Record durable reanalysis intent; the worker builds fresh evidence later."""
     group_id = str(group_id or "").strip().lower()
     if not re.fullmatch(r"[a-f0-9]{12}", group_id):
         return soc_alert_api_error("Invalid SOC alert group id")
-    if not SOC_ALERT_AI_PROMPT_BUILDER.exists():
-        return soc_alert_api_error(f"AI prompt builder is not installed: {SOC_ALERT_AI_PROMPT_BUILDER}", 503)
-    try:
-        alert_id = soc_alert_group_representative_alert_id(group_id)
-    except Exception as exc:
-        return soc_alert_api_error(f"Could not resolve alert group: {exc}", 503)
-    if not alert_id:
-        return soc_alert_api_error("SOC alert group was not found", 404)
-
     payload = payload if isinstance(payload, dict) else {}
-    related_limit = payload.get("related_limit", 250)
     try:
-        related_limit = max(1, min(500, int(related_limit)))
+        data = alert_store_post_json(
+            "/ai/request",
+            {
+                "group_id": group_id,
+                "reason": str(payload.get("reason") or "SOC analyst requested fresh AI analysis")[:500],
+                "requested_by": str(payload.get("requested_by") or "dashboard")[:100],
+                "related_limit": max(1, min(500, int(payload.get("related_limit", 250)))),
+                "pcap_analysis_limit": max(1, min(25, int(payload.get("pcap_analysis_limit", 8)))),
+            },
+            timeout=10.0,
+        )
     except (TypeError, ValueError):
-        related_limit = 250
-    pcap_limit = payload.get("pcap_analysis_limit", 8)
-    try:
-        pcap_limit = max(1, min(25, int(pcap_limit)))
-    except (TypeError, ValueError):
-        pcap_limit = 8
-
-    SOC_ALERT_AI_PROMPT_DIR.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        sys.executable,
-        str(SOC_ALERT_AI_PROMPT_BUILDER),
-        "--db",
-        str(SOC_ALERT_STORE_DB),
-        "--alert-id",
-        alert_id,
-        "--out-dir",
-        str(SOC_ALERT_AI_PROMPT_DIR),
-        "--related-limit",
-        str(related_limit),
-        "--pcap-analysis-limit",
-        str(pcap_limit),
-    ]
-    try:
-        proc = subprocess.run(cmd, text=True, capture_output=True, timeout=90)
-    except subprocess.TimeoutExpired:
-        return soc_alert_api_error("AI prompt queue request timed out", 504)
-    except OSError as exc:
-        return soc_alert_api_error(f"AI prompt queue request failed: {exc}", 503)
-    if proc.returncode != 0:
-        error = (proc.stderr or proc.stdout or "AI prompt builder failed").strip()
-        return soc_alert_api_error(error[:500], 503)
-    prompt_path = Path((proc.stdout or "").strip().splitlines()[-1]) if proc.stdout.strip() else Path()
-    if not prompt_path.exists():
-        return soc_alert_api_error("AI prompt builder did not create a prompt package", 503)
+        return soc_alert_api_error("AI analysis queue limits must be integers", 400)
+    except RuntimeError as exc:
+        return soc_alert_api_error(f"Alert-store AI queue request failed: {exc}", 503)
     return 202, {
-        "ok": True,
-        "group_id": group_id,
-        "representative_alert_id": alert_id,
+        **data,
         "ai_status_key": "queued",
         "ai_status_label": "Queued",
         "ai_status_detail": f"Manual SOC Analyst reanalysis queued at {now_iso_local()}",
-        "prompt_package": str(prompt_path),
     }
 
 
@@ -6111,6 +6058,8 @@ def soc_alert_detail_fragment_response(group_id: str) -> tuple[int, dict]:
     if not target.exists():
         return soc_alert_api_error("SOC alert detail fragment not found", 404)
     try:
+        if target.stat().st_size > SOC_ALERT_DETAIL_FRAGMENT_MAX_BYTES:
+            return soc_alert_api_error("SOC alert detail fragment exceeded the safe render limit", 413)
         detail_html = target.read_text(encoding="utf-8")
     except OSError as exc:
         return soc_alert_api_error(str(exc), 503)
