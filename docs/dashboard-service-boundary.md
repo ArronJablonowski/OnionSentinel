@@ -19,10 +19,20 @@ Portal to `http://10.77.7.225:8766/`.
 
 The listener guard validates the JSON service identity rather than accepting a
 generic HTTP success. It can terminate only the exact current-user
-`python -m http.server 8766` collision and then kickstart Onion Sentinel's own
-LaunchAgent. It refuses to kill an unknown listener and lets the stack monitor
-raise an operator-visible failure instead. This keeps self-healing narrow and
-prevents an unrelated process from being terminated automatically.
+`python -m http.server 8766` collision and then start Onion Sentinel's own
+LaunchAgent. If launchd has lost the job registration, the guard bootstraps
+only `$HOME/Library/LaunchAgents/com.arron.onion-sentinel.web.plist` after
+verifying that it is a regular file owned by the current user and that its
+embedded label matches the expected service. It refuses to kill an unknown
+listener and lets the stack monitor raise an operator-visible failure instead.
+This keeps self-healing narrow and prevents an unrelated process or arbitrary
+plist from being started automatically.
+
+Planned SQLite auto-recovery creates a current-user-owned maintenance hold
+under `$HOME/n8n-local/logs` for at most 15 minutes. During that bounded window
+the guard does not race the database swap. The maintenance script removes the
+hold and restores the alert store, proxy, and web service through an exit trap,
+including after an interrupted recovery.
 
 ## Required Isolation
 

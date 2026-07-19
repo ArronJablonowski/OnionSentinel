@@ -542,6 +542,16 @@ that run. Online backup operations wait up to 60 seconds for active writers and
 retry a bounded number of times; a transient `database is locked` result is not
 evidence of corruption.
 
+During an authorized `ALERT_STORE_AUTO_RECOVER=1` swap, maintenance creates a
+short-lived web guard hold and installs an exit trap before stopping services.
+The trap restores the host alert store, Docker proxy, and dedicated Onion
+Sentinel web LaunchAgent even if recovery is interrupted. The web guard can
+bootstrap the exact current-user-owned
+`com.arron.onion-sentinel.web.plist` when launchd has lost its registration;
+it never bootstraps an arbitrary path or label. Telegram and local SLO probe
+timeouts are bounded and logged without credential material or Python
+tracebacks.
+
 The daily runtime recovery bundle complements the hourly SQLite backups with
 n8n PostgreSQL and encryption/configuration state:
 

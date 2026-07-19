@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +31,11 @@ class OperationalSloTests(unittest.TestCase):
         failures, snapshot = self.slo.evaluate(metrics, health, now=now, disk_used_percent=55, sqlite_backup_age=60, postgres_backup_age=60, previous_ingest_errors=0)
         self.assertEqual(failures, [])
         self.assertTrue(snapshot["ok"])
+
+    def test_probe_timeout_is_bounded_without_traceback(self):
+        with mock.patch.object(self.slo.urllib.request, "urlopen", side_effect=TimeoutError("timed out")):
+            with self.assertRaisesRegex(self.slo.ProbeError, "metrics probe unavailable"):
+                self.slo.fetch_json("http://127.0.0.1:8787/metrics", "metrics")
 
     def test_stale_or_regressed_signals_fail(self):
         now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)

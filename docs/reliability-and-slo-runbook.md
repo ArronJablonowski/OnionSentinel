@@ -265,6 +265,14 @@ is retained in `operational-slo-history.jsonl`; its `soak.healthy_since` clock
 resets on any failed evaluation and `soak.qualified_48h` becomes true only
 after 48 uninterrupted hours.
 
+Transient local HTTP probe failures are converted to a concise named probe
+error; they never place a Python traceback in Telegram. Failure and recovery
+notifications use `send-telegram-notification.py`, which reads only the two
+Telegram fields from `.env` as inert data, retries transient network failures
+three times, and reports only a bounded status class. The stack monitor also
+runs the narrow Onion Sentinel web guard before declaring a web identity
+failure, allowing a stopped or deregistered exact LaunchAgent to self-heal.
+
 ## Verified Recovery Bundles
 
 Hourly alert-store maintenance continues to make online SQLite backups and run

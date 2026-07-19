@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import tempfile
 import unittest
 from unittest import mock
 
@@ -49,11 +50,16 @@ class WebServiceGuardTests(unittest.TestCase):
     @mock.patch.object(WEB_GUARD, "listener_pids", return_value=[42])
     def test_recovery_refuses_unknown_listener(self, _pids, _details, _probe):
         with mock.patch.object(WEB_GUARD.os, "getuid", return_value=501):
-            result = WEB_GUARD.recover(8766, WEB_GUARD.DEFAULT_LABEL, WEB_GUARD.DEFAULT_HEALTH_URL)
+            result = WEB_GUARD.recover(
+                8766,
+                WEB_GUARD.DEFAULT_LABEL,
+                WEB_GUARD.DEFAULT_HEALTH_URL,
+                Path("/tmp/unused.plist"),
+            )
         self.assertFalse(result["ok"])
         self.assertEqual(result["state"], "refused")
 
-    @mock.patch.object(WEB_GUARD, "kickstart")
+    @mock.patch.object(WEB_GUARD, "ensure_started", return_value=False)
     @mock.patch.object(WEB_GUARD, "terminate_known_simple_server")
     @mock.patch.object(
         WEB_GUARD,
@@ -72,14 +78,41 @@ class WebServiceGuardTests(unittest.TestCase):
         _pids,
         _details,
         terminate,
-        kickstart,
+        ensure_started,
     ):
         with mock.patch.object(WEB_GUARD.os, "getuid", return_value=501):
-            result = WEB_GUARD.recover(8766, WEB_GUARD.DEFAULT_LABEL, WEB_GUARD.DEFAULT_HEALTH_URL)
+            result = WEB_GUARD.recover(
+                8766,
+                WEB_GUARD.DEFAULT_LABEL,
+                WEB_GUARD.DEFAULT_HEALTH_URL,
+                Path("/tmp/unused.plist"),
+            )
         self.assertTrue(result["ok"])
         self.assertEqual(result["state"], "recovered")
         terminate.assert_called_once_with(42)
-        kickstart.assert_called_once_with(WEB_GUARD.DEFAULT_LABEL)
+        ensure_started.assert_called_once_with(WEB_GUARD.DEFAULT_LABEL, Path("/tmp/unused.plist"))
+
+    @mock.patch.object(WEB_GUARD.subprocess, "run")
+    @mock.patch.object(WEB_GUARD, "validate_plist", return_value=Path("/safe/web.plist"))
+    @mock.patch.object(WEB_GUARD, "service_registered", return_value=False)
+    def test_missing_service_bootstraps_allowlisted_plist(self, _registered, _validate, run):
+        run.return_value = mock.MagicMock(returncode=0)
+        with mock.patch.object(WEB_GUARD.os, "getuid", return_value=501):
+            self.assertTrue(WEB_GUARD.ensure_started(WEB_GUARD.DEFAULT_LABEL, Path("/safe/web.plist")))
+        self.assertEqual(
+            run.call_args_list[0].args[0],
+            ["/bin/launchctl", "bootstrap", "gui/501", "/safe/web.plist"],
+        )
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            ["/bin/launchctl", "kickstart", "-k", "gui/501/com.arron.onion-sentinel.web"],
+        )
+
+    def test_recent_owned_maintenance_hold_is_honored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            hold = Path(directory) / "hold"
+            hold.write_text("maintenance\n")
+            self.assertTrue(WEB_GUARD.maintenance_hold_active(hold))
 
 
 if __name__ == "__main__":

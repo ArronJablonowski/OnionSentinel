@@ -85,6 +85,7 @@ done
 cp "$REPO_DIR/n8n/bin/ensure-n8n-stack.zsh" "$STACK_DIR/bin/ensure-n8n-stack.zsh"
 cp "$REPO_DIR/n8n/bin/monitor-n8n-stack.zsh" "$STACK_DIR/bin/monitor-n8n-stack.zsh"
 cp "$REPO_DIR/n8n/bin/ensure-onion-sentinel-web.py" "$STACK_DIR/bin/ensure-onion-sentinel-web.py"
+cp "$REPO_DIR/n8n/bin/send-telegram-notification.py" "$STACK_DIR/bin/send-telegram-notification.py"
 cp "$REPO_DIR/n8n/bin/evaluate-operational-slos.py" "$STACK_DIR/bin/evaluate-operational-slos.py"
 cp "$REPO_DIR/n8n/bin/disk_capacity.py" "$STACK_DIR/bin/disk_capacity.py"
 cp "$REPO_DIR/n8n/bin/backup-onion-sentinel-runtime.py" "$STACK_DIR/bin/backup-onion-sentinel-runtime.py"

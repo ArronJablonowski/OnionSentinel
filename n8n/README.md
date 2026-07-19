@@ -25,7 +25,8 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `bin/backup-onion-sentinel-runtime.py` | Daily atomic SQLite, PostgreSQL, and secret-bearing runtime recovery bundle. |
 | `bin/report-production-soak.py` | Read-only 48-hour SLO coverage and acceptance reporter. |
 | `bin/run-recovery-restore-drill.py` | Full SQLite and network-isolated disposable PostgreSQL restore qualification. |
-| `bin/ensure-onion-sentinel-web.py` | One-minute service-identity guard that safely recovers the dedicated dashboard port from the exact known Python directory-server collision and refuses unknown listeners. |
+| `bin/ensure-onion-sentinel-web.py` | One-minute service-identity guard that safely recovers the dedicated dashboard port, bootstraps the exact allowlisted LaunchAgent if launchd lost the job, and refuses unknown listeners. |
+| `bin/send-telegram-notification.py` | Shared bounded Telegram sender that parses only allowlisted credentials as data, retries transient network failures, and emits concise status without tracebacks or secrets. |
 | `bin/maintain-pcap-evidence.py` | Runtime-only PCAP artifact and derived-analysis retention helper; dry-run by default. |
 | `bin/backfill-ai-correlation-context.py` | Idempotently indexes historical AI artifacts through alert-store without writing SQLite directly. |
 | `bin/agent_memory.py` | Shared role-aware Markdown memory library with relevance retrieval, validation, locking, deduplication, and expiry. |
@@ -436,6 +437,11 @@ The maintenance job:
   candidate with SQLite `.recover`;
 - sends Telegram on failure and recovery transitions when
   `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are present in the runtime `.env`;
+- uses the shared bounded notification helper so a Telegram timeout cannot
+  execute malformed `.env` content or emit a Python traceback;
+- creates a short-lived, current-user-owned web-maintenance hold during an
+  authorized auto-recovery swap and uses an exit trap to restore every stopped
+  runtime service if recovery is interrupted;
 - does not swap a recovered DB into production unless
   `ALERT_STORE_AUTO_RECOVER=1` is explicitly set for that run.
 

@@ -18,11 +18,14 @@ AUTO_RECOVER="${ALERT_STORE_AUTO_RECOVER:-0}"
 SQLITE_BUSY_TIMEOUT_MS="${ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS:-60000}"
 BACKUP_ATTEMPTS="${ALERT_STORE_BACKUP_ATTEMPTS:-5}"
 ENV_FILE="${ALERT_STORE_ENV_FILE:-$STACK_DIR/.env}"
+TELEGRAM_SENDER="$STACK_DIR/bin/send-telegram-notification.py"
 STATE_FILE="$LOG_DIR/alert-store-sqlite-maintenance-state.json"
 REFRESH_GROUPS_URL="${ALERT_STORE_REFRESH_GROUPS_URL:-http://127.0.0.1:8787/refresh-groups}"
 REFRESH_GROUPS_TIMEOUT="${ALERT_STORE_REFRESH_GROUPS_TIMEOUT:-60}"
 STAMP="$(date '+%Y%m%dT%H%M%S%z')"
 LOG_FILE="$LOG_DIR/alert-store-sqlite-maintenance.log"
+WEB_MAINTENANCE_HOLD="$LOG_DIR/onion-sentinel-web-maintenance.hold"
+RECOVERY_RUNTIME_STOPPED=0
 
 [[ "$SQLITE_BUSY_TIMEOUT_MS" == <-> ]] || SQLITE_BUSY_TIMEOUT_MS=60000
 [[ "$BACKUP_ATTEMPTS" == <-> ]] || BACKUP_ATTEMPTS=5
@@ -39,43 +42,8 @@ log() {
 
 send_telegram() {
   local message="$1"
-  [[ -f "$ENV_FILE" ]] || return 1
-  eval "$(/usr/bin/python3 - "$ENV_FILE" <<'PY'
-from pathlib import Path
-import shlex
-import sys
-
-for raw in Path(sys.argv[1]).read_text().splitlines():
-    line = raw.strip()
-    if not line or line.startswith("#") or "=" not in line:
-        continue
-    key, value = line.split("=", 1)
-    key = key.strip()
-    if key in {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"}:
-        print(f"export {key}={shlex.quote(value.strip())}")
-PY
-)"
-  [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]] || return 1
-  /usr/bin/python3 - "$TELEGRAM_BOT_TOKEN" "$TELEGRAM_CHAT_ID" "$message" <<'PY'
-import json
-import sys
-import urllib.request
-
-bot_token, chat_id, message = sys.argv[1:4]
-payload = json.dumps({
-    "chat_id": chat_id,
-    "text": message,
-    "disable_web_page_preview": True,
-}).encode("utf-8")
-req = urllib.request.Request(
-    f"https://api.telegram.org/bot{bot_token}/sendMessage",
-    data=payload,
-    headers={"Content-Type": "application/json"},
-    method="POST",
-)
-with urllib.request.urlopen(req, timeout=10) as response:
-    print(response.status)
-PY
+  [[ -x "$TELEGRAM_SENDER" ]] || return 1
+  /usr/bin/python3 "$TELEGRAM_SENDER" --env-file "$ENV_FILE" --message "$message"
 }
 
 read_status() {
@@ -260,6 +228,28 @@ refresh_group_summaries() {
   /usr/bin/curl -fsS --max-time "$REFRESH_GROUPS_TIMEOUT" -X POST "$REFRESH_GROUPS_URL"
 }
 
+restart_recovery_runtime() {
+  local failed=0
+  if (( RECOVERY_RUNTIME_STOPPED == 1 )); then
+    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.arron.soc.alert-store.plist" >/dev/null 2>&1 \
+      || launchctl kickstart -k "gui/$(id -u)/com.arron.soc.alert-store" >/dev/null 2>&1 \
+      || failed=1
+    (cd "$STACK_DIR" && /usr/local/bin/docker compose up -d alert-store >/dev/null) || failed=1
+    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.arron.onion-sentinel.web.plist" >/dev/null 2>&1 \
+      || launchctl kickstart -k "gui/$(id -u)/com.arron.onion-sentinel.web" >/dev/null 2>&1 \
+      || failed=1
+  fi
+  RECOVERY_RUNTIME_STOPPED=0
+  rm -f "$WEB_MAINTENANCE_HOLD" || failed=1
+  return "$failed"
+}
+
+recovery_exit_cleanup() {
+  local original_status=$?
+  restart_recovery_runtime || true
+  return "$original_status"
+}
+
 recover_candidate() {
   local corrupt_copy="$BACKUP_DIR/alerts.sqlite3.$STAMP.corrupt"
   local sql_file="$BACKUP_DIR/alerts.sqlite3.$STAMP.recover.sql"
@@ -279,19 +269,22 @@ recover_candidate() {
 
   if [[ "$AUTO_RECOVER" == "1" ]]; then
     log "AUTO_RECOVER enabled; stopping host alert-store, alert-store proxy, and Onion Sentinel web service before DB swap"
+    print -r -- "database recovery started at $(date '+%Y-%m-%d  %H:%M:%S%z')" > "$WEB_MAINTENANCE_HOLD"
+    chmod 0600 "$WEB_MAINTENANCE_HOLD"
+    RECOVERY_RUNTIME_STOPPED=1
+    trap 'recovery_exit_cleanup' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     (cd "$STACK_DIR" && /usr/local/bin/docker compose stop alert-store >/dev/null)
     launchctl bootout "gui/$(id -u)/com.arron.soc.alert-store" >/dev/null 2>&1 || true
     launchctl bootout "gui/$(id -u)/com.arron.onion-sentinel.web" >/dev/null 2>&1 || true
     mv "$DB_PATH" "$BACKUP_DIR/alerts.sqlite3.$STAMP.malformed-swapped-out"
     cp -p "$recovered" "$DB_PATH"
     rm -f "$DB_PATH-wal" "$DB_PATH-shm"
-    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.arron.soc.alert-store.plist" >/dev/null 2>&1 \
-      || launchctl kickstart -k "gui/$(id -u)/com.arron.soc.alert-store" >/dev/null 2>&1 \
-      || true
-    (cd "$STACK_DIR" && /usr/local/bin/docker compose up -d alert-store >/dev/null)
-    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.arron.onion-sentinel.web.plist" >/dev/null 2>&1 \
-      || launchctl kickstart -k "gui/$(id -u)/com.arron.onion-sentinel.web" >/dev/null 2>&1 \
-      || true
+    if ! restart_recovery_runtime; then
+      fail "database swap completed but one or more runtime services failed to restart"
+    fi
+    trap - EXIT INT TERM
     log "auto_recover_swap_complete"
     log "maintenance_complete recovered_db=$recovered"
     exit 0

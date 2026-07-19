@@ -10,7 +10,12 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import urllib.error
 import urllib.request
+
+
+class ProbeError(RuntimeError):
+    """A concise, operator-safe failure from a local read-only health probe."""
 
 
 def parse_timestamp(value: object) -> dt.datetime | None:
@@ -208,9 +213,15 @@ def evaluate(
     return failures, snapshot
 
 
-def fetch_json(url: str) -> dict[str, object]:
-    with urllib.request.urlopen(url, timeout=8) as response:
-        return json.load(response)
+def fetch_json(url: str, name: str) -> dict[str, object]:
+    try:
+        with urllib.request.urlopen(url, timeout=8) as response:
+            payload = json.load(response)
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        raise ProbeError(f"{name} probe unavailable ({type(exc).__name__})") from None
+    if not isinstance(payload, dict):
+        raise ProbeError(f"{name} probe returned a non-object payload")
+    return payload
 
 
 def main() -> int:
@@ -233,9 +244,15 @@ def main() -> int:
     now = dt.datetime.now(dt.timezone.utc)
     usage = shutil.disk_usage(args.stack_dir)
     disk_percent = (usage.used / usage.total * 100) if usage.total else 100.0
+    try:
+        metrics_payload = fetch_json(args.metrics_url, "alert-store metrics")
+        health_payload = fetch_json(args.health_url, "Onion Sentinel health")
+    except ProbeError as exc:
+        print(str(exc))
+        return 2
     failures, snapshot = evaluate(
-        fetch_json(args.metrics_url),
-        fetch_json(args.health_url),
+        metrics_payload,
+        health_payload,
         now=now,
         disk_used_percent=disk_percent,
         sqlite_backup_age=newest_file_age(args.stack_dir / "alert_store_backups", "*.backup", now),
