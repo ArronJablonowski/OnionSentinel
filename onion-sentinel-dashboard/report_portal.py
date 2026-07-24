@@ -5617,12 +5617,81 @@ def soc_alert_group_counts(conn: sqlite3.Connection) -> dict[str, int]:
     return {soc_alert_group_id(row["group_key"]): int(row["repeat_count"] or 0) for row in rows}
 
 
-def soc_alert_active_group_ids(conn: sqlite3.Connection, statuses: dict) -> set[str]:
+def soc_alert_manually_escalated_group_ids(conn: sqlite3.Connection) -> set[str]:
+    """Return every dashboard alias moved manually to Incident Responder."""
+    if not (
+        sqlite_table_exists(conn, "incident_response_cases")
+        and sqlite_table_exists(conn, "incident_response_events")
+    ):
+        return set()
+    try:
+        rows = conn.execute(
+            """
+            SELECT c.dashboard_group_id, c.group_id AS stable_group_id, e.detail_json
+            FROM incident_response_cases AS c
+            JOIN incident_response_events AS e ON e.case_id = c.case_id
+            WHERE e.event_type = 'escalated'
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return set()
+
+    dashboard_group_ids: set[str] = set()
+    stable_group_ids: set[str] = set()
+    for row in rows:
+        dashboard_group_id = str(row["dashboard_group_id"] or "").strip().lower()
+        if re.fullmatch(r"[a-f0-9]{12}", dashboard_group_id):
+            dashboard_group_ids.add(dashboard_group_id)
+        stable_group_id = str(row["stable_group_id"] or "").strip()
+        if stable_group_id:
+            stable_group_ids.add(stable_group_id)
+        try:
+            detail = json.loads(row["detail_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            detail = {}
+        event_group_id = str(detail.get("dashboard_group_id") or "").strip().lower() if isinstance(detail, dict) else ""
+        if re.fullmatch(r"[a-f0-9]{12}", event_group_id):
+            dashboard_group_ids.add(event_group_id)
+
+    if stable_group_ids and sqlite_table_exists(conn, "alert_group_alias"):
+        stable_ids = sorted(stable_group_ids)
+        for start in range(0, len(stable_ids), 500):
+            chunk = stable_ids[start:start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            try:
+                alias_rows = conn.execute(
+                    f"""
+                    SELECT legacy_group_id
+                    FROM alert_group_alias
+                    WHERE stable_group_id IN ({placeholders})
+                    """,
+                    chunk,
+                ).fetchall()
+            except sqlite3.Error:
+                continue
+            dashboard_group_ids.update(
+                str(row["legacy_group_id"]).strip().lower()
+                for row in alias_rows
+                if re.fullmatch(r"[a-f0-9]{12}", str(row["legacy_group_id"] or "").strip().lower())
+            )
+    return dashboard_group_ids
+
+
+def soc_alert_active_group_ids(
+    conn: sqlite3.Connection,
+    statuses: dict,
+    manually_escalated_group_ids: set[str] | None = None,
+) -> set[str]:
     """Return grouped detections currently visible in the default active view."""
-    suppressed_or_acknowledged = {
+    hidden_group_ids = {
         group_id for group_id, meta in (statuses or {}).items()
         if isinstance(meta, dict) and meta.get("status") in {"acknowledged", "suppressed"}
     }
+    hidden_group_ids.update(
+        manually_escalated_group_ids
+        if manually_escalated_group_ids is not None
+        else soc_alert_manually_escalated_group_ids(conn)
+    )
     if soc_alert_group_summary_available(conn):
         try:
             rows = conn.execute(
@@ -5632,7 +5701,7 @@ def soc_alert_active_group_ids(conn: sqlite3.Connection, statuses: dict) -> set[
                 WHERE lower(coalesce(filter_status, 'accepted')) != 'suppressed'
                 """
             ).fetchall()
-            return {row["group_id"] for row in rows if row["group_id"] not in suppressed_or_acknowledged}
+            return {row["group_id"] for row in rows if row["group_id"] not in hidden_group_ids}
         except sqlite3.Error:
             pass
     group_expr = soc_alert_group_key_sql()
@@ -5651,7 +5720,7 @@ def soc_alert_active_group_ids(conn: sqlite3.Connection, statuses: dict) -> set[
     return {
         soc_alert_group_id(row["group_key"])
         for row in rows
-        if soc_alert_group_id(row["group_key"]) not in suppressed_or_acknowledged
+        if soc_alert_group_id(row["group_key"]) not in hidden_group_ids
     }
 
 
@@ -5837,21 +5906,29 @@ def write_soc_alert_status(alert_id: str, meta: dict) -> None:
 
 def soc_alert_status_response() -> dict:
     statuses = load_soc_alert_statuses()
-    acknowledged = sorted(
+    acknowledged_all = {
         alert_id for alert_id, meta in statuses.items()
         if isinstance(meta, dict) and meta.get("status") == "acknowledged"
-    )
-    suppressed = sorted(
+    }
+    suppressed_all = {
         alert_id for alert_id, meta in statuses.items()
         if isinstance(meta, dict) and meta.get("status") == "suppressed"
-    )
+    }
+    acknowledged = sorted(acknowledged_all)
+    suppressed = sorted(suppressed_all)
     counts = {"open": 0, "acknowledged": len(acknowledged), "suppressed": len(suppressed)}
     try:
         with soc_alert_db_connect() as conn:
             group_counts = soc_alert_group_counts(conn)
-            active_group_ids = soc_alert_active_group_ids(conn, statuses)
+            escalated_group_ids = soc_alert_manually_escalated_group_ids(conn)
+            active_group_ids = soc_alert_active_group_ids(conn, statuses, escalated_group_ids)
+        acknowledged = sorted(acknowledged_all.difference(escalated_group_ids))
+        suppressed = sorted(suppressed_all.difference(escalated_group_ids))
         counts["open"] = len(active_group_ids)
-        counts["total"] = len(group_counts)
+        counts["acknowledged"] = len(acknowledged)
+        counts["suppressed"] = len(suppressed)
+        counts["escalated"] = len(set(group_counts).intersection(escalated_group_ids))
+        counts["total"] = len(set(group_counts).difference(escalated_group_ids))
     except Exception:
         counts["total"] = len(statuses)
     return {
@@ -7636,7 +7713,13 @@ def soc_alert_group_query_snapshot(
     cursor_id: str,
     limit: int,
     requested_page: int,
+    excluded_group_ids: set[str] | None = None,
 ) -> SocAlertQuerySnapshot:
+    if excluded_group_ids:
+        rows = [
+            row for row in rows
+            if soc_alert_group_id_for_query_row(row) not in excluded_group_ids
+        ]
     statuses = load_soc_alert_statuses()
     status_counts = soc_alert_status_bucket_counts(rows, statuses)
     # Active-card metrics describe work still requiring analyst action. Compute
@@ -7808,6 +7891,7 @@ def soc_alerts_summary_query_response(query: dict[str, list[str]]) -> tuple[int,
             if not soc_alert_group_summary_available(conn):
                 return None
             rows = conn.execute(sql, args).fetchall()
+            manually_escalated_group_ids = soc_alert_manually_escalated_group_ids(conn)
     except Exception as e:
         return soc_alert_api_error(str(e), 503)
 
@@ -7818,6 +7902,7 @@ def soc_alerts_summary_query_response(query: dict[str, list[str]]) -> tuple[int,
         cursor_id=cursor_id,
         limit=limit,
         requested_page=requested_page,
+        excluded_group_ids=manually_escalated_group_ids,
     )
     return 200, soc_alert_group_query_payload(
         source="sqlite-summary",
@@ -7890,6 +7975,7 @@ def soc_alerts_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
     try:
         with soc_alert_db_connect() as conn:
             rows = conn.execute(sql, args).fetchall()
+            manually_escalated_group_ids = soc_alert_manually_escalated_group_ids(conn)
     except Exception as e:
         return soc_alert_api_error(str(e), 503)
 
@@ -7900,6 +7986,7 @@ def soc_alerts_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
         cursor_id=cursor_id,
         limit=limit,
         requested_page=requested_page,
+        excluded_group_ids=manually_escalated_group_ids,
     )
     return 200, soc_alert_group_query_payload(
         source="sqlite",
@@ -8013,6 +8100,11 @@ def soc_alert_metrics_response(query: dict[str, list[str]]) -> tuple[int, dict]:
                     """,
                     args,
                 ).fetchall()
+            manually_escalated_group_ids = soc_alert_manually_escalated_group_ids(conn)
+            grouped_rows = [
+                row for row in grouped_rows
+                if soc_alert_group_id_for_query_row(row) not in manually_escalated_group_ids
+            ]
             by_filter = {r[0] or "accepted": r[1] for r in conn.execute(f"select coalesce(filter_status, 'accepted'), count(*) from alerts{where} group by coalesce(filter_status, 'accepted')", args)}
             by_level = {r[0] or "unknown": r[1] for r in conn.execute(f"select coalesce(triage_level, severity_label, 'unknown'), count(*) from alerts{where} group by coalesce(triage_level, severity_label, 'unknown')", args)}
             top_rules = [dict(rule_name=r[0] or "unknown", count=r[1]) for r in conn.execute(f"select coalesce(rule_name, 'unknown'), count(*) from alerts{where} group by coalesce(rule_name, 'unknown') order by count(*) desc limit 10", args)]

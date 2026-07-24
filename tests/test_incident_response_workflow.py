@@ -70,6 +70,13 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn('.ir-detail-shell,.ir-detail-content{text-align:left}', page)
         self.assertIn('<details class="ir-prior-ai"><summary>AI Analysis Output</summary>', page)
         self.assertIn('.ir-mobile-detail{padding:0 14px 16px;border-top:1px solid #1e303d;text-align:left}', page)
+        self.assertIn(
+            ".ai-status-analyzing,.ir-agent-analyzing{color:var(--cyan)!important;"
+            "animation:ai-status-analyzing-pulse 1.25s ease-in-out infinite",
+            page,
+        )
+        self.assertIn("@keyframes ai-status-analyzing-pulse", page)
+        self.assertGreaterEqual(page.count("ir-agent-${esc(item.agent_status)}"), 2)
         self.assertIn('colspan="10"', page)
         self.assertLess(page.index("Incident Responder</h1>"), page.index('id="incident-response-view"'))
 
@@ -78,6 +85,11 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
 
         self.assertGreaterEqual(source.count('data-escalate="'), 2)
         self.assertIn("requestIncidentEscalationForGroup", source)
+        self.assertIn("button.textContent='Escalated'", source)
+        self.assertIn("window.setTimeout(()=>removeEscalatedGroup(id),5000)", source)
+        self.assertIn("escalationRemovalDeadlines", source)
+        self.assertIn("loadApiAlerts(true)", source)
+        self.assertNotIn("button.textContent==='Escalated')button.textContent='Escalate'", source)
         self.assertIn("/escalate", source)
         self.assertIn("/api/soc-incidents", source)
         self.assertIn("Incident Response Investigation", source)

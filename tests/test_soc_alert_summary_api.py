@@ -314,6 +314,116 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["alerts"][0]["detection_outcome_label"], "n/a")
         self.assertNotIn("backend-suppressed-alert", [alert["representative_alert_id"] for alert in payload["alerts"]])
 
+    def test_manual_incident_escalation_removes_every_group_alias_from_soc_alerts(self) -> None:
+        newest_group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        older_group_id = self.portal.soc_alert_group_id(
+            "high|Older detection|192.0.2.20|198.51.100.20|accepted"
+        )
+        stable_group_id = "stable-incident-unit"
+        self.conn.executescript(
+            """
+            CREATE TABLE incident_response_cases (
+              case_id TEXT PRIMARY KEY,
+              group_id TEXT NOT NULL UNIQUE,
+              dashboard_group_id TEXT NOT NULL
+            );
+            CREATE TABLE incident_response_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              case_id TEXT NOT NULL,
+              event_type TEXT NOT NULL,
+              detail_json TEXT NOT NULL
+            );
+            CREATE TABLE alert_group_alias (
+              legacy_group_id TEXT PRIMARY KEY,
+              stable_group_id TEXT NOT NULL
+            );
+            """
+        )
+        self.conn.execute(
+            "INSERT INTO incident_response_cases VALUES (?, ?, ?)",
+            ("ir-manual-unit", stable_group_id, newest_group_id),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO incident_response_events (case_id, event_type, detail_json)
+            VALUES (?, 'escalated', ?)
+            """,
+            (
+                "ir-manual-unit",
+                json.dumps({"dashboard_group_id": newest_group_id}),
+            ),
+        )
+        self.conn.execute(
+            "INSERT INTO alert_group_alias VALUES (?, ?)",
+            (older_group_id, stable_group_id),
+        )
+        self.conn.commit()
+
+        status, open_payload = self.portal.soc_alerts_query_response(
+            {"limit": ["10"], "analyst_status": ["open"]}
+        )
+        _, all_payload = self.portal.soc_alerts_query_response({"limit": ["10"]})
+        metrics_status, metrics = self.portal.soc_alert_metrics_response({"since": [""]})
+        status_payload = self.portal.soc_alert_status_response()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(metrics_status, 200)
+        self.assertEqual(open_payload["total_matching"], 0)
+        self.assertEqual(open_payload["active_total"], 0)
+        self.assertEqual(open_payload["status_counts"]["total"], 1)
+        self.assertEqual(all_payload["total_matching"], 1)
+        self.assertEqual(
+            [alert["representative_alert_id"] for alert in all_payload["alerts"]],
+            ["backend-suppressed-alert"],
+        )
+        self.assertEqual(metrics["grouped_total"], 1)
+        self.assertEqual(metrics["by_analyst_status"]["total"], 1)
+        self.assertEqual(status_payload["counts"]["open"], 0)
+        self.assertEqual(status_payload["counts"]["escalated"], 2)
+        self.assertEqual(status_payload["counts"]["total"], 1)
+
+    def test_automatic_incident_event_does_not_remove_soc_alert_group(self) -> None:
+        newest_group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        self.conn.executescript(
+            """
+            CREATE TABLE incident_response_cases (
+              case_id TEXT PRIMARY KEY,
+              group_id TEXT NOT NULL UNIQUE,
+              dashboard_group_id TEXT NOT NULL
+            );
+            CREATE TABLE incident_response_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              case_id TEXT NOT NULL,
+              event_type TEXT NOT NULL,
+              detail_json TEXT NOT NULL
+            );
+            """
+        )
+        self.conn.execute(
+            "INSERT INTO incident_response_cases VALUES (?, ?, ?)",
+            ("ir-auto-unit", "stable-auto-unit", newest_group_id),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO incident_response_events (case_id, event_type, detail_json)
+            VALUES (?, 'auto_escalated', ?)
+            """,
+            ("ir-auto-unit", json.dumps({"dashboard_group_id": newest_group_id})),
+        )
+        self.conn.commit()
+
+        status, payload = self.portal.soc_alerts_query_response(
+            {"limit": ["10"], "analyst_status": ["open"]}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["total_matching"], 2)
+        self.assertIn("newest-alert", [alert["representative_alert_id"] for alert in payload["alerts"]])
+
     def test_active_metrics_are_independent_of_page_size_and_selected_status_bucket(self) -> None:
         _, one_row = self.portal.soc_alerts_query_response({"limit": ["1"], "analyst_status": ["open"]})
         _, all_rows = self.portal.soc_alerts_query_response({"limit": ["100"], "analyst_status": ["open"]})

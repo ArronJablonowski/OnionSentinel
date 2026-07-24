@@ -123,15 +123,15 @@ function fixtureStatuses(state) {
 
 function fixtureListPayload(state, requestUrl) {
   const analystStatus = new URL(requestUrl).searchParams.get('analyst_status') || '';
-  const statusMatches = !analystStatus
+  const statusMatches = !state.escalated && (!analystStatus
     || (['open', 'new'].includes(analystStatus) && state.status === 'open')
-    || analystStatus === state.status;
+    || analystStatus === state.status);
   const statusCounts = {
-    total: 1,
-    open: state.status === 'open' ? 1 : 0,
-    active: state.status === 'open' ? 1 : 0,
-    acknowledged: state.status === 'acknowledged' ? 1 : 0,
-    suppressed: state.status === 'suppressed' ? 1 : 0,
+    total: state.escalated ? 0 : 1,
+    open: !state.escalated && state.status === 'open' ? 1 : 0,
+    active: !state.escalated && state.status === 'open' ? 1 : 0,
+    acknowledged: !state.escalated && state.status === 'acknowledged' ? 1 : 0,
+    suppressed: !state.escalated && state.status === 'suppressed' ? 1 : 0,
   };
   return {
     ok: true,
@@ -164,13 +164,18 @@ function fixtureListPayload(state, requestUrl) {
   };
 }
 
-async function installSyntheticApi(page) {
+async function installSyntheticApi(page, { failEscalation = false } = {}) {
   const state = {
     status: 'open',
     reason: '',
     updatedAt: '',
     aiStatus: 'not-queued',
     pcapStatus: 'none',
+    escalated: false,
+    delayNextListResponse: false,
+    delayedListStarted: false,
+    delayedListFinished: false,
+    postEscalationListResponses: 0,
     mutations: [],
   };
 
@@ -186,7 +191,16 @@ async function installSyntheticApi(page) {
     });
 
     if (method === 'GET' && path === '/api/soc-alerts') {
-      await json(fixtureListPayload(state, request.url()));
+      const payload = fixtureListPayload(state, request.url());
+      if (state.delayNextListResponse) {
+        state.delayNextListResponse = false;
+        state.delayedListStarted = true;
+        await new Promise(resolveDelay => setTimeout(resolveDelay, 5500));
+        state.delayedListFinished = true;
+      } else if (state.escalated) {
+        state.postEscalationListResponses += 1;
+      }
+      await json(payload);
       return;
     }
     if (method === 'GET' && path === '/api/soc-alerts/events') {
@@ -244,6 +258,21 @@ async function installSyntheticApi(page) {
       state.pcapStatus = 'queued';
       state.mutations.push({ action: 'pcap', payload });
       await json({ ok: true, pcap_status_key: 'queued', pcap_status_label: 'Queued' });
+      return;
+    }
+    if (method === 'POST' && path === `/api/soc-alerts/${GROUP_ID}/escalate`) {
+      const payload = request.postDataJSON();
+      state.mutations.push({ action: 'escalate', payload });
+      if (failEscalation) {
+        await route.fulfill({
+          status: 503,
+          contentType: 'application/json',
+          body: JSON.stringify({ ok: false, error: 'synthetic escalation failure' }),
+        });
+        return;
+      }
+      state.escalated = true;
+      await json({ ok: true, case_id: 'ir-synthetic-ui', agent_status: 'queued' });
       return;
     }
 
@@ -362,4 +391,50 @@ test('short landscape mutation controls remain usable with synthetic state', asy
     page: document.documentElement.scrollWidth,
   }));
   expect(dimensions.page).toBeLessThanOrEqual(dimensions.viewport + 1);
+});
+
+test('successful escalation confirms for five seconds and removes desktop and mobile rows despite a stale list response', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const state = await installSyntheticApi(page);
+  await openSyntheticAlert(page);
+
+  const desktopGroup = page.locator(`tbody.report-row-group[data-report-id="${GROUP_ID}"]`);
+  const mobileCard = page.locator(`[data-mobile-report-id="${GROUP_ID}"]`);
+  state.delayNextListResponse = true;
+  await page.locator('[data-sort-key="severity"]').click();
+  await expect.poll(() => state.delayedListStarted).toBe(true);
+  const escalate = await visibleAction(page, 'escalate');
+  await escalate.click();
+
+  await expect.poll(() => state.escalated).toBe(true);
+  await expect(desktopGroup.locator('[data-escalate]')).toHaveText('Escalated');
+  await expect(desktopGroup.locator('[data-escalate]')).toBeDisabled();
+  await expect(mobileCard.locator('[data-escalate]')).toHaveText('Escalated');
+  await page.waitForTimeout(4000);
+  await expect(desktopGroup).toHaveCount(1);
+  await expect(mobileCard).toHaveCount(1);
+  await expect(desktopGroup).toHaveCount(0, { timeout: 2500 });
+  await expect(mobileCard).toHaveCount(0);
+  await expect.poll(() => state.delayedListFinished).toBe(true);
+  await expect.poll(() => state.postEscalationListResponses).toBeGreaterThanOrEqual(1);
+  await expect(desktopGroup).toHaveCount(0);
+  await expect(mobileCard).toHaveCount(0);
+  expect(state.mutations.filter(item => item.action === 'escalate')).toHaveLength(1);
+  expect(state.mutations.filter(item => item.action === 'blocked')).toEqual([]);
+});
+
+test('failed escalation restores the action and keeps the alert visible', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const state = await installSyntheticApi(page, { failEscalation: true });
+  await openSyntheticAlert(page);
+
+  const desktopGroup = page.locator(`tbody.report-row-group[data-report-id="${GROUP_ID}"]`);
+  const escalate = await visibleAction(page, 'escalate');
+  await escalate.click();
+
+  await expect(desktopGroup.locator('[data-escalate]')).toHaveText('Escalate');
+  await expect(desktopGroup.locator('[data-escalate]')).toBeEnabled();
+  await expect(desktopGroup).toHaveCount(1);
+  expect(state.escalated).toBe(false);
+  expect(state.mutations.filter(item => item.action === 'escalate')).toHaveLength(1);
 });
