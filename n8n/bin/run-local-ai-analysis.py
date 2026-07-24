@@ -23,7 +23,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -53,6 +53,7 @@ DEFAULT_OUT_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-analysis"
 DEFAULT_LLM_LOG_DIR = HOME / "n8n-local" / "soc-alerts" / "llm-analysis-logs"
 DEFAULT_LLM_LOG_FILE = DEFAULT_LLM_LOG_DIR / "llm-analysis-log.jsonl"
 DEFAULT_LLM_CURRENT_FILE = DEFAULT_LLM_LOG_DIR / "current-analysis.json"
+DEFAULT_LLM_ACTIVE_DIR = DEFAULT_LLM_LOG_DIR / "active"
 DEFAULT_ANALYSIS_INDEX_QUEUE_DIR = DEFAULT_LLM_LOG_DIR / "analysis-index-pending"
 DEFAULT_SYSTEM_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system_prompt.md"
 DEFAULT_SECOND_OPINION_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_second_opinion_prompt.md"
@@ -549,9 +550,24 @@ class SystemResourceMonitor:
 
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def active_analysis_record_path(run_id: object, active_dir: Path | None = None) -> Path:
+    directory = active_dir if active_dir is not None else DEFAULT_LLM_ACTIVE_DIR
+    safe_run_id = re.sub(r"[^A-Za-z0-9_-]+", "-", str(run_id or "analysis")).strip("-_")
+    return directory / f"{(safe_run_id or 'analysis')[:120]}.json"
 
 
 def append_jsonl(path: Path, data: dict[str, Any]) -> None:
@@ -665,7 +681,7 @@ def build_llm_log_record(
         if model_path == "frontier-codex-cli"
         else "ollama" if model_path == "ollama" else assigned_mode
     )
-    return {
+    record = {
         "log_id": run_id,
         "status": status,
         "success": status == "success",
@@ -694,6 +710,17 @@ def build_llm_log_record(
         "error": error,
         "alert": alert_summary,
     }
+    if status == "running":
+        record.update({
+            "active_phase": "primary_analysis",
+            "active_phase_started_at": started_at,
+            "active_model": model,
+            "active_model_path": model_path,
+            "active_model_route": model_route,
+            "active_provider": mode,
+            "second_opinion_trigger": "",
+        })
+    return record
 
 
 def latest_prompt(prompt_dir: Path) -> Path:
@@ -962,6 +989,94 @@ def assigned_model_metadata(
         if model:
             return model, "frontier-codex-cli", "codex-cli"
     return "", "unknown", str(settings.get("mode") or "unknown")
+
+
+def model_route_metadata(
+    settings: dict[str, Any],
+    route: str,
+) -> tuple[str, str, str, str]:
+    """Return canonical route, model, model path, and provider for live status."""
+    canonical = canonical_model_route(route, enabled_agent_model_routes(settings))
+    if canonical.startswith("ollama:"):
+        model = canonical.removeprefix("ollama:").strip()
+        if model:
+            return canonical, model, "ollama", "ollama"
+    if parsed := parse_codex_cli_route(canonical):
+        model, _ = parsed
+        return canonical, model, "frontier-codex-cli", "codex-cli"
+    if canonical == "codex-cli":
+        model = str(settings.get("codex_cli_model") or settings.get("cloud_model") or "").strip()
+        if model:
+            return canonical, model, "frontier-codex-cli", "codex-cli"
+    return canonical, "", "unknown", "unknown"
+
+
+def current_analysis_phase_record(
+    current_record: dict[str, Any],
+    settings: dict[str, Any],
+    *,
+    phase: str,
+    model_route: str = "",
+    trigger_reason: str = "",
+) -> dict[str, Any]:
+    """Return live-only execution metadata without changing primary log fields."""
+    updated = dict(current_record)
+    updated["active_phase"] = phase
+    updated["active_phase_started_at"] = project_now()
+    updated["second_opinion_trigger"] = trigger_reason
+    if model_route:
+        canonical, model, model_path, provider = model_route_metadata(settings, model_route)
+        updated.update({
+            "active_model": model,
+            "active_model_path": model_path,
+            "active_model_route": canonical,
+            "active_provider": provider,
+        })
+    else:
+        updated.update({
+            "active_model": "",
+            "active_model_path": "",
+            "active_model_route": "",
+            "active_provider": "",
+        })
+    return updated
+
+
+def publish_current_analysis_phase(
+    current_record: dict[str, Any],
+    settings: dict[str, Any],
+    *,
+    phase: str,
+    model_route: str = "",
+    trigger_reason: str = "",
+    active_record_path: Path | None = None,
+) -> dict[str, Any]:
+    """Atomically publish one transient phase for this analysis run."""
+    updated = current_analysis_phase_record(
+        current_record,
+        settings,
+        phase=phase,
+        model_route=model_route,
+        trigger_reason=trigger_reason,
+    )
+    target = active_record_path or active_analysis_record_path(updated.get("log_id"))
+    atomic_write_json(target, updated)
+    return updated
+
+
+def notify_analysis_phase(
+    callback: Callable[[str, str, str], None] | None,
+    phase: str,
+    model_route: str = "",
+    trigger_reason: str = "",
+) -> None:
+    """Publish optional live status without allowing telemetry to fail analysis."""
+    if callback is None:
+        return
+    try:
+        callback(phase, model_route, trigger_reason)
+    except Exception:
+        return
 
 
 def normalize_agent_models(value: Any, routes: list[str]) -> dict[str, str]:
@@ -1287,6 +1402,34 @@ def _ollama_request(
     return response
 
 
+def _unload_ollama_model(
+    settings: dict[str, Any],
+    model: str,
+    *,
+    timeout: float,
+) -> None:
+    """Best-effort release after the complete locked multi-turn exchange."""
+    url = str(settings.get("ollama_url") or DEFAULT_OLLAMA_URL).rstrip("/") + "/api/generate"
+    body = json.dumps({
+        "model": model,
+        "stream": False,
+        "keep_alive": 0,
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=max(1.0, min(timeout, 30.0))) as response:
+            response.read(4096)
+    except Exception as exc:
+        # Analysis output is already complete (or its original failure is being
+        # propagated). An unload warning must not discard that durable result.
+        print(f"warning: Ollama model unload failed for {model}: {exc}", file=sys.stderr)
+
+
 def _ollama_chat_for_model_unlocked(
     prompt_package: dict[str, Any],
     args: argparse.Namespace,
@@ -1416,7 +1559,14 @@ def _ollama_chat_for_model(
                 independent_review=independent_review,
             )
         finally:
-            fcntl.flock(lock_handle, fcntl.LOCK_UN)
+            try:
+                _unload_ollama_model(
+                    settings,
+                    model,
+                    timeout=float(getattr(args, "timeout", 30) or 30),
+                )
+            finally:
+                fcntl.flock(lock_handle, fcntl.LOCK_UN)
 
 
 def ollama_chat(prompt_package: dict[str, Any], args: argparse.Namespace, settings: dict[str, Any]) -> dict[str, Any]:
@@ -1697,6 +1847,7 @@ def apply_configured_second_opinion(
     args: argparse.Namespace,
     settings: dict[str, Any],
     agent_role: str,
+    phase_callback: Callable[[str, str, str], None] | None = None,
 ) -> dict[str, Any]:
     """Run an optional independent reviewer while preserving primary success.
 
@@ -1706,6 +1857,7 @@ def apply_configured_second_opinion(
     """
     trigger = second_opinion_trigger(primary_response)
     if not trigger:
+        notify_analysis_phase(phase_callback, "post_processing")
         return primary_response
     route = str((settings.get("agent_second_opinion_models") or {}).get(agent_role) or "").strip()
     if not route:
@@ -1714,12 +1866,23 @@ def apply_configured_second_opinion(
             "trigger": trigger,
             "model_route": "",
         }
+        notify_analysis_phase(
+            phase_callback,
+            "post_processing",
+            trigger_reason=trigger,
+        )
         return primary_response
     reviewer_prompt = Path(
         str(
             prompt_package.get("second_opinion_system_prompt_file")
             or getattr(args, "second_opinion_prompt_file", DEFAULT_SECOND_OPINION_PROMPT_FILE)
         )
+    )
+    notify_analysis_phase(
+        phase_callback,
+        "second_opinion",
+        route,
+        trigger,
     )
     started_monotonic = time.monotonic()
     try:
@@ -1762,6 +1925,12 @@ def apply_configured_second_opinion(
             "runtime_seconds": round(time.monotonic() - started_monotonic, 3),
             "error": f"{type(exc).__name__}: {exc}"[:1000],
         }
+    finally:
+        notify_analysis_phase(
+            phase_callback,
+            "post_processing",
+            trigger_reason=trigger,
+        )
     return primary_response
 
 
@@ -2654,9 +2823,11 @@ def main() -> int:
     response: dict[str, Any] | None = None
     json_path: Path | None = None
     md_path: Path | None = None
+    running_record: dict[str, Any] = {}
     started_at = project_now()
     started_monotonic = time.monotonic()
     run_id = hashlib.sha1(f"{started_at}:{prompt_path or ''}:{os.getpid()}".encode("utf-8")).hexdigest()[:16]
+    active_record_path = active_analysis_record_path(run_id)
     resource_monitor = SystemResourceMonitor()
     status = "failure"
     error = ""
@@ -2697,7 +2868,23 @@ def main() -> int:
             md_path=None,
             resource_monitor=resource_monitor,
         )
-        atomic_write_json(DEFAULT_LLM_CURRENT_FILE, running_record)
+        running_record["runner_pid"] = os.getpid()
+        atomic_write_json(active_record_path, running_record)
+
+        def update_current_phase(
+            phase: str,
+            model_route: str = "",
+            trigger_reason: str = "",
+        ) -> None:
+            nonlocal running_record
+            running_record = publish_current_analysis_phase(
+                running_record,
+                settings,
+                phase=phase,
+                model_route=model_route,
+                trigger_reason=trigger_reason,
+                active_record_path=active_record_path,
+            )
 
         resource_monitor.start()
         monitor_started = True
@@ -2726,7 +2913,10 @@ def main() -> int:
                 args,
                 settings,
                 agent_role,
+                phase_callback=update_current_phase,
             )
+        else:
+            notify_analysis_phase(update_current_phase, "post_processing")
         if agent_role == "incident-responder":
             # Attach collector-owned provenance after every model call. This is
             # deliberately not accepted from model output: only the restricted
@@ -2815,28 +3005,38 @@ def main() -> int:
         error = str(exc)
         raise
     finally:
-        if monitor_started:
-            resource_monitor.stop()
-        finished_at = project_now()
-        runtime_seconds = time.monotonic() - started_monotonic
-        if prompt_path or prompt_package:
-            record = build_llm_log_record(
-                run_id=run_id,
-                status=status,
-                started_at=started_at,
-                finished_at=finished_at,
-                runtime_seconds=runtime_seconds,
-                prompt_path=prompt_path,
-                prompt_package=prompt_package,
-                settings=settings or effective_ai_settings(args),
-                response=response,
-                json_path=json_path,
-                md_path=md_path,
-                resource_monitor=resource_monitor,
-                error=error,
-            )
-            append_jsonl(DEFAULT_LLM_LOG_FILE, record)
-            atomic_write_json(DEFAULT_LLM_CURRENT_FILE, record)
+        try:
+            if monitor_started:
+                resource_monitor.stop()
+            finished_at = project_now()
+            runtime_seconds = time.monotonic() - started_monotonic
+            if prompt_path or prompt_package:
+                record = build_llm_log_record(
+                    run_id=run_id,
+                    status=status,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    runtime_seconds=runtime_seconds,
+                    prompt_path=prompt_path,
+                    prompt_package=prompt_package,
+                    settings=settings or effective_ai_settings(args),
+                    response=response,
+                    json_path=json_path,
+                    md_path=md_path,
+                    resource_monitor=resource_monitor,
+                    error=error,
+                )
+                append_jsonl(DEFAULT_LLM_LOG_FILE, record)
+                # Retain the legacy single-record artifact for rolling upgrades
+                # and last-completed-run consumers. Live state uses per-run files.
+                atomic_write_json(DEFAULT_LLM_CURRENT_FILE, record)
+        finally:
+            try:
+                active_record_path.unlink(missing_ok=True)
+            except OSError:
+                # A stale telemetry record is ignored by the portal's process
+                # check and must not turn a completed analysis into a failure.
+                pass
 
 
 if __name__ == "__main__":

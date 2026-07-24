@@ -37,6 +37,18 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.portal.SOC_ALERT_STORE_API_URL = ""
         self.portal.SOC_ALERT_STATUS_FILE = Path(self.tmp.name) / ".soc_alert_status.json"
         self.portal.SOC_ALERT_STATIC_STATUS_FILE = Path(self.tmp.name) / "soc-alerts-status.json"
+        self.portal.SOC_AI_SETTINGS_FILE = Path(self.tmp.name) / "ai-model-settings.json"
+        self.portal.SOC_AI_SETTINGS_FILE.write_text(
+            json.dumps(self.portal.default_soc_ai_settings()),
+            encoding="utf-8",
+        )
+        self.portal.SOC_ALERT_LLM_ANALYSIS_CURRENT_FILE = (
+            Path(self.tmp.name) / "current-analysis.json"
+        )
+        self.portal.SOC_ALERT_LLM_ANALYSIS_ACTIVE_DIR = (
+            Path(self.tmp.name) / "active-analyses"
+        )
+        self.portal.SOC_ALERT_LLM_ANALYSIS_ACTIVE_DIR.mkdir()
         self.portal.SOC_ALERT_PCAP_WORKFLOW_STATE_FILE = Path(self.tmp.name) / "pcap-workflow-state.json"
         self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR = Path(self.tmp.name) / "pcap-analysis"
         self.portal.SOC_ALERT_PCAP_ARTIFACT_DIR = Path(self.tmp.name) / "pcap-artifacts"
@@ -704,6 +716,70 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["alerts"][0]["ai_status_label"], "Queued")
         self.assertIn("No AI analysis artifact exists", payload["alerts"][0]["ai_status_detail"])
 
+    def test_ai_analysis_threshold_skips_new_low_alerts_but_retains_history(self) -> None:
+        low_group_id = self.insert_summary(
+            "low|Below configured floor|192.0.2.40|198.51.100.40|accepted",
+            "low-alert",
+            "Below configured floor",
+            "low",
+            "2026-07-03  13:00:00Z",
+            1,
+            1,
+        )
+        settings = self.portal.default_soc_ai_settings()
+        settings["soc_analyst_analysis_min_severity"] = "medium"
+        self.portal.SOC_AI_SETTINGS_FILE.write_text(json.dumps(settings), encoding="utf-8")
+        self.conn.commit()
+
+        status, payload = self.portal.soc_alerts_query_response(
+            {"limit": ["10"], "analyst_status": ["open"]}
+        )
+        low_alert = next(
+            alert for alert in payload["alerts"]
+            if alert["representative_alert_id"] == "low-alert"
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(low_alert["ai_status_key"], "not-queued")
+        self.assertEqual(low_alert["ai_status_label"], "Skipped")
+        self.assertIn("Medium automatic AI-analysis minimum", low_alert["ai_status_detail"])
+
+        (self.portal.SOC_ALERT_AI_ANALYSIS_DIR / "low-alert-local-ai-analysis.json").write_text(
+            json.dumps(
+                {
+                    "alert_id": "low-alert",
+                    "generated_at": "2026-07-03  13:01:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.portal.SOC_ALERT_STATIC_STATUS_FILE.write_text(
+            json.dumps(
+                {
+                    "reports": {
+                        low_group_id: {
+                            "ai_status_key": "analyzed",
+                            "ai_status_label": "Analyzed",
+                            "ai_status_detail": "historical analysis artifact",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        status, payload = self.portal.soc_alerts_query_response(
+            {"limit": ["10"], "analyst_status": ["open"]}
+        )
+        low_alert = next(
+            alert for alert in payload["alerts"]
+            if alert["representative_alert_id"] == "low-alert"
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(low_alert["ai_status_key"], "analyzed")
+        self.assertEqual(low_alert["ai_status_label"], "Analyzed")
+
     def test_manual_analyze_queues_fresh_full_group_prompt(self) -> None:
         group_id = self.portal.soc_alert_group_id(
             "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
@@ -1033,6 +1109,269 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["metrics"]["by_analyst_status"]["open"], 2)
         self.assertEqual(payload["metrics"]["by_analyst_status"]["suppressed"], 1)
         self.assertEqual(payload["metrics"]["by_analyst_status"]["total"], payload["counts"]["total"])
+
+    def test_live_ai_activity_shows_primary_codex_model_with_effort(self) -> None:
+        merged = self.portal.merge_live_llm_activity(
+            {
+                "active": False,
+                "label": "AI Alert Triage",
+                "detail": "Idle · Assigned: Ollama · previous-local:latest",
+                "model": "Ollama · previous-local:latest",
+                "provider": "Ollama",
+                "route": "ollama:previous-local:latest",
+                "counts": {"analyzing": 0, "queued": 2},
+            },
+            {
+                "status": "running",
+                "active_phase": "primary_analysis",
+                "active_model": "gpt-5.6-sol",
+                "active_model_path": "frontier-codex-cli",
+                "active_model_route": "codex-cli:gpt-5.6-sol:xhigh",
+                "active_provider": "codex-cli",
+            },
+        )
+
+        self.assertTrue(merged["active"])
+        self.assertEqual(merged["phase"], "primary_analysis")
+        self.assertEqual(merged["provider"], "Codex CLI")
+        self.assertEqual(merged["route"], "codex-cli:gpt-5.6-sol:xhigh")
+        self.assertEqual(merged["model"], "Codex CLI · gpt-5.6-sol (xhigh)")
+        self.assertEqual(
+            merged["detail"],
+            "Analyzing · Running: Codex CLI · gpt-5.6-sol (xhigh)",
+        )
+        self.assertEqual(merged["counts"]["analyzing"], 1)
+        self.assertEqual(merged["counts"]["queued"], 2)
+
+    def test_active_run_files_report_both_concurrent_models(self) -> None:
+        active_records = [
+            {
+                "log_id": "codex-run",
+                "status": "running",
+                "runner_pid": 101,
+                "started_at": "2026-07-24  12:00:00-06:00",
+                "prompt_package": "/tmp/codex-prompt.json",
+                "active_phase": "primary_analysis",
+                "active_model": "gpt-5.6-sol",
+                "active_model_path": "frontier-codex-cli",
+                "active_model_route": "codex-cli:gpt-5.6-sol:high",
+                "active_provider": "codex-cli",
+            },
+            {
+                "log_id": "ollama-run",
+                "status": "running",
+                "runner_pid": 202,
+                "started_at": "2026-07-24  12:00:01-06:00",
+                "prompt_package": "/tmp/ollama-prompt.json",
+                "active_phase": "second_opinion",
+                "active_model": "gemma4:31b",
+                "active_model_path": "ollama",
+                "active_model_route": "ollama:gemma4:31b",
+                "active_provider": "ollama",
+            },
+        ]
+        for record in active_records:
+            (
+                self.portal.SOC_ALERT_LLM_ANALYSIS_ACTIVE_DIR
+                / f"{record['log_id']}.json"
+            ).write_text(json.dumps(record), encoding="utf-8")
+        self.portal.SOC_ALERT_STATIC_STATUS_FILE.write_text(
+            json.dumps({"ai": {"counts": {"analyzing": 0, "queued": 3}}}),
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(
+            self.portal,
+            "llm_analysis_process_commands",
+            return_value=[
+                "101 python /runtime/run-local-ai-analysis.py",
+                "202 python /runtime/run-local-ai-analysis.py",
+            ],
+        ):
+            current = self.portal.read_llm_current_analysis()
+
+        self.assertEqual(current["status"], "running")
+        self.assertEqual(current["active_count"], 2)
+        self.assertEqual(
+            [record["log_id"] for record in current["active_runs"]],
+            ["codex-run", "ollama-run"],
+        )
+        merged = self.portal.merge_live_llm_activity(
+            {"label": "AI Alert Triage", "counts": {"analyzing": 0, "queued": 3}},
+            current,
+        )
+        self.assertTrue(merged["active"])
+        self.assertEqual(merged["phase"], "concurrent")
+        self.assertEqual(merged["counts"]["analyzing"], 2)
+        self.assertEqual(merged["counts"]["queued"], 3)
+        self.assertIn("Codex CLI · gpt-5.6-sol (high)", merged["model"])
+        self.assertIn("Ollama · gemma4:31b", merged["model"])
+        self.assertIn("2 analyses running", merged["detail"])
+
+    def test_stale_active_run_does_not_hide_last_completed_record(self) -> None:
+        self.portal.SOC_ALERT_LLM_ANALYSIS_CURRENT_FILE.write_text(
+            json.dumps(
+                {
+                    "log_id": "completed-run",
+                    "status": "success",
+                    "model": "gpt-5.5",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (
+            self.portal.SOC_ALERT_LLM_ANALYSIS_ACTIVE_DIR
+            / "stale-run.json"
+        ).write_text(
+            json.dumps(
+                {
+                    "log_id": "stale-run",
+                    "status": "running",
+                    "runner_pid": 909,
+                    "prompt_package": "/tmp/reused-prompt.json",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(
+            self.portal,
+            "llm_analysis_process_commands",
+            return_value=[
+                "808 python /runtime/run-local-ai-analysis.py /tmp/reused-prompt.json",
+            ],
+        ):
+            current = self.portal.read_llm_current_analysis()
+
+        self.assertEqual(current["status"], "success")
+        self.assertEqual(current["log_id"], "completed-run")
+        self.assertNotIn("active_runs", current)
+
+    def test_pid_status_supports_runs_without_prompt_path_in_command(self) -> None:
+        commands = ["303 python /runtime/run-local-ai-analysis.py --generate-prompt"]
+
+        self.assertTrue(
+            self.portal.llm_analysis_process_active(
+                "/tmp/generated-prompt.json",
+                commands,
+                303,
+            )
+        )
+        self.assertFalse(
+            self.portal.llm_analysis_process_active(
+                "/tmp/generated-prompt.json",
+                commands,
+                404,
+            )
+        )
+        self.assertTrue(
+            self.portal.llm_analysis_process_active(
+                "/tmp/generated-prompt.json",
+                [
+                    "505 python /runtime/run-local-ai-analysis.py "
+                    "/tmp/generated-prompt.json",
+                ],
+            )
+        )
+
+    def test_event_snapshot_overrides_assigned_codex_with_active_ollama_reviewer(self) -> None:
+        self.portal.SOC_ALERT_STATIC_STATUS_FILE.write_text(
+            json.dumps(
+                {
+                    "ai": {
+                        "active": True,
+                        "label": "AI Alert Triage",
+                        "detail": "Analyzing · Assigned: Codex CLI · gpt-5.5 (medium)",
+                        "model": "Codex CLI · gpt-5.5 (medium)",
+                        "provider": "Codex CLI",
+                        "route": "codex-cli:gpt-5.5:medium",
+                        "counts": {"analyzing": 1, "queued": 0},
+                    },
+                    "reports": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.portal.SOC_ALERT_LLM_ANALYSIS_CURRENT_FILE.write_text(
+            json.dumps(
+                {
+                    "status": "running",
+                    "prompt_package": "/tmp/runtime-review-prompt.json",
+                    "active_phase": "second_opinion",
+                    "active_model": "gemma4:31b",
+                    "active_model_path": "ollama",
+                    "active_model_route": "ollama:gemma4:31b",
+                    "active_provider": "ollama",
+                    "model": "gpt-5.5",
+                    "model_route": "codex-cli:gpt-5.5:medium",
+                    "mode": "codex-cli",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(self.portal, "llm_analysis_process_active", return_value=True):
+            payload = self.portal.soc_alert_events_snapshot()
+
+        self.assertTrue(payload["ai"]["active"])
+        self.assertEqual(payload["ai"]["phase"], "second_opinion")
+        self.assertEqual(payload["ai"]["provider"], "Ollama")
+        self.assertEqual(payload["ai"]["route"], "ollama:gemma4:31b")
+        self.assertEqual(payload["ai"]["model"], "Ollama · gemma4:31b")
+        self.assertEqual(
+            payload["ai"]["detail"],
+            "Second-opinion review · Running: Ollama · gemma4:31b",
+        )
+
+    def test_live_ai_activity_post_processing_claims_no_running_model(self) -> None:
+        merged = self.portal.merge_live_llm_activity(
+            {
+                "active": True,
+                "label": "AI Alert Triage",
+                "model": "Codex CLI · gpt-5.5 (medium)",
+                "counts": {"analyzing": 1},
+            },
+            {
+                "status": "running",
+                "active_phase": "post_processing",
+                "active_model": "",
+                "active_model_path": "",
+                "active_model_route": "",
+                "active_provider": "",
+                "model": "gpt-5.5",
+                "model_route": "codex-cli:gpt-5.5:medium",
+                "mode": "codex-cli",
+            },
+        )
+
+        self.assertTrue(merged["active"])
+        self.assertEqual(merged["phase"], "post_processing")
+        self.assertEqual(merged["provider"], "")
+        self.assertEqual(merged["route"], "")
+        self.assertEqual(merged["model"], "No model running")
+        self.assertEqual(merged["detail"], "Finalizing analysis · No model running")
+
+    def test_live_ai_activity_supports_legacy_running_record(self) -> None:
+        runtime = self.portal.llm_runtime_model_state(
+            {
+                "status": "running",
+                "mode": "codex-cli",
+                "model": "gpt-5.5",
+                "model_path": "frontier-codex-cli",
+                "model_route": "codex-cli:gpt-5.5:medium",
+            }
+        )
+
+        self.assertTrue(runtime["running"])
+        self.assertEqual(runtime["phase"], "primary_analysis")
+        self.assertEqual(runtime["provider"], "Codex CLI")
+        self.assertEqual(runtime["route"], "codex-cli:gpt-5.5:medium")
+        self.assertEqual(runtime["model"], "gpt-5.5")
+        self.assertEqual(runtime["label"], "Codex CLI · gpt-5.5 (medium)")
+        self.assertEqual(
+            runtime["detail"],
+            "Analyzing · Running: Codex CLI · gpt-5.5 (medium)",
+        )
 
     def test_event_snapshot_cache_coalesces_concurrent_browser_clients(self) -> None:
         self.portal.SOC_ALERT_EVENTS_CACHE.clear()

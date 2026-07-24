@@ -131,8 +131,10 @@ The production Incident Responder route is Codex CLI using `gpt-5.5` with
 
 ## Automatic SOC Policy
 
-The Settings page exposes two SOC Analyst policy thresholds:
+The Settings page exposes three independent SOC Analyst policy thresholds:
 
+- **Automatic AI analysis**: the lowest alert severity that automatically
+  queues the assigned SOC Analyst model.
 - **Automatic PCAP analysis**: the lowest alert severity that automatically
   queues a PCAP request.
 - **Automatic Incident Response**: the lowest alert severity that automatically
@@ -140,22 +142,27 @@ The Settings page exposes two SOC Analyst policy thresholds:
 
 Severity order is `informational`, `low`, `medium`, `high`, `critical`. A
 selected threshold includes that severity and every higher severity. Incident
-Response also supports `disabled`.
+Response and automatic AI analysis also support `disabled`.
 
-The policy is stored in the runtime `ai_model_settings.json`, hot-reloaded by
-alert-store, and applied only after a newly inserted alert has committed.
-Suppressed or policy-dropped alerts are not automatically queued. Duplicate
-pending work is coalesced by stable alert group. Manual PCAP requests,
-escalations, and reanalysis remain available independently of these automatic
-thresholds.
+The policy is stored in the runtime `ai_model_settings.json`. Alert-store
+hot-reloads it for new post-commit queue decisions, and the AI scheduler
+re-reads the analysis threshold before each claim. Suppressed or policy-dropped
+alerts are not automatically queued. Duplicate pending work is coalesced by
+stable alert group. Existing below-threshold automatic AI jobs are completed
+without inference when claimed, while prior analysis artifacts remain visible
+as audit history. Manual PCAP requests, escalations, and AI reanalysis remain
+available independently of these automatic thresholds.
 
 Repository defaults are:
 
+- AI analysis threshold: `informational`
 - PCAP threshold: `informational`
 - Incident Response threshold: `disabled`
 
 Runtime operators may choose stricter thresholds without changing or committing
-the live settings file.
+the live settings file. A settings file that predates the AI-analysis control
+keeps the historical `informational` behavior until an operator explicitly
+saves the new threshold.
 
 ## Verification
 

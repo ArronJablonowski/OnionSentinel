@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -176,6 +177,194 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                 next_attempt_at,
             ),
         )
+
+    def run_indexed_worker_once(
+        self,
+        *,
+        severity: str,
+        payload: dict | None = None,
+        job_type: str = "ai_analysis",
+        analysis_threshold: str = "medium",
+    ) -> dict[str, object]:
+        """Run one indexed job through main() with inference boundaries mocked."""
+        self.enable_indexed_scheduler()
+        alert_id = f"{job_type}-{severity}-threshold-alert"
+        group_id = f"{job_type}-{severity}-threshold-group"
+        self.insert_alert(alert_id, severity, "2026-07-24  12:00:00Z", 80)
+        self.set_stable_group(alert_id, group_id)
+        self.insert_indexed_job(
+            group_id,
+            payload=payload,
+            job_type=job_type,
+        )
+        self.conn.commit()
+
+        root = Path(self.tempdir.name)
+        db_path = root / "alerts.sqlite3"
+        disk_conn = sqlite3.connect(db_path)
+        try:
+            self.conn.backup(disk_conn)
+        finally:
+            disk_conn.close()
+
+        settings_path = root / "ai_model_settings.json"
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "soc_analyst_analysis_min_severity": analysis_threshold,
+                }
+            ),
+            encoding="utf-8",
+        )
+        args = SimpleNamespace(
+            db=db_path,
+            prompt_dir=root / "prompts",
+            analysis_dir=root / "analysis",
+            pcap_analysis_dir=root / "pcap-analysis",
+            incident_evidence_dir=root / "incident-evidence",
+            incident_evidence_config=root / "incident-evidence.json",
+            ai_settings_file=settings_path,
+            provider_lane="any",
+            lock_file=root / "worker.lock",
+            wake_file=root / "worker.wake",
+            levels="critical,high,medium,low,informational",
+            hours=87600,
+            max_per_run=1,
+            related_limit=8,
+            correlation_limit=8,
+            correlation_min_score=15,
+            model=None,
+            timeout=30,
+            max_prompt_bytes=1024 * 1024,
+            portal_wake_file=root / "portal.wake",
+            no_portal_refresh=True,
+            alert_store_url="http://127.0.0.1:8787",
+            include_tests=True,
+            dry_run=False,
+        )
+
+        def status_transition(
+            _base_url: str,
+            _group_id: str,
+            status: str,
+            _error: str = "",
+            _lease_token: str = "",
+            *,
+            lease_token: str = "",
+            job_type: str = "ai_analysis",
+        ) -> bool | str:
+            del lease_token, job_type
+            return "threshold-test-lease" if status == "processing" else True
+
+        prompt_path = root / "prompt.json"
+        incident_evidence_path = root / "incident-evidence.json"
+        completed_process = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with (
+            mock.patch.object(self.scheduler, "parse_args", return_value=args),
+            mock.patch.object(self.scheduler, "require_runtime_capacity"),
+            mock.patch.object(self.scheduler, "consume_wake_marker"),
+            mock.patch.object(self.scheduler, "flush_deferred_analysis_results"),
+            mock.patch.object(self.scheduler, "reconcile_worker_state", return_value=0),
+            mock.patch.object(
+                self.scheduler,
+                "report_ai_job_status",
+                side_effect=status_transition,
+            ) as report_status,
+            mock.patch.object(
+                self.scheduler,
+                "collect_incident_evidence",
+                return_value=incident_evidence_path,
+            ) as collect_incident_evidence,
+            mock.patch.object(
+                self.scheduler,
+                "build_prompt",
+                return_value=prompt_path,
+            ) as build_prompt,
+            mock.patch.object(
+                self.scheduler,
+                "run_analysis",
+                return_value=completed_process,
+            ) as run_analysis,
+            mock.patch.object(self.scheduler, "signal_dashboard_refresh"),
+        ):
+            return_code = self.scheduler.main()
+
+        return {
+            "return_code": return_code,
+            "report_status": report_status,
+            "collect_incident_evidence": collect_incident_evidence,
+            "build_prompt": build_prompt,
+            "run_analysis": run_analysis,
+            "group_id": group_id,
+        }
+
+    def test_missing_analysis_threshold_preserves_all_severity_behavior(self) -> None:
+        self.args.ai_settings_file.write_text(
+            json.dumps({"soc_analyst_pcap_min_severity": "medium"}),
+            encoding="utf-8",
+        )
+
+        levels = self.scheduler.configured_analysis_levels(
+            self.args.ai_settings_file,
+            self.args.levels,
+        )
+
+        self.assertEqual(
+            levels,
+            ["critical", "high", "medium", "low", "informational"],
+        )
+
+    def test_pending_automatic_low_job_is_retired_without_inference_at_medium(self) -> None:
+        result = self.run_indexed_worker_once(severity="low")
+
+        self.assertEqual(result["return_code"], 0)
+        result["collect_incident_evidence"].assert_not_called()
+        result["build_prompt"].assert_not_called()
+        result["run_analysis"].assert_not_called()
+        transitions = [
+            (
+                call.args[2],
+                call.kwargs.get("lease_token", ""),
+                call.kwargs.get("job_type"),
+            )
+            for call in result["report_status"].call_args_list
+        ]
+        self.assertEqual(
+            transitions,
+            [
+                ("processing", "", "ai_analysis"),
+                ("completed", "threshold-test-lease", "ai_analysis"),
+            ],
+        )
+
+    def test_automatic_medium_job_runs_at_medium_threshold(self) -> None:
+        result = self.run_indexed_worker_once(severity="medium")
+
+        self.assertEqual(result["return_code"], 0)
+        result["build_prompt"].assert_called_once()
+        result["run_analysis"].assert_called_once()
+
+    def test_manual_analyze_low_job_bypasses_medium_threshold(self) -> None:
+        result = self.run_indexed_worker_once(
+            severity="low",
+            payload={"manual_reanalysis": True},
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["build_prompt"].assert_called_once()
+        result["run_analysis"].assert_called_once()
+
+    def test_incident_responder_low_job_bypasses_medium_threshold(self) -> None:
+        result = self.run_indexed_worker_once(
+            severity="low",
+            payload={"agent_role": "incident-responder"},
+            job_type="incident_response_analysis",
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["collect_incident_evidence"].assert_called_once()
+        result["build_prompt"].assert_called_once()
+        result["run_analysis"].assert_called_once()
 
     def test_indexed_provider_lanes_claim_only_assigned_agent_roles(self) -> None:
         self.enable_indexed_scheduler()

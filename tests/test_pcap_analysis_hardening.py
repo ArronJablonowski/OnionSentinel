@@ -371,7 +371,14 @@ class PcapAnalysisHardeningTest(unittest.TestCase):
         final = {"summary": "final", "pcap_query_requests": [{"operation": "dns", "limit": 1}]}
         args = type("Args", (), {})()
 
-        with mock.patch.object(runner, "_ollama_request", side_effect=[first, final]) as request:
+        with (
+            mock.patch.object(
+                runner,
+                "_ollama_request",
+                side_effect=[first, final],
+            ) as request,
+            mock.patch.object(runner, "_unload_ollama_model"),
+        ):
             response = runner.ollama_chat(package, args, {})
 
         self.assertEqual(request.call_count, 2)

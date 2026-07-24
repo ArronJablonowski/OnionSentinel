@@ -464,6 +464,7 @@ def default_soc_ai_settings() -> dict:
         ],
         'gpt_cli_enabled': False,
         'hybrid_policy': 'cloud_for_critical_high_or_recommended',
+        'soc_analyst_analysis_min_severity': 'informational',
         'soc_analyst_pcap_min_severity': 'informational',
         'soc_analyst_incident_min_severity': 'disabled',
         'agent_models': {
@@ -697,6 +698,7 @@ def load_soc_ai_settings() -> dict:
     settings['cloud_model'] = codex_model
     settings['cloud_command'] = ''
     for setting_key, fallback in (
+        ('soc_analyst_analysis_min_severity', 'informational'),
         ('soc_analyst_pcap_min_severity', 'informational'),
         ('soc_analyst_incident_min_severity', 'disabled'),
     ):
@@ -2027,13 +2029,48 @@ def is_test_alert_id(alert_id: str) -> bool:
     return alert_id.startswith(TEST_ALERT_PREFIXES)
 
 
-def row_is_ai_backlog_eligible(row: sqlite3.Row | dict) -> tuple[bool, str]:
+def severity_meets_analysis_threshold(severity: object, threshold: object) -> bool:
+    levels = ('informational', 'low', 'medium', 'high', 'critical')
+    normalized_severity = str(severity or 'informational').strip().lower()
+    normalized_threshold = str(threshold or 'informational').strip().lower()
+    if normalized_severity == 'info':
+        normalized_severity = 'informational'
+    if normalized_threshold == 'info':
+        normalized_threshold = 'informational'
+    if normalized_threshold == 'disabled':
+        return False
+    if normalized_threshold not in levels:
+        normalized_threshold = 'informational'
+    if normalized_severity not in levels:
+        return False
+    return levels.index(normalized_severity) >= levels.index(normalized_threshold)
+
+
+def row_is_ai_backlog_eligible(
+    row: sqlite3.Row | dict,
+    analysis_min_severity: str = 'informational',
+) -> tuple[bool, str]:
     candidate_ids = candidate_alert_ids_for_row(row)
     if candidate_ids and all(is_test_alert_id(alert_id) for alert_id in candidate_ids):
         return False, 'Test/validation alert is intentionally excluded from automatic assigned-model analysis'
     status = str(row['filter_status'] or 'accepted').strip().lower()
     if status not in AI_ELIGIBLE_FILTER_STATUSES:
         return False, f'Filter status {status or "blank"} is not eligible for automatic assigned-model analysis'
+    triage_level = row_value(row, 'triage_level') or row_value(row, 'severity_label') or 'informational'
+    normalized_level = str(triage_level).strip().lower()
+    if normalized_level == 'info':
+        normalized_level = 'informational'
+    if normalized_level not in {'informational', 'low', 'medium', 'high', 'critical'}:
+        return False, f'Unrecognized severity {normalized_level or "blank"} is not eligible for automatic assigned-model analysis'
+    if not severity_meets_analysis_threshold(triage_level, analysis_min_severity):
+        threshold_label = SOC_ANALYSIS_SEVERITY_LABELS.get(
+            str(analysis_min_severity or '').strip().lower(),
+            'Informational',
+        )
+        return (
+            False,
+            f'Below configured {threshold_label} automatic AI-analysis minimum',
+        )
     return True, 'Queued for the scheduled assigned-model analysis worker'
 
 
@@ -2056,7 +2093,13 @@ def analysis_artifact_mtime(analysis: dict | None) -> float:
         return 0
 
 
-def ai_workflow_status_for_row(row: sqlite3.Row | dict, ai_analysis_by_alert_id: dict[str, dict], ai_prompts_by_alert_id: dict[str, dict], running_ai_alert_ids: set[str]) -> tuple[str, str, str]:
+def ai_workflow_status_for_row(
+    row: sqlite3.Row | dict,
+    ai_analysis_by_alert_id: dict[str, dict],
+    ai_prompts_by_alert_id: dict[str, dict],
+    running_ai_alert_ids: set[str],
+    analysis_min_severity: str = 'informational',
+) -> tuple[str, str, str]:
     candidate_ids = candidate_alert_ids_for_row(row)
     for alert_id in candidate_ids:
         if alert_id in running_ai_alert_ids:
@@ -2083,7 +2126,7 @@ def ai_workflow_status_for_row(row: sqlite3.Row | dict, ai_analysis_by_alert_id:
         prompt = max(prompts, key=lambda item: float(item.get('_prompt_mtime') or 0))
         generated_at = prompt.get('generated_at') or 'queued'
         return ('queued', 'Queued', normalize_iso_display_text(f'{prompt.get("_prompt_filename") or "prompt package"} at {generated_at}'))
-    eligible, reason = row_is_ai_backlog_eligible(row)
+    eligible, reason = row_is_ai_backlog_eligible(row, analysis_min_severity)
     if not eligible:
         return ('not-queued', 'Skipped', reason)
     # The scheduled AI worker treats every eligible unique grouped alert as
@@ -2880,6 +2923,7 @@ def report_from_sqlite_row(
     ai_prompts_by_alert_id: dict[str, dict],
     running_ai_alert_ids: set[str],
     pcap_index: dict[str, set[str]] | None = None,
+    ai_analysis_min_severity: str = 'informational',
 ) -> AlertReport:
     # One SQLite row becomes one UI row. Matching Markdown is optional; suppressed
     # and dropped records often have no Markdown by design.
@@ -2898,7 +2942,13 @@ def report_from_sqlite_row(
         for action in (ai_response.get('recommended_tuning_actions') if isinstance(ai_response.get('recommended_tuning_actions'), list) else [])
         if str(action).strip()
     ]
-    ai_status_key, ai_status_label, ai_status_detail = ai_workflow_status_for_row(row, ai_analysis_by_alert_id, ai_prompts_by_alert_id, running_ai_alert_ids)
+    ai_status_key, ai_status_label, ai_status_detail = ai_workflow_status_for_row(
+        row,
+        ai_analysis_by_alert_id,
+        ai_prompts_by_alert_id,
+        running_ai_alert_ids,
+        ai_analysis_min_severity,
+    )
     enrichment_status_key, enrichment_status_label, enrichment_status_detail, enrichment_record_count, enrichment_skip_count, enrichment_error_count = public_enrichment_status(row['enrichment_json'])
     pcap_status = pcap_status_for_row(row, pcap_index)
     pcap_status_key, pcap_status_label, pcap_status_detail = pcap_status
@@ -3171,7 +3221,22 @@ def load_reports() -> list[AlertReport]:
     running_ai_alert_ids = running_ai_prompt_alert_ids(ai_prompts_by_alert_id)
     pcap_index = pcap_analysis_index()
     pcap_index.update(pcap_request_index)
-    reports = [report_from_sqlite_row(row, markdown_by_alert_id, ai_analysis_by_alert_id, ai_prompts_by_alert_id, running_ai_alert_ids, pcap_index) for row in aggregated_rows]
+    ai_analysis_min_severity = str(
+        load_soc_ai_settings().get('soc_analyst_analysis_min_severity')
+        or 'informational'
+    )
+    reports = [
+        report_from_sqlite_row(
+            row,
+            markdown_by_alert_id,
+            ai_analysis_by_alert_id,
+            ai_prompts_by_alert_id,
+            running_ai_alert_ids,
+            pcap_index,
+            ai_analysis_min_severity,
+        )
+        for row in aggregated_rows
+    ]
     return sorted(reports, key=lambda r: (r.criticality_rank, r.mtime, r.title.lower()), reverse=True)
 
 def human_size(num: int) -> str:
@@ -3681,8 +3746,15 @@ REPORTS_PAGE_ASSETS = '''
     const queue = document.querySelector('#llm-current-queue');
     if (title) title.textContent = running ? (alert.rule_name || 'Analyzing Security Onion alert') : 'No active AI analysis';
     if (route) route.textContent = running ? `${alert.source_ip || ''} > ${alert.destination_ip || ''}${alert.destination_port ? ' : ' + alert.destination_port : ''}`.trim() : 'Idle';
-    if (currentStatus) { currentStatus.textContent = running ? 'Analyzing now' : 'Idle'; currentStatus.className = `llm-status-badge ${running ? 'running' : 'unknown'}`; }
-    if (model) model.textContent = current?.model || 'n/a';
+    const activePhase = String(current?.active_phase || 'primary_analysis');
+    const activeModel = Object.prototype.hasOwnProperty.call(current || {}, 'active_model')
+      ? String(current?.active_model || '')
+      : String(current?.model || '');
+    const phaseLabel = activePhase === 'second_opinion'
+      ? 'Second-opinion review'
+      : activePhase === 'post_processing' ? 'Finalizing' : 'Analyzing now';
+    if (currentStatus) { currentStatus.textContent = running ? phaseLabel : 'Idle'; currentStatus.className = `llm-status-badge ${running ? 'running' : 'unknown'}`; }
+    if (model) model.textContent = running ? (activeModel || 'No model running') : (current?.model || 'n/a');
     if (started) started.textContent = current?.started_at || 'n/a';
     if (currentRuntime) renderCurrentRuntime();
     if (count) count.textContent = alert.alert_count || '0';
@@ -4668,6 +4740,24 @@ function updateSuppressionDialogState(){{const length=(suppressReasonInput?.valu
 }})();
 </script><script>
 (() => {{
+  // The generated JSON is a resilience fallback. Once the live event stream is
+  // connected, do not let its slower assigned-model snapshot overwrite the
+  // exact primary/reviewer phase reported by the running worker.
+  const dashboardFetch = window.fetch.bind(window);
+  window.fetch = (input, init) => {{
+    const rawUrl = typeof input === 'string' ? input : String(input?.url || '');
+    const requestUrl = new URL(rawUrl, window.location.href);
+    if (
+      window.__socEventsConnected
+      && requestUrl.pathname.endsWith('/soc-alerts-status.json')
+    ) {{
+      return Promise.resolve(new Response('', {{status: 503}}));
+    }}
+    return dashboardFetch(input, init);
+  }};
+}})();
+</script><script>
+(() => {{
   const headingText = node => String(node?.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
   const nearestSection = node => node?.closest?.('details,.detail-report-section') || node;
   function normalizeDetailSectionOrder(root) {{
@@ -5628,14 +5718,19 @@ def settings_page_section() -> str:
         'cyber-threat-intel': agent_model_control(ai_settings, 'cyber-threat-intel', 'Cyber Threat Intel Analyst'),
         'threat-hunter': agent_model_control(ai_settings, 'threat-hunter', 'Threat Hunter'),
     }
+    analysis_min_severity = str(
+        ai_settings.get('soc_analyst_analysis_min_severity') or 'informational'
+    )
     pcap_min_severity = str(
         ai_settings.get('soc_analyst_pcap_min_severity') or 'informational'
     )
     incident_min_severity = str(
         ai_settings.get('soc_analyst_incident_min_severity') or 'disabled'
     )
+    analysis_threshold_options = severity_threshold_options(analysis_min_severity)
     pcap_threshold_options = severity_threshold_options(pcap_min_severity)
     incident_threshold_options = severity_threshold_options(incident_min_severity)
+    analysis_threshold_label = SOC_ANALYSIS_SEVERITY_LABELS[analysis_min_severity]
     pcap_threshold_label = SOC_ANALYSIS_SEVERITY_LABELS[pcap_min_severity]
     incident_threshold_label = SOC_ANALYSIS_SEVERITY_LABELS[incident_min_severity]
     agent_prompt_controls = {
@@ -5790,6 +5885,7 @@ def settings_page_section() -> str:
               <span class="settings-trigger-line">Trigger: new eligible alert; scheduled AI worker drains highest severity newest first.</span>
               <span class="settings-model-line"><b>Model</b><span data-agent-model="soc-analyst">{agent_model_labels['soc-analyst']}</span></span>
               <span class="settings-model-line settings-second-opinion-line"><b>Second opinion</b><span data-agent-second-opinion-model="soc-analyst">{agent_second_opinion_model_labels['soc-analyst']}</span></span>
+              <span class="settings-model-line"><b>Analysis</b><span data-soc-policy-label="analysis">{analysis_threshold_label if analysis_min_severity != 'disabled' else 'Disabled'}{'' if analysis_min_severity == 'disabled' else ' and higher'}</span></span>
               <span class="settings-model-line"><b>PCAP</b><span data-soc-policy-label="pcap">{pcap_threshold_label} and higher</span></span>
               <span class="settings-model-line"><b>Incident</b><span data-soc-policy-label="incident">{incident_threshold_label if incident_min_severity != 'disabled' else 'Disabled'}</span></span>
             </span>
@@ -5813,7 +5909,12 @@ def settings_page_section() -> str:
             <h3 id="soc-analyst-automation-title">Evidence and escalation</h3>
             <p>The selected severity and every higher severity use the same automatic action.</p>
           </div>
-          <div class="settings-grid settings-grid-two">
+          <div class="settings-grid">
+            <label class="settings-field">Lowest severity for automatic AI analysis
+              <select id="soc-analyst-analysis-min-severity">
+                {analysis_threshold_options}
+              </select>
+            </label>
             <label class="settings-field">Lowest severity for automatic PCAP analysis
               <select id="soc-analyst-pcap-min-severity">
                 {pcap_threshold_options}
@@ -6107,6 +6208,7 @@ SETTINGS_PAGE_JS = '''
   const codexCliModels = document.querySelector('#ai-codex-cli-models');
   const codexCliCatalog = ['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
   const hybridPolicy = document.querySelector('#ai-hybrid-policy');
+  const socAnalysisMinSeverity = document.querySelector('#soc-analyst-analysis-min-severity');
   const socPcapMinSeverity = document.querySelector('#soc-analyst-pcap-min-severity');
   const socIncidentMinSeverity = document.querySelector('#soc-analyst-incident-min-severity');
   const saveSocPolicyButton = document.querySelector('#save-soc-analyst-policy');
@@ -6190,11 +6292,13 @@ SETTINGS_PAGE_JS = '''
     };
     return labels[normalized] ? `${labels[normalized]} and higher` : 'Invalid policy';
   }
-  function syncSocPolicyLabels(pcapThreshold, incidentThreshold) {
+  function syncSocPolicyLabels(analysisThreshold, pcapThreshold, incidentThreshold) {
     socPolicyLabels.forEach(element => {
       const policy = element.dataset.socPolicyLabel || '';
       element.textContent = severityThresholdLabel(
-        policy === 'pcap' ? pcapThreshold : incidentThreshold
+        policy === 'analysis'
+          ? analysisThreshold
+          : policy === 'pcap' ? pcapThreshold : incidentThreshold
       );
     });
   }
@@ -6468,6 +6572,7 @@ SETTINGS_PAGE_JS = '''
       codex_cli_models: codexModels,
       gpt_cli_enabled: gptEnabled,
       hybrid_policy: hybridPolicy?.value || 'cloud_for_critical_high_or_recommended',
+      soc_analyst_analysis_min_severity: socAnalysisMinSeverity?.value || 'informational',
       soc_analyst_pcap_min_severity: socPcapMinSeverity?.value || 'informational',
       soc_analyst_incident_min_severity: socIncidentMinSeverity?.value || 'disabled',
       maxmind_geoip_asn_db_path: maxmindGeoIpPaths.asn?.value.trim() || maxmindGeoIpDefaults.asn,
@@ -6502,6 +6607,9 @@ SETTINGS_PAGE_JS = '''
         }];
     renderCodexCliModels(codexEntries);
     if (hybridPolicy) hybridPolicy.value = settings.hybrid_policy || 'cloud_for_critical_high_or_recommended';
+    if (socAnalysisMinSeverity) {
+      socAnalysisMinSeverity.value = settings.soc_analyst_analysis_min_severity || 'informational';
+    }
     if (socPcapMinSeverity) {
       socPcapMinSeverity.value = settings.soc_analyst_pcap_min_severity || 'informational';
     }
@@ -6509,6 +6617,7 @@ SETTINGS_PAGE_JS = '''
       socIncidentMinSeverity.value = settings.soc_analyst_incident_min_severity || 'disabled';
     }
     syncSocPolicyLabels(
+      settings.soc_analyst_analysis_min_severity || 'informational',
       settings.soc_analyst_pcap_min_severity || 'informational',
       settings.soc_analyst_incident_min_severity || 'disabled'
     );
@@ -6672,7 +6781,8 @@ SETTINGS_PAGE_JS = '''
     }
     const thresholds = ['disabled', 'critical', 'high', 'medium', 'low', 'informational'];
     if (
-      !thresholds.includes(payload.soc_analyst_pcap_min_severity)
+      !thresholds.includes(payload.soc_analyst_analysis_min_severity)
+      || !thresholds.includes(payload.soc_analyst_pcap_min_severity)
       || !thresholds.includes(payload.soc_analyst_incident_min_severity)
     ) {
       return 'SOC Analyst automation severity threshold is invalid.';
@@ -6850,9 +6960,10 @@ SETTINGS_PAGE_JS = '''
   saveAiButton?.addEventListener('click', saveAiSettings);
   saveMaxmindButton?.addEventListener('click', saveMaxmindSettings);
   saveSocPolicyButton?.addEventListener('click', saveSocPolicySettings);
-  [socPcapMinSeverity, socIncidentMinSeverity].forEach(select => {
+  [socAnalysisMinSeverity, socPcapMinSeverity, socIncidentMinSeverity].forEach(select => {
     select?.addEventListener('change', () => {
       syncSocPolicyLabels(
+        socAnalysisMinSeverity?.value || 'informational',
         socPcapMinSeverity?.value || 'informational',
         socIncidentMinSeverity?.value || 'disabled'
       );

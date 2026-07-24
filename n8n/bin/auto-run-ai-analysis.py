@@ -201,6 +201,45 @@ def cli_agent_roles(settings_path: Path) -> set[str]:
     return cli_roles
 
 
+def configured_analysis_levels(settings_path: Path, configured_levels: str) -> list[str]:
+    """Return the launch allowlist constrained by the saved automatic AI floor.
+
+    The scheduler argument remains a deployment-level ceiling. Settings can
+    raise the floor at runtime without editing or reloading the launchd plist.
+    Older settings files retain the historical all-severity analysis behavior
+    until the operator explicitly saves the new control.
+    """
+    requested = [
+        level.strip().lower()
+        for level in str(configured_levels or "").split(",")
+        if level.strip().lower() in SEVERITY_PRIORITY
+    ]
+    try:
+        if not settings_path.is_file() or settings_path.stat().st_size > MAX_AI_SETTINGS_BYTES:
+            raw = {}
+        else:
+            raw = json.loads(settings_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raw = {}
+    except (OSError, ValueError, TypeError):
+        raw = {}
+    threshold = str(
+        raw.get("soc_analyst_analysis_min_severity", "informational") or ""
+    ).strip().lower()
+    if threshold == "info":
+        threshold = "informational"
+    if threshold == "disabled":
+        return []
+    if threshold not in SEVERITY_PRIORITY:
+        threshold = "informational"
+    highest_allowed_index = SEVERITY_PRIORITY.index(threshold)
+    return [
+        level
+        for level in SEVERITY_PRIORITY[: highest_allowed_index + 1]
+        if level in requested
+    ]
+
+
 def provider_lane_sql(args: argparse.Namespace) -> tuple[str, list[object]]:
     """Build an allowlisted SQL predicate for the selected provider lane."""
     provider_lane = str(getattr(args, "provider_lane", "any") or "any")
@@ -834,6 +873,7 @@ def select_next_alert_indexed(
                 SELECT 1 FROM durable_jobs AS existing
                 WHERE existing.job_type = 'ai_analysis'
                   AND existing.dedupe_key = r.stable_group_id
+                  AND existing.status != 'completed'
               )
               AND NOT EXISTS (
                 SELECT 1 FROM ai_analysis_runs AS ar
@@ -1264,6 +1304,7 @@ def reconcile_worker_state(args: argparse.Namespace, indexed_mode: bool) -> int:
 
 def main() -> int:
     args = parse_args()
+    launch_levels = args.levels
     require_runtime_capacity(args.analysis_dir, 0, label="AI analysis")
     if not args.db.exists():
         print(f"{project_now()} SQLite DB not found: {args.db}", file=sys.stderr)
@@ -1309,6 +1350,14 @@ def main() -> int:
         analyzed_count = 0
         attempted_count = 0
         while args.max_per_run == 0 or attempted_count < args.max_per_run:
+            allowed_analysis_levels = configured_analysis_levels(
+                args.ai_settings_file,
+                launch_levels,
+            )
+            # A sentinel keeps the indexed query able to claim and retire
+            # pre-upgrade automatic jobs while excluding every legacy
+            # non-durable candidate when automation is disabled.
+            args.levels = ",".join(allowed_analysis_levels or ["__disabled__"])
             # Re-query before every selection so newly arrived higher-severity
             # alerts take priority over any lower-severity backlog.
             print(f"{project_now()} checking highest-priority unanalyzed alert queue", flush=True)
@@ -1343,6 +1392,20 @@ def main() -> int:
                 if "durable_job_type" in selected.keys()
                 else "ai_analysis"
             )
+            job_payload = durable_payload(selected)
+            durable_intent = bool(
+                selected["has_durable_intent"]
+                if "has_durable_intent" in selected.keys()
+                else False
+            )
+            automatic_analysis_below_floor = (
+                indexed_mode
+                and durable_intent
+                and durable_job_type == "ai_analysis"
+                and job_payload.get("manual_reanalysis") is not True
+                and str(selected["triage_level"] or "").strip().lower()
+                not in set(allowed_analysis_levels)
+            )
             attempted_count += 1
             print(
                 json.dumps(
@@ -1376,13 +1439,22 @@ def main() -> int:
                 processing_lease_token = (
                     processing_transition if isinstance(processing_transition, str) else ""
                 )
-                durable_intent = bool(
-                    selected["has_durable_intent"]
-                    if "has_durable_intent" in selected.keys()
-                    else False
-                )
                 if indexed_mode and durable_intent and not processing_recorded:
                     raise RuntimeError("durable AI job disappeared before its processing lease was recorded")
+                if automatic_analysis_below_floor:
+                    report_ai_job_status(
+                        args.alert_store_url,
+                        selected_group_id,
+                        "completed",
+                        lease_token=processing_lease_token,
+                        job_type=durable_job_type,
+                    )
+                    print(
+                        f"{project_now()} skipped automatic AI analysis for "
+                        f"{selected['triage_level']} group below configured threshold",
+                        flush=True,
+                    )
+                    continue
                 def renew_processing_lease() -> None:
                     renewed = report_ai_job_status(
                         args.alert_store_url,
@@ -1409,7 +1481,7 @@ def main() -> int:
                     build_prompt(
                         alert_id,
                         args,
-                        durable_payload(selected),
+                        job_payload,
                         incident_evidence_path=incident_evidence_path,
                     )
                     if indexed_mode

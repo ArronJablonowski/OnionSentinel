@@ -292,6 +292,37 @@ class SocSettingsPromptApiTest(unittest.TestCase):
         self.assertEqual(settings["maxmind_geoip_city_db_path"], str(database))
         self.assertNotIn("maxmind_geoip_db_path", settings)
 
+    def test_ai_analysis_threshold_is_independent_from_pcap(self) -> None:
+        legacy = self.portal.default_soc_ai_settings()
+        legacy.pop("soc_analyst_analysis_min_severity")
+        legacy["soc_analyst_pcap_min_severity"] = "medium"
+
+        ok, migrated = self.portal.normalize_soc_ai_settings(legacy)
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            migrated["soc_analyst_analysis_min_severity"],
+            "informational",
+        )
+        self.assertEqual(migrated["soc_analyst_pcap_min_severity"], "medium")
+
+        migrated["soc_analyst_analysis_min_severity"] = "high"
+        migrated["soc_analyst_pcap_min_severity"] = "low"
+        ok, independent = self.portal.normalize_soc_ai_settings(migrated)
+
+        self.assertTrue(ok)
+        self.assertEqual(independent["soc_analyst_analysis_min_severity"], "high")
+        self.assertEqual(independent["soc_analyst_pcap_min_severity"], "low")
+
+    def test_ai_settings_reject_invalid_analysis_threshold(self) -> None:
+        settings = self.portal.default_soc_ai_settings()
+        settings["soc_analyst_analysis_min_severity"] = "everything"
+
+        ok, payload = self.portal.normalize_soc_ai_settings(settings)
+
+        self.assertFalse(ok)
+        self.assertIn("automatic AI analysis severity threshold", payload["error"])
+
     def test_ai_settings_reject_unsafe_or_non_mmdb_geoip_paths(self) -> None:
         for database_type in ("asn", "city", "country"):
             for configured in ("relative.mmdb", "/tmp/database.dat", "/tmp/bad\nname.mmdb"):

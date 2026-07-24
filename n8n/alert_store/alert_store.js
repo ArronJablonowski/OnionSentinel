@@ -2866,18 +2866,22 @@ async function storeAlert(rawAlert) {
         const groupKey = stored.alert.stable_group_key || alertGroupKeyFromRow(stored.alert);
         const groupId = stored.alert.stable_group_id || alertGroupId(groupKey);
         const level = String(stored.alert.triage_level || 'informational').toLowerCase();
-        await durableJobs.enqueue('ai_analysis', groupId, {
-          group_id: groupId,
-          group_key: groupKey,
-          representative_alert_id: stored.alert.alert_id,
-        }, {priority: severityRank[level] ?? 0, maxAttempts: 8});
-        await pipelineMetrics.record('ai_analysis', 'enqueued', groupId, {
-          eventKey: `ai_analysis:enqueued:${groupId}:${stored.alert.seen_count || 1}`,
-        });
-        // Enrichment normally finishes in seconds. Let that committed evidence
-        // wake AI first so the initial prompt includes it; launchd's interval
-        // remains the bounded fallback if enrichment is delayed or unavailable.
-        wakeAiAfterCommit = !enrichmentQueued || stored.incident?.status === 'queued';
+        if (socAnalysisPolicy.matchesAnalysis(level)) {
+          await durableJobs.enqueue('ai_analysis', groupId, {
+            group_id: groupId,
+            group_key: groupKey,
+            representative_alert_id: stored.alert.alert_id,
+          }, {priority: severityRank[level] ?? 0, maxAttempts: 8});
+          await pipelineMetrics.record('ai_analysis', 'enqueued', groupId, {
+            eventKey: `ai_analysis:enqueued:${groupId}:${stored.alert.seen_count || 1}`,
+          });
+          // Enrichment normally finishes in seconds. Let that committed
+          // evidence wake AI first; launchd remains the bounded fallback.
+          wakeAiAfterCommit = !enrichmentQueued;
+        }
+        // Automatic incident response owns a separate threshold and still
+        // needs the worker even when base SOC analysis is below its floor.
+        wakeAiAfterCommit = wakeAiAfterCommit || stored.incident?.status === 'queued';
       }
       await pipelineMetrics.record('alert_ingest', 'completed', stored.alert?.alert_id || 'unknown', {
         eventKey: `alert_ingest:completed:${stored.alert?.alert_id || 'unknown'}:${stored.alert?.seen_count || 1}`,
@@ -3193,15 +3197,17 @@ async function drainEnrichmentJobs() {
           const groupKey = updatedRow.stable_group_key || alertGroupKeyFromRow(updatedRow);
           const groupId = updatedRow.stable_group_id || alertGroupId(groupKey);
           const level = String(updatedRow.triage_level || 'informational').toLowerCase();
-          await durableJobs.enqueue('ai_analysis', groupId, {
-            group_id: groupId,
-            group_key: groupKey,
-            representative_alert_id: updatedRow.alert_id,
-          }, {priority: severityRank[level] ?? 0, maxAttempts: 8});
-          await pipelineMetrics.record('ai_analysis', 'enqueued', groupId, {
-            eventKey: `ai_analysis:enqueued:${groupId}:enrichment:${job.id}:${job.attempt_count}`,
-          });
-          wakeAi = true;
+          if (socAnalysisPolicy.matchesAnalysis(level)) {
+            await durableJobs.enqueue('ai_analysis', groupId, {
+              group_id: groupId,
+              group_key: groupKey,
+              representative_alert_id: updatedRow.alert_id,
+            }, {priority: severityRank[level] ?? 0, maxAttempts: 8});
+            await pipelineMetrics.record('ai_analysis', 'enqueued', groupId, {
+              eventKey: `ai_analysis:enqueued:${groupId}:enrichment:${job.id}:${job.attempt_count}`,
+            });
+            wakeAi = true;
+          }
         }
         const completed = await durableJobs.complete(job);
         if (completed) {
@@ -4753,7 +4759,11 @@ async function completePcapAnalysis(payload) {
     sizeBytes: row?.artifact_size_bytes || 0,
   });
   let wakeAiAnalysis = false;
-  if (status === 'completed' && row?.queue_group_id) {
+  if (
+    status === 'completed'
+    && row?.queue_group_id
+    && socAnalysisPolicy.matchesAnalysis(row.triage_level)
+  ) {
     const groupId = String(row.queue_group_id);
     const groupKey = String(row.queue_group_key || groupId);
     const level = String(row.triage_level || 'informational').toLowerCase();

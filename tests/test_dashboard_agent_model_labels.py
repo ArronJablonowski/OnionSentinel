@@ -161,6 +161,96 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
         self.assertNotIn("appendCodexCliModel", script)
         self.assertNotIn("addCodexCliModelButton", script)
 
+    def test_soc_automation_section_has_independent_analysis_threshold(self) -> None:
+        settings = {
+            **self.builder.default_soc_ai_settings(),
+            "soc_analyst_analysis_min_severity": "medium",
+            "soc_analyst_pcap_min_severity": "high",
+            "soc_analyst_incident_min_severity": "disabled",
+        }
+        with (
+            mock.patch.object(self.builder, "load_soc_ai_settings", return_value=settings),
+            mock.patch.object(self.builder, "list_ollama_models", return_value=["devstral:latest"]),
+        ):
+            rendered = self.builder.settings_page_section()
+
+        self.assertIn("Lowest severity for automatic AI analysis", rendered)
+        self.assertIn('id="soc-analyst-analysis-min-severity"', rendered)
+        self.assertIn('data-soc-policy-label="analysis">Medium and higher</span>', rendered)
+        analysis_select = rendered.split(
+            'id="soc-analyst-analysis-min-severity"',
+            1,
+        )[1].split("</select>", 1)[0]
+        self.assertIn('<option value="medium" selected>Medium</option>', analysis_select)
+        self.assertIn(
+            "soc_analyst_analysis_min_severity: socAnalysisMinSeverity?.value",
+            self.builder.SETTINGS_PAGE_JS,
+        )
+
+    def test_ai_status_applies_threshold_only_to_unanalyzed_automatic_work(self) -> None:
+        row = {
+            "alert_id": "low-alert",
+            "filter_status": "accepted",
+            "triage_level": "low",
+        }
+
+        status = self.builder.ai_workflow_status_for_row(
+            row,
+            {},
+            {},
+            set(),
+            "medium",
+        )
+        self.assertEqual(status[0], "not-queued")
+        self.assertEqual(status[1], "Skipped")
+        self.assertIn("Medium automatic AI-analysis minimum", status[2])
+
+        historical = self.builder.ai_workflow_status_for_row(
+            row,
+            {
+                "low-alert": {
+                    "generated_at": "2026-07-24  12:00:00Z",
+                    "response": {"_analysis_model": "historical-model"},
+                }
+            },
+            {},
+            set(),
+            "medium",
+        )
+        self.assertEqual(historical[0], "analyzed")
+        self.assertEqual(historical[1], "Analyzed")
+
+        manual = self.builder.ai_workflow_status_for_row(
+            row,
+            {},
+            {
+                "low-alert": {
+                    "generated_at": "2026-07-24  12:01:00Z",
+                    "_prompt_mtime": 1.0,
+                    "_prompt_filename": "manual-prompt.json",
+                }
+            },
+            set(),
+            "medium",
+        )
+        self.assertEqual(manual[0], "queued")
+        self.assertEqual(manual[1], "Queued")
+
+        unknown = self.builder.ai_workflow_status_for_row(
+            {
+                "alert_id": "unknown-alert",
+                "filter_status": "accepted",
+                "triage_level": "mystery",
+            },
+            {},
+            {},
+            set(),
+            "informational",
+        )
+        self.assertEqual(unknown[0], "not-queued")
+        self.assertEqual(unknown[1], "Skipped")
+        self.assertIn("Unrecognized severity mystery", unknown[2])
+
     def test_only_enabled_codex_model_entries_appear_in_agent_selectors(self) -> None:
         settings = {
             **self.builder.default_soc_ai_settings(),
@@ -240,6 +330,10 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
         self.assertIn("Assigned AI triage", flow)
         self.assertIn("<strong>Codex CLI</strong><em>gpt-5.6-sol (high)</em>", flow)
         self.assertNotIn("<strong>Ollama</strong><em>previous-local:latest</em>", flow)
+        self.assertIn(
+            "requestUrl.pathname.endsWith('/soc-alerts-status.json')",
+            self.builder.build_html([]),
+        )
 
     def test_saved_settings_refresh_role_specific_controls(self) -> None:
         script = self.builder.SETTINGS_PAGE_JS

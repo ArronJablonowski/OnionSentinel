@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import datetime as dt
+import heapq
 import hashlib
 import hmac
 import html
@@ -75,6 +76,9 @@ SOC_ALERT_AI_PROMPT_BUILDER = HOME / "n8n-local" / "bin" / "build-ai-investigati
 SOC_ALERT_LLM_ANALYSIS_LOG_DIR = HOME / "n8n-local" / "soc-alerts" / "llm-analysis-logs"
 SOC_ALERT_LLM_ANALYSIS_LOG_FILE = SOC_ALERT_LLM_ANALYSIS_LOG_DIR / "llm-analysis-log.jsonl"
 SOC_ALERT_LLM_ANALYSIS_CURRENT_FILE = SOC_ALERT_LLM_ANALYSIS_LOG_DIR / "current-analysis.json"
+SOC_ALERT_LLM_ANALYSIS_ACTIVE_DIR = SOC_ALERT_LLM_ANALYSIS_LOG_DIR / "active"
+SOC_ALERT_LLM_ANALYSIS_RECORD_MAX_BYTES = 256 * 1024
+SOC_ALERT_LLM_ANALYSIS_ACTIVE_LIMIT = 16
 SOC_ALERT_LLM_ANALYSIS_LOG_INDEX = JsonlLogIndex(SOC_ALERT_LLM_ANALYSIS_LOG_FILE)
 SOC_ANALYST_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system_prompt.md"
 SIEM_ENGINEER_PROMPT_FILE = HOME / "n8n-local" / "config" / "siem_engineer_system_prompt.md"
@@ -1350,6 +1354,13 @@ CODEX_CLI_MODEL_CATALOG = (
 SOC_ANALYSIS_SEVERITY_THRESHOLDS = frozenset(
     {"disabled", "critical", "high", "medium", "low", "informational"}
 )
+SOC_ANALYSIS_SEVERITY_ORDER = (
+    "informational",
+    "low",
+    "medium",
+    "high",
+    "critical",
+)
 
 
 def default_soc_ai_settings() -> dict:
@@ -1372,6 +1383,9 @@ def default_soc_ai_settings() -> dict:
         ],
         "gpt_cli_enabled": False,
         "hybrid_policy": "cloud_for_critical_high_or_recommended",
+        # Automatic base analysis is independently configurable from evidence
+        # collection and case creation.
+        "soc_analyst_analysis_min_severity": "informational",
         # Preserve the deployed all-alert PCAP policy unless an operator
         # deliberately raises the floor in Settings.
         "soc_analyst_pcap_min_severity": "informational",
@@ -1676,6 +1690,7 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
         settings["agent_models"],
     )
     for setting_key, label in (
+        ("soc_analyst_analysis_min_severity", "automatic AI analysis"),
         ("soc_analyst_pcap_min_severity", "PCAP analysis"),
         ("soc_analyst_incident_min_severity", "incident escalation"),
     ):
@@ -5879,13 +5894,101 @@ def current_llm_queue_size() -> int:
         return 0
 
 
+def read_bounded_llm_analysis_record(path: Path) -> dict:
+    """Read one trusted local status record without accepting unbounded input."""
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(SOC_ALERT_LLM_ANALYSIS_RECORD_MAX_BYTES + 1)
+        if len(raw) > SOC_ALERT_LLM_ANALYSIS_RECORD_MAX_BYTES:
+            return {}
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def active_llm_analysis_record_paths() -> list[Path]:
+    """Return a bounded newest-first set of regular per-run status files."""
+    newest: list[tuple[int, str, Path]] = []
+    try:
+        with os.scandir(SOC_ALERT_LLM_ANALYSIS_ACTIVE_DIR) as entries:
+            for entry in entries:
+                if not entry.name.endswith(".json") or not entry.is_file(follow_symlinks=False):
+                    continue
+                try:
+                    mtime_ns = entry.stat(follow_symlinks=False).st_mtime_ns
+                except OSError:
+                    continue
+                item = (mtime_ns, entry.name, Path(entry.path))
+                if len(newest) < SOC_ALERT_LLM_ANALYSIS_ACTIVE_LIMIT:
+                    heapq.heappush(newest, item)
+                elif item[:2] > newest[0][:2]:
+                    heapq.heapreplace(newest, item)
+    except OSError:
+        return []
+    return [item[2] for item in sorted(newest, reverse=True)]
+
+
+def read_active_llm_analyses() -> list[dict]:
+    """Read only live per-run records, using one bounded process snapshot."""
+    records = [
+        record
+        for path in active_llm_analysis_record_paths()
+        if (record := read_bounded_llm_analysis_record(path))
+        and record.get("status") == "running"
+    ]
+    if not records:
+        return []
+    commands = llm_analysis_process_commands()
+    active = [
+        record
+        for record in records
+        if llm_analysis_process_active(
+            str(record.get("prompt_package") or ""),
+            commands,
+            record.get("runner_pid"),
+        )
+    ]
+    active.sort(key=lambda record: (
+        str(record.get("started_at") or ""),
+        str(record.get("log_id") or ""),
+    ))
+    return active
+
+
 def read_llm_current_analysis() -> dict:
     queue_size = current_llm_queue_size()
-    try:
-        data = json.loads(SOC_ALERT_LLM_ANALYSIS_CURRENT_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {"ok": True, "status": "idle", "alert": {}, "model": "n/a", "queue_size": queue_size}
-    if not isinstance(data, dict):
+    active_runs = read_active_llm_analyses()
+    if active_runs:
+        data = dict(active_runs[0])
+        data.update({
+            "ok": True,
+            "status": "running",
+            "queue_size": queue_size,
+            "active_count": len(active_runs),
+            "active_runs": active_runs,
+        })
+        if len(active_runs) > 1:
+            runtimes = [llm_runtime_model_state(record) for record in active_runs]
+            labels = [str(runtime.get("label") or "") for runtime in runtimes]
+            providers = list(dict.fromkeys(
+                str(runtime.get("provider") or "") for runtime in runtimes
+                if runtime.get("provider")
+            ))
+            routes = [
+                str(runtime.get("route") or "") for runtime in runtimes
+                if runtime.get("route")
+            ]
+            data.update({
+                "active_phase": "concurrent",
+                "active_model": " + ".join(labels),
+                "active_provider": " + ".join(providers),
+                "active_model_route": " | ".join(routes),
+            })
+        return data
+
+    data = read_bounded_llm_analysis_record(SOC_ALERT_LLM_ANALYSIS_CURRENT_FILE)
+    if not data:
         return {"ok": True, "status": "idle", "alert": {}, "model": "n/a", "queue_size": queue_size}
     data = dict(data)
     data["ok"] = True
@@ -5896,12 +5999,170 @@ def read_llm_current_analysis() -> dict:
     return data
 
 
-def llm_analysis_process_active(prompt_package: str) -> bool:
+def llm_runtime_model_state(current: object) -> dict:
+    """Describe the model executing now without rewriting primary audit data."""
+    if not isinstance(current, dict) or current.get("status") != "running":
+        return {"running": False}
+    has_phase_metadata = "active_phase" in current
+    phase = str(current.get("active_phase") or "primary_analysis").strip().lower()
+    if has_phase_metadata:
+        route = str(current.get("active_model_route") or "").strip()
+        model = str(current.get("active_model") or "").strip()
+        provider_key = str(current.get("active_provider") or "").strip().lower()
+        model_path = str(current.get("active_model_path") or "").strip().lower()
+    else:
+        # Rolling-deploy fallback for a runner that predates active-phase fields.
+        route = str(current.get("model_route") or "").strip()
+        model = str(current.get("model") or "").strip()
+        provider_key = str(current.get("mode") or "").strip().lower()
+        model_path = str(current.get("model_path") or "").strip().lower()
+
+    provider = ""
+    effort = ""
+    if route.startswith("codex-cli:"):
+        try:
+            routed_model, effort = route.removeprefix("codex-cli:").rsplit(":", 1)
+        except ValueError:
+            routed_model = ""
+        if routed_model:
+            model = routed_model
+        provider = "Codex CLI"
+    elif route.startswith("ollama:"):
+        model = route.removeprefix("ollama:").strip() or model
+        provider = "Ollama"
+    elif provider_key in {"codex-cli", "gpt-cli"} or model_path == "frontier-codex-cli":
+        provider = "Codex CLI"
+    elif provider_key == "ollama" or model_path == "ollama":
+        provider = "Ollama"
+
+    if phase == "post_processing" and not route and not model:
+        return {
+            "running": True,
+            "phase": phase,
+            "phase_label": "Finalizing analysis",
+            "route": "",
+            "model": "",
+            "provider": "",
+            "label": "No model running",
+            "detail": "Finalizing analysis · No model running",
+        }
+    label = " · ".join(part for part in (provider, model) if part) or "Unknown model"
+    if provider == "Codex CLI" and effort:
+        label += f" ({effort})"
+    phase_label = {
+        "second_opinion": "Second-opinion review",
+        "live_follow_up": "Live-evidence follow-up",
+        "primary_analysis": "Analyzing",
+    }.get(phase, "Analyzing")
+    return {
+        "running": True,
+        "phase": phase,
+        "phase_label": phase_label,
+        "route": route,
+        "model": model,
+        "provider": provider,
+        "label": label,
+        "detail": f"{phase_label} · Running: {label}",
+    }
+
+
+def merge_live_llm_activity(static_ai: object, current: object) -> dict:
+    """Overlay current execution on the slower generated queue summary."""
+    merged = dict(static_ai) if isinstance(static_ai, dict) else {}
+    current_records = (
+        [
+            record for record in current.get("active_runs", [])
+            if isinstance(record, dict)
+        ]
+        if isinstance(current, dict) and isinstance(current.get("active_runs"), list)
+        else [current]
+    )
+    runtimes = [
+        runtime
+        for record in current_records
+        if (runtime := llm_runtime_model_state(record)).get("running")
+    ]
+    if not runtimes:
+        return merged
+    counts = dict(merged.get("counts") or {}) if isinstance(merged.get("counts"), dict) else {}
     try:
-        proc = subprocess.run(["ps", "axo", "command="], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+        analyzing_count = int(counts.get("analyzing") or 0)
+    except (TypeError, ValueError, OverflowError):
+        analyzing_count = 0
+    counts["analyzing"] = max(len(runtimes), analyzing_count)
+    if len(runtimes) == 1:
+        runtime = runtimes[0]
+        detail = runtime["detail"]
+        model = runtime["label"]
+        provider = runtime["provider"]
+        route = runtime["route"]
+        phase = runtime["phase"]
+    else:
+        detail = (
+            f"{len(runtimes)} analyses running · "
+            + " | ".join(
+                f"{runtime['phase_label']}: {runtime['label']}"
+                for runtime in runtimes
+            )
+        )
+        model = " + ".join(str(runtime["label"]) for runtime in runtimes)
+        provider = " + ".join(dict.fromkeys(
+            str(runtime["provider"]) for runtime in runtimes
+            if runtime["provider"]
+        ))
+        route = " | ".join(
+            str(runtime["route"]) for runtime in runtimes
+            if runtime["route"]
+        )
+        phase = "concurrent"
+    merged.update({
+        "active": True,
+        "label": str(merged.get("label") or "AI Alert Triage"),
+        "detail": detail,
+        "model": model,
+        "provider": provider,
+        "route": route,
+        "phase": phase,
+        "counts": counts,
+    })
+    return merged
+
+
+def llm_analysis_process_commands() -> list[str]:
+    try:
+        proc = subprocess.run(
+            ["ps", "axo", "pid=,command="],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=3,
+        )
     except Exception:
+        return []
+    return proc.stdout.splitlines()
+
+
+def llm_analysis_process_active(
+    prompt_package: str,
+    commands: list[str] | None = None,
+    runner_pid: object = None,
+) -> bool:
+    commands = commands if commands is not None else llm_analysis_process_commands()
+    try:
+        expected_pid = int(str(runner_pid or "").strip())
+    except (TypeError, ValueError):
+        expected_pid = 0
+    if expected_pid > 0:
+        for command in commands:
+            parts = command.strip().split(maxsplit=1)
+            if (
+                len(parts) == 2
+                and parts[0] == str(expected_pid)
+                and "run-local-ai-analysis.py" in parts[1]
+            ):
+                return True
         return False
-    commands = proc.stdout.splitlines()
     if prompt_package:
         return any("run-local-ai-analysis.py" in command and prompt_package in command for command in commands)
     return any("run-local-ai-analysis.py" in command for command in commands)
@@ -6354,11 +6615,34 @@ def soc_alert_group_has_analysis_artifact(row: sqlite3.Row) -> bool:
     return any(soc_alert_latest_analysis_mtime(alert_id) > 0 for alert_id in member_ids)
 
 
+def soc_alert_severity_meets_analysis_threshold(
+    severity: object,
+    threshold: object,
+) -> bool:
+    normalized_severity = str(severity or "informational").strip().lower()
+    normalized_threshold = str(threshold or "informational").strip().lower()
+    if normalized_severity == "info":
+        normalized_severity = "informational"
+    if normalized_threshold == "info":
+        normalized_threshold = "informational"
+    if normalized_threshold == "disabled":
+        return False
+    if normalized_threshold not in SOC_ANALYSIS_SEVERITY_ORDER:
+        normalized_threshold = "informational"
+    if normalized_severity not in SOC_ANALYSIS_SEVERITY_ORDER:
+        return False
+    return (
+        SOC_ANALYSIS_SEVERITY_ORDER.index(normalized_severity)
+        >= SOC_ANALYSIS_SEVERITY_ORDER.index(normalized_threshold)
+    )
+
+
 def soc_alert_group_ai_status(
     row: sqlite3.Row,
     group_id: str,
     ai_reports: dict | None = None,
     ai_artifacts: dict[str, object] | None = None,
+    analysis_min_severity: str = "informational",
 ) -> dict:
     alert_id = str(row["alert_id"] or "") if "alert_id" in row.keys() else ""
     prompt_mtime_by_alert = ai_artifacts.get("prompt_mtime_by_alert", {}) if isinstance(ai_artifacts, dict) else {}
@@ -6378,10 +6662,49 @@ def soc_alert_group_ai_status(
 
     reports = ai_reports if isinstance(ai_reports, dict) else soc_alert_static_ai_reports()
     status = reports.get(group_id)
+    has_artifact = (
+        group_id in analysis_group_ids
+        if ai_artifacts
+        else soc_alert_group_has_analysis_artifact(row)
+    )
+    triage_level = (
+        row["triage_level"]
+        if "triage_level" in row.keys()
+        else "informational"
+    )
+    normalized_triage_level = str(triage_level or "").strip().lower()
+    if normalized_triage_level == "info":
+        normalized_triage_level = "informational"
+    if (
+        not has_artifact
+        and normalized_triage_level not in SOC_ANALYSIS_SEVERITY_ORDER
+    ):
+        return {
+            "ai_status_key": "not-queued",
+            "ai_status_label": "Skipped",
+            "ai_status_detail": (
+                f"Unrecognized severity {normalized_triage_level or 'blank'} "
+                "is not eligible for automatic AI analysis"
+            ),
+        }
+    if (
+        not has_artifact
+        and not soc_alert_severity_meets_analysis_threshold(
+            triage_level,
+            analysis_min_severity,
+        )
+    ):
+        threshold_label = str(analysis_min_severity or "informational").strip().title()
+        return {
+            "ai_status_key": "not-queued",
+            "ai_status_label": "Skipped",
+            "ai_status_detail": (
+                f"Below configured {threshold_label} automatic AI-analysis minimum"
+            ),
+        }
     if isinstance(status, dict):
         key = str(status.get("ai_status_key") or "queued")
         filter_status = str(row["filter_status"] or "accepted").strip().lower() if "filter_status" in row.keys() else "accepted"
-        has_artifact = group_id in analysis_group_ids if ai_artifacts else soc_alert_group_has_analysis_artifact(row)
         if key in {"analyzed", "analyzing"} and not has_artifact:
             return {
                 "ai_status_key": "queued",
@@ -6610,6 +6933,7 @@ def soc_alert_group_row_to_api(
     pcap_requests: dict[str, dict] | None = None,
     ai_artifacts: dict[str, object] | None = None,
     evidence_metadata: dict[str, dict[str, object]] | None = None,
+    analysis_min_severity: str = "informational",
 ) -> dict:
     group_key = row["group_key"]
     group_id = soc_alert_group_id(group_key)
@@ -6651,7 +6975,15 @@ def soc_alert_group_row_to_api(
         "analyst_status_updated_at": local_status.get("updated_at") if isinstance(local_status, dict) else None,
         "analyst_status_updated_by": local_status.get("updated_by", "") if isinstance(local_status, dict) else "",
     }
-    data.update(soc_alert_group_ai_status(row, group_id, ai_reports, ai_artifacts))
+    data.update(
+        soc_alert_group_ai_status(
+            row,
+            group_id,
+            ai_reports,
+            ai_artifacts,
+            analysis_min_severity,
+        )
+    )
     data.update(soc_alert_public_enrichment_status(enrichment_json))
     data.update(soc_alert_pcap_status(group_id, row["alert_id"], pcap_analysis or {}, pcap_requests or {}))
     data.update((evidence_metadata or {}).get(group_id, {
@@ -7348,6 +7680,16 @@ def soc_alert_group_query_payload(
 ) -> dict:
     ai_reports = soc_alert_static_ai_reports()
     ai_artifacts = soc_alert_page_ai_artifact_context(snapshot.page_rows)
+    ai_settings_response = read_soc_ai_settings()
+    ai_settings = (
+        ai_settings_response.get("settings", {})
+        if isinstance(ai_settings_response, dict)
+        else {}
+    )
+    analysis_min_severity = str(
+        ai_settings.get("soc_analyst_analysis_min_severity")
+        or "informational"
+    )
     pcap_analysis = soc_alert_pcap_analysis_index()
     try:
         with soc_alert_db_connect() as conn:
@@ -7396,6 +7738,7 @@ def soc_alert_group_query_payload(
                 pcap_requests,
                 ai_artifacts,
                 evidence_metadata,
+                analysis_min_severity,
             )
             for row in snapshot.page_rows
         ],
@@ -7733,6 +8076,7 @@ def read_soc_alert_json_file(path: Path) -> dict:
 def soc_alert_events_snapshot() -> dict:
     analyst_status = soc_alert_status_response()
     static_status = read_soc_alert_json_file(SOC_ALERT_STATIC_STATUS_FILE)
+    current_analysis = read_llm_current_analysis()
     beacon = read_soc_alert_json_file(SOC_ALERT_N8N_BEACON_FILE)
     # Event snapshots drive live nav badges and metric cards. Keep them aligned
     # with the default SOC Alerts table/counts instead of a time-windowed view,
@@ -7746,7 +8090,7 @@ def soc_alert_events_snapshot() -> dict:
         "time": now_iso_utc(),
         "counts": analyst_status.get("counts", {}),
         "statuses": analyst_status.get("statuses", {}),
-        "ai": static_status.get("ai", {}),
+        "ai": merge_live_llm_activity(static_status.get("ai", {}), current_analysis),
         "reports": static_status.get("reports", {}),
         "status_updated_at": static_status.get("updated_at"),
         "metrics": metrics,

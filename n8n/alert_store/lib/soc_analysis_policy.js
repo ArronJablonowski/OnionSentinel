@@ -13,6 +13,8 @@ const SEVERITY_RANK = Object.freeze({
 });
 const THRESHOLD_VALUES = new Set(['disabled', ...Object.keys(SEVERITY_RANK)]);
 const DEFAULT_POLICY = Object.freeze({
+  // Preserve all-severity base analysis unless an operator raises the floor.
+  soc_analyst_analysis_min_severity: 'informational',
   // Preserve the existing all-severity PCAP behavior during rolling upgrades.
   soc_analyst_pcap_min_severity: 'informational',
   // Automatic incident escalation is opt-in because it creates analyst cases.
@@ -107,6 +109,10 @@ function createSocAnalysisPolicy(options = {}) {
     }
     const fallback = defaults();
     cachedPolicy = {
+      soc_analyst_analysis_min_severity: normalizeThreshold(
+        raw.soc_analyst_analysis_min_severity,
+        fallback.soc_analyst_analysis_min_severity,
+      ),
       soc_analyst_pcap_min_severity: normalizeThreshold(
         raw.soc_analyst_pcap_min_severity,
         fallback.soc_analyst_pcap_min_severity,
@@ -124,6 +130,9 @@ function createSocAnalysisPolicy(options = {}) {
   return {
     settingsPath,
     read,
+    matchesAnalysis(severity) {
+      return matchesSeverityThreshold(severity, read().soc_analyst_analysis_min_severity);
+    },
     matchesPcap(severity) {
       return matchesSeverityThreshold(severity, read().soc_analyst_pcap_min_severity);
     },

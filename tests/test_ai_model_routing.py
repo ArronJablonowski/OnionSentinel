@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -155,6 +156,138 @@ class AiModelRoutingTests(unittest.TestCase):
 
         self.assertEqual(response, completed)
         self.assertEqual([call.args[3] for call in analyze.call_args_list], ["primary:latest", "fallback:latest"])
+
+    def test_ollama_chat_request_keeps_model_for_bounded_follow_up(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "system_prompt_file": Path("/tmp/nonexistent-system-prompt.md"),
+                "temperature": 0.1,
+                "max_predict_tokens": 4096,
+                "timeout": 60,
+                "max_response_bytes": 1024 * 1024,
+            },
+        )()
+        captured: dict[str, object] = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def fake_urlopen(request, timeout):
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        with (
+            mock.patch.object(self.runner.urllib.request, "urlopen", side_effect=fake_urlopen),
+            mock.patch.object(
+                self.runner,
+                "read_bounded_json",
+                return_value={"message": {"content": '{"summary":"Local result"}'}},
+            ),
+        ):
+            response = self.runner._ollama_request(
+                {"response_schema": {"type": "object"}},
+                args,
+                {
+                    "ollama_model": "reviewer:latest",
+                    "ollama_url": "http://127.0.0.1:11434",
+                },
+                "Analyze",
+            )
+
+        body = captured["body"]
+        self.assertIsInstance(body, dict)
+        self.assertEqual(body["model"], "reviewer:latest")
+        self.assertNotIn("keep_alive", body)
+        self.assertFalse(body["stream"])
+        self.assertEqual(body["format"], "json")
+        self.assertEqual(body["options"]["num_predict"], 4096)
+        self.assertEqual(captured["timeout"], 60)
+        self.assertEqual(response["_analysis_model"], "reviewer:latest")
+
+    def test_ollama_exchange_unloads_once_after_all_model_turns(self) -> None:
+        args = type("Args", (), {"timeout": 60})()
+        settings = {"ollama_url": "http://127.0.0.1:11434"}
+        completed = {"summary": "complete"}
+        with tempfile.TemporaryDirectory() as temp_name:
+            lock_path = Path(temp_name) / "ollama.lock"
+            with (
+                mock.patch.object(
+                    self.runner,
+                    "DEFAULT_OLLAMA_INFERENCE_LOCK",
+                    lock_path,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "_ollama_chat_for_model_unlocked",
+                    return_value=completed,
+                ) as exchange,
+                mock.patch.object(
+                    self.runner,
+                    "_unload_ollama_model",
+                ) as unload,
+            ):
+                response = self.runner._ollama_chat_for_model(
+                    {},
+                    args,
+                    settings,
+                    "reviewer:latest",
+                )
+
+        self.assertIs(response, completed)
+        exchange.assert_called_once()
+        unload.assert_called_once_with(
+            settings,
+            "reviewer:latest",
+            timeout=60.0,
+        )
+
+    def test_ollama_unload_uses_zero_keep_alive_without_inference(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return b'{"done":true}'
+
+        def fake_urlopen(request, timeout):
+            captured["url"] = request.full_url
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        with mock.patch.object(
+            self.runner.urllib.request,
+            "urlopen",
+            side_effect=fake_urlopen,
+        ):
+            self.runner._unload_ollama_model(
+                {"ollama_url": "http://127.0.0.1:11434"},
+                "reviewer:latest",
+                timeout=60,
+            )
+
+        self.assertEqual(captured["url"], "http://127.0.0.1:11434/api/generate")
+        self.assertEqual(
+            captured["body"],
+            {
+                "model": "reviewer:latest",
+                "stream": False,
+                "keep_alive": 0,
+            },
+        )
+        self.assertEqual(captured["timeout"], 30.0)
 
     def test_soc_analyst_runs_only_its_assigned_ollama_model(self) -> None:
         args = type("Args", (), {})()
@@ -334,6 +467,144 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(record["agent_role"], "soc-analyst")
         self.assertEqual(record["model_route"], "codex-cli:gpt-5.6-sol:high")
         self.assertNotEqual(record["model"], "previous-local:latest")
+        self.assertEqual(record["active_phase"], "primary_analysis")
+        self.assertEqual(record["active_model"], "gpt-5.6-sol")
+        self.assertEqual(record["active_model_path"], "frontier-codex-cli")
+        self.assertEqual(record["active_model_route"], "codex-cli:gpt-5.6-sol:high")
+        self.assertEqual(record["active_provider"], "codex-cli")
+
+    def test_current_phase_switches_to_reviewer_without_relabeling_primary(self) -> None:
+        settings = self.runner.default_ai_settings()
+        settings.update({
+            "enabled_ollama_models": ["reviewer:latest"],
+            "codex_cli_models": [
+                {"model": "gpt-5.6-sol", "reasoning_effort": "high", "enabled": True},
+            ],
+            "gpt_cli_enabled": True,
+        })
+        primary_route = "codex-cli:gpt-5.6-sol:high"
+        primary = {
+            "log_id": "synthetic-running",
+            "status": "running",
+            "model": "gpt-5.6-sol",
+            "model_path": "frontier-codex-cli",
+            "model_route": primary_route,
+            "alert": {"primary_alert_id": "synthetic-alert"},
+            "started_at": "2026-07-24  10:00:00-06:00",
+        }
+
+        active_path = Path("/tmp/synthetic-active-analysis.json")
+        with mock.patch.object(self.runner, "atomic_write_json") as write:
+            reviewing = self.runner.publish_current_analysis_phase(
+                primary,
+                settings,
+                phase="second_opinion",
+                model_route="ollama:reviewer:latest",
+                trigger_reason="The primary model reported low confidence.",
+                active_record_path=active_path,
+            )
+
+        write.assert_called_once_with(active_path, reviewing)
+        self.assertEqual(reviewing["model"], "gpt-5.6-sol")
+        self.assertEqual(reviewing["model_route"], primary_route)
+        self.assertEqual(reviewing["active_phase"], "second_opinion")
+        self.assertEqual(reviewing["active_model"], "reviewer:latest")
+        self.assertEqual(reviewing["active_model_path"], "ollama")
+        self.assertEqual(reviewing["active_model_route"], "ollama:reviewer:latest")
+        self.assertEqual(reviewing["active_provider"], "ollama")
+
+        post_processing = self.runner.current_analysis_phase_record(
+            reviewing,
+            settings,
+            phase="post_processing",
+            trigger_reason=reviewing["second_opinion_trigger"],
+        )
+        self.assertEqual(post_processing["model"], "gpt-5.6-sol")
+        self.assertEqual(post_processing["model_route"], primary_route)
+        self.assertEqual(post_processing["active_phase"], "post_processing")
+        self.assertEqual(post_processing["active_model"], "")
+        self.assertEqual(post_processing["active_model_path"], "")
+        self.assertEqual(post_processing["active_model_route"], "")
+        self.assertEqual(post_processing["active_provider"], "")
+
+    def test_concurrent_atomic_status_writes_never_share_a_temp_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            target = Path(temp_name) / "current-analysis.json"
+            payloads = [
+                {"writer": writer, "body": "x" * 4096}
+                for writer in range(32)
+            ]
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                list(
+                    executor.map(
+                        lambda payload: self.runner.atomic_write_json(target, payload),
+                        payloads,
+                    )
+                )
+
+            written = json.loads(target.read_text(encoding="utf-8"))
+            self.assertIn(written, payloads)
+            self.assertEqual(list(target.parent.glob("*.tmp")), [])
+
+    def test_active_analysis_path_is_scoped_to_one_sanitized_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            active_dir = Path(temp_name) / "active"
+            path = self.runner.active_analysis_record_path(
+                "../../unsafe run id",
+                active_dir,
+            )
+
+        self.assertEqual(path.parent, active_dir)
+        self.assertEqual(path.suffix, ".json")
+        self.assertNotIn("/", path.name)
+        self.assertNotIn("..", path.name)
+
+    def test_completed_log_keeps_primary_model_and_omits_transient_active_fields(self) -> None:
+        settings = self.runner.default_ai_settings()
+        settings.update({
+            "enabled_ollama_models": ["reviewer:latest"],
+            "codex_cli_models": [
+                {"model": "gpt-5.6-sol", "reasoning_effort": "high", "enabled": True},
+            ],
+            "gpt_cli_enabled": True,
+        })
+        settings["agent_models"]["soc-analyst"] = "codex-cli:gpt-5.6-sol:high"
+        response = {
+            "_analysis_model": "gpt-5.6-sol",
+            "_analysis_model_path": "frontier-codex-cli",
+            "_second_opinion": {
+                "model_route": "ollama:reviewer:latest",
+                "response": {
+                    "_analysis_model": "reviewer:latest",
+                    "_analysis_model_path": "ollama",
+                },
+            },
+        }
+
+        record = self.runner.build_llm_log_record(
+            run_id="synthetic-complete",
+            status="success",
+            started_at="2026-07-24  10:00:00-06:00",
+            finished_at="2026-07-24  10:01:00-06:00",
+            runtime_seconds=60,
+            prompt_path=Path("/tmp/synthetic-prompt.json"),
+            prompt_package={
+                "agent_role": "soc-analyst",
+                "alert": {"alert_id": "synthetic-alert"},
+            },
+            settings=settings,
+            response=response,
+            json_path=Path("/tmp/synthetic-result.json"),
+            md_path=Path("/tmp/synthetic-result.md"),
+            resource_monitor=self.runner.SystemResourceMonitor(),
+        )
+
+        self.assertEqual(record["model"], "gpt-5.6-sol")
+        self.assertEqual(record["model_path"], "frontier-codex-cli")
+        self.assertEqual(record["model_route"], "codex-cli:gpt-5.6-sol:high")
+        self.assertNotIn("active_phase", record)
+        self.assertNotIn("active_model", record)
+        self.assertNotIn("active_model_route", record)
 
     def test_codex_settings_reject_arbitrary_executable_and_effort(self) -> None:
         for payload in (
@@ -423,11 +694,14 @@ class AiModelRoutingTests(unittest.TestCase):
             "response_schema": {"type": "object"},
         }
 
-        with mock.patch.object(
-            self.runner,
-            "_ollama_request",
-            return_value={"summary": "Independent review"},
-        ) as request:
+        with (
+            mock.patch.object(
+                self.runner,
+                "_ollama_request",
+                return_value={"summary": "Independent review"},
+            ) as request,
+            mock.patch.object(self.runner, "_unload_ollama_model"),
+        ):
             result = self.runner._ollama_chat_for_model(
                 prompt_package,
                 args,
@@ -462,9 +736,17 @@ class AiModelRoutingTests(unittest.TestCase):
             "bluf": "True Positive - Suspicious: independent review.",
             "summary": "Independent review",
         }
+        phases: list[tuple[str, str, str]] = []
 
         with mock.patch.object(self.runner, "analyze_model_route", return_value=secondary) as analyze:
-            result = self.runner.apply_configured_second_opinion({}, primary, args, settings, "soc-analyst")
+            result = self.runner.apply_configured_second_opinion(
+                {},
+                primary,
+                args,
+                settings,
+                "soc-analyst",
+                phase_callback=lambda phase, route, trigger: phases.append((phase, route, trigger)),
+            )
 
         analyze.assert_called_once_with(
             "ollama:reviewer:latest",
@@ -480,6 +762,21 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(
             result["_second_opinion"]["comparison"]["agreement"],
             "material_disagreement",
+        )
+        self.assertEqual(
+            phases,
+            [
+                (
+                    "second_opinion",
+                    "ollama:reviewer:latest",
+                    "The primary model reported low confidence.",
+                ),
+                (
+                    "post_processing",
+                    "",
+                    "The primary model reported low confidence.",
+                ),
+            ],
         )
 
     def test_comparison_distinguishes_full_advisory_and_material_disagreement(self) -> None:
@@ -540,13 +837,22 @@ class AiModelRoutingTests(unittest.TestCase):
             "detection_outcome": "true_positive_authorized_benign",
             "summary": "Supported conclusion",
         })
+        phases: list[tuple[str, str, str]] = []
 
         with mock.patch.object(self.runner, "analyze_model_route") as analyze:
-            result = self.runner.apply_configured_second_opinion({}, primary, args, settings, "soc-analyst")
+            result = self.runner.apply_configured_second_opinion(
+                {},
+                primary,
+                args,
+                settings,
+                "soc-analyst",
+                phase_callback=lambda phase, route, trigger: phases.append((phase, route, trigger)),
+            )
 
         self.assertIs(result, primary)
         self.assertNotIn("_second_opinion", result)
         analyze.assert_not_called()
+        self.assertEqual(phases, [("post_processing", "", "")])
 
     def test_string_false_does_not_request_second_opinion(self) -> None:
         response = self.runner.validate_response({
@@ -577,6 +883,45 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(result["summary"], "Primary result must survive")
         self.assertEqual(result["_second_opinion"]["status"], "failed")
         self.assertIn("reviewer timeout", result["_second_opinion"]["error"])
+
+    def test_phase_status_failure_does_not_block_configured_reviewer(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {"second_opinion_prompt_file": Path("/tmp/synthetic-reviewer-prompt.md")},
+        )()
+        settings = self.runner.default_ai_settings()
+        settings["enabled_ollama_models"] = ["primary:latest", "reviewer:latest"]
+        settings["agent_models"]["soc-analyst"] = "ollama:primary:latest"
+        settings["agent_second_opinion_models"]["soc-analyst"] = "ollama:reviewer:latest"
+        primary = self.runner.validate_response({
+            "confidence": "low",
+            "detection_outcome": "inconclusive",
+            "summary": "Primary result",
+        })
+        secondary = {
+            "confidence": "high",
+            "detection_outcome": "inconclusive",
+            "summary": "Reviewer result",
+        }
+
+        with mock.patch.object(
+            self.runner,
+            "analyze_model_route",
+            return_value=secondary,
+        ) as analyze:
+            result = self.runner.apply_configured_second_opinion(
+                {},
+                primary,
+                args,
+                settings,
+                "soc-analyst",
+                phase_callback=mock.Mock(side_effect=OSError("status file unavailable")),
+            )
+
+        analyze.assert_called_once()
+        self.assertEqual(result["_second_opinion"]["status"], "completed")
+        self.assertEqual(result["_second_opinion"]["response"]["summary"], "Reviewer result")
 
     def test_cli_model_override_routes_soc_analyst_to_exact_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
