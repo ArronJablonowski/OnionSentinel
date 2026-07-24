@@ -195,9 +195,16 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         self.args.ai_settings_file.write_text(
             json.dumps(
                 {
+                    "codex_cli_models": [
+                        {
+                            "model": "gpt-5.6-sol",
+                            "reasoning_effort": "high",
+                            "enabled": True,
+                        }
+                    ],
                     "agent_models": {
                         "soc-analyst": "ollama:local-model",
-                        "incident-responder": "codex-cli",
+                        "incident-responder": "codex-cli:gpt-5.6-sol:high",
                     }
                 }
             ),
@@ -212,6 +219,54 @@ class AiSchedulerPriorityTest(unittest.TestCase):
 
         self.assertEqual(cli_selected["alert_id"], "ir-alert")
         self.assertEqual(ollama_selected["alert_id"], "soc-alert")
+
+    def test_cli_lane_rejects_malformed_or_disabled_exact_routes(self) -> None:
+        settings_path = self.args.ai_settings_file
+        for route, roster in (
+            (
+                "codex-cli:gpt-5.6-sol:ultra",
+                [{"model": "gpt-5.6-sol", "reasoning_effort": "high", "enabled": True}],
+            ),
+            (
+                "codex-cli:gpt-5.6-sol:high",
+                [{"model": "gpt-5.6-sol", "reasoning_effort": "high", "enabled": False}],
+            ),
+            (
+                "codex-cli:not allowed:high",
+                [{"model": "not allowed", "reasoning_effort": "high", "enabled": True}],
+            ),
+        ):
+            with self.subTest(route=route, roster=roster):
+                settings_path.write_text(
+                    json.dumps(
+                        {
+                            "codex_cli_models": roster,
+                            "agent_models": {"soc-analyst": route},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                self.assertEqual(self.scheduler.cli_agent_roles(settings_path), set())
+
+    def test_analysis_child_uses_the_same_settings_file_as_lane_selection(self) -> None:
+        settings_path = Path(self.tempdir.name) / "custom-ai-settings.json"
+        args = SimpleNamespace(
+            analysis_dir=Path(self.tempdir.name) / "analysis",
+            timeout=600,
+            alert_store_url="http://127.0.0.1:8787",
+            ai_settings_file=settings_path,
+            model=None,
+        )
+
+        command = self.scheduler.analysis_command(
+            Path(self.tempdir.name) / "prompt.json",
+            args,
+        )
+
+        self.assertEqual(
+            command[command.index("--ai-settings-file") + 1],
+            str(settings_path),
+        )
 
     def test_indexed_contract_rejects_partial_schema(self) -> None:
         self.conn.execute("ALTER TABLE alerts ADD COLUMN stable_group_id TEXT")

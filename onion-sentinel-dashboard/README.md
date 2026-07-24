@@ -62,8 +62,10 @@ dependency.
   is kept distinct from process counters that reset with alert-store.
 - Paginated PCAP workflow history with artifact size and end-to-end transfer time.
 - Flow page with privacy IP masking and explicit durable alert, public-enrichment,
-  read-only PCAP/relay-SSD, Zeek/TShark, correlation/memory, local-AI, reporting,
-  dashboard, and Telegram paths.
+  read-only PCAP/relay-SSD, Zeek/TShark, correlation/memory, assigned-model AI,
+  reporting, dashboard, and Telegram paths. The Flow and AI Activity views show
+  the SOC Analyst's effective provider/model route rather than the legacy
+  Ollama compatibility default.
 - Threat Hunter route with expandable hunt recommendations and copyable KQL/OQL/OSQuery pivots.
 - Cyber Threat Intel route for future intelligence briefs, indicators, and enrichment context.
 - SIEM Engineer menu route for model-backed tuning, detection recommendations, and a top ROI tuning candidate summary. Rows in both recommendation tables expand by click or keyboard to show an evidence-backed AI engineering report with the proposed change, rationale, grouped detection context, enrichment and PCAP findings, validation steps, rollback guidance, and complete escaped AI response JSON.

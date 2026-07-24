@@ -935,12 +935,34 @@ def codex_cli_model_rows(models: list[dict]) -> str:
     return ''.join(rows)
 
 
-def current_local_ai_model() -> str:
-    """Return the local Ollama model most recently used for alert analysis."""
-    env_model = os.environ.get('SOC_AI_MODEL', '').strip()
-    candidates: list[str] = []
-    settings = load_soc_ai_settings()
-    candidates.append(settings.get('ollama_model', '').strip())
+def current_soc_analysis_model(settings: dict | None = None) -> dict[str, str]:
+    """Describe the SOC Analyst's assigned provider, model, and exact route."""
+    settings = settings or load_soc_ai_settings()
+    route = str((settings.get('agent_models') or {}).get('soc-analyst') or '').strip()
+    if route.startswith('ollama:'):
+        model = route.removeprefix('ollama:').strip()
+        if model:
+            return {
+                'provider': 'Ollama',
+                'provider_key': 'ollama',
+                'model': model,
+                'model_detail': model,
+                'label': f'Ollama · {model}',
+                'route': route,
+            }
+    if codex_parts := _codex_cli_route_parts(route, settings):
+        model, effort = codex_parts
+        return {
+            'provider': 'Codex CLI',
+            'provider_key': 'codex-cli',
+            'model': model,
+            'model_detail': f'{model} ({effort})',
+            'label': f'Codex CLI · {model} ({effort})',
+            'route': _codex_cli_route(model, effort),
+        }
+
+    # A malformed or missing assignment should not make the dashboard claim a
+    # configured provider. Fall back only to stamped analysis provenance.
     try:
         for path in sorted(AI_ANALYSIS_DIR.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
@@ -948,23 +970,45 @@ def current_local_ai_model() -> str:
             except Exception:
                 continue
             response = data.get('response') if isinstance(data.get('response'), dict) else {}
-            for value in (
+            model = next((str(value).strip() for value in (
                 data.get('analysis_model'),
                 data.get('_analysis_model'),
                 data.get('model'),
                 response.get('_analysis_model'),
-            ):
-                if value:
-                    candidates.append(str(value).strip())
-            if candidates:
-                break
+            ) if value), '')
+            model_path = str(
+                data.get('analysis_model_path')
+                or data.get('_analysis_model_path')
+                or response.get('_analysis_model_path')
+                or ''
+            ).strip()
+            if not model:
+                continue
+            provider = 'Codex CLI' if model_path == 'frontier-codex-cli' else 'Ollama'
+            return {
+                'provider': provider,
+                'provider_key': 'codex-cli' if provider == 'Codex CLI' else 'ollama',
+                'model': model,
+                'model_detail': model,
+                'label': f'{provider} · {model}',
+                'route': '',
+            }
     except Exception:
         pass
-    candidates.extend([
-        env_model,
-        'devstral:latest',
-    ])
-    return next((candidate for candidate in candidates if candidate), 'devstral:latest')
+    fallback = os.environ.get('SOC_AI_MODEL', '').strip() or 'unassigned'
+    return {
+        'provider': 'Unassigned',
+        'provider_key': 'unassigned',
+        'model': fallback,
+        'model_detail': fallback,
+        'label': f'Unassigned · {fallback}',
+        'route': '',
+    }
+
+
+def current_local_ai_model() -> str:
+    """Compatibility helper returning the effective SOC Analyst model label."""
+    return current_soc_analysis_model()['label']
 
 
 def count_ai_analysis_artifacts(suffix: str) -> int:
@@ -1956,11 +2000,11 @@ def is_test_alert_id(alert_id: str) -> bool:
 def row_is_ai_backlog_eligible(row: sqlite3.Row | dict) -> tuple[bool, str]:
     candidate_ids = candidate_alert_ids_for_row(row)
     if candidate_ids and all(is_test_alert_id(alert_id) for alert_id in candidate_ids):
-        return False, 'Test/validation alert is intentionally excluded from automatic local AI analysis'
+        return False, 'Test/validation alert is intentionally excluded from automatic assigned-model analysis'
     status = str(row['filter_status'] or 'accepted').strip().lower()
     if status not in AI_ELIGIBLE_FILTER_STATUSES:
-        return False, f'Filter status {status or "blank"} is not eligible for automatic local AI analysis'
-    return True, 'Queued for the scheduled local AI analysis worker'
+        return False, f'Filter status {status or "blank"} is not eligible for automatic assigned-model analysis'
+    return True, 'Queued for the scheduled assigned-model analysis worker'
 
 
 def ai_analysis_for_row(row: sqlite3.Row | dict, ai_analysis_by_alert_id: dict[str, dict]) -> dict | None:
@@ -1987,7 +2031,7 @@ def ai_workflow_status_for_row(row: sqlite3.Row | dict, ai_analysis_by_alert_id:
     for alert_id in candidate_ids:
         if alert_id in running_ai_alert_ids:
             prompt = ai_prompts_by_alert_id.get(alert_id, {})
-            return ('analyzing', 'Analyzing', prompt.get('_prompt_filename') or 'Local AI runner is active')
+            return ('analyzing', 'Analyzing', prompt.get('_prompt_filename') or 'Assigned-model runner is active')
     prompts = [ai_prompts_by_alert_id[alert_id] for alert_id in candidate_ids if alert_id in ai_prompts_by_alert_id]
     analyses = [ai_analysis_by_alert_id[alert_id] for alert_id in candidate_ids if alert_id in ai_analysis_by_alert_id]
     newest_prompt = max((float(prompt.get('_prompt_mtime') or 0) for prompt in prompts), default=0)
@@ -3200,19 +3244,25 @@ def ai_activity_state(reports: list[AlertReport]) -> dict[str, object]:
         'total': len(reports),
     }
     active = counts['analyzing'] > 0
-    model = current_local_ai_model()
+    assignment = current_soc_analysis_model()
+    model = assignment['label']
     status_label = 'Analyzing' if active else 'Idle'
     return {
         'active': active,
         'label': 'AI Alert Triage',
-        'detail': f'{status_label} · Model: {model}',
+        'detail': f'{status_label} · Assigned: {model}',
         'model': model,
+        'provider': assignment['provider'],
+        'route': assignment['route'],
         'counts': counts,
     }
 
 
 def render_ai_activity_metric(state: dict[str, object]) -> str:
-    return render_ai_activity_metric_card(state, current_local_ai_model())
+    return render_ai_activity_metric_card(
+        state,
+        current_soc_analysis_model()['label'],
+    )
 
 
 def load_llm_analysis_logs(limit: int = 250) -> list[dict[str, object]]:
@@ -3383,7 +3433,7 @@ def llm_log_table_row(log: dict[str, object]) -> str:
 def llm_current_panel(current: dict[str, object]) -> str:
     alert = llm_log_alert(current)
     status = str(current.get('status') or 'idle').lower()
-    title = str(alert.get('rule_name') or 'No active local LLM analysis')
+    title = str(alert.get('rule_name') or 'No active AI analysis')
     src = str(alert.get('source_ip') or '').strip()
     dst = str(alert.get('destination_ip') or '').strip()
     port = str(alert.get('destination_port') or '').strip()
@@ -3395,7 +3445,7 @@ def llm_current_panel(current: dict[str, object]) -> str:
     return f'''
       <section class="llm-current-card" aria-label="Current alert being analyzed">
         <div>
-          <span class="settings-kicker">Current local LLM analysis</span>
+          <span class="settings-kicker">Current assigned-model analysis</span>
           <h2 id="llm-current-title">{html.escape(title)}</h2>
           <p id="llm-current-route">{html.escape(route)}</p>
         </div>
@@ -3413,11 +3463,11 @@ def reports_page_section(_reports: list[AlertReport]) -> str:
     total_runs = count_llm_analysis_logs()
     rows = ''.join(llm_log_table_row(log) for log in logs[:50])
     if not rows:
-        rows = '<tr><td colspan="15" class="llm-empty-row">No local LLM analysis logs found yet.</td></tr>'
+        rows = '<tr><td colspan="15" class="llm-empty-row">No AI analysis logs found yet.</td></tr>'
     return f'''
-    <section class="view-section active reports-view" aria-label="Local LLM analysis reports">
+    <section class="view-section active reports-view" aria-label="AI analysis reports">
       {llm_current_panel(load_current_llm_analysis())}
-      <section class="llm-log-section" aria-label="Local LLM analysis log">
+      <section class="llm-log-section" aria-label="AI analysis log">
         <div class="llm-log-toolbar">
           <div>
             <span class="settings-kicker">Reports</span>
@@ -3599,7 +3649,7 @@ REPORTS_PAGE_ASSETS = '''
     const currentRuntime = document.querySelector('#llm-current-runtime');
     const count = document.querySelector('#llm-current-count');
     const queue = document.querySelector('#llm-current-queue');
-    if (title) title.textContent = running ? (alert.rule_name || 'Analyzing Security Onion alert') : 'No active local LLM analysis';
+    if (title) title.textContent = running ? (alert.rule_name || 'Analyzing Security Onion alert') : 'No active AI analysis';
     if (route) route.textContent = running ? `${alert.source_ip || ''} > ${alert.destination_ip || ''}${alert.destination_port ? ' : ' + alert.destination_port : ''}`.trim() : 'Idle';
     if (currentStatus) { currentStatus.textContent = running ? 'Analyzing now' : 'Idle'; currentStatus.className = `llm-status-badge ${running ? 'running' : 'unknown'}`; }
     if (model) model.textContent = current?.model || 'n/a';
@@ -3623,7 +3673,7 @@ REPORTS_PAGE_ASSETS = '''
       const data = await response.json();
       totalPages = Math.max(1, Number(data.total_pages || 1));
       page = Math.min(Math.max(1, Number(data.page || page)), totalPages);
-      if (body) body.innerHTML = (data.logs || []).length ? data.logs.map(rowHtml).join('') : '<tr><td colspan="15" class="llm-empty-row">No local LLM analysis logs found yet.</td></tr>';
+      if (body) body.innerHTML = (data.logs || []).length ? data.logs.map(rowHtml).join('') : '<tr><td colspan="15" class="llm-empty-row">No AI analysis logs found yet.</td></tr>';
       if (status) status.textContent = `Page ${page} of ${totalPages} · ${data.total || 0} logs`;
       if (totalRuns) totalRuns.textContent = String(data.total || 0);
       if (prev) prev.disabled = page <= 1;
@@ -4346,7 +4396,7 @@ def build_html(reports: list[AlertReport]) -> str:
           <div class="flow-copy">
             <span class="flow-kicker">Network flow</span>
             <h2>Resilient SOC Alert Intake & AI Triage</h2>
-            <p>Alerts use a durable relay and SQLite-backed intake path. PCAP travels separately as read-only evidence, then enrichment, parsed packet findings, correlation context, and agent memory converge for local AI triage.</p>
+            <p>Alerts use a durable relay and SQLite-backed intake path. PCAP travels separately as read-only evidence, then enrichment, parsed packet findings, correlation context, and agent memory converge at the assigned analysis model.</p>
           </div>
           <div class="network-diagram" role="img" aria-label="Security Onion alert data flow diagram">
             <div class="flow-node node-so">
@@ -4372,7 +4422,7 @@ def build_html(reports: list[AlertReport]) -> str:
             <div class="flow-fanout" aria-hidden="true"></div>
             <div class="flow-output output-dashboard"><b>Dashboard</b><span>Grouped Count rows</span></div>
             <div class="flow-output output-markdown"><b>Markdown</b><span>Reports + rollups</span></div>
-            <div class="flow-output output-ai"><b>Local AI</b><span>Prompt packages</span></div>
+            <div class="flow-output output-ai"><b>Assigned AI</b><span>Prompt packages</span></div>
             <div class="flow-output output-phone"><b>Telegram</b><span>High/critical only</span></div>
           </div>
         </section>
@@ -4380,7 +4430,7 @@ def build_html(reports: list[AlertReport]) -> str:
           <div class="status-tile"><span>Source</span><strong>Security Onion</strong><em>Restricted export wrapper</em></div>
           <div class="status-tile"><span>Relay</span><strong>Raspberry Pi</strong><em>5 minute timer</em></div>
           <div class="status-tile"><span>Store</span><strong>SQLite</strong><em>{len(reports)} grouped detections</em></div>
-          <div class="status-tile"><span>Analyst</span><strong>Local AI</strong><em>Daily rollups ready</em></div>
+          <div class="status-tile"><span>Analyst</span><strong>Assigned AI</strong><em>Daily rollups ready</em></div>
         </section>
       </div>
     </section>'''
@@ -5292,7 +5342,14 @@ def enrichment_service_tiles() -> str:
 
 
 def flow_page_section(reports: list[AlertReport]) -> str:
-    local_model = html.escape(current_local_ai_model())
+    analysis_assignment = current_soc_analysis_model()
+    analysis_provider = html.escape(analysis_assignment['provider'])
+    analysis_model = html.escape(analysis_assignment['model_detail'])
+    analysis_icon = (
+        'assets/brand/ollama.svg'
+        if analysis_assignment['provider_key'] == 'ollama'
+        else 'assets/settings-ai-model-routing.png'
+    )
     total_groups = len(reports)
     total_observations = sum(max(1, int(report.repeat_count or 1)) for report in reports)
     analyzed_groups = sum(1 for report in reports if report.ai_status_key == 'analyzed')
@@ -5311,7 +5368,7 @@ def flow_page_section(reports: list[AlertReport]) -> str:
         <div class="flow-product-copy">
           <h2 id="flow-title">Resilient Alert, Evidence & AI Triage Pipeline</h2>
           <div class="flow-pulse-divider" aria-hidden="true"></div>
-          <p>Alert JSON and packet evidence use separate durable paths. Alert-store commits analyst state and work queues first; enrichment, read-only PCAP collection, Zeek/TShark parsing, local AI correlation, reporting, and notification then continue independently.</p>
+          <p>Alert JSON and packet evidence use separate durable paths. Alert-store commits analyst state and work queues first; enrichment, read-only PCAP collection, Zeek/TShark parsing, assigned-model correlation, reporting, and notification then continue independently.</p>
         </div>
         <div class="flow-product-map" aria-label="Current Onion Sentinel data flow">
           <div class="flow-stage-heading">
@@ -5401,7 +5458,7 @@ def flow_page_section(reports: list[AlertReport]) -> str:
 
           <div class="flow-stage-heading">
             <span>Analysis and outputs</span>
-            <div><strong>Local correlation, analyst state, reports, and notification</strong><p>The SOC Analyst receives bounded evidence; durable state and analyst-facing artifacts remain rebuildable.</p></div>
+            <div><strong>Assigned-model correlation, analyst state, reports, and notification</strong><p>The SOC Analyst receives bounded evidence through its exact enabled model route; durable state and analyst-facing artifacts remain rebuildable.</p></div>
           </div>
 
           <section class="flow-output-band" aria-label="Mac Studio hosted outputs and external notification">
@@ -5426,14 +5483,14 @@ def flow_page_section(reports: list[AlertReport]) -> str:
                   <em>dashboard source</em>
                 </article>
                 <article class="flow-system-node">
-                  <span class="flow-logo-ring"><img src="assets/brand/ollama.svg" alt="Ollama logo"></span>
+                  <span class="flow-logo-ring"><img src="{analysis_icon}" alt="{analysis_provider} route icon"></span>
                   <div>
-                    <strong>SOC Analyst AI</strong><span>Ollama · {local_model}</span>
+                    <strong>SOC Analyst AI</strong><span>{analysis_provider} · {analysis_model}</span>
                     <div class="flow-evidence-list" aria-label="SOC Analyst AI evidence inputs">
                       <span>group timeline</span><span>public intel</span><span>PCAP findings</span><span>correlation + memory</span>
                     </div>
                   </div>
-                  <em>severity-priority local triage</em>
+                  <em>severity-priority assigned-model triage</em>
                 </article>
                 <article class="flow-system-node">
                   <div class="flow-logo-pair" aria-label="AI report output formats">
@@ -5491,7 +5548,7 @@ def flow_page_section(reports: list[AlertReport]) -> str:
         <div class="flow-summary-card"><span>Durable commit</span><strong>alert-store + SQLite</strong><em>Group, state, and job transaction</em></div>
         <div class="flow-summary-card"><span>Enrichment</span><strong>Public intel worker</strong><em>Privacy gates, cache, rate limits</em></div>
         <div class="flow-summary-card"><span>Packet evidence</span><strong>SSD + rsync + Zeek/TShark</strong><em>Read-only stream and verified cleanup</em></div>
-        <div class="flow-summary-card"><span>Local AI triage</span><strong>Ollama</strong><em>{local_model}</em></div>
+        <div class="flow-summary-card"><span>Assigned AI triage</span><strong>{analysis_provider}</strong><em>{analysis_model}</em></div>
         <div class="flow-summary-card"><span>Analyst outputs</span><strong>Dashboard + reports</strong><em>SQLite, Markdown, JSON, memory</em></div>
         <div class="flow-summary-card"><span>Notification</span><strong>Telegram</strong><em>High/critical and health signals</em></div>
       </section>
@@ -5717,7 +5774,7 @@ def settings_page_section() -> str:
         </summary>
         <div class="settings-panel-top">
           <div>
-            <p>This prompt is sent as the system message when the local AI model analyzes Security Onion alerts.</p>
+            <p>This prompt is sent as the system message when the assigned model analyzes Security Onion alerts.</p>
           </div>
         </div>
         {agent_model_controls['soc-analyst']}

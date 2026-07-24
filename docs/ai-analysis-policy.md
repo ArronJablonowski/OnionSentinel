@@ -179,7 +179,19 @@ license to infer missing facts.
 
 All Ollama/local-model invocations share one host-wide inference lock. Codex
 CLI and GPT CLI use an independent provider lane and may run concurrently with
-one local analysis. Jobs never silently cross providers.
+one local analysis. Exact Codex routes enter that lane only when the matching
+model/reasoning pair is enabled in `codex_cli_models`; malformed, disabled, or
+unknown routes fail closed to the local lane. The scheduler passes the same
+settings-file path to the analysis child that it used for lane selection, so
+selection and execution cannot read different assignments. Jobs never silently
+cross providers.
+
+Running-analysis logs resolve their provider, model, and route from the
+assigned agent before inference starts, then replace those values with stamped
+response provenance when the run completes. The dashboard AI Activity, Reports,
+and Flow views use that same SOC Analyst assignment instead of the compatibility
+`ollama_model` field. A configured Ollama second opinion is reported separately
+and does not change the primary model provenance.
 
 When a parsed PCAP evidence artifact is newer than the matching local AI
 analysis artifact, the scheduled AI runner treats that analysis as stale. The

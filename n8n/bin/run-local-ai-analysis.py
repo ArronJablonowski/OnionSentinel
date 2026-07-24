@@ -638,8 +638,27 @@ def build_llm_log_record(
     error: str = "",
 ) -> dict[str, Any]:
     alert_summary = prompt_alert_summary(prompt_package) if prompt_package else {}
-    model_path = str((response or {}).get("_analysis_model_path") or settings.get("mode") or "unknown")
-    model = str((response or {}).get("_analysis_model") or settings.get("ollama_model") or settings.get("cloud_model") or "unknown")
+    agent_role = str(prompt_package.get("agent_role") or "soc-analyst")
+    enabled_routes = enabled_agent_model_routes(settings)
+    model_route = canonical_model_route(
+        (settings.get("agent_models") or {}).get(agent_role),
+        enabled_routes,
+    )
+    assigned_model, assigned_model_path, assigned_mode = assigned_model_metadata(
+        settings,
+        agent_role,
+    )
+    model_path = str(
+        (response or {}).get("_analysis_model_path")
+        or assigned_model_path
+        or "unknown"
+    )
+    model = str((response or {}).get("_analysis_model") or assigned_model or "unknown")
+    mode = (
+        "codex-cli"
+        if model_path == "frontier-codex-cli"
+        else "ollama" if model_path == "ollama" else assigned_mode
+    )
     return {
         "log_id": run_id,
         "status": status,
@@ -647,9 +666,11 @@ def build_llm_log_record(
         "started_at": started_at,
         "finished_at": finished_at,
         "runtime_seconds": round(runtime_seconds, 3) if runtime_seconds is not None else None,
-        "mode": str(settings.get("mode") or "unknown"),
+        "mode": mode,
         "model": model,
         "model_path": model_path,
+        "agent_role": agent_role,
+        "model_route": model_route,
         "prompt_package": str(prompt_path) if prompt_path else "",
         "analysis_json": str(json_path) if json_path else "",
         "analysis_markdown": str(md_path) if md_path else "",
@@ -879,6 +900,44 @@ def canonical_model_route(value: Any, routes: list[str] | None = None) -> str:
             route,
         )
     return "codex-cli" if route == "gpt-cli" else route
+
+
+def parse_codex_cli_route(route: str) -> tuple[str, str] | None:
+    """Return the exact model/effort pair encoded in a Codex route."""
+    if not route.startswith("codex-cli:"):
+        return None
+    try:
+        model, effort = route.removeprefix("codex-cli:").rsplit(":", 1)
+    except ValueError:
+        return None
+    if (
+        not CODEX_CLI_MODEL_PATTERN.fullmatch(model)
+        or effort not in CODEX_CLI_REASONING_EFFORTS
+    ):
+        return None
+    return model, effort
+
+
+def assigned_model_metadata(
+    settings: dict[str, Any],
+    agent_role: str,
+) -> tuple[str, str, str]:
+    """Resolve pre-inference UI/log metadata from the agent's exact assignment."""
+    role = agent_role if agent_role in CYBER_SECURITY_AGENT_ROLES else "soc-analyst"
+    routes = enabled_agent_model_routes(settings)
+    route = canonical_model_route((settings.get("agent_models") or {}).get(role), routes)
+    if route.startswith("ollama:"):
+        model = route.removeprefix("ollama:").strip()
+        if model:
+            return model, "ollama", "ollama"
+    if parsed := parse_codex_cli_route(route):
+        model, _ = parsed
+        return model, "frontier-codex-cli", "codex-cli"
+    if route == "codex-cli":
+        model = str(settings.get("codex_cli_model") or settings.get("cloud_model") or "").strip()
+        if model:
+            return model, "frontier-codex-cli", "codex-cli"
+    return "", "unknown", str(settings.get("mode") or "unknown")
 
 
 def normalize_agent_models(value: Any, routes: list[str]) -> dict[str, str]:
@@ -1469,16 +1528,10 @@ def analyze_model_route(
             independent_review=independent_review,
         )
     if route.startswith("codex-cli:"):
-        route_value = route.removeprefix("codex-cli:")
-        try:
-            model, effort = route_value.rsplit(":", 1)
-        except ValueError as exc:
-            raise SystemExit("Configured Codex CLI route is invalid") from exc
-        if (
-            not CODEX_CLI_MODEL_PATTERN.fullmatch(model)
-            or effort not in CODEX_CLI_REASONING_EFFORTS
-        ):
+        parsed = parse_codex_cli_route(route)
+        if not parsed:
             raise SystemExit("Configured Codex CLI route is invalid")
+        model, effort = parsed
         return cloud_cli_chat(
             prompt_package,
             args,

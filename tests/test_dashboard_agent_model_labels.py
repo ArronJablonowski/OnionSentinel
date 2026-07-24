@@ -167,6 +167,42 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
         self.assertIn("Codex CLI: gpt-5.6-terra (low)", options)
         self.assertNotIn("Codex CLI: gpt-5.6-sol (xhigh)", options)
 
+    def test_ai_activity_and_flow_show_the_assigned_codex_model(self) -> None:
+        settings = {
+            **self.builder.default_soc_ai_settings(),
+            "enabled_ollama_models": ["previous-local:latest"],
+            "codex_cli_models": [
+                {"model": "gpt-5.6-sol", "reasoning_effort": "high", "enabled": True},
+            ],
+            "agent_models": {
+                role: "codex-cli:gpt-5.6-sol:high"
+                for role in self.builder.CYBER_SECURITY_AGENT_ROLES
+            },
+        }
+        with mock.patch.object(self.builder, "load_soc_ai_settings", return_value=settings):
+            assignment = self.builder.current_soc_analysis_model()
+            state = self.builder.ai_activity_state([])
+
+        self.assertEqual(assignment["provider"], "Codex CLI")
+        self.assertEqual(assignment["model_detail"], "gpt-5.6-sol (high)")
+        self.assertEqual(state["model"], "Codex CLI · gpt-5.6-sol (high)")
+        self.assertNotIn("previous-local:latest", state["detail"])
+
+        with (
+            mock.patch.object(self.builder, "current_soc_analysis_model", return_value=assignment),
+            mock.patch.object(self.builder, "count_ai_analysis_artifacts", return_value=0),
+            mock.patch.object(
+                self.builder,
+                "telegram_sent_counts",
+                return_value={"critical": 0, "high": 0},
+            ),
+        ):
+            flow = self.builder.flow_page_section([])
+
+        self.assertIn("Assigned AI triage", flow)
+        self.assertIn("<strong>Codex CLI</strong><em>gpt-5.6-sol (high)</em>", flow)
+        self.assertNotIn("<strong>Ollama</strong><em>previous-local:latest</em>", flow)
+
     def test_saved_settings_refresh_role_specific_controls(self) -> None:
         script = self.builder.SETTINGS_PAGE_JS
 

@@ -266,6 +266,42 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(seen_command[seen_command.index("--model") + 1], "gpt-5.6-sol")
         self.assertIn('model_reasoning_effort="xhigh"', seen_command)
 
+    def test_running_log_metadata_uses_exact_assigned_codex_route(self) -> None:
+        settings = self.runner.default_ai_settings()
+        settings.update({
+            "enabled_ollama_models": ["previous-local:latest"],
+            "codex_cli_models": [
+                {"model": "gpt-5.6-sol", "reasoning_effort": "high", "enabled": True},
+            ],
+            "gpt_cli_enabled": True,
+        })
+        settings["agent_models"]["soc-analyst"] = "codex-cli:gpt-5.6-sol:high"
+
+        record = self.runner.build_llm_log_record(
+            run_id="synthetic-running",
+            status="running",
+            started_at="2026-07-24  10:00:00-06:00",
+            finished_at=None,
+            runtime_seconds=None,
+            prompt_path=Path("/tmp/synthetic-prompt.json"),
+            prompt_package={
+                "agent_role": "soc-analyst",
+                "alert": {"alert_id": "synthetic-alert"},
+            },
+            settings=settings,
+            response=None,
+            json_path=None,
+            md_path=None,
+            resource_monitor=self.runner.SystemResourceMonitor(),
+        )
+
+        self.assertEqual(record["mode"], "codex-cli")
+        self.assertEqual(record["model"], "gpt-5.6-sol")
+        self.assertEqual(record["model_path"], "frontier-codex-cli")
+        self.assertEqual(record["agent_role"], "soc-analyst")
+        self.assertEqual(record["model_route"], "codex-cli:gpt-5.6-sol:high")
+        self.assertNotEqual(record["model"], "previous-local:latest")
+
     def test_codex_settings_reject_arbitrary_executable_and_effort(self) -> None:
         for payload in (
             {"codex_cli_path": "codex --dangerous"},

@@ -14,6 +14,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import urllib.error
 import urllib.request
@@ -56,6 +57,8 @@ DEFAULT_MAX_CHILD_STDOUT_BYTES = max(1024 * 1024, int(os.environ.get("SOC_AI_SCH
 DEFAULT_MAX_CHILD_STDERR_BYTES = max(256 * 1024, int(os.environ.get("SOC_AI_SCHEDULER_MAX_STDERR_BYTES", 2 * 1024 * 1024)))
 DEFAULT_MAX_CONTROL_RESPONSE_BYTES = 1024 * 1024
 MAX_AI_SETTINGS_BYTES = 256 * 1024
+CODEX_CLI_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
+CODEX_CLI_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 AGENT_ROLES = (
     "soc-analyst",
     "incident-responder",
@@ -172,11 +175,26 @@ def cli_agent_roles(settings_path: Path) -> set[str]:
     routes = raw.get("agent_models") if isinstance(raw, dict) else {}
     if not isinstance(routes, dict):
         return set()
-    return {
-        role
-        for role in AGENT_ROLES
-        if str(routes.get(role) or "").strip().lower() in {"gpt-cli", "codex-cli"}
-    }
+    codex_models = raw.get("codex_cli_models", [])
+    if not isinstance(codex_models, list):
+        return set()
+    enabled_codex_routes: set[str] = set()
+    for entry in codex_models:
+        if not isinstance(entry, dict) or entry.get("enabled") is not True:
+            continue
+        model = str(entry.get("model") or "").strip()
+        effort = str(entry.get("reasoning_effort") or "").strip().lower()
+        if (
+            CODEX_CLI_MODEL_PATTERN.fullmatch(model)
+            and effort in CODEX_CLI_REASONING_EFFORTS
+        ):
+            enabled_codex_routes.add(f"codex-cli:{model}:{effort}")
+    cli_roles: set[str] = set()
+    for role in AGENT_ROLES:
+        route = str(routes.get(role) or "").strip()
+        if route.lower() in {"gpt-cli", "codex-cli"} or route in enabled_codex_routes:
+            cli_roles.add(role)
+    return cli_roles
 
 
 def provider_lane_sql(args: argparse.Namespace) -> tuple[str, list[object]]:
@@ -1147,6 +1165,8 @@ def analysis_command(prompt_path: Path, args: argparse.Namespace) -> list[str]:
         str(args.timeout),
         "--alert-store-url",
         args.alert_store_url,
+        "--ai-settings-file",
+        str(args.ai_settings_file),
     ]
     if args.model:
         cmd.extend(["--model", args.model])
