@@ -70,6 +70,25 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn('.ir-detail-shell,.ir-detail-content{text-align:left}', page)
         self.assertIn('<details class="ir-prior-ai"><summary>AI Analysis Output</summary>', page)
         self.assertIn('.ir-mobile-detail{padding:0 14px 16px;border-top:1px solid #1e303d;text-align:left}', page)
+        self.assertIn("const queryPurposes={", page)
+        self.assertIn("details.className='ir-query-details'", page)
+        self.assertIn(
+            "summaryPurpose.textContent=String(record.dataset.queryPurpose||'').trim()||queryPurpose(pack)",
+            page,
+        )
+        self.assertIn("summaryFinding.textContent=queryFinding(record,meta)", page)
+        self.assertIn("content.querySelectorAll('pre.ir-query-code').forEach", page)
+        self.assertIn("button.setAttribute('aria-label',`Copy ${headingText} for ${title}`)", page)
+        self.assertIn("feedback.setAttribute('role','status')", page)
+        self.assertIn("feedback.setAttribute('aria-live','polite')", page)
+        self.assertIn("await navigator.clipboard.writeText(value)", page)
+        self.assertIn("document.execCommand?.('copy')", page)
+        self.assertIn("await copyExactQuery(code.textContent||'')", page)
+        self.assertIn("feedback.textContent='Copied exact query.'", page)
+        self.assertIn("feedback.textContent='Copy failed — select and copy the query manually.'", page)
+        self.assertIn(".ir-query-details>summary", page)
+        self.assertIn(".ir-query-copy", page)
+        self.assertNotIn("details.open=true", page)
         self.assertIn(
             ".ai-status-analyzing,.ir-agent-analyzing{color:var(--cyan)!important;"
             "animation:ai-status-analyzing-pulse 1.25s ease-in-out infinite",
@@ -182,6 +201,24 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
                     }],
                 }],
             },
+            "_incident_live_osquery_audit": {
+                "trusted_source": "restricted-elastic-osquery-manager-wrapper",
+                "read_only": True,
+                "complete": True,
+                "query_contract": "onion-sentinel-live-osquery-v1",
+                "queries": [{
+                    "target_alias": "synthetic-endpoint",
+                    "purpose": "Confirm the endpoint process inventory.",
+                    "status": "ok",
+                    "query_digest": "digest-live-osquery-unit",
+                    "query": "SELECT pid, name, path FROM processes LIMIT 25;",
+                    "total_rows": 2,
+                    "returned_rows": 2,
+                    "truncated": False,
+                    "duration_ms": 17,
+                    "rows_preview": [{"pid": "1", "name": "synthetic-init"}],
+                }],
+            },
         }
         prior_response = {
             "bluf": "Synthetic SOC assessment.",
@@ -212,20 +249,28 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         status, payload = self.portal.soc_incident_detail_response("ir-query-audit")
 
         self.assertEqual(status, 200)
-        self.assertEqual(payload["query_count"], 2)
+        self.assertEqual(payload["query_count"], 3)
         self.assertIn("KQL (analyst-readable equivalent)", payload["incident_html"])
         self.assertIn('source.ip: &quot;192.0.2.10&quot;', payload["incident_html"])
         self.assertIn("Elasticsearch Query DSL (exact executed request)", payload["incident_html"])
         self.assertIn('&quot;source.ip&quot;: &quot;192.0.2.10&quot;', payload["incident_html"])
         self.assertIn("0 total / 1 returned", payload["incident_html"])
+        self.assertIn(
+            'data-query-finding="Synthetic connection observed."',
+            payload["incident_html"],
+        )
         self.assertIn("Detection Outcome Reasoning", payload["incident_html"])
         self.assertIn("OSquery Findings", payload["incident_html"])
-        self.assertIn("OSquery Command Audit", payload["incident_html"])
+        self.assertIn("Security Onion Appliance OSQuery Snapshot Audit", payload["incident_html"])
         self.assertIn(
             "SELECT hostname, cpu_brand, physical_memory FROM system_info;",
             payload["incident_html"],
         )
         self.assertIn("synthetic-security-onion", payload["incident_html"])
+        self.assertIn("Endpoint Live OSQuery Audit", payload["incident_html"])
+        self.assertIn("Confirm the endpoint process inventory.", payload["incident_html"])
+        self.assertIn("SELECT pid, name, path FROM processes LIMIT 25;", payload["incident_html"])
+        self.assertIn("synthetic-init", payload["incident_html"])
         self.assertIn("Synthetic SOC assessment.", payload["prior_ai_html"])
 
     def test_escalation_api_records_intent_through_alert_store(self) -> None:

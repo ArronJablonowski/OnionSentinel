@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 
 const GROUP_ID = 'a1b2c3d4e5f6';
 const FIXTURE_REASON = 'Synthetic QA suppression reason';
+const INCIDENT_CASE_ID = 'ir-synthetic-query-audit';
+const EXACT_ALERT_CONTEXT_KQL = 'event.dataset: "synthetic.alert" AND source.ip: "192.0.2.10"';
+const EXACT_NETWORK_FLOW_KQL = 'source.ip: "192.0.2.10" AND destination.ip: "198.51.100.20"';
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const SPEC_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SPEC_DIR, '../..');
@@ -121,6 +124,56 @@ function fixtureStatuses(state) {
   };
 }
 
+function escapeFixtureHtml(value) {
+  return String(value).replace(/[&<>"']/g, character => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[character]));
+}
+
+function fixtureIncidentQueryRecord(position, pack, kql, totalHits, returnedHits, linkedFinding = '') {
+  const dsl = JSON.stringify({
+    query: { bool: { filter: [{ query_string: { query: kql } }] } },
+    size: 25,
+  }, null, 2);
+  return `<article class="ir-query-record" data-query-finding="${escapeFixtureHtml(linkedFinding)}">`
+    + `<h4>Query ${position}: ${pack}</h4>`
+    + `<div class="ir-query-meta">`
+    + `<span><b>Status:</b> ok</span>`
+    + `<span><b>Digest:</b> <code>digest-${position}</code></span>`
+    + `<span><b>Window:</b> 2026-07-15  08:00:00-06:00 to 2026-07-15  08:10:00-06:00</span>`
+    + `<span><b>Hits:</b> ${totalHits} total / ${returnedHits} returned</span>`
+    + `</div>`
+    + `<h5>KQL (analyst-readable equivalent)</h5>`
+    + `<pre class="ir-query-code"><code>${escapeFixtureHtml(kql)}</code></pre>`
+    + `<h5>Elasticsearch Query DSL (exact executed request)</h5>`
+    + `<pre class="ir-query-code"><code>${escapeFixtureHtml(dsl)}</code></pre>`
+    + (position === 2
+      ? `<h5>Bounded Result Preview</h5><pre class="ir-query-code"><code>[{"synthetic":true}]</code></pre>`
+      : '')
+    + `</article>`;
+}
+
+function fixtureIncidentHtml() {
+  return `<section class="ir-investigation-report"><h3>Incident Response Investigation</h3>`
+    + `<p>Synthetic query-audit browser fixture.</p></section>`
+    + `<section class="ir-query-audit"><h3>Security Onion Query Audit</h3>`
+    + `<div class="ir-analysis-meta"><span><b>Source:</b> synthetic restricted wrapper</span></div>`
+    + fixtureIncidentQueryRecord(
+      1,
+      'alert_context',
+      EXACT_ALERT_CONTEXT_KQL,
+      1,
+      1,
+      'The triggering synthetic detection was returned by the bounded query.',
+    )
+    + fixtureIncidentQueryRecord(2, 'network_flow', EXACT_NETWORK_FLOW_KQL, 7, 3)
+    + `</section>`;
+}
+
 function fixtureListPayload(state, requestUrl) {
   const analystStatus = new URL(requestUrl).searchParams.get('analyst_status') || '';
   const statusMatches = !state.escalated && (!analystStatus
@@ -190,6 +243,39 @@ async function installSyntheticApi(page, { failEscalation = false } = {}) {
       body: JSON.stringify(body),
     });
 
+    if (method === 'GET' && path === '/api/soc-incidents') {
+      await json({
+        ok: true,
+        incidents: [{
+          case_id: INCIDENT_CASE_ID,
+          status: 'open',
+          agent_status: 'analyzed',
+          triage_level: 'medium',
+          escalated_at: '2026-07-15  08:06:00-06:00',
+          rule_name: 'Synthetic incident query audit',
+          reason: 'Synthetic browser-only evidence review',
+          source_ip: '192.0.2.10',
+          destination_ip: '198.51.100.20',
+          destination_port: 443,
+          seen_count: 3,
+        }],
+        total: 1,
+        page: 1,
+        pages: 1,
+        status_counts: { open: 1 },
+        agent_status_counts: { analyzed: 1 },
+      });
+      return;
+    }
+    if (method === 'GET' && path === `/api/soc-incidents/${INCIDENT_CASE_ID}/detail`) {
+      await json({
+        ok: true,
+        case_id: INCIDENT_CASE_ID,
+        incident_html: fixtureIncidentHtml(),
+        prior_ai_html: '<div class="ir-prior-analysis"><p>Synthetic prior analysis.</p></div>',
+      });
+      return;
+    }
     if (method === 'GET' && path === '/api/soc-alerts') {
       const payload = fixtureListPayload(state, request.url());
       if (state.delayNextListResponse) {
@@ -391,6 +477,73 @@ test('short landscape mutation controls remain usable with synthetic state', asy
     page: document.documentElement.scrollWidth,
   }));
   expect(dimensions.page).toBeLessThanOrEqual(dimensions.viewport + 1);
+});
+
+test('incident query audits collapse by default and copy exact queries with accessible feedback', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.addInitScript(() => {
+    window.__incidentQueryCopies = [];
+    window.__incidentQueryCopyFailure = false;
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: async value => {
+          if (window.__incidentQueryCopyFailure) throw new Error('synthetic clipboard failure');
+          window.__incidentQueryCopies.push(value);
+        },
+      },
+    });
+    document.execCommand = command => command === 'copy' && !window.__incidentQueryCopyFailure;
+  });
+  await installSyntheticApi(page);
+  await page.goto(`${fixtureBaseUrl}/investigations.html`, { waitUntil: 'domcontentloaded' });
+
+  const incidentRow = page.locator(`[data-case-id="${INCIDENT_CASE_ID}"]`);
+  await expect(incidentRow).toBeVisible();
+  await incidentRow.click();
+
+  const detail = page.locator(`.ir-detail-row[data-detail-for="${INCIDENT_CASE_ID}"]:not([hidden])`);
+  const queries = detail.locator('details.ir-query-details');
+  await expect(queries).toHaveCount(2);
+  await expect(page.locator(`[data-mobile-case="${INCIDENT_CASE_ID}"] details.ir-query-details`)).toHaveCount(2);
+  for (let index = 0; index < 2; index += 1) {
+    await expect(queries.nth(index)).not.toHaveAttribute('open', '');
+  }
+
+  const alertContext = queries.nth(0);
+  await expect(alertContext.locator('summary')).toContainText('Query 1: alert_context');
+  await expect(alertContext.locator('summary')).toContainText('Review the triggering detection and its immediate alert context.');
+  await expect(alertContext.locator('summary')).toContainText('1 total hits; 1 returned. Status: ok.');
+  await expect(alertContext.locator('summary')).toContainText(
+    'Responder finding: The triggering synthetic detection was returned by the bounded query.',
+  );
+  await alertContext.locator('summary').click();
+  await expect(alertContext).toHaveAttribute('open', '');
+
+  const queryCopyButtons = detail.locator('.ir-query-copy');
+  await expect(queryCopyButtons).toHaveCount(4);
+  const kqlCopy = alertContext.getByRole('button', {
+    name: 'Copy KQL (analyst-readable equivalent) for Query 1: alert_context',
+  });
+  await kqlCopy.click();
+  await expect(kqlCopy).toHaveText('Copied');
+  await expect(alertContext.getByRole('status')).toHaveText('Copied exact query.');
+  await expect.poll(() => page.evaluate(() => window.__incidentQueryCopies[0])).toBe(EXACT_ALERT_CONTEXT_KQL);
+
+  const networkFlow = queries.nth(1);
+  await expect(networkFlow.locator('summary')).toContainText('Review related network connections and traffic metadata.');
+  await expect(networkFlow.locator('summary')).toContainText('7 total hits; 3 returned. Status: ok.');
+  await expect(networkFlow.locator('summary')).toContainText(
+    'No query-linked responder finding was recorded.',
+  );
+  await networkFlow.locator('summary').click();
+  await page.evaluate(() => { window.__incidentQueryCopyFailure = true; });
+  const failedCopy = networkFlow.getByRole('button', {
+    name: 'Copy KQL (analyst-readable equivalent) for Query 2: network_flow',
+  });
+  await failedCopy.click();
+  await expect(failedCopy).toHaveText('Try again');
+  await expect(networkFlow.getByRole('status')).toHaveText('Copy failed — select and copy the query manually.');
 });
 
 test('successful escalation confirms for five seconds and removes desktop and mobile rows despite a stale list response', async ({ page }) => {

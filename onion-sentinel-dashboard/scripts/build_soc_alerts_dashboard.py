@@ -4943,7 +4943,7 @@ def incident_response_page_section() -> str:
       </div>
     </section>
     <style>
-      .ir-view{display:block;padding:0 0 28px}.ir-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:0 0 16px}.ir-metrics>div{min-height:84px;padding:16px 18px;border:1px solid #223341;background:#0d1822;border-radius:8px}.ir-metrics span{display:block;color:#9caec2;font-size:.76rem;font-weight:800;text-transform:uppercase}.ir-metrics strong{display:block;margin-top:7px;color:#75efff;font-size:1.55rem}.ir-toolbar{display:flex;justify-content:flex-end;gap:14px;align-items:end;margin:0 0 12px}.ir-toolbar label{color:#9caec2;font-size:.76rem;font-weight:800;text-transform:uppercase}.ir-toolbar select{display:block;min-height:44px;margin-top:5px;padding:0 38px 0 12px;color:#e9f2ff;background:#0b1620;border:1px solid #07566a;border-radius:8px}.ir-error{margin:0 0 12px;padding:12px 14px;color:#ffb8c3;background:#25131a;border:1px solid #7f3345;border-radius:8px}.ir-table-wrap{overflow-x:auto;border:1px solid #223341;border-radius:8px;background:#09131d}.ir-table{width:100%;min-width:1480px;border-collapse:collapse;table-layout:fixed}.ir-table col.ir-col-expand{width:60px}.ir-table col.ir-col-status{width:112px}.ir-table col.ir-col-severity{width:128px}.ir-table col.ir-col-escalated{width:264px}.ir-table col.ir-col-alert{width:auto}.ir-table col.ir-col-source{width:152px}.ir-table col.ir-col-destination{width:152px}.ir-table col.ir-col-destination-port{width:118px}.ir-table col.ir-col-count{width:76px}.ir-table col.ir-col-agent{width:116px}.ir-table th,.ir-table td{padding:14px 12px;text-align:left;border-bottom:1px solid #1e303d;vertical-align:middle}.ir-table th{color:#9caec2;background:#101e2a;font-size:.75rem;text-transform:uppercase}.ir-table th:first-child,.ir-case-row td:first-child{padding-left:8px;padding-right:8px;text-align:center}.ir-table th:nth-child(9),.ir-case-row td:nth-child(9){text-align:center}.ir-case-row{cursor:pointer}.ir-case-row:hover td,.ir-case-row:focus-within td{background:#0e202b}.ir-expand{width:40px;height:40px;border:1px solid #07566a;border-radius:7px;background:#0a1a24;color:#75efff;cursor:pointer}.ir-alert-title{display:block;color:#eef5ff;line-height:1.35;overflow-wrap:anywhere}.ir-muted{display:block;margin-top:4px;color:#8fa2b8;font-size:.8rem;line-height:1.35}.ir-escalated{white-space:nowrap;font-variant-numeric:tabular-nums;color:#c8d6e6}.ir-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#d8e7f8;white-space:nowrap}.ir-status,.ir-agent{display:inline-block;white-space:nowrap;font-size:.72rem;font-weight:900;text-transform:uppercase}.ir-status-open,.ir-agent-queued{color:#ffcb67}.ir-status-in_progress,.ir-agent-analyzing{color:#75efff}.ir-status-resolved,.ir-agent-analyzed{color:#69e89a}.ir-agent-failed{color:#ff7088}.ir-severity-critical{color:#ff6681}.ir-severity-high{color:#ff963e}.ir-severity-medium{color:#ffca67}.ir-severity-low{color:#72e99c}.ir-severity-informational{color:#75efff}.ir-detail-row td{padding:0;background:#07111a;text-align:left}.ir-detail-shell,.ir-detail-content{text-align:left}.ir-detail-shell{padding:18px 20px 24px;border-left:3px solid #1fc7dc}.ir-investigation-report,.ir-query-audit{margin-bottom:14px;padding:18px;border:1px solid #184352;border-radius:8px;background:#0c1924}.ir-investigation-report>h3,.ir-query-audit>h3{margin:0 0 12px;color:#eef5ff}.ir-analysis-meta{display:flex;flex-wrap:wrap;gap:8px 18px;margin-bottom:14px;color:#9caec2;font-size:.83rem}.ir-report-subsection{padding:14px 0;border-top:1px solid #19313d}.ir-report-subsection h4{margin:0 0 8px;color:#eef5ff}.ir-report-subsection p,.ir-report-list{margin:0;color:#c6d3e2;line-height:1.55;white-space:pre-wrap}.ir-report-list{padding-left:22px}.ir-timeline-wrap{max-width:100%;overflow-x:auto}.ir-timeline-table{width:100%;min-width:920px;border-collapse:collapse;table-layout:auto}.ir-timeline-table th,.ir-timeline-table td{padding:10px;text-align:left;vertical-align:top;border-bottom:1px solid #1e303d}.ir-timeline-table th{color:#9caec2;background:#101e2a}.ir-query-record{padding:16px 0;border-top:1px solid #19313d}.ir-query-record h4,.ir-query-record h5{margin:0 0 9px;color:#eef5ff}.ir-query-record h5{margin-top:14px;color:#9caec2}.ir-query-meta{display:flex;flex-wrap:wrap;gap:7px 16px;color:#9caec2;font-size:.82rem}.ir-query-code{max-width:100%;max-height:420px;margin:8px 0 0;padding:13px;overflow:auto;color:#d8e7f8;background:#061019;border:1px solid #1d3442;border-radius:7px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre}.ir-prior-ai{margin:0;padding:0;border:1px solid #223341;border-radius:8px;background:#0c1924;overflow:hidden}.ir-prior-ai>summary{min-height:52px;padding:15px 18px;color:#eef5ff;font-weight:800;cursor:pointer}.ir-prior-ai[open]>summary{border-bottom:1px solid #223341}.ir-prior-analysis{padding:4px 18px 16px}.ir-analysis-empty{color:#9caec2}.ir-loading{text-align:center!important;color:#9caec2}.ir-pagination{display:flex;justify-content:flex-end;align-items:center;gap:12px;padding:14px 0}.ir-pagination button{min-height:44px;padding:0 16px;color:#e8f1fc;background:#0b1620;border:1px solid #07566a;border-radius:8px}.ir-pagination button:disabled{opacity:.45}.ir-mobile-list{display:none}.ir-mobile-card{border:1px solid #223341;border-radius:8px;background:#0b1721;overflow:hidden}.ir-mobile-toggle{width:100%;min-height:76px;padding:14px;text-align:left;color:inherit;background:none;border:0}.ir-mobile-top{display:flex;justify-content:space-between;gap:12px;margin-bottom:8px}.ir-mobile-detail{padding:0 14px 16px;border-top:1px solid #1e303d;text-align:left}.ir-mobile-list{gap:10px}
+      .ir-view{display:block;padding:0 0 28px}.ir-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:0 0 16px}.ir-metrics>div{min-height:84px;padding:16px 18px;border:1px solid #223341;background:#0d1822;border-radius:8px}.ir-metrics span{display:block;color:#9caec2;font-size:.76rem;font-weight:800;text-transform:uppercase}.ir-metrics strong{display:block;margin-top:7px;color:#75efff;font-size:1.55rem}.ir-toolbar{display:flex;justify-content:flex-end;gap:14px;align-items:end;margin:0 0 12px}.ir-toolbar label{color:#9caec2;font-size:.76rem;font-weight:800;text-transform:uppercase}.ir-toolbar select{display:block;min-height:44px;margin-top:5px;padding:0 38px 0 12px;color:#e9f2ff;background:#0b1620;border:1px solid #07566a;border-radius:8px}.ir-error{margin:0 0 12px;padding:12px 14px;color:#ffb8c3;background:#25131a;border:1px solid #7f3345;border-radius:8px}.ir-table-wrap{overflow-x:auto;border:1px solid #223341;border-radius:8px;background:#09131d}.ir-table{width:100%;min-width:1480px;border-collapse:collapse;table-layout:fixed}.ir-table col.ir-col-expand{width:60px}.ir-table col.ir-col-status{width:112px}.ir-table col.ir-col-severity{width:128px}.ir-table col.ir-col-escalated{width:264px}.ir-table col.ir-col-alert{width:auto}.ir-table col.ir-col-source{width:152px}.ir-table col.ir-col-destination{width:152px}.ir-table col.ir-col-destination-port{width:118px}.ir-table col.ir-col-count{width:76px}.ir-table col.ir-col-agent{width:116px}.ir-table th,.ir-table td{padding:14px 12px;text-align:left;border-bottom:1px solid #1e303d;vertical-align:middle}.ir-table th{color:#9caec2;background:#101e2a;font-size:.75rem;text-transform:uppercase}.ir-table th:first-child,.ir-case-row td:first-child{padding-left:8px;padding-right:8px;text-align:center}.ir-table th:nth-child(9),.ir-case-row td:nth-child(9){text-align:center}.ir-case-row{cursor:pointer}.ir-case-row:hover td,.ir-case-row:focus-within td{background:#0e202b}.ir-expand{width:40px;height:40px;border:1px solid #07566a;border-radius:7px;background:#0a1a24;color:#75efff;cursor:pointer}.ir-alert-title{display:block;color:#eef5ff;line-height:1.35;overflow-wrap:anywhere}.ir-muted{display:block;margin-top:4px;color:#8fa2b8;font-size:.8rem;line-height:1.35}.ir-escalated{white-space:nowrap;font-variant-numeric:tabular-nums;color:#c8d6e6}.ir-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#d8e7f8;white-space:nowrap}.ir-status,.ir-agent{display:inline-block;white-space:nowrap;font-size:.72rem;font-weight:900;text-transform:uppercase}.ir-status-open,.ir-agent-queued{color:#ffcb67}.ir-status-in_progress,.ir-agent-analyzing{color:#75efff}.ir-status-resolved,.ir-agent-analyzed{color:#69e89a}.ir-agent-failed{color:#ff7088}.ir-severity-critical{color:#ff6681}.ir-severity-high{color:#ff963e}.ir-severity-medium{color:#ffca67}.ir-severity-low{color:#72e99c}.ir-severity-informational{color:#75efff}.ir-detail-row td{padding:0;background:#07111a;text-align:left}.ir-detail-shell,.ir-detail-content{text-align:left}.ir-detail-shell{padding:18px 20px 24px;border-left:3px solid #1fc7dc}.ir-investigation-report,.ir-query-audit{margin-bottom:14px;padding:18px;border:1px solid #184352;border-radius:8px;background:#0c1924}.ir-investigation-report>h3,.ir-query-audit>h3{margin:0 0 12px;color:#eef5ff}.ir-analysis-meta{display:flex;flex-wrap:wrap;gap:8px 18px;margin-bottom:14px;color:#9caec2;font-size:.83rem}.ir-report-subsection{padding:14px 0;border-top:1px solid #19313d}.ir-report-subsection h4{margin:0 0 8px;color:#eef5ff}.ir-report-subsection p,.ir-report-list{margin:0;color:#c6d3e2;line-height:1.55;white-space:pre-wrap}.ir-report-list{padding-left:22px}.ir-timeline-wrap{max-width:100%;overflow-x:auto}.ir-timeline-table{width:100%;min-width:920px;border-collapse:collapse;table-layout:auto}.ir-timeline-table th,.ir-timeline-table td{padding:10px;text-align:left;vertical-align:top;border-bottom:1px solid #1e303d}.ir-timeline-table th{color:#9caec2;background:#101e2a}.ir-query-record{padding:0;border-top:1px solid #19313d}.ir-query-details>summary{position:relative;display:grid;gap:4px;min-height:64px;padding:14px 44px 14px 4px;color:#eef5ff;cursor:pointer;list-style:none}.ir-query-details>summary::-webkit-details-marker{display:none}.ir-query-details>summary:after{content:"›";position:absolute;right:14px;top:50%;color:#75efff;font-size:26px;line-height:1;transform:translateY(-50%);transition:transform .16s ease}.ir-query-details[open]>summary:after{transform:translateY(-50%) rotate(90deg)}.ir-query-details>summary:hover,.ir-query-details>summary:focus-visible{background:rgba(34,211,238,.045)}.ir-query-summary-title{color:#eef5ff;font-size:.94rem;font-weight:850}.ir-query-summary-purpose{color:#a9bbce;font-size:.8rem;line-height:1.4}.ir-query-summary-finding{color:#75efff;font-size:.77rem;font-weight:750;line-height:1.35}.ir-query-record-content{padding:2px 4px 16px}.ir-query-record h4,.ir-query-record h5{margin:0 0 9px;color:#eef5ff}.ir-query-record h5{margin-top:14px;color:#9caec2}.ir-query-meta{display:flex;flex-wrap:wrap;gap:7px 16px;color:#9caec2;font-size:.82rem}.ir-query-code-heading{display:flex;align-items:center;gap:10px;margin-top:14px}.ir-query-code-heading h5{flex:1 1 auto;min-width:0;margin:0}.ir-query-copy{min-height:34px;padding:6px 11px;border:1px solid #07566a;border-radius:7px;color:#d9f7fb;background:#071722;font-size:.76rem;font-weight:850;cursor:pointer}.ir-query-copy:hover,.ir-query-copy:focus-visible{border-color:#1fc7dc;color:#75efff}.ir-query-copy:disabled{opacity:.72;cursor:wait}.ir-copy-feedback{min-width:76px;color:#9caec2;font-size:.75rem;font-weight:800}.ir-copy-feedback:empty{display:none}.ir-copy-feedback[data-state="success"]{color:#69e89a}.ir-copy-feedback[data-state="error"]{color:#ff7088}.ir-query-code{max-width:100%;max-height:420px;margin:8px 0 0;padding:13px;overflow:auto;color:#d8e7f8;background:#061019;border:1px solid #1d3442;border-radius:7px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre}.ir-prior-ai{margin:0;padding:0;border:1px solid #223341;border-radius:8px;background:#0c1924;overflow:hidden}.ir-prior-ai>summary{min-height:52px;padding:15px 18px;color:#eef5ff;font-weight:800;cursor:pointer}.ir-prior-ai[open]>summary{border-bottom:1px solid #223341}.ir-prior-analysis{padding:4px 18px 16px}.ir-analysis-empty{color:#9caec2}.ir-loading{text-align:center!important;color:#9caec2}.ir-pagination{display:flex;justify-content:flex-end;align-items:center;gap:12px;padding:14px 0}.ir-pagination button{min-height:44px;padding:0 16px;color:#e8f1fc;background:#0b1620;border:1px solid #07566a;border-radius:8px}.ir-pagination button:disabled{opacity:.45}.ir-mobile-list{display:none}.ir-mobile-card{border:1px solid #223341;border-radius:8px;background:#0b1721;overflow:hidden}.ir-mobile-toggle{width:100%;min-height:76px;padding:14px;text-align:left;color:inherit;background:none;border:0}.ir-mobile-top{display:flex;justify-content:space-between;gap:12px;margin-bottom:8px}.ir-mobile-detail{padding:0 14px 16px;border-top:1px solid #1e303d;text-align:left}.ir-mobile-list{gap:10px}
       @media(max-width:900px){.ir-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.ir-metrics>div:last-child{grid-column:span 2}.ir-toolbar{justify-content:space-between}.ir-table-wrap{display:none}.ir-mobile-list{display:grid}.ir-detail-shell{padding:14px 0}.ir-pagination{justify-content:center}}
       @media(max-width:480px){.ir-metrics{gap:8px}.ir-metrics>div{min-height:72px;padding:12px}.ir-toolbar{align-items:stretch}.ir-toolbar label{flex:1}.ir-toolbar select{width:100%}}
     </style>
@@ -4962,6 +4962,156 @@ def incident_response_page_section() -> str:
       const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
       const severity=item=>String(item.triage_level||item.severity_label||'informational').toLowerCase().replace(/[^a-z]/g,'')||'informational';
       const label=value=>String(value||'unknown').replaceAll('_',' ');
+      const queryPurposes={
+        alert_context:'Review the triggering detection and its immediate alert context.',
+        network_flow:'Review related network connections and traffic metadata.',
+        dns_activity:'Review DNS activity related to the alert observables.',
+        osquery_history:'Review prior OSquery evidence associated with the alert.',
+        cross_sensor_timeline:'Correlate related activity across available sensors.',
+        system_inventory:'Review the target system inventory.',
+        logged_in_users:'Review users currently logged in to the target.',
+        listening_ports:'Review listening network services on the target.',
+        process_inventory:'Review running processes on the target.',
+        installed_packages:'Review installed software packages on the target.',
+        scheduled_tasks:'Review scheduled tasks on the target.',
+        startup_items:'Review configured startup items on the target.',
+      };
+      const queryPack=heading=>{
+        const text=String(heading?.textContent||'').trim();
+        const separator=text.indexOf(':');
+        return (separator>=0?text.slice(separator+1):text).trim()||'evidence_pack';
+      };
+      const queryPurpose=pack=>{
+        const normalized=String(pack||'evidence_pack').trim().toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
+        return queryPurposes[normalized]||`Review ${label(normalized||'evidence')} evidence.`;
+      };
+      const queryMetaValue=(meta,name)=>{
+        const wanted=String(name||'').toLowerCase();
+        const entry=[...(meta?.querySelectorAll('span')||[])].find(node=>String(node.querySelector('b')?.textContent||'').replace(':','').trim().toLowerCase()===wanted);
+        if(!entry)return '';
+        const clone=entry.cloneNode(true);
+        clone.querySelector('b')?.remove();
+        return String(clone.textContent||'').trim();
+      };
+      const queryFinding=(record,meta)=>{
+        const linked=String(record?.dataset?.queryFinding||'').trim();
+        const status=queryMetaValue(meta,'Status');
+        const hits=queryMetaValue(meta,'Hits');
+        const rows=queryMetaValue(meta,'Rows');
+        const countText=hits||rows;
+        const countMatch=countText.match(/(\d+)\s+total\s*\/\s*(\d+)\s+returned/i);
+        const unit=hits?'hits':'rows';
+        const parts=[];
+        if(countMatch)parts.push(`${countMatch[1]} total ${unit}; ${countMatch[2]} returned.`);
+        else if(countText)parts.push(`${countText}.`);
+        if(status)parts.push(`Status: ${status}.`);
+        if(record.querySelector('.ir-query-error'))parts.push('The query recorded an error.');
+        const resultSummary=parts.join(' ')||'No query result summary was recorded.';
+        return linked
+          ? `${resultSummary} Responder finding: ${linked}`
+          : `${resultSummary} No query-linked responder finding was recorded.`;
+      };
+      async function copyExactQuery(value){
+        if(navigator.clipboard?.writeText){
+          try{await navigator.clipboard.writeText(value);return}catch(_){}
+        }
+        const field=document.createElement('textarea');
+        field.value=value;
+        field.setAttribute('readonly','');
+        field.setAttribute('aria-hidden','true');
+        field.style.position='fixed';
+        field.style.left='-10000px';
+        field.style.top='0';
+        field.style.opacity='0';
+        document.body.appendChild(field);
+        field.focus();
+        field.select();
+        field.setSelectionRange(0,field.value.length);
+        let copied=false;
+        try{copied=Boolean(document.execCommand?.('copy'))}finally{field.remove()}
+        if(!copied)throw new Error('Clipboard copy is unavailable');
+      }
+      function addQueryCopyControl(pre,title){
+        if(pre.dataset.copyEnhanced==='true')return;
+        const code=pre.querySelector('code');
+        const heading=pre.previousElementSibling;
+        if(!code||!heading?.matches('h5'))return;
+        const headingText=String(heading.textContent||'').trim();
+        if(!/^(KQL|Elasticsearch Query DSL|OSquery SQL)\b/i.test(headingText))return;
+        pre.dataset.copyEnhanced='true';
+        const toolbar=document.createElement('div');
+        toolbar.className='ir-query-code-heading';
+        heading.before(toolbar);
+        const button=document.createElement('button');
+        button.type='button';
+        button.className='ir-query-copy';
+        button.textContent='Copy';
+        button.setAttribute('aria-label',`Copy ${headingText} for ${title}`);
+        const feedback=document.createElement('span');
+        feedback.className='ir-copy-feedback';
+        feedback.setAttribute('role','status');
+        feedback.setAttribute('aria-live','polite');
+        toolbar.append(heading,button,feedback);
+        button.addEventListener('click',async event=>{
+          event.preventDefault();
+          event.stopPropagation();
+          const previousTimer=Number(button.dataset.resetTimer||0);
+          if(previousTimer)window.clearTimeout(previousTimer);
+          button.disabled=true;
+          button.textContent='Copying…';
+          feedback.textContent='';
+          delete feedback.dataset.state;
+          try{
+            await copyExactQuery(code.textContent||'');
+            button.textContent='Copied';
+            feedback.textContent='Copied exact query.';
+            feedback.dataset.state='success';
+          }catch(_){
+            button.textContent='Try again';
+            feedback.textContent='Copy failed — select and copy the query manually.';
+            feedback.dataset.state='error';
+          }finally{
+            button.disabled=false;
+            button.dataset.resetTimer=String(window.setTimeout(()=>{
+              button.textContent='Copy';
+              feedback.textContent='';
+              delete feedback.dataset.state;
+              delete button.dataset.resetTimer;
+            },2400));
+          }
+        });
+      }
+      function enhanceIncidentQueryAudit(root){
+        root.querySelectorAll('.ir-query-record').forEach(record=>{
+          if(record.dataset.queryEnhanced==='true')return;
+          const heading=record.querySelector(':scope > h4');
+          const meta=record.querySelector(':scope > .ir-query-meta');
+          if(!heading)return;
+          record.dataset.queryEnhanced='true';
+          const title=String(heading.textContent||'Query audit').trim();
+          const pack=queryPack(heading);
+          const details=document.createElement('details');
+          details.className='ir-query-details';
+          const summary=document.createElement('summary');
+          const summaryTitle=document.createElement('span');
+          summaryTitle.className='ir-query-summary-title';
+          summaryTitle.textContent=title;
+          const summaryPurpose=document.createElement('span');
+          summaryPurpose.className='ir-query-summary-purpose';
+          summaryPurpose.textContent=String(record.dataset.queryPurpose||'').trim()||queryPurpose(pack);
+          const summaryFinding=document.createElement('span');
+          summaryFinding.className='ir-query-summary-finding';
+          summaryFinding.textContent=queryFinding(record,meta);
+          summary.append(summaryTitle,summaryPurpose,summaryFinding);
+          const content=document.createElement('div');
+          content.className='ir-query-record-content';
+          [...record.childNodes].forEach(node=>{if(node!==heading)content.appendChild(node)});
+          heading.remove();
+          details.append(summary,content);
+          record.appendChild(details);
+          content.querySelectorAll('pre.ir-query-code').forEach(pre=>addQueryCopyControl(pre,title));
+        });
+      }
       const rowHtml=item=>{const level=severity(item);return `<tr class="ir-case-row" tabindex="0" data-case-id="${esc(item.case_id)}"><td><button class="ir-expand" type="button" aria-expanded="false" aria-label="Expand incident case">&#9662;</button></td><td><span class="ir-status ir-status-${esc(item.status)}">${esc(label(item.status))}</span></td><td><span class="ir-status ir-severity-${esc(level)}">${esc(level)}</span></td><td class="ir-escalated">${esc(item.escalated_at||'n/a')}</td><td><strong class="ir-alert-title">${esc(item.rule_name||'Security Onion alert')}</strong><span class="ir-muted">${esc(item.reason||'Escalated for incident response')}</span></td><td><code class="ir-code">${esc(item.source_ip||'n/a')}</code></td><td><code class="ir-code">${esc(item.destination_ip||'n/a')}</code></td><td><code class="ir-code">${esc(item.destination_port??'n/a')}</code></td><td>${Number(item.seen_count||0)}</td><td><span class="ir-agent ir-agent-${esc(item.agent_status)}">${esc(label(item.agent_status))}</span></td></tr><tr class="ir-detail-row" data-detail-for="${esc(item.case_id)}" hidden><td colspan="10"><div class="ir-detail-shell"><div class="ir-detail-content">Loading case evidence...</div></div></td></tr>`};
       const mobileHtml=item=>{const level=severity(item);return `<article class="ir-mobile-card" data-mobile-case="${esc(item.case_id)}"><button class="ir-mobile-toggle" type="button" aria-expanded="false"><span class="ir-mobile-top"><span class="ir-status ir-severity-${esc(level)}">${esc(level)}</span><span class="ir-agent ir-agent-${esc(item.agent_status)}">${esc(label(item.agent_status))}</span></span><strong class="ir-alert-title">${esc(item.rule_name||'Security Onion alert')}</strong><span class="ir-muted">${esc(item.source_ip||'n/a')} &gt; ${esc(item.destination_ip||'n/a')}${item.destination_port?':'+esc(item.destination_port):''} | ${Number(item.seen_count||0)} alert(s)</span></button><div class="ir-mobile-detail" hidden><div class="ir-detail-content">Loading case evidence...</div></div></article>`};
       async function loadDetail(item,targets){
@@ -4972,7 +5122,7 @@ def incident_response_page_section() -> str:
           const payload=await response.json();
           if(!response.ok||payload.ok===false)throw new Error(payload.error||`HTTP ${response.status}`);
           const html=`${payload.incident_html||'<section class="ir-investigation-report"><h3>Incident Response Investigation</h3><p>No responder report is available.</p></section>'}<details class="ir-prior-ai"><summary>AI Analysis Output</summary>${payload.prior_ai_html||'<div class="ir-prior-analysis"><p>No prior SOC AI analysis is available.</p></div>'}</details>`;
-          targets.forEach(target=>{target.innerHTML=html;target.dataset.loaded='true'});
+          targets.forEach(target=>{target.innerHTML=html;enhanceIncidentQueryAudit(target);target.dataset.loaded='true'});
         }catch(error){targets.forEach(target=>{target.innerHTML=`<div class="ir-error">Unable to load case evidence: ${esc(error.message)}</div>`})}
       }
       async function toggleCase(caseId){
