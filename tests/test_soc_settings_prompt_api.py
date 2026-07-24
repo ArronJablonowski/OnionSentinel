@@ -208,10 +208,13 @@ class SocSettingsPromptApiTest(unittest.TestCase):
         settings = self.portal.default_soc_ai_settings()
         settings.update({
             "enabled_ollama_models": ["primary:latest", "fallback:latest", "primary:latest"],
-            "gpt_cli_enabled": True,
             "codex_cli_path": "codex",
             "codex_cli_model": "gpt-5.5",
             "codex_cli_reasoning_effort": "medium",
+            "codex_cli_models": [
+                {"model": "gpt-5.6-sol", "reasoning_effort": "high", "enabled": True},
+                {"model": "gpt-5.6-terra", "reasoning_effort": "low", "enabled": True},
+            ],
         })
 
         ok, normalized = self.portal.normalize_soc_ai_settings(settings)
@@ -221,14 +224,17 @@ class SocSettingsPromptApiTest(unittest.TestCase):
         self.assertEqual(normalized["ollama_model"], "primary:latest")
         self.assertEqual(normalized["mode"], "hybrid")
         self.assertTrue(normalized["gpt_cli_enabled"])
-        self.assertEqual(normalized["codex_cli_model"], "gpt-5.5")
+        self.assertEqual(normalized["codex_cli_model"], "gpt-5.6-sol")
+        self.assertEqual(len(normalized["codex_cli_models"]), 2)
         self.assertEqual(normalized["cloud_command"], "")
 
     def test_ai_settings_normalize_exact_agent_assignments_and_stale_routes(self) -> None:
         settings = self.portal.default_soc_ai_settings()
         settings.update({
             "enabled_ollama_models": ["primary:latest", "specialist:latest"],
-            "gpt_cli_enabled": True,
+            "codex_cli_models": [
+                {"model": "gpt-5.6-sol", "reasoning_effort": "high", "enabled": True},
+            ],
             "agent_models": {
                 "soc-analyst": "ollama:specialist:latest",
                 "incident-responder": "gpt-cli",
@@ -240,7 +246,10 @@ class SocSettingsPromptApiTest(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(normalized["agent_models"]["soc-analyst"], "ollama:specialist:latest")
-        self.assertEqual(normalized["agent_models"]["incident-responder"], "codex-cli")
+        self.assertEqual(
+            normalized["agent_models"]["incident-responder"],
+            "codex-cli:gpt-5.6-sol:high",
+        )
         self.assertEqual(normalized["agent_models"]["siem-engineer"], "ollama:primary:latest")
         self.assertEqual(set(normalized["agent_models"]), set(self.portal.CYBER_SECURITY_AGENT_ROLES))
 
@@ -256,6 +265,45 @@ class SocSettingsPromptApiTest(unittest.TestCase):
                 "codex_cli_path": configured,
                 "codex_cli_reasoning_effort": effort,
             })
+
+            ok, response = self.portal.normalize_soc_ai_settings(settings)
+
+            self.assertFalse(ok)
+            self.assertIn("Codex CLI", response["error"])
+
+    def test_codex_cli_models_are_independently_enabled_for_agent_assignment(self) -> None:
+        settings = self.portal.default_soc_ai_settings()
+        settings["codex_cli_models"] = [
+            {"model": "gpt-5.6-sol", "reasoning_effort": "high", "enabled": True},
+            {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh", "enabled": False},
+            {"model": "gpt-5.6-terra", "reasoning_effort": "low", "enabled": True},
+        ]
+        settings["agent_models"]["soc-analyst"] = "codex-cli:gpt-5.6-sol:high"
+        settings["agent_models"]["incident-responder"] = "codex-cli:gpt-5.6-sol:xhigh"
+
+        ok, normalized = self.portal.normalize_soc_ai_settings(settings)
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            normalized["agent_models"]["soc-analyst"],
+            "codex-cli:gpt-5.6-sol:high",
+        )
+        self.assertNotEqual(
+            normalized["agent_models"]["incident-responder"],
+            "codex-cli:gpt-5.6-sol:xhigh",
+        )
+        self.assertTrue(normalized["gpt_cli_enabled"])
+
+    def test_codex_cli_model_roster_rejects_duplicates_and_unsafe_names(self) -> None:
+        for roster in (
+            [
+                {"model": "gpt-5.6-sol", "reasoning_effort": "high", "enabled": True},
+                {"model": "gpt-5.6-sol", "reasoning_effort": "high", "enabled": False},
+            ],
+            [{"model": "gpt-5.6-sol; rm", "reasoning_effort": "high", "enabled": True}],
+        ):
+            settings = self.portal.default_soc_ai_settings()
+            settings["codex_cli_models"] = roster
 
             ok, response = self.portal.normalize_soc_ai_settings(settings)
 
@@ -348,6 +396,7 @@ class SocSettingsPromptApiTest(unittest.TestCase):
         settings = self.portal.default_soc_ai_settings()
         settings.pop("enabled_ollama_models")
         settings.pop("gpt_cli_enabled")
+        settings.pop("codex_cli_models")
         settings.update({"mode": "hybrid", "ollama_model": "legacy:latest"})
 
         ok, normalized = self.portal.normalize_soc_ai_settings(settings)

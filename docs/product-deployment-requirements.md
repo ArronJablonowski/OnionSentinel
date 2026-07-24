@@ -114,8 +114,10 @@ that are also collapsed by default and can be enabled independently.
 The Ollama section must refresh its inventory from `ollama ls` and allow an
 ordered set of local models to be enabled. Each incompatible or unverifiable
 local model must show a warning with a concise hover/focus reason derived from
-Ollama metadata, without relying on model-name heuristics. The GPT CLI section
-has a separate master toggle. Each Cyber Security Agent must select exactly one
+Ollama metadata, without relying on model-name heuristics. The Codex CLI
+section must support multiple model and reasoning-effort combinations, each
+enabled independently. A Codex entry must not be assignable until that exact
+combination is enabled. Each Cyber Security Agent must select exactly one
 primary route and may select one different, optional second-opinion route from
 the enabled global roster. Both assignments must persist atomically per role so
 one agent save cannot overwrite another. The SOC Analyst runtime must execute

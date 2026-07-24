@@ -229,10 +229,12 @@ prompt pair as well as each role memory and the shared memory file. A missing
 reviewer prompt is a failed deployment verification, not a silent fallback to
 the primary prompt.
 
-The Incident Responder production assignment is `gpt-cli`, with Codex model
-`gpt-5.5` and `medium` reasoning. Install and authenticate Codex CLI for the
-Mac Studio runtime user before enabling that route. Verify the executable and
-saved routing without printing credentials:
+The seeded Incident Responder production assignment is
+`codex-cli:gpt-5.5:medium`. Codex model/reasoning combinations are stored in
+`codex_cli_models` and must be enabled individually before an agent can use
+them. Install and authenticate Codex CLI for the Mac Studio runtime user before
+enabling a route. Verify the executable and saved routing without printing
+credentials:
 
 ```bash
 command -v codex

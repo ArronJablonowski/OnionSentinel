@@ -1340,6 +1340,7 @@ CYBER_SECURITY_AGENT_ROLES = (
 )
 SOC_AI_SETTINGS_LOCK = threading.RLock()
 CODEX_CLI_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
+CODEX_CLI_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SOC_ANALYSIS_SEVERITY_THRESHOLDS = frozenset(
     {"disabled", "critical", "high", "medium", "low", "informational"}
 )
@@ -1359,6 +1360,9 @@ def default_soc_ai_settings() -> dict:
         "codex_cli_path": "codex",
         "codex_cli_model": "gpt-5.5",
         "codex_cli_reasoning_effort": "medium",
+        "codex_cli_models": [
+            {"model": "gpt-5.5", "reasoning_effort": "medium", "enabled": False}
+        ],
         "gpt_cli_enabled": False,
         "hybrid_policy": "cloud_for_critical_high_or_recommended",
         # Preserve the deployed all-alert PCAP policy unless an operator
@@ -1418,12 +1422,73 @@ def _derive_model_mode(enabled_ollama_models: list[str], gpt_cli_enabled: bool) 
     return "ollama"
 
 
-def _enabled_agent_model_routes(enabled_ollama_models: list[str], gpt_cli_enabled: bool) -> list[str]:
+def _codex_cli_route(model: str, effort: str) -> str:
+    return f"codex-cli:{model}:{effort}"
+
+
+def _normalize_codex_cli_models(
+    value: object,
+    *,
+    legacy_model: str,
+    legacy_effort: str,
+    legacy_enabled: bool,
+) -> tuple[bool, list[dict]]:
+    """Validate a bounded, duplicate-free roster of Codex model/effort pairs."""
+    raw_entries = value if isinstance(value, list) else [
+        {
+            "model": legacy_model,
+            "reasoning_effort": legacy_effort,
+            "enabled": legacy_enabled,
+        }
+    ]
+    if len(raw_entries) > 32:
+        return False, []
+    entries: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in raw_entries:
+        if not isinstance(raw, dict):
+            return False, []
+        model = str(raw.get("model") or "").strip()
+        effort = str(raw.get("reasoning_effort") or "medium").strip().lower()
+        if not CODEX_CLI_MODEL_PATTERN.fullmatch(model):
+            return False, []
+        if effort not in CODEX_CLI_REASONING_EFFORTS:
+            return False, []
+        key = (model, effort)
+        if key in seen:
+            return False, []
+        seen.add(key)
+        entries.append({
+            "model": model,
+            "reasoning_effort": effort,
+            "enabled": _boolean_setting(raw.get("enabled")),
+        })
+    return True, entries
+
+
+def _enabled_agent_model_routes(
+    enabled_ollama_models: list[str],
+    codex_cli_models: list[dict],
+) -> list[str]:
     """Return stable route identifiers that agents may be assigned to."""
     routes = [f"ollama:{model}" for model in enabled_ollama_models]
-    if gpt_cli_enabled:
-        routes.append("codex-cli")
+    routes.extend(
+        _codex_cli_route(entry["model"], entry["reasoning_effort"])
+        for entry in codex_cli_models
+        if entry.get("enabled") is True
+    )
     return routes
+
+
+def _canonical_agent_route(route: object, enabled_routes: list[str]) -> str:
+    """Migrate the legacy provider-only route to the first enabled Codex entry."""
+    normalized = str(route or "").strip()[:260]
+    if normalized in {"gpt-cli", "codex-cli"}:
+        return next(
+            (candidate for candidate in enabled_routes if candidate.startswith("codex-cli:")),
+            normalized,
+        )
+    return normalized
 
 
 def _normalize_agent_models(value: object, enabled_routes: list[str]) -> dict[str, str]:
@@ -1432,9 +1497,7 @@ def _normalize_agent_models(value: object, enabled_routes: list[str]) -> dict[st
     fallback = enabled_routes[0]
     assignments: dict[str, str] = {}
     for role in CYBER_SECURITY_AGENT_ROLES:
-        route = str(raw.get(role) or "").strip()[:260]
-        if route == "gpt-cli":
-            route = "codex-cli"
+        route = _canonical_agent_route(raw.get(role), enabled_routes)
         assignments[role] = route if route in enabled_routes else fallback
     return assignments
 
@@ -1448,9 +1511,7 @@ def _normalize_agent_second_opinion_models(
     raw = value if isinstance(value, dict) else {}
     assignments: dict[str, str] = {}
     for role in CYBER_SECURITY_AGENT_ROLES:
-        route = str(raw.get(role) or "").strip()[:260]
-        if route == "gpt-cli":
-            route = "codex-cli"
+        route = _canonical_agent_route(raw.get(role), enabled_routes)
         assignments[role] = (
             route
             if route in enabled_routes and route != primary_assignments.get(role)
@@ -1466,6 +1527,7 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
     for key in settings:
         if key in {
             "enabled_ollama_models",
+            "codex_cli_models",
             "gpt_cli_enabled",
             "agent_models",
             "agent_second_opinion_models",
@@ -1486,23 +1548,10 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
     else:
         legacy_model = str(payload.get("ollama_model") or settings["ollama_model"]).strip()
         enabled_ollama_models = [] if legacy_mode == "cloud" else _normalized_model_list([legacy_model])
-    if "gpt_cli_enabled" in payload:
-        gpt_cli_enabled = _boolean_setting(payload.get("gpt_cli_enabled"))
-    else:
-        gpt_cli_enabled = legacy_mode in {"cloud", "hybrid"}
-    if not enabled_ollama_models and not gpt_cli_enabled:
-        return False, {"ok": False, "error": "Enable at least one Ollama model or GPT CLI."}
-    settings["enabled_ollama_models"] = enabled_ollama_models
-    settings["gpt_cli_enabled"] = gpt_cli_enabled
-    settings["mode"] = _derive_model_mode(enabled_ollama_models, gpt_cli_enabled)
-    if enabled_ollama_models:
-        settings["ollama_model"] = enabled_ollama_models[0]
-    enabled_routes = _enabled_agent_model_routes(enabled_ollama_models, gpt_cli_enabled)
-    settings["agent_models"] = _normalize_agent_models(payload.get("agent_models"), enabled_routes)
-    settings["agent_second_opinion_models"] = _normalize_agent_second_opinion_models(
-        payload.get("agent_second_opinion_models"),
-        enabled_routes,
-        settings["agent_models"],
+    legacy_gpt_enabled = (
+        _boolean_setting(payload.get("gpt_cli_enabled"))
+        if "gpt_cli_enabled" in payload
+        else legacy_mode in {"cloud", "hybrid"}
     )
     if settings["hybrid_policy"] not in {"cloud_for_critical_high_or_recommended", "cloud_when_recommended_only"}:
         return False, {"ok": False, "error": "Hybrid policy is invalid."}
@@ -1546,6 +1595,41 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
             "ok": False,
             "error": "Codex CLI reasoning effort must be low, medium, high, or xhigh.",
         }
+    valid_codex_models, codex_cli_models = _normalize_codex_cli_models(
+        payload.get("codex_cli_models") if "codex_cli_models" in payload else None,
+        legacy_model=codex_cli_model,
+        legacy_effort=codex_cli_effort,
+        legacy_enabled=legacy_gpt_enabled,
+    )
+    if not valid_codex_models:
+        return False, {
+            "ok": False,
+            "error": (
+                "Each Codex CLI entry requires a unique model name containing only "
+                "letters, numbers, dots, underscores, or hyphens and a supported reasoning effort."
+            ),
+        }
+    gpt_cli_enabled = any(entry["enabled"] for entry in codex_cli_models)
+    if not enabled_ollama_models and not gpt_cli_enabled:
+        return False, {
+            "ok": False,
+            "error": "Enable at least one Ollama model or Codex CLI model.",
+        }
+    settings["enabled_ollama_models"] = enabled_ollama_models
+    settings["codex_cli_models"] = codex_cli_models
+    settings["gpt_cli_enabled"] = gpt_cli_enabled
+    settings["mode"] = _derive_model_mode(enabled_ollama_models, gpt_cli_enabled)
+    if enabled_ollama_models:
+        settings["ollama_model"] = enabled_ollama_models[0]
+    enabled_codex = next(
+        (entry for entry in codex_cli_models if entry["enabled"]),
+        codex_cli_models[0] if codex_cli_models else {
+            "model": codex_cli_model,
+            "reasoning_effort": codex_cli_effort,
+        },
+    )
+    codex_cli_model = enabled_codex["model"]
+    codex_cli_effort = enabled_codex["reasoning_effort"]
     settings["codex_cli_path"] = codex_cli_path
     settings["codex_cli_model"] = codex_cli_model
     settings["codex_cli_reasoning_effort"] = codex_cli_effort
@@ -1554,6 +1638,19 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
     # Retain the key for rolling-deploy compatibility but never persist an
     # operator-supplied command that could turn Settings into shell execution.
     settings["cloud_command"] = ""
+    enabled_routes = _enabled_agent_model_routes(
+        enabled_ollama_models,
+        codex_cli_models,
+    )
+    settings["agent_models"] = _normalize_agent_models(
+        payload.get("agent_models"),
+        enabled_routes,
+    )
+    settings["agent_second_opinion_models"] = _normalize_agent_second_opinion_models(
+        payload.get("agent_second_opinion_models"),
+        enabled_routes,
+        settings["agent_models"],
+    )
     for setting_key, label in (
         ("soc_analyst_pcap_min_severity", "PCAP analysis"),
         ("soc_analyst_incident_min_severity", "incident escalation"),
@@ -1875,7 +1972,7 @@ def save_soc_agent_model(payload: object) -> tuple[bool, dict]:
             return False, current
         enabled_routes = _enabled_agent_model_routes(
             current["enabled_ollama_models"],
-            current["gpt_cli_enabled"],
+            current["codex_cli_models"],
         )
         if model_route not in enabled_routes:
             return False, {

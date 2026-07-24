@@ -709,8 +709,9 @@ Settings page behavior:
   the Settings page is open and supports a manual refresh.
 - Preserves configured local models that are temporarily absent from the local
   inventory and marks them unavailable instead of silently changing routing.
-- Treats enabled Ollama models and GPT CLI as the approved global roster. Each
-  Cyber Security Agent selects one primary route and may select one different,
+- Treats enabled Ollama models and each independently enabled Codex CLI
+  model/reasoning combination as the approved global roster. Each Cyber
+  Security Agent selects one primary route and may select one different,
   optional second-opinion route from that roster.
 - Saves the global roster through `/api/soc-settings/ai-model` and saves a
   role's primary and second-opinion assignments atomically through

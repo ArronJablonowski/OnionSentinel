@@ -434,6 +434,8 @@ SOC_ANALYSIS_SEVERITY_LABELS = {
     'low': 'Low',
     'informational': 'Informational',
 }
+CODEX_CLI_REASONING_EFFORTS = ('low', 'medium', 'high', 'xhigh')
+CODEX_CLI_MODEL_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
 
 
 def default_soc_ai_settings() -> dict:
@@ -450,6 +452,9 @@ def default_soc_ai_settings() -> dict:
         'codex_cli_path': 'codex',
         'codex_cli_model': 'gpt-5.5',
         'codex_cli_reasoning_effort': 'medium',
+        'codex_cli_models': [
+            {'model': 'gpt-5.5', 'reasoning_effort': 'medium', 'enabled': False}
+        ],
         'gpt_cli_enabled': False,
         'hybrid_policy': 'cloud_for_critical_high_or_recommended',
         'soc_analyst_pcap_min_severity': 'informational',
@@ -494,12 +499,65 @@ def _boolean_setting(value: object, default: bool = False) -> bool:
     return default
 
 
+def _codex_cli_route(model: str, effort: str) -> str:
+    return f'codex-cli:{model}:{effort}'
+
+
+def _normalized_codex_cli_models(
+    value: object,
+    *,
+    legacy_model: str,
+    legacy_effort: str,
+    legacy_enabled: bool,
+) -> list[dict]:
+    """Normalize the editable Codex roster without rendering unsafe values."""
+    raw_entries = value if isinstance(value, list) else [{
+        'model': legacy_model,
+        'reasoning_effort': legacy_effort,
+        'enabled': legacy_enabled,
+    }]
+    entries: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in raw_entries[:32]:
+        if not isinstance(raw, dict):
+            continue
+        model = str(raw.get('model') or '').strip()
+        effort = str(raw.get('reasoning_effort') or 'medium').strip().lower()
+        key = (model, effort)
+        if (
+            not CODEX_CLI_MODEL_PATTERN.fullmatch(model)
+            or effort not in CODEX_CLI_REASONING_EFFORTS
+            or key in seen
+        ):
+            continue
+        seen.add(key)
+        entries.append({
+            'model': model,
+            'reasoning_effort': effort,
+            'enabled': _boolean_setting(raw.get('enabled')),
+        })
+    return entries
+
+
 def enabled_agent_model_routes(settings: dict) -> list[str]:
     """Return the exact model routes available to individual agents."""
     routes = [f'ollama:{model}' for model in _normalized_enabled_models(settings.get('enabled_ollama_models'))]
-    if _boolean_setting(settings.get('gpt_cli_enabled')):
-        routes.append('codex-cli')
+    routes.extend(
+        _codex_cli_route(entry['model'], entry['reasoning_effort'])
+        for entry in settings.get('codex_cli_models', [])
+        if isinstance(entry, dict) and entry.get('enabled') is True
+    )
     return routes
+
+
+def _canonical_agent_route(route: object, enabled_routes: list[str]) -> str:
+    normalized = str(route or '').strip()[:260]
+    if normalized in {'gpt-cli', 'codex-cli'}:
+        return next(
+            (candidate for candidate in enabled_routes if candidate.startswith('codex-cli:')),
+            normalized,
+        )
+    return normalized
 
 
 def normalize_agent_models(value: object, enabled_routes: list[str]) -> dict[str, str]:
@@ -508,9 +566,7 @@ def normalize_agent_models(value: object, enabled_routes: list[str]) -> dict[str
     fallback = enabled_routes[0]
     assignments: dict[str, str] = {}
     for role in CYBER_SECURITY_AGENT_ROLES:
-        route = str(raw.get(role) or '').strip()[:260]
-        if route == 'gpt-cli':
-            route = 'codex-cli'
+        route = _canonical_agent_route(raw.get(role), enabled_routes)
         assignments[role] = route if route in enabled_routes else fallback
     return assignments
 
@@ -529,9 +585,7 @@ def normalize_agent_second_opinion_models(
     raw = value if isinstance(value, dict) else {}
     assignments: dict[str, str] = {}
     for role in CYBER_SECURITY_AGENT_ROLES:
-        route = str(raw.get(role) or '').strip()[:260]
-        if route == 'gpt-cli':
-            route = 'codex-cli'
+        route = _canonical_agent_route(raw.get(role), enabled_routes)
         assignments[role] = (
             route
             if route in enabled_routes and route != primary_assignments.get(role)
@@ -551,6 +605,7 @@ def load_soc_ai_settings() -> dict:
         for key in settings:
             if key in {
                 'enabled_ollama_models',
+                'codex_cli_models',
                 'gpt_cli_enabled',
                 'agent_models',
                 'agent_second_opinion_models',
@@ -565,15 +620,11 @@ def load_soc_ai_settings() -> dict:
         enabled_models = _normalized_enabled_models(data.get('enabled_ollama_models'))
     else:
         enabled_models = [] if legacy_mode == 'cloud' else _normalized_enabled_models([settings['ollama_model']])
-    if isinstance(data, dict) and 'gpt_cli_enabled' in data:
-        gpt_cli_enabled = _boolean_setting(data.get('gpt_cli_enabled'))
-    else:
-        gpt_cli_enabled = legacy_mode in {'cloud', 'hybrid'}
-    if not enabled_models and not gpt_cli_enabled:
-        enabled_models = [settings['ollama_model'] or 'devstral:latest']
-    settings['enabled_ollama_models'] = enabled_models
-    settings['gpt_cli_enabled'] = gpt_cli_enabled
-    settings['mode'] = 'hybrid' if enabled_models and gpt_cli_enabled else ('cloud' if gpt_cli_enabled else 'ollama')
+    legacy_gpt_enabled = (
+        _boolean_setting(data.get('gpt_cli_enabled'))
+        if isinstance(data, dict) and 'gpt_cli_enabled' in data
+        else legacy_mode in {'cloud', 'hybrid'}
+    )
     if settings['hybrid_policy'] not in {'cloud_for_critical_high_or_recommended', 'cloud_when_recommended_only'}:
         settings['hybrid_policy'] = 'cloud_for_critical_high_or_recommended'
     settings['ollama_model'] = enabled_models[0] if enabled_models else (settings['ollama_model'] or 'devstral:latest')
@@ -593,6 +644,28 @@ def load_soc_ai_settings() -> dict:
     codex_effort = str(settings.get('codex_cli_reasoning_effort') or 'medium').strip().lower()
     if codex_effort not in {'low', 'medium', 'high', 'xhigh'}:
         codex_effort = 'medium'
+    codex_cli_models = _normalized_codex_cli_models(
+        data.get('codex_cli_models') if isinstance(data, dict) and 'codex_cli_models' in data else None,
+        legacy_model=codex_model,
+        legacy_effort=codex_effort,
+        legacy_enabled=legacy_gpt_enabled,
+    )
+    gpt_cli_enabled = any(entry['enabled'] for entry in codex_cli_models)
+    if not enabled_models and not gpt_cli_enabled:
+        enabled_models = [settings['ollama_model'] or 'devstral:latest']
+    selected_codex = next(
+        (entry for entry in codex_cli_models if entry['enabled']),
+        codex_cli_models[0] if codex_cli_models else {
+            'model': codex_model,
+            'reasoning_effort': codex_effort,
+        },
+    )
+    codex_model = selected_codex['model']
+    codex_effort = selected_codex['reasoning_effort']
+    settings['enabled_ollama_models'] = enabled_models
+    settings['codex_cli_models'] = codex_cli_models
+    settings['gpt_cli_enabled'] = gpt_cli_enabled
+    settings['mode'] = 'hybrid' if enabled_models and gpt_cli_enabled else ('cloud' if gpt_cli_enabled else 'ollama')
     settings['codex_cli_path'] = codex_path
     settings['codex_cli_model'] = codex_model
     settings['codex_cli_reasoning_effort'] = codex_effort
@@ -636,14 +709,31 @@ def severity_threshold_options(selected: str) -> str:
     )
 
 
+def _codex_cli_route_parts(route: str, settings: dict) -> tuple[str, str] | None:
+    """Resolve either an exact Codex route or the legacy provider-only route."""
+    if route.startswith('codex-cli:'):
+        try:
+            model, effort = route.removeprefix('codex-cli:').rsplit(':', 1)
+        except ValueError:
+            return None
+        if CODEX_CLI_MODEL_PATTERN.fullmatch(model) and effort in CODEX_CLI_REASONING_EFFORTS:
+            return model, effort
+        return None
+    if route in {'gpt-cli', 'codex-cli'}:
+        return (
+            str(settings.get('codex_cli_model') or settings.get('cloud_model') or 'gpt-5.5').strip(),
+            str(settings.get('codex_cli_reasoning_effort') or 'medium').strip(),
+        )
+    return None
+
+
 def agent_model_route_label(settings: dict, role: str) -> str:
     """Describe one agent's persisted exact model assignment."""
     route = str((settings.get('agent_models') or {}).get(role) or '').strip()
     if route.startswith('ollama:'):
         return f"Ollama: {route.removeprefix('ollama:')}"
-    if route in {'gpt-cli', 'codex-cli'}:
-        model = str(settings.get('codex_cli_model') or settings.get('cloud_model') or 'gpt-5.5').strip()
-        effort = str(settings.get('codex_cli_reasoning_effort') or 'medium').strip()
+    if codex_parts := _codex_cli_route_parts(route, settings):
+        model, effort = codex_parts
         return f'Codex CLI: {model} ({effort})'
     return 'No analysis model assigned'
 
@@ -653,9 +743,8 @@ def agent_second_opinion_model_route_label(settings: dict, role: str) -> str:
     route = str((settings.get('agent_second_opinion_models') or {}).get(role) or '').strip()
     if route.startswith('ollama:'):
         return f"Ollama: {route.removeprefix('ollama:')}"
-    if route in {'gpt-cli', 'codex-cli'}:
-        model = str(settings.get('codex_cli_model') or settings.get('cloud_model') or 'gpt-5.5').strip()
-        effort = str(settings.get('codex_cli_reasoning_effort') or 'medium').strip()
+    if codex_parts := _codex_cli_route_parts(route, settings):
+        model, effort = codex_parts
         return f'Codex CLI: {model} ({effort})'
     return 'None selected'
 
@@ -674,8 +763,10 @@ def agent_model_option_rows(settings: dict, role: str, *, second_opinion: bool =
         if route.startswith('ollama:'):
             label = f"Ollama: {route.removeprefix('ollama:')}"
         else:
-            model = str(settings.get('codex_cli_model') or settings.get('cloud_model') or 'gpt-5.5').strip()
-            effort = str(settings.get('codex_cli_reasoning_effort') or 'medium').strip()
+            codex_parts = _codex_cli_route_parts(route, settings)
+            if not codex_parts:
+                continue
+            model, effort = codex_parts
             label = f'Codex CLI: {model} ({effort})'
         options.append(
             f'<option value="{html.escape(route, quote=True)}"{" selected" if route == selected else ""}>'
@@ -812,6 +903,35 @@ def ollama_model_toggle_rows(installed_models: list[str], enabled_models: list[s
             <span class="settings-model-option-copy"><span class="settings-model-name-line"><strong>{escaped}</strong>{warning}</span><small>{availability}</small></span>
             <span class="settings-switch"><input type="checkbox" data-ollama-model-toggle value="{escaped}"{checked}><span aria-hidden="true"></span></span>
           </label>''')
+    return ''.join(rows)
+
+
+def codex_cli_model_rows(models: list[dict]) -> str:
+    """Render independently enabled Codex model and reasoning configurations."""
+    rows = []
+    for entry in models:
+        model = html.escape(str(entry.get('model') or ''), quote=True)
+        effort = str(entry.get('reasoning_effort') or 'medium')
+        effort_options = ''.join(
+            f'<option value="{value}"{" selected" if value == effort else ""}>'
+            f'{"Extra high" if value == "xhigh" else value.title()}</option>'
+            for value in CODEX_CLI_REASONING_EFFORTS
+        )
+        checked = ' checked' if entry.get('enabled') is True else ''
+        rows.append(f'''
+          <div class="settings-model-option settings-codex-model-option" data-codex-cli-model-row>
+            <label class="settings-field">Model
+              <input type="text" data-codex-cli-model-name value="{model}" placeholder="gpt-5.6-sol" autocomplete="off" spellcheck="false">
+            </label>
+            <label class="settings-field">Reasoning effort
+              <select data-codex-cli-model-effort>{effort_options}</select>
+            </label>
+            <label class="settings-codex-enable">
+              <span>Enabled</span>
+              <span class="settings-switch"><input type="checkbox" data-codex-cli-model-enabled{checked}><span aria-hidden="true"></span></span>
+            </label>
+            <button class="settings-model-remove" type="button" data-codex-cli-model-remove aria-label="Remove Codex CLI model">Remove</button>
+          </div>''')
     return ''.join(rows)
 
 
@@ -5483,14 +5603,12 @@ def settings_page_section() -> str:
     installed_models = list_ollama_models()
     enabled_models = _normalized_enabled_models(ai_settings.get('enabled_ollama_models'))
     model_toggle_rows = ollama_model_toggle_rows(installed_models, enabled_models)
-    gpt_cli_enabled = _boolean_setting(ai_settings.get('gpt_cli_enabled'))
+    codex_models = list(ai_settings.get('codex_cli_models') or [])
+    enabled_codex_models = [entry for entry in codex_models if entry.get('enabled') is True]
+    codex_model_rows = codex_cli_model_rows(codex_models)
     ollama_state = f'{len(enabled_models)} enabled' if enabled_models else 'Disabled'
-    gpt_cli_state = 'Enabled' if gpt_cli_enabled else 'Disabled'
+    gpt_cli_state = f'{len(enabled_codex_models)} enabled' if enabled_codex_models else 'Disabled'
     codex_cli_path = html.escape(str(ai_settings.get('codex_cli_path') or 'codex'))
-    codex_cli_model = html.escape(str(ai_settings.get('codex_cli_model') or 'gpt-5.5'))
-    codex_cli_reasoning_effort = str(
-        ai_settings.get('codex_cli_reasoning_effort') or 'medium'
-    ).strip().lower()
     maxmind_asn_db_path = html.escape(ai_settings['maxmind_geoip_asn_db_path'])
     maxmind_city_db_path = html.escape(ai_settings['maxmind_geoip_city_db_path'])
     maxmind_country_db_path = html.escape(ai_settings['maxmind_geoip_country_db_path'])
@@ -5545,25 +5663,16 @@ def settings_page_section() -> str:
               <span class="settings-provider-state" id="gpt-cli-enabled-summary">{html.escape(gpt_cli_state)}</span>
             </summary>
             <div class="settings-provider-body">
-              <label class="settings-provider-toggle-row" for="ai-gpt-cli-enabled">
-                <span><strong>Enable Codex CLI</strong><small>Make the hardened Codex route available in each agent's model selector.</small></span>
-                <span class="settings-switch"><input id="ai-gpt-cli-enabled" type="checkbox"{' checked' if gpt_cli_enabled else ''}><span aria-hidden="true"></span></span>
-              </label>
-              <div class="settings-grid">
+              <div class="settings-provider-toolbar">
                 <label class="settings-field">Executable
                   <input id="ai-codex-cli-path" type="text" value="{codex_cli_path}" placeholder="codex">
                 </label>
-                <label class="settings-field">Model
-                  <input id="ai-codex-cli-model" type="text" value="{codex_cli_model}" placeholder="gpt-5.5">
-                </label>
-                <label class="settings-field">Reasoning effort
-                  <select id="ai-codex-cli-reasoning-effort">
-                    <option value="low" {'selected' if codex_cli_reasoning_effort == 'low' else ''}>Low</option>
-                    <option value="medium" {'selected' if codex_cli_reasoning_effort == 'medium' else ''}>Medium</option>
-                    <option value="high" {'selected' if codex_cli_reasoning_effort == 'high' else ''}>High</option>
-                    <option value="xhigh" {'selected' if codex_cli_reasoning_effort == 'xhigh' else ''}>Extra high</option>
-                  </select>
-                </label>
+                <button id="add-codex-cli-model" class="settings-secondary-button" type="button">Add model</button>
+              </div>
+              <div class="settings-codex-model-list" id="ai-codex-cli-models" aria-label="Configured Codex CLI models">
+                {codex_model_rows}
+              </div>
+              <div class="settings-grid">
                 <label class="settings-field settings-field-wide">Hybrid policy
                   <select id="ai-hybrid-policy">
                     <option value="cloud_for_critical_high_or_recommended" {'selected' if hybrid_policy == 'cloud_for_critical_high_or_recommended' else ''}>Use Codex CLI for Critical/High or when local recommends it</option>
@@ -5571,7 +5680,7 @@ def settings_page_section() -> str:
                   </select>
                 </label>
               </div>
-              <div class="settings-note">The adapter invokes <code>codex exec</code> with fixed arguments, an ephemeral read-only sandbox, bounded output, and no operator-defined shell command. It is used only by agents explicitly assigned to it.</div>
+              <div class="settings-note">Add model and reasoning combinations, then enable each one separately. Only enabled entries appear in agent selectors. The adapter invokes <code>codex exec --model</code> with the selected model and a fixed reasoning override, ephemeral read-only sandbox, bounded output, and no operator-defined shell command.</div>
             </div>
           </details>
         </div>
@@ -5889,6 +5998,7 @@ SETTINGS_PAGE_CSS = '''
 .settings-field input,.settings-field select{min-height:44px}
 .settings-provider-list{display:grid;gap:12px;margin:0 20px 18px}.settings-provider-details{overflow:hidden;border:1px solid rgba(148,163,184,.16);border-radius:12px;background:#071018}.settings-details .settings-provider-details>summary{list-style:none;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 18px;cursor:pointer}.settings-provider-details>summary::-webkit-details-marker{display:none}.settings-details .settings-provider-details>summary:before{content:'▸';flex:0 0 auto;color:#8ff4ff;font-size:14px;transition:transform .16s ease}.settings-details .settings-provider-details[open]>summary:before{transform:rotate(90deg)}.settings-provider-summary-copy{display:grid;min-width:0;margin-right:auto}.settings-provider-summary-copy strong{margin-top:4px!important;color:#f4f8ff;font-size:18px!important;letter-spacing:0!important}.settings-provider-summary-copy small{margin-top:3px;color:#91a4ba;font-size:12px;line-height:1.35}.settings-provider-state{flex:0 0 auto;border:1px solid rgba(34,211,238,.24);border-radius:999px;padding:6px 10px;color:#8ff4ff;background:rgba(34,211,238,.05);font-size:11px;font-weight:900;letter-spacing:0}.settings-provider-state.is-disabled{border-color:rgba(148,163,184,.20);color:#91a4ba;background:rgba(148,163,184,.04)}.settings-provider-body{display:grid;gap:16px;border-top:1px solid rgba(148,163,184,.12);padding:18px}.settings-provider-toolbar{display:grid;grid-template-columns:minmax(240px,1fr) max-content;gap:12px;align-items:end}.settings-secondary-button{min-height:44px;border:1px solid rgba(34,211,238,.35);border-radius:10px;padding:10px 14px;color:#dce9f8;background:#0c1722;font-size:12px;font-weight:900;cursor:pointer}.settings-secondary-button:hover,.settings-secondary-button:focus-visible{border-color:#8ff4ff;color:#8ff4ff;outline:none}.settings-secondary-button:disabled{cursor:wait;opacity:.65}.settings-model-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.settings-model-option,.settings-provider-toggle-row{display:flex;align-items:center;justify-content:space-between;gap:14px;min-width:0;border:1px solid rgba(148,163,184,.12);border-radius:10px;padding:11px 12px;background:#0a141e;cursor:pointer}.settings-model-option:hover,.settings-provider-toggle-row:hover{border-color:rgba(34,211,238,.34)}.settings-model-option-copy,.settings-provider-toggle-row>span:first-child{display:grid;min-width:0}.settings-model-name-line{display:flex;align-items:center;gap:7px;min-width:0}.settings-model-name-line strong{min-width:0}.settings-model-warning{display:inline-grid;place-items:center;width:18px;height:18px;flex:0 0 18px;border:1px solid rgba(246,199,109,.72);border-radius:50%;color:#f6c76d;background:rgba(246,199,109,.08);font:950 12px/1 Inter,ui-sans-serif,system-ui,sans-serif;cursor:help}.settings-model-warning:hover,.settings-model-warning:focus-visible{border-color:#ffd978;color:#ffd978;background:rgba(246,199,109,.15);outline:none;box-shadow:0 0 0 2px rgba(246,199,109,.12)}.settings-model-option-copy strong,.settings-provider-toggle-row strong{overflow:hidden;color:#dce9f8;font:800 12px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;text-overflow:ellipsis;white-space:nowrap}.settings-model-option-copy small,.settings-provider-toggle-row small{margin-top:3px;color:#7f91a6;font-size:10px;line-height:1.3}.settings-model-option[data-installed="false"] .settings-model-option-copy small,.settings-model-option[data-compatible="false"] .settings-model-option-copy small{color:#f6c76d}.settings-switch{position:relative;display:inline-flex;width:42px;height:24px;flex:0 0 42px}.settings-switch input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}.settings-switch>span{display:block;width:42px;height:24px;border:1px solid rgba(148,163,184,.30);border-radius:999px;background:#14202c;transition:border-color .16s,background .16s}.settings-switch>span:after{content:'';display:block;width:18px;height:18px;margin:2px;border-radius:50%;background:#91a4ba;transition:transform .16s,background .16s}.settings-switch input:checked+span{border-color:rgba(34,211,238,.72);background:rgba(34,211,238,.18)}.settings-switch input:checked+span:after{transform:translateX(18px);background:#8ff4ff}.settings-switch input:focus-visible+span{outline:2px solid #8ff4ff;outline-offset:2px}.settings-provider-toggle-row{padding:14px}.settings-provider-toggle-row strong{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:13px}.settings-model-empty{grid-column:1/-1;padding:12px;color:#91a4ba}.settings-provider-details .settings-note{margin-top:0}.settings-provider-details .settings-grid{margin-top:0}@media(max-width:760px){.settings-provider-list{margin:0 12px 16px}.settings-details .settings-provider-details>summary{grid-template-columns:auto minmax(0,1fr);padding:14px}.settings-provider-state{grid-column:2}.settings-provider-toolbar,.settings-model-list{grid-template-columns:1fr}.settings-secondary-button{width:100%}.settings-provider-body{padding:14px}.settings-model-option-copy strong{white-space:normal;overflow-wrap:anywhere}}
 .settings-agent-prompt-list{display:grid;gap:10px;margin:0 20px}.settings-agent-prompt-details .prompt-editor-label,.settings-agent-prompt-details .prompt-editor,.settings-agent-prompt-details .settings-actions{margin-left:0!important;margin-right:0!important}.settings-agent-prompt-details .prompt-editor{width:100%;min-height:420px}.settings-agent-prompt-details .settings-actions{margin-top:0}.settings-agent-prompt-details>.settings-provider-body{gap:12px}@media(max-width:760px){.settings-agent-prompt-list{margin:0 12px}.settings-agent-prompt-details .prompt-editor{min-height:360px}}
+.settings-codex-model-list{display:grid;gap:8px}.settings-codex-model-option{display:grid;grid-template-columns:minmax(220px,1fr) minmax(150px,.45fr) max-content max-content;align-items:end;cursor:default}.settings-codex-enable{display:grid;gap:7px;color:#a9bad0;font-size:11px;font-weight:850;text-transform:uppercase;letter-spacing:.06em}.settings-model-remove{min-height:42px;border:1px solid rgba(251,113,133,.28);border-radius:9px;padding:8px 11px;color:#fda4af;background:rgba(127,29,29,.10);font-size:11px;font-weight:900;cursor:pointer}.settings-model-remove:hover,.settings-model-remove:focus-visible{border-color:#fb7185;color:#fecdd3;outline:none}@media(max-width:860px){.settings-codex-model-option{grid-template-columns:1fr 1fr}.settings-codex-enable,.settings-model-remove{align-self:end}}@media(max-width:560px){.settings-codex-model-option{grid-template-columns:1fr}}
 .settings-agent-model-control{display:grid;grid-template-columns:minmax(260px,420px) auto minmax(0,1fr);align-items:end;gap:12px;margin:0 20px 18px}.settings-agent-model-fields{display:grid;gap:12px;min-width:0}.settings-agent-model-control .settings-secondary-button{align-self:end}.settings-agent-model-help{align-self:center;color:#7f91a6;font-size:12px;line-height:1.45}.settings-agent-model-control .settings-save-status:empty{display:none}@media(max-width:760px){.settings-agent-model-control{grid-template-columns:1fr;margin:0 12px 16px}.settings-agent-model-control .settings-secondary-button{width:100%}.settings-agent-model-help{display:none}}
 .settings-agent-policy-control{display:grid;gap:14px;margin:0 20px 18px;border:1px solid rgba(34,211,238,.16);border-radius:12px;padding:16px;background:#071018}.settings-agent-policy-copy h3{margin:5px 0;color:#f4f8ff;font-size:17px}.settings-agent-policy-copy p{margin:0;color:#91a4ba;font-size:12px}.settings-agent-policy-control .settings-actions{margin-top:0}.settings-agent-policy-control .settings-save-status:empty{display:none}@media(max-width:760px){.settings-agent-policy-control{margin:0 12px 16px}.settings-agent-policy-control .settings-secondary-button{width:100%}}
 </style>
@@ -5906,11 +6016,10 @@ SETTINGS_PAGE_JS = '''
   const ollamaUrl = document.querySelector('#ai-ollama-url');
   const refreshOllamaButton = document.querySelector('#refresh-ollama-models');
   const ollamaEnabledSummary = document.querySelector('#ollama-enabled-summary');
-  const gptCliEnabled = document.querySelector('#ai-gpt-cli-enabled');
   const gptCliEnabledSummary = document.querySelector('#gpt-cli-enabled-summary');
   const codexCliPath = document.querySelector('#ai-codex-cli-path');
-  const codexCliModel = document.querySelector('#ai-codex-cli-model');
-  const codexCliReasoningEffort = document.querySelector('#ai-codex-cli-reasoning-effort');
+  const codexCliModels = document.querySelector('#ai-codex-cli-models');
+  const addCodexCliModelButton = document.querySelector('#add-codex-cli-model');
   const hybridPolicy = document.querySelector('#ai-hybrid-policy');
   const socPcapMinSeverity = document.querySelector('#soc-analyst-pcap-min-severity');
   const socIncidentMinSeverity = document.querySelector('#soc-analyst-incident-min-severity');
@@ -5959,6 +6068,7 @@ SETTINGS_PAGE_JS = '''
   if (memoryModal) document.body.appendChild(memoryModal);
   let memoryReturnFocus = null;
   let modelSelectionDirty = false;
+  let codexSelectionDirty = false;
   let configuredEnabledModels = [];
   let configuredAgentModels = {};
   let configuredAgentSecondOpinionModels = {};
@@ -6063,6 +6173,81 @@ SETTINGS_PAGE_JS = '''
     if (!ollamaModels) return [];
     return [...ollamaModels.querySelectorAll('[data-ollama-model-toggle]:checked')].map(input => input.value.trim()).filter(Boolean);
   }
+  function normalizeCodexCliModels(value) {
+    if (!Array.isArray(value)) return [];
+    return value.slice(0, 32).map(entry => ({
+      model: String(entry?.model || '').trim(),
+      reasoning_effort: String(entry?.reasoning_effort || 'medium').trim().toLowerCase(),
+      enabled: entry?.enabled === true
+    })).filter(entry => entry.model);
+  }
+  function currentCodexCliModels() {
+    if (!codexCliModels) return [];
+    return [...codexCliModels.querySelectorAll('[data-codex-cli-model-row]')].map(row => ({
+      model: String(row.querySelector('[data-codex-cli-model-name]')?.value || '').trim(),
+      reasoning_effort: String(row.querySelector('[data-codex-cli-model-effort]')?.value || 'medium').trim(),
+      enabled: Boolean(row.querySelector('[data-codex-cli-model-enabled]')?.checked)
+    }));
+  }
+  function codexEffortLabel(effort) {
+    return effort === 'xhigh' ? 'Extra high' : `${effort.slice(0, 1).toUpperCase()}${effort.slice(1)}`;
+  }
+  function appendCodexCliModel(entry = {model: '', reasoning_effort: 'medium', enabled: false}) {
+    if (!codexCliModels) return;
+    const row = document.createElement('div');
+    row.className = 'settings-model-option settings-codex-model-option';
+    row.setAttribute('data-codex-cli-model-row', '');
+    const modelLabel = document.createElement('label');
+    modelLabel.className = 'settings-field';
+    modelLabel.append('Model');
+    const modelInput = document.createElement('input');
+    modelInput.type = 'text';
+    modelInput.value = String(entry.model || '');
+    modelInput.placeholder = 'gpt-5.6-sol';
+    modelInput.autocomplete = 'off';
+    modelInput.spellcheck = false;
+    modelInput.setAttribute('data-codex-cli-model-name', '');
+    modelLabel.appendChild(modelInput);
+    const effortLabel = document.createElement('label');
+    effortLabel.className = 'settings-field';
+    effortLabel.append('Reasoning effort');
+    const effortSelect = document.createElement('select');
+    effortSelect.setAttribute('data-codex-cli-model-effort', '');
+    ['low', 'medium', 'high', 'xhigh'].forEach(effort => {
+      const option = document.createElement('option');
+      option.value = effort;
+      option.textContent = codexEffortLabel(effort);
+      option.selected = effort === String(entry.reasoning_effort || 'medium');
+      effortSelect.appendChild(option);
+    });
+    effortLabel.appendChild(effortSelect);
+    const enableLabel = document.createElement('label');
+    enableLabel.className = 'settings-codex-enable';
+    enableLabel.append('Enabled');
+    const switchElement = document.createElement('span');
+    switchElement.className = 'settings-switch';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = entry.enabled === true;
+    checkbox.setAttribute('data-codex-cli-model-enabled', '');
+    const track = document.createElement('span');
+    track.setAttribute('aria-hidden', 'true');
+    switchElement.append(checkbox, track);
+    enableLabel.appendChild(switchElement);
+    const remove = document.createElement('button');
+    remove.className = 'settings-model-remove';
+    remove.type = 'button';
+    remove.textContent = 'Remove';
+    remove.setAttribute('data-codex-cli-model-remove', '');
+    remove.setAttribute('aria-label', 'Remove Codex CLI model');
+    row.append(modelLabel, effortLabel, enableLabel, remove);
+    codexCliModels.appendChild(row);
+  }
+  function renderCodexCliModels(entries) {
+    if (!codexCliModels) return;
+    codexCliModels.replaceChildren();
+    normalizeCodexCliModels(entries).forEach(appendCodexCliModel);
+  }
   function derivedAnalysisMode(localModels, gptEnabled) {
     if (localModels.length && gptEnabled) return 'hybrid';
     if (gptEnabled) return 'cloud';
@@ -6075,8 +6260,9 @@ SETTINGS_PAGE_JS = '''
       ollamaEnabledSummary.classList.toggle('is-disabled', !enabledModels.length);
     }
     if (gptCliEnabledSummary) {
-      gptCliEnabledSummary.textContent = gptCliEnabled?.checked ? 'Enabled' : 'Disabled';
-      gptCliEnabledSummary.classList.toggle('is-disabled', !gptCliEnabled?.checked);
+      const enabledCount = currentCodexCliModels().filter(entry => entry.enabled).length;
+      gptCliEnabledSummary.textContent = enabledCount ? `${enabledCount} enabled` : 'Disabled';
+      gptCliEnabledSummary.classList.toggle('is-disabled', enabledCount === 0);
     }
   }
   function workflowCompatibilityReason(assessment) {
@@ -6101,32 +6287,43 @@ SETTINGS_PAGE_JS = '''
   }
   function enabledAgentRoutes(settings) {
     const routes = normalizeModelList(settings?.enabled_ollama_models).map(model => `ollama:${model}`);
-    if (settings?.gpt_cli_enabled === true) routes.push('codex-cli');
+    normalizeCodexCliModels(settings?.codex_cli_models)
+      .filter(entry => entry.enabled)
+      .forEach(entry => routes.push(`codex-cli:${entry.model}:${entry.reasoning_effort}`));
     return routes;
   }
-  function canonicalAgentRoute(route) {
+  function canonicalAgentRoute(route, routes = []) {
     const normalized = String(route || '').trim();
-    return normalized === 'gpt-cli' ? 'codex-cli' : normalized;
+    if (['gpt-cli', 'codex-cli'].includes(normalized)) {
+      return routes.find(candidate => candidate.startsWith('codex-cli:')) || normalized;
+    }
+    return normalized;
   }
   function normalizeAgentModels(value, routes) {
     const source = value && typeof value === 'object' ? value : {};
     const fallback = routes[0] || '';
     return Object.fromEntries(agentRoles.map(role => {
-      const route = canonicalAgentRoute(source[role]);
+      const route = canonicalAgentRoute(source[role], routes);
       return [role, routes.includes(route) ? route : fallback];
     }));
   }
   function normalizeAgentSecondOpinionModels(value, routes, primaryAssignments) {
     const source = value && typeof value === 'object' ? value : {};
     return Object.fromEntries(agentRoles.map(role => {
-      const route = canonicalAgentRoute(source[role]);
-      const primary = canonicalAgentRoute(primaryAssignments?.[role]);
+      const route = canonicalAgentRoute(source[role], routes);
+      const primary = canonicalAgentRoute(primaryAssignments?.[role], routes);
       return [role, routes.includes(route) && route !== primary ? route : ''];
     }));
   }
   function agentModelRouteLabel(route, settings) {
     if (route.startsWith('ollama:')) return `Ollama: ${route.slice('ollama:'.length)}`;
-    if (canonicalAgentRoute(route) === 'codex-cli') {
+    if (route.startsWith('codex-cli:')) {
+      const parts = route.slice('codex-cli:'.length).split(':');
+      const effort = parts.pop() || 'medium';
+      const model = parts.join(':');
+      return `Codex CLI: ${model} (${effort})`;
+    }
+    if (['gpt-cli', 'codex-cli'].includes(route)) {
       const model = String(settings?.codex_cli_model || settings?.cloud_model || 'gpt-5.5').trim();
       const effort = String(settings?.codex_cli_reasoning_effort || 'medium').trim();
       return `Codex CLI: ${model} (${effort})`;
@@ -6200,18 +6397,25 @@ SETTINGS_PAGE_JS = '''
   }
   function currentAiSettings() {
     const enabledModels = enabledOllamaModels();
-    const gptEnabled = Boolean(gptCliEnabled?.checked);
+    const codexModels = currentCodexCliModels();
+    const enabledCodexModels = codexModels.filter(entry => entry.enabled);
+    const primaryCodex = enabledCodexModels[0] || codexModels[0] || {
+      model: 'gpt-5.5',
+      reasoning_effort: 'medium'
+    };
+    const gptEnabled = enabledCodexModels.length > 0;
     const settings = {
       mode: derivedAnalysisMode(enabledModels, gptEnabled),
       ollama_model: enabledModels[0] || configuredEnabledModels[0] || 'devstral:latest',
       enabled_ollama_models: enabledModels,
       ollama_url: ollamaUrl?.value.trim() || 'http://127.0.0.1:11434',
       cloud_provider: 'codex-cli',
-      cloud_model: codexCliModel?.value.trim() || 'gpt-5.5',
+      cloud_model: primaryCodex.model,
       cloud_command: '',
       codex_cli_path: codexCliPath?.value.trim() || 'codex',
-      codex_cli_model: codexCliModel?.value.trim() || 'gpt-5.5',
-      codex_cli_reasoning_effort: codexCliReasoningEffort?.value || 'medium',
+      codex_cli_model: primaryCodex.model,
+      codex_cli_reasoning_effort: primaryCodex.reasoning_effort,
+      codex_cli_models: codexModels,
       gpt_cli_enabled: gptEnabled,
       hybrid_policy: hybridPolicy?.value || 'cloud_for_critical_high_or_recommended',
       soc_analyst_pcap_min_severity: socPcapMinSeverity?.value || 'informational',
@@ -6237,11 +6441,16 @@ SETTINGS_PAGE_JS = '''
         input.checked = configuredEnabledModels.includes(input.value);
       });
     }
-    if (gptCliEnabled) gptCliEnabled.checked = settings.gpt_cli_enabled === true || (settings.gpt_cli_enabled == null && ['cloud', 'hybrid'].includes(mode));
     if (ollamaUrl) ollamaUrl.value = settings.ollama_url || 'http://127.0.0.1:11434';
     if (codexCliPath) codexCliPath.value = settings.codex_cli_path || 'codex';
-    if (codexCliModel) codexCliModel.value = settings.codex_cli_model || settings.cloud_model || 'gpt-5.5';
-    if (codexCliReasoningEffort) codexCliReasoningEffort.value = settings.codex_cli_reasoning_effort || 'medium';
+    const codexEntries = Array.isArray(settings.codex_cli_models)
+      ? settings.codex_cli_models
+      : [{
+          model: settings.codex_cli_model || settings.cloud_model || 'gpt-5.5',
+          reasoning_effort: settings.codex_cli_reasoning_effort || 'medium',
+          enabled: settings.gpt_cli_enabled === true || (settings.gpt_cli_enabled == null && ['cloud', 'hybrid'].includes(mode))
+        }];
+    renderCodexCliModels(codexEntries);
     if (hybridPolicy) hybridPolicy.value = settings.hybrid_policy || 'cloud_for_critical_high_or_recommended';
     if (socPcapMinSeverity) {
       socPcapMinSeverity.value = settings.soc_analyst_pcap_min_severity || 'informational';
@@ -6261,9 +6470,11 @@ SETTINGS_PAGE_JS = '''
     syncAgentModelControls(settings.agent_models, settings.agent_second_opinion_models, {
       ...settings,
       enabled_ollama_models: configuredEnabledModels,
-      gpt_cli_enabled: Boolean(gptCliEnabled?.checked)
+      codex_cli_models: currentCodexCliModels(),
+      gpt_cli_enabled: currentCodexCliModels().some(entry => entry.enabled)
     });
     modelSelectionDirty = false;
+    codexSelectionDirty = false;
     updateProviderSummaries();
   }
   function applyGeoIpDatabaseStatus(databaseType, database) {
@@ -6385,7 +6596,7 @@ SETTINGS_PAGE_JS = '''
   }
   function validateAiSettings(payload) {
     if (!payload.enabled_ollama_models.length && !payload.gpt_cli_enabled) {
-      return 'Enable at least one Ollama model or Codex CLI.';
+      return 'Enable at least one Ollama model or Codex CLI model.';
     }
     if (
       payload.gpt_cli_enabled
@@ -6394,11 +6605,19 @@ SETTINGS_PAGE_JS = '''
     ) {
       return 'Codex CLI executable must be "codex" or an absolute path ending in /codex.';
     }
-    if (payload.gpt_cli_enabled && !payload.codex_cli_model) {
-      return 'Codex CLI requires a model name.';
-    }
-    if (!['low', 'medium', 'high', 'xhigh'].includes(payload.codex_cli_reasoning_effort)) {
-      return 'Codex CLI reasoning effort is invalid.';
+    const seenCodexEntries = new Set();
+    for (const entry of payload.codex_cli_models) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(entry.model)) {
+        return 'Each Codex CLI model name may contain only letters, numbers, dots, underscores, and hyphens.';
+      }
+      if (!['low', 'medium', 'high', 'xhigh'].includes(entry.reasoning_effort)) {
+        return 'Codex CLI reasoning effort is invalid.';
+      }
+      const key = `${entry.model}:${entry.reasoning_effort}`;
+      if (seenCodexEntries.has(key)) {
+        return 'Each Codex CLI model and reasoning-effort combination must be unique.';
+      }
+      seenCodexEntries.add(key);
     }
     const thresholds = ['disabled', 'critical', 'high', 'medium', 'low', 'informational'];
     if (
@@ -6617,8 +6836,28 @@ SETTINGS_PAGE_JS = '''
     const settings = currentAiSettings();
     syncAgentModelControls(settings.agent_models, settings.agent_second_opinion_models, settings);
   });
-  gptCliEnabled?.addEventListener('change', () => {
-    modelSelectionDirty = true;
+  addCodexCliModelButton?.addEventListener('click', () => {
+    appendCodexCliModel();
+    codexSelectionDirty = true;
+    updateProviderSummaries();
+    codexCliModels?.querySelector('[data-codex-cli-model-row]:last-child [data-codex-cli-model-name]')?.focus();
+  });
+  codexCliModels?.addEventListener('click', event => {
+    const removeButton = event.target.closest('[data-codex-cli-model-remove]');
+    if (!removeButton) return;
+    removeButton.closest('[data-codex-cli-model-row]')?.remove();
+    codexSelectionDirty = true;
+    updateProviderSummaries();
+    const settings = currentAiSettings();
+    syncAgentModelControls(settings.agent_models, settings.agent_second_opinion_models, settings);
+  });
+  codexCliModels?.addEventListener('input', event => {
+    if (!event.target.matches('[data-codex-cli-model-name]')) return;
+    codexSelectionDirty = true;
+  });
+  codexCliModels?.addEventListener('change', event => {
+    if (!event.target.matches('[data-codex-cli-model-enabled], [data-codex-cli-model-effort], [data-codex-cli-model-name]')) return;
+    codexSelectionDirty = true;
     updateProviderSummaries();
     const settings = currentAiSettings();
     syncAgentModelControls(settings.agent_models, settings.agent_second_opinion_models, settings);

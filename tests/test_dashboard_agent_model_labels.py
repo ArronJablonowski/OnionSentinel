@@ -128,13 +128,44 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
         self.assertIn('id="gpt-cli-provider-settings"', rendered)
         self.assertIn("Codex CLI", rendered)
         self.assertIn('id="ai-codex-cli-path"', rendered)
-        self.assertIn('id="ai-codex-cli-model"', rendered)
-        self.assertIn('id="ai-codex-cli-reasoning-effort"', rendered)
+        self.assertIn('id="ai-codex-cli-models"', rendered)
+        self.assertIn('id="add-codex-cli-model"', rendered)
+        self.assertIn("data-codex-cli-model-name", rendered)
+        self.assertIn("data-codex-cli-model-effort", rendered)
+        self.assertIn("data-codex-cli-model-enabled", rendered)
         self.assertNotIn('id="ai-cloud-command"', rendered)
         self.assertNotIn('id="ai-analysis-mode"', rendered)
         self.assertEqual(rendered.count("data-ollama-model-toggle"), 2)
         self.assertNotIn('<details class="settings-provider-details" id="ollama-provider-settings" open', rendered)
         self.assertNotIn('<details class="settings-provider-details" id="gpt-cli-provider-settings" open', rendered)
+
+    def test_only_enabled_codex_model_entries_appear_in_agent_selectors(self) -> None:
+        settings = {
+            **self.builder.default_soc_ai_settings(),
+            "enabled_ollama_models": ["primary:latest"],
+            "codex_cli_models": [
+                {"model": "gpt-5.6-sol", "reasoning_effort": "high", "enabled": True},
+                {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh", "enabled": False},
+                {"model": "gpt-5.6-terra", "reasoning_effort": "low", "enabled": True},
+            ],
+            "agent_models": {
+                role: "codex-cli:gpt-5.6-sol:high"
+                for role in self.builder.CYBER_SECURITY_AGENT_ROLES
+            },
+        }
+
+        self.assertEqual(
+            self.builder.enabled_agent_model_routes(settings),
+            [
+                "ollama:primary:latest",
+                "codex-cli:gpt-5.6-sol:high",
+                "codex-cli:gpt-5.6-terra:low",
+            ],
+        )
+        options = self.builder.agent_model_option_rows(settings, "soc-analyst")
+        self.assertIn("Codex CLI: gpt-5.6-sol (high)", options)
+        self.assertIn("Codex CLI: gpt-5.6-terra (low)", options)
+        self.assertNotIn("Codex CLI: gpt-5.6-sol (xhigh)", options)
 
     def test_saved_settings_refresh_role_specific_controls(self) -> None:
         script = self.builder.SETTINGS_PAGE_JS

@@ -45,7 +45,7 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(
             settings["agent_models"],
             {
-                role: ("codex-cli" if role == "incident-responder" else primary)
+                role: ("codex-cli:gpt-5.5:medium" if role == "incident-responder" else primary)
                 for role in self.runner.CYBER_SECURITY_AGENT_ROLES
             },
         )
@@ -54,6 +54,10 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(settings["cloud_provider"], "codex-cli")
         self.assertEqual(settings["codex_cli_model"], "gpt-5.5")
         self.assertEqual(settings["codex_cli_reasoning_effort"], "medium")
+        self.assertEqual(
+            settings["codex_cli_models"],
+            [{"enabled": True, "model": "gpt-5.5", "reasoning_effort": "medium"}],
+        )
         self.assertEqual(
             settings["agent_second_opinion_models"],
             {role: reviewer for role in self.runner.CYBER_SECURITY_AGENT_ROLES},
@@ -223,6 +227,44 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertIn("--ephemeral", seen_command)
         self.assertNotIn("sh", seen_command)
         self.assertNotIn("this must never execute", " ".join(seen_command))
+
+    def test_exact_codex_route_overrides_global_model_and_effort(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "system_prompt_file": Path("/tmp/nonexistent-system-prompt.md"),
+                "timeout": 60,
+                "max_response_bytes": 1024 * 1024,
+            },
+        )()
+        settings = {
+            **self.runner.default_ai_settings(),
+            "codex_cli_model": "legacy-model",
+            "codex_cli_reasoning_effort": "low",
+        }
+        seen_command = []
+
+        def fake_run(command, **kwargs):
+            seen_command.extend(command)
+            output_path = Path(command[command.index("--output-last-message") + 1])
+            output_path.write_text('{"summary":"Exact route"}', encoding="utf-8")
+            return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        with (
+            mock.patch.object(self.runner, "resolve_codex_cli", return_value="/usr/local/bin/codex"),
+            mock.patch.object(self.runner, "run_bounded_command", side_effect=fake_run),
+        ):
+            response = self.runner.analyze_model_route(
+                "codex-cli:gpt-5.6-sol:xhigh",
+                {"response_schema": {"type": "object"}},
+                args,
+                settings,
+            )
+
+        self.assertEqual(response["_analysis_model"], "gpt-5.6-sol")
+        self.assertEqual(seen_command[seen_command.index("--model") + 1], "gpt-5.6-sol")
+        self.assertIn('model_reasoning_effort="xhigh"', seen_command)
 
     def test_codex_settings_reject_arbitrary_executable_and_effort(self) -> None:
         for payload in (

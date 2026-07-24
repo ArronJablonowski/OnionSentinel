@@ -93,6 +93,7 @@ DEFAULT_MAX_SETTINGS_BYTES = max(
 ANALYSIS_INDEX_MAX_RESPONSE_BYTES = 1024 * 1024
 DEFAULT_CLOUD_MAX_STDERR_BYTES = int(os.environ.get("SOC_AI_CLOUD_MAX_STDERR_BYTES", str(1024 * 1024)))
 CODEX_CLI_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
+CODEX_CLI_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 DEFAULT_SYSTEM_PROMPT = (
     "You are a careful SOC analyst. Use only the supplied evidence. "
     "Return one valid JSON object and no prose outside JSON."
@@ -770,6 +771,9 @@ def default_ai_settings() -> dict[str, Any]:
         "codex_cli_path": "codex",
         "codex_cli_model": "gpt-5.5",
         "codex_cli_reasoning_effort": "medium",
+        "codex_cli_models": [
+            {"model": "gpt-5.5", "reasoning_effort": "medium", "enabled": False}
+        ],
         "gpt_cli_enabled": False,
         "hybrid_policy": "cloud_for_critical_high_or_recommended",
         "agent_models": {
@@ -809,17 +813,71 @@ def boolean_setting(value: Any, default: bool = False) -> bool:
     return default
 
 
+def codex_cli_route(model: str, effort: str) -> str:
+    return f"codex-cli:{model}:{effort}"
+
+
+def normalized_codex_cli_models(
+    value: Any,
+    *,
+    legacy_model: str,
+    legacy_effort: str,
+    legacy_enabled: bool,
+) -> list[dict[str, Any]]:
+    """Return a validated, bounded roster of exact Codex CLI configurations."""
+    raw_entries = value if isinstance(value, list) else [
+        {
+            "model": legacy_model,
+            "reasoning_effort": legacy_effort,
+            "enabled": legacy_enabled,
+        }
+    ]
+    if len(raw_entries) > 32:
+        raise RuntimeArtifactError("Codex CLI model roster cannot exceed 32 entries")
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in raw_entries:
+        if not isinstance(raw, dict):
+            raise RuntimeArtifactError("Codex CLI model roster entries must be objects")
+        model = str(raw.get("model") or "").strip()
+        effort = str(raw.get("reasoning_effort") or "medium").strip().lower()
+        if not CODEX_CLI_MODEL_PATTERN.fullmatch(model):
+            raise RuntimeArtifactError("Codex CLI model name is invalid")
+        if effort not in CODEX_CLI_REASONING_EFFORTS:
+            raise RuntimeArtifactError(
+                "Codex CLI reasoning effort must be low, medium, high, or xhigh"
+            )
+        key = (model, effort)
+        if key in seen:
+            raise RuntimeArtifactError("Codex CLI model roster contains a duplicate entry")
+        seen.add(key)
+        entries.append({
+            "model": model,
+            "reasoning_effort": effort,
+            "enabled": boolean_setting(raw.get("enabled")),
+        })
+    return entries
+
+
 def enabled_agent_model_routes(settings: dict[str, Any]) -> list[str]:
     """Return the exact model routes agents may select from the enabled roster."""
     routes = [f"ollama:{model}" for model in normalized_model_roster(settings.get("enabled_ollama_models"))]
-    if boolean_setting(settings.get("gpt_cli_enabled")):
-        routes.append("codex-cli")
+    routes.extend(
+        codex_cli_route(entry["model"], entry["reasoning_effort"])
+        for entry in settings.get("codex_cli_models", [])
+        if isinstance(entry, dict) and entry.get("enabled") is True
+    )
     return routes
 
 
-def canonical_model_route(value: Any) -> str:
-    """Map the retired UI label to the fixed Codex CLI adapter route."""
+def canonical_model_route(value: Any, routes: list[str] | None = None) -> str:
+    """Map a retired provider-only label to the first enabled Codex route."""
     route = str(value or "").strip()
+    if route in {"gpt-cli", "codex-cli"} and routes is not None:
+        return next(
+            (candidate for candidate in routes if candidate.startswith("codex-cli:")),
+            route,
+        )
     return "codex-cli" if route == "gpt-cli" else route
 
 
@@ -833,7 +891,7 @@ def normalize_agent_models(value: Any, routes: list[str]) -> dict[str, str]:
     source = value if isinstance(value, dict) else {}
     fallback = routes[0] if routes else ""
     return {
-        role: route if (route := canonical_model_route(source.get(role))) in routes else fallback
+        role: route if (route := canonical_model_route(source.get(role), routes)) in routes else fallback
         for role in CYBER_SECURITY_AGENT_ROLES
     }
 
@@ -848,7 +906,7 @@ def normalize_agent_second_opinion_models(
     return {
         role: route
         if (
-            (route := canonical_model_route(source.get(role))) in routes
+            (route := canonical_model_route(source.get(role), routes)) in routes
             and route != primary_assignments.get(role)
         )
         else ""
@@ -866,10 +924,10 @@ def apply_model_roster(settings: dict[str, Any], raw: dict[str, Any]) -> dict[st
     else:
         legacy_model = str(raw.get("ollama_model") or settings.get("ollama_model") or FALLBACK_OLLAMA_MODEL).strip()
         enabled_models = [] if legacy_mode == "cloud" else normalized_model_roster([legacy_model])
-    if "gpt_cli_enabled" in raw:
-        gpt_enabled = boolean_setting(raw.get("gpt_cli_enabled"))
-    else:
-        gpt_enabled = legacy_mode in {"cloud", "hybrid"}
+    gpt_enabled = any(
+        isinstance(entry, dict) and entry.get("enabled") is True
+        for entry in settings.get("codex_cli_models", [])
+    )
     if not enabled_models and not gpt_enabled:
         raise RuntimeArtifactError("AI settings must enable at least one Ollama model or GPT CLI")
     settings["enabled_ollama_models"] = enabled_models
@@ -918,9 +976,31 @@ def normalize_codex_cli_settings(settings: dict[str, Any], raw: dict[str, Any]) 
         raise RuntimeArtifactError(
             "Codex CLI reasoning effort must be low, medium, high, or xhigh"
         )
+    legacy_mode = str(raw.get("mode") or settings.get("mode") or "ollama").strip().lower()
+    legacy_enabled = (
+        boolean_setting(raw.get("gpt_cli_enabled"))
+        if "gpt_cli_enabled" in raw
+        else legacy_mode in {"cloud", "hybrid"}
+    )
+    codex_models = normalized_codex_cli_models(
+        raw.get("codex_cli_models") if "codex_cli_models" in raw else None,
+        legacy_model=model,
+        legacy_effort=effort,
+        legacy_enabled=legacy_enabled,
+    )
+    selected = next(
+        (entry for entry in codex_models if entry["enabled"]),
+        codex_models[0] if codex_models else {
+            "model": model,
+            "reasoning_effort": effort,
+        },
+    )
+    model = selected["model"]
+    effort = selected["reasoning_effort"]
     settings["codex_cli_path"] = executable
     settings["codex_cli_model"] = model
     settings["codex_cli_reasoning_effort"] = effort
+    settings["codex_cli_models"] = codex_models
     # Compatibility fields remain readable during rolling deploys, but the
     # legacy arbitrary command is never executed.
     settings["cloud_provider"] = "codex-cli"
@@ -942,6 +1022,7 @@ def load_ai_settings(path: Path) -> dict[str, Any]:
     for key, value in data.items():
         if key in {
             "enabled_ollama_models",
+            "codex_cli_models",
             "gpt_cli_enabled",
             "agent_models",
             "agent_second_opinion_models",
@@ -1276,13 +1357,21 @@ def cloud_cli_chat(
     args: argparse.Namespace,
     settings: dict[str, Any],
     *,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
     system_prompt_file: Path | None = None,
     independent_review: bool = False,
 ) -> dict[str, Any]:
     """Run Codex through a fixed, ephemeral, read-only argv contract."""
     executable = resolve_codex_cli(settings)
-    model = str(settings.get("codex_cli_model") or "gpt-5.5").strip()
-    effort = str(settings.get("codex_cli_reasoning_effort") or "medium").strip().lower()
+    model = str(model or settings.get("codex_cli_model") or "gpt-5.5").strip()
+    effort = str(
+        reasoning_effort
+        or settings.get("codex_cli_reasoning_effort")
+        or "medium"
+    ).strip().lower()
+    if not CODEX_CLI_MODEL_PATTERN.fullmatch(model):
+        raise SystemExit("Codex CLI model name is invalid")
     if effort not in CODEX_CLI_REASONING_EFFORTS:
         raise SystemExit("Codex CLI reasoning effort is invalid")
     live_follow_up = isinstance(prompt_package.get("live_osquery_follow_up"), dict)
@@ -1376,6 +1465,26 @@ def analyze_model_route(
             prompt_package,
             args,
             settings,
+            system_prompt_file=system_prompt_file,
+            independent_review=independent_review,
+        )
+    if route.startswith("codex-cli:"):
+        route_value = route.removeprefix("codex-cli:")
+        try:
+            model, effort = route_value.rsplit(":", 1)
+        except ValueError as exc:
+            raise SystemExit("Configured Codex CLI route is invalid") from exc
+        if (
+            not CODEX_CLI_MODEL_PATTERN.fullmatch(model)
+            or effort not in CODEX_CLI_REASONING_EFFORTS
+        ):
+            raise SystemExit("Configured Codex CLI route is invalid")
+        return cloud_cli_chat(
+            prompt_package,
+            args,
+            settings,
+            model=model,
+            reasoning_effort=effort,
             system_prompt_file=system_prompt_file,
             independent_review=independent_review,
         )

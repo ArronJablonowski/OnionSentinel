@@ -424,12 +424,15 @@ follow-up operations are executed by the fixed local query broker. Hovering or
 focusing the warning explains the failed requirement. Assessments are cached
 for five minutes, while a manual model refresh invalidates the cache.
 Compatibility fields `mode` and `ollama_model` remain in the JSON file for
-older tooling, but they are derived from `enabled_ollama_models` and
-`gpt_cli_enabled`. Primary assignments are stored in `agent_models`; optional
+older tooling, but they are derived from `enabled_ollama_models` and the
+individually enabled entries in `codex_cli_models`; `gpt_cli_enabled` remains a
+derived rolling-deploy compatibility field. Primary assignments are stored in
+`agent_models`; optional
 reviewers are stored in `agent_second_opinion_models`. Both maps use stable
 route identifiers such as
 `ollama:devstral-small-2:24b-instruct-2512-q4_K_M`, `ollama:gemma4:31b`, and
-`gpt-cli`.
+`codex-cli:gpt-5.6-sol:high`. Disabled Codex model/effort entries are retained
+for editing but cannot appear in or be accepted from an agent assignment.
 
 Editable SOC Analyst system prompt:
 
