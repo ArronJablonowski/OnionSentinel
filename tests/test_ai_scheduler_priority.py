@@ -235,6 +235,10 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                 "codex-cli:not allowed:high",
                 [{"model": "not allowed", "reasoning_effort": "high", "enabled": True}],
             ),
+            (
+                "codex-cli:gpt-9-unknown:high",
+                [{"model": "gpt-9-unknown", "reasoning_effort": "high", "enabled": True}],
+            ),
         ):
             with self.subTest(route=route, roster=roster):
                 settings_path.write_text(

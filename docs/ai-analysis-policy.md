@@ -443,8 +443,12 @@ derived rolling-deploy compatibility field. Primary assignments are stored in
 reviewers are stored in `agent_second_opinion_models`. Both maps use stable
 route identifiers such as
 `ollama:devstral-small-2:24b-instruct-2512-q4_K_M`, `ollama:gemma4:31b`, and
-`codex-cli:gpt-5.6-sol:high`. Disabled Codex model/effort entries are retained
-for editing but cannot appear in or be accepted from an agent assignment.
+`codex-cli:gpt-5.6-sol:high`. The Codex catalog is fixed to `gpt-5.5`,
+`gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`. Settings renders one
+immutable row per model with a reasoning-effort selector and enable switch.
+Missing catalog rows are added disabled during migration; unknown or duplicate
+model rows are rejected. Disabled Codex routes cannot appear in or be accepted
+from an agent assignment.
 
 Editable SOC Analyst system prompt:
 

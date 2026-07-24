@@ -730,6 +730,11 @@ configured path and standard user-local/Homebrew locations without executing
 lookalike binaries. If the executable is unavailable, the case fails visibly;
 it does not silently change providers or privacy boundaries.
 
+The Settings roster exposes the fixed Codex CLI catalog `gpt-5.5`,
+`gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`. Each model has one
+reasoning-effort selection and an independent enable switch. Only enabled exact
+routes may be assigned to an agent.
+
 Provider lanes are independent. All Ollama/local-model work shares one
 host-wide inference lock; the Codex/GPT CLI worker does not acquire that lock
 and can process one CLI job in parallel with one local-model job. Each durable

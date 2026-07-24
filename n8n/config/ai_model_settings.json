@@ -22,6 +22,21 @@
       "enabled": true,
       "model": "gpt-5.5",
       "reasoning_effort": "medium"
+    },
+    {
+      "enabled": false,
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "medium"
+    },
+    {
+      "enabled": false,
+      "model": "gpt-5.6-terra",
+      "reasoning_effort": "medium"
+    },
+    {
+      "enabled": false,
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "medium"
     }
   ],
   "codex_cli_path": "codex",

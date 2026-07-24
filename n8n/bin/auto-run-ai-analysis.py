@@ -14,7 +14,6 @@ import fcntl
 import hashlib
 import json
 import os
-import re
 import sqlite3
 import urllib.error
 import urllib.request
@@ -58,7 +57,12 @@ DEFAULT_MAX_CHILD_STDERR_BYTES = max(256 * 1024, int(os.environ.get("SOC_AI_SCHE
 DEFAULT_MAX_CONTROL_RESPONSE_BYTES = 1024 * 1024
 MAX_AI_SETTINGS_BYTES = 256 * 1024
 CODEX_CLI_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
-CODEX_CLI_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+CODEX_CLI_MODEL_CATALOG = frozenset({
+    "gpt-5.5",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+})
 AGENT_ROLES = (
     "soc-analyst",
     "incident-responder",
@@ -185,7 +189,7 @@ def cli_agent_roles(settings_path: Path) -> set[str]:
         model = str(entry.get("model") or "").strip()
         effort = str(entry.get("reasoning_effort") or "").strip().lower()
         if (
-            CODEX_CLI_MODEL_PATTERN.fullmatch(model)
+            model in CODEX_CLI_MODEL_CATALOG
             and effort in CODEX_CLI_REASONING_EFFORTS
         ):
             enabled_codex_routes.add(f"codex-cli:{model}:{effort}")

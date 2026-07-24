@@ -1341,6 +1341,12 @@ CYBER_SECURITY_AGENT_ROLES = (
 SOC_AI_SETTINGS_LOCK = threading.RLock()
 CODEX_CLI_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
 CODEX_CLI_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+CODEX_CLI_MODEL_CATALOG = (
+    "gpt-5.5",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+)
 SOC_ANALYSIS_SEVERITY_THRESHOLDS = frozenset(
     {"disabled", "critical", "high", "medium", "low", "informational"}
 )
@@ -1361,7 +1367,8 @@ def default_soc_ai_settings() -> dict:
         "codex_cli_model": "gpt-5.5",
         "codex_cli_reasoning_effort": "medium",
         "codex_cli_models": [
-            {"model": "gpt-5.5", "reasoning_effort": "medium", "enabled": False}
+            {"model": model, "reasoning_effort": "medium", "enabled": False}
+            for model in CODEX_CLI_MODEL_CATALOG
         ],
         "gpt_cli_enabled": False,
         "hybrid_policy": "cloud_for_critical_high_or_recommended",
@@ -1433,7 +1440,7 @@ def _normalize_codex_cli_models(
     legacy_effort: str,
     legacy_enabled: bool,
 ) -> tuple[bool, list[dict]]:
-    """Validate a bounded, duplicate-free roster of Codex model/effort pairs."""
+    """Validate settings for the fixed, one-row-per-model Codex catalog."""
     raw_entries = value if isinstance(value, list) else [
         {
             "model": legacy_model,
@@ -1441,29 +1448,33 @@ def _normalize_codex_cli_models(
             "enabled": legacy_enabled,
         }
     ]
-    if len(raw_entries) > 32:
+    if len(raw_entries) > len(CODEX_CLI_MODEL_CATALOG):
         return False, []
-    entries: list[dict] = []
-    seen: set[tuple[str, str]] = set()
+    configured: dict[str, dict] = {}
     for raw in raw_entries:
         if not isinstance(raw, dict):
             return False, []
         model = str(raw.get("model") or "").strip()
         effort = str(raw.get("reasoning_effort") or "medium").strip().lower()
-        if not CODEX_CLI_MODEL_PATTERN.fullmatch(model):
+        if model not in CODEX_CLI_MODEL_CATALOG:
             return False, []
         if effort not in CODEX_CLI_REASONING_EFFORTS:
             return False, []
-        key = (model, effort)
-        if key in seen:
+        if model in configured:
             return False, []
-        seen.add(key)
-        entries.append({
+        configured[model] = {
             "model": model,
             "reasoning_effort": effort,
             "enabled": _boolean_setting(raw.get("enabled")),
+        }
+    return True, [
+        configured.get(model, {
+            "model": model,
+            "reasoning_effort": "medium",
+            "enabled": False,
         })
-    return True, entries
+        for model in CODEX_CLI_MODEL_CATALOG
+    ]
 
 
 def _enabled_agent_model_routes(
@@ -1486,6 +1497,19 @@ def _canonical_agent_route(route: object, enabled_routes: list[str]) -> str:
     if normalized in {"gpt-cli", "codex-cli"}:
         return next(
             (candidate for candidate in enabled_routes if candidate.startswith("codex-cli:")),
+            normalized,
+        )
+    if normalized.startswith("codex-cli:") and normalized not in enabled_routes:
+        try:
+            model, _ = normalized.removeprefix("codex-cli:").rsplit(":", 1)
+        except ValueError:
+            return normalized
+        return next(
+            (
+                candidate
+                for candidate in enabled_routes
+                if candidate.startswith(f"codex-cli:{model}:")
+            ),
             normalized,
         )
     return normalized
@@ -1605,8 +1629,8 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
         return False, {
             "ok": False,
             "error": (
-                "Each Codex CLI entry requires a unique model name containing only "
-                "letters, numbers, dots, underscores, or hyphens and a supported reasoning effort."
+                "Codex CLI settings must use each supported catalog model at most "
+                "once with a valid reasoning effort."
             ),
         }
     gpt_cli_enabled = any(entry["enabled"] for entry in codex_cli_models)

@@ -74,8 +74,9 @@ dependency.
   models as an approved roster, preserves configured unavailable models, and
   warns beside models whose bounded Ollama metadata lacks the completion,
   chat-template, or minimum-context capabilities required by the SOC workflow.
-  Codex CLI supports multiple model/reasoning combinations, each with an
-  independent enable toggle. Only enabled combinations are assignable. Each
+  Codex CLI lists the fixed `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`, and
+  `gpt-5.6-luna` catalog with an independent enable toggle and reasoning
+  selector for each model. Only enabled model/effort routes are assignable. Each
   Cyber Security Agent selects exactly one enabled primary route and an
   optional distinct second-opinion route in its expanded panel. Its collapsed row shows both assignments and
   explicitly reports `None selected` when no reviewer is configured. Both

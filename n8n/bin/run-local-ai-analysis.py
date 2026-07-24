@@ -94,6 +94,12 @@ ANALYSIS_INDEX_MAX_RESPONSE_BYTES = 1024 * 1024
 DEFAULT_CLOUD_MAX_STDERR_BYTES = int(os.environ.get("SOC_AI_CLOUD_MAX_STDERR_BYTES", str(1024 * 1024)))
 CODEX_CLI_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
 CODEX_CLI_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+CODEX_CLI_MODEL_CATALOG = (
+    "gpt-5.5",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+)
 DEFAULT_SYSTEM_PROMPT = (
     "You are a careful SOC analyst. Use only the supplied evidence. "
     "Return one valid JSON object and no prose outside JSON."
@@ -793,7 +799,8 @@ def default_ai_settings() -> dict[str, Any]:
         "codex_cli_model": "gpt-5.5",
         "codex_cli_reasoning_effort": "medium",
         "codex_cli_models": [
-            {"model": "gpt-5.5", "reasoning_effort": "medium", "enabled": False}
+            {"model": model, "reasoning_effort": "medium", "enabled": False}
+            for model in CODEX_CLI_MODEL_CATALOG
         ],
         "gpt_cli_enabled": False,
         "hybrid_policy": "cloud_for_critical_high_or_recommended",
@@ -845,7 +852,7 @@ def normalized_codex_cli_models(
     legacy_effort: str,
     legacy_enabled: bool,
 ) -> list[dict[str, Any]]:
-    """Return a validated, bounded roster of exact Codex CLI configurations."""
+    """Return validated settings for the fixed Codex CLI model catalog."""
     raw_entries = value if isinstance(value, list) else [
         {
             "model": legacy_model,
@@ -853,31 +860,35 @@ def normalized_codex_cli_models(
             "enabled": legacy_enabled,
         }
     ]
-    if len(raw_entries) > 32:
-        raise RuntimeArtifactError("Codex CLI model roster cannot exceed 32 entries")
-    entries: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    if len(raw_entries) > len(CODEX_CLI_MODEL_CATALOG):
+        raise RuntimeArtifactError("Codex CLI model roster contains too many entries")
+    configured: dict[str, dict[str, Any]] = {}
     for raw in raw_entries:
         if not isinstance(raw, dict):
             raise RuntimeArtifactError("Codex CLI model roster entries must be objects")
         model = str(raw.get("model") or "").strip()
         effort = str(raw.get("reasoning_effort") or "medium").strip().lower()
-        if not CODEX_CLI_MODEL_PATTERN.fullmatch(model):
-            raise RuntimeArtifactError("Codex CLI model name is invalid")
+        if model not in CODEX_CLI_MODEL_CATALOG:
+            raise RuntimeArtifactError("Codex CLI model is not in the supported catalog")
         if effort not in CODEX_CLI_REASONING_EFFORTS:
             raise RuntimeArtifactError(
                 "Codex CLI reasoning effort must be low, medium, high, or xhigh"
             )
-        key = (model, effort)
-        if key in seen:
-            raise RuntimeArtifactError("Codex CLI model roster contains a duplicate entry")
-        seen.add(key)
-        entries.append({
+        if model in configured:
+            raise RuntimeArtifactError("Codex CLI model roster contains a duplicate model")
+        configured[model] = {
             "model": model,
             "reasoning_effort": effort,
             "enabled": boolean_setting(raw.get("enabled")),
+        }
+    return [
+        configured.get(model, {
+            "model": model,
+            "reasoning_effort": "medium",
+            "enabled": False,
         })
-    return entries
+        for model in CODEX_CLI_MODEL_CATALOG
+    ]
 
 
 def enabled_agent_model_routes(settings: dict[str, Any]) -> list[str]:
@@ -897,6 +908,19 @@ def canonical_model_route(value: Any, routes: list[str] | None = None) -> str:
     if route in {"gpt-cli", "codex-cli"} and routes is not None:
         return next(
             (candidate for candidate in routes if candidate.startswith("codex-cli:")),
+            route,
+        )
+    if routes is not None and route.startswith("codex-cli:") and route not in routes:
+        try:
+            model, _ = route.removeprefix("codex-cli:").rsplit(":", 1)
+        except ValueError:
+            return route
+        return next(
+            (
+                candidate
+                for candidate in routes
+                if candidate.startswith(f"codex-cli:{model}:")
+            ),
             route,
         )
     return "codex-cli" if route == "gpt-cli" else route

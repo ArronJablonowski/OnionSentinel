@@ -129,15 +129,37 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
         self.assertIn("Codex CLI", rendered)
         self.assertIn('id="ai-codex-cli-path"', rendered)
         self.assertIn('id="ai-codex-cli-models"', rendered)
-        self.assertIn('id="add-codex-cli-model"', rendered)
-        self.assertIn("data-codex-cli-model-name", rendered)
+        self.assertNotIn('id="add-codex-cli-model"', rendered)
+        self.assertNotIn("data-codex-cli-model-name", rendered)
+        self.assertNotIn("data-codex-cli-model-remove", rendered)
         self.assertIn("data-codex-cli-model-effort", rendered)
         self.assertIn("data-codex-cli-model-enabled", rendered)
+        self.assertEqual(rendered.count("data-codex-cli-model-row"), 4)
+        self.assertEqual(rendered.count("data-codex-cli-model-enabled"), 4)
+        catalog_positions = [
+            rendered.index(f'data-codex-cli-model="{model}"')
+            for model in self.builder.CODEX_CLI_MODEL_CATALOG
+        ]
+        self.assertEqual(catalog_positions, sorted(catalog_positions))
+        for model in self.builder.CODEX_CLI_MODEL_CATALOG:
+            self.assertIn(f'aria-label="Enable Codex CLI {model}"', rendered)
+            self.assertIn(
+                f'aria-label="Reasoning effort for Codex CLI {model}"',
+                rendered,
+            )
         self.assertNotIn('id="ai-cloud-command"', rendered)
         self.assertNotIn('id="ai-analysis-mode"', rendered)
         self.assertEqual(rendered.count("data-ollama-model-toggle"), 2)
         self.assertNotIn('<details class="settings-provider-details" id="ollama-provider-settings" open', rendered)
         self.assertNotIn('<details class="settings-provider-details" id="gpt-cli-provider-settings" open', rendered)
+        script = self.builder.SETTINGS_PAGE_JS
+        self.assertIn(
+            "const codexCliCatalog = ['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];",
+            script,
+        )
+        self.assertIn("model: String(row.dataset.codexCliModel || '').trim()", script)
+        self.assertNotIn("appendCodexCliModel", script)
+        self.assertNotIn("addCodexCliModelButton", script)
 
     def test_only_enabled_codex_model_entries_appear_in_agent_selectors(self) -> None:
         settings = {
@@ -145,8 +167,8 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
             "enabled_ollama_models": ["primary:latest"],
             "codex_cli_models": [
                 {"model": "gpt-5.6-sol", "reasoning_effort": "high", "enabled": True},
-                {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh", "enabled": False},
                 {"model": "gpt-5.6-terra", "reasoning_effort": "low", "enabled": True},
+                {"model": "gpt-5.6-luna", "reasoning_effort": "xhigh", "enabled": False},
             ],
             "agent_models": {
                 role: "codex-cli:gpt-5.6-sol:high"
@@ -165,7 +187,23 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
         options = self.builder.agent_model_option_rows(settings, "soc-analyst")
         self.assertIn("Codex CLI: gpt-5.6-sol (high)", options)
         self.assertIn("Codex CLI: gpt-5.6-terra (low)", options)
-        self.assertNotIn("Codex CLI: gpt-5.6-sol (xhigh)", options)
+        self.assertNotIn("Codex CLI: gpt-5.6-luna (xhigh)", options)
+
+    def test_legacy_codex_roster_expands_to_the_fixed_catalog(self) -> None:
+        entries = self.builder._normalized_codex_cli_models(
+            [{"model": "gpt-5.5", "reasoning_effort": "high", "enabled": True}],
+            legacy_model="gpt-5.5",
+            legacy_effort="medium",
+            legacy_enabled=False,
+        )
+
+        self.assertEqual(
+            [entry["model"] for entry in entries],
+            list(self.builder.CODEX_CLI_MODEL_CATALOG),
+        )
+        self.assertEqual(entries[0]["reasoning_effort"], "high")
+        self.assertTrue(entries[0]["enabled"])
+        self.assertTrue(all(not entry["enabled"] for entry in entries[1:]))
 
     def test_ai_activity_and_flow_show_the_assigned_codex_model(self) -> None:
         settings = {

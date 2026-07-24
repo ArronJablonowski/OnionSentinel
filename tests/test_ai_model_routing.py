@@ -56,7 +56,14 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(settings["codex_cli_reasoning_effort"], "medium")
         self.assertEqual(
             settings["codex_cli_models"],
-            [{"enabled": True, "model": "gpt-5.5", "reasoning_effort": "medium"}],
+            [
+                {
+                    "enabled": model == "gpt-5.5",
+                    "model": model,
+                    "reasoning_effort": "medium",
+                }
+                for model in self.runner.CODEX_CLI_MODEL_CATALOG
+            ],
         )
         self.assertEqual(
             settings["agent_second_opinion_models"],
@@ -107,6 +114,32 @@ class AiModelRoutingTests(unittest.TestCase):
         )
         self.assertEqual(settings["cloud_command"], "")
         self.assertEqual(settings["codex_cli_model"], "gpt-5.5")
+        self.assertEqual(
+            [entry["model"] for entry in settings["codex_cli_models"]],
+            list(self.runner.CODEX_CLI_MODEL_CATALOG),
+        )
+        self.assertTrue(settings["codex_cli_models"][0]["enabled"])
+        self.assertTrue(all(not entry["enabled"] for entry in settings["codex_cli_models"][1:]))
+
+    def test_runner_rejects_codex_models_outside_the_fixed_catalog(self) -> None:
+        settings = self.runner.default_ai_settings()
+
+        with self.assertRaisesRegex(
+            self.runner.RuntimeArtifactError,
+            "supported catalog",
+        ):
+            self.runner.normalize_codex_cli_settings(
+                settings,
+                {
+                    "codex_cli_models": [
+                        {
+                            "model": "gpt-9-unknown",
+                            "reasoning_effort": "medium",
+                            "enabled": True,
+                        }
+                    ]
+                },
+            )
 
     def test_ollama_uses_enabled_models_as_ordered_failover(self) -> None:
         args = type("Args", (), {})()
@@ -339,6 +372,30 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(
             settings["agent_models"],
             {role: "ollama:approved:latest" for role in self.runner.CYBER_SECURITY_AGENT_ROLES},
+        )
+
+    def test_runner_preserves_codex_model_when_reasoning_effort_changes(self) -> None:
+        settings = self.runner.default_ai_settings()
+        self.runner.normalize_codex_cli_settings(settings, {
+            "codex_cli_models": [
+                {
+                    "model": "gpt-5.6-terra",
+                    "reasoning_effort": "xhigh",
+                    "enabled": True,
+                }
+            ],
+        })
+
+        self.runner.apply_model_roster(settings, {
+            "enabled_ollama_models": ["primary:latest"],
+            "agent_models": {
+                "soc-analyst": "codex-cli:gpt-5.6-terra:medium",
+            },
+        })
+
+        self.assertEqual(
+            settings["agent_models"]["soc-analyst"],
+            "codex-cli:gpt-5.6-terra:xhigh",
         )
 
     def test_second_opinion_assignments_must_be_enabled_and_differ_from_primary(self) -> None:

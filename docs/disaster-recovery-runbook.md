@@ -230,11 +230,12 @@ reviewer prompt is a failed deployment verification, not a silent fallback to
 the primary prompt.
 
 The seeded Incident Responder production assignment is
-`codex-cli:gpt-5.5:medium`. Codex model/reasoning combinations are stored in
-`codex_cli_models` and must be enabled individually before an agent can use
-them. Install and authenticate Codex CLI for the Mac Studio runtime user before
-enabling a route. Verify the executable and saved routing without printing
-credentials:
+`codex-cli:gpt-5.5:medium`. The fixed `codex_cli_models` catalog contains
+`gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`; each model has
+one operator-selected reasoning effort and must be enabled individually before
+an agent can use it. Install and authenticate Codex CLI for the Mac Studio
+runtime user before enabling a route. Verify the executable and saved routing
+without printing credentials:
 
 ```bash
 command -v codex
