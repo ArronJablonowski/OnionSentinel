@@ -17,6 +17,7 @@ from agent_memory import (
     initialize_memory_file,
     role_memory_file,
     role_prompt_file,
+    role_second_opinion_prompt_file,
 )
 
 
@@ -54,9 +55,11 @@ def verify_setup(config_dir: Path, memory_dir: Path) -> dict[str, Any]:
     agents: dict[str, Any] = {}
     for role in sorted(MEMORY_ROLES):
         prompt_file = role_prompt_file(config_dir, role)
+        second_opinion_prompt_file = role_second_opinion_prompt_file(config_dir, role)
         memory_file = role_memory_file(memory_dir, role)
         issues = [
             *(f"prompt:{item}" for item in _file_contract(prompt_file)),
+            *(f"second-opinion-prompt:{item}" for item in _file_contract(second_opinion_prompt_file)),
             *(f"memory:{item}" for item in _file_contract(memory_file, managed_memory=True)),
             *(f"shared:{item}" for item in shared_issues),
         ]
@@ -86,6 +89,7 @@ def verify_setup(config_dir: Path, memory_dir: Path) -> dict[str, Any]:
                 )
                 execution_context_ok = (
                     execution_context["system_prompt_file"] == str(prompt_file)
+                    and execution_context["second_opinion_system_prompt_file"] == str(second_opinion_prompt_file)
                     and execution_context["agent_memory_file"] == str(memory_file)
                     and execution_context["shared_memory_file"] == str(shared_file)
                     and execution_context["memory_writeback_contract"]["response_field"] == "memory_candidates"
@@ -99,6 +103,7 @@ def verify_setup(config_dir: Path, memory_dir: Path) -> dict[str, Any]:
         agents[role] = {
             "ok": not issues,
             "prompt_file": str(prompt_file),
+            "second_opinion_prompt_file": str(second_opinion_prompt_file),
             "memory_file": str(memory_file),
             "shared_memory_file": str(shared_file),
             "read_context_ready": context_ok,

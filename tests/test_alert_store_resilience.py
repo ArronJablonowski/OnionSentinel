@@ -9,6 +9,7 @@ ALERT_STORE = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
 PROVIDER_SCHEDULER = REPO_ROOT / "n8n" / "alert_store" / "lib" / "provider_scheduler.js"
 HTTP_RUNTIME = REPO_ROOT / "n8n" / "alert_store" / "lib" / "http_runtime.js"
 HTTP_JSON_CLIENT = REPO_ROOT / "n8n" / "alert_store" / "lib" / "http_json_client.js"
+ENRICHMENT_CACHE = REPO_ROOT / "n8n" / "alert_store" / "lib" / "enrichment_cache.js"
 
 
 class AlertStoreResilienceTest(unittest.TestCase):
@@ -18,6 +19,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
         cls.provider_scheduler = PROVIDER_SCHEDULER.read_text(encoding="utf-8")
         cls.http_runtime = HTTP_RUNTIME.read_text(encoding="utf-8")
         cls.http_json_client = HTTP_JSON_CLIENT.read_text(encoding="utf-8")
+        cls.enrichment_cache = ENRICHMENT_CACHE.read_text(encoding="utf-8")
 
     def test_enrichment_uses_a_separate_gate(self) -> None:
         self.assertIn("require('./lib/provider_scheduler')", self.code)
@@ -42,13 +44,16 @@ class AlertStoreResilienceTest(unittest.TestCase):
     def test_enrichment_cache_and_rate_limits_share_the_sqlite_write_boundary(self) -> None:
         self.assertIn("async function reserveProviderRateLimitSlot(source)", self.code)
         self.assertIn("return withSqliteWriteGate(() => withImmediateTransaction(async () =>", self.code)
+        self.assertIn("withWriteGate: withSqliteWriteGate", self.code)
+        self.assertIn("withTransaction: withImmediateTransaction", self.code)
         cached_lookup = self.code.split("async function cachedLookup", 1)[1].split(
             "async function lookupAbuseIpdb", 1
         )[0]
-        self.assertIn("const cached = await withSqliteWriteGate(", cached_lookup)
+        self.assertIn("return enrichmentCache.lookup({", cached_lookup)
         self.assertIn("const waitMs = await reserveProviderRateLimitSlot(source)", cached_lookup)
-        self.assertIn("const record = await lookup();", cached_lookup)
-        self.assertIn("const saved = await withSqliteWriteGate(", cached_lookup)
+        self.assertIn("return lookup();", cached_lookup)
+        self.assertIn("await withWriteGate(() => withTransaction(() => run(", self.enrichment_cache)
+        self.assertIn("withWriteGate(() => get('SELECT * FROM enrichment_cache", self.enrichment_cache)
 
     def test_enrichment_requests_identify_the_service_and_keep_safe_provider_errors(self) -> None:
         self.assertIn("'User-Agent': 'Onion-Sentinel/1.0'", self.http_json_client)
@@ -94,6 +99,22 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("parsedUrl.pathname === '/jobs/reconcile-completed'", self.code)
         self.assertIn(".slice(0, 2000)", self.code)
         self.assertIn("durableJobs.completePendingByDedupeKeys", self.code)
+
+    def test_second_opinion_telemetry_has_an_independent_durable_schema(self) -> None:
+        self.assertIn("CREATE TABLE IF NOT EXISTS ai_second_opinion_runs", self.code)
+        self.assertIn("INSERT INTO ai_second_opinion_runs", self.code)
+        for field in (
+            "primary_model",
+            "reviewer_model",
+            "reviewer_outcome",
+            "agreement",
+            "material_disagreement",
+            "disputed_fields_json",
+            "reviewer_runtime_seconds",
+            "memory_candidates_promoted",
+        ):
+            self.assertIn(field, self.code)
+        self.assertIn("second_opinion_recorded: secondOpinionRecorded", self.code)
 
     def test_ai_status_callback_resolves_legacy_group_alias(self) -> None:
         self.assertIn("async function transitionDurableJobStatus", self.code)
@@ -158,9 +179,9 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("async function signalWorker", self.code)
         self.assertIn("AI_ANALYSIS_WAKE_PATH", self.code)
         self.assertIn("PCAP_ANALYSIS_WAKE_PATH", self.code)
-        self.assertIn("void signalWorker(aiAnalysisWakePath, 'enrichment-completed')", self.code)
+        self.assertIn("void signalAiWorkers('enrichment-completed')", self.code)
         self.assertIn("void signalWorker(pcapAnalysisWakePath, 'pcap-transfer-completed')", self.code)
-        self.assertIn("void signalWorker(aiAnalysisWakePath, 'pcap-analysis-completed')", self.code)
+        self.assertIn("void signalAiWorkers('pcap-analysis-completed')", self.code)
 
 
 if __name__ == "__main__":

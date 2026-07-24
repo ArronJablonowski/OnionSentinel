@@ -138,7 +138,7 @@ class AgentMemoryTests(unittest.TestCase):
         self.assertEqual(text.count(MEMORY.MANAGED_START), 1)
         self.assertEqual(text.count(MEMORY.MANAGED_END), 1)
 
-    def test_every_agent_role_has_one_prompt_and_memory_contract(self) -> None:
+    def test_every_agent_role_has_primary_reviewer_and_memory_contracts(self) -> None:
         expected_roles = {
             "soc-analyst",
             "incident-responder",
@@ -149,14 +149,24 @@ class AgentMemoryTests(unittest.TestCase):
         self.assertEqual(set(MEMORY.MEMORY_ROLES), expected_roles)
         self.assertEqual(set(MEMORY.AGENT_MEMORY_FILES), expected_roles)
         self.assertEqual(set(MEMORY.AGENT_PROMPT_FILES), expected_roles)
+        self.assertEqual(set(MEMORY.AGENT_SECOND_OPINION_PROMPT_FILES), expected_roles)
         for role in expected_roles:
             memory = ROOT / "n8n" / "agent-memory" / MEMORY.AGENT_MEMORY_FILES[role]
             prompt = ROOT / "n8n" / "config" / MEMORY.AGENT_PROMPT_FILES[role]
+            reviewer_prompt = (
+                ROOT / "n8n" / "config" / MEMORY.AGENT_SECOND_OPINION_PROMPT_FILES[role]
+            )
             self.assertTrue(memory.is_file())
             self.assertTrue(prompt.is_file())
+            self.assertTrue(reviewer_prompt.is_file())
             prompt_text = prompt.read_text(encoding="utf-8").lower()
+            reviewer_text = reviewer_prompt.read_text(encoding="utf-8").lower()
             self.assertIn("memory_candidates", prompt_text)
             self.assertIn("shared", prompt_text)
+            self.assertIn("memory_candidates", reviewer_text)
+            self.assertIn("shared", reviewer_text)
+            self.assertIn("independent", reviewer_text)
+            self.assertIn("withheld", reviewer_text)
 
     def test_deployment_verifier_accepts_repo_templates(self) -> None:
         command = [
@@ -174,7 +184,16 @@ class AgentMemoryTests(unittest.TestCase):
         self.assertEqual(payload["agent_count"], len(MEMORY.MEMORY_ROLES))
         self.assertTrue(all(item["read_context_ready"] for item in payload["agents"].values()))
         self.assertTrue(all(item["execution_context_ready"] for item in payload["agents"].values()))
+        self.assertTrue(all(item["second_opinion_prompt_file"] for item in payload["agents"].values()))
         self.assertEqual(set(payload["agents"]), set(MEMORY.MEMORY_ROLES))
+
+    def test_installer_seeds_every_reviewer_prompt_without_overwriting_runtime_policy(self) -> None:
+        installer = (ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh").read_text(
+            encoding="utf-8"
+        )
+        for prompt_file in MEMORY.AGENT_SECOND_OPINION_PROMPT_FILES.values():
+            self.assertIn(prompt_file, installer)
+        self.assertIn('if [[ ! -f "$STACK_DIR/config/$reviewer_prompt" ]]', installer)
 
     def test_execution_context_binds_prompt_and_both_memories(self) -> None:
         for filename in MEMORY.AGENT_MEMORY_FILES.values():
@@ -187,6 +206,10 @@ class AgentMemoryTests(unittest.TestCase):
             evidence={"hunt": "tls certificate reuse"},
         )
         self.assertIn("senior threat hunt analyst", context["system_prompt"].lower())
+        self.assertEqual(
+            context["second_opinion_system_prompt_file"],
+            str(ROOT / "n8n" / "config" / "threat_hunter_second_opinion_prompt.md"),
+        )
         self.assertEqual(context["agent_memory"]["role_memory"]["agent_role"], "threat-hunter")
         self.assertEqual(context["agent_memory"]["shared_memory"]["agent_role"], "shared")
         self.assertEqual(context["memory_writeback_contract"]["response_field"], "memory_candidates")

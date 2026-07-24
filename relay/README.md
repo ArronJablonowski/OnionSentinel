@@ -27,6 +27,9 @@ replay a safely committed alert.
 | `systemd/so-pcap-broker.service` | `/etc/systemd/system/so-pcap-broker.service` | One independent PCAP broker execution. |
 | `systemd/so-pcap-broker.timer` | `/etc/systemd/system/so-pcap-broker.timer` | Runs PCAP work every minute. |
 | `ssh/99-key-only-admin.conf` | `/etc/ssh/sshd_config.d/99-key-only-admin.conf` | Optional SSH hardening after deployment is confirmed. |
+| `app/live_osquery_broker.py` | `/opt/so-alert-relay/app/live_osquery_broker.py` | Disabled-by-default validator and broker for bounded Incident Responder endpoint OSQuery. |
+| `config/live-osquery.example.json` | `/etc/so-alert-relay/live-osquery.json` | Root-owned exact alias roster and dedicated Security Onion SSH transport settings. |
+| `sudoers/so-live-osquery` | `/etc/sudoers.d/92-so-alert-relay-live-osquery` | Installer-rendered rule that lets only the relay administrator execute the broker as `soalert`. |
 
 ## Install
 
@@ -34,6 +37,11 @@ replay a safely committed alert.
 cd /path/to/OnionSentinel
 sudo relay/bin/install-pi-relay.sh
 ```
+
+The installer renders `__RELAY_ADMIN_USER__` from `SUDO_USER`. When installing
+from a direct root shell, set `ONION_SENTINEL_RELAY_ADMIN_USER` to the existing
+administrative account. The rendered rule permits only the forced live-OSQuery
+broker command to run as `soalert`.
 
 Then install the Security Onion private key:
 
@@ -82,6 +90,15 @@ Pin the Mac Studio ED25519 host key in
 `ssh-keyscan` on the Pi with `/etc/ssh/ssh_host_ed25519_key.pub` through an
 already trusted Mac admin session before installing it. Never use
 `StrictHostKeyChecking=no` for this path.
+
+Live endpoint OSQuery uses its own Mac-to-relay key and the forced command in
+`relay/config/authorized_keys.live-osquery.example`. That forced command uses
+the narrow sudoers rule to run only `live_osquery_broker.py` as `soalert`.
+Configure exact endpoint aliases in `/etc/so-alert-relay/live-osquery.json`,
+install a separate relay-to-Security Onion key, and prove the disabled
+fail-closed response before enabling it. The relay never receives a Fleet
+agent ID or Kibana credential. Full limits are documented in
+`docs/incident-response-query-and-model-routing.md`.
 
 Install the dedicated public key on the Mac Studio with the repo's backup-first
 helper:
@@ -181,7 +198,7 @@ PCAP fulfillment is disabled by default in `config/config.example.json`:
   "security_onion_storage_telemetry": true,
   "capture_protection_enabled": true,
   "capture_protection_require_telemetry": true,
-  "capture_loss_threshold_percent": 0.1,
+  "capture_loss_threshold_percent": 1.0,
   "sensor_packet_loss_threshold_percent": 0.1,
   "capture_loss_freshness_seconds": 900,
   "stream_chunk_idle_timeout_seconds": 300,
@@ -391,6 +408,14 @@ export, rsync leg, or checksum verification is active. The heartbeat renews the
 claim lease and lets System Health distinguish a live large-file transfer from
 a stalled request. Packet bytes never traverse n8n.
 
+Every broker timer run also posts a bounded `pcap_broker` status heartbeat.
+When capture telemetry exceeds its safety threshold, the heartbeat reports a
+`capture_protection_hold` with the observed metric and threshold. This is an
+intentional degraded state, not a transport failure: pending requests remain
+durable, no retry is consumed, and the Mac Studio can distinguish the hold from
+a silent relay. Command lines, credentials, paths, and packet evidence are not
+included in this status event.
+
 PCAP streaming and Mac artifact upload are tracked separately. If a chunk stream
 or Mac upload is interrupted, the relay retains its hashed checkpoint on the
 external SSD and retries without creating source-side recovery state. After the
@@ -450,6 +475,39 @@ PCAP SSH runs under the service account used for the broker command. If the
 broker is invoked with `sudo`, make sure the Security Onion host key is present
 in that account's `known_hosts`; otherwise PCAP export will fail before the
 forced-command wrapper receives the request.
+
+## Incident Evidence Relay
+
+Incident Response evidence uses a control plane separate from alert delivery
+and PCAP transport. The Mac Studio connects with a dedicated key whose relay
+authorized-key entry is rendered from
+`relay/config/authorized_keys.incident-evidence.example`. That forced command
+runs only `relay/app/incident_evidence_broker.py`; it does not accept an SSH
+command, forwarding request, PTY, path, or query text.
+
+The broker validates a bounded JSON request and relays it over a second
+dedicated key to Security Onion. Runtime settings belong in
+`/etc/so-alert-relay/incident-evidence.json`, rendered from the sanitized
+example. The broker caps request, response, stderr, connection, and total
+runtime sizes on both hops. Security Onion independently rebuilds every query
+from fixed allowlisted packs, so neither the dashboard nor either model can
+turn incident reasoning into an arbitrary Elasticsearch or shell operation.
+
+Each successful Elastic query result carries two audit forms:
+
+- `kql_equivalent`: a readable equivalent for analyst review.
+- `query_dsl`: the exact read-only Elasticsearch request that was executed.
+
+The DSL is authoritative. The KQL is displayed to make the search intent easy
+to inspect and must never be treated as proof that a separate KQL request ran.
+
+The same request also invokes only the fixed OSquery packs compiled into the
+Security Onion wrapper. Each result records the reviewed pack name, exact
+read-only SQL, local Security Onion target, execution status, digest, and
+bounded row metadata. The relay cannot accept or forward caller-authored SQL.
+This provides host context from Security Onion itself and bounded historical
+osquery/endpoint evidence without granting the model an interactive shell or
+general endpoint-query channel.
 
 ## Firewall Needs
 

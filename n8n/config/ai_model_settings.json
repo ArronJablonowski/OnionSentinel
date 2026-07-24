@@ -1,9 +1,36 @@
 {
+  "agent_models": {
+    "cyber-threat-intel": "ollama:devstral-small-2:24b-instruct-2512-q4_K_M",
+    "incident-responder": "codex-cli",
+    "siem-engineer": "ollama:devstral-small-2:24b-instruct-2512-q4_K_M",
+    "soc-analyst": "ollama:devstral-small-2:24b-instruct-2512-q4_K_M",
+    "threat-hunter": "ollama:devstral-small-2:24b-instruct-2512-q4_K_M"
+  },
+  "agent_second_opinion_models": {
+    "cyber-threat-intel": "ollama:gemma4:31b",
+    "incident-responder": "ollama:gemma4:31b",
+    "siem-engineer": "ollama:gemma4:31b",
+    "soc-analyst": "ollama:gemma4:31b",
+    "threat-hunter": "ollama:gemma4:31b"
+  },
   "cloud_command": "",
-  "cloud_model": "",
-  "cloud_provider": "gpt-cli",
+  "cloud_model": "gpt-5.5",
+  "cloud_provider": "codex-cli",
+  "codex_cli_model": "gpt-5.5",
+  "codex_cli_path": "codex",
+  "codex_cli_reasoning_effort": "medium",
+  "enabled_ollama_models": [
+    "devstral-small-2:24b-instruct-2512-q4_K_M",
+    "gemma4:31b"
+  ],
+  "gpt_cli_enabled": true,
   "hybrid_policy": "cloud_for_critical_high_or_recommended",
-  "mode": "ollama",
-  "ollama_model": "devstral:latest",
-  "ollama_url": "http://127.0.0.1:11434"
+  "maxmind_geoip_asn_db_path": "~/n8n-local/config/maxmind/GeoLite2-ASN.mmdb",
+  "maxmind_geoip_city_db_path": "~/n8n-local/config/maxmind/GeoLite2-City.mmdb",
+  "maxmind_geoip_country_db_path": "~/n8n-local/config/maxmind/GeoLite2-Country.mmdb",
+  "mode": "hybrid",
+  "ollama_model": "devstral-small-2:24b-instruct-2512-q4_K_M",
+  "ollama_url": "http://127.0.0.1:11434",
+  "soc_analyst_incident_min_severity": "disabled",
+  "soc_analyst_pcap_min_severity": "informational"
 }

@@ -115,10 +115,19 @@ grows. On the Mac Studio, HTTP JSON reads, scheduler output, prompt packages,
 legacy SSH artifacts, Zeek/TShark output, and extracted archives all enforce
 size and timeout limits before entering memory or disk.
 
-Public-enrichment cache writes and provider rate reservations pass through the
-same serialized SQLite write gate. A provider slot is reserved atomically before
-the network call, preventing concurrent workers from exceeding free-tier limits
-or racing cache rows.
+Public enrichment uses a bounded memory L1 in front of the durable SQLite L2.
+Normalized cache keys prevent casing, URL-fragment, trailing-dot, and equivalent
+IPv6 forms from spending duplicate requests. Concurrent misses for one
+provider/indicator are single-flight coalesced. A provider rate slot is reserved
+atomically only after both cache tiers miss, preventing concurrent workers from
+exceeding free-tier limits or racing cache rows.
+
+Expired evidence is retained only for the configured stale-on-error window. It
+can be returned when a provider refresh fails, but the record and provider
+summary are explicitly marked `stale_cache`. Unknown zero-confidence results
+use a shorter negative TTL. L1 entries, SQLite rows, and raw provider JSON are
+bounded by independent entry and byte ceilings, and an hourly retention pass
+prevents the cache from becoming a memory or disk exhaustion path.
 
 The defaults and recovery-safe overrides are documented in `n8n/.env.example`
 and `relay/config/config.example.json`. Increase a limit only after measuring a
@@ -237,10 +246,10 @@ workflow log displays the elapsed time; legacy rows are backfilled from
 | --- | --- | --- |
 | Relay heartbeat | Successful every 5 minutes | Critical when older than 20 minutes. |
 | Alert ingest | Normal error rate 0; p95 below 500 ms | Investigate sustained errors or p95 above 1 second. |
-| Enrichment jobs | Oldest pending below 15 minutes | Inspect provider latency, keys, cache, worker retries. |
-| AI jobs | Active processing advances within 15 minutes; an idle worker with pending work completes within 30 minutes | Inspect PCAP evidence arrival, Ollama, LaunchAgent, leases, and failed jobs. The 30-minute idle threshold permits two bounded inference/scheduler retry windows, while an actively claimed job retains the tighter progress deadline. |
-| PCAP broker | No request older than 20 minutes without fresh transfer progress | Fresh 30-second transfer heartbeats receive a bounded, size-aware queue grace; stale heartbeats revert immediately to the 20-minute warning. |
-| Zeek capture loss during PCAP export | Latest worker maximum at or below 0.1 percent; Zeek/Suricata local packet loss at or below 0.1 percent | Relay defers before claim and between chunks when telemetry is missing, stale, or above threshold. Security Onion reads and relay-to-Mac rsync are both capped at 4 MiB/s by default. Keep the timer paused if a controlled export breaches the target. |
+| Enrichment jobs | Oldest pending below 15 minutes; cache remains inside configured row/byte ceilings | Inspect provider latency, keys, cache hit/miss/error counters, stale fallbacks, worker retries, and `/metrics.enrichment_cache`. |
+| AI jobs | Active processing advances within 15 minutes; an idle worker does not leave the same pending work undrained for 30 minutes | Inspect PCAP evidence arrival, Ollama, LaunchAgent, leases, and failed jobs. Both the oldest pending job and the last completion must be older than 30 minutes before an idle-worker failure is raised; this prevents a new job after a quiet period from inheriting an old completion clock. An actively claimed job retains the tighter progress deadline. |
+| PCAP broker | No request older than 20 minutes without fresh transfer progress or a fresh capture-protection hold | Fresh 30-second transfer heartbeats receive bounded, size-aware queue grace. Byte-level request progress takes precedence over the between-run broker summary during a long transfer. A relay `capture_protection_hold` is advisory-only for three minutes and pauses soak qualification; stale hold telemetry without transfer progress, stale claimed work, or operational failures alert normally. |
+| Zeek capture loss during PCAP export | Latest worker maximum at or below 1.0 percent; Zeek/Suricata local packet loss at or below 0.1 percent | Relay defers before claim and between chunks when telemetry is missing, stale, or above threshold. Security Onion reads and relay-to-Mac rsync are both capped at 4 MiB/s by default. Keep the timer paused if a controlled export breaches the target. |
 | Relay SSD | Below 75 percent used with at least 200 GiB free | Stop new streams before spool exhaustion. |
 | Relay root SD card | Below 75 percent used with at least 2 GiB free | Stop new writes, prune seven-day relay-owned evidence, and alert before the 80 percent hard ceiling. |
 | Mac Studio data volume | Below 75 percent used with at least 50 GiB free after projected work | Reject new alert/enrichment writes, PCAP intake/extraction, AI work, and backups before the 80 percent hard ceiling. Heartbeats and drain/cleanup state remain available. |
@@ -293,7 +302,7 @@ The Mac Studio LaunchAgent runs `evaluate-operational-slos.py` through the
 existing stateful stack monitor every five minutes. It fails the monitor when
 the heartbeat is older than 20 minutes, enrichment is older than 15 minutes,
 an active AI claim has made no state progress for 15 minutes, an idle AI worker
-with pending work has made no completion for 30 minutes, a PCAP request is older
+has left pending work undrained with no completion for 30 minutes, a PCAP request is older
 than 20 minutes without a fresh large-transfer heartbeat, recent PCAP workflow
 warnings exist, ingest errors increase, runtime disk use reaches 75 percent,
 or a verified backup becomes stale. The monitor sends one Telegram transition
@@ -304,8 +313,9 @@ is retained in `operational-slo-history.jsonl`; its `soak.healthy_since` clock
 resets on any failed evaluation and `soak.qualified_48h` becomes true only
 after 48 uninterrupted hours.
 
-Transient local HTTP probe failures are converted to a concise named probe
-error; they never place a Python traceback in Telegram. Failure and recovery
+Transient local HTTP probe failures receive one bounded retry before they are
+converted to a concise named probe error; persistent failures still fail the
+same monitor cycle, and tracebacks are never placed in Telegram. Failure and recovery
 notifications use `send-telegram-notification.py`, which reads only the two
 Telegram fields from `.env` as inert data, retries transient network failures
 three times, and reports only a bounded status class. The stack monitor also

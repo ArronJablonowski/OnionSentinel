@@ -11,6 +11,12 @@ const VIEWPORTS = [
   { name: 'desktop-1920', width: 1920, height: 1080 },
 ];
 
+const MOBILE_NAV_VIEWPORTS = [
+  { name: 'compact-portrait', width: 320, height: 568 },
+  { name: 'iphone-portrait', width: 390, height: 844 },
+  { name: 'phone-landscape', width: 844, height: 390 },
+];
+
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 function collectRuntimeErrors(page) {
@@ -148,6 +154,57 @@ for (const viewport of VIEWPORTS) {
   });
 }
 
+for (const viewport of MOBILE_NAV_VIEWPORTS) {
+  test(`${viewport.name}: every mobile navigation item remains reachable`, async ({ page }) => {
+    const runtimeErrors = collectRuntimeErrors(page);
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await protectLiveState(page);
+    await openAlerts(page);
+
+    const toggle = page.locator('#sidebar-toggle');
+    await expect(toggle).toBeVisible();
+    await expect(toggle).toHaveAttribute('aria-label', 'Open navigation menu');
+    await toggle.click();
+
+    const shell = page.locator('.app-shell');
+    const sidebar = page.locator('.sidebar');
+    const nav = sidebar.locator('.nav');
+    const items = nav.locator('.nav-item');
+    await expect(shell).toHaveClass(/mobile-nav-open/);
+    await expect(nav).toBeVisible();
+    expect(await items.count()).toBeGreaterThanOrEqual(13);
+
+    const geometry = await nav.evaluate(element => {
+      const style = getComputedStyle(element);
+      return {
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        overflowY: style.overflowY,
+        touchAction: style.touchAction,
+      };
+    });
+    expect(geometry.overflowY).toBe('auto');
+    expect(geometry.touchAction).toBe('pan-y');
+    expect(geometry.scrollHeight).toBeGreaterThanOrEqual(geometry.clientHeight);
+
+    const targets = await items.evaluateAll(links => links.map(link => {
+      const rect = link.getBoundingClientRect();
+      return { width: rect.width, height: rect.height };
+    }));
+    expect(targets.every(target => target.width >= 44 && target.height >= 44), JSON.stringify(targets)).toBe(true);
+
+    await nav.evaluate(element => { element.scrollTop = element.scrollHeight; });
+    const lastItem = items.last();
+    await expect(lastItem).toBeInViewport();
+    await expect(lastItem).toHaveAttribute('href', 'flow.html');
+    await lastItem.click();
+    await expect(page).toHaveURL(/\/flow\.html$/);
+    await expect(page.locator('main')).toBeVisible();
+    await assertContainedLayout(page);
+    expect(runtimeErrors).toEqual([]);
+  });
+}
+
 test('internal page crawl and safe interactive-state audit', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -267,7 +324,7 @@ test('desktop pinned alert keeps action controls stable and synchronizes horizon
       whiteSpace: buttons.map(button => getComputedStyle(button).whiteSpace),
     };
   });
-  expect(actionGeometry.labels).toEqual(['Analyze', 'Acknowledge', 'Suppress', 'PCAP']);
+  expect(actionGeometry.labels).toEqual(['Analyze', 'Acknowledge', 'Suppress', 'PCAP', 'Escalate']);
   expect(actionGeometry.whiteSpace.every(value => value === 'nowrap')).toBe(true);
   expect(actionGeometry.boxes.every(box => box.width >= 48 && box.height >= 32), JSON.stringify(actionGeometry)).toBe(true);
   for (let index = 1; index < actionGeometry.boxes.length; index += 1) {
@@ -474,5 +531,46 @@ test('Settings agent icons use consistent source and rendered dimensions', async
       return {width: rect.width, height: rect.height};
     }));
   expect(mobileIcons.every(icon => icon.width === mobileIcons[0].width && icon.height === mobileIcons[0].height), JSON.stringify(mobileIcons)).toBe(true);
+  expect(runtimeErrors).toEqual([]);
+});
+
+test('Incident Response preserves endpoint columns and SOC-style expanded evidence', async ({ page }) => {
+  const runtimeErrors = collectRuntimeErrors(page);
+  await protectLiveState(page);
+
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto('./investigations.html', { waitUntil: 'domcontentloaded' });
+  const desktopRow = page.locator('.ir-case-row').first();
+  await expect(desktopRow).toBeVisible();
+  await expect(page.locator('.ir-table > thead > tr > th')).toHaveText([
+    '', 'Status', 'Severity', 'Escalated', 'Alert', 'Source IP',
+    'Destination IP', 'Destination Port', 'Count', 'Agent',
+  ]);
+  await expect(desktopRow.locator('td')).toHaveCount(10);
+  for (const index of [5, 6, 7]) {
+    await expect(desktopRow.locator('td').nth(index)).not.toHaveText('n/a');
+  }
+  await desktopRow.click();
+  const desktopDetail = page.locator('.ir-detail-row:not([hidden]) .ir-detail-content');
+  await expect(desktopDetail).toBeVisible();
+  await expect(desktopDetail.locator('.ir-canonical-detail')).toBeVisible();
+  await expect(desktopDetail).toHaveCSS('text-align', 'left');
+  await expect(desktopDetail.locator('.ir-canonical-detail')).toHaveCSS('text-align', 'left');
+  await assertContainedLayout(page);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  const mobileCard = page.locator('.ir-mobile-card').first();
+  await expect(page.locator('.ir-table-wrap')).toBeHidden();
+  await expect(mobileCard).toBeVisible();
+  const mobileRoute = mobileCard.locator('.ir-muted');
+  await expect(mobileRoute).toContainText('>');
+  await expect(mobileRoute).toContainText(':');
+  await mobileCard.locator('.ir-mobile-toggle').click();
+  const mobileDetail = mobileCard.locator('.ir-mobile-detail:not([hidden]) .ir-detail-content');
+  await expect(mobileDetail).toBeVisible();
+  await expect(mobileDetail.locator('.ir-canonical-detail')).toBeVisible();
+  await expect(mobileDetail).toHaveCSS('text-align', 'left');
+  await assertContainedLayout(page);
   expect(runtimeErrors).toEqual([]);
 });

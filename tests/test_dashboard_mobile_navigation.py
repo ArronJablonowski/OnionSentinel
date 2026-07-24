@@ -19,6 +19,28 @@ class DashboardMobileNavigationTest(unittest.TestCase):
         self.assertNotIn(".sidebar{{position:fixed;left:0;right:0;bottom:0;top:auto", source)
         self.assertNotIn(".content{{padding:14px 10px 92px}}", source)
 
+    def test_open_mobile_navigation_owns_vertical_scrolling(self):
+        source = DASHBOARD_BUILDER.read_text()
+
+        self.assertIn(
+            ".app-shell.mobile-nav-open .sidebar{{height:100vh;height:100dvh;"
+            "max-height:100vh;max-height:100dvh;overflow:hidden",
+            source,
+        )
+        self.assertIn(
+            ".app-shell.mobile-nav-open .sidebar .nav{{display:grid;"
+            "grid-auto-rows:max-content;align-content:start;flex:1 1 auto;"
+            "min-height:0;width:100%;overflow-x:hidden;overflow-y:auto",
+            source,
+        )
+        self.assertIn("touch-action:pan-y", source)
+        self.assertIn("calc(20px + env(safe-area-inset-bottom))", source)
+        self.assertIn(
+            ".app-shell.mobile-nav-open .sidebar .nav-item{{width:100%;"
+            "height:auto;min-height:48px",
+            source,
+        )
+
     def test_mobile_expansion_survives_api_refresh_without_persisting(self):
         source = DASHBOARD_BUILDER.read_text()
 

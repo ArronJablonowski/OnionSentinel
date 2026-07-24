@@ -108,12 +108,23 @@ n8n/config/soc_analyst_system_prompt.md
 ## Model Settings Requirements
 
 The Settings page should expose a collapsed-by-default `AI Analysis Model
-Selection` panel. Order the controls as Analysis Mode, Ollama settings, then
-Cloud/Frontier provider settings.
+Selection` panel. Inside it, Ollama and GPT CLI are separate provider sections
+that are also collapsed by default and can be enabled independently.
 
-Ollama model selection should be a dropdown refreshed from `ollama ls`. Cloud
-or frontier integrations must keep API keys and credentials in runtime-local
-configuration only.
+The Ollama section must refresh its inventory from `ollama ls` and allow an
+ordered set of local models to be enabled. Each incompatible or unverifiable
+local model must show a warning with a concise hover/focus reason derived from
+Ollama metadata, without relying on model-name heuristics. The GPT CLI section
+has a separate master toggle. Each Cyber Security Agent must select exactly one
+primary route and may select one different, optional second-opinion route from
+the enabled global roster. Both assignments must persist atomically per role so
+one agent save cannot overwrite another. The SOC Analyst runtime must execute
+its exact primary assignment rather than silently failing over to a different
+model or privacy boundary. Its reviewer may run only for an explicit request,
+low confidence, or an inconclusive result; it must be non-recursive and its
+failure must not discard the primary result. Cloud or frontier integrations
+must keep commands, credentials, and API keys in runtime-local configuration
+only.
 
 ## Runtime Architecture
 

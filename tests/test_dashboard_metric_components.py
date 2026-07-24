@@ -84,6 +84,110 @@ class DashboardMetricComponentTest(unittest.TestCase):
         self.assertIn('id="pcap-ingest-size">512 KB</span>', html)
         self.assertIn("Last Alert:</b> 2026-07-06&nbsp;&nbsp;13:00:00-06:00 &lt;latest&gt;", html)
 
+    def test_active_alert_metrics_use_all_matching_active_groups(self) -> None:
+        source = BUILDER_PATH.read_text()
+
+        self.assertIn(
+            "apiActiveTotal=Number(data.active_total??data.status_counts?.open",
+            source,
+        )
+        self.assertIn(
+            "apiSeverityCounts=data.active_severity_counts||data.severity_counts||null",
+            source,
+        )
+        self.assertIn("setActiveAlertCount(apiActiveTotal)", source)
+        self.assertNotIn("setActiveAlertCount(apiTotalMatching)", source)
+
+    def test_alert_table_exposes_group_evidence_columns(self) -> None:
+        source = BUILDER_PATH.read_text()
+
+        for contract_token in (
+            "Detection Outcome",
+            "PCAP Size",
+            "pcap_size_bytes",
+            "detection_outcome_label",
+            "apiDetectionOutcomePill",
+            'colspan="18"',
+        ):
+            self.assertIn(contract_token, source)
+
+    def test_siem_engineering_rows_expand_into_evidence_reports(self) -> None:
+        report = self.builder.AlertReport(
+            title="Repeated outbound scan",
+            source=Path("synthetic.md"),
+            rel_source="synthetic.md",
+            mtime=0.0,
+            size=256,
+            digest="synthetic-digest",
+            rendered_html="",
+            summary="Repeated behavior warrants a scoped rule review.",
+            criticality="High",
+            criticality_rank=4,
+            alert_source="suricata.alert",
+            filter_status="accepted",
+            source_ip="192.0.2.10",
+            source_port="41000",
+            destination_ip="198.51.100.20",
+            destination_port="443",
+            source_endpoint="192.0.2.10:41000",
+            destination_endpoint="198.51.100.20:443",
+            rule_id="synthetic-rule",
+            rule_name="Synthetic repeated outbound scan",
+            raw_alert_count=8,
+            total_seen_count=8,
+            repeat_count=8,
+            first_seen="2026-07-20  08:00:00-06:00",
+            last_seen="2026-07-20  09:00:00-06:00",
+            alert_group_key="synthetic-group",
+            alert_ts=1.0,
+            ai_status_key="analyzed",
+            ai_status_label="Analyzed",
+            ai_status_detail="AI artifact available",
+            enrichment_status_key="enriched",
+            enrichment_status_label="Enriched",
+            enrichment_status_detail="Two sources",
+            enrichment_record_count=2,
+            enrichment_skip_count=0,
+            enrichment_error_count=0,
+            pcap_status_key="analyzed",
+            pcap_status_label="Analyzed",
+            pcap_status_detail="Parsed PCAP evidence available",
+            tuning_recommendation="threshold",
+            tuning_reason="Repeated expected traffic creates avoidable review volume.",
+            recommended_tuning_actions=["Threshold only this verified route."],
+            ai_analysis={
+                "generated_at": "2026-07-20T09:05:00-06:00",
+                "response": {
+                    "detection_outcome": "true_positive_benign",
+                    "bluf": "The traffic is real but expected.",
+                    "summary": "A narrowly scoped threshold is appropriate.",
+                    "public_enrichment_findings": ["Synthetic enrichment finding"],
+                    "pcap_analysis_findings": ["Synthetic PCAP finding"],
+                    "recommended_next_steps": ["Backtest before deployment"],
+                },
+            },
+        )
+
+        current = self.builder.siem_engineering_tuning_row(report, 1)
+        candidate = self.builder.siem_engineering_detection_row(report, 1)
+
+        for rendered in (current, candidate):
+            self.assertIn('data-siem-toggle', rendered)
+            self.assertIn('tabindex="0"', rendered)
+            self.assertIn('aria-expanded="false"', rendered)
+            self.assertIn('class="siem-recommendation-detail" hidden', rendered)
+            self.assertIn("What should change", rendered)
+            self.assertIn("Detection context", rendered)
+            self.assertIn("Public enrichment findings", rendered)
+            self.assertIn("PCAP findings", rendered)
+            self.assertIn("Complete AI response JSON", rendered)
+            self.assertIn("Synthetic enrichment finding", rendered)
+
+        self.assertIn("Current rule tuning analysis", current)
+        self.assertIn("New detection candidate analysis", candidate)
+        self.assertIn("[data-siem-toggle]", self.builder.SIEM_ENGINEERING_JS)
+        self.assertIn("event.key !== 'Enter'", self.builder.SIEM_ENGINEERING_JS)
+
 
 if __name__ == "__main__":
     unittest.main()

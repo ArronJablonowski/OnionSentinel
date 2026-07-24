@@ -892,7 +892,7 @@ def capture_protection_decision(config: dict, status: dict | None) -> dict:
     if not bool(broker.get("capture_protection_enabled", True)):
         return {"deferred": False, "reason": "disabled"}
     require_telemetry = bool(broker.get("capture_protection_require_telemetry", True))
-    threshold = max(0.0, min(100.0, float(broker.get("capture_loss_threshold_percent", 0.1) or 0.1)))
+    threshold = max(0.0, min(100.0, float(broker.get("capture_loss_threshold_percent", 1.0) or 1.0)))
     packet_loss_threshold = max(
         0.0,
         min(100.0, float(broker.get("sensor_packet_loss_threshold_percent", 0.1) or 0.1)),

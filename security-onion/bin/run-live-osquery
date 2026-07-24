@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+"""Execute bounded Elastic Osquery Manager live queries for exact endpoint aliases.
+
+The wrapper is a narrow control-plane exception to Onion Sentinel's normal
+read-only Security Onion integration. It creates only Osquery Manager live
+query actions and cannot accept shell commands, paths, index names, Fleet agent
+IDs, credentials, wildcard targets, or mutating SQL from upstream callers.
+"""
+from __future__ import annotations
+
+import json
+import os
+import ssl
+import stat
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+LIB_DIR = Path(
+    os.environ.get(
+        "ONION_SENTINEL_LIVE_OSQUERY_LIB",
+        "/usr/local/lib/onion-sentinel",
+    )
+)
+sys.path.insert(0, str(LIB_DIR))
+
+from live_osquery_contract import (  # noqa: E402
+    MAX_RESPONSE_BYTES,
+    LiveOsqueryContractError,
+    bounded_json_bytes,
+    validate_result_artifact,
+    validate_transport_payload,
+)
+
+
+MAX_REQUEST_BYTES = 64 * 1024
+MAX_CONFIG_BYTES = 64 * 1024
+MAX_AUTH_BYTES = 4096
+DEFAULT_CONFIG = Path("/etc/onion-sentinel/live-osquery.json")
+_PENDING_STATES = frozenset({"pending", "running"})
+
+
+class LiveQueryError(RuntimeError):
+    """A live-query request failed without exposing sensitive server details."""
+
+
+def _emit(payload: dict[str, Any], code: int = 0) -> int:
+    sys.stdout.buffer.write(bounded_json_bytes(payload) + b"\n")
+    return code
+
+
+def _require_secure_regular_file(
+    path: Path,
+    *,
+    maximum_bytes: int,
+    label: str,
+) -> os.stat_result:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise LiveQueryError(f"{label} is unavailable") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise LiveQueryError(f"{label} must be a regular file")
+    if info.st_uid != 0 or info.st_mode & 0o077:
+        raise LiveQueryError(f"{label} must be root-owned with mode 0600")
+    if info.st_size < 1 or info.st_size > maximum_bytes:
+        raise LiveQueryError(f"{label} has an invalid size")
+    return info
+
+
+def _load_config(path: Path) -> dict[str, Any]:
+    _require_secure_regular_file(
+        path,
+        maximum_bytes=MAX_CONFIG_BYTES,
+        label="live OSQuery configuration",
+    )
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LiveQueryError("live OSQuery configuration is invalid") from exc
+    if not isinstance(value, dict):
+        raise LiveQueryError("live OSQuery configuration root must be an object")
+    if value.get("enabled") is not True:
+        raise LiveQueryError("live-host OSQuery is disabled on Security Onion")
+    kibana_url = str(value.get("kibana_url") or "").strip().rstrip("/")
+    if not kibana_url.startswith("https://"):
+        raise LiveQueryError("Kibana URL must use HTTPS")
+    if value.get("verify_tls") is not True:
+        raise LiveQueryError("Kibana TLS verification must remain enabled")
+    aliases = value.get("target_aliases")
+    if not isinstance(aliases, dict) or not aliases:
+        raise LiveQueryError("at least one exact endpoint alias must be configured")
+    value["kibana_url"] = kibana_url
+    return value
+
+
+def _load_authorization(path: Path) -> str:
+    _require_secure_regular_file(
+        path,
+        maximum_bytes=MAX_AUTH_BYTES,
+        label="Kibana authorization file",
+    )
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise LiveQueryError("Kibana authorization file could not be read") from exc
+    if "\n" in value or "\r" in value:
+        raise LiveQueryError("Kibana authorization file must contain one header value")
+    if not (value.startswith("ApiKey ") or value.startswith("Bearer ")):
+        raise LiveQueryError(
+            "Kibana authorization must use an ApiKey or Bearer header value"
+        )
+    return value
+
+
+def _ssl_context(config: dict[str, Any]) -> ssl.SSLContext:
+    ca_value = str(config.get("ca_file") or "").strip()
+    if ca_value:
+        ca_path = Path(ca_value)
+        if not ca_path.is_absolute() or not ca_path.is_file():
+            raise LiveQueryError("configured Kibana CA file is unavailable")
+        return ssl.create_default_context(cafile=str(ca_path))
+    return ssl.create_default_context()
+
+
+def _api_root(config: dict[str, Any]) -> str:
+    space = str(config.get("space") or "default").strip()
+    if space and space != "default":
+        safe_space = urllib.parse.quote(space, safe="")
+        return f"{config['kibana_url']}/s/{safe_space}/api"
+    return f"{config['kibana_url']}/api"
+
+
+def _http_json(
+    *,
+    method: str,
+    url: str,
+    authorization: str,
+    context: ssl.SSLContext,
+    timeout_seconds: float,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    body = None if payload is None else bounded_json_bytes(payload, maximum=64 * 1024)
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method=method,
+        headers={
+            "Authorization": authorization,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "kbn-xsrf": "onion-sentinel",
+        },
+    )
+    try:
+        with urllib.request.urlopen(
+            request,
+            context=context,
+            timeout=timeout_seconds,
+        ) as response:
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        raise LiveQueryError(f"Kibana live-query API returned HTTP {exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError, ssl.SSLError) as exc:
+        raise LiveQueryError(
+            f"Kibana live-query transport failed ({type(exc).__name__})"
+        ) from exc
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise LiveQueryError("Kibana live-query response exceeded its byte limit")
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LiveQueryError("Kibana live-query response was not valid JSON") from exc
+    if not isinstance(value, dict):
+        raise LiveQueryError("Kibana live-query response root was not an object")
+    return value
+
+
+def _response_data(value: dict[str, Any]) -> dict[str, Any]:
+    data = value.get("data")
+    if not isinstance(data, dict):
+        raise LiveQueryError("Kibana live-query response did not contain data")
+    return data
+
+
+def _extract_action_ids(response: dict[str, Any]) -> tuple[str, str]:
+    data = _response_data(response)
+    action_id = str(data.get("action_id") or "").strip()
+    queries = data.get("queries")
+    if not action_id or not isinstance(queries, list) or len(queries) != 1:
+        raise LiveQueryError("Kibana did not return one live-query action")
+    query = queries[0] if isinstance(queries[0], dict) else {}
+    query_action_id = str(query.get("action_id") or "").strip()
+    if not query_action_id:
+        raise LiveQueryError("Kibana did not return the query action identifier")
+    return action_id, query_action_id
+
+
+def _query_state(details: dict[str, Any]) -> tuple[str, int, int, int, int]:
+    data = _response_data(details)
+    state = str(data.get("status") or "").strip().lower()
+    queries = data.get("queries")
+    query = queries[0] if isinstance(queries, list) and queries else {}
+    if isinstance(query, dict):
+        state = str(query.get("status") or state).strip().lower()
+
+    def number(name: str) -> int:
+        try:
+            source = query if isinstance(query, dict) and name in query else data
+            return max(0, int(source.get(name) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    return (
+        state,
+        number("successful"),
+        number("failed"),
+        number("pending"),
+        number("responded"),
+    )
+
+
+def _result_rows(response: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
+    data = _response_data(response)
+    edges = data.get("edges")
+    if not isinstance(edges, list):
+        raise LiveQueryError("Kibana live-query result edges were missing")
+    rows: list[dict[str, Any]] = []
+    for edge in edges:
+        source = edge.get("_source") if isinstance(edge, dict) else None
+        osquery = source.get("osquery") if isinstance(source, dict) else None
+        if not isinstance(osquery, dict):
+            raise LiveQueryError("Kibana live-query result row had an invalid shape")
+        # Current Kibana responses place the row columns directly under
+        # `_source.osquery`. Accept the older nested `columns` shape as a
+        # compatibility fallback, but never copy agent/action metadata.
+        columns = osquery.get("columns")
+        row = columns if isinstance(columns, dict) else osquery
+        if not isinstance(row, dict) or len(row) > 64:
+            raise LiveQueryError("Kibana live-query result row had an invalid shape")
+        rows.append(row)
+    total_value = data.get("total")
+    if isinstance(total_value, dict):
+        total_value = total_value.get("value")
+    try:
+        total = int(total_value if total_value is not None else len(rows))
+    except (TypeError, ValueError) as exc:
+        raise LiveQueryError("Kibana live-query result total was invalid") from exc
+    return rows, max(total, len(rows))
+
+
+def _run_query(
+    *,
+    target_alias: str,
+    agent_id: str,
+    query: str,
+    purpose: str,
+    config: dict[str, Any],
+    authorization: str,
+    context: ssl.SSLContext,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    api_root = _api_root(config)
+    request_timeout = min(max(int(config.get("query_timeout_seconds", 60)), 10), 300)
+    overall_timeout = min(max(int(config.get("timeout_seconds", 120)), 20), 600)
+    poll_seconds = min(max(float(config.get("poll_seconds", 2)), 0.5), 10.0)
+    status = "error"
+    rows: list[dict[str, Any]] = []
+    total_rows = 0
+    error = ""
+    try:
+        submitted = _http_json(
+            method="POST",
+            url=f"{api_root}/osquery/live_queries",
+            authorization=authorization,
+            context=context,
+            timeout_seconds=request_timeout,
+            payload={
+                "agent_ids": [agent_id],
+                "query": query,
+                "timeout": request_timeout,
+            },
+        )
+        action_id, query_action_id = _extract_action_ids(submitted)
+        deadline = time.monotonic() + overall_timeout
+        state = "pending"
+        successful = failed = pending = responded = 0
+        details_url = (
+            f"{api_root}/osquery/live_queries/"
+            f"{urllib.parse.quote(action_id, safe='')}"
+        )
+        while time.monotonic() < deadline:
+            details = _http_json(
+                method="GET",
+                url=details_url,
+                authorization=authorization,
+                context=context,
+                timeout_seconds=request_timeout,
+            )
+            state, successful, failed, pending, responded = _query_state(details)
+            if state not in _PENDING_STATES and pending == 0:
+                break
+            time.sleep(poll_seconds)
+        else:
+            status = "timeout"
+            error = "endpoint live query exceeded its bounded execution window"
+            raise TimeoutError(error)
+
+        result_url = (
+            f"{details_url}/results/"
+            f"{urllib.parse.quote(query_action_id, safe='')}?page=1&pageSize=200"
+        )
+        result_response = _http_json(
+            method="GET",
+            url=result_url,
+            authorization=authorization,
+            context=context,
+            timeout_seconds=request_timeout,
+        )
+        rows, total_rows = _result_rows(result_response)
+        if failed > 0:
+            status = "error"
+            error = "endpoint reported a live-query execution failure"
+        elif successful > 0 or responded > 0:
+            status = "ok"
+        else:
+            status = "error"
+            error = "endpoint did not report a successful live-query response"
+    except TimeoutError:
+        pass
+    except LiveQueryError as exc:
+        status = "error"
+        error = str(exc)
+    duration_ms = min(int((time.monotonic() - started) * 1000), 10 * 60 * 1000)
+    return {
+        "target_alias": target_alias,
+        "query": query,
+        "purpose": purpose,
+        "status": status,
+        "rows": rows,
+        "total_rows": total_rows,
+        "truncated": total_rows > len(rows),
+        "duration_ms": duration_ms,
+        "error": error,
+    }
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        return _emit({"error": "live OSQuery wrapper must run as root"}, 2)
+    if os.environ.get("SSH_ORIGINAL_COMMAND", "").strip():
+        return _emit({"error": "commands are not accepted by this endpoint"}, 2)
+    try:
+        config_path = Path(
+            os.environ.get("ONION_SENTINEL_LIVE_OSQUERY_CONFIG", DEFAULT_CONFIG)
+        )
+        config = _load_config(config_path)
+        raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
+        if len(raw) > MAX_REQUEST_BYTES:
+            raise LiveQueryError("live OSQuery request exceeded its byte limit")
+        request = json.loads(raw.decode("utf-8"))
+        alias_map = {
+            str(alias).strip().lower(): str(agent_id).strip()
+            for alias, agent_id in config["target_aliases"].items()
+            if str(alias).strip() and str(agent_id).strip()
+        }
+        normalized = validate_transport_payload(
+            request,
+            allowed_aliases=alias_map,
+        )
+        auth_path = Path(str(config.get("authorization_file") or "").strip())
+        if not auth_path.is_absolute():
+            raise LiveQueryError("Kibana authorization file path must be absolute")
+        authorization = _load_authorization(auth_path)
+        context = _ssl_context(config)
+        results = [
+            _run_query(
+                target_alias=item["target_alias"],
+                agent_id=alias_map[item["target_alias"]],
+                query=item["query"],
+                purpose=item["purpose"],
+                config=config,
+                authorization=authorization,
+                context=context,
+            )
+            for item in normalized["requests"]
+        ]
+        artifact = {
+            "schema": normalized["schema"],
+            "case_id": normalized["case_id"],
+            "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "read_only": True,
+            "complete": all(item["status"] == "ok" for item in results),
+            "results": results,
+        }
+        artifact = validate_result_artifact(
+            artifact,
+            expected_requests=normalized["requests"],
+        )
+        return _emit(artifact)
+    except (
+        LiveQueryError,
+        LiveOsqueryContractError,
+        KeyError,
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        return _emit({"error": str(exc)[:1000]}, 3)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

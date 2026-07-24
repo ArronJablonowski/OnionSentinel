@@ -236,19 +236,73 @@ def run_relay() -> subprocess.CompletedProcess:
     return run_shell_command(RELAY_COMMAND, timeout=RELAY_COMMAND_TIMEOUT_SECONDS)
 
 
-def run_pcap_broker() -> subprocess.CompletedProcess:
-    result = run_shell_command(RELAY_PCAP_COMMAND, timeout=RELAY_PCAP_TIMEOUT_SECONDS)
-    if result.returncode != 0:
-        return result
-    summary = None
-    for line in reversed((result.stdout or "").splitlines()):
+def parse_pcap_summary(stdout: str) -> dict | None:
+    """Return the broker's final bounded JSON summary, if one was emitted."""
+    for line in reversed((stdout or "").splitlines()):
         try:
             candidate = json.loads(line)
         except Exception:
             continue
-        if isinstance(candidate, dict) and "operational_failures" in candidate:
-            summary = candidate
-            break
+        if not isinstance(candidate, dict):
+            continue
+        if "processed" in candidate and ("enabled" in candidate or "operational_failures" in candidate):
+            return candidate
+    return None
+
+
+def bounded_nonnegative_int(value: object) -> int:
+    """Coerce broker counters without allowing malformed telemetry to crash health."""
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def build_pcap_status_event(result: subprocess.CompletedProcess) -> dict:
+    """Build safe relay telemetry that distinguishes a hold from a failure.
+
+    Capture-loss protection intentionally returns success because the broker is
+    healthy and refusing optional evidence work to protect Security Onion. The
+    Mac needs this explicit state to avoid interpreting the quiet queue as a
+    crashed worker. Only bounded counters and capture telemetry are published;
+    command lines, credentials, paths, and raw stderr are never included.
+    """
+    summary = parse_pcap_summary(result.stdout) or {}
+    protection = summary.get("capture_protection")
+    protection = protection if isinstance(protection, dict) else {}
+    deferred = bool(summary.get("deferred"))
+    operational_failures = bounded_nonnegative_int(summary.get("operational_failures"))
+    state = "capture_protection_hold" if deferred else (
+        "operational_failure" if result.returncode or operational_failures else "healthy"
+    )
+    reason = str(summary.get("defer_reason") or protection.get("reason") or "")[:300]
+    metric = str(protection.get("metric") or "zeek_capture_loss")[:64]
+    workflow = {
+        "state": state,
+        "deferred": deferred,
+        "reason": reason,
+        "metric": metric,
+        "observed_percent": protection.get("observed_percent"),
+        "threshold_percent": protection.get("threshold_percent"),
+        "telemetry_age_seconds": protection.get("age_seconds"),
+        "processed": bounded_nonnegative_int(summary.get("processed")),
+        "operational_failures": operational_failures or (1 if result.returncode else 0),
+    }
+    return {
+        "message_type": "relay_heartbeat",
+        "component": "pcap_broker",
+        "source": "security-onion",
+        "relay_host": HOST_LABEL,
+        "generated_at": now_iso(),
+        "pcap_workflow": workflow,
+    }
+
+
+def run_pcap_broker() -> subprocess.CompletedProcess:
+    result = run_shell_command(RELAY_PCAP_COMMAND, timeout=RELAY_PCAP_TIMEOUT_SECONDS)
+    if result.returncode != 0:
+        return result
+    summary = parse_pcap_summary(result.stdout)
     if summary and (not summary.get("ok", True) or int(summary.get("operational_failures") or 0) > 0):
         detail = json.dumps({
             "ok": summary.get("ok"),
@@ -337,6 +391,11 @@ def main() -> int:
         print(pcap_result.stdout, end="")
         if pcap_result.stderr:
             print(pcap_result.stderr, end="", file=sys.stderr)
+        # Publish every broker cycle, including intentional capture-protection
+        # holds. Delivery failure is observable in journald but must not turn a
+        # healthy, locally enforced safety hold into a broker process failure.
+        pcap_status = send_relay_health_event(build_pcap_status_event(pcap_result))
+        print(json.dumps({"pcap_status_event": pcap_status}, sort_keys=True))
 
     if component == "storage":
         try:

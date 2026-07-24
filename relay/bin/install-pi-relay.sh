@@ -7,6 +7,16 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
+RELAY_ADMIN_USER="${ONION_SENTINEL_RELAY_ADMIN_USER:-${SUDO_USER:-}}"
+if [[ -z "$RELAY_ADMIN_USER" || "$RELAY_ADMIN_USER" == "root" ]]; then
+  echo "Unable to identify the relay administrator. Re-run with sudo or set ONION_SENTINEL_RELAY_ADMIN_USER." >&2
+  exit 1
+fi
+if [[ ! "$RELAY_ADMIN_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || ! id "$RELAY_ADMIN_USER" >/dev/null 2>&1; then
+  echo "Invalid relay administrator account: $RELAY_ADMIN_USER" >&2
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
@@ -29,6 +39,8 @@ install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay.py" /opt/so-ale
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/alert_outbox.py" /opt/so-alert-relay/app/alert_outbox.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/alert_delivery.py" /opt/so-alert-relay/app/alert_delivery.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/process_io.py" /opt/so-alert-relay/app/process_io.py
+install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/live_osquery_broker.py" /opt/so-alert-relay/app/live_osquery_broker.py
+install -o soalert -g soalert -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract.py" /opt/so-alert-relay/app/live_osquery_contract.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay_health_wrapper.py" /opt/so-alert-relay/app/relay_health_wrapper.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/storage_health.py" /opt/so-alert-relay/app/storage_health.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/config/config.example.json" /opt/so-alert-relay/app/config.json
@@ -37,6 +49,15 @@ if [[ ! -f /etc/so-alert-relay/relay.env ]]; then
   # Do not overwrite live secrets during a repair install.
   install -o root -g soalert -m 0640 "$REPO_DIR/relay/config/relay.example.env" /etc/so-alert-relay/relay.env
   echo "Created /etc/so-alert-relay/relay.env from example. Edit it before enabling live forwarding." >&2
+fi
+
+if [[ ! -f /etc/so-alert-relay/live-osquery.json ]]; then
+  # This path remains inert until operators configure exact endpoint aliases
+  # and provision its two dedicated forced-command SSH keys.
+  install -o root -g soalert -m 0640 \
+    "$REPO_DIR/relay/config/live-osquery.example.json" \
+    /etc/so-alert-relay/live-osquery.json
+  echo "Created disabled /etc/so-alert-relay/live-osquery.json example." >&2
 fi
 
 install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-alert-relay.service" /etc/systemd/system/so-alert-relay.service
@@ -49,6 +70,18 @@ install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-storage-health.servi
 install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-storage-health.timer" /etc/systemd/system/so-storage-health.timer
 install -o root -g root -m 0440 "$REPO_DIR/relay/sudoers/so-storage-health" /etc/sudoers.d/91-so-alert-relay-storage-health
 visudo -cf /etc/sudoers.d/91-so-alert-relay-storage-health
+LIVE_OSQUERY_SUDOERS_TMP="$(mktemp)"
+trap 'rm -f "$LIVE_OSQUERY_SUDOERS_TMP"' EXIT
+sed "s/__RELAY_ADMIN_USER__/${RELAY_ADMIN_USER}/g" \
+  "$REPO_DIR/relay/sudoers/so-live-osquery" > "$LIVE_OSQUERY_SUDOERS_TMP"
+if grep -q "__RELAY_ADMIN_USER__" "$LIVE_OSQUERY_SUDOERS_TMP"; then
+  echo "Failed to render the live OSQuery sudoers rule." >&2
+  exit 1
+fi
+install -o root -g root -m 0440 "$LIVE_OSQUERY_SUDOERS_TMP" /etc/sudoers.d/92-so-alert-relay-live-osquery
+visudo -cf /etc/sudoers.d/92-so-alert-relay-live-osquery
+rm -f "$LIVE_OSQUERY_SUDOERS_TMP"
+trap - EXIT
 install -o root -g root -m 0755 -d /etc/systemd/journald.conf.d
 install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/onion-sentinel-journald.conf" /etc/systemd/journald.conf.d/onion-sentinel.conf
 install -o root -g systemd-journal -m 2755 -d /var/log/journal
@@ -72,6 +105,8 @@ Required manual steps:
 5. Install its forced-command public key on the Mac Studio.
 6. Edit /etc/so-alert-relay/relay.env and replace placeholder tokens.
 7. Verify /opt/so-alert-relay/app/config.json host/path values, then enable alert_ingest.
+8. Live endpoint OSQuery uses a separate key and remains disabled until
+   /etc/so-alert-relay/live-osquery.json contains exact operator aliases.
 
 Test:
   sudo -u soalert /usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/so-alert-relay/app/config.json --pull-once

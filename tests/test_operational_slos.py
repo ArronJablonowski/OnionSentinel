@@ -1,6 +1,7 @@
 import datetime as dt
 from contextlib import closing
 import importlib.util
+import io
 from pathlib import Path
 import tempfile
 import unittest
@@ -33,9 +34,34 @@ class OperationalSloTests(unittest.TestCase):
         self.assertTrue(snapshot["ok"])
 
     def test_probe_timeout_is_bounded_without_traceback(self):
-        with mock.patch.object(self.slo.urllib.request, "urlopen", side_effect=TimeoutError("timed out")):
+        with mock.patch.object(
+            self.slo.urllib.request,
+            "urlopen",
+            side_effect=TimeoutError("timed out"),
+        ) as urlopen, mock.patch.object(self.slo.time, "sleep"):
             with self.assertRaisesRegex(self.slo.ProbeError, "metrics probe unavailable"):
                 self.slo.fetch_json("http://127.0.0.1:8787/metrics", "metrics")
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_probe_retries_one_transient_timeout(self):
+        response = io.BytesIO(b'{"ok":true}')
+        with mock.patch.object(
+            self.slo.urllib.request,
+            "urlopen",
+            side_effect=[TimeoutError("timed out"), response],
+        ) as urlopen, mock.patch.object(self.slo.time, "sleep") as sleep:
+            payload = self.slo.fetch_json("http://127.0.0.1:8787/metrics", "metrics")
+
+        self.assertEqual(payload, {"ok": True})
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(self.slo.DEFAULT_PROBE_RETRY_DELAY_SECONDS)
+
+    def test_probe_does_not_retry_invalid_json_contract(self):
+        response = io.BytesIO(b'not-json')
+        with mock.patch.object(self.slo.urllib.request, "urlopen", return_value=response) as urlopen:
+            with self.assertRaisesRegex(self.slo.ProbeError, "BoundedHttpError"):
+                self.slo.fetch_json("http://127.0.0.1:8787/metrics", "metrics")
+        self.assertEqual(urlopen.call_count, 1)
 
     def test_stale_or_regressed_signals_fail(self):
         now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
@@ -163,6 +189,65 @@ class OperationalSloTests(unittest.TestCase):
         self.assertTrue(snapshot["signals"]["pcap_queue_progressing"])
         self.assertEqual(snapshot["signals"]["pcap_last_progress_age_seconds"], 75)
 
+    def test_fresh_capture_protection_hold_is_degraded_not_failed(self):
+        now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
+        metrics = {"metrics": {
+            "process": {"ingest_errors": 0},
+            "oldest_pending_job_seconds": 0,
+            "oldest_pending_jobs": [],
+            "oldest_pending_pcap_seconds": 4 * 60 * 60,
+        }}
+        health = {
+            "summary": {"latest": {"timestamp_utc": "2026-07-14T17:55:00Z"}},
+            "pcap": {
+                "warning_count": 0,
+                "capture_protection": {
+                    "active": True,
+                    "state": "capture_protection_hold",
+                    "reason": "Zeek capture loss exceeds threshold",
+                    "report_age_seconds": 30,
+                },
+            },
+        }
+
+        failures, snapshot = self.slo.evaluate(
+            metrics, health, now=now, disk_used_percent=55,
+            sqlite_backup_age=60, postgres_backup_age=60, previous_ingest_errors=0,
+        )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(snapshot["status"], "degraded")
+        self.assertTrue(snapshot["advisories"])
+        self.assertTrue(snapshot["signals"]["pcap_workflow_operational"])
+
+    def test_inactive_capture_protection_does_not_hide_stale_backlog(self):
+        now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
+        metrics = {"metrics": {
+            "process": {"ingest_errors": 0},
+            "oldest_pending_job_seconds": 0,
+            "oldest_pending_jobs": [],
+            "oldest_pending_pcap_seconds": 4 * 60 * 60,
+        }}
+        health = {
+            "summary": {"latest": {"timestamp_utc": "2026-07-14T17:55:00Z"}},
+            "pcap": {
+                "warning_count": 0,
+                "capture_protection": {
+                    "active": False,
+                    "state": "capture_protection_hold",
+                    "report_age_seconds": 600,
+                },
+            },
+        }
+
+        failures, snapshot = self.slo.evaluate(
+            metrics, health, now=now, disk_used_percent=55,
+            sqlite_backup_age=60, postgres_backup_age=60, previous_ingest_errors=0,
+        )
+
+        self.assertIn("PCAP backlog exceeds 60 minutes", failures)
+        self.assertEqual(snapshot["status"], "failed")
+
     def test_enrichment_keeps_fifteen_minute_deadline(self):
         now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
         metrics = {"metrics": {
@@ -198,6 +283,26 @@ class OperationalSloTests(unittest.TestCase):
                                         sqlite_backup_age=60, postgres_backup_age=60,
                                         previous_ingest_errors=0)
         self.assertIn("AI analysis has pending work but no completion within 30 minutes", failures)
+
+    def test_fresh_ai_job_after_idle_period_does_not_page(self):
+        now = dt.datetime(2030, 1, 15, 8, 41, 44, tzinfo=dt.timezone.utc)
+        metrics = {"metrics": {
+            "process": {"ingest_errors": 0},
+            "durable_jobs": [{"job_type": "ai_analysis", "status": "pending", "count": 1}],
+            "oldest_pending_jobs": [{"job_type": "ai_analysis", "seconds": 33}],
+            "latest_completed_jobs": [{"job_type": "ai_analysis", "seconds": 3544}],
+            "oldest_pending_pcap_seconds": 0,
+        }}
+        health = {"summary": {"latest": {"timestamp_utc": "2030-01-15T08:40:00Z"}},
+                  "pcap": {"warning_count": 0}}
+
+        failures, snapshot = self.slo.evaluate(
+            metrics, health, now=now, disk_used_percent=55,
+            sqlite_backup_age=60, postgres_backup_age=60, previous_ingest_errors=0,
+        )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(snapshot["signals"]["oldest_pending_ai_job_seconds"], 33)
 
     def test_active_ai_processing_uses_processing_age(self):
         now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)

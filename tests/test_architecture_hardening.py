@@ -44,13 +44,21 @@ class ArchitectureHardeningTest(unittest.TestCase):
         self.assertNotIn("devstral:latest", plist)
 
     def test_local_analysis_workers_are_event_driven_with_timer_fallbacks(self):
-        ai_plist = (ROOT / "n8n/launchd/com.arron.soc.ai-analysis.plist").read_text(encoding="utf-8")
+        ollama_plist = (ROOT / "n8n/launchd/com.arron.soc.ai-analysis.plist").read_text(encoding="utf-8")
+        cli_plist = (ROOT / "n8n/launchd/com.arron.soc.ai-analysis-cli.plist").read_text(encoding="utf-8")
         pcap_plist = (ROOT / "n8n/launchd/com.arron.soc.pcap-analysis.plist").read_text(encoding="utf-8")
-        self.assertIn("<key>WatchPaths</key>", ai_plist)
-        self.assertIn("ai-analysis.wake", ai_plist)
-        self.assertIn("<key>KeepAlive</key>", ai_plist)
-        self.assertIn("<key>PathState</key>", ai_plist)
-        self.assertIn("<key>StartInterval</key>", ai_plist)
+        for plist, wake_path, worker_lock, lane in (
+            (ollama_plist, "ai-analysis-ollama.wake", "ai-analysis-ollama-worker.lock", "ollama"),
+            (cli_plist, "ai-analysis-cli.wake", "ai-analysis-cli-worker.lock", "cli"),
+        ):
+            self.assertIn("<key>WatchPaths</key>", plist)
+            self.assertIn(wake_path, plist)
+            self.assertIn(worker_lock, plist)
+            self.assertIn("<key>KeepAlive</key>", plist)
+            self.assertIn("<key>PathState</key>", plist)
+            self.assertIn("<key>StartInterval</key>", plist)
+            self.assertIn("<string>--provider-lane</string>", plist)
+            self.assertIn(f"<string>{lane}</string>", plist)
         self.assertIn("<key>WatchPaths</key>", pcap_plist)
         self.assertIn("pcap-analysis.wake", pcap_plist)
         self.assertIn("<key>KeepAlive</key>", pcap_plist)

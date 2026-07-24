@@ -8,9 +8,13 @@ This directory contains the Security Onion-side pieces for Onion Sentinel.
 | --- | --- | --- |
 | `bin/export-recent-alerts` | `/usr/local/sbin/export-recent-alerts` | Restricted wrapper that exports recent alerts as JSON. |
 | `bin/export-pcap-window` | `/usr/local/sbin/export-pcap-window` | Restricted wrapper that streams one bounded, filtered rotation directly to the relay SSD without Security Onion staging. |
+| `bin/export-incident-evidence` | `/usr/local/sbin/export-incident-evidence` | Restricted read-only incident evidence wrapper with fixed Elasticsearch query packs. |
+| `bin/run-live-osquery` | `/usr/local/sbin/run-live-osquery` | Disabled-by-default live endpoint OSQuery wrapper with exact alias mapping and bounded Osquery Manager calls. |
 | `sudoers/90-so-ai-relay-export` | `/etc/sudoers.d/90-so-ai-relay-export` | Allows only the wrapper to run passwordless for `so-ai-relay`. |
 | `ssh/authorized_keys.example` | `/home/so-ai-relay/.ssh/authorized_keys` | Forced-command SSH template restricted to the relay source IP. |
 | `ssh/authorized_keys.pcap.example` | `/home/so-ai-relay/.ssh/authorized_keys` | Separate forced-command SSH template for PCAP fulfillment. |
+| `ssh/authorized_keys.incident-query.example` | `/home/so-ai-relay/.ssh/authorized_keys` | Separate forced-command SSH template for bounded incident evidence queries. |
+| `ssh/authorized_keys.live-osquery.example` | `/home/so-ai-relay/.ssh/authorized_keys` | Separate forced-command SSH template for bounded endpoint OSQuery. |
 | `bin/install-security-onion-wrapper.sh` | run with `sudo` on Security Onion | Installs wrapper, sudoers, and service account scaffolding. |
 
 ## Install
@@ -31,6 +35,39 @@ sudo chmod 0600 /home/so-ai-relay/.ssh/authorized_keys
 ```
 
 Replace `REPLACE_WITH_PUBLIC_KEY` with the Raspberry Pi relay public key. Keep the `from="10.88.8.8"` restriction unless the relay address changes.
+
+Incident Response evidence collection uses another dedicated key entry based on
+`security-onion/ssh/authorized_keys.incident-query.example`. That key can invoke
+only `export-incident-evidence`; forwarding, PTY allocation, user rc files, and
+arbitrary commands remain disabled.
+
+The incident wrapper accepts validated observables and bounded UTC windows,
+then executes five built-in Elastic packs and seven built-in OSquery packs.
+Elastic covers alert context, network flow, DNS activity, host telemetry, and a
+cross-sensor timeline. OSquery covers Security Onion system inventory,
+logged-in users, listening ports, processes, packages, scheduled tasks, and
+startup items. A separate fixed history pack searches retained Security Onion
+Elastic osquery/endpoint events for the bounded incident window.
+
+The caller cannot supply an index, field list, KQL expression, Query DSL
+object, OSquery SQL, host target, path, or shell command. Every Elastic result
+records the analyst-readable KQL equivalent and exact Query DSL submitted
+through `so-elasticsearch-query`. Every OSquery result records the reviewed
+pack, exact SQL, local target, status, query digest, bounded result metadata,
+and any explicit error. Query DSL and OSquery SQL are the authoritative command
+audits; KQL is explanatory and is not independently executed.
+
+Live endpoint OSQuery is a separate Incident Responder capability based on
+`security-onion/ssh/authorized_keys.live-osquery.example`. It remains disabled
+until `/etc/onion-sentinel/live-osquery.json` maps each operator alias to one
+exact Fleet agent ID and references a trusted Kibana CA plus a root-only
+authorization file. The wrapper independently rejects wildcard targets,
+non-SELECT SQL, comments, mutations, CTEs, compound queries, subqueries,
+unknown tables, excessive rows, oversized output, and excessive runtime. It
+uses the Kibana Osquery Manager API; neither the Mac nor relay receives the
+Fleet IDs or credential. See
+`docs/incident-response-query-and-model-routing.md` for the complete allowlist
+and recovery gates.
 
 PCAP fulfillment should use a separate key entry based on
 `security-onion/ssh/authorized_keys.pcap.example`. The wrapper reads a bounded

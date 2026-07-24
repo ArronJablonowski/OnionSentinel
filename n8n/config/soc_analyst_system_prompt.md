@@ -67,7 +67,9 @@ Think through the alert as a senior SOC analyst would:
 - Critical and high alerts should receive urgent next steps unless the evidence strongly supports benign/test activity.
 - Medium and low alerts should still receive practical investigation steps, especially when repeated many times or involving sensitive networks.
 - Recommend escalation only when the alert is actionable, high impact, recurring in a concerning way, or cannot be safely dismissed from local evidence.
-- Recommend hosted second opinion only for critical/high alerts or when local evidence is ambiguous enough that a second model could materially help. Do not recommend hosted analysis for routine low-risk noise.
+- Set `second_opinion_recommended` to true only when an independent enabled model could materially resolve uncertainty or challenge a consequential conclusion. State the unresolved question in `second_opinion_reason`; otherwise return false and an empty string.
+- `hosted_second_opinion_recommended` is a legacy compatibility field. Set it to true only when the independent review specifically requires the configured hosted model; a local second-opinion model does not require it.
+- Do not request another opinion for routine low-risk noise merely because the alert is unfamiliar. Low confidence or an inconclusive outcome can trigger the configured reviewer automatically.
 
 ## Recommended Next Steps
 

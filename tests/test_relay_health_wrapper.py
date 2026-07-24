@@ -150,6 +150,43 @@ class RelayHealthWrapperTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
 
+    def test_capture_protection_hold_is_reported_as_safe_degraded_state(self) -> None:
+        result = completed(
+            0,
+            stdout=(
+                '{"ok":true,"enabled":true,"processed":0,"deferred":true,'
+                '"defer_reason":"Zeek capture loss 0.5000% exceeds 0.1000%",'
+                '"capture_protection":{"observed_percent":0.5,'
+                '"threshold_percent":0.1,"age_seconds":12}}\n'
+            ),
+        )
+
+        event = self.wrapper.build_pcap_status_event(result)
+
+        self.assertEqual(event["message_type"], "relay_heartbeat")
+        self.assertEqual(event["component"], "pcap_broker")
+        self.assertEqual(event["pcap_workflow"]["state"], "capture_protection_hold")
+        self.assertTrue(event["pcap_workflow"]["deferred"])
+        self.assertEqual(event["pcap_workflow"]["observed_percent"], 0.5)
+        self.assertEqual(event["pcap_workflow"]["operational_failures"], 0)
+
+    def test_real_pcap_failure_is_not_misclassified_as_hold(self) -> None:
+        event = self.wrapper.build_pcap_status_event(completed(2, stdout="malformed\n"))
+
+        self.assertEqual(event["pcap_workflow"]["state"], "operational_failure")
+        self.assertFalse(event["pcap_workflow"]["deferred"])
+        self.assertEqual(event["pcap_workflow"]["operational_failures"], 1)
+
+    def test_malformed_pcap_counters_do_not_crash_health_wrapper(self) -> None:
+        event = self.wrapper.build_pcap_status_event(completed(
+            0,
+            stdout='{"ok":true,"enabled":true,"processed":"bad","operational_failures":"bad"}\n',
+        ))
+
+        self.assertEqual(event["pcap_workflow"]["state"], "healthy")
+        self.assertEqual(event["pcap_workflow"]["processed"], 0)
+        self.assertEqual(event["pcap_workflow"]["operational_failures"], 0)
+
     def test_storage_component_uses_independent_state_and_command(self) -> None:
         stdout = io.StringIO()
         with (

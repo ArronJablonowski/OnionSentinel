@@ -68,7 +68,7 @@
     "security_onion_storage_telemetry": true,
     "capture_protection_enabled": true,
     "capture_protection_require_telemetry": true,
-    "capture_loss_threshold_percent": 0.1,
+    "capture_loss_threshold_percent": 1.0,
     "sensor_packet_loss_threshold_percent": 0.1,
     "capture_loss_freshness_seconds": 900,
     "stream_chunk_idle_timeout_seconds": 300,

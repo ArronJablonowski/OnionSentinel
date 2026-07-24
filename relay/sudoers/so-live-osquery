@@ -1,0 +1,4 @@
+# The Mac Studio live-query key is forced to this exact broker command. Running
+# as soalert keeps the dedicated downstream key and root-owned broker config
+# unreadable to the normal relay SSH account.
+__RELAY_ADMIN_USER__ ALL=(soalert) NOPASSWD: /usr/bin/python3 /opt/so-alert-relay/app/live_osquery_broker.py

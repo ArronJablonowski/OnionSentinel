@@ -46,6 +46,8 @@ class OnionSentinelServerTests(unittest.TestCase):
 
     def test_only_soc_api_routes_are_exposed(self):
         self.assertTrue(server.is_soc_get_api("/api/soc-alerts"))
+        self.assertTrue(server.is_soc_get_api("/api/soc-incidents"))
+        self.assertTrue(server.is_soc_get_api("/api/soc-incidents/ir-example/detail"))
         self.assertTrue(server.is_soc_get_api("/api/soc-alerts/example/detail"))
         self.assertTrue(server.is_soc_get_api("/api/soc-settings/agent-memory"))
         self.assertFalse(server.is_soc_get_api("/api/reports"))
@@ -54,9 +56,33 @@ class OnionSentinelServerTests(unittest.TestCase):
 
         self.assertTrue(server.is_soc_post_api("/api/soc-alerts/example/analyze"))
         self.assertTrue(server.is_soc_post_api("/api/soc-alerts/example/pcap"))
+        self.assertTrue(server.is_soc_post_api("/api/soc-alerts/example/escalate"))
+        self.assertTrue(server.is_soc_post_api("/api/soc-settings/agent-model"))
         self.assertTrue(server.is_soc_post_api("/api/soc-settings/ai-model"))
         self.assertFalse(server.is_soc_post_api("/api/resource-library/remove"))
         self.assertFalse(server.is_soc_post_api("/admin/action"))
+
+    def test_all_role_primary_and_reviewer_prompt_routes_are_allowlisted(self):
+        routes = {
+            "/api/soc-settings/analyst-prompt",
+            "/api/soc-settings/analyst-second-opinion-prompt",
+            "/api/soc-settings/incident-responder-prompt",
+            "/api/soc-settings/incident-responder-second-opinion-prompt",
+            "/api/soc-settings/siem-engineer-prompt",
+            "/api/soc-settings/siem-engineer-second-opinion-prompt",
+            "/api/soc-settings/cyber-threat-intel-prompt",
+            "/api/soc-settings/cyber-threat-intel-second-opinion-prompt",
+            "/api/soc-settings/threat-hunter-prompt",
+            "/api/soc-settings/threat-hunter-second-opinion-prompt",
+        }
+        self.assertEqual(set(server.runtime.SOC_SETTINGS_PROMPT_API_PATHS), routes)
+        for route in routes:
+            self.assertTrue(server.is_soc_get_api(route), route)
+            self.assertTrue(server.is_soc_post_api(route), route)
+
+        unknown = "/api/soc-settings/arbitrary-prompt"
+        self.assertFalse(server.is_soc_get_api(unknown))
+        self.assertFalse(server.is_soc_post_api(unknown))
 
     def test_runtime_paths_do_not_use_hermes_or_report_portal(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -66,6 +92,7 @@ class OnionSentinelServerTests(unittest.TestCase):
                 server.runtime.SOC_ALERT_DASHBOARD_DIR,
                 server.runtime.SOC_ALERT_DETAIL_DIR,
                 server.runtime.SOC_ALERT_STATUS_FILE,
+                server.runtime.SOC_ALERT_PCAP_WORKFLOW_STATE_FILE,
                 server.runtime.ADMIN_STATE_DIR,
                 server.runtime.ADMIN_PASSWORD_FILE,
             )
@@ -78,6 +105,7 @@ class OnionSentinelServerTests(unittest.TestCase):
         installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text(encoding="utf-8")
         refresh = (ROOT / "n8n/bin/refresh-soc-dashboard.py").read_text(encoding="utf-8")
         self.assertIn('DASHBOARD_RUNTIME_DIR="${STACK_DIR}/onion-sentinel-dashboard"', installer)
+        self.assertIn("dashboard_executive_metrics.py", installer)
         self.assertNotIn("HERMES_SCRIPT_DIR", installer)
         self.assertNotIn("HERMES_ASSET_DIR", installer)
         self.assertNotIn('PORTAL_DIR="${HOME}/report_portal"', installer)

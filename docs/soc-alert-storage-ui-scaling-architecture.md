@@ -129,6 +129,68 @@ The background worker owns API-key checks, privacy filtering, rate limits,
 SQLite cache, retries, and normalized output. Provider latency therefore does
 not hold the alert ingest transaction open.
 
+### Enrichment cache hierarchy
+
+Alert-store resolves each provider/indicator lookup through two bounded cache
+tiers before it can reserve provider quota:
+
+```mermaid
+flowchart LR
+  JOB["Durable enrichment job"] --> KEY["Normalize provider + type + indicator"]
+  KEY --> L1["L1 bounded memory cache\n5 minute hot-entry ceiling"]
+  L1 -->|miss| L2["L2 SQLite enrichment_cache\ndurable across restarts"]
+  L2 -->|miss or expired| SF["Single-flight key lock"]
+  SF --> QUEUE["Per-provider queue + persisted rate slot"]
+  QUEUE --> API["Public enrichment API"]
+  API --> BOUND["Normalize + bound raw response"]
+  BOUND --> L2
+  L2 --> L1
+```
+
+Equivalent domains, URLs, IPs, hashes, and CVEs share a normalized cache key.
+The in-process tier is LRU-bounded and short lived; SQLite remains the durable
+source after restart. Concurrent misses for the same provider and indicator
+join one in-flight promise, so only one request can spend provider quota. A
+cache hit never enters the provider scheduler and never reserves a persisted
+rate-limit slot.
+
+Positive TTLs default to 6-24 hours according to source volatility. Unknown
+zero-confidence results use a shorter six-hour negative TTL. Provider-specific
+TTLs can be overridden with
+`ENRICHMENT_CACHE_<SOURCE>_TTL_SECONDS`. During an upstream outage, an expired
+result may be used for seven days, or 30 days for vulnerability catalogs. Such
+records and source summaries are explicitly marked `stale_cache`; they are not
+presented as current provider observations.
+
+Memory entries, SQLite rows, total cache payload bytes, and each provider
+raw-response JSON all have independent ceilings. An hourly retention pass
+deletes evidence beyond its source-specific stale fallback window and evicts
+the oldest rows over either the entry or byte maximum. During upgrades, it also
+replaces oversized legacy raw-response bodies with bounded metadata while
+retaining normalized intelligence fields. Cache counters and
+current bounds are exposed by `/health`; durable row, freshness, and byte
+statistics are exposed by `/metrics` without indicators or provider secrets.
+
+The Home Executive SOC page consumes only that sanitized telemetry. Its cache
+card deliberately separates two lifetimes:
+
+- **Reusable now**, **expired entries**, and cache payload size come from the
+  durable SQLite inventory and survive alert-store restarts.
+- **Cache hit rate**, **API calls avoided**, provider lookups, provider errors,
+  and stale fallbacks are process counters since the current alert-store start.
+
+The page labels the process lifetime explicitly. It does not display cached
+indicators, provider responses, API keys, or other enrichment evidence.
+
+The adjacent 12-hour alert-intake chart counts unique completed `alert_ingest`
+events from `pipeline_stage_events`. Reconciliation/bootstrap duplicates are
+collapsed globally by alert ID before clock-hour bucketing. Browser JavaScript
+formats each fixed UTC bucket in the viewer's local timezone and marks the
+current hour as partial. If pipeline telemetry is absent during an upgrade, the
+builder uses individual `alerts.last_seen` rows as a compatibility fallback.
+It must never assign a grouped detection's lifetime `repeat_count` to its latest
+hour; that produces misleading volume spikes when a long-lived group updates.
+
 Rows stored before the enrichment stage can be repaired with
 `n8n/bin/backfill-public-enrichment.js`. Run it inside the alert-store
 container so it can reach both `/data/alerts.sqlite3` and
@@ -159,7 +221,9 @@ Normalized public enrichment records use this shape:
   "first_seen": null,
   "last_seen": "2026-07-04  18:00:00-06:00",
   "raw_response": {},
-  "cached_at": "2026-07-05  06:00:00-06:00"
+  "cached_at": "2026-07-05  06:00:00-06:00",
+  "expires_at": "2026-07-06  06:00:00-06:00",
+  "cache_state": "fresh"
 }
 ```
 
@@ -364,6 +428,16 @@ acknowledge/suppress/expose writes still use the shared API. Every browser
 opens `/api/soc-alerts/events` for live updates, with slower polling retained
 as a fallback for multi-analyst convergence.
 
+Each API row also carries durable group-level evidence metadata. The
+`pcap_size_bytes` field is the deduplicated sum of completed PCAP artifacts
+associated with that alert group; retries that reference the same SHA-256 or
+artifact path are counted once. `detection_outcome` and
+`detection_outcome_label` identify the newest completed AI classification for
+the group. These values are resolved with page-scoped SQLite queries rather
+than one query per row. Retained parsed-PCAP and AI JSON artifacts provide a
+read-only fallback for older restored databases that predate those columns.
+The desktop table and mobile alert card both expose these fields.
+
 Validation on 2026-07-03:
 
 ```text
@@ -546,7 +620,7 @@ index.html          SOC Alerts default page
 soc-alerts.html     Direct SOC Alerts bookmark
 home.html           Executive KPI and chart overview
 flow.html           Data-flow overview via Flow nav item
-investigations.html Incident Responder workspace placeholder
+investigations.html Incident Responder case queue with expandable canonical alert evidence
 cyber-threat-intel.html Cyber Threat Intel workspace placeholder
 siem-engineering.html SIEM Engineer tuning and detection recommendation workspace with top ROI candidate summary
 reports.html        Reports workspace placeholder
@@ -557,6 +631,27 @@ threat-hunter.html  Threat Hunter workspace with expandable hunt plans and copya
 siem-tuning.html    Backward-compatible alias for SIEM Engineer
 settings.html       Settings page with AI model routing plus collapsed SOC Analyst, Incident Responder, SIEM Engineer, Cyber Threat Intel Analyst, and Threat Hunter prompt editors
 ```
+
+The `Current rule tuning` and `New detections` tables on
+`siem-engineering.html` use the same discoverable row-expansion model as the
+SOC Alerts workspace. Each recommendation row is mouse- and
+keyboard-activatable, starts collapsed, and opens an AI engineering report
+derived from the newest stored analysis artifact plus the grouped detection
+view model. The report includes the recommended change and rationale, full
+first-seen through last-seen context, observation counts, AI/enrichment/PCAP
+state, model findings, validation steps, rollback guidance, and the complete
+AI response JSON. Model values are escaped before rendering and are never
+treated as trusted HTML.
+
+`investigations.html` is API-backed and paginated. The SOC Alerts `Escalate`
+action posts only the dashboard group id to the dedicated Onion Sentinel API.
+The API resolves the stable group inside alert-store, upserts one
+`incident_response_cases` row, records an immutable case event, and enqueues a
+high-priority `incident_response_analysis` durable job. Expanded case rows lazy
+load the standard Detailed Alert Report, then prepend the latest role-specific
+Incident Response analysis panel. This preserves every prior SOC analysis,
+timeline observation, enrichment result, PCAP finding, note, and raw artifact
+without copying the evidence into case storage.
 
 The Flow page is intentionally simple: it gives an analyst a fast visual model
 of the deployed data flow before they move into other SOC pages. The current
@@ -607,15 +702,46 @@ Settings page behavior:
 
 - Keeps the full `AI Analysis Model Selection` panel collapsed by default.
 - Reads `$HOME/n8n-local/config/ai_model_settings.json`.
-- Displays model routing controls for Ollama local-only, frontier/cloud CLI-only,
-  or local-first hybrid analysis.
-- Orders the model controls as a focused numbered 1-2-3 workflow: Analysis
-  Mode first, Ollama Settings second, and Cloud Provider Settings third.
-- Populates the Ollama model dropdown from `ollama ls` through
+- Contains separate Ollama and GPT CLI provider sections, both collapsed by
+  default and independently enabled.
+- Populates an Ollama toggle roster from `ollama ls` through
   `/api/soc-settings/ollama-models`; the list refreshes every 60 seconds while
-  the Settings page is open, and the current configured model is preserved even
-  if it is not returned by the local model inventory.
-- Saves model routing through `/api/soc-settings/ai-model`.
+  the Settings page is open and supports a manual refresh.
+- Preserves configured local models that are temporarily absent from the local
+  inventory and marks them unavailable instead of silently changing routing.
+- Treats enabled Ollama models and GPT CLI as the approved global roster. Each
+  Cyber Security Agent selects one primary route and may select one different,
+  optional second-opinion route from that roster.
+- Saves the global roster through `/api/soc-settings/ai-model` and saves a
+  role's primary and second-opinion assignments atomically through
+  `/api/soc-settings/agent-model`, avoiding unrelated-setting overwrite races.
+- Shows each role's own effective assignment in its collapsed Cyber Security
+  Agent row. Labels and selectors refresh after the settings API loads or
+  saves, so they do not depend on a dashboard rebuild.
+- Runs the SOC Analyst with its exact persisted assignment. A disabled route is
+  normalized to the first still-enabled route; runtime model failures remain
+  visible instead of silently crossing to a different model or provider.
+- Invokes the configured SOC Analyst reviewer only for a validated low-
+  confidence or inconclusive result, or when the primary explicitly requests
+  another opinion. The reviewer uses its own role-specific prompt and receives
+  the same bounded evidence and relevant memory without the primary
+  conclusion. The review is bounded, independent, non-recursive, and
+  fail-open: a secondary failure is recorded without discarding the primary
+  analysis. Deterministic comparison records material/advisory disagreements
+  in `ai_second_opinion_runs`; reviewer memory candidates are eligible only
+  after high-confidence agreement and the normal validation/deduplication
+  gates.
+- Shows `Main system prompt` and `Second-opinion system prompt` in that order
+  inside every agent panel. Both prompt editors are collapsed by default and
+  use fixed allowlisted API routes.
+- Shows a standalone `MaxMind GeoIP Databases` section below the Cyber Security
+  Agents section. ASN, City, and Country paths each have an independent
+  metadata-only `Ready`, `Missing`, or `Unreadable` live state. The UI never
+  returns database contents.
+- Saves `maxmind_geoip_asn_db_path`, `maxmind_geoip_city_db_path`, and
+  `maxmind_geoip_country_db_path` atomically with the analysis settings. Each
+  path must be absolute or `$HOME`-relative and end in `.mmdb`; the databases
+  are private runtime artifacts and are never generated or copied into Git.
 - Reads `$HOME/n8n-local/config/soc_analyst_system_prompt.md`.
 - Displays the current `SOC Analyst` prompt in a collapsible editor that is
   collapsed by default.
@@ -629,16 +755,16 @@ Settings page behavior:
 - Reads `$HOME/n8n-local/config/incident_responder_system_prompt.md`.
 - Displays the current `Incident Responder` prompt in a matching collapsible
   editor below the SOC Analyst prompt.
-- Shows the collapsed trigger summary as manual incident workflow now, with
-  external incident response host collection still marked TODO.
+- Shows the collapsed trigger summary as operator escalation from SOC Alerts;
+  external incident response host collection remains marked TODO.
 - Shows the collapsed memory path:
   `$HOME/n8n-local/soc-alerts/agent-memory/incident-responder-memory.md`.
 - Shows the collapsed shared memory path:
   `$HOME/n8n-local/soc-alerts/agent-memory/shared-agent-memory.md`.
 - Saves through `/api/soc-settings/incident-responder-prompt`.
-- The Incident Responder prompt is for senior incident response planning and
-  future external host artifact collection guidance. Direct external tooling is
-  a TODO until a dedicated incident response host is connected, authenticated,
+- The Incident Responder prompt is used by the durable escalation workflow for
+  senior incident response planning. Direct external tooling remains a TODO
+  until a dedicated incident response host is connected, authenticated,
   logged, and approved.
 - Reads `$HOME/n8n-local/config/siem_engineer_system_prompt.md`.
 - Displays the current `SIEM Engineer` prompt in a matching collapsible editor
@@ -692,13 +818,30 @@ Settings page behavior:
 Current Flow page model:
 
 ```text
-Security Onion -> Raspberry Pi relay -> forced SSH intake -> alert-store /alert
-alert-store -> SQLite grouped detection store plus durable jobs
-alert-store n8n_post_commit worker -> n8n committed-alert report workflow
-alert-store enrichment worker -> public enrichment services -> enrichment_json
-SQLite -> Mac Studio AI Lab -> Ollama current local model -> AI Reports
-SQLite + AI Reports -> Onion Sentinel dashboard
-alert-store notification policy -> Telegram high/critical notifications
+Alert JSON:
+  Security Onion read-only export
+    -> relay alert poller + SQLite outbox
+    -> Docker-hosted n8n validation and heartbeat
+    -> alert-store atomic SQLite commit and durable jobs
+
+Public enrichment:
+  enrichment durable worker
+    -> privacy/key gates, cache, retries, and provider rate limits
+    -> normalized enrichment_json
+
+PCAP evidence:
+  metadata-only request control plane
+    -> Security Onion bounded read-only SSH stream
+    -> relay external-SSD checkpoint and resumable rsync
+    -> restricted Mac artifact intake
+    -> Zeek/TShark bounded evidence and successful raw-PCAP cleanup
+
+AI and analyst outputs:
+  grouped timeline + public enrichment + parsed PCAP + prior analyses + memory
+    -> SOC Analyst AI through Ollama current local model
+    -> SQLite state, Markdown/JSON reports, and reusable memory lessons
+  SQLite + reports -> Onion Sentinel API/dashboard
+  notification outbox -> Telegram high/critical and health/recovery signals
 ```
 
 The implementation lives in:
@@ -713,7 +856,11 @@ The generated page should contain:
 data-view="overview"
 flow-product-hero
 flow-lane
+flow-lane-ingress
+flow-lane-pcap
+flow-pcap-band
 flow-enrichment-band
+flow-stage-heading
 enrichment-service-grid
 enrichment-service
 flow-system-node
@@ -949,6 +1096,12 @@ warnings for stale pending/claimed work or unexpected failures. Normal
 a transport or parser failure. The page also shows recent PCAP broker request
 history so operators can distinguish queued, claimed, fulfilled, no-packet, and
 unexpected-failure states without opening the database.
+
+The relay publishes one bounded broker-state heartbeat per timer cycle.
+Alert-store keeps the latest state in an atomic dedicated file so alert bursts
+cannot evict it from bounded beacon history. A fresh capture-protection hold is
+shown as an amber advisory and suppresses only pending-age warnings; a stale
+state, stalled claimed request, or operational error remains a red warning.
 
 Runtime retention is handled on the Mac Studio with
 `$HOME/n8n-local/bin/maintain-pcap-evidence.py`. It defaults to dry-run, keeps
@@ -1195,6 +1348,14 @@ the current page of grouped alerts. The SOC Alerts table uses those fields to
 render a rows-per-page selector plus Previous, Next, and direct page selection.
 The default rows-per-page value is 25. This keeps the browser loading only one
 selected slice of the grouped summary table at a time.
+
+Metric-card aggregates are a separate contract from the page slice. The API
+returns `active_total`, `active_severity_counts`, and
+`active_highest_severity`, calculated across every active grouped alert that
+matches the current search, severity, and time filters before `LIMIT`, page, or
+analyst-status view selection is applied. The Active Alerts card and navigation
+badge consume those fields, so changing rows per page or browsing acknowledged
+or suppressed rows cannot replace active counts with page-local totals.
 
 The SOC Alerts toolbar includes a compact `Last Seen` time-window filter and a `Sorting Default` selector. The sorting default currently supports `Newest Alerts First` and `Highest Severity First`, persists in browser local storage, and resets the table to page 1 when changed.
 

@@ -86,3 +86,6 @@ build/
 tmp/
 *.log
 *.md.lock
+# Operator-supplied offline GeoIP databases are runtime data.
+*.mmdb
+GeoLite2-*

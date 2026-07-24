@@ -8,18 +8,39 @@ PORTAL = REPO_ROOT / "onion-sentinel-dashboard" / "report_portal.py"
 
 
 class DashboardSettingsMemoryViewerTest(unittest.TestCase):
-    def test_each_prompt_path_opens_its_existing_editor(self) -> None:
+    def test_each_primary_and_reviewer_prompt_path_opens_its_collapsed_editor(self) -> None:
         source = DASHBOARD_BUILDER.read_text(encoding="utf-8")
 
         for prompt_target in (
             "soc-analyst-prompt",
+            "soc-analyst-second-opinion-prompt",
             "incident-responder-prompt",
+            "incident-responder-second-opinion-prompt",
             "siem-engineer-prompt",
+            "siem-engineer-second-opinion-prompt",
             "cyber-threat-intel-prompt",
+            "cyber-threat-intel-second-opinion-prompt",
             "threat-hunter-prompt",
+            "threat-hunter-second-opinion-prompt",
         ):
             self.assertIn(f'data-prompt-target="{prompt_target}"', source)
-        self.assertEqual(source.count('class="settings-path-row settings-file-link settings-prompt-link"'), 5)
+        self.assertEqual(source.count('class="settings-path-row settings-file-link settings-prompt-link"'), 10)
+        helper = source[source.index("def agent_prompt_editors("):source.index("def list_ollama_models(")]
+        self.assertEqual(helper.count('<details class="settings-provider-details settings-agent-prompt-details"'), 2)
+        self.assertNotIn("<details open", helper)
+        self.assertLess(
+            helper.index("Main system prompt"),
+            helper.index("Second-opinion system prompt"),
+        )
+        for endpoint in (
+            "/api/soc-settings/analyst-second-opinion-prompt",
+            "/api/soc-settings/incident-responder-second-opinion-prompt",
+            "/api/soc-settings/siem-engineer-second-opinion-prompt",
+            "/api/soc-settings/cyber-threat-intel-second-opinion-prompt",
+            "/api/soc-settings/threat-hunter-second-opinion-prompt",
+        ):
+            self.assertIn(endpoint, source)
+        self.assertIn("const promptConfigurations = [...document.querySelectorAll('[data-prompt-save]')]", source)
         self.assertIn("panel.open = true;", source)
         self.assertIn("promptEditor.focus({preventScroll: true});", source)
 
@@ -48,6 +69,19 @@ class DashboardSettingsMemoryViewerTest(unittest.TestCase):
         self.assertIn("memoryLabels[memoryKey] || 'Agent Memory'", dashboard_source)
         self.assertIn('if path == "/api/soc-settings/agent-memory":', portal_source)
         self.assertNotIn('if parsed.path == "/api/soc-settings/agent-memory":', portal_source)
+
+    def test_maxmind_databases_are_a_standalone_three_database_section(self) -> None:
+        source = DASHBOARD_BUILDER.read_text(encoding="utf-8")
+
+        agent_end = source.index('</section>\n      <section class="settings-maxmind-section"')
+        maxmind_start = source.index('<section class="settings-maxmind-section"')
+        self.assertLess(agent_end, maxmind_start)
+        for database_type in ("asn", "city", "country"):
+            self.assertIn(f'id="maxmind-geoip-{database_type}-db-path"', source)
+            self.assertIn(f'id="maxmind-geoip-{database_type}-db-state"', source)
+            self.assertIn(f'maxmind_geoip_{database_type}_db_path:', source)
+        self.assertIn('id="save-maxmind-geoip-settings"', source)
+        self.assertIn("applyGeoIpDatabaseStatuses(data.geoip_databases, data.geoip_database);", source)
 
 
 if __name__ == "__main__":

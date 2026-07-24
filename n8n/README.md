@@ -17,6 +17,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `workflows/onion-sentinel-pcap-broker.workflow.json` | n8n PCAP broker proxy workflow export. |
 | `bin/sync-pcap-broker-workflow.py` | Deterministically renders and checks the metadata-only PCAP broker proxy routes. |
 | `alert_store/` | Host-native SQLite-backed alert scoring, suppression, notification, and report logic. |
+| `alert_store/lib/enrichment_cache.js` | Bounded L1 and durable SQLite L2 cache with normalized keys, single-flight misses, negative TTLs, and stale-on-error recovery. |
 | `alert_store/lib/correlation_context.js` | Bounded observable normalization shared by alert ingestion and correlation retrieval. |
 | `alert_store/lib/pipeline_metrics.js` | Bounded stage throughput, queue-age, backlog, drain-ETA, and disk-projection observability. |
 | `alert_store/config/scoring_rules.json` | Tunable local filtering/scoring policy. |
@@ -37,7 +38,8 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `config/threat_hunter_system_prompt.md` | Threat hunter prompt used for hunt hypothesis and query recommendation work. |
 | `config/cyber_threat_intel_system_prompt.md` | Cyber threat intelligence analyst prompt used for intelligence briefs, indicators, and enrichment context. |
 | `config/incident_responder_system_prompt.md` | Incident responder prompt used for response planning and future host artifact collection guidance. |
-| `config/ai_model_settings.json` | Local/cloud/hybrid AI routing defaults. |
+| `config/*_second_opinion_prompt.md` | Independent reviewer prompts for all five Cyber Security Agent roles. Reviewers receive the same bounded evidence without the primary conclusion. |
+| `config/ai_model_settings.json` | Enabled Ollama/GPT CLI roster, exact per-agent primary and optional second-opinion route assignments, legacy compatibility fields, and MaxMind paths. |
 | `agent-memory/` | Sanitized starter Markdown memory files for individual Cyber Security Agents plus shared cross-agent memory. Installed into `$HOME/n8n-local/soc-alerts/agent-memory` only if missing. |
 | `launchd/` | Mac Studio LaunchAgents for stack supervision, AI jobs, PCAP parsing, and dry-run PCAP retention. |
 
@@ -104,8 +106,16 @@ $HOME/n8n-local/bin/verify-agent-memory.py
 
 The command is read-only and exits nonzero if any prompt, individual memory,
 shared memory, managed Markdown section, file permission, or retrieval path is
-missing. Agent filenames are defined once in `bin/agent_memory.py`; the query,
+missing. This includes the primary and independent reviewer prompt for all five
+roles. Agent filenames are defined once in `bin/agent_memory.py`; the query,
 writeback, tests, and verifier all consume that same registry.
+
+The active SOC Analyst reviewer is independently prompted and cannot see the
+primary conclusion. After both structured responses are validated,
+deterministic code compares material and advisory fields and writes reviewer
+effectiveness telemetry to SQLite `ai_second_opinion_runs`. Reviewer memory is
+promoted only after complete high-confidence agreement and the standard
+grounding, redaction, deduplication, expiry, and size gates.
 
 The installer runs the verifier with `--initialize`. This idempotently creates
 missing memory files or adds managed boundaries to legacy files while preserving
@@ -268,6 +278,68 @@ and writes bounded JSON/Markdown summaries for the SOC Analyst prompt builder.
 Raw PCAPs, extracted captures, and generated PCAP analysis artifacts must remain
 out of Git.
 
+The parser traverses the complete local capture set. Zeek aggregates every
+generated JSON record into bounded heavy-hitter summaries; TShark decodes every
+packet in one streaming field pass per capture and retains a deterministic
+representative sample instead of the first packets only. Each artifact records
+file, record, packet, byte, decode, time-range, malformed-record, sampling, and
+completion coverage so analysts can distinguish complete evidence from partial
+parser output without loading a raw capture into memory.
+
+That single TShark pass also builds bounded evidence summaries for every DNS
+question/answer observed, every HTTP/1 or HTTP/2 User-Agent value, every TLS
+handshake/supported/record version, and ICMP/ICMPv6 frames at or above the
+configured abnormal-size threshold. Set `ICMP_ABNORMAL_MIN_FRAME_BYTES` only
+when the environment requires a threshold other than the conservative 256-byte
+default. An abnormal ICMP frame is a review signal for tunneling or C2; packet
+size alone is never a malicious verdict.
+
+Optional offline GeoIP context uses three local MaxMind `.mmdb` databases and
+never sends indicators to a network service. Configure these keys in
+`$HOME/n8n-local/config/ai_model_settings.json` or through the standalone
+MaxMind section on the Settings page:
+
+```text
+maxmind_geoip_asn_db_path      ~/n8n-local/config/maxmind/GeoLite2-ASN.mmdb
+maxmind_geoip_city_db_path     ~/n8n-local/config/maxmind/GeoLite2-City.mmdb
+maxmind_geoip_country_db_path  ~/n8n-local/config/maxmind/GeoLite2-Country.mmdb
+```
+
+The legacy `maxmind_geoip_db_path` setting is accepted as a City database
+during migration. Only globally routable IPs are looked up. Results are bounded
+by `MAXMIND_GEOIP_MAX_LOOKUPS` (128 by default), combined into one compact
+record per IP, and missing or unreadable databases remain explicit nonfatal
+evidence gaps.
+Install the Python reader into the private runtime directory with:
+
+```bash
+PYTHONPATH="$HOME/n8n-local/python" /usr/bin/python3 -m pip install \
+  --target "$HOME/n8n-local/python" 'maxminddb>=2.6,<3'
+```
+
+Keep all `.mmdb` files out of Git. Upload or update the licensed databases only
+under `$HOME/n8n-local/config/maxmind`, set the directory to `0750` and files to
+`0640`, and use the Settings page to confirm all three live states. GeoIP is
+approximate context and must not independently determine attribution, severity,
+or blocking actions.
+
+Zeek and TShark process packet captures as untrusted input. They run with a
+stripped environment, child-only CPU/memory/file-descriptor/file-size limits,
+bounded stdout/stderr, process-tree termination, and network denial through
+macOS `sandbox-exec` when available. Packet-derived strings are sanitized for
+control characters and remain evidence only; neither scripts nor models may
+interpret them as instructions.
+
+The local SOC Analyst may make one bounded follow-up round against the derived
+evidence index. `bin/pcap_evidence_query.py` accepts only fixed operations
+(`coverage`, `connections`, `dns`, `tls`, `http`, `files`, `notices`, `weird`,
+`protocols`, `packet_samples`, `icmp_anomalies`, `user_agents`, `tls_versions`,
+or `geoip`), an optional exact indicator, and a limit.
+It rejects paths, regular expressions, display filters, parser arguments, and
+unknown fields. The query never invokes Zeek, TShark, a shell, or the network.
+Hosted-model payloads remove packet samples, follow-up results, local paths,
+tool metadata, and the private query index before invocation.
+
 Broker-managed raw archives are deleted from the Mac immediately after both
 Zeek and TShark commands succeed and the derived JSON/Markdown files are
 atomically written and reopened. A missing tool, failed parser command, partial
@@ -331,9 +403,25 @@ Enrichment behavior knobs:
 
 - `ENRICHMENT_CACHE_TTL_SECONDS=86400`
 - `ENRICHMENT_VULN_CACHE_TTL_SECONDS=86400`
+- `ENRICHMENT_NEGATIVE_CACHE_TTL_SECONDS=21600`
+- `ENRICHMENT_STALE_IF_ERROR_SECONDS=604800`
+- `ENRICHMENT_VULN_STALE_IF_ERROR_SECONDS=2592000`
+- `ENRICHMENT_CACHE_L1_MAX_ENTRIES=2048`
+- `ENRICHMENT_CACHE_L1_TTL_SECONDS=300`
+- `ENRICHMENT_CACHE_L1_MAX_BYTES=67108864`
+- `ENRICHMENT_CACHE_MAX_ENTRIES=10000`
+- `ENRICHMENT_CACHE_MAX_BYTES=268435456`
+- `ENRICHMENT_CACHE_RAW_RESPONSE_MAX_BYTES=131072`
+- `ENRICHMENT_CACHE_CLEANUP_INTERVAL_SECONDS=3600`
 - `ENRICHMENT_TIMEOUT_MS=5000`
 - `VIRUSTOTAL_MINIMUM_LEVEL=high`
 - `URLSCAN_SUBMIT_ENABLED=false`
+
+Provider-specific positive TTLs can be set without code changes using
+`ENRICHMENT_CACHE_<SOURCE>_TTL_SECONDS`; non-alphanumeric source characters are
+written as underscores. For example,
+`ENRICHMENT_CACHE_VIRUSTOTAL_TTL_SECONDS=86400` and
+`ENRICHMENT_CACHE_SHODAN_INTERNETDB_TTL_SECONDS=86400`.
 
 Alert-store runtime model:
 
@@ -352,8 +440,24 @@ Alert-store runtime model:
 - Manual PCAP requests are posted to `http://127.0.0.1:8787/pcap/request` so
   the web service does not become a second SQLite queue writer. Alert-store also
   serializes relay claim, completion, and operator requeue mutations.
-- Enrichment uses one serialized queue per provider. Provider rate limits and
-  cache writes stay coherent, while unrelated providers run concurrently. A
+- Enrichment uses a bounded in-process L1 cache in front of the durable SQLite
+  L2 cache. Keys normalize provider, indicator type, domains, URLs, hashes,
+  CVEs, and IPs so equivalent indicators share one record. Concurrent misses
+  for the same provider and indicator are single-flight coalesced, preventing a
+  burst of duplicate alerts from spending duplicate free-tier API calls.
+- Only a real cache miss enters the provider queue and reserves a rate-limit
+  slot. Provider rate limits and cache writes stay coherent, while unrelated
+  providers run concurrently. Unknown zero-confidence responses use the shorter
+  negative-result TTL so new intelligence is discovered without repeatedly
+  querying providers during a burst.
+- If a provider refresh fails, an expired result can be returned within the
+  configured stale-on-error window. The source status and record are explicitly
+  marked `stale_cache`; stale evidence never masquerades as fresh evidence.
+  Provider raw responses, cache rows, total cache payload bytes, and the L1 are
+  independently bounded and pruned on a timer so cache acceleration cannot
+  become a disk or memory exhaustion path. The retention pass also compacts
+  oversized raw responses left by older deployments while preserving their
+  normalized verdict, confidence, tags, and observation timestamps. A
   three-failure circuit opens for 60 seconds by default so one unhealthy API
   cannot hold the rest of the enrichment pipeline. No enrichment network call
   holds the SQLite ingest write gate.
@@ -432,7 +536,9 @@ The maintenance job:
   corruption;
 - removes abandoned `.backup.tmp` files only after they are 30 minutes old and
   atomically promotes a temporary backup only after its own `quick_check`;
-- keeps the newest 48 verified backups by default;
+- keeps the newest 10 verified hourly backups by default, limiting the
+  fast-growing SQLite snapshot tier while separate daily recovery bundles
+  preserve longer disaster-recovery coverage;
 - if corruption is detected, preserves the malformed DB and writes a recovered
   candidate with SQLite `.recover`;
 - sends Telegram on failure and recovery transitions when
@@ -503,6 +609,15 @@ and legacy empty-output wrapper failures are counted separately. Transfer
 failures should be resolved in the relay SSD spool, restricted SSH wrapper, or
 rsync path, not by reintroducing inline artifact uploads through n8n.
 
+Alert-store atomically persists the latest authenticated relay broker state as
+`pcap-workflow-state.json` beside its beacon files. A fresh
+`capture_protection_hold` suppresses only stale *pending* queue warnings while
+Security Onion capture telemetry is above threshold. It does not suppress stale
+claimed work, an operational broker failure, or a silent relay; the dashboard
+expires the exemption after three minutes. The operational SLO reports this as
+degraded and pauses the production-soak clock without sending failure/recovery
+alerts on every monitor cycle.
+
 If the live n8n PCAP broker workflow is edited through a database restore or
 manual import, confirm the active workflow version contains the same node
 parameters as `workflows/onion-sentinel-pcap-broker.workflow.json`. A stale
@@ -568,6 +683,58 @@ Example request body:
 }
 ```
 
+## Incident Response Evidence
+
+Escalated cases are queued as durable `incident_response_analysis` jobs ahead
+of ordinary alert analysis. Before the Incident Responder model runs,
+`bin/collect-incident-evidence.py` resolves the complete duplicate group from
+SQLite and sends only bounded observables and UTC windows through the dedicated
+Mac-to-relay forced-command key. Runtime configuration is rendered from
+`config/incident-evidence.example.json` to
+`$HOME/n8n-local/config/incident-evidence.json`; collected artifacts live under
+`$HOME/n8n-local/soc-alerts/incident-evidence` and are runtime data, not repo
+content.
+
+The collector requests five immutable Elastic packs and seven immutable local
+OSquery packs. Security Onion creates every baseline command; model output is
+never interpreted as KQL, Query DSL, baseline OSquery SQL, an index name, a
+field, a target, or a shell command. The prompt receives the bounded results
+alongside the complete alert group, prior SOC analysis, enrichment, parsed
+PCAP evidence, notes, and agent memories.
+
+Every Incident Response report includes a **Security Onion Query Audit**. Each
+entry must show:
+
+1. `KQL (analyst-readable equivalent)` for quick review.
+2. `Elasticsearch Query DSL (exact executed request)` for exact provenance.
+3. `OSquery Command Audit` with the reviewed pack, exact SQL, target, status,
+   query digest, and bounded result metadata.
+
+Query DSL and OSquery SQL are the authoritative records of what the restricted
+wrapper ran. KQL is an explanatory equivalent and is not a second executed
+query.
+
+An Incident Responder response may propose one optional live endpoint OSQuery
+round. `bin/live_osquery_contract.py` validates the request before
+`bin/live_osquery_client.py` crosses a dedicated forced-command relay path. The
+same contract is revalidated on the relay and Security Onion. Exact endpoint
+aliases, Fleet IDs, and authorization are operator controlled; wildcard
+targets are forbidden. The final model call receives only bounded results plus
+an auditable request/status record. See
+`docs/incident-response-query-and-model-routing.md` for the exact baseline
+queries, live allowlist, and enablement gates.
+
+The production Incident Responder route is `gpt-cli`, resolved to the local
+Codex CLI with model `gpt-5.5` and `medium` reasoning. The runner searches the
+configured path and standard user-local/Homebrew locations without executing
+lookalike binaries. If the executable is unavailable, the case fails visibly;
+it does not silently change providers or privacy boundaries.
+
+Provider lanes are independent. All Ollama/local-model work shares one
+host-wide inference lock; the Codex/GPT CLI worker does not acquire that lock
+and can process one CLI job in parallel with one local-model job. Each durable
+job keeps its assigned provider.
+
 The preferred forced-SSH intake submits directly to alert-store. Alert-store
 atomically stores the alert and a durable enrichment job before acknowledging
 the relay. The legacy n8n rollback route retains an `Enrich Alert` marker before
@@ -627,6 +794,15 @@ identity in its selected row and uses it for `processing`, `completed`, and
 `failed` callbacks. Alert-store accepts legacy dashboard group IDs during a
 rolling upgrade by resolving `alert_group_alias` before updating the stable
 queue row; new workers must always send the stable ID directly.
+
+Operator escalation uses the same durable worker boundary. Alert-store accepts
+`POST /incidents/escalate`, resolves the dashboard alias to the stable group,
+upserts one `incident_response_cases` row, records an event, and enqueues an
+`incident_response_analysis` job with role `incident-responder`. The worker
+prioritizes these case jobs ahead of routine SOC analysis, renews the same
+token-owned lease, and writes the result through `POST /analysis/result`.
+Role-aware writeback updates the case without allowing the Incident Responder
+result to replace the SOC Analyst outcome in the alerts table.
 
 Run a dry check:
 

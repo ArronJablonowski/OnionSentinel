@@ -1,0 +1,1 @@
+from="10.88.8.8",command="sudo -n /usr/local/sbin/export-incident-evidence",no-agent-forwarding,no-X11-forwarding,no-port-forwarding,no-pty,no-user-rc ssh-ed25519 REPLACE_WITH_PUBLIC_KEY so-ai-relay-incident-query@security-onion

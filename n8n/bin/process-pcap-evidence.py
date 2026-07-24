@@ -10,8 +10,10 @@ model.
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as dt
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -33,10 +35,24 @@ from pcap_lifecycle import analysis_completed, delete_request_artifacts
 from disk_capacity import require_runtime_capacity
 from bounded_http import BoundedHttpError, read_bounded_json
 from bounded_process import BoundedProcessError, run_bounded_command, run_bounded_command_to_file
+from pcap_analysis_core import BoundedTopCounter, CoverageTracker, DeterministicReservoir, sanitize_evidence_text
+from pcap_tool_runtime import run_isolated_command, stream_isolated_lines
 
 
 HOME = Path.home()
 DEFAULT_DB = HOME / "n8n-local" / "alert_store_data" / "alerts.sqlite3"
+DEFAULT_AI_SETTINGS = HOME / "n8n-local" / "config" / "ai_model_settings.json"
+DEFAULT_MAXMIND_DBS = {
+    "asn": HOME / "n8n-local" / "config" / "maxmind" / "GeoLite2-ASN.mmdb",
+    "city": HOME / "n8n-local" / "config" / "maxmind" / "GeoLite2-City.mmdb",
+    "country": HOME / "n8n-local" / "config" / "maxmind" / "GeoLite2-Country.mmdb",
+}
+# Kept as a compatibility alias for direct callers and older tests. Existing
+# City-only deployments are migrated by configured_maxmind_db_paths().
+DEFAULT_MAXMIND_DB = DEFAULT_MAXMIND_DBS["city"]
+RUNTIME_PYTHON_DIR = HOME / "n8n-local" / "python"
+if RUNTIME_PYTHON_DIR.is_dir() and str(RUNTIME_PYTHON_DIR) not in sys.path:
+    sys.path.insert(0, str(RUNTIME_PYTHON_DIR))
 DEFAULT_ARTIFACT_DIR = HOME / "n8n-local" / "pcap-evidence" / "artifacts"
 DEFAULT_OUT_DIR = HOME / "n8n-local" / "soc-alerts" / "pcap-analysis"
 DEFAULT_WAKE = Path(os.environ.get(
@@ -48,7 +64,21 @@ LOG_LIMIT = 2000
 SUMMARY_LIMIT = 20
 MAX_TOOL_STDOUT_BYTES = max(64 * 1024, int(os.environ.get("PCAP_TOOL_MAX_STDOUT_BYTES", str(2 * 1024 * 1024))))
 MAX_TOOL_STDERR_BYTES = max(16 * 1024, int(os.environ.get("PCAP_TOOL_MAX_STDERR_BYTES", str(512 * 1024))))
-TSHARK_SUMMARY_PACKET_LIMIT = max(200, int(os.environ.get("PCAP_TSHARK_SUMMARY_PACKET_LIMIT", "5000")))
+TSHARK_SAMPLE_LIMIT = max(20, int(os.environ.get("PCAP_TSHARK_SAMPLE_LIMIT", "200")))
+PARSER_TIMEOUT_SECONDS = max(60, int(os.environ.get("PCAP_PARSER_TIMEOUT_SECONDS", "900")))
+HEAVY_HITTER_CAPACITY = max(SUMMARY_LIMIT, int(os.environ.get("PCAP_HEAVY_HITTER_CAPACITY", "256")))
+QUERY_INDEX_LIMIT = max(
+    SUMMARY_LIMIT,
+    min(HEAVY_HITTER_CAPACITY, int(os.environ.get("PCAP_QUERY_INDEX_LIMIT", "96"))),
+)
+ICMP_ABNORMAL_MIN_FRAME_BYTES = max(
+    64,
+    int(os.environ.get("PCAP_ICMP_ABNORMAL_MIN_FRAME_BYTES", "256")),
+)
+MAXMIND_GEOIP_MAX_LOOKUPS = max(
+    1,
+    min(512, int(os.environ.get("MAXMIND_GEOIP_MAX_LOOKUPS", "128"))),
+)
 MAX_ARCHIVE_MEMBERS = max(1, int(os.environ.get("PCAP_MAX_ARCHIVE_MEMBERS", "2048")))
 MAX_EXTRACTED_BYTES = max(1, int(os.environ.get("PCAP_MAX_EXTRACTED_BYTES", str(40 * 1024 * 1024 * 1024))))
 MAX_PCAP_FILES = max(1, int(os.environ.get("PCAP_MAX_FILES", "256")))
@@ -58,6 +88,9 @@ MAX_REMOTE_ARTIFACT_BYTES = max(
 )
 REMOTE_FETCH_TIMEOUT_SECONDS = max(30, int(os.environ.get("PCAP_REMOTE_FETCH_TIMEOUT_SECONDS", "3600")))
 MAX_CONTROL_RESPONSE_BYTES = 64 * 1024
+# Keep repeated TShark field values distinct without corrupting legitimate
+# commas in DNS names, HTTP User-Agent strings, or other evidence text.
+TSHARK_OCCURRENCE_SEPARATOR = "\x1f"
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,6 +98,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="Alert-store SQLite DB")
     parser.add_argument("--artifact-dir", type=Path, default=DEFAULT_ARTIFACT_DIR, help="Runtime-only copied PCAP artifact directory")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help="PCAP analysis JSON/Markdown output directory")
+    parser.add_argument("--ai-settings", type=Path, default=DEFAULT_AI_SETTINGS, help="AI/GeoIP settings JSON")
     parser.add_argument("--wake-file", type=Path, default=DEFAULT_WAKE, help="Consumable launchd wake marker")
     parser.add_argument("--request-id", help="Process one PCAP broker request id")
     parser.add_argument("--pcap", type=Path, help="Parse a local PCAP directly, without reading pcap_requests")
@@ -113,6 +147,246 @@ def safe_filename(value: object) -> str:
     return (cleaned or "pcap")[:140]
 
 
+def configured_maxmind_db_paths(settings_path: Path = DEFAULT_AI_SETTINGS) -> dict[str, Path]:
+    """Resolve the three local MMDB paths while migrating the City-only key.
+
+    Environment overrides remain useful for ephemeral deployments. The legacy
+    MAXMIND_GEOIP_DB_PATH and maxmind_geoip_db_path values apply only to City so
+    an existing operator configuration is never silently discarded.
+    """
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        settings = {}
+    settings = settings if isinstance(settings, dict) else {}
+    legacy_city = str(
+        os.environ.get("MAXMIND_GEOIP_DB_PATH")
+        or settings.get("maxmind_geoip_db_path")
+        or ""
+    ).strip()
+    paths: dict[str, Path] = {}
+    for database_type, default_path in DEFAULT_MAXMIND_DBS.items():
+        environment_key = f"MAXMIND_GEOIP_{database_type.upper()}_DB_PATH"
+        setting_key = f"maxmind_geoip_{database_type}_db_path"
+        configured = str(os.environ.get(environment_key) or settings.get(setting_key) or "").strip()
+        if database_type == "city" and not configured:
+            configured = legacy_city
+        paths[database_type] = Path(configured or default_path).expanduser()
+    return paths
+
+
+def configured_maxmind_db_path(settings_path: Path = DEFAULT_AI_SETTINGS) -> Path:
+    """Return the configured City database path for legacy callers."""
+    return configured_maxmind_db_paths(settings_path)["city"]
+
+
+def public_ip(value: object) -> str:
+    """Return a canonical globally routable IP or an empty string.
+
+    Private, loopback, link-local, multicast, documentation, and otherwise
+    non-global addresses are deliberately excluded from GeoIP lookup.
+    """
+    try:
+        address = ipaddress.ip_address(str(value or "").strip())
+    except ValueError:
+        return ""
+    return str(address) if address.is_global else ""
+
+
+TLS_VERSION_NAMES = {
+    "0x0300": "SSL 3.0",
+    "0x0301": "TLS 1.0",
+    "0x0302": "TLS 1.1",
+    "0x0303": "TLS 1.2 (or TLS 1.3 legacy record)",
+    "0x0304": "TLS 1.3",
+}
+
+
+def tshark_occurrences(value: object) -> list[str]:
+    """Split TShark multi-occurrence fields into bounded, sanitized values."""
+    return [
+        sanitized
+        for item in str(value or "").split(TSHARK_OCCURRENCE_SEPARATOR)[:64]
+        if (sanitized := sanitize_evidence_text(item, 512))
+    ]
+
+
+def tls_version_name(value: object) -> tuple[str, str]:
+    raw = sanitize_evidence_text(value, 32).lower()
+    if not raw:
+        return "", ""
+    if raw.isdigit():
+        raw = f"0x{int(raw):04x}"
+    return raw, TLS_VERSION_NAMES.get(raw, f"Unknown ({raw})")
+
+
+def _maxmind_name(record: object) -> str:
+    if not isinstance(record, dict):
+        return ""
+    names = record.get("names")
+    return sanitize_evidence_text(names.get("en"), 160) if isinstance(names, dict) else ""
+
+
+def compact_maxmind_record(address: str, record: dict[str, Any], roles: list[str], count: int) -> dict[str, Any]:
+    """Keep only useful offline GeoIP context; raw MMDB records stay local."""
+    country = record.get("country") if isinstance(record.get("country"), dict) else {}
+    registered = record.get("registered_country") if isinstance(record.get("registered_country"), dict) else {}
+    continent = record.get("continent") if isinstance(record.get("continent"), dict) else {}
+    city = record.get("city") if isinstance(record.get("city"), dict) else {}
+    location = record.get("location") if isinstance(record.get("location"), dict) else {}
+    subdivisions = record.get("subdivisions") if isinstance(record.get("subdivisions"), list) else []
+    subdivision = subdivisions[0] if subdivisions and isinstance(subdivisions[0], dict) else {}
+    output: dict[str, Any] = {
+        "ip": address,
+        "roles": sorted(set(roles)),
+        "packet_observations": count,
+        "continent": _maxmind_name(continent),
+        "country_iso_code": sanitize_evidence_text(country.get("iso_code"), 8),
+        "country": _maxmind_name(country),
+        "registered_country_iso_code": sanitize_evidence_text(registered.get("iso_code"), 8),
+        "subdivision": _maxmind_name(subdivision),
+        "city": _maxmind_name(city),
+        "time_zone": sanitize_evidence_text(location.get("time_zone"), 80),
+        "accuracy_radius_km": location.get("accuracy_radius"),
+        "latitude": location.get("latitude"),
+        "longitude": location.get("longitude"),
+        "autonomous_system_number": record.get("autonomous_system_number"),
+        "autonomous_system_organization": sanitize_evidence_text(record.get("autonomous_system_organization"), 200),
+    }
+    return {key: value for key, value in output.items() if value not in (None, "", [], {})}
+
+
+def maxmind_geoip_summary(
+    candidates: BoundedTopCounter,
+    database_paths: dict[str, Path] | Path,
+) -> dict[str, Any]:
+    """Perform bounded, offline ASN, City, and Country lookups.
+
+    Readers are opened only after TShark has finished streaming. Every public IP
+    is looked up at most once per ready database, and only compact merged fields
+    are retained. A missing optional database never blocks PCAP analysis.
+    """
+    if isinstance(database_paths, Path):
+        database_paths = {"city": database_paths}
+    normalized_paths = {
+        database_type: Path(path).expanduser()
+        for database_type, path in database_paths.items()
+        if database_type in DEFAULT_MAXMIND_DBS
+    }
+    summary: dict[str, Any] = {
+        "available": False,
+        "network_access": "none-offline-database-only",
+        "public_ip_candidates": 0,
+        "lookups_attempted": 0,
+        "records": [],
+        "databases": {},
+    }
+    candidate_rows = candidates.most_common(("ip", "role"), MAXMIND_GEOIP_MAX_LOOKUPS * 2)
+    by_ip: dict[str, dict[str, Any]] = {}
+    for item in candidate_rows:
+        address = public_ip(item.get("ip"))
+        if not address:
+            continue
+        current = by_ip.setdefault(address, {"count": 0, "roles": []})
+        current["count"] += int(item.get("count") or 0)
+        role = sanitize_evidence_text(item.get("role"), 24)
+        if role:
+            current["roles"].append(role)
+    summary["public_ip_candidates"] = len(by_ip)
+    for database_type in ("asn", "city", "country"):
+        path = normalized_paths.get(database_type)
+        if path is None:
+            continue
+        summary["databases"][database_type] = {
+            "state": "missing",
+            "database": path.name,
+            "lookups_attempted": 0,
+            "records_found": 0,
+            "records_not_found": 0,
+            "lookup_errors": 0,
+        }
+    ready_paths = {
+        database_type: path
+        for database_type, path in normalized_paths.items()
+        if path.is_file()
+    }
+    if not ready_paths:
+        summary["reason"] = "No configured MaxMind MMDB files are installed"
+        return summary
+    try:
+        import maxminddb  # type: ignore
+    except ImportError:
+        summary["reason"] = "maxminddb Python reader is not installed in the Onion Sentinel runtime"
+        return summary
+    readers: dict[str, Any] = {}
+    try:
+        for database_type, path in ready_paths.items():
+            database_status = summary["databases"][database_type]
+            try:
+                reader = maxminddb.open_database(str(path))
+                metadata = reader.metadata()
+            except Exception as exc:
+                database_status["state"] = "unreadable"
+                database_status["error"] = sanitize_evidence_text(exc, 240)
+                continue
+            readers[database_type] = reader
+            database_status["state"] = "ready"
+            database_status["database_type"] = sanitize_evidence_text(
+                getattr(metadata, "database_type", ""),
+                120,
+            )
+        for address, context in sorted(
+            by_ip.items(),
+            key=lambda item: (-item[1]["count"], item[0]),
+        )[:MAXMIND_GEOIP_MAX_LOOKUPS]:
+            merged: dict[str, Any] = {
+                "ip": address,
+                "roles": sorted(set(context["roles"])),
+                "packet_observations": context["count"],
+            }
+            sources: list[str] = []
+            for database_type in ("asn", "city", "country"):
+                reader = readers.get(database_type)
+                if reader is None:
+                    continue
+                database_status = summary["databases"][database_type]
+                database_status["lookups_attempted"] += 1
+                summary["lookups_attempted"] += 1
+                try:
+                    record = reader.get(address)
+                except Exception:
+                    database_status["lookup_errors"] += 1
+                    continue
+                if not isinstance(record, dict):
+                    database_status["records_not_found"] += 1
+                    continue
+                database_status["records_found"] += 1
+                sources.append(database_type)
+                compact = compact_maxmind_record(address, record, context["roles"], context["count"])
+                for key, value in compact.items():
+                    if key not in {"ip", "roles", "packet_observations"} and key not in merged:
+                        merged[key] = value
+            if sources:
+                merged["database_sources"] = sources
+                summary["records"].append(merged)
+    finally:
+        for reader in readers.values():
+            reader.close()
+    summary["available"] = bool(readers)
+    summary["records_found"] = len(summary["records"])
+    summary["records_not_found"] = sum(
+        int(status.get("records_not_found") or 0)
+        for status in summary["databases"].values()
+    )
+    summary["lookup_errors"] = sum(
+        int(status.get("lookup_errors") or 0)
+        for status in summary["databases"].values()
+    )
+    if not readers:
+        summary["reason"] = "Configured MaxMind MMDB files could not be opened"
+    return summary
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -137,7 +411,7 @@ def tool_path(env_name: str, executable: str) -> str | None:
 
 def run_command(command: list[str], cwd: Path | None = None, timeout: int = 120) -> dict[str, Any]:
     try:
-        proc = run_bounded_command(
+        proc = run_isolated_command(
             command,
             timeout_seconds=timeout,
             max_stdout_bytes=MAX_TOOL_STDOUT_BYTES,
@@ -387,6 +661,44 @@ def top_values(records: list[dict[str, Any]], *fields: str) -> list[dict[str, An
     ]
 
 
+ZEEK_SUMMARY_FIELDS = {
+    "conn": ("id.orig_h", "id.resp_h", "id.resp_p", "proto", "service"),
+    "dns": ("query", "qtype_name", "rcode_name"),
+    "tls": ("server_name", "id.orig_h", "id.resp_h"),
+    "http": ("host", "uri", "method", "status_code"),
+    "files": ("mime_type", "filename", "seen_bytes"),
+    "notice": ("note", "msg"),
+    "weird": ("name", "addl"),
+}
+
+
+def aggregate_zeek_log(
+    path: Path,
+    fields: tuple[str, ...],
+    counter: BoundedTopCounter,
+    coverage: CoverageTracker,
+) -> None:
+    """Read every Zeek record while keeping only bounded heavy-hitter state."""
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                coverage.malformed_records += 1
+                continue
+            if not isinstance(parsed, dict):
+                coverage.malformed_records += 1
+                continue
+            packet_bytes = 0
+            for key in ("orig_bytes", "resp_bytes", "seen_bytes"):
+                try:
+                    packet_bytes += max(0, int(parsed.get(key) or 0))
+                except (TypeError, ValueError):
+                    continue
+            coverage.observe(timestamp=parsed.get("ts"), length=packet_bytes, decoded=True)
+            counter.add(parsed.get(field) for field in fields)
+
+
 def run_zeek(pcap_files: list[Path], work_dir: Path) -> dict[str, Any]:
     zeek = tool_path("ZEEK_BIN", "zeek")
     if not zeek:
@@ -403,138 +715,337 @@ def run_zeek(pcap_files: list[Path], work_dir: Path) -> dict[str, Any]:
         "notice": ("notice.log",),
         "weird": ("weird.log",),
     }
-    samples: dict[str, list[dict[str, Any]]] = {key: [] for key in log_names}
-    record_counts: Counter[str] = Counter()
-    invalid_lines: Counter[str] = Counter()
+    counters = {key: BoundedTopCounter(HEAVY_HITTER_CAPACITY) for key in log_names}
+    coverage = {key: CoverageTracker() for key in log_names}
+    files_processed = 0
 
     for index, pcap in enumerate(pcap_files):
         # Zeek uses fixed output names. A distinct workspace per capture keeps
         # one run from overwriting or silently mixing another capture's logs.
         capture_dir = zeek_dir / f"{index:04d}-{safe_filename(pcap.stem)}"
         capture_dir.mkdir(parents=True, exist_ok=False)
-        result = run_command(
-            [zeek, "-C", "LogAscii::use_json=T", "-r", str(pcap)],
-            cwd=capture_dir,
-            timeout=300,
-        )
-        commands.append({key: result[key] for key in ("ok", "returncode", "stderr", "command")})
-        for log_key, candidates in log_names.items():
-            path = next((capture_dir / name for name in candidates if (capture_dir / name).exists()), None)
-            if path is None:
-                continue
-            remaining = max(0, LOG_LIMIT - len(samples[log_key]))
-            scan = scan_json_lines(path, remaining)
-            samples[log_key].extend(scan["records"])
-            record_counts[log_key] += int(scan["valid_records"])
-            invalid_lines[log_key] += int(scan["invalid_lines"])
-        shutil.rmtree(capture_dir, ignore_errors=True)
-        if not result["ok"]:
-            break
+        try:
+            result = run_command(
+                [zeek, "-C", "LogAscii::use_json=T", "-r", str(pcap)],
+                cwd=capture_dir,
+                timeout=PARSER_TIMEOUT_SECONDS,
+            )
+            commands.append({key: result[key] for key in ("ok", "returncode", "stderr", "command")})
+            for log_key, candidates in log_names.items():
+                path = next((capture_dir / name for name in candidates if (capture_dir / name).exists()), None)
+                if path is not None:
+                    aggregate_zeek_log(path, ZEEK_SUMMARY_FIELDS[log_key], counters[log_key], coverage[log_key])
+            if result["ok"]:
+                files_processed += 1
+        finally:
+            shutil.rmtree(capture_dir, ignore_errors=True)
+    record_counts = {key: coverage[key].total_records for key in log_names}
+    valid_timestamps = [item for item in coverage.values() if item.first_timestamp is not None]
     return {
         "available": True,
         "commands": commands,
-        "record_counts": {key: record_counts[key] for key in log_names},
-        "sampling": {
-            "sample_limit_per_log": LOG_LIMIT,
-            "sampled_records": {key: len(samples[key]) for key in log_names},
-            "records_truncated": {key: record_counts[key] > len(samples[key]) for key in log_names},
-            "invalid_json_lines": {key: invalid_lines[key] for key in log_names},
+        "record_counts": record_counts,
+        "coverage": {
+            "pcap_files_total": len(pcap_files),
+            "pcap_files_processed": files_processed,
+            "records_aggregated": sum(record_counts.values()),
+            "first_timestamp_epoch": min((item.first_timestamp for item in valid_timestamps), default=None),
+            "last_timestamp_epoch": max((item.last_timestamp for item in valid_timestamps), default=None),
+            "per_log": {key: coverage[key].as_dict() for key in log_names},
+            "complete": files_processed == len(pcap_files) and all(item.get("ok") for item in commands),
         },
-        "top_connections": top_values(samples["conn"], "id.orig_h", "id.resp_h", "id.resp_p", "proto", "service"),
-        "dns_queries": top_values(samples["dns"], "query", "qtype_name", "rcode_name"),
-        "tls_sni": top_values(samples["tls"], "server_name", "id.orig_h", "id.resp_h"),
-        "http_hosts": top_values(samples["http"], "host", "uri", "method", "status_code"),
-        "files": top_values(samples["files"], "mime_type", "filename", "seen_bytes"),
-        "notices": top_values(samples["notice"], "note", "msg"),
-        "weird": top_values(samples["weird"], "name", "addl"),
+        "sampling": {
+            "strategy": "full-stream-bounded-heavy-hitters",
+            "heavy_hitter_capacity_per_log": HEAVY_HITTER_CAPACITY,
+            "records_truncated_before_aggregation": {key: False for key in log_names},
+            "invalid_json_lines": {key: coverage[key].malformed_records for key in log_names},
+        },
+        "top_connections": counters["conn"].most_common(ZEEK_SUMMARY_FIELDS["conn"], SUMMARY_LIMIT),
+        "dns_queries": counters["dns"].most_common(ZEEK_SUMMARY_FIELDS["dns"], SUMMARY_LIMIT),
+        "tls_sni": counters["tls"].most_common(ZEEK_SUMMARY_FIELDS["tls"], SUMMARY_LIMIT),
+        "http_hosts": counters["http"].most_common(ZEEK_SUMMARY_FIELDS["http"], SUMMARY_LIMIT),
+        "files": counters["files"].most_common(ZEEK_SUMMARY_FIELDS["files"], SUMMARY_LIMIT),
+        "notices": counters["notice"].most_common(ZEEK_SUMMARY_FIELDS["notice"], SUMMARY_LIMIT),
+        "weird": counters["weird"].most_common(ZEEK_SUMMARY_FIELDS["weird"], SUMMARY_LIMIT),
+        # This bounded index is retained only for local, allowlisted follow-up
+        # queries. It is stripped before either the initial local prompt or any
+        # hosted-model request is assembled.
+        "_local_query_index": {
+            "connections": counters["conn"].most_common(ZEEK_SUMMARY_FIELDS["conn"], QUERY_INDEX_LIMIT),
+            "dns": counters["dns"].most_common(ZEEK_SUMMARY_FIELDS["dns"], QUERY_INDEX_LIMIT),
+            "tls": counters["tls"].most_common(ZEEK_SUMMARY_FIELDS["tls"], QUERY_INDEX_LIMIT),
+            "http": counters["http"].most_common(ZEEK_SUMMARY_FIELDS["http"], QUERY_INDEX_LIMIT),
+            "files": counters["files"].most_common(ZEEK_SUMMARY_FIELDS["files"], QUERY_INDEX_LIMIT),
+            "notices": counters["notice"].most_common(ZEEK_SUMMARY_FIELDS["notice"], QUERY_INDEX_LIMIT),
+            "weird": counters["weird"].most_common(ZEEK_SUMMARY_FIELDS["weird"], QUERY_INDEX_LIMIT),
+        },
     }
 
 
-def run_tshark(pcap_files: list[Path]) -> dict[str, Any]:
+def run_tshark(
+    pcap_files: list[Path],
+    maxmind_db_paths: dict[str, Path] | Path | None = None,
+) -> dict[str, Any]:
     tshark = tool_path("TSHARK_BIN", "tshark")
     if not tshark:
         return {"available": False, "reason": "tshark executable not found on PATH or TSHARK_BIN"}
-    commands = []
-    packet_samples = []
-    for pcap in pcap_files[:3]:
-        hierarchy = run_command(
-            [tshark, "-r", str(pcap), "-c", str(TSHARK_SUMMARY_PACKET_LIMIT), "-q", "-z", "io,phs"],
-            timeout=180,
-        )
-        conversations = run_command(
-            [
-                tshark,
-                "-r",
-                str(pcap),
-                "-c",
-                str(TSHARK_SUMMARY_PACKET_LIMIT),
-                "-q",
-                "-z",
-                "conv,tcp",
-                "-z",
-                "conv,udp",
-            ],
-            timeout=180,
-        )
-        fields = run_command(
-            [
-                tshark,
-                "-r",
-                str(pcap),
-                "-c",
-                "200",
-                "-T",
-                "fields",
-                "-E",
-                "header=y",
-                "-E",
-                "separator=\\t",
-                "-e",
-                "frame.time_epoch",
-                "-e",
-                "ip.src",
-                "-e",
-                "ip.dst",
-                "-e",
-                "tcp.srcport",
-                "-e",
-                "tcp.dstport",
-                "-e",
-                "udp.srcport",
-                "-e",
-                "udp.dstport",
-                "-e",
-                "_ws.col.Protocol",
-                "-e",
-                "frame.len",
-                "-e",
-                "dns.qry.name",
-                "-e",
-                "tls.handshake.extensions_server_name",
-                "-e",
-                "http.host",
-                "-e",
-                "http.request.uri",
-            ],
-            timeout=180,
-        )
-        commands.extend([
-            {"type": "protocol_hierarchy", **{key: hierarchy[key] for key in ("ok", "returncode", "stderr", "command")}},
-            {"type": "conversations", **{key: conversations[key] for key in ("ok", "returncode", "stderr", "command")}},
-            {"type": "field_sample", **{key: fields[key] for key in ("ok", "returncode", "stderr", "command")}},
-        ])
-        packet_samples.append({
-            "pcap": str(pcap),
-            "protocol_hierarchy": hierarchy["stdout"][:12000],
-            "conversations": conversations["stdout"][:12000],
-            "field_sample_tsv": fields["stdout"][:12000],
-        })
+    field_names = (
+        "frame_number", "timestamp_epoch", "frame_length", "protocol",
+        "ipv4_src", "ipv6_src", "ipv4_dst", "ipv6_dst",
+        "tcp_srcport", "tcp_dstport", "udp_srcport", "udp_dstport",
+        "dns_query", "dns_query_type", "dns_rcode", "dns_answer_ipv4", "dns_answer_ipv6", "dns_cname",
+        "tls_sni", "tls_handshake_version", "tls_supported_version", "tls_record_version",
+        "http_host", "http_uri", "http_user_agent", "http2_user_agent",
+        "icmp_type", "icmp_code", "icmpv6_type", "icmpv6_code",
+    )
+    tshark_fields = (
+        "frame.number", "frame.time_epoch", "frame.len", "_ws.col.Protocol",
+        "ip.src", "ipv6.src", "ip.dst", "ipv6.dst",
+        "tcp.srcport", "tcp.dstport", "udp.srcport", "udp.dstport",
+        "dns.qry.name", "dns.qry.type", "dns.flags.rcode", "dns.a", "dns.aaaa", "dns.cname",
+        "tls.handshake.extensions_server_name", "tls.handshake.version", "tls.handshake.extensions.supported_version", "tls.record.version",
+        "http.host", "http.request.uri", "http.user_agent", "http2.headers.user_agent",
+        "icmp.type", "icmp.code", "icmpv6.type", "icmpv6.code",
+    )
+    commands: list[dict[str, Any]] = []
+    coverage = CoverageTracker()
+    per_file: list[dict[str, Any]] = []
+    reservoir = DeterministicReservoir(TSHARK_SAMPLE_LIMIT)
+    protocols = BoundedTopCounter(128)
+    conversations = BoundedTopCounter(HEAVY_HITTER_CAPACITY)
+    dns_queries = BoundedTopCounter(HEAVY_HITTER_CAPACITY)
+    dns_answers = BoundedTopCounter(HEAVY_HITTER_CAPACITY)
+    dns_query_types = BoundedTopCounter(128)
+    dns_rcodes = BoundedTopCounter(128)
+    user_agents = BoundedTopCounter(HEAVY_HITTER_CAPACITY)
+    tls_versions = BoundedTopCounter(128)
+    icmp_anomalies = BoundedTopCounter(HEAVY_HITTER_CAPACITY)
+    icmp_anomaly_samples = DeterministicReservoir(min(TSHARK_SAMPLE_LIMIT, 100))
+    geoip_candidates = BoundedTopCounter(HEAVY_HITTER_CAPACITY)
+    dns_packet_count = 0
+    dns_query_count = 0
+    dns_answer_count = 0
+    user_agent_count = 0
+    tls_version_observation_count = 0
+    icmp_packet_count = 0
+    icmp_abnormal_count = 0
+    icmp_max_frame_bytes = 0
+    files_processed = 0
+    for pcap in pcap_files:
+        file_coverage = CoverageTracker()
+
+        def on_line(line: str) -> None:
+            nonlocal dns_packet_count, dns_query_count, dns_answer_count, user_agent_count
+            nonlocal tls_version_observation_count, icmp_packet_count, icmp_abnormal_count, icmp_max_frame_bytes
+            try:
+                values = next(csv.reader([line], delimiter="\t", quotechar='"'))
+            except (csv.Error, StopIteration):
+                file_coverage.malformed_records += 1
+                coverage.malformed_records += 1
+                return
+            values.extend([""] * max(0, len(field_names) - len(values)))
+            row = dict(zip(field_names, values[: len(field_names)]))
+            source = row["ipv4_src"] or row["ipv6_src"]
+            destination = row["ipv4_dst"] or row["ipv6_dst"]
+            source_port = row["tcp_srcport"] or row["udp_srcport"]
+            destination_port = row["tcp_dstport"] or row["udp_dstport"]
+            transport = "tcp" if row["tcp_srcport"] or row["tcp_dstport"] else "udp" if row["udp_srcport"] or row["udp_dstport"] else ""
+            decoded = bool(row["protocol"])
+            file_coverage.observe(timestamp=row["timestamp_epoch"], length=row["frame_length"], decoded=decoded)
+            coverage.observe(timestamp=row["timestamp_epoch"], length=row["frame_length"], decoded=decoded)
+            protocols.add((row["protocol"],))
+            conversations.add((source, destination, source_port, destination_port, transport, row["protocol"]))
+            source_public = public_ip(source)
+            destination_public = public_ip(destination)
+            if source_public:
+                geoip_candidates.add((source_public, "source"))
+            if destination_public:
+                geoip_candidates.add((destination_public, "destination"))
+            query_values = tshark_occurrences(row["dns_query"])
+            answer_values = (
+                [("A", value) for value in tshark_occurrences(row["dns_answer_ipv4"])]
+                + [("AAAA", value) for value in tshark_occurrences(row["dns_answer_ipv6"])]
+                + [("CNAME", value) for value in tshark_occurrences(row["dns_cname"])]
+            )
+            if query_values or answer_values or row["dns_query_type"] or row["dns_rcode"] or row["protocol"].upper() in {"DNS", "MDNS", "LLMNR", "NBNS"}:
+                dns_packet_count += 1
+            for value in query_values:
+                dns_query_count += 1
+                dns_queries.add((value,))
+            for value in tshark_occurrences(row["dns_query_type"]):
+                dns_query_types.add((value,))
+            for value in tshark_occurrences(row["dns_rcode"]):
+                dns_rcodes.add((value,))
+            for answer_type, value in answer_values:
+                dns_answer_count += 1
+                dns_answers.add((answer_type, value))
+                address = public_ip(value)
+                if address:
+                    geoip_candidates.add((address, "dns_answer"))
+            for source_field, raw_user_agents in (("http/1", row["http_user_agent"]), ("http/2", row["http2_user_agent"])):
+                for raw_user_agent in tshark_occurrences(raw_user_agents):
+                    user_agent_count += 1
+                    user_agents.add((source_field, raw_user_agent))
+            for version_source, raw_versions in (
+                ("handshake", row["tls_handshake_version"]),
+                ("supported", row["tls_supported_version"]),
+                ("record", row["tls_record_version"]),
+            ):
+                for value in tshark_occurrences(raw_versions):
+                    raw_version, version_name = tls_version_name(value)
+                    if raw_version:
+                        tls_version_observation_count += 1
+                        tls_versions.add((version_source, raw_version, version_name))
+            icmp_family = "icmpv6" if row["icmpv6_type"] or row["icmpv6_code"] else "icmp" if row["icmp_type"] or row["icmp_code"] else ""
+            if icmp_family:
+                icmp_packet_count += 1
+                try:
+                    frame_bytes = max(0, int(float(row["frame_length"] or 0)))
+                except (TypeError, ValueError):
+                    frame_bytes = 0
+                icmp_max_frame_bytes = max(icmp_max_frame_bytes, frame_bytes)
+                if frame_bytes >= ICMP_ABNORMAL_MIN_FRAME_BYTES:
+                    icmp_abnormal_count += 1
+                    icmp_type = row["icmpv6_type"] if icmp_family == "icmpv6" else row["icmp_type"]
+                    icmp_code = row["icmpv6_code"] if icmp_family == "icmpv6" else row["icmp_code"]
+                    icmp_anomalies.add((icmp_family, icmp_type, icmp_code, source, destination, frame_bytes))
+                    icmp_anomaly_samples.add({
+                        "frame_number": row["frame_number"],
+                        "timestamp_epoch": row["timestamp_epoch"],
+                        "family": icmp_family,
+                        "type": icmp_type,
+                        "code": icmp_code,
+                        "source_ip": source,
+                        "destination_ip": destination,
+                        "frame_bytes": frame_bytes,
+                    })
+            reservoir.add({
+                "frame_number": row["frame_number"],
+                "timestamp_epoch": row["timestamp_epoch"],
+                "frame_length": row["frame_length"],
+                "protocol": row["protocol"],
+                "source_ip": source,
+                "destination_ip": destination,
+                "source_port": source_port,
+                "destination_port": destination_port,
+                "transport": transport,
+                "dns_query": row["dns_query"],
+                "tls_sni": row["tls_sni"],
+                "http_host": row["http_host"],
+                "http_uri": row["http_uri"],
+            })
+
+        command = [
+            tshark, "-n", "-r", str(pcap), "-T", "fields",
+            # TShark uses /t for a literal tab. A backslash-t value is treated
+            # as ordinary text by current Wireshark releases and concatenates
+            # quoted fields, which silently corrupts coverage telemetry.
+            "-E", "header=n", "-E", "separator=/t", "-E", "quote=d", "-E", "occurrence=a",
+            "-E", f"aggregator={TSHARK_OCCURRENCE_SEPARATOR}",
+        ]
+        for field_name in tshark_fields:
+            command.extend(["-e", field_name])
+        try:
+            result = stream_isolated_lines(command, on_line, timeout_seconds=PARSER_TIMEOUT_SECONDS)
+        except (BoundedProcessError, OSError) as exc:
+            result = {"ok": False, "returncode": 124, "stderr": str(exc), "command": command, "line_count": 0, "stream_bytes": 0}
+        commands.append({"type": "full_field_stream", **result})
+        if result.get("ok"):
+            files_processed += 1
+        per_file.append({"pcap": pcap.name, **file_coverage.as_dict(), "ok": bool(result.get("ok"))})
+    packet_samples = reservoir.records()
+    top_protocols = protocols.most_common(("protocol",), SUMMARY_LIMIT)
+    top_conversations = conversations.most_common(
+        ("source_ip", "destination_ip", "source_port", "destination_port", "transport", "protocol"),
+        SUMMARY_LIMIT,
+    )
+    dns_activity = {
+        "packets_observed": dns_packet_count,
+        "query_observations": dns_query_count,
+        "answer_observations": dns_answer_count,
+        "query_names": dns_queries.most_common(("query",), SUMMARY_LIMIT),
+        "query_types": dns_query_types.most_common(("type",), SUMMARY_LIMIT),
+        "response_codes": dns_rcodes.most_common(("rcode",), SUMMARY_LIMIT),
+        "answers": dns_answers.most_common(("answer_type", "answer"), SUMMARY_LIMIT),
+    }
+    http_user_agents = {
+        "observations": user_agent_count,
+        "values": user_agents.most_common(("http_version", "user_agent"), SUMMARY_LIMIT),
+    }
+    tls_version_summary = {
+        "observations": tls_version_observation_count,
+        "versions": tls_versions.most_common(("source", "raw_version", "version"), SUMMARY_LIMIT),
+    }
+    icmp_size_review = {
+        "classification": "suspicious-size-review-signal-not-a-c2-verdict",
+        "abnormal_frame_threshold_bytes": ICMP_ABNORMAL_MIN_FRAME_BYTES,
+        "icmp_packets_observed": icmp_packet_count,
+        "abnormal_packets_observed": icmp_abnormal_count,
+        "maximum_frame_bytes": icmp_max_frame_bytes,
+        "top_abnormal_flows": icmp_anomalies.most_common(
+            ("family", "type", "code", "source_ip", "destination_ip", "frame_bytes"),
+            SUMMARY_LIMIT,
+        ),
+        "representative_samples": icmp_anomaly_samples.records(),
+    }
+    geoip = maxmind_geoip_summary(
+        geoip_candidates,
+        maxmind_db_paths or configured_maxmind_db_paths(),
+    )
+    field_sample_header = "\t".join((
+        "frame_number", "timestamp_epoch", "source_ip", "destination_ip", "source_port",
+        "destination_port", "transport", "protocol", "frame_length", "dns_query", "tls_sni", "http_host", "http_uri",
+    ))
+    field_sample_tsv = "\n".join(
+        [field_sample_header]
+        + ["\t".join(sanitize_evidence_text(record.get(key), 256) for key in field_sample_header.split("\t")) for record in packet_samples]
+    )
     return {
         "available": True,
         "commands": commands,
-        "summary_packet_limit": TSHARK_SUMMARY_PACKET_LIMIT,
-        "pcap_file_limit": 3,
-        "samples": packet_samples,
+        "coverage": {
+            **coverage.as_dict(),
+            "pcap_files_total": len(pcap_files),
+            "pcap_files_processed": files_processed,
+            "complete": files_processed == len(pcap_files) and all(item.get("ok") for item in commands),
+            "per_file": per_file,
+        },
+        "sampling": {
+            "strategy": "deterministic-reservoir-over-full-stream",
+            "sample_limit": TSHARK_SAMPLE_LIMIT,
+            "packets_seen": reservoir.seen,
+            "packets_sampled": len(packet_samples),
+        },
+        "protocol_counts": top_protocols,
+        "top_conversations": top_conversations,
+        "dns_activity": dns_activity,
+        "http_user_agents": http_user_agents,
+        "tls_versions": tls_version_summary,
+        "icmp_size_review": icmp_size_review,
+        "geoip": geoip,
+        "packet_samples": packet_samples,
+        "_local_query_index": {
+            "connections": conversations.most_common(
+                ("source_ip", "destination_ip", "source_port", "destination_port", "transport", "protocol"),
+                QUERY_INDEX_LIMIT,
+            ),
+            "protocols": protocols.most_common(("protocol",), QUERY_INDEX_LIMIT),
+            "packet_samples": packet_samples,
+            "dns": dns_queries.most_common(("query",), QUERY_INDEX_LIMIT),
+            "user_agents": user_agents.most_common(("http_version", "user_agent"), QUERY_INDEX_LIMIT),
+            "tls_versions": tls_versions.most_common(("source", "raw_version", "version"), QUERY_INDEX_LIMIT),
+            "icmp_anomalies": icmp_anomalies.most_common(
+                ("family", "type", "code", "source_ip", "destination_ip", "frame_bytes"),
+                QUERY_INDEX_LIMIT,
+            ),
+            "geoip": geoip.get("records", [])[:QUERY_INDEX_LIMIT],
+        },
+        "samples": [{
+            "pcap": "all-capture-files",
+            "protocol_hierarchy": json.dumps(top_protocols, indent=2, sort_keys=True),
+            "conversations": json.dumps(top_conversations, indent=2, sort_keys=True),
+            "field_sample_tsv": field_sample_tsv[:12000],
+        }],
     }
 
 
@@ -569,11 +1080,18 @@ def build_markdown(analysis: dict[str, Any]) -> str:
         lines.append(f"- Zeek unavailable: {zeek.get('reason')}")
     else:
         lines.append(f"- Record counts: `{json.dumps(zeek.get('record_counts', {}), sort_keys=True)}`")
+        coverage = zeek.get("coverage") if isinstance(zeek.get("coverage"), dict) else {}
+        lines.extend([
+            f"- Capture files processed: {coverage.get('pcap_files_processed', 0)} of {coverage.get('pcap_files_total', 0)}",
+            f"- Records aggregated: {coverage.get('records_aggregated', 0)}",
+            f"- Complete: {bool(coverage.get('complete'))}",
+        ])
         for title, key in (
             ("Top Connections", "top_connections"),
             ("DNS Queries", "dns_queries"),
             ("TLS SNI", "tls_sni"),
             ("HTTP Hosts", "http_hosts"),
+            ("Files", "files"),
             ("Notices", "notices"),
             ("Weird Activity", "weird"),
         ):
@@ -583,6 +1101,46 @@ def build_markdown(analysis: dict[str, Any]) -> str:
     if not tshark.get("available"):
         lines.append(f"- TShark unavailable: {tshark.get('reason')}")
     else:
+        coverage = tshark.get("coverage") if isinstance(tshark.get("coverage"), dict) else {}
+        sampling = tshark.get("sampling") if isinstance(tshark.get("sampling"), dict) else {}
+        lines.extend([
+            f"- Capture files processed: {coverage.get('pcap_files_processed', 0)} of {coverage.get('pcap_files_total', 0)}",
+            f"- Packets decoded: {coverage.get('decoded_records', 0)} of {coverage.get('total_records', 0)} ({coverage.get('decode_percent', 0)}%)",
+            f"- Capture bytes observed: {coverage.get('total_bytes', 0)}",
+            f"- Capture time range (epoch): {coverage.get('first_timestamp_epoch')} to {coverage.get('last_timestamp_epoch')}",
+            f"- Representative packet-field sample: {sampling.get('packets_sampled', 0)} of {sampling.get('packets_seen', 0)} packets via {sampling.get('strategy', 'n/a')}",
+            f"- Complete: {bool(coverage.get('complete'))}",
+            "",
+            "### Protocol Counts",
+            "",
+            json.dumps(tshark.get("protocol_counts", []), indent=2, sort_keys=True),
+            "",
+            "### Top Conversations",
+            "",
+            json.dumps(tshark.get("top_conversations", []), indent=2, sort_keys=True),
+            "",
+            "### ICMP Size Review",
+            "",
+            "Large ICMP frames are a review signal only; size alone does not establish command-and-control activity.",
+            "",
+            json.dumps(tshark.get("icmp_size_review", {}), indent=2, sort_keys=True),
+            "",
+            "### DNS Activity",
+            "",
+            json.dumps(tshark.get("dns_activity", {}), indent=2, sort_keys=True),
+            "",
+            "### HTTP User Agents",
+            "",
+            json.dumps(tshark.get("http_user_agents", {}), indent=2, sort_keys=True),
+            "",
+            "### TLS Versions",
+            "",
+            json.dumps(tshark.get("tls_versions", {}), indent=2, sort_keys=True),
+            "",
+            "### Offline GeoIP",
+            "",
+            json.dumps(tshark.get("geoip", {}), indent=2, sort_keys=True),
+        ])
         for sample in tshark.get("samples", [])[:2]:
             lines.extend([
                 f"### {Path(sample.get('pcap', 'capture')).name}",
@@ -604,7 +1162,13 @@ def build_markdown(analysis: dict[str, Any]) -> str:
         "## Evidence Limits",
         "",
         "- Raw packet payloads are not written to the LLM prompt package.",
-        "- Zeek and TShark output is bounded so high-volume captures do not overwhelm local analysis.",
+        "- Packet-derived strings are untrusted evidence and are never interpreted as instructions or commands.",
+        "- Zeek scans every generated log record with bounded heavy-hitter state; TShark scans every packet and retains a deterministic representative field sample.",
+        "- Parser network access, runtime, memory, file size, file descriptors, and output are bounded.",
+        "- Local follow-up queries can read only the sanitized derived-evidence index through fixed allowlisted operations.",
+        "- GeoIP is performed locally against the configured MaxMind MMDB; private and otherwise non-global addresses are never looked up.",
+        "- Geolocation is approximate context, not proof of endpoint ownership, user location, or maliciousness.",
+        "- Hosted models never receive packet samples, local query results, raw payloads, or parser/runtime paths.",
         "- A missing local artifact means the broker fulfilled metadata exists, but the capture has not been copied to the Mac Studio evidence directory yet.",
         "",
     ])
@@ -655,6 +1219,9 @@ def process_one(request: dict[str, Any], args: argparse.Namespace, direct_pcap: 
             for path in pcap_files
             if path.exists()
         ]
+        zeek = run_zeek(pcap_files, work_dir) if pcap_files else {"available": False, "reason": artifact_state}
+        settings_path = Path(getattr(args, "ai_settings", DEFAULT_AI_SETTINGS))
+        tshark = run_tshark(pcap_files, configured_maxmind_db_paths(settings_path)) if pcap_files else {"available": False, "reason": artifact_state}
         analysis = {
             "analysis_type": "soc-pcap-analysis",
             "generated_at": project_now(),
@@ -666,8 +1233,32 @@ def process_one(request: dict[str, Any], args: argparse.Namespace, direct_pcap: 
                 "zeek_cut": tool_path("ZEEK_CUT_BIN", "zeek-cut"),
                 "tshark": tool_path("TSHARK_BIN", "tshark"),
             },
-            "zeek": run_zeek(pcap_files, work_dir) if pcap_files else {"available": False, "reason": artifact_state},
-            "tshark": run_tshark(pcap_files) if pcap_files else {"available": False, "reason": artifact_state},
+            "coverage": {
+                "pcap_files_total": len(pcap_meta),
+                "source_bytes": sum(int(item.get("size_bytes") or 0) for item in pcap_meta),
+                "zeek": zeek.get("coverage") if isinstance(zeek.get("coverage"), dict) else {},
+                "tshark": tshark.get("coverage") if isinstance(tshark.get("coverage"), dict) else {},
+                "complete": bool(
+                    pcap_meta
+                    and isinstance(zeek.get("coverage"), dict)
+                    and zeek["coverage"].get("complete")
+                    and isinstance(tshark.get("coverage"), dict)
+                    and tshark["coverage"].get("complete")
+                ),
+            },
+            "evidence_security": {
+                "raw_packet_payloads_included": False,
+                "packet_derived_strings_trust": "untrusted-evidence-only",
+                "follow_up_query_mode": "sanitized-derived-evidence-allowlist",
+                "parser_network_access": (
+                    "denied-by-sandbox-exec"
+                    if sys.platform == "darwin" and shutil.which("sandbox-exec")
+                    else "not-enforced-by-operating-system"
+                ),
+                "hosted_packet_samples_allowed": False,
+            },
+            "zeek": zeek,
+            "tshark": tshark,
         }
     args.out_dir.mkdir(parents=True, exist_ok=True)
     json_path = analysis_json_path(args.out_dir, request_id)

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -20,6 +21,8 @@ from bounded_http import BoundedHttpError, read_bounded_json
 
 
 MAX_PROBE_RESPONSE_BYTES = 8 * 1024 * 1024
+DEFAULT_PROBE_ATTEMPTS = 2
+DEFAULT_PROBE_RETRY_DELAY_SECONDS = 0.2
 
 
 class ProbeError(RuntimeError):
@@ -102,6 +105,7 @@ def evaluate(
         if isinstance(item, dict)
     }
     failures: list[str] = []
+    advisories: list[str] = []
     pending_job_ages = {
         str(item.get("job_type") or ""): int(item.get("seconds") or 0)
         for item in (metrics.get("oldest_pending_jobs") or [])
@@ -148,17 +152,28 @@ def evaluate(
     ai_processing_count = processing_job_counts.get("ai_analysis", 0)
     if ai_processing_count and (ai_processing_age is None or ai_processing_age > 15 * 60):
         failures.append("AI analysis has been processing without state progress for 15 minutes")
-    elif ai_pending_count and not ai_processing_count and (ai_completion_age is None or ai_completion_age > 30 * 60):
-        # One inference may legitimately consume the configured ten-minute
-        # timeout and retry on the next five-minute scheduler tick. Alert only
-        # after two complete retry windows have passed without forward progress.
+    elif (
+        ai_pending_count
+        and not ai_processing_count
+        and ai_job_age > 30 * 60
+        and (ai_completion_age is None or ai_completion_age > 30 * 60)
+    ):
+        # The completion clock may be old simply because the queue was idle.
+        # Require the pending work itself to be stale so a newly arrived job
+        # gets its normal scheduler/inference window before it can page.
         failures.append("AI analysis has pending work but no completion within 30 minutes")
     active_pcap_transfers = [
         item for item in (pcap.get("active_transfers") or [])
         if isinstance(item, dict) and item.get("progress_at")
     ]
+    capture_protection = dict(pcap.get("capture_protection") or {})
+    capture_protection_active = bool(capture_protection.get("active"))
+    if capture_protection_active:
+        reason = str(capture_protection.get("reason") or "Security Onion capture telemetry is above threshold")
+        advisories.append(f"PCAP capture-protection hold: {reason}")
     pcap_queue_progressing = bool(pcap.get("queue_progressing")) or bool(active_pcap_transfers)
-    if int(metrics.get("oldest_pending_pcap_seconds") or 0) > 60 * 60 and not pcap_queue_progressing:
+    pcap_workflow_operational = pcap_queue_progressing or capture_protection_active
+    if int(metrics.get("oldest_pending_pcap_seconds") or 0) > 60 * 60 and not pcap_workflow_operational:
         failures.append("PCAP backlog exceeds 60 minutes")
     if int(pcap.get("warning_count") or 0) > 0:
         failures.append(f"PCAP workflow has {int(pcap.get('warning_count') or 0)} warning(s)")
@@ -178,7 +193,9 @@ def evaluate(
     snapshot = {
         "generated_at": now.astimezone().replace(microsecond=0).isoformat().replace("T", "  "),
         "ok": not failures,
+        "status": "failed" if failures else ("degraded" if advisories else "healthy"),
         "failures": failures,
+        "advisories": advisories,
         "signals": {
             "heartbeat_age_seconds": heartbeat_age,
             "oldest_pending_job_seconds": int(metrics.get("oldest_pending_job_seconds") or 0),
@@ -192,6 +209,10 @@ def evaluate(
             "pcap_warning_count": int(pcap.get("warning_count") or 0),
             "active_pcap_transfer_count": len(active_pcap_transfers),
             "pcap_queue_progressing": pcap_queue_progressing,
+            "pcap_workflow_operational": pcap_workflow_operational,
+            "pcap_capture_protection_active": capture_protection_active,
+            "pcap_capture_protection_state": capture_protection.get("state"),
+            "pcap_capture_protection_report_age_seconds": capture_protection.get("report_age_seconds"),
             "pcap_last_progress_age_seconds": pcap.get("last_progress_age_seconds"),
             "ingest_errors": ingest_errors,
             "disk_used_percent": round(disk_used_percent, 1),
@@ -221,13 +242,36 @@ def evaluate(
     return failures, snapshot
 
 
-def fetch_json(url: str, name: str) -> dict[str, object]:
-    try:
-        with urllib.request.urlopen(url, timeout=8) as response:
-            payload = read_bounded_json(response, max_bytes=MAX_PROBE_RESPONSE_BYTES)
-    except (BoundedHttpError, OSError, ValueError, urllib.error.URLError) as exc:
-        raise ProbeError(f"{name} probe unavailable ({type(exc).__name__})") from None
-    return payload
+def fetch_json(
+    url: str,
+    name: str,
+    *,
+    attempts: int = DEFAULT_PROBE_ATTEMPTS,
+    retry_delay_seconds: float = DEFAULT_PROBE_RETRY_DELAY_SECONDS,
+) -> dict[str, object]:
+    """Fetch one bounded local probe, tolerating one transient I/O stall.
+
+    Alert-store metrics are read-only but can briefly queue behind a large
+    SQLite transaction. A single bounded retry avoids converting that tail
+    latency into a stack-wide failure while persistent transport errors still
+    fail the same monitor run.
+    """
+    bounded_attempts = max(1, min(int(attempts), 3))
+    delay = max(0.0, min(float(retry_delay_seconds), 1.0))
+    last_error: BaseException | None = None
+    for attempt in range(bounded_attempts):
+        try:
+            with urllib.request.urlopen(url, timeout=8) as response:
+                return read_bounded_json(response, max_bytes=MAX_PROBE_RESPONSE_BYTES)
+        except (BoundedHttpError, ValueError) as exc:
+            # Invalid or oversized data is a contract failure, not a transient
+            # socket condition, so retrying the same response would hide it.
+            raise ProbeError(f"{name} probe unavailable ({type(exc).__name__})") from None
+        except (OSError, urllib.error.URLError) as exc:
+            last_error = exc
+            if attempt + 1 < bounded_attempts:
+                time.sleep(delay)
+    raise ProbeError(f"{name} probe unavailable ({type(last_error).__name__})") from None
 
 
 def main() -> int:
@@ -265,7 +309,9 @@ def main() -> int:
         postgres_backup_age=newest_file_age(args.stack_dir / "recovery_backups", "*/n8n-postgres.dump", now),
         previous_ingest_errors=int(previous["ingest_errors"]) if "ingest_errors" in previous else None,
     )
-    snapshot["soak"] = update_soak_state(previous, failures, now)
+    # A deliberate capture-protection hold is not a stack failure, but it also
+    # must not count toward the 48-hour end-to-end production qualification.
+    snapshot["soak"] = update_soak_state(previous, failures + list(snapshot.get("advisories") or []), now)
     snapshot_path.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
     os.chmod(snapshot_path, 0o600)
     append_bounded_history(history_path, snapshot)
@@ -277,6 +323,9 @@ def main() -> int:
     if failures:
         print("; ".join(failures))
         return 2
+    if snapshot.get("advisories"):
+        print("operational SLOs degraded: " + "; ".join(snapshot["advisories"]))
+        return 0
     print("operational SLOs healthy")
     return 0
 

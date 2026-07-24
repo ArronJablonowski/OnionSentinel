@@ -66,7 +66,9 @@ class AlertStoreConcurrencyTests(unittest.TestCase):
             "ALERT_STORE_BEACON_PATHS": str(self.runtime / "beacon.json"),
             "ALERT_STORE_BEACON_HISTORY_PATHS": str(self.runtime / "beacon-history.json"),
             "ALERT_STORE_DISK_MIN_FREE_BYTES": "0",
-            "ALERT_STORE_DISK_START_MAX_USED_PERCENT": "79",
+            # Keep the production 80% hard stop while allowing this isolated
+            # temp-database test to run on a development volume near the cap.
+            "ALERT_STORE_DISK_START_MAX_USED_PERCENT": "79.99",
             "ALERT_STORE_DISK_HARD_MAX_USED_PERCENT": "80",
             "TELEGRAM_OUTBOX_AUTOSTART": "0",
             "N8N_POST_COMMIT_TOKEN": "",

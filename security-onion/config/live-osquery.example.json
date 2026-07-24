@@ -1,0 +1,14 @@
+{
+  "enabled": false,
+  "kibana_url": "https://127.0.0.1",
+  "space": "default",
+  "authorization_file": "/etc/onion-sentinel/live-osquery.authorization",
+  "ca_file": "/etc/pki/ca-trust/source/anchors/REPLACE_WITH_KIBANA_CA.pem",
+  "verify_tls": true,
+  "target_aliases": {
+    "REPLACE_WITH_OPERATOR_ENDPOINT_ALIAS": "REPLACE_WITH_EXACT_FLEET_AGENT_ID"
+  },
+  "query_timeout_seconds": 60,
+  "timeout_seconds": 120,
+  "poll_seconds": 2
+}

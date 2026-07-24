@@ -12,7 +12,7 @@ flowchart LR
   PI -->|bounded forced SSH batch| INTAKE["Restricted alert intake\nMac Studio 10.77.7.225"]
   INTAKE --> STORE["alert-store commit boundary"]
   STORE --> DB["SQLite alert store"]
-  STORE --> ENRICH["Durable public enrichment jobs"]
+  STORE --> ENRICH["Durable public enrichment jobs\nL1 memory + L2 SQLite cache"]
   STORE --> N8N["Durable post-commit n8n report handoff"]
   N8N --> MD["Markdown + JSON reports"]
   STORE --> TG["Telegram high/critical alerts"]
@@ -73,6 +73,26 @@ The least-privilege migration plan for supported Security Onion APIs and
 policy-brokered OSQuery investigations is in
 `docs/security-onion-api-and-osquery-roadmap.md`. Restricted SSH remains the
 production transport until that roadmap's acceptance gates pass.
+
+SOC analysts can escalate any grouped detection from the SOC Alerts table.
+Escalation creates or reopens one durable Incident Response case for the stable
+group, queues the `incident-responder` agent ahead of routine SOC analysis, and
+surfaces the case in the paginated Incident Responder workspace. The expanded
+case reuses the canonical alert detail contract, including the complete
+timeline, prior analyses, enrichment, PCAP evidence, notes, and raw logs; it
+does not duplicate live evidence into a second datastore.
+
+Before inference, the Incident Responder receives fixed, bounded, read-only
+Security Onion Elastic and local OSquery evidence packs through a dedicated
+forced-command relay path. An optional, separately gated follow-up lets only the
+Incident Responder propose bounded read-only OSQuery against exact
+operator-configured Fleet endpoint aliases. It is disabled and fail-closed
+until all three nodes are configured. Reports preserve analyst-readable KQL,
+exact executed Query DSL, exact OSquery SQL, status, and digests. Provider-aware
+workers serialize all local/Ollama inference while allowing the Codex/GPT CLI
+lane to run independently. The exact pack inventory, live-query allowlist,
+concurrency contract, and automatic severity thresholds are documented in
+`docs/incident-response-query-and-model-routing.md`.
 
 The staged plan for evaluating Hermes Agent, OpenClaw, and a thin
 Onion Sentinel-specific investigation runtime is in

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.arron.soc.ai-analysis-cli</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__HOME__/n8n-local/bin/auto-run-ai-analysis.py</string>
+    <string>--provider-lane</string>
+    <string>cli</string>
+    <string>--lock-file</string>
+    <string>__HOME__/n8n-local/run/ai-analysis-cli-worker.lock</string>
+    <string>--wake-file</string>
+    <string>__HOME__/n8n-local/run/ai-analysis-cli.wake</string>
+    <string>--levels</string>
+    <string>critical,high,medium,low,informational</string>
+    <string>--hours</string>
+    <string>87600</string>
+    <string>--max-per-run</string>
+    <string>0</string>
+    <string>--related-limit</string>
+    <string>8</string>
+    <string>--timeout</string>
+    <string>600</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__/n8n-local</string>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>WatchPaths</key>
+  <array>
+    <string>__HOME__/n8n-local/run/ai-analysis-cli.wake</string>
+  </array>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>PathState</key>
+    <dict>
+      <key>__HOME__/n8n-local/run/ai-analysis-cli.wake</key>
+      <true/>
+    </dict>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/n8n-local/logs/ai-analysis-cli.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__HOME__/n8n-local/logs/ai-analysis-cli.err.log</string>
+</dict>
+</plist>

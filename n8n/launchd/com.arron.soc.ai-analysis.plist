@@ -10,6 +10,12 @@
   <array>
     <string>/usr/bin/python3</string>
     <string>__HOME__/n8n-local/bin/auto-run-ai-analysis.py</string>
+    <string>--provider-lane</string>
+    <string>ollama</string>
+    <string>--lock-file</string>
+    <string>__HOME__/n8n-local/run/ai-analysis-ollama-worker.lock</string>
+    <string>--wake-file</string>
+    <string>__HOME__/n8n-local/run/ai-analysis-ollama.wake</string>
     <string>--levels</string>
     <string>critical,high,medium,low,informational</string>
     <string>--hours</string>
@@ -32,7 +38,7 @@
        StartInterval remains the recovery path for a missed filesystem event. -->
   <key>WatchPaths</key>
   <array>
-    <string>__HOME__/n8n-local/run/ai-analysis.wake</string>
+    <string>__HOME__/n8n-local/run/ai-analysis-ollama.wake</string>
   </array>
 
   <!-- WatchPaths can coalesce a change that occurs while the worker is still
@@ -42,7 +48,7 @@
   <dict>
     <key>PathState</key>
     <dict>
-      <key>__HOME__/n8n-local/run/ai-analysis.wake</key>
+      <key>__HOME__/n8n-local/run/ai-analysis-ollama.wake</key>
       <true/>
     </dict>
   </dict>

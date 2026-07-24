@@ -6,6 +6,7 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALERT_STORE = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
+SOC_ANALYSIS_POLICY = REPO_ROOT / "n8n" / "alert_store" / "lib" / "soc_analysis_policy.js"
 COMPOSE = REPO_ROOT / "n8n" / "docker-compose.yml"
 ENV_EXAMPLE = REPO_ROOT / "n8n" / ".env.example"
 HOST_RUNNER = REPO_ROOT / "n8n" / "bin" / "run-alert-store-host.zsh"
@@ -16,9 +17,15 @@ PCAP_WORKFLOW_SYNC = REPO_ROOT / "n8n" / "bin" / "sync-pcap-broker-workflow.py"
 class AlertStorePcapPolicyTest(unittest.TestCase):
     def test_alert_store_auto_queues_pcap_for_configured_levels(self) -> None:
         code = ALERT_STORE.read_text()
+        policy = SOC_ANALYSIS_POLICY.read_text()
 
-        self.assertIn("PCAP_AUTO_REQUEST_LEVELS", code)
-        self.assertIn("critical,high,medium,low,informational", code)
+        self.assertIn("createSocAnalysisPolicy", code)
+        self.assertIn("socAnalysisPolicy.matchesPcap(level)", code)
+        self.assertIn("soc_analyst_pcap_min_severity", policy)
+        self.assertIn(
+            "SEVERITY_RANK[normalizedSeverity] >= SEVERITY_RANK[normalizedThreshold]",
+            policy,
+        )
         self.assertIn("async function maybeQueueAutomaticPcapRequest", code)
         self.assertIn("const pcap = await maybeQueueAutomaticPcapRequest(alert, row, inserted, suppression);", code)
         self.assertIn("pcap,", code)

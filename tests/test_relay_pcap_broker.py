@@ -902,6 +902,18 @@ class RelayPcapBrokerTest(unittest.TestCase):
         self.assertEqual(result["operational_failures"], 0)
         broker_request.assert_not_called()
 
+    def test_capture_protection_default_allows_capture_loss_below_one_percent(self) -> None:
+        status = {
+            **self.healthy_capture_status,
+            "zeek_capture_loss_max_percent": 0.8361,
+            "zeek_capture_loss_age_seconds": 30,
+        }
+
+        decision = self.relay.capture_protection_decision({"pcap_broker": {}}, status)
+
+        self.assertFalse(decision["deferred"])
+        self.assertEqual(decision["threshold_percent"], 1.0)
+
     def test_capture_protection_defers_on_fresh_zeek_packet_loss(self) -> None:
         status = {
             **self.healthy_capture_status,

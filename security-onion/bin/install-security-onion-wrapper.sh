@@ -12,6 +12,10 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/export-recent-alerts" /usr/local/sbin/export-recent-alerts
 install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/export-pcap-window" /usr/local/sbin/export-pcap-window
+install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/export-incident-evidence" /usr/local/sbin/export-incident-evidence
+install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/run-live-osquery" /usr/local/sbin/run-live-osquery
+install -o root -g root -m 0755 -d /usr/local/lib/onion-sentinel
+install -o root -g root -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract.py" /usr/local/lib/onion-sentinel/live_osquery_contract.py
 install -o root -g root -m 0440 "$REPO_DIR/security-onion/sudoers/90-so-ai-relay-export" /etc/sudoers.d/90-so-ai-relay-export
 # Always validate sudoers before relying on passwordless wrapper execution.
 visudo -cf /etc/sudoers.d/90-so-ai-relay-export
@@ -43,6 +47,12 @@ fi
 # Sign manifest chunks on Security Onion so normal capture rotation cannot
 # invalidate an in-flight transfer or let the relay substitute another source.
 install -o root -g root -m 0700 -d /etc/onion-sentinel
+if [[ ! -f /etc/onion-sentinel/live-osquery.json ]]; then
+  install -o root -g root -m 0600 \
+    "$REPO_DIR/security-onion/config/live-osquery.example.json" \
+    /etc/onion-sentinel/live-osquery.json
+  echo "Created disabled /etc/onion-sentinel/live-osquery.json example." >&2
+fi
 if [[ ! -s /etc/onion-sentinel/pcap-stream-token.key ]]; then
   umask 077
   head -c 32 /dev/urandom > /etc/onion-sentinel/pcap-stream-token.key
@@ -78,6 +88,9 @@ Next manual step:
 4. Keep the from="10.88.8.8" source restriction unless the Pi address changes.
 5. Do not create the deprecated staged-rsync account or key. PCAP bytes stream
    through the dedicated forced-command key from authorized_keys.pcap.example.
+6. Endpoint live OSQuery requires a third dedicated key, exact endpoint aliases,
+   a root-only authorization file, and explicit enablement. It is not part of
+   the default read-only alert and PCAP data plane.
 
 Test:
   sudo -u so-ai-relay sudo -n /usr/local/sbin/export-recent-alerts | jq '.alerts | length'

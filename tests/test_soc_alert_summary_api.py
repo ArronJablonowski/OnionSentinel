@@ -37,6 +37,7 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.portal.SOC_ALERT_STORE_API_URL = ""
         self.portal.SOC_ALERT_STATUS_FILE = Path(self.tmp.name) / ".soc_alert_status.json"
         self.portal.SOC_ALERT_STATIC_STATUS_FILE = Path(self.tmp.name) / "soc-alerts-status.json"
+        self.portal.SOC_ALERT_PCAP_WORKFLOW_STATE_FILE = Path(self.tmp.name) / "pcap-workflow-state.json"
         self.portal.SOC_ALERT_PCAP_ANALYSIS_DIR = Path(self.tmp.name) / "pcap-analysis"
         self.portal.SOC_ALERT_PCAP_ARTIFACT_DIR = Path(self.tmp.name) / "pcap-artifacts"
         self.portal.SOC_ALERT_AI_ANALYSIS_DIR = Path(self.tmp.name) / "ai-analysis"
@@ -65,6 +66,8 @@ class SocAlertSummaryApiTest(unittest.TestCase):
               transport_protocol TEXT,
               triage_level TEXT,
               filter_status TEXT,
+              suppression_key TEXT,
+              enrichment_json TEXT,
               alert_json TEXT,
               raw_event_json TEXT
             );
@@ -142,6 +145,22 @@ class SocAlertSummaryApiTest(unittest.TestCase):
               transfer_progress_at TEXT,
               transfer_duration_seconds INTEGER,
               updated_at TEXT NOT NULL
+            );
+            CREATE TABLE ai_analysis_runs (
+              analysis_id TEXT PRIMARY KEY,
+              group_id TEXT NOT NULL,
+              alert_id TEXT NOT NULL,
+              generated_at TEXT NOT NULL,
+              model TEXT,
+              model_path TEXT,
+              detection_outcome TEXT,
+              bluf TEXT,
+              summary TEXT,
+              confidence TEXT,
+              artifact_path TEXT,
+              evidence_hash TEXT,
+              response_json TEXT NOT NULL,
+              created_at TEXT NOT NULL
             );
             """
         )
@@ -261,6 +280,9 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["status_counts"]["suppressed"], 1)
         self.assertEqual(payload["status_counts"]["acknowledged"], 0)
         self.assertEqual(payload["status_counts"]["total"], 3)
+        self.assertEqual(payload["active_total"], 2)
+        self.assertEqual(payload["active_highest_severity"], "critical")
+        self.assertEqual(payload["active_severity_counts"], payload["severity_counts"])
         self.assertEqual(payload["severity_counts"]["critical"], 1)
         self.assertEqual(payload["severity_counts"]["high"], 1)
         self.assertEqual(payload["severity_counts"]["medium"], 0)
@@ -275,7 +297,33 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["alerts"][0]["ai_status_label"], "Queued")
         self.assertEqual(payload["alerts"][0]["pcap_status_key"], "none")
         self.assertEqual(payload["alerts"][0]["pcap_status_label"], "None")
+        self.assertEqual(payload["alerts"][0]["pcap_size_bytes"], 0)
+        self.assertEqual(payload["alerts"][0]["detection_outcome"], "")
+        self.assertEqual(payload["alerts"][0]["detection_outcome_label"], "n/a")
         self.assertNotIn("backend-suppressed-alert", [alert["representative_alert_id"] for alert in payload["alerts"]])
+
+    def test_active_metrics_are_independent_of_page_size_and_selected_status_bucket(self) -> None:
+        _, one_row = self.portal.soc_alerts_query_response({"limit": ["1"], "analyst_status": ["open"]})
+        _, all_rows = self.portal.soc_alerts_query_response({"limit": ["100"], "analyst_status": ["open"]})
+        _, suppressed_view = self.portal.soc_alerts_query_response({"limit": ["1"], "analyst_status": ["suppressed"]})
+
+        self.assertEqual(one_row["count"], 1)
+        self.assertEqual(one_row["total_matching"], 2)
+        self.assertEqual(all_rows["count"], 2)
+        self.assertEqual(one_row["active_total"], 2)
+        self.assertEqual(one_row["active_total"], all_rows["active_total"])
+        self.assertEqual(one_row["active_severity_counts"], all_rows["active_severity_counts"])
+        self.assertEqual(one_row["active_severity_counts"], {
+            "critical": 1,
+            "high": 1,
+            "medium": 0,
+            "low": 0,
+            "informational": 0,
+        })
+        self.assertEqual(suppressed_view["total_matching"], 1)
+        self.assertEqual(suppressed_view["active_total"], one_row["active_total"])
+        self.assertEqual(suppressed_view["active_severity_counts"], one_row["active_severity_counts"])
+        self.assertEqual(suppressed_view["active_highest_severity"], "critical")
 
     def test_alert_list_marks_groups_with_parsed_pcap_analysis(self) -> None:
         newest_group_id = self.portal.soc_alert_group_id(
@@ -300,6 +348,106 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["alerts"][0]["representative_alert_id"], "newest-alert")
         self.assertEqual(payload["alerts"][0]["pcap_status_key"], "analyzed")
         self.assertEqual(payload["alerts"][0]["pcap_status_label"], "Analyzed")
+        self.assertEqual(payload["alerts"][0]["pcap_size_bytes"], 128)
+
+    def test_alert_list_aggregates_group_pcap_size_and_latest_detection_outcome(self) -> None:
+        group_key = "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        group_id = self.portal.soc_alert_group_id(group_key)
+        pcap_values = (
+            ("request-one", "sha-one", 1024),
+            ("request-one-retry", "sha-one", 1024),
+            ("request-two", "sha-two", 2048),
+        )
+        for request_id, sha256, size_bytes in pcap_values:
+            self.conn.execute(
+                """
+                INSERT INTO pcap_requests (
+                  request_id, status, alert_id, group_id, group_key, reason,
+                  max_window_seconds, artifact_path, artifact_sha256,
+                  artifact_size_bytes, request_json, created_at, updated_at
+                ) VALUES (?, 'fulfilled', 'newest-alert', ?, ?, 'unit test',
+                          300, ?, ?, ?, '{}', ?, ?)
+                """,
+                (
+                    request_id,
+                    group_id,
+                    group_key,
+                    f"/tmp/{request_id}.pcap",
+                    sha256,
+                    size_bytes,
+                    "2026-07-03  12:01:00Z",
+                    "2026-07-03  12:01:00Z",
+                ),
+            )
+        for analysis_id, generated_at, outcome in (
+            ("analysis-old", "2026-07-03  12:01:00Z", "true_positive_suspicious"),
+            ("analysis-new", "2026-07-03  12:02:00Z", "false_positive_logic_rule"),
+        ):
+            self.conn.execute(
+                """
+                INSERT INTO ai_analysis_runs (
+                  analysis_id, group_id, alert_id, generated_at,
+                  detection_outcome, response_json, created_at
+                ) VALUES (?, ?, 'newest-alert', ?, ?, '{}', ?)
+                """,
+                (analysis_id, group_id, generated_at, outcome, generated_at),
+            )
+        self.conn.commit()
+
+        status, payload = self.portal.soc_alerts_query_response({"limit": ["10"], "analyst_status": ["open"]})
+
+        self.assertEqual(status, 200)
+        newest = payload["alerts"][0]
+        self.assertEqual(newest["pcap_size_bytes"], 3072)
+        self.assertEqual(newest["detection_outcome"], "false_positive_logic_rule")
+        self.assertEqual(newest["detection_outcome_label"], "FP - Rule")
+
+    def test_alert_list_batches_page_enrichment_without_per_group_lookup(self) -> None:
+        group_key = "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        for alert_id, last_seen, external_intel in (
+            (
+                "enrichment-errors",
+                "2026-07-03  12:02:00Z",
+                {"errors": [{"source": "synthetic"}]},
+            ),
+            (
+                "enrichment-records",
+                "2026-07-03  12:01:00Z",
+                {"records": [{"source": "synthetic"}]},
+            ),
+        ):
+            self.conn.execute(
+                """
+                INSERT INTO alerts (
+                  alert_id, first_seen, last_seen, timestamp, rule_name,
+                  source_ip, destination_ip, triage_level, filter_status,
+                  enrichment_json, alert_json, raw_event_json
+                ) VALUES (?, ?, ?, ?, 'Newest detection', '192.0.2.10',
+                          '198.51.100.10', 'critical', 'accepted', ?, '{}', '{}')
+                """,
+                (
+                    alert_id,
+                    last_seen,
+                    last_seen,
+                    last_seen,
+                    json.dumps({"external_intel": external_intel}),
+                ),
+            )
+        self.conn.commit()
+
+        with mock.patch.object(
+            self.portal,
+            "soc_alert_group_enrichment_json",
+            side_effect=AssertionError("per-group enrichment lookup must not run"),
+        ):
+            status, payload = self.portal.soc_alerts_query_response(
+                {"limit": ["10"], "analyst_status": ["open"]}
+            )
+
+        self.assertEqual(status, 200)
+        newest = next(alert for alert in payload["alerts"] if alert["group_key"] == group_key)
+        self.assertEqual(newest["enrichment_status_key"], "enriched")
+        self.assertEqual(newest["enrichment_record_count"], 1)
 
     def test_detail_fragment_rejects_legacy_layout_instead_of_appending_pcap(self) -> None:
         newest_group_id = self.portal.soc_alert_group_id(
@@ -766,11 +914,20 @@ class SocAlertSummaryApiTest(unittest.TestCase):
             ],
         )
         self.conn.commit()
+        # Broker summaries are emitted between serial transfers and may be
+        # older than their three-minute freshness window during a large copy.
+        # The request's fresh byte-progress heartbeat must take precedence.
+        self.portal.SOC_ALERT_PCAP_WORKFLOW_STATE_FILE.write_text(json.dumps({
+            "generated_at": old_at,
+            "component": "pcap_broker",
+            "pcap_workflow": {"state": "healthy", "processed": 0},
+        }), encoding="utf-8")
 
         payload = self.portal.n8n_beacon_history_response({"hours": ["24"]})
 
         self.assertEqual(payload["pcap"]["warning_count"], 0)
         self.assertEqual(payload["pcap"]["active_transfers"][0]["request_id"], "pcap-active-large")
+        self.assertFalse(any("telemetry is stale" in item for item in payload["pcap"]["warnings"]))
 
     def test_system_health_preserves_bounded_progress_between_serial_pcap_jobs(self) -> None:
         old_at = self.portal.format_iso_timestamp(
@@ -800,6 +957,72 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertTrue(payload["pcap"]["queue_progressing"])
         self.assertLessEqual(payload["pcap"]["last_progress_age_seconds"], 65)
         self.assertEqual(payload["pcap"]["warning_count"], 0)
+
+    def test_system_health_treats_fresh_capture_hold_as_advisory(self) -> None:
+        old_at = self.portal.format_iso_timestamp(
+            dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2),
+            timespec="seconds",
+        )
+        fresh_at = self.portal.format_iso_timestamp(dt.datetime.now(dt.timezone.utc), timespec="seconds")
+        self.conn.execute(
+            """
+            INSERT INTO pcap_requests (
+              request_id, status, reason, max_window_seconds, request_json,
+              created_at, updated_at
+            ) VALUES ('pcap-held', 'pending', 'unit test', 120, '{}', ?, ?)
+            """,
+            (old_at, old_at),
+        )
+        self.conn.commit()
+        self.portal.SOC_ALERT_PCAP_WORKFLOW_STATE_FILE.write_text(json.dumps({
+            "generated_at": fresh_at,
+            "component": "pcap_broker",
+            "relay_host": "relay-test",
+            "pcap_workflow": {
+                "state": "capture_protection_hold",
+                "deferred": True,
+                "reason": "Zeek capture loss exceeds threshold",
+                "processed": 0,
+                "operational_failures": 0,
+            },
+        }), encoding="utf-8")
+
+        payload = self.portal.n8n_beacon_history_response({"hours": ["24"]})
+
+        self.assertEqual(payload["pcap"]["warning_count"], 0)
+        self.assertTrue(payload["pcap"]["capture_protection"]["active"])
+        self.assertTrue(payload["pcap"]["advisories"])
+
+    def test_system_health_rejects_stale_capture_hold_exemption(self) -> None:
+        old_at = self.portal.format_iso_timestamp(
+            dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2),
+            timespec="seconds",
+        )
+        self.conn.execute(
+            """
+            INSERT INTO pcap_requests (
+              request_id, status, reason, max_window_seconds, request_json,
+              created_at, updated_at
+            ) VALUES ('pcap-stale-hold', 'pending', 'unit test', 120, '{}', ?, ?)
+            """,
+            (old_at, old_at),
+        )
+        self.conn.commit()
+        self.portal.SOC_ALERT_PCAP_WORKFLOW_STATE_FILE.write_text(json.dumps({
+            "generated_at": old_at,
+            "component": "pcap_broker",
+            "pcap_workflow": {
+                "state": "capture_protection_hold",
+                "deferred": True,
+                "reason": "stale hold",
+            },
+        }), encoding="utf-8")
+
+        payload = self.portal.n8n_beacon_history_response({"hours": ["24"]})
+
+        self.assertFalse(payload["pcap"]["capture_protection"]["active"])
+        self.assertTrue(any("pending PCAP request" in item for item in payload["pcap"]["warnings"]))
+        self.assertTrue(any("telemetry is stale" in item for item in payload["pcap"]["warnings"]))
 
     def test_event_snapshot_uses_consistent_status_and_metrics_counts(self) -> None:
         payload = self.portal.soc_alert_events_snapshot()
@@ -841,6 +1064,10 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["source"], "sqlite-summary")
         self.assertEqual(payload["total_matching"], 1)
+        self.assertEqual(payload["active_total"], 1)
+        self.assertEqual(payload["active_highest_severity"], "high")
+        self.assertEqual(payload["active_severity_counts"]["critical"], 0)
+        self.assertEqual(payload["active_severity_counts"]["high"], 1)
         self.assertEqual(payload["severity_counts"]["critical"], 0)
         self.assertEqual(payload["severity_counts"]["high"], 1)
         self.assertEqual(payload["alerts"][0]["representative_alert_id"], "older-alert")

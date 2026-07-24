@@ -13,10 +13,11 @@ STACK_DIR="${STACK_DIR:-$HOME/n8n-local}"
 LAUNCHD_DIR="${HOME}/Library/LaunchAgents"
 DASHBOARD_RUNTIME_DIR="${STACK_DIR}/onion-sentinel-dashboard"
 
-mkdir -p "$STACK_DIR/alert_store/config" "$STACK_DIR/alert_store/lib" "$STACK_DIR/bin" "$STACK_DIR/config" "$STACK_DIR/logs" "$STACK_DIR/run" "$STACK_DIR/alert_store_data" "$STACK_DIR/n8n_data" "$STACK_DIR/soc-alerts" "$STACK_DIR/soc-alerts/agent-memory" "$STACK_DIR/soc-alerts/pcap-analysis" "$STACK_DIR/pcap-evidence/artifacts"
+mkdir -p "$STACK_DIR/alert_store/config" "$STACK_DIR/alert_store/lib" "$STACK_DIR/bin" "$STACK_DIR/config" "$STACK_DIR/config/maxmind" "$STACK_DIR/logs" "$STACK_DIR/run" "$STACK_DIR/python" "$STACK_DIR/alert_store_data" "$STACK_DIR/n8n_data" "$STACK_DIR/soc-alerts" "$STACK_DIR/soc-alerts/agent-memory" "$STACK_DIR/soc-alerts/pcap-analysis" "$STACK_DIR/pcap-evidence/artifacts"
 chmod 0700 "$STACK_DIR/run"
-touch "$STACK_DIR/run/ai-analysis.wake" "$STACK_DIR/run/pcap-analysis.wake" "$STACK_DIR/run/dashboard-refresh.wake"
-chmod 0600 "$STACK_DIR/run/ai-analysis.wake" "$STACK_DIR/run/pcap-analysis.wake" "$STACK_DIR/run/dashboard-refresh.wake"
+chmod 0750 "$STACK_DIR/config/maxmind"
+touch "$STACK_DIR/run/ai-analysis-ollama.wake" "$STACK_DIR/run/ai-analysis-cli.wake" "$STACK_DIR/run/pcap-analysis.wake" "$STACK_DIR/run/dashboard-refresh.wake"
+chmod 0600 "$STACK_DIR/run/ai-analysis-ollama.wake" "$STACK_DIR/run/ai-analysis-cli.wake" "$STACK_DIR/run/pcap-analysis.wake" "$STACK_DIR/run/dashboard-refresh.wake"
 
 # n8n writes reports to ./soc-alerts inside the compose project. Obsidian uses
 # the friendlier Documents path, so expose the same directory there with a
@@ -45,6 +46,8 @@ cp "$REPO_DIR/n8n/alert_store/lib/http_runtime.js" "$STACK_DIR/alert_store/lib/h
 cp "$REPO_DIR/n8n/alert_store/lib/pipeline_metrics.js" "$STACK_DIR/alert_store/lib/pipeline_metrics.js"
 cp "$REPO_DIR/n8n/alert_store/lib/group_identity.js" "$STACK_DIR/alert_store/lib/group_identity.js"
 cp "$REPO_DIR/n8n/alert_store/lib/correlation_context.js" "$STACK_DIR/alert_store/lib/correlation_context.js"
+cp "$REPO_DIR/n8n/alert_store/lib/enrichment_cache.js" "$STACK_DIR/alert_store/lib/enrichment_cache.js"
+cp "$REPO_DIR/n8n/alert_store/lib/soc_analysis_policy.js" "$STACK_DIR/alert_store/lib/soc_analysis_policy.js"
 # The repository carries a sanitized DR baseline. Production tuning may contain
 # environment-specific rule names and addresses, so a repair install must not
 # erase it. Runtime backups remain responsible for preserving the live policy.
@@ -68,6 +71,19 @@ fi
 if [[ ! -f "$STACK_DIR/config/incident_responder_system_prompt.md" ]]; then
   cp "$REPO_DIR/n8n/config/incident_responder_system_prompt.md" "$STACK_DIR/config/incident_responder_system_prompt.md"
 fi
+# Reviewer prompts are operator-editable runtime policy, just like the primary
+# prompts. Seed missing files during recovery but never overwrite live edits.
+for reviewer_prompt in \
+  soc_analyst_second_opinion_prompt.md \
+  incident_responder_second_opinion_prompt.md \
+  siem_engineer_second_opinion_prompt.md \
+  cyber_threat_intel_second_opinion_prompt.md \
+  threat_hunter_second_opinion_prompt.md
+do
+  if [[ ! -f "$STACK_DIR/config/$reviewer_prompt" ]]; then
+    cp "$REPO_DIR/n8n/config/$reviewer_prompt" "$STACK_DIR/config/$reviewer_prompt"
+  fi
+done
 if [[ ! -f "$STACK_DIR/config/ai_model_settings.json" ]]; then
   cp "$REPO_DIR/n8n/config/ai_model_settings.json" "$STACK_DIR/config/ai_model_settings.json"
   chmod 0600 "$STACK_DIR/config/ai_model_settings.json"
@@ -96,6 +112,11 @@ cp "$REPO_DIR/n8n/bin/run-recovery-restore-drill.py" "$STACK_DIR/bin/run-recover
 cp "$REPO_DIR/n8n/bin/run-alert-store-host.zsh" "$STACK_DIR/bin/run-alert-store-host.zsh"
 cp "$REPO_DIR/n8n/bin/maintain-alert-store-sqlite.zsh" "$STACK_DIR/bin/maintain-alert-store-sqlite.zsh"
 cp "$REPO_DIR/n8n/bin/build-ai-investigation-prompt.py" "$STACK_DIR/bin/build-ai-investigation-prompt.py"
+cp "$REPO_DIR/n8n/bin/incident_evidence_contract.py" "$STACK_DIR/bin/incident_evidence_contract.py"
+cp "$REPO_DIR/n8n/bin/collect-incident-evidence.py" "$STACK_DIR/bin/collect-incident-evidence.py"
+cp "$REPO_DIR/n8n/bin/live_osquery_contract.py" "$STACK_DIR/bin/live_osquery_contract.py"
+cp "$REPO_DIR/n8n/bin/live_osquery_client.py" "$STACK_DIR/bin/live_osquery_client.py"
+cp "$REPO_DIR/n8n/bin/collect-live-osquery.py" "$STACK_DIR/bin/collect-live-osquery.py"
 cp "$REPO_DIR/n8n/bin/run-local-ai-analysis.py" "$STACK_DIR/bin/run-local-ai-analysis.py"
 cp "$REPO_DIR/n8n/bin/bounded_http.py" "$STACK_DIR/bin/bounded_http.py"
 cp "$REPO_DIR/n8n/bin/bounded_process.py" "$STACK_DIR/bin/bounded_process.py"
@@ -105,6 +126,9 @@ cp "$REPO_DIR/n8n/bin/manage-agent-memory.py" "$STACK_DIR/bin/manage-agent-memor
 cp "$REPO_DIR/n8n/bin/verify-agent-memory.py" "$STACK_DIR/bin/verify-agent-memory.py"
 cp "$REPO_DIR/n8n/bin/backfill-ai-correlation-context.py" "$STACK_DIR/bin/backfill-ai-correlation-context.py"
 cp "$REPO_DIR/n8n/bin/process-pcap-evidence.py" "$STACK_DIR/bin/process-pcap-evidence.py"
+cp "$REPO_DIR/n8n/bin/pcap_analysis_core.py" "$STACK_DIR/bin/pcap_analysis_core.py"
+cp "$REPO_DIR/n8n/bin/pcap_evidence_query.py" "$STACK_DIR/bin/pcap_evidence_query.py"
+cp "$REPO_DIR/n8n/bin/pcap_tool_runtime.py" "$STACK_DIR/bin/pcap_tool_runtime.py"
 cp "$REPO_DIR/n8n/bin/onion-sentinel-pcap-intake.py" "$STACK_DIR/bin/onion-sentinel-pcap-intake.py"
 cp "$REPO_DIR/n8n/bin/onion-sentinel-alert-intake.py" "$STACK_DIR/bin/onion-sentinel-alert-intake.py"
 cp "$REPO_DIR/n8n/bin/configure-post-commit-env.py" "$STACK_DIR/bin/configure-post-commit-env.py"
@@ -117,11 +141,30 @@ chmod +x "$STACK_DIR/bin/"*.zsh
 chmod +x "$STACK_DIR/bin/"*.py
 "$STACK_DIR/bin/verify-agent-memory.py" --initialize >/dev/null
 
+if [[ ! -f "$STACK_DIR/config/live-osquery.json" ]]; then
+  cp "$REPO_DIR/n8n/config/live-osquery.example.json" "$STACK_DIR/config/live-osquery.json"
+  chmod 0600 "$STACK_DIR/config/live-osquery.json"
+fi
+
+# GeoIP is an offline, optional enrichment. Keep its Python reader isolated
+# from macOS system packages, and leave PCAP parsing operational if package
+# installation is temporarily unavailable during disaster recovery.
+if ! PYTHONPATH="$STACK_DIR/python" /usr/bin/python3 -c 'import maxminddb' >/dev/null 2>&1; then
+  if ! /usr/bin/python3 -m pip install \
+    --disable-pip-version-check \
+    --no-input \
+    --target "$STACK_DIR/python" \
+    'maxminddb>=2.6,<3'; then
+    echo "WARNING: optional MaxMind reader installation failed; PCAP parsing will continue without GeoIP until maxminddb is installed." >&2
+  fi
+fi
+
 # Onion Sentinel owns its builder, assets, API helpers, and web service. Never
 # install these files under ~/.hermes or ~/report_portal; the Hermes LAN Portal
 # may contain an external link to this service and nothing more.
 mkdir -p "$DASHBOARD_RUNTIME_DIR/scripts" "$DASHBOARD_RUNTIME_DIR/assets"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py" "$DASHBOARD_RUNTIME_DIR/scripts/build_soc_alerts_dashboard.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_executive_metrics.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_executive_metrics.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_metric_components.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_metric_components.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_pcap_components.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_pcap_components.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_timeline_components.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_timeline_components.py"
@@ -165,6 +208,7 @@ for plist in \
   com.arron.soc.pcap-analysis.plist \
   com.arron.soc.pcap-retention.plist \
   com.arron.soc.ai-analysis.plist \
+  com.arron.soc.ai-analysis-cli.plist \
   com.arron.soc.dashboard-refresh.plist \
   com.arron.soc.daily-rollup.plist \
   com.arron.onion-sentinel.web.plist \
@@ -198,6 +242,7 @@ launchctl unload "$LAUNCHD_DIR/com.arron.soc.alert-store-maintenance.plist" >/de
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.pcap-analysis.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.pcap-retention.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.ai-analysis.plist" >/dev/null 2>&1 || true
+launchctl unload "$LAUNCHD_DIR/com.arron.soc.ai-analysis-cli.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.dashboard-refresh.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.web-guard.plist" >/dev/null 2>&1 || true
@@ -210,6 +255,7 @@ launchctl load "$LAUNCHD_DIR/com.arron.soc.alert-store-maintenance.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.pcap-analysis.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.pcap-retention.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.ai-analysis.plist"
+launchctl load "$LAUNCHD_DIR/com.arron.soc.ai-analysis-cli.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.dashboard-refresh.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.web.plist"

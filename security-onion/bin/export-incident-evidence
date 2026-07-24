@@ -1,0 +1,409 @@
+#!/usr/bin/env python3
+"""Read a bounded, fixed evidence pack from Security Onion Elasticsearch.
+
+This forced-command wrapper is intentionally not a general query proxy.  It
+accepts only exact observables and named evidence packs, builds Elasticsearch
+Query DSL locally, and records an equivalent KQL filter for analyst audit.
+Security Onion remains read-only and neither the caller nor an LLM can choose
+indices, fields, DSL, shell arguments, or result sizes.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import json
+import glob
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+MAX_REQUEST_BYTES = 16 * 1024
+MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+MAX_HITS = 200
+MAX_WINDOWS = 4
+QUERY_TIMEOUT_SECONDS = 45
+OSQUERY_TIMEOUT_SECONDS = 20
+MAX_OSQUERY_OUTPUT_BYTES = 2 * 1024 * 1024
+MAX_OSQUERY_ROWS = 200
+SO_QUERY = Path("/usr/sbin/so-elasticsearch-query")
+PACKS = {
+    "alert_context": {
+        "datasets": ["suricata.alert"],
+        "fields": ["@timestamp", "event.*", "rule.*", "source.*", "destination.*", "network.*", "message"],
+    },
+    "network_flow": {
+        "datasets": ["zeek.connection", "endpoint.events.network", "suricata.alert"],
+        "fields": ["@timestamp", "event.*", "source.*", "destination.*", "network.*", "host.*", "process.*", "message"],
+    },
+    "dns_activity": {
+        "datasets": ["zeek.dns", "endpoint.events.network"],
+        "fields": ["@timestamp", "event.*", "dns.*", "url.*", "source.*", "destination.*", "host.*", "process.*", "message"],
+    },
+    "osquery_history": {
+        "datasets": ["endpoint.events.process", "endpoint.events.file", "endpoint.events.network", "osquery_manager.result", "osquery_manager.response"],
+        "fields": ["@timestamp", "event.*", "host.*", "user.*", "process.*", "file.*", "source.*", "destination.*", "message"],
+    },
+    "cross_sensor_timeline": {
+        "datasets": ["suricata.alert", "zeek.connection", "zeek.dns", "endpoint.events.network", "endpoint.events.process", "endpoint.events.file"],
+        "fields": ["@timestamp", "event.*", "rule.*", "source.*", "destination.*", "network.*", "dns.*", "url.*", "host.*", "user.*", "process.*", "file.*", "message"],
+    },
+}
+OSQUERY_PACKS = {
+    "system_inventory": (
+        "SELECT hostname, uuid, cpu_brand, cpu_physical_cores, "
+        "cpu_logical_cores, physical_memory, hardware_vendor, hardware_model "
+        "FROM system_info LIMIT 1;"
+    ),
+    "logged_in_users": (
+        "SELECT user, tty, host, time, type, pid FROM logged_in_users "
+        "ORDER BY time DESC LIMIT 100;"
+    ),
+    "listening_ports": (
+        "SELECT lp.protocol, lp.address, lp.port, lp.pid, p.name, p.path "
+        "FROM listening_ports AS lp LEFT JOIN processes AS p ON lp.pid = p.pid "
+        "ORDER BY lp.port LIMIT 200;"
+    ),
+    "process_inventory": (
+        "SELECT pid, parent, name, path, uid, gid, start_time FROM processes "
+        "ORDER BY pid LIMIT 200;"
+    ),
+    "installed_packages": (
+        "SELECT name, version, release, source, arch FROM rpm_packages "
+        "ORDER BY name LIMIT 200;"
+    ),
+    "scheduled_tasks": (
+        "SELECT event, minute, hour, day_of_month, month, day_of_week, command, path "
+        "FROM crontab ORDER BY path LIMIT 200;"
+    ),
+    "startup_items": (
+        "SELECT name, path, args, type, status, source FROM startup_items "
+        "ORDER BY name LIMIT 200;"
+    ),
+}
+OBSERVABLE_FIELDS = {
+    "ips": ["source.ip", "destination.ip", "client.ip", "server.ip", "host.ip"],
+    "domains": ["dns.question.name", "url.domain", "server.domain", "destination.domain"],
+    "hosts": ["host.id", "host.name", "agent.id"],
+    "users": ["user.id", "user.name"],
+}
+SAFE_VALUE = re.compile(r"^[A-Za-z0-9_.:@-]{1,255}$")
+
+
+def fail(message: str, code: int = 2) -> None:
+    print(json.dumps({"ok": False, "error": message}, separators=(",", ":")))
+    raise SystemExit(code)
+
+
+def parse_time(value: object) -> dt.datetime:
+    text = str(value or "").strip().replace("  ", "T")
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    parsed = dt.datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp must include a UTC offset")
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def iso_utc(value: dt.datetime) -> str:
+    return value.astimezone(dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def read_request() -> dict:
+    raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
+    if len(raw) > MAX_REQUEST_BYTES:
+        fail("request exceeds the 16384-byte limit")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        fail(f"invalid JSON request: {exc}")
+    if not isinstance(data, dict):
+        fail("request root must be an object")
+    return data
+
+
+def validated_request(data: dict) -> tuple[list[str], list[str], list[dict], dict[str, list[str]], int]:
+    packs = data.get("packs") or list(PACKS)
+    if not isinstance(packs, list) or not packs or len(packs) > len(PACKS):
+        fail("packs must be a non-empty bounded list")
+    packs = [str(item) for item in packs]
+    if len(set(packs)) != len(packs) or any(item not in PACKS for item in packs):
+        fail("one or more evidence packs are not allowlisted")
+    osquery_packs = data.get("osquery_packs") or list(OSQUERY_PACKS)
+    if (
+        not isinstance(osquery_packs, list)
+        or not osquery_packs
+        or len(osquery_packs) > len(OSQUERY_PACKS)
+    ):
+        fail("osquery_packs must be a non-empty bounded list")
+    osquery_packs = [str(item) for item in osquery_packs]
+    if (
+        len(set(osquery_packs)) != len(osquery_packs)
+        or any(item not in OSQUERY_PACKS for item in osquery_packs)
+    ):
+        fail("one or more OSquery packs are not allowlisted")
+    windows = data.get("windows")
+    if not isinstance(windows, list) or not windows or len(windows) > MAX_WINDOWS:
+        fail(f"windows must contain 1-{MAX_WINDOWS} entries")
+    clean_windows = []
+    for item in windows:
+        if not isinstance(item, dict):
+            fail("each window must be an object")
+        try:
+            start, end = parse_time(item.get("start")), parse_time(item.get("end"))
+        except (TypeError, ValueError) as exc:
+            fail(f"invalid evidence window: {exc}")
+        if end <= start or end - start > dt.timedelta(hours=24):
+            fail("each evidence window must be positive and no longer than 24 hours")
+        clean_windows.append({"start": iso_utc(start), "end": iso_utc(end)})
+    observables = data.get("observables") or {}
+    if not isinstance(observables, dict):
+        fail("observables must be an object")
+    clean_observables: dict[str, list[str]] = {}
+    for kind in OBSERVABLE_FIELDS:
+        values = observables.get(kind) or []
+        if not isinstance(values, list) or len(values) > 16:
+            fail(f"{kind} must contain at most 16 values")
+        clean = []
+        for value in values:
+            text = str(value or "").strip()
+            if not SAFE_VALUE.fullmatch(text):
+                fail(f"invalid {kind} observable")
+            if text not in clean:
+                clean.append(text)
+        clean_observables[kind] = clean
+    if not any(clean_observables.values()):
+        fail("at least one exact observable is required")
+    size = data.get("size", 100)
+    try:
+        size = int(size)
+    except (TypeError, ValueError):
+        fail("size must be an integer")
+    if size < 1 or size > MAX_HITS:
+        fail(f"size must be between 1 and {MAX_HITS}")
+    return packs, osquery_packs, clean_windows, clean_observables, size
+
+
+def observable_clause(observables: dict[str, list[str]]) -> dict:
+    should = []
+    for kind, fields in OBSERVABLE_FIELDS.items():
+        for value in observables.get(kind, []):
+            should.extend({"term": {field: value}} for field in fields)
+    return {"bool": {"should": should, "minimum_should_match": 1}}
+
+
+def dataset_clause(datasets: list[str]) -> dict:
+    should = []
+    for dataset in datasets:
+        should.append({"term": {"event.dataset": dataset}})
+        should.append({"prefix": {"event.dataset": dataset + "."}})
+    return {"bool": {"should": should, "minimum_should_match": 1}}
+
+
+def kql_equivalent(window: dict, datasets: list[str], observables: dict[str, list[str]]) -> str:
+    dataset = " or ".join(f'event.dataset : "{value}"' for value in datasets)
+    obs = []
+    for kind, fields in OBSERVABLE_FIELDS.items():
+        for value in observables.get(kind, []):
+            obs.append("(" + " or ".join(f'{field} : "{value}"' for field in fields) + ")")
+    return f'@timestamp >= "{window["start"]}" and @timestamp <= "{window["end"]}" and ({dataset}) and (' + " or ".join(obs) + ")"
+
+
+def execute_pack(pack_name: str, window: dict, observables: dict[str, list[str]], size: int) -> dict:
+    pack = PACKS[pack_name]
+    body = {
+        "size": size,
+        "track_total_hits": True,
+        "timeout": "30s",
+        "sort": [{"@timestamp": {"order": "asc", "unmapped_type": "date"}}, {"_id": "asc"}],
+        "_source": pack["fields"],
+        "query": {"bool": {"filter": [
+            {"range": {"@timestamp": {"gte": window["start"], "lte": window["end"]}}},
+            dataset_clause(pack["datasets"]),
+            observable_clause(observables),
+        ]}},
+    }
+    encoded = json.dumps(body, separators=(",", ":"), sort_keys=True)
+    digest = hashlib.sha256(encoded.encode()).hexdigest()
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(
+            [str(SO_QUERY), "/_search", "-d", encoded],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=QUERY_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"pack": pack_name, "status": "timeout", "query_digest": digest, "query_dsl": body, "hits": [], "duration_ms": QUERY_TIMEOUT_SECONDS * 1000}
+    duration_ms = round((time.monotonic() - started) * 1000)
+    if len(proc.stdout) > MAX_OUTPUT_BYTES:
+        return {"pack": pack_name, "status": "output_limit", "query_digest": digest, "query_dsl": body, "hits": [], "duration_ms": duration_ms}
+    if proc.returncode != 0:
+        error = proc.stderr.decode("utf-8", "replace")[:1000]
+        return {"pack": pack_name, "status": "error", "query_digest": digest, "query_dsl": body, "hits": [], "duration_ms": duration_ms, "error": error}
+    try:
+        parsed = json.loads(proc.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {"pack": pack_name, "status": "invalid_response", "query_digest": digest, "query_dsl": body, "hits": [], "duration_ms": duration_ms, "error": str(exc)}
+    raw_hits = ((parsed.get("hits") or {}).get("hits") or []) if isinstance(parsed, dict) else []
+    hits = []
+    for hit in raw_hits[:size]:
+        if isinstance(hit, dict):
+            hits.append({"id": str(hit.get("_id") or ""), "index": str(hit.get("_index") or ""), "source": hit.get("_source") if isinstance(hit.get("_source"), dict) else {}})
+    total = (parsed.get("hits") or {}).get("total", 0) if isinstance(parsed, dict) else 0
+    if isinstance(total, dict):
+        total = total.get("value", 0)
+    return {"pack": pack_name, "status": "ok", "query_digest": digest, "query_dsl": body, "total_hits": int(total or 0), "returned_hits": len(hits), "truncated": int(total or 0) > len(hits), "duration_ms": duration_ms, "hits": hits}
+
+
+def osquery_binary() -> Path | None:
+    """Return the managed Elastic Agent osqueryd without accepting a caller path."""
+    candidates = sorted(
+        glob.glob("/opt/Elastic/Agent/data/elastic-agent-*/components/osqueryd"),
+        reverse=True,
+    )
+    for candidate in candidates:
+        path = Path(candidate)
+        if path.is_file():
+            return path
+    return None
+
+
+def execute_osquery_pack(binary: Path, pack_name: str) -> dict:
+    """Run one reviewed query as ephemeral osqueryi and preserve its exact audit."""
+    query = OSQUERY_PACKS[pack_name]
+    digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
+    started = time.monotonic()
+    base = {
+        "pack": pack_name,
+        "target": "security-onion-local-host",
+        "query": query,
+        "query_digest": digest,
+    }
+    try:
+        proc = subprocess.run(
+            ["osqueryi", "--disable_database", "--json", query],
+            executable=str(binary),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=OSQUERY_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            **base,
+            "status": "timeout",
+            "total_rows": 0,
+            "returned_rows": 0,
+            "truncated": False,
+            "duration_ms": OSQUERY_TIMEOUT_SECONDS * 1000,
+            "rows": [],
+        }
+    duration_ms = round((time.monotonic() - started) * 1000)
+    if len(proc.stdout) > MAX_OSQUERY_OUTPUT_BYTES:
+        return {
+            **base,
+            "status": "output_limit",
+            "total_rows": 0,
+            "returned_rows": 0,
+            "truncated": False,
+            "duration_ms": duration_ms,
+            "rows": [],
+        }
+    if proc.returncode != 0:
+        return {
+            **base,
+            "status": "error",
+            "total_rows": 0,
+            "returned_rows": 0,
+            "truncated": False,
+            "duration_ms": duration_ms,
+            "rows": [],
+            "error": proc.stderr.decode("utf-8", "replace")[:1000],
+        }
+    try:
+        parsed = json.loads(proc.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {
+            **base,
+            "status": "invalid_response",
+            "total_rows": 0,
+            "returned_rows": 0,
+            "truncated": False,
+            "duration_ms": duration_ms,
+            "rows": [],
+            "error": str(exc),
+        }
+    if not isinstance(parsed, list) or any(not isinstance(row, dict) for row in parsed):
+        return {
+            **base,
+            "status": "invalid_response",
+            "total_rows": 0,
+            "returned_rows": 0,
+            "truncated": False,
+            "duration_ms": duration_ms,
+            "rows": [],
+            "error": "osquery result root must be an array of objects",
+        }
+    rows = parsed[:MAX_OSQUERY_ROWS]
+    return {
+        **base,
+        "status": "ok",
+        "total_rows": len(parsed),
+        "returned_rows": len(rows),
+        "truncated": len(parsed) > len(rows),
+        "duration_ms": duration_ms,
+        "rows": rows,
+    }
+
+
+def main() -> int:
+    if not SO_QUERY.is_file():
+        fail("Security Onion query CLI is unavailable", 3)
+    binary = osquery_binary()
+    if binary is None:
+        fail("managed Elastic Agent osqueryd is unavailable", 3)
+    packs, osquery_packs, windows, observables, size = validated_request(read_request())
+    results = []
+    for window_index, window in enumerate(windows):
+        for pack_name in packs:
+            result = execute_pack(pack_name, window, observables, size)
+            result.update({
+                "window_index": window_index,
+                "window": window,
+                "kql_equivalent": kql_equivalent(window, PACKS[pack_name]["datasets"], observables),
+            })
+            results.append(result)
+    osquery_results = [
+        execute_osquery_pack(binary, pack_name)
+        for pack_name in osquery_packs
+    ]
+    complete = all(result["status"] == "ok" for result in [*results, *osquery_results])
+    response = {
+        # A failed evidence pack is an explicit investigative gap, not a
+        # transport failure. Returning a successful protocol response lets the
+        # incident worker preserve all other pack results and report the gap.
+        "ok": True,
+        "complete": complete,
+        "partial": not complete,
+        "read_only": True,
+        "query_contract": "onion-sentinel-incident-evidence-v2",
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "observables": observables,
+        "results": results,
+        "osquery_results": osquery_results,
+    }
+    output = json.dumps(response, separators=(",", ":"), sort_keys=True).encode()
+    if len(output) > MAX_OUTPUT_BYTES:
+        fail("bounded evidence response exceeded the output contract", 4)
+    sys.stdout.buffer.write(output + b"\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Automatically analyze the next eligible SOC alert with local Ollama.
+"""Automatically analyze the next eligible SOC alert with its assigned model.
 
-This wrapper is intended for launchd. It processes a small bounded batch per
-run, holds a lock so two model jobs do not overlap, skips grouped detections
-that already have analysis JSON, and reuses the existing prompt builder plus
-local analysis runner.
+This wrapper is intended for launchd. Separate provider lanes allow hosted CLI
+work to proceed while local Ollama inference is active. Each lane still holds
+its own worker lock, while run-local-ai-analysis.py enforces a second host-wide
+lock around every Ollama call so local models can never overlap.
 """
 from __future__ import annotations
 
@@ -34,6 +34,9 @@ DEFAULT_DB = HOME / "n8n-local" / "alert_store_data" / "alerts.sqlite3"
 DEFAULT_PROMPT_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-prompts"
 DEFAULT_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-analysis"
 DEFAULT_PCAP_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "pcap-analysis"
+DEFAULT_INCIDENT_EVIDENCE_DIR = HOME / "n8n-local" / "soc-alerts" / "incident-evidence"
+DEFAULT_INCIDENT_EVIDENCE_CONFIG = HOME / "n8n-local" / "config" / "incident-evidence.json"
+DEFAULT_AI_SETTINGS = HOME / "n8n-local" / "config" / "ai_model_settings.json"
 DEFAULT_LOCK = HOME / "n8n-local" / "run" / "ai-analysis.lock"
 DEFAULT_WAKE = Path(os.environ.get(
     "AI_ANALYSIS_WAKE_PATH",
@@ -52,6 +55,14 @@ DEFAULT_MAX_PROMPT_BYTES = max(256 * 1024, int(os.environ.get("SOC_AI_MAX_PROMPT
 DEFAULT_MAX_CHILD_STDOUT_BYTES = max(1024 * 1024, int(os.environ.get("SOC_AI_SCHEDULER_MAX_STDOUT_BYTES", 16 * 1024 * 1024)))
 DEFAULT_MAX_CHILD_STDERR_BYTES = max(256 * 1024, int(os.environ.get("SOC_AI_SCHEDULER_MAX_STDERR_BYTES", 2 * 1024 * 1024)))
 DEFAULT_MAX_CONTROL_RESPONSE_BYTES = 1024 * 1024
+MAX_AI_SETTINGS_BYTES = 256 * 1024
+AGENT_ROLES = (
+    "soc-analyst",
+    "incident-responder",
+    "siem-engineer",
+    "cyber-threat-intel",
+    "threat-hunter",
+)
 
 
 def alert_time_sql(alias: str = "") -> str:
@@ -95,6 +106,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt-dir", type=Path, default=DEFAULT_PROMPT_DIR, help="Prompt package directory")
     parser.add_argument("--analysis-dir", type=Path, default=DEFAULT_ANALYSIS_DIR, help="AI analysis output directory")
     parser.add_argument("--pcap-analysis-dir", type=Path, default=DEFAULT_PCAP_ANALYSIS_DIR, help="Parsed PCAP evidence directory")
+    parser.add_argument("--incident-evidence-dir", type=Path, default=DEFAULT_INCIDENT_EVIDENCE_DIR, help="Restricted Security Onion incident evidence directory")
+    parser.add_argument("--incident-evidence-config", type=Path, default=DEFAULT_INCIDENT_EVIDENCE_CONFIG, help="Restricted relay evidence transport config")
+    parser.add_argument("--ai-settings-file", type=Path, default=DEFAULT_AI_SETTINGS, help="AI model routing settings JSON")
+    parser.add_argument(
+        "--provider-lane",
+        choices=("any", "ollama", "cli"),
+        default="any",
+        help="Only claim jobs assigned to this inference provider",
+    )
     parser.add_argument("--lock-file", type=Path, default=DEFAULT_LOCK, help="Non-overlap lock file")
     parser.add_argument("--wake-file", type=Path, default=DEFAULT_WAKE, help="Consumable launchd wake marker")
     parser.add_argument("--levels", default=DEFAULT_LEVELS, help="Comma-separated triage levels to analyze")
@@ -136,6 +156,55 @@ def project_now() -> str:
     return dt.datetime.now().astimezone().replace(microsecond=0).isoformat().replace("T", "  ")
 
 
+def cli_agent_roles(settings_path: Path) -> set[str]:
+    """Return roles explicitly assigned to the hosted Codex/GPT CLI lane.
+
+    Settings are treated as untrusted runtime input. A missing, oversized, or
+    malformed file fails closed to the local lane so a configuration accident
+    cannot unexpectedly send alert evidence to a hosted model.
+    """
+    try:
+        if not settings_path.is_file() or settings_path.stat().st_size > MAX_AI_SETTINGS_BYTES:
+            return set()
+        raw = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return set()
+    routes = raw.get("agent_models") if isinstance(raw, dict) else {}
+    if not isinstance(routes, dict):
+        return set()
+    return {
+        role
+        for role in AGENT_ROLES
+        if str(routes.get(role) or "").strip().lower() in {"gpt-cli", "codex-cli"}
+    }
+
+
+def provider_lane_sql(args: argparse.Namespace) -> tuple[str, list[object]]:
+    """Build an allowlisted SQL predicate for the selected provider lane."""
+    provider_lane = str(getattr(args, "provider_lane", "any") or "any")
+    if provider_lane == "any":
+        return "", []
+    cli_roles = sorted(cli_agent_roles(Path(getattr(args, "ai_settings_file", DEFAULT_AI_SETTINGS))))
+    role_expr = """
+      CASE
+        WHEN p.id IS NULL THEN 'soc-analyst'
+        WHEN json_valid(COALESCE(p.payload_json, '')) THEN
+          COALESCE(
+            NULLIF(TRIM(CAST(json_extract(p.payload_json, '$.agent_role') AS TEXT)), ''),
+            CASE WHEN p.job_type = 'incident_response_analysis'
+                 THEN 'incident-responder' ELSE 'soc-analyst' END
+          )
+        WHEN p.job_type = 'incident_response_analysis' THEN 'incident-responder'
+        ELSE 'soc-analyst'
+      END
+    """
+    if not cli_roles:
+        return ("AND 0 = 1", []) if provider_lane == "cli" else ("", [])
+    placeholders = ", ".join("?" for _ in cli_roles)
+    operator = "IN" if provider_lane == "cli" else "NOT IN"
+    return f"AND ({role_expr}) {operator} ({placeholders})", list(cli_roles)
+
+
 def rows(conn: sqlite3.Connection, sql: str, params: Iterable[object] = ()) -> list[sqlite3.Row]:
     return conn.execute(sql, tuple(params)).fetchall()
 
@@ -146,6 +215,7 @@ def report_ai_job_status(
     status: str,
     error: str = "",
     lease_token: str = "",
+    job_type: str = "ai_analysis",
 ) -> bool | str:
     """Transition durable AI intent through a bounded local HTTP contract.
 
@@ -155,7 +225,7 @@ def report_ai_job_status(
     lease in the current indexed architecture.
     """
     payload = json.dumps({
-        "job_type": "ai_analysis",
+        "job_type": job_type,
         "dedupe_key": group_id,
         "status": status,
         "error": error[:1000],
@@ -670,19 +740,38 @@ def select_next_alert_indexed(
     if not args.include_tests:
         clause, test_params = test_filter_sql("eligible.alert_id")
         test_sql = f"AND {clause}"
+    run_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(ai_analysis_runs)")
+    }
+    run_role_sql = (
+        "AND COALESCE(ar.agent_role, 'soc-analyst') = 'soc-analyst'"
+        if "agent_role" in run_columns
+        else ""
+    )
+    lane_sql, lane_params = provider_lane_sql(args)
     # Indexed groups are guarded by durable job state. Do not apply the legacy
     # per-process exclusion set: a request coalesced while inference is active
     # becomes a fresh pending job and should be eligible immediately.
     del already_selected_groups
     candidate = conn.execute(
         f"""
-        WITH due_jobs AS (
-          SELECT id, dedupe_key, payload_json, priority
+        WITH due_jobs_ranked AS (
+          SELECT id, job_type, dedupe_key, payload_json, priority,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY dedupe_key
+                   ORDER BY CASE job_type WHEN 'incident_response_analysis' THEN 0 ELSE 1 END,
+                            priority DESC, requested_at ASC, id ASC
+                 ) AS job_rank
           FROM durable_jobs
-          WHERE job_type = 'ai_analysis' AND status = 'pending'
+          WHERE job_type IN ('incident_response_analysis', 'ai_analysis')
+            AND status = 'pending'
             AND attempt_count < max_attempts
             AND julianday(replace(next_attempt_at, '  ', 'T')) <=
                 julianday(replace(?, '  ', 'T'))
+        ),
+        due_jobs AS (
+          SELECT id, job_type, dedupe_key, payload_json, priority
+          FROM due_jobs_ranked WHERE job_rank = 1
         ),
         ranked AS (
           SELECT a.*,
@@ -703,8 +792,10 @@ def select_next_alert_indexed(
                r.stable_group_id, r.routing, r.suppression_key, r.queue_time,
                COALESCE(NULLIF(r.stable_group_key, ''), r.stable_group_id) AS queue_group_key,
                p.payload_json AS durable_payload_json,
+               p.job_type AS durable_job_type,
                CASE WHEN p.id IS NOT NULL THEN 1 ELSE 0 END AS has_durable_intent,
                CASE
+                 WHEN p.job_type = 'incident_response_analysis' THEN 0
                  WHEN p.id IS NOT NULL
                    AND instr(replace(p.payload_json, ' ', ''), '"manual_reanalysis":true') > 0 THEN 0
                  WHEN p.id IS NOT NULL THEN 1
@@ -725,6 +816,7 @@ def select_next_alert_indexed(
               AND NOT EXISTS (
                 SELECT 1 FROM ai_analysis_runs AS ar
                 WHERE ar.group_id = r.stable_group_id
+                  {run_role_sql}
               )
               AND EXISTS (
                 SELECT 1 FROM alerts AS eligible
@@ -738,11 +830,13 @@ def select_next_alert_indexed(
               )
             )
           )
-        ORDER BY request_bucket ASC, severity_rank ASC, queue_time_sort DESC,
+          {lane_sql}
+        ORDER BY request_bucket ASC, COALESCE(p.priority, 0) DESC,
+                 severity_rank ASC, queue_time_sort DESC,
                  COALESCE(r.triage_score, 0) DESC, r.alert_id DESC
         LIMIT 1
         """,
-        [project_now(), since, *levels, *ELIGIBLE_FILTER_STATUSES, *test_params],
+        [project_now(), since, *levels, *ELIGIBLE_FILTER_STATUSES, *test_params, *lane_params],
     ).fetchone()
     return candidate
 
@@ -945,7 +1039,48 @@ def run_command(
     )
 
 
-def build_prompt(alert_id: str, args: argparse.Namespace, job_payload: dict[str, object] | None = None) -> Path:
+def collect_incident_evidence(alert_id: str, args: argparse.Namespace, *, progress_callback=None) -> Path:
+    collector = Path(__file__).with_name("collect-incident-evidence.py")
+    proc = run_command(
+        [
+            sys.executable,
+            str(collector),
+            "--alert-id",
+            alert_id,
+            "--db",
+            str(args.db),
+            "--config",
+            str(args.incident_evidence_config),
+            "--out-dir",
+            str(args.incident_evidence_dir),
+        ],
+        timeout_seconds=360,
+        max_stdout_bytes=1024 * 1024,
+        max_stderr_bytes=DEFAULT_MAX_CHILD_STDERR_BYTES,
+        progress_callback=progress_callback,
+        progress_interval_seconds=30,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"incident evidence collector failed rc={proc.returncode}")
+    output_lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if not output_lines:
+        raise RuntimeError("incident evidence collector returned no artifact path")
+    artifact = Path(output_lines[-1])
+    try:
+        artifact.resolve().relative_to(args.incident_evidence_dir.resolve())
+    except ValueError as exc:
+        raise RuntimeError("incident evidence collector returned a path outside its configured directory") from exc
+    if not artifact.is_file():
+        raise RuntimeError("incident evidence collector did not publish its artifact")
+    return artifact
+
+
+def build_prompt(
+    alert_id: str,
+    args: argparse.Namespace,
+    job_payload: dict[str, object] | None = None,
+    incident_evidence_path: Path | None = None,
+) -> Path:
     builder = Path(__file__).with_name("build-ai-investigation-prompt.py")
     job_payload = job_payload or {}
     related_limit = bounded_int(job_payload.get("related_limit"), args.related_limit, 1, 500)
@@ -967,7 +1102,11 @@ def build_prompt(alert_id: str, args: argparse.Namespace, job_payload: dict[str,
         str(pcap_analysis_limit),
         "--max-package-bytes",
         str(args.max_prompt_bytes),
+        "--agent-role",
+        str(job_payload.get("agent_role") or "soc-analyst"),
     ]
+    if incident_evidence_path is not None:
+        cmd.extend(["--incident-evidence-file", str(incident_evidence_path)])
     if args.include_tests:
         cmd.append("--include-tests")
     proc = run_command(
@@ -1124,6 +1263,16 @@ def main() -> int:
         finally:
             conn.close()
 
+        if not indexed_mode and args.provider_lane == "cli":
+            # Legacy databases do not expose the durable job payload that owns
+            # the agent role. A CLI worker therefore cannot prove that a job is
+            # assigned to its privacy/cost boundary and must fail closed.
+            print(
+                f"{project_now()} CLI provider lane requires the indexed scheduler; no work claimed",
+                flush=True,
+            )
+            return 0
+
         if indexed_mode:
             # A model result is first written atomically to local disk, then
             # indexed through alert-store. Publish any result left behind by a
@@ -1165,6 +1314,11 @@ def main() -> int:
                 selected_group_id = alert_group_id(str(selected["queue_group_key"] or alert_group_key(selected)))
             selected_groups.add(selected_group_id)
             selected_groups.add(str(selected["queue_group_key"] or alert_group_key(selected)))
+            durable_job_type = (
+                str(selected["durable_job_type"] or "ai_analysis")
+                if "durable_job_type" in selected.keys()
+                else "ai_analysis"
+            )
             attempted_count += 1
             print(
                 json.dumps(
@@ -1175,6 +1329,8 @@ def main() -> int:
                         "triage_score": selected["triage_score"],
                         "last_seen": selected["last_seen"],
                         "queue_time": selected["queue_time"],
+                        "job_type": durable_job_type,
+                        "provider_lane": args.provider_lane,
                     },
                     sort_keys=True,
                 ),
@@ -1190,6 +1346,7 @@ def main() -> int:
                     args.alert_store_url,
                     selected_group_id,
                     "processing",
+                    job_type=durable_job_type,
                 )
                 processing_recorded = bool(processing_transition)
                 processing_lease_token = (
@@ -1202,26 +1359,39 @@ def main() -> int:
                 )
                 if indexed_mode and durable_intent and not processing_recorded:
                     raise RuntimeError("durable AI job disappeared before its processing lease was recorded")
-                # Indexed work always builds a fresh bounded package at claim
-                # time. This guarantees manual reruns and newly coalesced alert,
-                # enrichment, PCAP, note, and memory evidence cannot reuse an
-                # obsolete prompt artifact.
-                prompt_path = (
-                    build_prompt(alert_id, args, durable_payload(selected))
-                    if indexed_mode
-                    else reusable_prompt_for_alert(args.prompt_dir, selected, args.pcap_analysis_dir)
-                    or build_prompt(alert_id, args)
-                )
                 def renew_processing_lease() -> None:
                     renewed = report_ai_job_status(
                         args.alert_store_url,
                         selected_group_id,
                         "processing",
                         lease_token=processing_lease_token,
+                        job_type=durable_job_type,
                     )
                     if renewed != processing_lease_token:
                         raise RuntimeError("durable AI processing lease could not be renewed")
 
+                incident_evidence_path = None
+                if durable_job_type == "incident_response_analysis":
+                    incident_evidence_path = collect_incident_evidence(
+                        alert_id,
+                        args,
+                        progress_callback=renew_processing_lease if processing_recorded else None,
+                    )
+                # Indexed work always builds a fresh bounded package at claim
+                # time. This guarantees manual reruns and newly coalesced alert,
+                # enrichment, PCAP, note, and memory evidence cannot reuse an
+                # obsolete prompt artifact.
+                prompt_path = (
+                    build_prompt(
+                        alert_id,
+                        args,
+                        durable_payload(selected),
+                        incident_evidence_path=incident_evidence_path,
+                    )
+                    if indexed_mode
+                    else reusable_prompt_for_alert(args.prompt_dir, selected, args.pcap_analysis_dir)
+                    or build_prompt(alert_id, args)
+                )
                 proc = run_analysis(
                     prompt_path,
                     args,
@@ -1240,6 +1410,7 @@ def main() -> int:
                             "failed",
                             detail,
                             processing_lease_token,
+                            job_type=durable_job_type,
                         )
                     print(detail.strip(), file=sys.stderr)
                     continue
@@ -1249,6 +1420,7 @@ def main() -> int:
                         selected_group_id,
                         "completed",
                         lease_token=processing_lease_token,
+                        job_type=durable_job_type,
                     )
                 analyzed_count += 1
             except (BoundedProcessError, RuntimeError, OSError) as error:
@@ -1260,6 +1432,7 @@ def main() -> int:
                             "failed",
                             str(error),
                             processing_lease_token,
+                            job_type=durable_job_type,
                         )
                     except RuntimeError as status_error:
                         print(f"AI failure callback also failed: {status_error}", file=sys.stderr)

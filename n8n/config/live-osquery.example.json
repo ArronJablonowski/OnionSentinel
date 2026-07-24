@@ -1,0 +1,14 @@
+{
+  "enabled": false,
+  "relay_host": "10.88.8.8",
+  "relay_user": "aj",
+  "port": 22,
+  "identity_file": "~/.ssh/id_onion_sentinel_live_osquery",
+  "known_hosts": "~/.ssh/known_hosts",
+  "allowed_target_aliases": [
+    "REPLACE_WITH_OPERATOR_ENDPOINT_ALIAS"
+  ],
+  "connect_timeout_seconds": 10,
+  "timeout_seconds": 180,
+  "artifact_dir": "~/n8n-local/soc-alerts/incident-evidence/live-osquery"
+}

@@ -13,9 +13,11 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const {createEnrichmentCache} = require('./lib/enrichment_cache');
 const {createProviderScheduler} = require('./lib/provider_scheduler');
 const {createDurableJobQueue} = require('./lib/durable_job_queue');
 const {createPipelineMetrics} = require('./lib/pipeline_metrics');
+const {createSocAnalysisPolicy} = require('./lib/soc_analysis_policy');
 const {stableGroupKey, stableGroupId} = require('./lib/group_identity');
 const {buildAlertObservables, compactCorrelationCandidates} = require('./lib/correlation_context');
 const {configureHttpServer, createRequestAdmission, readJsonObject} = require('./lib/http_runtime');
@@ -84,6 +86,61 @@ const telegramOutboxAutostart = !['0', 'false', 'no'].includes(
 );
 const enrichmentCacheDefaultTtlSeconds = Number(process.env.ENRICHMENT_CACHE_TTL_SECONDS || 86400);
 const vulnerabilityCacheDefaultTtlSeconds = Number(process.env.ENRICHMENT_VULN_CACHE_TTL_SECONDS || 86400);
+const enrichmentNegativeCacheTtlSeconds = Math.max(
+  300,
+  Number(process.env.ENRICHMENT_NEGATIVE_CACHE_TTL_SECONDS || 21600),
+);
+const enrichmentStaleIfErrorSeconds = Math.max(
+  3600,
+  Number(process.env.ENRICHMENT_STALE_IF_ERROR_SECONDS || 7 * 86400),
+);
+const enrichmentVulnerabilityStaleIfErrorSeconds = Math.max(
+  enrichmentStaleIfErrorSeconds,
+  Number(process.env.ENRICHMENT_VULN_STALE_IF_ERROR_SECONDS || 30 * 86400),
+);
+const enrichmentCacheL1MaxEntries = Math.max(
+  64,
+  Number(process.env.ENRICHMENT_CACHE_L1_MAX_ENTRIES || 2048),
+);
+const enrichmentCacheL1TtlSeconds = Math.max(
+  10,
+  Number(process.env.ENRICHMENT_CACHE_L1_TTL_SECONDS || 300),
+);
+const enrichmentCacheL1MaxBytes = Math.max(
+  1024 * 1024,
+  Number(process.env.ENRICHMENT_CACHE_L1_MAX_BYTES || 64 * 1024 * 1024),
+);
+const enrichmentCacheMaxEntries = Math.max(
+  1000,
+  Number(process.env.ENRICHMENT_CACHE_MAX_ENTRIES || 10000),
+);
+const enrichmentCacheMaxBytes = Math.max(
+  16 * 1024 * 1024,
+  Number(process.env.ENRICHMENT_CACHE_MAX_BYTES || 256 * 1024 * 1024),
+);
+const enrichmentCacheRawResponseMaxBytes = Math.max(
+  1024,
+  Number(process.env.ENRICHMENT_CACHE_RAW_RESPONSE_MAX_BYTES || 128 * 1024),
+);
+const enrichmentCacheCleanupIntervalMs = Math.max(
+  5 * 60 * 1000,
+  Number(process.env.ENRICHMENT_CACHE_CLEANUP_INTERVAL_SECONDS || 3600) * 1000,
+);
+const enrichmentSourceTtlDefaults = Object.freeze({
+  abuseipdb: 12 * 3600,
+  greynoise: 24 * 3600,
+  shodan_internetdb: 24 * 3600,
+  otx: 12 * 3600,
+  urlhaus: 6 * 3600,
+  virustotal: 24 * 3600,
+  urlscan: 12 * 3600,
+  google_safe_browsing: 6 * 3600,
+  phishtank: 6 * 3600,
+  malwarebazaar: 24 * 3600,
+  threatfox: 6 * 3600,
+  shodan: 24 * 3600,
+  censys: 24 * 3600,
+});
 const enrichmentTimeoutMs = Number(process.env.ENRICHMENT_TIMEOUT_MS || 5000);
 const httpJsonMaxResponseBytes = Math.max(
   1024,
@@ -147,19 +204,22 @@ const aiAnalysisLeaseSeconds = Math.max(
 const runtimeDir = String(
   process.env.ONION_SENTINEL_RUNTIME_DIR || path.join(os.homedir(), 'n8n-local'),
 ).trim();
-const aiAnalysisWakePath = String(
-  process.env.AI_ANALYSIS_WAKE_PATH || path.join(runtimeDir, 'run', 'ai-analysis.wake'),
-).trim();
+const aiAnalysisWakePaths = String(
+  process.env.AI_ANALYSIS_WAKE_PATHS
+    || [
+      process.env.AI_ANALYSIS_WAKE_PATH,
+      path.join(runtimeDir, 'run', 'ai-analysis-ollama.wake'),
+      path.join(runtimeDir, 'run', 'ai-analysis-cli.wake'),
+    ].filter(Boolean).join(','),
+)
+  .split(',')
+  .map((value) => value.trim())
+  .filter((value, index, values) => value && values.indexOf(value) === index);
 const pcapAnalysisWakePath = String(
   process.env.PCAP_ANALYSIS_WAKE_PATH || path.join(runtimeDir, 'run', 'pcap-analysis.wake'),
 ).trim();
 const analystStatusReasonMaxLength = 140;
-const autoPcapLevels = new Set(
-  (process.env.PCAP_AUTO_REQUEST_LEVELS || 'critical,high,medium,low,informational')
-    .split(',')
-    .map((level) => level.trim().toLowerCase())
-    .filter(Boolean),
-);
+const socAnalysisPolicy = createSocAnalysisPolicy({runtimeDir});
 
 const enrichmentSecrets = {
   abuseipdb: (process.env.ABUSEIPDB_API_KEY || '').trim(),
@@ -233,6 +293,13 @@ function assertDiskWriteAdmission(label, additionalBytes = maxRequestBytes) {
 }
 
 const severityRank = {informational: 0, info: 0, low: 1, medium: 2, high: 3, critical: 4};
+const supportedAgentRoles = new Set([
+  'soc-analyst',
+  'incident-responder',
+  'siem-engineer',
+  'cyber-threat-intel',
+  'threat-hunter',
+]);
 
 async function signalWorker(wakePath, eventName) {
   if (!wakePath) return false;
@@ -247,6 +314,13 @@ async function signalWorker(wakePath, eventName) {
     console.error(`${nowUtc()} worker wake signal failed for ${eventName}: ${error.message}`);
     return false;
   }
+}
+
+async function signalAiWorkers(eventName) {
+  const results = await Promise.all(
+    aiAnalysisWakePaths.map((wakePath) => signalWorker(wakePath, eventName)),
+  );
+  return results.some(Boolean);
 }
 
 function loadScoringRules() {
@@ -355,6 +429,49 @@ function n8nBeaconHistoryPaths() {
   return [...paths];
 }
 
+function boundedPcapWorkflowState(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const finiteNumber = (value) => {
+    if (value === null || value === undefined || value === '') return null;
+    return Number.isFinite(Number(value)) ? Number(value) : null;
+  };
+  return {
+    state: String(raw.state || 'unknown').slice(0, 64),
+    deferred: Boolean(raw.deferred),
+    reason: String(raw.reason || '').slice(0, 300),
+    metric: String(raw.metric || '').slice(0, 64),
+    observed_percent: finiteNumber(raw.observed_percent),
+    threshold_percent: finiteNumber(raw.threshold_percent),
+    telemetry_age_seconds: finiteNumber(raw.telemetry_age_seconds),
+    processed: nonNegativeIntegerField(raw.processed) || 0,
+    operational_failures: nonNegativeIntegerField(raw.operational_failures) || 0,
+  };
+}
+
+function writePcapWorkflowState(payload) {
+  // Keep one latest-state file per beacon output directory. This avoids relying
+  // on the bounded general beacon history during alert bursts while retaining
+  // atomic local-only state with no credentials or packet evidence.
+  const state = boundedPcapWorkflowState(payload?.pcap_workflow);
+  if (payload?.component !== 'pcap_broker' || !state) return;
+  const paths = new Set();
+  for (const filePath of beaconPaths) {
+    paths.add(path.join(path.dirname(filePath), 'pcap-workflow-state.json'));
+  }
+  for (const filePath of paths) {
+    try {
+      writeJsonAtomic(filePath, {
+        generated_at: payload.generated_at,
+        component: 'pcap_broker',
+        relay_host: payload.relay_host ? String(payload.relay_host).slice(0, 128) : null,
+        pcap_workflow: state,
+      });
+    } catch (writeError) {
+      console.error(`Unable to write PCAP workflow state ${filePath}: ${writeError.message}`);
+    }
+  }
+}
+
 function appendN8nBeaconHistory(payload) {
   const generatedAt = parseProjectTimestamp(payload?.generated_at);
   const cutoff = Date.now() - (72 * 60 * 60 * 1000);
@@ -413,6 +530,8 @@ function writeN8nBeacon(stage, alert = {}, result = null, error = null) {
     notification_status: result?.notification?.status || null,
     error: error ? String(error.message || error) : null,
     relay_previous_failure: alert?.relay_previous_failure || null,
+    component: alert?.component || null,
+    pcap_workflow: boundedPcapWorkflowState(alert?.pcap_workflow),
   };
   for (const filePath of beaconPaths) {
     try {
@@ -422,6 +541,7 @@ function writeN8nBeacon(stage, alert = {}, result = null, error = null) {
     }
   }
   if (stage !== 'received') {
+    writePcapWorkflowState(payload);
     appendN8nBeaconHistory(payload);
   }
   return payload;
@@ -867,66 +987,21 @@ function sourceRateLimitMs(source) {
 }
 
 function sourceTtlSeconds(source) {
-  return ['cisa_kev', 'epss', 'nvd'].includes(source) ? vulnerabilityCacheDefaultTtlSeconds : enrichmentCacheDefaultTtlSeconds;
-}
-
-function cacheKey(source, indicatorType, indicator) {
-  return crypto.createHash('sha256').update(`${source}|${indicatorType}|${indicator}`).digest('hex');
-}
-
-async function readEnrichmentCache(source, indicatorType, indicator) {
-  const row = await get('SELECT * FROM enrichment_cache WHERE cache_key = ? AND expires_at > ?', [cacheKey(source, indicatorType, indicator), nowUtc()]);
-  if (!row) return null;
-  return {
-    source: row.source,
-    indicator: row.indicator,
-    indicator_type: row.indicator_type,
-    verdict: row.verdict || 'unknown',
-    confidence: row.confidence ?? 0,
-    tags: JSON.parse(row.tags_json || '[]'),
-    first_seen: row.first_seen || null,
-    last_seen: row.last_seen || null,
-    raw_response: JSON.parse(row.raw_response_json || 'null'),
-    cached_at: row.cached_at,
-  };
-}
-
-async function writeEnrichmentCache(record, ttlSeconds) {
-  const now = nowUtc();
-  const expiresAt = isoFromMs(epochMs() + secondsToMs(ttlSeconds)).replace('T', '  ');
-  await run(
-    `
-      INSERT INTO enrichment_cache (
-        cache_key, source, indicator, indicator_type, verdict, confidence, tags_json,
-        first_seen, last_seen, raw_response_json, cached_at, expires_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(cache_key) DO UPDATE SET
-        verdict = excluded.verdict,
-        confidence = excluded.confidence,
-        tags_json = excluded.tags_json,
-        first_seen = excluded.first_seen,
-        last_seen = excluded.last_seen,
-        raw_response_json = excluded.raw_response_json,
-        cached_at = excluded.cached_at,
-        expires_at = excluded.expires_at
-    `,
-    [
-      cacheKey(record.source, record.indicator_type, record.indicator),
-      record.source,
-      record.indicator,
-      record.indicator_type,
-      record.verdict,
-      record.confidence,
-      jsonText(record.tags || []),
-      record.first_seen || null,
-      record.last_seen || null,
-      jsonText(record.raw_response ?? null),
-      now,
-      expiresAt,
-    ],
+  const normalizedSource = String(source || '').trim().toLowerCase();
+  const sourceOverride = Number(
+    process.env[`ENRICHMENT_CACHE_${normalizedSource.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_TTL_SECONDS`],
   );
-  return {...record, cached_at: now};
+  if (Number.isFinite(sourceOverride) && sourceOverride >= 300) return Math.floor(sourceOverride);
+  if (['cisa_kev', 'epss', 'nvd'].includes(normalizedSource)) {
+    return Math.max(300, vulnerabilityCacheDefaultTtlSeconds);
+  }
+  return Math.max(300, enrichmentSourceTtlDefaults[normalizedSource] || enrichmentCacheDefaultTtlSeconds);
+}
+
+function sourceStaleIfErrorSeconds(source) {
+  return ['cisa_kev', 'epss', 'nvd'].includes(String(source || '').toLowerCase())
+    ? enrichmentVulnerabilityStaleIfErrorSeconds
+    : enrichmentStaleIfErrorSeconds;
 }
 
 async function reserveProviderRateLimitSlot(source) {
@@ -957,19 +1032,20 @@ async function reserveProviderRateLimitSlot(source) {
 }
 
 async function cachedLookup(source, indicatorType, indicator, lookup) {
-  const cached = await withSqliteWriteGate(
-    () => readEnrichmentCache(source, indicatorType, indicator),
-  );
-  if (cached) return {record: cached, cached: true};
-  const waitMs = await reserveProviderRateLimitSlot(source);
-  if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
-  const record = await lookup();
-  const saved = await withSqliteWriteGate(
-    () => withImmediateTransaction(
-      () => writeEnrichmentCache(record, sourceTtlSeconds(source)),
-    ),
-  );
-  return {record: saved, cached: false};
+  const ttlSeconds = sourceTtlSeconds(source);
+  return enrichmentCache.lookup({
+    source,
+    indicatorType,
+    indicator,
+    ttlSeconds,
+    negativeTtlSeconds: Math.min(ttlSeconds, enrichmentNegativeCacheTtlSeconds),
+    staleIfErrorSeconds: sourceStaleIfErrorSeconds(source),
+    loader: () => enrichmentScheduler.run(source, async () => {
+      const waitMs = await reserveProviderRateLimitSlot(source);
+      if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+      return lookup();
+    }),
+  });
 }
 
 async function lookupAbuseIpdb(ip) {
@@ -1207,12 +1283,22 @@ async function runEnrichmentLookup(source, indicatorType, indicator, lookup, sum
     return;
   }
   try {
-    const result = await enrichmentScheduler.run(
-      source,
-      () => cachedLookup(source, indicatorType, indicator, lookup),
-    );
+    const result = await cachedLookup(source, indicatorType, indicator, lookup);
     summary.records.push(result.record);
-    summary.sources[source] = {status: result.cached ? 'cached' : 'queried', limit_note: sourceLimitNote(source)};
+    summary.sources[source] = {
+      status: result.cache_state === 'stale' ? 'stale_cache' : result.cached ? 'cached' : 'queried',
+      cache_state: result.cache_state,
+      limit_note: sourceLimitNote(source),
+    };
+    if (result.fallback_error) {
+      summary.warnings.push({
+        source,
+        indicator,
+        indicator_type: indicatorType,
+        reason: 'provider_refresh_failed_stale_cache_used',
+        detail: result.fallback_error,
+      });
+    }
   } catch (error) {
     summary.errors.push({source, indicator, indicator_type: indicatorType, reason: error.message, limit_note: sourceLimitNote(source)});
   }
@@ -1236,6 +1322,7 @@ async function enrichAlert(alert) {
     sources: {},
     records: [],
     skipped: [],
+    warnings: [],
     errors: [],
     privacy: {
       submitted_private_ips: false,
@@ -1641,6 +1728,23 @@ async function withImmediateTransaction(task) {
   }
 }
 
+const enrichmentCache = createEnrichmentCache({
+  run,
+  get,
+  all,
+  withWriteGate: withSqliteWriteGate,
+  withTransaction: withImmediateTransaction,
+  formatTimestamp: formatProjectTimestamp,
+  l1MaxEntries: enrichmentCacheL1MaxEntries,
+  l1TtlSeconds: enrichmentCacheL1TtlSeconds,
+  l1MaxBytes: enrichmentCacheL1MaxBytes,
+  maxEntries: enrichmentCacheMaxEntries,
+  maxBytes: enrichmentCacheMaxBytes,
+  rawResponseMaxBytes: enrichmentCacheRawResponseMaxBytes,
+  staleIfErrorSeconds: enrichmentStaleIfErrorSeconds,
+  vulnerabilityStaleIfErrorSeconds: enrichmentVulnerabilityStaleIfErrorSeconds,
+});
+
 async function initDb() {
   // Schema upgrades are additive. ensureColumn keeps existing SQLite DBs usable
   // after new triage fields are introduced.
@@ -1797,6 +1901,7 @@ async function initDb() {
       analysis_id TEXT PRIMARY KEY,
       group_id TEXT NOT NULL,
       alert_id TEXT NOT NULL,
+      agent_role TEXT NOT NULL DEFAULT 'soc-analyst',
       generated_at TEXT NOT NULL,
       model TEXT,
       model_path TEXT,
@@ -1810,8 +1915,75 @@ async function initDb() {
       created_at TEXT NOT NULL
     )
   `);
+  await ensureColumn('ai_analysis_runs', 'agent_role', "TEXT NOT NULL DEFAULT 'soc-analyst'");
   await run('CREATE INDEX IF NOT EXISTS idx_ai_analysis_runs_group ON ai_analysis_runs(group_id, generated_at DESC)');
   await run('CREATE INDEX IF NOT EXISTS idx_ai_analysis_runs_alert ON ai_analysis_runs(alert_id, generated_at DESC)');
+  await run('CREATE INDEX IF NOT EXISTS idx_ai_analysis_runs_role_group ON ai_analysis_runs(agent_role, group_id, generated_at DESC)');
+  await run(`
+    CREATE TABLE IF NOT EXISTS incident_response_cases (
+      case_id TEXT PRIMARY KEY,
+      group_id TEXT NOT NULL UNIQUE,
+      dashboard_group_id TEXT NOT NULL,
+      representative_alert_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open'
+        CHECK(status IN ('open', 'in_progress', 'resolved')),
+      agent_status TEXT NOT NULL DEFAULT 'queued'
+        CHECK(agent_status IN ('queued', 'analyzing', 'analyzed', 'failed')),
+      escalated_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      escalated_by TEXT,
+      reason TEXT,
+      latest_analysis_id TEXT,
+      latest_model TEXT,
+      latest_generated_at TEXT,
+      latest_error TEXT
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_incident_cases_status_updated ON incident_response_cases(status, updated_at DESC)');
+  await run('CREATE INDEX IF NOT EXISTS idx_incident_cases_agent_status ON incident_response_cases(agent_status, updated_at DESC)');
+  await run('CREATE INDEX IF NOT EXISTS idx_incident_cases_dashboard_group ON incident_response_cases(dashboard_group_id)');
+  await run(`
+    CREATE TABLE IF NOT EXISTS incident_response_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      case_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      actor TEXT,
+      detail_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(case_id) REFERENCES incident_response_cases(case_id)
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_incident_events_case_created ON incident_response_events(case_id, created_at DESC)');
+  await run(`
+    CREATE TABLE IF NOT EXISTS ai_second_opinion_runs (
+      analysis_id TEXT PRIMARY KEY,
+      group_id TEXT NOT NULL,
+      alert_id TEXT NOT NULL,
+      agent_role TEXT NOT NULL,
+      trigger TEXT,
+      status TEXT NOT NULL,
+      primary_model TEXT,
+      primary_model_path TEXT,
+      primary_outcome TEXT,
+      primary_confidence TEXT,
+      reviewer_model TEXT,
+      reviewer_model_path TEXT,
+      reviewer_outcome TEXT,
+      reviewer_confidence TEXT,
+      agreement TEXT,
+      material_disagreement INTEGER NOT NULL DEFAULT 0,
+      disputed_fields_json TEXT NOT NULL DEFAULT '[]',
+      comparison_json TEXT NOT NULL DEFAULT '{}',
+      reviewer_runtime_seconds REAL,
+      memory_candidates_promoted INTEGER NOT NULL DEFAULT 0,
+      generated_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_ai_second_opinion_generated ON ai_second_opinion_runs(generated_at DESC)');
+  await run('CREATE INDEX IF NOT EXISTS idx_ai_second_opinion_agreement ON ai_second_opinion_runs(agreement, generated_at DESC)');
+  await run('CREATE INDEX IF NOT EXISTS idx_ai_second_opinion_group ON ai_second_opinion_runs(group_id, generated_at DESC)');
   await run(`
     CREATE TABLE IF NOT EXISTS alert_correlations (
       source_group_id TEXT NOT NULL,
@@ -1882,24 +2054,7 @@ async function initDb() {
       escalation_threshold INTEGER NOT NULL
     )
   `);
-  await run(`
-    CREATE TABLE IF NOT EXISTS enrichment_cache (
-      cache_key TEXT PRIMARY KEY,
-      source TEXT NOT NULL,
-      indicator TEXT NOT NULL,
-      indicator_type TEXT NOT NULL,
-      verdict TEXT,
-      confidence INTEGER,
-      tags_json TEXT,
-      first_seen TEXT,
-      last_seen TEXT,
-      raw_response_json TEXT,
-      cached_at TEXT NOT NULL,
-      expires_at TEXT NOT NULL
-    )
-  `);
-  await run('CREATE INDEX IF NOT EXISTS idx_enrichment_cache_expires_at ON enrichment_cache(expires_at)');
-  await run('CREATE INDEX IF NOT EXISTS idx_enrichment_cache_indicator ON enrichment_cache(indicator)');
+  await enrichmentCache.install();
   await run(`
     CREATE TABLE IF NOT EXISTS enrichment_rate_limit (
       source TEXT PRIMARY KEY,
@@ -2124,16 +2279,19 @@ async function recordAiAnalysisResult(payload) {
   const generatedAt = safeString(payload?.generated_at, 64) || nowUtc();
   const groupId = alertRow.stable_group_id;
   if (!groupId) throw new Error('analysis alert has no stable group identity');
+  const requestedAgentRole = safeString(payload?.agent_role || 'soc-analyst', 64).toLowerCase();
+  const agentRole = supportedAgentRoles.has(requestedAgentRole) ? requestedAgentRole : 'soc-analyst';
 
   await run(
     `INSERT INTO ai_analysis_runs (
-       analysis_id, group_id, alert_id, generated_at, model, model_path,
+       analysis_id, group_id, alert_id, agent_role, generated_at, model, model_path,
        detection_outcome, bluf, summary, confidence, artifact_path,
        evidence_hash, response_json, created_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(analysis_id) DO UPDATE SET
        group_id = excluded.group_id,
        alert_id = excluded.alert_id,
+       agent_role = excluded.agent_role,
        generated_at = excluded.generated_at,
        model = excluded.model,
        model_path = excluded.model_path,
@@ -2148,6 +2306,7 @@ async function recordAiAnalysisResult(payload) {
       analysisId,
       groupId,
       alertId,
+      agentRole,
       generatedAt,
       safeString(payload?.model || response._analysis_model, 200),
       safeString(payload?.model_path || response._analysis_model_path, 100),
@@ -2161,6 +2320,107 @@ async function recordAiAnalysisResult(payload) {
       nowUtc(),
     ],
   );
+
+  const secondOpinion = response._second_opinion && typeof response._second_opinion === 'object'
+    ? response._second_opinion
+    : null;
+  let secondOpinionRecorded = false;
+  if (secondOpinion) {
+    const reviewer = secondOpinion.response && typeof secondOpinion.response === 'object'
+      ? secondOpinion.response
+      : {};
+    const comparison = secondOpinion.comparison && typeof secondOpinion.comparison === 'object'
+      ? secondOpinion.comparison
+      : {};
+    const memoryWriteback = secondOpinion.memory_writeback && typeof secondOpinion.memory_writeback === 'object'
+      ? secondOpinion.memory_writeback
+      : {};
+    const runtime = Number(secondOpinion.runtime_seconds);
+    const now = nowUtc();
+    await run(
+      `INSERT INTO ai_second_opinion_runs (
+         analysis_id, group_id, alert_id, agent_role, trigger, status,
+         primary_model, primary_model_path, primary_outcome, primary_confidence,
+         reviewer_model, reviewer_model_path, reviewer_outcome, reviewer_confidence,
+         agreement, material_disagreement, disputed_fields_json, comparison_json,
+         reviewer_runtime_seconds, memory_candidates_promoted, generated_at,
+         created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(analysis_id) DO UPDATE SET
+         group_id = excluded.group_id,
+         alert_id = excluded.alert_id,
+         agent_role = excluded.agent_role,
+         trigger = excluded.trigger,
+         status = excluded.status,
+         primary_model = excluded.primary_model,
+         primary_model_path = excluded.primary_model_path,
+         primary_outcome = excluded.primary_outcome,
+         primary_confidence = excluded.primary_confidence,
+         reviewer_model = excluded.reviewer_model,
+         reviewer_model_path = excluded.reviewer_model_path,
+         reviewer_outcome = excluded.reviewer_outcome,
+         reviewer_confidence = excluded.reviewer_confidence,
+         agreement = excluded.agreement,
+         material_disagreement = excluded.material_disagreement,
+         disputed_fields_json = excluded.disputed_fields_json,
+         comparison_json = excluded.comparison_json,
+         reviewer_runtime_seconds = excluded.reviewer_runtime_seconds,
+         memory_candidates_promoted = excluded.memory_candidates_promoted,
+         generated_at = excluded.generated_at,
+         updated_at = excluded.updated_at`,
+      [
+        analysisId,
+        groupId,
+        alertId,
+        agentRole,
+        safeString(secondOpinion.trigger, 1000),
+        safeString(secondOpinion.status || 'unknown', 32),
+        safeString(payload?.model || response._analysis_model, 200),
+        safeString(payload?.model_path || response._analysis_model_path, 100),
+        safeString(response.detection_outcome, 100),
+        safeString(response.confidence, 16).toLowerCase(),
+        safeString(reviewer._analysis_model || secondOpinion.model_route, 200),
+        safeString(reviewer._analysis_model_path, 100),
+        safeString(reviewer.detection_outcome, 100),
+        safeString(reviewer.confidence, 16).toLowerCase(),
+        safeString(comparison.agreement, 64),
+        comparison.material_disagreement ? 1 : 0,
+        jsonText(Array.isArray(comparison.disputed_fields) ? comparison.disputed_fields : []),
+        jsonText(comparison),
+        Number.isFinite(runtime) && runtime >= 0 ? runtime : null,
+        Math.max(0, Number(memoryWriteback.accepted) || 0),
+        generatedAt,
+        now,
+        now,
+      ],
+    );
+    secondOpinionRecorded = true;
+  }
+
+  if (agentRole === 'incident-responder') {
+    const caseRow = await get('SELECT case_id FROM incident_response_cases WHERE group_id = ?', [groupId]);
+    if (caseRow?.case_id) {
+      const updatedAt = nowUtc();
+      await run(
+        `UPDATE incident_response_cases
+         SET agent_status = 'analyzed', latest_analysis_id = ?, latest_model = ?,
+             latest_generated_at = ?, latest_error = NULL, updated_at = ?
+         WHERE case_id = ?`,
+        [
+          analysisId,
+          safeString(payload?.model || response._analysis_model, 200),
+          generatedAt,
+          updatedAt,
+          caseRow.case_id,
+        ],
+      );
+      await run(
+        `INSERT INTO incident_response_events (case_id, event_type, actor, detail_json, created_at)
+         VALUES (?, 'analysis_completed', 'incident-responder', ?, ?)`,
+        [caseRow.case_id, jsonText({analysis_id: analysisId, generated_at: generatedAt}), updatedAt],
+      );
+    }
+  }
 
   const assessment = normalizeCorrelationAssessment(response.correlation_assessment);
   const candidates = compactCorrelationCandidates(payload?.correlation_candidates);
@@ -2201,7 +2461,14 @@ async function recordAiAnalysisResult(payload) {
     );
     correlations += 1;
   }
-  return {ok: true, status: 'analysis_indexed', analysis_id: analysisId, group_id: groupId, correlations};
+  return {
+    ok: true,
+    status: 'analysis_indexed',
+    analysis_id: analysisId,
+    group_id: groupId,
+    correlations,
+    second_opinion_recorded: secondOpinionRecorded,
+  };
 }
 
 async function refreshGroupAliases() {
@@ -2610,7 +2877,7 @@ async function storeAlert(rawAlert) {
         // Enrichment normally finishes in seconds. Let that committed evidence
         // wake AI first so the initial prompt includes it; launchd's interval
         // remains the bounded fallback if enrichment is delayed or unavailable.
-        wakeAiAfterCommit = !enrichmentQueued;
+        wakeAiAfterCommit = !enrichmentQueued || stored.incident?.status === 'queued';
       }
       await pipelineMetrics.record('alert_ingest', 'completed', stored.alert?.alert_id || 'unknown', {
         eventKey: `alert_ingest:completed:${stored.alert?.alert_id || 'unknown'}:${stored.alert?.seen_count || 1}`,
@@ -2620,7 +2887,7 @@ async function storeAlert(rawAlert) {
     return stored;
   }));
   if (!result.ok) return result;
-  if (wakeAiAfterCommit) void signalWorker(aiAnalysisWakePath, 'alert-committed');
+  if (wakeAiAfterCommit) void signalAiWorkers('alert-committed');
   // Delivery is deliberately outside the ingest transaction. A Telegram
   // timeout cannot delay the webhook response or cause n8n to replay a safely
   // committed alert.
@@ -2634,7 +2901,7 @@ async function transitionDurableJobStatus(jobType, dedupeKey, status, error = ''
   let resolvedKey = dedupeKey;
   let transition = await durableJobs.transition(jobType, resolvedKey, status, error, leaseToken);
   let updated = Boolean(transition?.updated);
-  if (!updated && jobType === 'ai_analysis') {
+  if (!updated && ['ai_analysis', 'incident_response_analysis'].includes(jobType)) {
     // Workers deployed before stable V2 group identities report the legacy
     // dashboard key. Resolve that key at the write boundary so rolling
     // upgrades cannot leave healthy analysis work permanently pending.
@@ -2648,19 +2915,41 @@ async function transitionDurableJobStatus(jobType, dedupeKey, status, error = ''
       updated = Boolean(transition?.updated);
     }
   }
-  if (updated && pipelineMetrics) {
+  if (updated) {
     const job = await get(
       'SELECT status, attempt_count, updated_at, last_completed_at FROM durable_jobs WHERE job_type = ? AND dedupe_key = ?',
       [jobType, resolvedKey],
     );
     const eventType = status === 'processing' ? 'started' : status;
-    await pipelineMetrics.record(jobType, eventType, resolvedKey, {
-      eventKey: `${jobType}:${eventType}:${resolvedKey}:${job?.attempt_count || 0}:${job?.last_completed_at || job?.updated_at || nowUtc()}`,
-    });
+    if (pipelineMetrics) {
+      await pipelineMetrics.record(jobType, eventType, resolvedKey, {
+        eventKey: `${jobType}:${eventType}:${resolvedKey}:${job?.attempt_count || 0}:${job?.last_completed_at || job?.updated_at || nowUtc()}`,
+      });
+    }
     if (jobType === 'ai_analysis' && status === 'completed' && job?.status === 'pending') {
       // Evidence arrived while this inference was running. The queue retained
       // one coalesced rerun request; wake launchd after the completed run.
-      void signalWorker(aiAnalysisWakePath, 'ai-rerun-pending');
+      void signalAiWorkers('ai-rerun-pending');
+    }
+    if (jobType === 'incident_response_analysis') {
+      const agentStatus = {
+        pending: 'queued',
+        processing: 'analyzing',
+        completed: 'analyzed',
+        failed: 'failed',
+      }[job?.status] || 'queued';
+      const caseRow = await get('SELECT case_id FROM incident_response_cases WHERE group_id = ?', [resolvedKey]);
+      if (caseRow?.case_id) {
+        await run(
+          `UPDATE incident_response_cases
+           SET agent_status = ?, latest_error = ?, updated_at = ?
+           WHERE case_id = ?`,
+          [agentStatus, job?.status === 'failed' ? safeString(error, 1000) : null, nowUtc(), caseRow.case_id],
+        );
+      }
+      if (status === 'completed' && job?.status === 'pending') {
+        void signalAiWorkers('incident-response-rerun-pending');
+      }
     }
   }
   return {updated, resolvedKey, leaseToken: transition?.leaseToken || null};
@@ -2675,8 +2964,8 @@ async function recoverExpiredDurableJobs() {
     ));
     if (!summary.recovered && !summary.failed) return;
     console.warn(`${nowUtc()} durable job lease recovery: ${JSON.stringify(summary)}`);
-    if (summary.job_types.ai_analysis) {
-      void signalWorker(aiAnalysisWakePath, 'ai-lease-recovered');
+    if (summary.job_types.ai_analysis || summary.job_types.incident_response_analysis) {
+      void signalAiWorkers('ai-lease-recovered');
     }
     if (summary.job_types.public_enrichment) void drainEnrichmentJobs();
     if (summary.job_types.n8n_post_commit) void drainN8nPostCommitJobs();
@@ -2685,13 +2974,7 @@ async function recoverExpiredDurableJobs() {
   }
 }
 
-async function requestAiReanalysis(payload) {
-  const dashboardGroupId = safeString(payload?.group_id, 64).toLowerCase();
-  if (!/^[a-f0-9]{12}$/.test(dashboardGroupId)) {
-    const error = new Error('valid dashboard group_id is required');
-    error.statusCode = 400;
-    throw error;
-  }
+async function resolveDashboardAlertGroup(dashboardGroupId) {
   let representative = await get(
     `SELECT a.alert_id, a.stable_group_id, a.stable_group_key
      FROM alert_group_summary AS g
@@ -2710,6 +2993,17 @@ async function requestAiReanalysis(payload) {
       [dashboardGroupId],
     );
   }
+  return representative;
+}
+
+async function requestAiReanalysis(payload) {
+  const dashboardGroupId = safeString(payload?.group_id, 64).toLowerCase();
+  if (!/^[a-f0-9]{12}$/.test(dashboardGroupId)) {
+    const error = new Error('valid dashboard group_id is required');
+    error.statusCode = 400;
+    throw error;
+  }
+  const representative = await resolveDashboardAlertGroup(dashboardGroupId);
   const stableGroupId = safeString(representative?.stable_group_id, 64).toLowerCase();
   if (!representative?.alert_id || !stableGroupId) {
     const error = new Error('SOC alert group was not found');
@@ -2747,6 +3041,126 @@ async function requestAiReanalysis(payload) {
     group_id: dashboardGroupId,
     queue_group_id: stableGroupId,
     representative_alert_id: representative.alert_id,
+    requested_at: requestedAt,
+  };
+}
+
+async function requestIncidentEscalation(payload) {
+  const dashboardGroupId = safeString(payload?.group_id, 64).toLowerCase();
+  if (!/^[a-f0-9]{12}$/.test(dashboardGroupId)) {
+    const error = new Error('valid dashboard group_id is required');
+    error.statusCode = 400;
+    throw error;
+  }
+  const representative = await resolveDashboardAlertGroup(dashboardGroupId);
+  const stableGroupId = safeString(representative?.stable_group_id, 64).toLowerCase();
+  if (!representative?.alert_id || !stableGroupId) {
+    const error = new Error('SOC alert group was not found');
+    error.statusCode = 404;
+    throw error;
+  }
+  return queueIncidentResponseForGroup({
+    dashboardGroupId,
+    representative,
+    requestedBy: payload?.requested_by || 'dashboard',
+    reason: payload?.reason || 'Escalated from SOC Alerts for incident response',
+    relatedLimit: payload?.related_limit ?? 250,
+    pcapAnalysisLimit: payload?.pcap_analysis_limit ?? 25,
+    manualReanalysis: true,
+    eventType: 'escalated',
+    priority: 1100,
+  });
+}
+
+async function queueIncidentResponseForGroup({
+  dashboardGroupId,
+  representative,
+  requestedBy = 'dashboard',
+  reason = 'Escalated from SOC Alerts for incident response',
+  relatedLimit = 250,
+  pcapAnalysisLimit = 25,
+  manualReanalysis = false,
+  eventType = 'escalated',
+  priority = 1100,
+}) {
+  const stableGroupId = safeString(representative?.stable_group_id, 64).toLowerCase();
+  if (!representative?.alert_id || !stableGroupId) {
+    const error = new Error('resolved SOC alert group is missing its stable identity');
+    error.statusCode = 409;
+    throw error;
+  }
+  const requestedRelatedLimit = Number(relatedLimit);
+  const requestedPcapLimit = Number(pcapAnalysisLimit);
+  if (!Number.isFinite(requestedRelatedLimit) || !Number.isFinite(requestedPcapLimit)) {
+    const error = new Error('Incident response queue limits must be finite numbers');
+    error.statusCode = 400;
+    throw error;
+  }
+  const requestedAt = nowUtc();
+  const actor = safeString(requestedBy, 100);
+  const normalizedReason = safeString(reason, 1000);
+  const caseId = `ir-${crypto.createHash('sha256').update(stableGroupId).digest('hex').slice(0, 16)}`;
+  await run(
+    `INSERT INTO incident_response_cases (
+       case_id, group_id, dashboard_group_id, representative_alert_id, status,
+       agent_status, escalated_at, updated_at, escalated_by, reason
+     ) VALUES (?, ?, ?, ?, 'open', 'queued', ?, ?, ?, ?)
+     ON CONFLICT(group_id) DO UPDATE SET
+       dashboard_group_id = excluded.dashboard_group_id,
+       representative_alert_id = excluded.representative_alert_id,
+       status = CASE WHEN incident_response_cases.status = 'resolved' THEN 'open' ELSE incident_response_cases.status END,
+       agent_status = 'queued',
+       updated_at = excluded.updated_at,
+       escalated_by = excluded.escalated_by,
+       reason = excluded.reason,
+       latest_error = NULL`,
+    [
+      caseId,
+      stableGroupId,
+      dashboardGroupId,
+      representative.alert_id,
+      requestedAt,
+      requestedAt,
+      actor,
+      normalizedReason,
+    ],
+  );
+  const incident = await get('SELECT case_id, escalated_at FROM incident_response_cases WHERE group_id = ?', [stableGroupId]);
+  await run(
+    `INSERT INTO incident_response_events (case_id, event_type, actor, detail_json, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [
+      incident.case_id,
+      safeString(eventType, 64),
+      actor,
+      jsonText({dashboard_group_id: dashboardGroupId, reason: normalizedReason}),
+      requestedAt,
+    ],
+  );
+  await durableJobs.enqueue('incident_response_analysis', stableGroupId, {
+    agent_role: 'incident-responder',
+    case_id: incident.case_id,
+    alert_id: representative.alert_id,
+    group_id: stableGroupId,
+    dashboard_group_id: dashboardGroupId,
+    manual_reanalysis: Boolean(manualReanalysis),
+    requested_by: actor,
+    requested_at: requestedAt,
+    reason: normalizedReason,
+    related_limit: Math.max(1, Math.min(500, Math.trunc(requestedRelatedLimit))),
+    pcap_analysis_limit: Math.max(1, Math.min(25, Math.trunc(requestedPcapLimit))),
+  }, {priority: Math.max(0, Number(priority) || 0), maxAttempts: 12});
+  await pipelineMetrics.record('incident_response_analysis', 'enqueued', stableGroupId, {
+    eventKey: `incident_response_analysis:${manualReanalysis ? 'manual' : 'automatic'}:${stableGroupId}:${requestedAt}`,
+  });
+  return {
+    ok: true,
+    status: 'queued',
+    case_id: incident.case_id,
+    group_id: dashboardGroupId,
+    queue_group_id: stableGroupId,
+    representative_alert_id: representative.alert_id,
+    escalated_at: incident.escalated_at,
     requested_at: requestedAt,
   };
 }
@@ -2797,7 +3211,7 @@ async function drainEnrichmentJobs() {
           });
         }
       }));
-      if (wakeAi) void signalWorker(aiAnalysisWakePath, 'enrichment-completed');
+      if (wakeAi) void signalAiWorkers('enrichment-completed');
     } catch (error) {
       let enrichmentExhausted = false;
       await withSqliteWriteGate(() => withImmediateTransaction(async () => {
@@ -2808,7 +3222,7 @@ async function drainEnrichmentJobs() {
           eventKey: `public_enrichment:failed:${job.id}:${job.attempt_count}`,
         });
       }));
-      if (enrichmentExhausted) void signalWorker(aiAnalysisWakePath, 'enrichment-exhausted');
+      if (enrichmentExhausted) void signalAiWorkers('enrichment-exhausted');
     }
   } finally {
     enrichmentDrainActive = false;
@@ -3074,6 +3488,7 @@ async function storeAlertUnlocked(alert) {
   }
   await refreshAlertGroupSummary(nextGroupKey);
   const pcap = await maybeQueueAutomaticPcapRequest(alert, row, inserted, suppression);
+  const incident = await maybeQueueAutomaticIncidentResponse(alert, row, inserted, suppression);
 
   return {
     ok: true,
@@ -3083,6 +3498,7 @@ async function storeAlertUnlocked(alert) {
     triage: alert.triage,
     filter: suppression,
     pcap,
+    incident,
     notification: {channel: 'telegram', status: 'pending'},
   };
 }
@@ -3824,14 +4240,17 @@ async function createPcapRequest(payload) {
 }
 
 async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppression) {
-  if (!inserted || autoPcapLevels.size === 0) return {status: 'skipped_policy'};
+  if (!inserted) return {status: 'skipped_duplicate'};
   if (!storedRow || ['suppressed', 'dropped'].includes(String(storedRow.filter_status || '').toLowerCase())) {
     return {status: 'skipped_filter'};
   }
   if (suppression?.status === 'suppressed') return {status: 'skipped_suppression'};
 
   const level = String(nestedField(alert, 'triage.level') || storedRow.triage_level || '').toLowerCase();
-  if (!autoPcapLevels.has(level)) return {status: 'skipped_level', triage_level: level};
+  const threshold = socAnalysisPolicy.read().soc_analyst_pcap_min_severity;
+  if (!socAnalysisPolicy.matchesPcap(level)) {
+    return {status: 'skipped_level', triage_level: level, threshold};
+  }
 
   try {
     const groupKey = alertGroupKeyFromRow(storedRow);
@@ -3854,7 +4273,13 @@ async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppre
         [storedRow.alert_id, storedRow.last_seen, jsonText(existingPayload),
           `Coalesced automatic PCAP request for ${level} alert group`, nowUtc(), existingPending.request_id],
       );
-      return {status: 'coalesced', request_id: existingPending.request_id, group_id: groupId, triage_level: level};
+      return {
+        status: 'coalesced',
+        request_id: existingPending.request_id,
+        group_id: groupId,
+        triage_level: level,
+        threshold,
+      };
     }
     const result = await createPcapRequest({
       group_id: groupId,
@@ -3868,9 +4293,42 @@ async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppre
       request_id: result.request?.request_id || null,
       group_id: groupId,
       triage_level: level,
+      threshold,
     };
   } catch (error) {
-    return {status: 'failed', reason: error.message, triage_level: level};
+    return {status: 'failed', reason: error.message, triage_level: level, threshold};
+  }
+}
+
+async function maybeQueueAutomaticIncidentResponse(alert, storedRow, inserted, suppression) {
+  if (!inserted) return {status: 'skipped_duplicate'};
+  if (!storedRow || ['suppressed', 'dropped'].includes(String(storedRow.filter_status || '').toLowerCase())) {
+    return {status: 'skipped_filter'};
+  }
+  if (suppression?.status === 'suppressed') return {status: 'skipped_suppression'};
+
+  const level = String(nestedField(alert, 'triage.level') || storedRow.triage_level || '').toLowerCase();
+  const threshold = socAnalysisPolicy.read().soc_analyst_incident_min_severity;
+  if (!socAnalysisPolicy.matchesIncident(level)) {
+    return {status: 'skipped_level', triage_level: level, threshold};
+  }
+
+  try {
+    const dashboardGroupId = alertGroupId(alertGroupKeyFromRow(storedRow));
+    const result = await queueIncidentResponseForGroup({
+      dashboardGroupId,
+      representative: storedRow,
+      requestedBy: 'alert-store-auto-incident',
+      reason: `Automatic incident response for ${level} alert at configured ${threshold} threshold`,
+      relatedLimit: 250,
+      pcapAnalysisLimit: 25,
+      manualReanalysis: false,
+      eventType: 'auto_escalated',
+      priority: 100 + (severityRank[level] ?? 0),
+    });
+    return {...result, triage_level: level, threshold};
+  } catch (error) {
+    return {status: 'failed', reason: error.message, triage_level: level, threshold};
   }
 }
 
@@ -4376,6 +4834,7 @@ async function operationalMetricsSnapshot() {
     pcap_outcomes: pcapOutcomes,
     pcap_storage: pcapStorage || {},
     oldest_pending_pcap_seconds: Number(oldestPcap?.seconds || 0),
+    enrichment_cache: await enrichmentCache.stats(),
     telegram_outbox: await telegramOutboxSnapshot(),
     sqlite_bytes: sqliteBytes,
     disk_capacity: diskCapacitySnapshot(),
@@ -4401,6 +4860,7 @@ async function handleRequest(request, response) {
         status: 'healthy',
         telegram_outbox: await telegramOutboxSnapshot(),
         enrichment_scheduler: enrichmentScheduler.snapshot(),
+        enrichment_cache: enrichmentCache.snapshot(),
         disk_capacity: diskCapacitySnapshot(),
       });
       return;
@@ -4469,7 +4929,18 @@ async function handleRequest(request, response) {
       const result = await withSqliteWriteGate(() => withImmediateTransaction(
         () => requestAiReanalysis(payload),
       ));
-      void signalWorker(aiAnalysisWakePath, 'manual-ai-reanalysis');
+      void signalAiWorkers('manual-ai-reanalysis');
+      sendJson(response, 202, result);
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/incidents/escalate') {
+      // Escalation is an idempotent case transition plus a distinct agent job.
+      // It never overwrites or masquerades as the SOC Analyst's prior result.
+      const payload = await readJsonBody(request);
+      const result = await withSqliteWriteGate(() => withImmediateTransaction(
+        () => requestIncidentEscalation(payload),
+      ));
+      void signalAiWorkers('incident-response-escalation');
       sendJson(response, 202, result);
       return;
     }
@@ -4565,7 +5036,7 @@ async function handleRequest(request, response) {
       const result = await withSqliteWriteGate(() => withImmediateTransaction(
         () => completePcapAnalysis(payload),
       ));
-      if (result.wake_ai_analysis) void signalWorker(aiAnalysisWakePath, 'pcap-analysis-completed');
+      if (result.wake_ai_analysis) void signalAiWorkers('pcap-analysis-completed');
       delete result.wake_ai_analysis;
       sendJson(response, 200, result);
       return;
@@ -4646,6 +5117,12 @@ initDb().then(() => {
   }
   setInterval(() => void drainEnrichmentJobs(), enrichmentWorkerIntervalMs).unref();
   void drainEnrichmentJobs();
+  setInterval(() => {
+    void enrichmentCache.prune()
+      .catch((error) => console.error(`enrichment cache retention failed: ${error.message}`));
+  }, enrichmentCacheCleanupIntervalMs).unref();
+  void enrichmentCache.prune()
+    .catch((error) => console.error(`initial enrichment cache retention failed: ${error.message}`));
   setInterval(() => void drainN8nPostCommitJobs(), n8nPostCommitIntervalMs).unref();
   void drainN8nPostCommitJobs();
   setInterval(() => {

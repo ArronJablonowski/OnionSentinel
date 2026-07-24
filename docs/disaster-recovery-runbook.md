@@ -213,6 +213,39 @@ $HOME/n8n-local/config/threat_hunter_system_prompt.md
 $HOME/n8n-local/config/ai_model_settings.json
 ```
 
+The installer also seeds the five independent reviewer prompts only when they
+are missing. Existing operator edits are never overwritten:
+
+```text
+$HOME/n8n-local/config/soc_analyst_second_opinion_prompt.md
+$HOME/n8n-local/config/incident_responder_second_opinion_prompt.md
+$HOME/n8n-local/config/siem_engineer_second_opinion_prompt.md
+$HOME/n8n-local/config/cyber_threat_intel_second_opinion_prompt.md
+$HOME/n8n-local/config/threat_hunter_second_opinion_prompt.md
+```
+
+After deployment, `verify-agent-memory.py` verifies every primary/reviewer
+prompt pair as well as each role memory and the shared memory file. A missing
+reviewer prompt is a failed deployment verification, not a silent fallback to
+the primary prompt.
+
+The Incident Responder production assignment is `gpt-cli`, with Codex model
+`gpt-5.5` and `medium` reasoning. Install and authenticate Codex CLI for the
+Mac Studio runtime user before enabling that route. Verify the executable and
+saved routing without printing credentials:
+
+```bash
+command -v codex
+codex --version
+python3 -m json.tool "$HOME/n8n-local/config/ai_model_settings.json" >/dev/null
+```
+
+`run-local-ai-analysis.py` resolves an executable named exactly `codex` from
+the configured path, the runtime user's `PATH`, `$HOME/.local/bin`, or standard
+Homebrew locations. It does not execute arbitrary provider command strings. A
+missing Codex binary fails the case visibly instead of silently switching the
+model or privacy boundary.
+
 The installer also seeds editable Cyber Security Agent Markdown memory files
 only if they are missing:
 
@@ -291,6 +324,22 @@ continues to storage. `Store Score And Filter Alert` uses a 30 second
 alert-store timeout. Do not reduce that timeout below normal `/alert` write
 latency plus burst headroom.
 
+After restoring alert-store, verify the durable enrichment cache without
+printing indicators or raw provider responses:
+
+```bash
+curl -fsS http://127.0.0.1:8787/health
+curl -fsS http://127.0.0.1:8787/metrics
+sqlite3 "$HOME/n8n-local/alert_store_data/alerts.sqlite3" \
+  "SELECT COUNT(*) AS cache_rows, COALESCE(SUM(length(raw_response_json)),0) AS cache_bytes FROM enrichment_cache;"
+```
+
+`/health.enrichment_cache` reports process-local hit, miss, coalescing, stale
+fallback, and bound counters. `/metrics.metrics.enrichment_cache` adds durable
+row, freshness, and byte totals. Neither endpoint returns cached indicators,
+provider payloads, or secrets. A cold L1 after restart is expected; valid SQLite
+rows continue serving lookups without provider calls.
+
 Install Mac Studio packet-analysis tooling before expecting PCAP evidence in AI
 reports. Zeek/zeek-cut provide structured network logs; TShark provides
 protocol hierarchy and packet-field corroboration. The restore script copies the
@@ -306,6 +355,40 @@ $HOME/n8n-local/pcap-evidence/artifacts
 $HOME/n8n-local/soc-alerts/pcap-analysis
 $HOME/Library/LaunchAgents/com.arron.soc.pcap-analysis.plist
 ```
+
+The installer also creates `$HOME/n8n-local/python` and attempts to install the
+bounded `maxminddb` reader there. A package-install failure does not disable
+Zeek/TShark analysis; it leaves offline GeoIP unavailable until the reader is
+installed. Verify it without reading any database contents:
+
+```bash
+PYTHONPATH="$HOME/n8n-local/python" /usr/bin/python3 -c 'import maxminddb; print(maxminddb.__version__)'
+```
+
+The default runtime database locations are:
+
+```text
+$HOME/n8n-local/config/maxmind/GeoLite2-ASN.mmdb
+$HOME/n8n-local/config/maxmind/GeoLite2-City.mmdb
+$HOME/n8n-local/config/maxmind/GeoLite2-Country.mmdb
+```
+
+Create `$HOME/n8n-local/config/maxmind` with mode `0750`, upload only the three
+extracted `.mmdb` files, set each file to `0640`, and confirm the standalone
+MaxMind section on the Settings page reports `Ready` for ASN, City, and Country.
+To use other absolute or `$HOME`-relative files, set
+`maxmind_geoip_asn_db_path`, `maxmind_geoip_city_db_path`, and
+`maxmind_geoip_country_db_path` in
+`$HOME/n8n-local/config/ai_model_settings.json` or save the paths through the
+Settings page. The legacy `maxmind_geoip_db_path` key migrates to City only.
+Never place a database or vendor archive in the repo, generated dashboard,
+report corpus, backup bundle intended for Git, or Obsidian vault.
+
+The TShark parser reviews every packet for DNS activity, HTTP User-Agent values,
+TLS versions, and abnormal-size ICMP/ICMPv6 frames in the same bounded pass used
+for packet samples. `ICMP_ABNORMAL_MIN_FRAME_BYTES=256` is the default. These
+signals and offline GeoIP are contextual evidence only, not automatic malicious
+classifications.
 
 The `pcap_requests` table uses `created_at`, `claimed_at`, `completed_at`, and
 `updated_at` to track broker lifecycle. If a restored database is older, restart
@@ -462,6 +545,20 @@ Dashboard URL:
 http://10.77.7.225:8766/
 ```
 
+After alert-store starts, its additive schema migration creates the Incident
+Response case/event tables and the AI-run role discriminator. Verify the
+dedicated dashboard endpoints without exposing alert content:
+
+```bash
+curl -fsS http://127.0.0.1:8766/api/soc-incidents >/dev/null
+curl -fsS http://127.0.0.1:8766/investigations.html >/dev/null
+```
+
+Escalations originate at `POST /api/soc-alerts/<dashboard-group-id>/escalate`,
+are resolved to the stable group by alert-store, and enqueue a durable
+`incident_response_analysis` job. Restore alert-store before the dashboard and
+AI worker so case state and role-isolated analysis writeback are available.
+
 Synthetic durable-intake test from the relay:
 
 ```bash
@@ -540,7 +637,9 @@ transitions when the runtime `.env` contains Telegram credentials. It does not
 replace the live DB unless `ALERT_STORE_AUTO_RECOVER=1` is explicitly set for
 that run. Online backup operations wait up to 60 seconds for active writers and
 retry a bounded number of times; a transient `database is locked` result is not
-evidence of corruption.
+evidence of corruption. The hourly tier retains the newest 10 verified
+`alerts.sqlite3.*.backup` snapshots; daily recovery bundles remain a separate
+longer-lived DR tier.
 
 During an authorized `ALERT_STORE_AUTO_RECOVER=1` swap, maintenance creates a
 short-lived web guard hold and installs an exit trap before stopping services.
@@ -702,6 +801,82 @@ stdout directly to its external SSD. Do not install or enable the former
 `/nsm`. The staged implementation and rollback switch are absent from the
 current source tree.
 
+For Incident Response evidence, install a third dedicated forced-command key
+using `security-onion/ssh/authorized_keys.incident-query.example`. The
+associated wrapper is:
+
+```text
+/usr/local/sbin/export-incident-evidence
+```
+
+The relay side uses
+`relay/config/authorized_keys.incident-evidence.example` and
+`relay/app/incident_evidence_broker.py`. The Mac runtime configuration is
+rendered from `n8n/config/incident-evidence.example.json`; never commit the
+private keys or live rendered file.
+
+This baseline path accepts only validated observables and a bounded UTC window.
+Security Onion constructs five fixed Elastic packs and seven fixed local
+OSquery packs. The caller cannot supply KQL, Query DSL, OSquery SQL, an index,
+target, path, or command. Reports retain analyst-readable KQL, exact executed
+Query DSL, and exact executed OSquery SQL with pack, target, status, digest,
+and bounded row metadata.
+
+Live endpoint OSQuery is a separate, optional Incident Responder follow-up. Its
+Mac, relay, and Security Onion configurations are disabled by default. Recover
+the fixed evidence path first. Then follow
+`docs/incident-response-query-and-model-routing.md` to install two dedicated
+forced-command keys, pin both host keys, configure identical operator aliases,
+map each alias to one exact Fleet agent ID on Security Onion, install the
+trusted Kibana CA and least-privilege authorization, and validate the
+fail-closed state before enabling each node. Never configure wildcard or
+all-endpoint aliases.
+
+Validate the full chain with a disposable alert-store fixture whose selected
+alert contains only reserved TEST-NET observables. The collector accepts an
+alert ID, reads that alert's exact group from SQLite, and writes the artifact
+path to stdout; it intentionally does not accept caller-supplied observables or
+queries:
+
+```bash
+TEST_ALERT_ID='<synthetic-alert-id>'
+TEST_DB='/path/to/disposable-test-alerts.sqlite3'
+ARTIFACT="$(
+  $HOME/n8n-local/bin/collect-incident-evidence.py \
+    --alert-id "$TEST_ALERT_ID" \
+    --db "$TEST_DB" \
+    --out-dir /tmp/onion-sentinel-incident-evidence-test \
+    --size 10
+)"
+
+python3 - "$ARTIFACT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text())
+response = data["security_onion_response"]
+assert data["schema"] == "onion-sentinel-incident-evidence-v2"
+assert response["ok"] is True
+assert response["read_only"] is True
+assert response["complete"] is True
+assert len(response["results"]) == len(data["request"]["packs"]) * len(data["request"]["windows"])
+assert all(item["status"] == "ok" for item in response["results"])
+assert all(item.get("kql_equivalent") for item in response["results"])
+assert all(item.get("query_dsl") and item.get("query_digest") for item in response["results"])
+assert len(response["osquery_results"]) == 7
+assert all(item["status"] == "ok" for item in response["osquery_results"])
+assert all(item.get("query") and item.get("query_digest") for item in response["osquery_results"])
+print("incident evidence contract passed")
+PY
+
+rm -f "$ARTIFACT"
+rmdir /tmp/onion-sentinel-incident-evidence-test 2>/dev/null || true
+```
+
+Use only reserved TEST-NET observables for this test. Do not print returned
+rows, which may contain local host context.
+
 The installer creates `/etc/onion-sentinel/pcap-stream-token.key` as a root-only
 32-byte signing key. Manifest chunks bind the exact source inode, initial size,
 request window, and BPF variant. This lets `stream_chunk` validate a prior
@@ -740,6 +915,24 @@ $HOME/n8n-local/bin/process-pcap-evidence.py --request-id <request_id>
 and writes bounded Zeek/TShark summaries to
 `$HOME/n8n-local/soc-alerts/pcap-analysis`. The SOC Analyst prompt builder
 automatically includes those summaries for matching alerts.
+
+The production parser must scan the complete capture set while retaining only
+bounded state. Zeek aggregates every generated JSON record; TShark performs one
+streaming field pass over every packet and retains a deterministic
+representative sample. Confirm the resulting JSON contains `coverage.complete`
+and parser-specific file/record/packet/byte/time coverage before treating the
+evidence as complete. A failed or incomplete parser pass preserves the raw Mac
+artifact for investigation and must not be silently reported as analyzed.
+
+The parser process boundary is part of the security recovery baseline. Restore
+`pcap_analysis_core.py`, `pcap_tool_runtime.py`, and
+`pcap_evidence_query.py` with `process-pcap-evidence.py`. Parser children use a
+stripped environment, process and output ceilings, and macOS network denial
+when `sandbox-exec` is available. The SOC Analyst follow-up interface queries
+only sanitized derived evidence through fixed operations; it never accepts a
+path, shell command, regular expression, display filter, or parser argument.
+Hosted model invocations must not contain raw payloads, packet samples, local
+query results, tool paths, or the private derived-evidence index.
 
 When parsed PCAP evidence is newer than an existing SOC Analyst report, the AI
 scheduler considers that grouped detection stale and rebuilds the prompt before
@@ -845,7 +1038,7 @@ The default n8n proxy configuration is:
   "security_onion_storage_telemetry": true,
   "capture_protection_enabled": true,
   "capture_protection_require_telemetry": true,
-  "capture_loss_threshold_percent": 0.1,
+  "capture_loss_threshold_percent": 1.0,
   "capture_loss_freshness_seconds": 900,
   "stream_chunk_idle_timeout_seconds": 300,
   "mac_transfer": {
@@ -896,9 +1089,14 @@ Security Onion reads. The old n8n inline
 upload and Security Onion tar-staging paths are absent.
 
 Keep capture protection enabled. The relay must receive a fresh latest-interval
-Zeek capture-loss sample before claiming work and should defer when any worker
-exceeds 1 percent. A protected deferral is healthy and must not consume a retry
-attempt or be reported as a stack failure.
+Zeek capture-loss sample before claiming work and uses a 1.0 percent default
+threshold unless the reviewed live configuration says otherwise. The separate
+Zeek and Suricata packet-loss threshold remains 0.1 percent. A protected
+deferral is an intentional degraded state: it must not consume a retry attempt
+or be reported as a stack failure. Confirm the relay posts a `pcap_broker`
+heartbeat each minute and that the Mac has a fresh
+`alert_store_data/pcap-workflow-state.json`; state older than three minutes is
+treated as stale and cannot suppress a real backlog warning.
 
 Do not install the obsolete Security Onion PCAP output retention timer. The
 production wrapper is read-only, stages zero bytes, and leaves native capture

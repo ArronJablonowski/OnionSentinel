@@ -13,7 +13,8 @@ STACK_DIR="${STACK_DIR:-$HOME/n8n-local}"
 DB_PATH="${ALERT_STORE_DB_PATH:-$STACK_DIR/alert_store_data/alerts.sqlite3}"
 BACKUP_DIR="${ALERT_STORE_BACKUP_DIR:-$STACK_DIR/alert_store_backups}"
 LOG_DIR="${ALERT_STORE_MAINTENANCE_LOG_DIR:-$STACK_DIR/logs}"
-KEEP_BACKUPS="${ALERT_STORE_BACKUP_KEEP:-48}"
+DEFAULT_KEEP_BACKUPS=10
+KEEP_BACKUPS="${ALERT_STORE_BACKUP_KEEP:-$DEFAULT_KEEP_BACKUPS}"
 AUTO_RECOVER="${ALERT_STORE_AUTO_RECOVER:-0}"
 SQLITE_BUSY_TIMEOUT_MS="${ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS:-60000}"
 BACKUP_ATTEMPTS="${ALERT_STORE_BACKUP_ATTEMPTS:-5}"
@@ -298,7 +299,7 @@ recover_candidate() {
 prune_backups() {
   local keep="$KEEP_BACKUPS"
   if ! [[ "$keep" =~ '^[0-9]+$' ]] || (( keep < 1 )); then
-    keep=48
+    keep="$DEFAULT_KEEP_BACKUPS"
   fi
   find "$BACKUP_DIR" -maxdepth 1 -type f -name 'alerts.sqlite3.*.backup' -print0 \
     | xargs -0 ls -t 2>/dev/null \

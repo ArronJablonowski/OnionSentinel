@@ -57,11 +57,49 @@ class DashboardSystemHealthComponentTest(unittest.TestCase):
     def test_beacon_result_badges_never_wrap(self) -> None:
         css = self.component.SYSTEM_HEALTH_CSS
 
-        self.assertIn(".system-health-table th:nth-child(2),.system-health-table td:nth-child(2)", css)
-        self.assertIn("min-width:126px", css)
+        self.assertIn(".health-beacon-table th:nth-child(2),.health-beacon-table td:nth-child(2)", css)
+        self.assertIn(".health-beacon-table .health-col-result{width:132px}", css)
         self.assertIn(".health-result{box-sizing:border-box;min-width:104px", css)
         self.assertIn("white-space:nowrap", css)
         self.assertIn("word-break:keep-all", css)
+
+    def test_all_health_tables_have_explicit_column_contracts(self) -> None:
+        html = self.component.system_health_page_section() + self.component.SYSTEM_HEALTH_JS
+        css = self.component.SYSTEM_HEALTH_CSS
+
+        for table_class in (
+            "health-beacon-table",
+            "health-pcap-table",
+            "health-pipeline-stage-table",
+        ):
+            self.assertIn(table_class, html)
+            self.assertIn(f".{table_class}", css)
+
+        for column_class in (
+            "health-col-time",
+            "health-col-result",
+            "health-col-outcome",
+            "health-col-request",
+            "health-col-backlog",
+            "health-col-drain",
+        ):
+            self.assertIn(column_class, html)
+
+        self.assertIn(".health-data-table{width:100%;table-layout:fixed}", css)
+        self.assertIn(".health-pcap-recent td::before{display:none;content:none}", css)
+
+    def test_mobile_health_table_labels_match_semantic_columns(self) -> None:
+        css = self.component.SYSTEM_HEALTH_CSS
+
+        expected_labels = (
+            '.system-health-table td:nth-child(3)::before{content:"Stage"}',
+            '.system-health-table td:nth-child(4)::before{content:"Relay"}',
+            '.system-health-table td:nth-child(5)::before{content:"Alerts"}',
+            '.health-pcap-recent td:nth-child(3)::before{content:"Outcome"}',
+            '.health-pcap-recent td:nth-child(7)::before{content:"Transfer Time"}',
+        )
+        for label in expected_labels:
+            self.assertIn(label, css)
 
 
 if __name__ == "__main__":

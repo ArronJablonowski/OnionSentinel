@@ -24,6 +24,8 @@ def run_bounded_command(
     max_stdout_bytes: int,
     max_stderr_bytes: int,
     cwd: Path | str | None = None,
+    env: dict[str, str] | None = None,
+    preexec_fn: Callable[[], None] | None = None,
     progress_callback: Callable[[], None] | None = None,
     progress_interval_seconds: float = 30,
 ) -> subprocess.CompletedProcess[str]:
@@ -50,6 +52,8 @@ def run_bounded_command(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=str(cwd) if cwd is not None else None,
+            env=env,
+            preexec_fn=preexec_fn,
             # A timed-out parser may have spawned helper processes. A new
             # session lets us terminate the complete tree instead of leaking
             # descendants that continue consuming CPU, memory, or disk.
@@ -127,6 +131,8 @@ def run_bounded_command_to_file(
     max_stdout_bytes: int,
     max_stderr_bytes: int,
     cwd: Path | str | None = None,
+    env: dict[str, str] | None = None,
+    preexec_fn: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Stream child stdout to disk while enforcing time and byte ceilings.
 
@@ -149,6 +155,8 @@ def run_bounded_command_to_file(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=str(cwd) if cwd is not None else None,
+        env=env,
+        preexec_fn=preexec_fn,
         start_new_session=True,
     )
     assert process.stdout is not None and process.stderr is not None

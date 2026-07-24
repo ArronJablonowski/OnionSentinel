@@ -207,6 +207,32 @@ class DashboardDetailOrderTests(unittest.TestCase):
         self.assertIn(".detail-collapsible-section{{display:block;margin:6px 0}}", source)
         self.assertIn(".detail-collapsible-section>summary{{display:flex", source)
 
+    def test_enrichment_results_table_preserves_readable_tags_column(self) -> None:
+        html = self.builder.markdown_to_html(
+            "\n".join(
+                [
+                    "| Source | Indicator | Type | Verdict | Confidence | Tags | Cached |",
+                    "| --- | --- | --- | --- | --- | --- | --- |",
+                    "| abuseipdb | 198.51.100.10 | ip | benign | 0 | Data Center/Web Hosting/Transit, Example Corp, US | 2026-07-21  18:27:38.891-06:00 |",
+                ]
+            )
+        )
+
+        self.assertIn('class="table-wrap public-enrichment-table public-enrichment-records-table"', html)
+        self.assertIn('<col class="enrichment-col-tags">', html)
+        self.assertIn('<col class="enrichment-col-cached">', html)
+
+        source = MODULE_PATH.read_text()
+        self.assertIn(".enrichment-col-tags{{width:360px}}", source)
+        self.assertIn(":is(.detail-template,.mobile-pill-details) .markdown-body .public-enrichment-records-table", source)
+        self.assertIn("min-width:1154px!important", source)
+        self.assertIn("width:180px!important;min-width:180px!important", source)
+        self.assertIn("width:100px!important;min-width:100px!important", source)
+        self.assertIn(
+            "width:360px!important;min-width:360px!important;word-break:normal!important;overflow-wrap:anywhere!important",
+            source,
+        )
+
     def test_nested_pcap_accordion_does_not_capture_following_top_level_sections(self) -> None:
         html = self.builder.markdown_to_html(
             "\n\n".join(

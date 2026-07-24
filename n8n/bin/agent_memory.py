@@ -34,6 +34,13 @@ AGENT_PROMPT_FILES = {
     "cyber-threat-intel": "cyber_threat_intel_system_prompt.md",
     "threat-hunter": "threat_hunter_system_prompt.md",
 }
+AGENT_SECOND_OPINION_PROMPT_FILES = {
+    "soc-analyst": "soc_analyst_second_opinion_prompt.md",
+    "incident-responder": "incident_responder_second_opinion_prompt.md",
+    "siem-engineer": "siem_engineer_second_opinion_prompt.md",
+    "cyber-threat-intel": "cyber_threat_intel_second_opinion_prompt.md",
+    "threat-hunter": "threat_hunter_second_opinion_prompt.md",
+}
 MEMORY_ROLES = frozenset(AGENT_MEMORY_FILES)
 MEMORY_CATEGORIES = {
     "benign_pattern",
@@ -88,6 +95,15 @@ def role_prompt_file(config_dir: Path, agent_role: str) -> Path:
     """Return the canonical system-prompt path from the shared role registry."""
     try:
         filename = AGENT_PROMPT_FILES[agent_role]
+    except KeyError as exc:
+        raise ValueError(f"unsupported agent role: {agent_role}") from exc
+    return config_dir / filename
+
+
+def role_second_opinion_prompt_file(config_dir: Path, agent_role: str) -> Path:
+    """Return the canonical independent-review prompt path for an agent role."""
+    try:
+        filename = AGENT_SECOND_OPINION_PROMPT_FILES[agent_role]
     except KeyError as exc:
         raise ValueError(f"unsupported agent role: {agent_role}") from exc
     return config_dir / filename
@@ -308,12 +324,18 @@ def build_agent_execution_context(
     prompt_file = role_prompt_file(config_dir, agent_role)
     if not prompt_file.is_file():
         raise FileNotFoundError(f"agent system prompt not found: {prompt_file}")
+    reviewer_prompt_file = role_second_opinion_prompt_file(config_dir, agent_role)
+    if not reviewer_prompt_file.is_file():
+        raise FileNotFoundError(f"agent second-opinion prompt not found: {reviewer_prompt_file}")
     memory_file = role_memory_file(memory_dir, agent_role)
     shared_file = memory_dir / "shared-agent-memory.md"
     return {
         "agent_role": agent_role,
         "system_prompt_file": str(prompt_file),
         "system_prompt": prompt_file.read_text(encoding="utf-8", errors="replace").strip(),
+        # The reviewer reads this file in a separate model call. Its contents are
+        # intentionally excluded from the primary package to preserve isolation.
+        "second_opinion_system_prompt_file": str(reviewer_prompt_file),
         "agent_memory_file": str(memory_file),
         "shared_memory_file": str(shared_file),
         "agent_memory": build_agent_memory_context(

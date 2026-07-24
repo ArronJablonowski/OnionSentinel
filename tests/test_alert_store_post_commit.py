@@ -100,7 +100,9 @@ class AlertStorePostCommitTest(unittest.TestCase):
             "ALERT_STORE_BEACON_PATHS": str(self.runtime / "n8n-beacon.json"),
             "ALERT_STORE_BEACON_HISTORY_PATHS": str(self.runtime / "n8n-beacon-history.json"),
             "ALERT_STORE_DISK_MIN_FREE_BYTES": "0",
-            "ALERT_STORE_DISK_START_MAX_USED_PERCENT": "79",
+            # Keep the production 80% hard stop while allowing this isolated
+            # temp-database test to run on a development volume near the cap.
+            "ALERT_STORE_DISK_START_MAX_USED_PERCENT": "79.99",
             "ALERT_STORE_DISK_HARD_MAX_USED_PERCENT": "80",
             "TELEGRAM_OUTBOX_AUTOSTART": "0",
             "ENRICHMENT_WORKER_INTERVAL_MS": "600000",

@@ -14,6 +14,7 @@ dependency.
 | `artifact_cache.py` | Thread-safe, single-flight cache for parsed Markdown/JSON artifacts. |
 | `response_cache.py` | Short-lived, bounded cache for serialized read-only API responses. |
 | `scripts/build_soc_alerts_dashboard.py` | Builds the static dashboard pages from SQLite/report artifacts. |
+| `scripts/dashboard_executive_metrics.py` | Bounded read-only Home metrics for exact hourly alert intake and enrichment-cache efficiency. |
 | `scripts/dashboard_metric_components.py` | Small tested render helpers for the SOC Alerts metric cards. |
 | `scripts/dashboard_timeline_components.py` | Grouped-observation timeline rendering, including single-observation reports. |
 | `scripts/dashboard_system_health_components.py` | System Health page markup, PCAP workflow panel styles, and browser refresh logic. |
@@ -32,10 +33,20 @@ dependency.
 ## Dashboard Features
 
 - API-backed paginated SOC Alerts table.
+- SOC Alerts rows include an `Escalate` action. It creates or reopens one
+  durable case for the stable group and queues Incident Responder analysis.
+- Incident Responder is a paginated case workspace with desktop and mobile
+  expandable rows. Details lazy load the same standardized report used by SOC
+  Alerts and add the latest role-specific response assessment above it. Its
+  queue keeps source IP, destination IP, and destination port in distinct
+  columns and falls back to the representative alert when historical group
+  aliases cannot resolve a current summary row.
 - SOC Alerts table includes compact AI, enrichment, and PCAP analysis status columns.
 - Shared SQLite analyst state for open, acknowledged, and suppressed grouped detections.
 - Mobile SOC Alerts uses full-width expandable alert pills and a top collapsed
-  navigation drawer opened from the logo/hamburger control.
+  navigation drawer opened from the logo/hamburger control. The open drawer
+  keeps its header fixed while the menu list scrolls independently with iPhone
+  safe-area padding, so every navigation destination remains reachable.
 - Short phone-landscape layouts collapse filters by default and present metric
   cards as a compact horizontal strip so alerts begin in the initial viewport.
 - Lazy-loaded Detailed Alert Reports governed by layout contract
@@ -45,18 +56,56 @@ dependency.
 - Cross-alert correlation renders only as a subsection inside `AI Analysis Output`;
   it must not add, remove, or reorder a top-level report section.
 - Live System Health, PCAP ingest size, AI activity, and SOC count metrics.
+- Home Executive SOC metrics include exact committed alert intake by the
+  viewer's local clock hour plus threat-intelligence cache inventory, hit rate,
+  provider lookups, avoided API calls, and stale-fallback use. Durable inventory
+  is kept distinct from process counters that reset with alert-store.
 - Paginated PCAP workflow history with artifact size and end-to-end transfer time.
-- Flow page with data-flow diagram and privacy IP masking.
+- Flow page with privacy IP masking and explicit durable alert, public-enrichment,
+  read-only PCAP/relay-SSD, Zeek/TShark, correlation/memory, local-AI, reporting,
+  dashboard, and Telegram paths.
 - Threat Hunter route with expandable hunt recommendations and copyable KQL/OQL/OSQuery pivots.
 - Cyber Threat Intel route for future intelligence briefs, indicators, and enrichment context.
-- SIEM Engineer menu route for model-backed tuning, detection recommendations, and a top ROI tuning candidate summary.
-- Settings page for AI model routing plus SOC Analyst, Incident Responder, SIEM Engineer, Cyber Threat Intel Analyst, and Threat Hunter system prompts. Each collapsed agent row exposes a `Prompt` control that opens and focuses the matching editable prompt panel, plus allowlisted `Memory` and `Shared` controls that open the live Markdown file in a read-only viewer; the UI has no memory write action.
+- SIEM Engineer menu route for model-backed tuning, detection recommendations, and a top ROI tuning candidate summary. Rows in both recommendation tables expand by click or keyboard to show an evidence-backed AI engineering report with the proposed change, rationale, grouped detection context, enrichment and PCAP findings, validation steps, rollback guidance, and complete escaped AI response JSON.
+- Settings page with collapsed Ollama and GPT CLI provider controls. The Ollama
+  section refreshes the local `ollama ls` inventory, supports multiple enabled
+  models as an approved roster, preserves configured unavailable models, and
+  warns beside models whose bounded Ollama metadata lacks the completion,
+  chat-template, or minimum-context capabilities required by the SOC workflow.
+  GPT CLI has an independent enable toggle. Each Cyber Security Agent selects
+  exactly one enabled primary route and an optional distinct second-opinion
+  route in its expanded panel. Its collapsed row shows both assignments and
+  explicitly reports `None selected` when no reviewer is configured. Both
+  labels refresh after role-scoped saves without rewriting unrelated settings.
+  The active SOC Analyst worker honors those exact routes.
+  The page also includes a standalone MaxMind GeoIP section
+  below the agent settings. The section independently configures local GeoLite2
+  ASN, City, and Country `.mmdb` paths and shows metadata-only readiness for
+  each database. It also exposes SOC Analyst, Incident Responder, SIEM Engineer,
+  Cyber Threat Intel Analyst, and Threat Hunter system prompts. Each collapsed
+  agent row shows its own effective model route and refreshes that label when
+  model settings are loaded or saved. It also exposes a `Prompt` control that
+  opens and focuses the matching editable prompt panel, plus allowlisted
+  `Memory` and `Shared` controls that open the live Markdown file in a read-only
+  viewer; the UI has no memory write action. Each agent panel also places an
+  editable `Second-opinion system prompt` immediately below the editable
+  `Main system prompt`. Both prompt editors are nested collapsible sections and
+  are closed by default. Their path controls use distinct fixed API routes, so
+  opening or saving a reviewer prompt cannot target a primary prompt or an
+  arbitrary runtime file. The GeoIP status endpoint returns
+  only path metadata, not database contents, and the database files remain
+  private runtime artifacts.
 
 ## Maintenance Notes
 
 - Keep high-churn SOC metric-card styling in `assets/dashboard-metrics.css`.
 - Keep SOC metric-card markup in the named render helpers inside `scripts/dashboard_metric_components.py`.
 - Keep System Health beacon and PCAP workflow UI in `scripts/dashboard_system_health_components.py`.
+- Keep Home activity and cache telemetry reads in
+  `scripts/dashboard_executive_metrics.py`. Hourly intake must count unique
+  committed alert IDs from `pipeline_stage_events`, with `alerts.last_seen` only
+  as a compatibility fallback; never derive hourly volume from a grouped row's
+  lifetime repeat count.
 - Avoid adding new metric-card HTML directly into the large page template string.
 - Route API requests before scanning the report library. Recursive report scans belong
   only on report-library and view routes; placing them in the common request path makes

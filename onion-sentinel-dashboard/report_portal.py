@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime as dt
 import hashlib
 import hmac
@@ -19,6 +20,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -64,6 +66,7 @@ SOC_ALERT_DETAIL_DIR = SOC_ALERT_DASHBOARD_DIR / "details"
 SOC_ALERT_STATIC_STATUS_FILE = SOC_ALERT_DASHBOARD_DIR / "soc-alerts-status.json"
 SOC_ALERT_N8N_BEACON_FILE = SOC_ALERT_DASHBOARD_DIR / "n8n-beacon.json"
 SOC_ALERT_N8N_BEACON_HISTORY_FILE = SOC_ALERT_DASHBOARD_DIR / "n8n-beacon-history.json"
+SOC_ALERT_PCAP_WORKFLOW_STATE_FILE = SOC_ALERT_DASHBOARD_DIR / "pcap-workflow-state.json"
 SOC_ALERT_PCAP_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "pcap-analysis"
 SOC_ALERT_PCAP_ARTIFACT_DIR = HOME / "n8n-local" / "pcap-evidence" / "artifacts"
 SOC_ALERT_AI_PROMPT_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-prompts"
@@ -78,6 +81,24 @@ SIEM_ENGINEER_PROMPT_FILE = HOME / "n8n-local" / "config" / "siem_engineer_syste
 THREAT_HUNTER_PROMPT_FILE = HOME / "n8n-local" / "config" / "threat_hunter_system_prompt.md"
 CYBER_THREAT_INTEL_PROMPT_FILE = HOME / "n8n-local" / "config" / "cyber_threat_intel_system_prompt.md"
 INCIDENT_RESPONDER_PROMPT_FILE = HOME / "n8n-local" / "config" / "incident_responder_system_prompt.md"
+SOC_ANALYST_SECOND_OPINION_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_second_opinion_prompt.md"
+SIEM_ENGINEER_SECOND_OPINION_PROMPT_FILE = HOME / "n8n-local" / "config" / "siem_engineer_second_opinion_prompt.md"
+THREAT_HUNTER_SECOND_OPINION_PROMPT_FILE = HOME / "n8n-local" / "config" / "threat_hunter_second_opinion_prompt.md"
+CYBER_THREAT_INTEL_SECOND_OPINION_PROMPT_FILE = HOME / "n8n-local" / "config" / "cyber_threat_intel_second_opinion_prompt.md"
+INCIDENT_RESPONDER_SECOND_OPINION_PROMPT_FILE = HOME / "n8n-local" / "config" / "incident_responder_second_opinion_prompt.md"
+SOC_SETTINGS_PROMPT_FILES = {
+    "/api/soc-settings/analyst-prompt": ("SOC Analyst", SOC_ANALYST_PROMPT_FILE),
+    "/api/soc-settings/analyst-second-opinion-prompt": ("SOC Analyst second-opinion", SOC_ANALYST_SECOND_OPINION_PROMPT_FILE),
+    "/api/soc-settings/siem-engineer-prompt": ("SIEM Engineer", SIEM_ENGINEER_PROMPT_FILE),
+    "/api/soc-settings/siem-engineer-second-opinion-prompt": ("SIEM Engineer second-opinion", SIEM_ENGINEER_SECOND_OPINION_PROMPT_FILE),
+    "/api/soc-settings/threat-hunter-prompt": ("Threat Hunter", THREAT_HUNTER_PROMPT_FILE),
+    "/api/soc-settings/threat-hunter-second-opinion-prompt": ("Threat Hunter second-opinion", THREAT_HUNTER_SECOND_OPINION_PROMPT_FILE),
+    "/api/soc-settings/cyber-threat-intel-prompt": ("Cyber Threat Intel", CYBER_THREAT_INTEL_PROMPT_FILE),
+    "/api/soc-settings/cyber-threat-intel-second-opinion-prompt": ("Cyber Threat Intel second-opinion", CYBER_THREAT_INTEL_SECOND_OPINION_PROMPT_FILE),
+    "/api/soc-settings/incident-responder-prompt": ("Incident Responder", INCIDENT_RESPONDER_PROMPT_FILE),
+    "/api/soc-settings/incident-responder-second-opinion-prompt": ("Incident Responder second-opinion", INCIDENT_RESPONDER_SECOND_OPINION_PROMPT_FILE),
+}
+SOC_SETTINGS_PROMPT_API_PATHS = frozenset(SOC_SETTINGS_PROMPT_FILES)
 AGENT_MEMORY_DIR = HOME / "n8n-local" / "soc-alerts" / "agent-memory"
 SOC_ANALYST_MEMORY_FILE = AGENT_MEMORY_DIR / "soc-analyst-memory.md"
 INCIDENT_RESPONDER_MEMORY_FILE = AGENT_MEMORY_DIR / "incident-responder-memory.md"
@@ -108,6 +129,9 @@ SOC_ALERT_ARTIFACT_CACHE_TTL_SECONDS = 5.0
 SOC_ALERT_ARTIFACT_CACHE = ArtifactCache(SOC_ALERT_ARTIFACT_CACHE_TTL_SECONDS)
 SOC_ALERT_RESPONSE_CACHE = ResponseCache(1.0)
 SOC_ALERT_EVENTS_CACHE = ResponseCache(4.0, max_entries=2, lock_stripes=1)
+OLLAMA_MODEL_COMPATIBILITY_CACHE = ResponseCache(300.0, max_entries=128, lock_stripes=16)
+OLLAMA_MODEL_SHOW_MAX_BYTES = 2 * 1024 * 1024
+OLLAMA_MODEL_MIN_CONTEXT_TOKENS = 32_768
 HERMES_DR_BACKUP_DIR = HOME / "Hermes_DR_Backups"
 HERMES_DR_REMOTE_DEST = "aj_lab@10.77.7.222"
 HERMES_DR_REMOTE_DIR = "/Users/aj_lab/Hermes_DR_Backups"
@@ -210,6 +234,9 @@ class CronJobSummary:
 class SocAlertQuerySnapshot:
     statuses: dict
     status_counts: dict[str, int]
+    active_total: int
+    active_severity_counts: dict[str, int]
+    active_highest_severity: str
     severity_counts: dict[str, int]
     highest_severity: str
     top_endpoints: dict[str, str]
@@ -433,6 +460,55 @@ def n8n_beacon_history_response(query: dict[str, list[str]]) -> dict[str, object
     }
 
 
+def _pcap_relay_workflow_state(now_utc: dt.datetime) -> dict[str, object]:
+    """Read the latest authenticated relay broker state from alert-store.
+
+    The state is considered actionable for only three minutes. A stale safety
+    hold must never grant an indefinite health exemption if the relay, n8n, or
+    state writer stops reporting.
+    """
+    state_path = _freshest_existing_path([
+        SOC_ALERT_PCAP_WORKFLOW_STATE_FILE,
+        HOME / "SOC Alerts Web" / "pcap-workflow-state.json",
+        HOME / "n8n-local" / "alert_store_data" / "pcap-workflow-state.json",
+    ])
+    raw = _safe_read_json(state_path, {}) if state_path else {}
+    workflow = raw.get("pcap_workflow") if isinstance(raw, dict) else {}
+    workflow = workflow if isinstance(workflow, dict) else {}
+    generated_at = raw.get("generated_at") if isinstance(raw, dict) else None
+    report_age_seconds: int | None = None
+    if generated_at:
+        try:
+            reported_at = parse_iso_timestamp(generated_at).astimezone(dt.timezone.utc)
+            report_age_seconds = max(0, int((now_utc - reported_at).total_seconds()))
+        except Exception:
+            generated_at = None
+    state = str(workflow.get("state") or "unknown")
+    fresh = report_age_seconds is not None and report_age_seconds <= 3 * 60
+    def nonnegative_int(value: object) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    return {
+        "available": bool(state_path and workflow),
+        "state": state,
+        "active": bool(fresh and state == "capture_protection_hold" and workflow.get("deferred")),
+        "fresh": fresh,
+        "reported_at": generated_at,
+        "report_age_seconds": report_age_seconds,
+        "relay_host": raw.get("relay_host") if isinstance(raw, dict) else None,
+        "reason": str(workflow.get("reason") or "")[:300],
+        "metric": str(workflow.get("metric") or "")[:64],
+        "observed_percent": workflow.get("observed_percent"),
+        "threshold_percent": workflow.get("threshold_percent"),
+        "telemetry_age_seconds": workflow.get("telemetry_age_seconds"),
+        "processed": nonnegative_int(workflow.get("processed")),
+        "operational_failures": nonnegative_int(workflow.get("operational_failures")),
+    }
+
+
 def pcap_workflow_health_response() -> dict[str, object]:
     """Return compact PCAP broker/parser health for the System Health page."""
     summary: dict[str, object] = {
@@ -444,6 +520,7 @@ def pcap_workflow_health_response() -> dict[str, object]:
         "storage": {},
         "warning_count": 0,
         "warnings": [],
+        "advisories": [],
         "active_transfers": [],
         "queue_progressing": False,
         "last_progress_at": None,
@@ -454,6 +531,12 @@ def pcap_workflow_health_response() -> dict[str, object]:
         "latest_analysis": None,
         "artifact_size_bytes": directory_size_bytes(SOC_ALERT_PCAP_ARTIFACT_DIR),
     }
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    relay_workflow = _pcap_relay_workflow_state(now_utc)
+    summary["capture_protection"] = relay_workflow
+    if relay_workflow.get("active"):
+        reason = str(relay_workflow.get("reason") or "Security Onion capture telemetry is above its safety threshold")
+        summary["advisories"] = [f"PCAP reads are safely paused: {reason}"]
     try:
         if SOC_ALERT_STORE_DB.exists():
             with soc_alert_db_connect() as conn:
@@ -514,7 +597,6 @@ def pcap_workflow_health_response() -> dict[str, object]:
                             continue
                         if failure_at.astimezone(dt.timezone.utc) >= failure_cutoff:
                             unexpected_failure_count += 1
-                    now_utc = dt.datetime.now(dt.timezone.utc)
                     stale_cutoff = now_utc - dt.timedelta(minutes=20)
                     has_transfer_progress = {
                         "transfer_stage", "transfer_bytes", "transfer_total_bytes", "transfer_progress_at"
@@ -612,7 +694,7 @@ def pcap_workflow_health_response() -> dict[str, object]:
                             updated_at = parse_iso_timestamp(freshness_value)
                         except Exception:
                             continue
-                        if row["status"] == "pending" and queue_progressing:
+                        if row["status"] == "pending" and (queue_progressing or relay_workflow.get("active")):
                             continue
                         row_cutoff = now_utc - pending_grace if row["status"] == "pending" else stale_cutoff
                         if updated_at.astimezone(dt.timezone.utc) < row_cutoff:
@@ -623,6 +705,22 @@ def pcap_workflow_health_response() -> dict[str, object]:
                         warnings.append(f"{count} {status} PCAP request(s) older than 20 minutes")
                     if unexpected_failure_count:
                         warnings.append(f"{unexpected_failure_count} PCAP request failure(s) need review")
+                    if (
+                        relay_workflow.get("available")
+                        and not relay_workflow.get("fresh")
+                        and int(summary["request_counts"]["pending"] or 0) > 0
+                        and not queue_progressing
+                    ):
+                        # A multi-gigabyte transfer can outlive the broker's
+                        # between-run status event. Fresh byte progress from the
+                        # claimed request is the stronger liveness signal; warn
+                        # only when both telemetry sources have gone quiet.
+                        warnings.append("PCAP broker safety telemetry is stale")
+                    if (
+                        relay_workflow.get("fresh")
+                        and relay_workflow.get("state") == "operational_failure"
+                    ):
+                        warnings.append("PCAP broker reports an operational failure")
                     summary["warnings"] = warnings
                     summary["warning_count"] = len(warnings)
                     latest = conn.execute(
@@ -1060,59 +1158,49 @@ def expired_admin_session_cookie_header() -> str:
     return f"{ADMIN_SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
 
 
-def read_soc_analyst_prompt() -> dict:
-    """Return the current SOC Analyst system prompt shown on the Settings page."""
+def read_prompt_file(path: Path, label: str) -> dict:
+    """Read one allowlisted settings prompt without accepting a caller-supplied path."""
     try:
-        prompt = SOC_ANALYST_PROMPT_FILE.read_text(encoding="utf-8")
+        prompt = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         prompt = ""
     except Exception as exc:
-        return {"ok": False, "error": f"Could not read SOC Analyst prompt: {exc}", "path": str(SOC_ANALYST_PROMPT_FILE)}
-    return {"ok": True, "prompt": prompt, "path": str(SOC_ANALYST_PROMPT_FILE)}
+        return {"ok": False, "error": f"Could not read {label} prompt: {exc}", "path": str(path)}
+    return {"ok": True, "prompt": prompt, "path": str(path)}
+
+
+def read_soc_analyst_prompt() -> dict:
+    """Return the current SOC Analyst system prompt shown on the Settings page."""
+    return read_prompt_file(SOC_ANALYST_PROMPT_FILE, "SOC Analyst")
 
 
 def read_siem_engineer_prompt() -> dict:
     """Return the current SIEM Engineer system prompt shown on the Settings page."""
-    try:
-        prompt = SIEM_ENGINEER_PROMPT_FILE.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        prompt = ""
-    except Exception as exc:
-        return {"ok": False, "error": f"Could not read SIEM Engineer prompt: {exc}", "path": str(SIEM_ENGINEER_PROMPT_FILE)}
-    return {"ok": True, "prompt": prompt, "path": str(SIEM_ENGINEER_PROMPT_FILE)}
+    return read_prompt_file(SIEM_ENGINEER_PROMPT_FILE, "SIEM Engineer")
 
 
 def read_threat_hunter_prompt() -> dict:
     """Return the current Threat Hunter system prompt shown on the Settings page."""
-    try:
-        prompt = THREAT_HUNTER_PROMPT_FILE.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        prompt = ""
-    except Exception as exc:
-        return {"ok": False, "error": f"Could not read Threat Hunter prompt: {exc}", "path": str(THREAT_HUNTER_PROMPT_FILE)}
-    return {"ok": True, "prompt": prompt, "path": str(THREAT_HUNTER_PROMPT_FILE)}
+    return read_prompt_file(THREAT_HUNTER_PROMPT_FILE, "Threat Hunter")
 
 
 def read_cyber_threat_intel_prompt() -> dict:
     """Return the current Cyber Threat Intel Analyst system prompt shown on the Settings page."""
-    try:
-        prompt = CYBER_THREAT_INTEL_PROMPT_FILE.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        prompt = ""
-    except Exception as exc:
-        return {"ok": False, "error": f"Could not read Cyber Threat Intel prompt: {exc}", "path": str(CYBER_THREAT_INTEL_PROMPT_FILE)}
-    return {"ok": True, "prompt": prompt, "path": str(CYBER_THREAT_INTEL_PROMPT_FILE)}
+    return read_prompt_file(CYBER_THREAT_INTEL_PROMPT_FILE, "Cyber Threat Intel")
 
 
 def read_incident_responder_prompt() -> dict:
     """Return the current Incident Responder system prompt shown on the Settings page."""
-    try:
-        prompt = INCIDENT_RESPONDER_PROMPT_FILE.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        prompt = ""
-    except Exception as exc:
-        return {"ok": False, "error": f"Could not read Incident Responder prompt: {exc}", "path": str(INCIDENT_RESPONDER_PROMPT_FILE)}
-    return {"ok": True, "prompt": prompt, "path": str(INCIDENT_RESPONDER_PROMPT_FILE)}
+    return read_prompt_file(INCIDENT_RESPONDER_PROMPT_FILE, "Incident Responder")
+
+
+def read_settings_prompt(api_path: str) -> dict:
+    """Read a primary or reviewer prompt selected only from the fixed API route map."""
+    entry = SOC_SETTINGS_PROMPT_FILES.get(api_path)
+    if entry is None:
+        return {"ok": False, "error": "Unknown SOC settings prompt route."}
+    label, path = entry
+    return read_prompt_file(path, label)
 
 
 def agent_memory_files() -> dict[str, tuple[str, Path]]:
@@ -1219,17 +1307,156 @@ def save_incident_responder_prompt(prompt: object) -> tuple[bool, dict]:
     return save_prompt_file(prompt, INCIDENT_RESPONDER_PROMPT_FILE, "Incident Responder")
 
 
+def save_settings_prompt(api_path: str, prompt: object) -> tuple[bool, dict]:
+    """Save a primary or reviewer prompt selected only from the fixed API route map."""
+    entry = SOC_SETTINGS_PROMPT_FILES.get(api_path)
+    if entry is None:
+        return False, {"ok": False, "error": "Unknown SOC settings prompt route."}
+    label, path = entry
+    return save_prompt_file(prompt, path, label)
+
+
+MAXMIND_GEOIP_DATABASE_SETTINGS = {
+    "asn": (
+        "maxmind_geoip_asn_db_path",
+        "~/n8n-local/config/maxmind/GeoLite2-ASN.mmdb",
+    ),
+    "city": (
+        "maxmind_geoip_city_db_path",
+        "~/n8n-local/config/maxmind/GeoLite2-City.mmdb",
+    ),
+    "country": (
+        "maxmind_geoip_country_db_path",
+        "~/n8n-local/config/maxmind/GeoLite2-Country.mmdb",
+    ),
+}
+
+CYBER_SECURITY_AGENT_ROLES = (
+    "soc-analyst",
+    "incident-responder",
+    "siem-engineer",
+    "cyber-threat-intel",
+    "threat-hunter",
+)
+SOC_AI_SETTINGS_LOCK = threading.RLock()
+CODEX_CLI_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
+SOC_ANALYSIS_SEVERITY_THRESHOLDS = frozenset(
+    {"disabled", "critical", "high", "medium", "low", "informational"}
+)
+
+
 def default_soc_ai_settings() -> dict:
     """Return safe AI analysis routing defaults for the Settings page and runner."""
+    default_model = os.environ.get("SOC_AI_MODEL") or "devstral:latest"
     return {
         "mode": "ollama",
-        "ollama_model": os.environ.get("SOC_AI_MODEL") or "devstral:latest",
+        "ollama_model": default_model,
+        "enabled_ollama_models": [default_model],
         "ollama_url": os.environ.get("OLLAMA_URL") or "http://127.0.0.1:11434",
-        "cloud_provider": "gpt-cli",
-        "cloud_model": "",
+        "cloud_provider": "codex-cli",
+        "cloud_model": "gpt-5.5",
         "cloud_command": "",
+        "codex_cli_path": "codex",
+        "codex_cli_model": "gpt-5.5",
+        "codex_cli_reasoning_effort": "medium",
+        "gpt_cli_enabled": False,
         "hybrid_policy": "cloud_for_critical_high_or_recommended",
-    }
+        # Preserve the deployed all-alert PCAP policy unless an operator
+        # deliberately raises the floor in Settings.
+        "soc_analyst_pcap_min_severity": "informational",
+        # Automatic case creation is opt-in because it changes analyst state.
+        "soc_analyst_incident_min_severity": "disabled",
+        "agent_models": {
+            role: f"ollama:{default_model}"
+            for role in CYBER_SECURITY_AGENT_ROLES
+        },
+        "agent_second_opinion_models": {
+            role: ""
+            for role in CYBER_SECURITY_AGENT_ROLES
+        },
+        **{
+            setting_key: default_path
+            for setting_key, default_path in MAXMIND_GEOIP_DATABASE_SETTINGS.values()
+        },
+}
+
+
+def _normalized_model_list(value: object) -> list[str]:
+    """Return a bounded, ordered model roster without duplicate or control-text entries."""
+    if not isinstance(value, list):
+        return []
+    models: list[str] = []
+    for item in value[:32]:
+        model = str(item or "").strip()[:240]
+        if not model or re.search(r"[\x00-\x1f\x7f]", model) or model in models:
+            continue
+        models.append(model)
+    return models
+
+
+def _boolean_setting(value: object, default: bool = False) -> bool:
+    """Normalize booleans without treating the string ``false`` as truthy."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "disabled", ""}:
+            return False
+    return default
+
+
+def _derive_model_mode(enabled_ollama_models: list[str], gpt_cli_enabled: bool) -> str:
+    """Keep the legacy mode field deterministic for rolling-deploy compatibility."""
+    if enabled_ollama_models and gpt_cli_enabled:
+        return "hybrid"
+    if gpt_cli_enabled:
+        return "cloud"
+    return "ollama"
+
+
+def _enabled_agent_model_routes(enabled_ollama_models: list[str], gpt_cli_enabled: bool) -> list[str]:
+    """Return stable route identifiers that agents may be assigned to."""
+    routes = [f"ollama:{model}" for model in enabled_ollama_models]
+    if gpt_cli_enabled:
+        routes.append("codex-cli")
+    return routes
+
+
+def _normalize_agent_models(value: object, enabled_routes: list[str]) -> dict[str, str]:
+    """Keep every agent on exactly one enabled route after roster changes."""
+    raw = value if isinstance(value, dict) else {}
+    fallback = enabled_routes[0]
+    assignments: dict[str, str] = {}
+    for role in CYBER_SECURITY_AGENT_ROLES:
+        route = str(raw.get(role) or "").strip()[:260]
+        if route == "gpt-cli":
+            route = "codex-cli"
+        assignments[role] = route if route in enabled_routes else fallback
+    return assignments
+
+
+def _normalize_agent_second_opinion_models(
+    value: object,
+    enabled_routes: list[str],
+    primary_assignments: dict[str, str],
+) -> dict[str, str]:
+    """Validate optional secondary routes without inventing a fallback."""
+    raw = value if isinstance(value, dict) else {}
+    assignments: dict[str, str] = {}
+    for role in CYBER_SECURITY_AGENT_ROLES:
+        route = str(raw.get(role) or "").strip()[:260]
+        if route == "gpt-cli":
+            route = "codex-cli"
+        assignments[role] = (
+            route
+            if route in enabled_routes and route != primary_assignments.get(role)
+            else ""
+        )
+    return assignments
 
 
 def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
@@ -1237,35 +1464,194 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
     payload = payload if isinstance(payload, dict) else {}
     settings = default_soc_ai_settings()
     for key in settings:
+        if key in {
+            "enabled_ollama_models",
+            "gpt_cli_enabled",
+            "agent_models",
+            "agent_second_opinion_models",
+        }:
+            continue
         if key in payload:
             settings[key] = str(payload.get(key) or "").strip()
-    if settings["mode"] not in {"ollama", "cloud", "hybrid"}:
-        return False, {"ok": False, "error": "Mode must be ollama, cloud, or hybrid."}
+    # Migrate the original City-only setting without retaining an ambiguous key
+    # in newly written runtime configuration.
+    city_key = MAXMIND_GEOIP_DATABASE_SETTINGS["city"][0]
+    if city_key not in payload and payload.get("maxmind_geoip_db_path") is not None:
+        settings[city_key] = str(payload.get("maxmind_geoip_db_path") or "").strip()
+    legacy_mode = str(payload.get("mode") or settings["mode"]).strip().lower()
+    if legacy_mode not in {"ollama", "cloud", "hybrid"}:
+        legacy_mode = "ollama"
+    if "enabled_ollama_models" in payload:
+        enabled_ollama_models = _normalized_model_list(payload.get("enabled_ollama_models"))
+    else:
+        legacy_model = str(payload.get("ollama_model") or settings["ollama_model"]).strip()
+        enabled_ollama_models = [] if legacy_mode == "cloud" else _normalized_model_list([legacy_model])
+    if "gpt_cli_enabled" in payload:
+        gpt_cli_enabled = _boolean_setting(payload.get("gpt_cli_enabled"))
+    else:
+        gpt_cli_enabled = legacy_mode in {"cloud", "hybrid"}
+    if not enabled_ollama_models and not gpt_cli_enabled:
+        return False, {"ok": False, "error": "Enable at least one Ollama model or GPT CLI."}
+    settings["enabled_ollama_models"] = enabled_ollama_models
+    settings["gpt_cli_enabled"] = gpt_cli_enabled
+    settings["mode"] = _derive_model_mode(enabled_ollama_models, gpt_cli_enabled)
+    if enabled_ollama_models:
+        settings["ollama_model"] = enabled_ollama_models[0]
+    enabled_routes = _enabled_agent_model_routes(enabled_ollama_models, gpt_cli_enabled)
+    settings["agent_models"] = _normalize_agent_models(payload.get("agent_models"), enabled_routes)
+    settings["agent_second_opinion_models"] = _normalize_agent_second_opinion_models(
+        payload.get("agent_second_opinion_models"),
+        enabled_routes,
+        settings["agent_models"],
+    )
     if settings["hybrid_policy"] not in {"cloud_for_critical_high_or_recommended", "cloud_when_recommended_only"}:
         return False, {"ok": False, "error": "Hybrid policy is invalid."}
-    if not settings["ollama_model"]:
-        return False, {"ok": False, "error": "Ollama model cannot be empty."}
     if not settings["ollama_url"].startswith(("http://", "https://")):
         return False, {"ok": False, "error": "Ollama URL must start with http:// or https://."}
-    if settings["mode"] in {"cloud", "hybrid"} and not settings["cloud_command"]:
-        return False, {"ok": False, "error": "Cloud or hybrid mode requires a cloud CLI command."}
-    for key in ("ollama_model", "ollama_url", "cloud_provider", "cloud_model", "cloud_command"):
+    codex_cli_path = str(settings.get("codex_cli_path") or "codex").strip()
+    codex_cli_model = str(
+        payload.get("codex_cli_model")
+        or payload.get("cloud_model")
+        or settings.get("codex_cli_model")
+        or "gpt-5.5"
+    ).strip()
+    codex_cli_effort = str(
+        settings.get("codex_cli_reasoning_effort") or "medium"
+    ).strip().lower()
+    if (
+        not codex_cli_path
+        or len(codex_cli_path) > 1024
+        or re.search(r"[\x00-\x1f\x7f]", codex_cli_path)
+    ):
+        return False, {"ok": False, "error": "Codex CLI executable path is invalid."}
+    if Path(codex_cli_path).is_absolute():
+        if Path(codex_cli_path).name != "codex":
+            return False, {
+                "ok": False,
+                "error": "Codex CLI path must end in /codex.",
+            }
+    elif codex_cli_path != "codex":
+        return False, {
+            "ok": False,
+            "error": "Codex CLI path must be 'codex' or an absolute path ending in /codex.",
+        }
+    if (
+        not codex_cli_model
+        or len(codex_cli_model) > 240
+        or re.search(r"[\x00-\x1f\x7f]", codex_cli_model)
+    ):
+        return False, {"ok": False, "error": "Codex CLI model is invalid."}
+    if codex_cli_effort not in CODEX_CLI_REASONING_EFFORTS:
+        return False, {
+            "ok": False,
+            "error": "Codex CLI reasoning effort must be low, medium, high, or xhigh.",
+        }
+    settings["codex_cli_path"] = codex_cli_path
+    settings["codex_cli_model"] = codex_cli_model
+    settings["codex_cli_reasoning_effort"] = codex_cli_effort
+    settings["cloud_provider"] = "codex-cli"
+    settings["cloud_model"] = codex_cli_model
+    # Retain the key for rolling-deploy compatibility but never persist an
+    # operator-supplied command that could turn Settings into shell execution.
+    settings["cloud_command"] = ""
+    for setting_key, label in (
+        ("soc_analyst_pcap_min_severity", "PCAP analysis"),
+        ("soc_analyst_incident_min_severity", "incident escalation"),
+    ):
+        threshold = str(settings.get(setting_key) or "").strip().lower()
+        if threshold == "info":
+            threshold = "informational"
+        if threshold not in SOC_ANALYSIS_SEVERITY_THRESHOLDS:
+            return False, {
+                "ok": False,
+                "error": f"SOC Analyst {label} severity threshold is invalid.",
+            }
+        settings[setting_key] = threshold
+    for database_type, (setting_key, _) in MAXMIND_GEOIP_DATABASE_SETTINGS.items():
+        geoip_path = settings[setting_key]
+        label = database_type.upper() if database_type == "asn" else database_type.title()
+        if len(geoip_path) > 1024 or re.search(r"[\x00-\x1f\x7f]", geoip_path):
+            return False, {"ok": False, "error": f"MaxMind GeoIP database path for {label} is invalid."}
+        if not geoip_path.startswith(("/", "~/")):
+            return False, {"ok": False, "error": f"MaxMind GeoIP database path for {label} must be absolute or start with ~/."}
+        if Path(geoip_path).suffix.lower() != ".mmdb":
+            return False, {"ok": False, "error": f"MaxMind GeoIP database path for {label} must end in .mmdb."}
+    for key in (
+        "ollama_model",
+        "ollama_url",
+        "cloud_provider",
+        "cloud_model",
+        "cloud_command",
+        "codex_cli_model",
+        "codex_cli_reasoning_effort",
+    ):
         settings[key] = settings[key][:240]
     return True, settings
 
 
+def maxmind_geoip_database_status(settings: dict, database_type: str = "city") -> dict:
+    """Expose one database's readiness without reading or returning contents."""
+    if database_type not in MAXMIND_GEOIP_DATABASE_SETTINGS:
+        raise ValueError(f"Unsupported MaxMind database type: {database_type}")
+    setting_key, default_path = MAXMIND_GEOIP_DATABASE_SETTINGS[database_type]
+    configured = str(settings.get(setting_key) or "").strip()
+    if database_type == "city" and not configured:
+        configured = str(settings.get("maxmind_geoip_db_path") or "").strip()
+    configured = configured or default_path
+    path = Path(configured).expanduser()
+    status = {
+        "database_type": database_type,
+        "setting_key": setting_key,
+        "state": "missing",
+        "configured_path": configured,
+        "filename": path.name,
+    }
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return status
+    except OSError:
+        status["state"] = "unreadable"
+        return status
+    if not path.is_file() or not os.access(path, os.R_OK):
+        status["state"] = "unreadable"
+        return status
+    status.update({
+        "state": "ready",
+        "size_bytes": stat.st_size,
+        "modified_at": dt.datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat().replace("T", "  "),
+    })
+    return status
+
+
+def maxmind_geoip_databases_status(settings: dict) -> dict:
+    """Return independent readiness for ASN, City, and Country databases."""
+    return {
+        database_type: maxmind_geoip_database_status(settings, database_type)
+        for database_type in MAXMIND_GEOIP_DATABASE_SETTINGS
+    }
+
+
 def read_soc_ai_settings() -> dict:
     """Return the current SOC AI model-routing settings."""
-    try:
-        raw = json.loads(SOC_AI_SETTINGS_FILE.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        raw = {}
-    except Exception as exc:
-        return {"ok": False, "error": f"Could not read SOC AI settings: {exc}", "path": str(SOC_AI_SETTINGS_FILE)}
+    with SOC_AI_SETTINGS_LOCK:
+        try:
+            raw = json.loads(SOC_AI_SETTINGS_FILE.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raw = {}
+        except Exception as exc:
+            return {"ok": False, "error": f"Could not read SOC AI settings: {exc}", "path": str(SOC_AI_SETTINGS_FILE)}
     ok, normalized = normalize_soc_ai_settings(raw)
     if not ok:
         normalized = default_soc_ai_settings()
-    return {"ok": True, "settings": normalized, "path": str(SOC_AI_SETTINGS_FILE)}
+    return {
+        "ok": True,
+        "settings": normalized,
+        "geoip_databases": maxmind_geoip_databases_status(normalized),
+        # Compatibility alias for older dashboard builds during rolling deploys.
+        "geoip_database": maxmind_geoip_database_status(normalized, "city"),
+        "path": str(SOC_AI_SETTINGS_FILE),
+    }
 
 
 def list_ollama_models() -> list[str]:
@@ -1302,25 +1688,139 @@ def list_ollama_models() -> list[str]:
     return models
 
 
-def ollama_models_response() -> dict:
+def _ollama_context_length(model_info: object) -> int:
+    """Return the largest declared context window from Ollama model metadata."""
+    if not isinstance(model_info, dict):
+        return 0
+    lengths: list[int] = []
+    for key, value in model_info.items():
+        if not str(key).endswith(".context_length"):
+            continue
+        try:
+            lengths.append(max(0, int(value)))
+        except (TypeError, ValueError):
+            continue
+    return max(lengths, default=0)
+
+
+def classify_ollama_model_compatibility(model: str, metadata: object) -> dict:
+    """Assess only capabilities the current bounded SOC analysis exchange requires."""
+    if not isinstance(metadata, dict):
+        return {
+            "compatible": False,
+            "status": "unverified",
+            "reasons": ["Ollama did not return capability metadata for this model."],
+            "capabilities": [],
+            "context_length": 0,
+        }
+
+    capabilities = sorted({
+        str(item).strip().lower()
+        for item in metadata.get("capabilities", [])
+        if str(item).strip()
+    }) if isinstance(metadata.get("capabilities"), list) else []
+    context_length = _ollama_context_length(metadata.get("model_info"))
+    reasons: list[str] = []
+
+    if "completion" not in capabilities:
+        if "image" in capabilities:
+            reasons.append(
+                "Image-generation only: this model cannot return the text and JSON analysis required by Onion Sentinel."
+            )
+        elif "embedding" in capabilities:
+            reasons.append(
+                "Embedding-only: this model cannot generate the text and JSON analysis required by Onion Sentinel."
+            )
+        else:
+            reasons.append(
+                "No text-completion capability was reported, so the model cannot produce an Onion Sentinel analysis."
+            )
+    if not str(metadata.get("template") or "").strip():
+        reasons.append(
+            "No chat template was reported, so the model cannot accept the system and analyst messages used by Onion Sentinel."
+        )
+    if context_length and context_length < OLLAMA_MODEL_MIN_CONTEXT_TOKENS:
+        reasons.append(
+            f"The {context_length:,}-token context window is below Onion Sentinel's "
+            f"{OLLAMA_MODEL_MIN_CONTEXT_TOKENS:,}-token operational minimum."
+        )
+
+    return {
+        "compatible": not reasons,
+        "status": "compatible" if not reasons else "incompatible",
+        "reasons": reasons,
+        "capabilities": capabilities,
+        "context_length": context_length,
+    }
+
+
+def ollama_model_compatibility(model: str, ollama_url: str) -> dict:
+    """Read bounded local Ollama metadata and cache the compatibility decision."""
+    cache_key = (ollama_url.rstrip("/"), model)
+
+    def compute() -> dict:
+        endpoint = cache_key[0] + "/api/show"
+        request = urllib_request.Request(
+            endpoint,
+            data=json.dumps({"model": model}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(request, timeout=4) as response:
+                metadata = read_bounded_json(response, max_bytes=OLLAMA_MODEL_SHOW_MAX_BYTES)
+        except Exception:
+            return classify_ollama_model_compatibility(model, None)
+        return classify_ollama_model_compatibility(model, metadata)
+
+    return OLLAMA_MODEL_COMPATIBILITY_CACHE.get_or_compute(cache_key, compute)
+
+
+def ollama_models_response(force_refresh: bool = False) -> dict:
     settings = read_soc_ai_settings().get("settings") or default_soc_ai_settings()
-    models = list_ollama_models()
-    current = str(settings.get("ollama_model") or "").strip()
-    if current and current not in models:
-        models.insert(0, current)
+    installed_models = list_ollama_models()
+    enabled_models = _normalized_model_list(settings.get("enabled_ollama_models"))
+    models = list(installed_models)
+    for configured_model in enabled_models:
+        if configured_model not in models:
+            models.append(configured_model)
+    if force_refresh:
+        OLLAMA_MODEL_COMPATIBILITY_CACHE.clear()
+    ollama_url = str(settings.get("ollama_url") or "http://127.0.0.1:11434").rstrip("/")
+    installed_set = set(installed_models)
+
+    def assess(model: str) -> tuple[str, dict]:
+        if model not in installed_set:
+            return model, {
+                "compatible": False,
+                "status": "unavailable",
+                "reasons": ["This model is configured but is not installed locally, so Onion Sentinel cannot run it."],
+                "capabilities": [],
+                "context_length": 0,
+            }
+        return model, ollama_model_compatibility(model, ollama_url)
+
+    compatibility: dict[str, dict] = {}
+    if models:
+        # Metadata reads are independent local requests. A small fixed pool keeps
+        # one unhealthy model endpoint from serially delaying the Settings page.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(models))) as executor:
+            for model, assessment in executor.map(assess, models):
+                compatibility[model] = assessment
+    current = enabled_models[0] if enabled_models else str(settings.get("ollama_model") or "").strip()
     return {
         "ok": True,
         "models": models,
+        "installed_models": installed_models,
+        "enabled_models": enabled_models,
+        "compatibility": compatibility,
         "selected": current,
         "command": "ollama ls",
     }
 
 
-def save_soc_ai_settings(payload: object) -> tuple[bool, dict]:
-    """Atomically save SOC AI model-routing settings."""
-    ok, normalized = normalize_soc_ai_settings(payload if isinstance(payload, dict) else {})
-    if not ok:
-        return False, normalized
+def _write_soc_ai_settings(normalized: dict) -> tuple[bool, dict]:
+    """Write one fully normalized settings document while the caller holds the lock."""
     try:
         SOC_AI_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         tmp = SOC_AI_SETTINGS_FILE.with_suffix(".tmp")
@@ -1332,7 +1832,78 @@ def save_soc_ai_settings(payload: object) -> tuple[bool, dict]:
         tmp.replace(SOC_AI_SETTINGS_FILE)
     except Exception as exc:
         return False, {"ok": False, "error": f"Could not save SOC AI settings: {exc}", "path": str(SOC_AI_SETTINGS_FILE)}
-    return True, {"ok": True, "message": "SOC AI model settings saved.", "settings": normalized, "path": str(SOC_AI_SETTINGS_FILE)}
+    return True, {
+        "ok": True,
+        "message": "SOC AI model and MaxMind GeoIP settings saved.",
+        "settings": normalized,
+        "geoip_databases": maxmind_geoip_databases_status(normalized),
+        "geoip_database": maxmind_geoip_database_status(normalized, "city"),
+        "path": str(SOC_AI_SETTINGS_FILE),
+    }
+
+
+def save_soc_ai_settings(payload: object) -> tuple[bool, dict]:
+    """Atomically save the complete SOC AI model-routing configuration."""
+    with SOC_AI_SETTINGS_LOCK:
+        ok, normalized = normalize_soc_ai_settings(payload if isinstance(payload, dict) else {})
+        if not ok:
+            return False, normalized
+        return _write_soc_ai_settings(normalized)
+
+
+def save_soc_agent_model(payload: object) -> tuple[bool, dict]:
+    """Atomically update one agent's primary and optional secondary routes."""
+    payload = payload if isinstance(payload, dict) else {}
+    role = str(payload.get("role") or "").strip()
+    model_route = str(payload.get("model_route") or payload.get("model") or "").strip()[:260]
+    second_model_route = str(
+        payload.get("second_opinion_model_route")
+        or payload.get("second_opinion_model")
+        or ""
+    ).strip()[:260]
+    if role not in CYBER_SECURITY_AGENT_ROLES:
+        return False, {"ok": False, "error": "Cyber Security Agent role is invalid."}
+    with SOC_AI_SETTINGS_LOCK:
+        try:
+            raw = json.loads(SOC_AI_SETTINGS_FILE.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raw = {}
+        except Exception as exc:
+            return False, {"ok": False, "error": f"Could not read SOC AI settings: {exc}", "path": str(SOC_AI_SETTINGS_FILE)}
+        ok, current = normalize_soc_ai_settings(raw)
+        if not ok:
+            return False, current
+        enabled_routes = _enabled_agent_model_routes(
+            current["enabled_ollama_models"],
+            current["gpt_cli_enabled"],
+        )
+        if model_route not in enabled_routes:
+            return False, {
+                "ok": False,
+                "error": "That model is not enabled. Save the global model roster before assigning it to an agent.",
+            }
+        if second_model_route and second_model_route not in enabled_routes:
+            return False, {
+                "ok": False,
+                "error": "That second-opinion model is not enabled. Save the global model roster first.",
+            }
+        if second_model_route == model_route:
+            return False, {
+                "ok": False,
+                "error": "The second-opinion model must differ from the assigned primary model.",
+            }
+        current["agent_models"][role] = model_route
+        current["agent_second_opinion_models"][role] = second_model_route
+        ok, normalized = normalize_soc_ai_settings(current)
+        if not ok:
+            return False, normalized
+        saved, response = _write_soc_ai_settings(normalized)
+        if saved:
+            response["message"] = f"Model assignment saved for {role}."
+            response["role"] = role
+            response["model_route"] = normalized["agent_models"][role]
+            response["second_opinion_model_route"] = normalized["agent_second_opinion_models"][role]
+        return saved, response
 
 
 def admin_status_path(action_id: str) -> Path:
@@ -4084,6 +4655,63 @@ def soc_alert_group_enrichment_json(conn: sqlite3.Connection, group_key: object)
     return str(row["enrichment_json"] or "") if row else ""
 
 
+def soc_alert_group_enrichment_json_map(
+    conn: sqlite3.Connection,
+    group_keys: list[object],
+) -> dict[str, str]:
+    """Load the best enrichment record for each visible group in one query.
+
+    Group keys are derived expressions rather than indexed columns in the raw
+    alert table. Looking them up one row at a time therefore scans the alert
+    corpus once per displayed group. The window query below scans it once for
+    the bounded page and preserves the same quality/newness ordering used by
+    ``soc_alert_group_enrichment_json``.
+    """
+    keys = list(dict.fromkeys(str(value or "").strip() for value in group_keys if str(value or "").strip()))
+    if not keys:
+        return {}
+
+    group_expr = soc_alert_group_key_sql()
+    placeholders = ",".join("?" for _ in keys)
+    try:
+        rows = conn.execute(
+            f"""
+            WITH ranked_enrichment AS (
+              SELECT
+                {group_expr} AS resolved_group_key,
+                enrichment_json,
+                ROW_NUMBER() OVER (
+                  PARTITION BY {group_expr}
+                  ORDER BY
+                    CASE
+                      WHEN COALESCE(json_array_length(json_extract(enrichment_json, '$.external_intel.records')), 0) > 0 THEN 0
+                      WHEN COALESCE(json_array_length(json_extract(enrichment_json, '$.external_intel.errors')), 0) > 0 THEN 1
+                      WHEN COALESCE(json_array_length(json_extract(enrichment_json, '$.external_intel.skipped')), 0) > 0 THEN 2
+                      ELSE 3
+                    END,
+                    replace(replace(COALESCE(last_seen, timestamp, first_seen), 'T', ' '), 'Z', '') DESC,
+                    alert_id DESC
+                ) AS enrichment_rank
+              FROM alerts
+              WHERE {group_expr} IN ({placeholders})
+                AND enrichment_json IS NOT NULL
+                AND TRIM(enrichment_json) != ''
+            )
+            SELECT resolved_group_key, enrichment_json
+            FROM ranked_enrichment
+            WHERE enrichment_rank = 1
+            """,
+            keys,
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {
+        str(row["resolved_group_key"]): str(row["enrichment_json"] or "")
+        for row in rows
+        if row["resolved_group_key"]
+    }
+
+
 def directory_size_bytes(path: Path) -> int:
     """Return total bytes for a runtime evidence directory without following symlinks."""
     if not path.exists():
@@ -4116,10 +4744,20 @@ def write_artifact_cache(name: str, path: Path, value: object) -> object:
     return SOC_ALERT_ARTIFACT_CACHE.put(name, path, value)
 
 
-def soc_alert_pcap_analysis_index() -> dict[str, set[str]]:
+def soc_alert_pcap_analysis_index() -> dict[str, object]:
     """Index parsed Zeek/TShark artifacts once per API response."""
-    def build_index() -> dict[str, set[str]]:
-        index = {"request_ids": set(), "alert_ids": set(), "group_ids": set()}
+    def build_index() -> dict[str, object]:
+        index: dict[str, object] = {
+            "request_ids": set(),
+            "alert_ids": set(),
+            "group_ids": set(),
+            "size_by_alert_id": {},
+            "size_by_group_id": {},
+        }
+        seen_sizes: dict[str, set[tuple[str, str]]] = {
+            "size_by_alert_id": set(),
+            "size_by_group_id": set(),
+        }
         if not SOC_ALERT_PCAP_ANALYSIS_DIR.exists():
             return index
         for path in SOC_ALERT_PCAP_ANALYSIS_DIR.glob("*-pcap-analysis.json"):
@@ -4134,6 +4772,34 @@ def soc_alert_pcap_analysis_index() -> dict[str, set[str]]:
                 value = str(request.get(key) or "").strip()
                 if value:
                     index[bucket].add(value)
+            pcap_files = record.get("pcap_files") if isinstance(record.get("pcap_files"), list) else []
+            request_id = str(request.get("request_id") or "").strip()
+            for position, item in enumerate(pcap_files):
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    capture_bytes = max(0, int(item.get("size_bytes") or 0))
+                except (TypeError, ValueError):
+                    # A malformed historical artifact must not break the alert
+                    # list API; valid files in the same analysis still count.
+                    continue
+                if capture_bytes <= 0:
+                    continue
+                identity = str(
+                    item.get("sha256")
+                    or item.get("artifact_sha256")
+                    or item.get("path")
+                    or item.get("file")
+                    or f"{request_id}:{position}"
+                ).strip()
+                for request_key, size_key in (("alert_id", "size_by_alert_id"), ("group_id", "size_by_group_id")):
+                    value = str(request.get(request_key) or "").strip()
+                    artifact_key = (value, identity)
+                    if not value or artifact_key in seen_sizes[size_key]:
+                        continue
+                    seen_sizes[size_key].add(artifact_key)
+                    sizes = index[size_key]
+                    sizes[value] = int(sizes.get(value, 0)) + capture_bytes
         return index
 
     return SOC_ALERT_ARTIFACT_CACHE.get_or_compute(
@@ -4197,7 +4863,7 @@ def soc_alert_pcap_request_statuses(conn: sqlite3.Connection, rows: list[sqlite3
     return statuses
 
 
-def soc_alert_pcap_status(group_id: str, alert_id: str, analysis_index: dict[str, set[str]], request_statuses: dict[str, dict]) -> dict:
+def soc_alert_pcap_status(group_id: str, alert_id: str, analysis_index: dict[str, object], request_statuses: dict[str, dict]) -> dict:
     """Return the compact PCAP table status for one grouped alert."""
     group_id = str(group_id or "").strip()
     alert_id = str(alert_id or "").strip()
@@ -5434,12 +6100,13 @@ def soc_alert_latest_analysis_mtime(alert_id: str) -> float:
     return newest
 
 
-def soc_alert_ai_artifact_index() -> dict[str, dict[str, float]]:
+def soc_alert_ai_artifact_index() -> dict[str, object]:
     """Index AI prompt/analysis artifact mtimes once for one API response."""
     cache_path = SOC_ALERT_AI_ANALYSIS_DIR.parent
-    def build_index() -> dict[str, dict[str, float]]:
+    def build_index() -> dict[str, object]:
         prompt_mtime_by_alert: dict[str, float] = {}
         analysis_mtime_by_alert: dict[str, float] = {}
+        detection_outcome_by_alert: dict[str, str] = {}
         prompt_dir_matches_analysis = (
             SOC_ALERT_AI_PROMPT_DIR.exists()
             and SOC_ALERT_AI_ANALYSIS_DIR.exists()
@@ -5463,10 +6130,17 @@ def soc_alert_ai_artifact_index() -> dict[str, dict[str, float]]:
                     continue
                 alert_id = str(data.get("alert_id") or "").strip()
                 if alert_id:
-                    analysis_mtime_by_alert[alert_id] = max(analysis_mtime_by_alert.get(alert_id, 0.0), path.stat().st_mtime)
+                    artifact_mtime = path.stat().st_mtime
+                    if artifact_mtime >= analysis_mtime_by_alert.get(alert_id, 0.0):
+                        analysis_mtime_by_alert[alert_id] = artifact_mtime
+                        response = data.get("response") if isinstance(data.get("response"), dict) else {}
+                        outcome = str(response.get("detection_outcome") or data.get("detection_outcome") or "").strip()
+                        if outcome:
+                            detection_outcome_by_alert[alert_id] = outcome
         return {
             "prompt_mtime_by_alert": prompt_mtime_by_alert,
             "analysis_mtime_by_alert": analysis_mtime_by_alert,
+            "detection_outcome_by_alert": detection_outcome_by_alert,
         }
 
     return SOC_ALERT_ARTIFACT_CACHE.get_or_compute("ai-artifact-index", cache_path, build_index)
@@ -5476,8 +6150,19 @@ def soc_alert_page_ai_artifact_context(rows: list[sqlite3.Row | dict]) -> dict[s
     """Return page-scoped AI artifact state without per-row filesystem scans."""
     artifact_index = soc_alert_ai_artifact_index()
     analysis_mtime_by_alert = artifact_index["analysis_mtime_by_alert"]
+    detection_outcome_by_alert = artifact_index["detection_outcome_by_alert"]
     analysis_group_ids: set[str] = set()
+    detection_outcome_by_group_id: dict[str, str] = {}
+    outcome_mtime_by_group_id: dict[str, float] = {}
     group_keys: list[str] = []
+
+    def consider_outcome(group_id: str, alert_id: str) -> None:
+        outcome = str(detection_outcome_by_alert.get(alert_id) or "").strip()
+        mtime = float(analysis_mtime_by_alert.get(alert_id, 0.0) or 0.0)
+        if outcome and mtime >= outcome_mtime_by_group_id.get(group_id, 0.0):
+            detection_outcome_by_group_id[group_id] = outcome
+            outcome_mtime_by_group_id[group_id] = mtime
+
     for row in rows:
         if isinstance(row, dict):
             group_key = str(row.get("group_key") or "").strip()
@@ -5487,8 +6172,10 @@ def soc_alert_page_ai_artifact_context(rows: list[sqlite3.Row | dict]) -> dict[s
             alert_id = str(row["alert_id"] or row["representative_alert_id"] or "").strip() if "alert_id" in row.keys() else ""
         if group_key:
             group_keys.append(group_key)
+            group_id = soc_alert_group_id(group_key)
             if alert_id in analysis_mtime_by_alert:
-                analysis_group_ids.add(soc_alert_group_id(group_key))
+                analysis_group_ids.add(group_id)
+            consider_outcome(group_id, alert_id)
     group_keys = sorted(set(group_keys))
     if group_keys and analysis_mtime_by_alert:
         placeholders = ",".join("?" for _ in group_keys)
@@ -5506,12 +6193,16 @@ def soc_alert_page_ai_artifact_context(rows: list[sqlite3.Row | dict]) -> dict[s
                 if str(item["alert_id"] or "").strip() in analysis_mtime_by_alert:
                     group_key = str(item["group_key"] or "").strip()
                     if group_key:
-                        analysis_group_ids.add(soc_alert_group_id(group_key))
+                        group_id = soc_alert_group_id(group_key)
+                        alert_id = str(item["alert_id"] or "").strip()
+                        analysis_group_ids.add(group_id)
+                        consider_outcome(group_id, alert_id)
         except Exception:
             pass
     return {
         **artifact_index,
         "analysis_group_ids": analysis_group_ids,
+        "detection_outcome_by_group_id": detection_outcome_by_group_id,
     }
 
 
@@ -5610,13 +6301,194 @@ def soc_alert_group_ai_status(
     }
 
 
+SOC_ALERT_DETECTION_OUTCOME_LABELS = {
+    "true_positive_malicious": "TP - Malicious",
+    "true_positive_suspicious": "TP - Suspicious",
+    "true_positive_authorized_benign": "TP - Benign",
+    "true_positive_benign": "TP - Benign",
+    "false_positive_logic_rule": "FP - Rule",
+    "false_positive_data_parser": "FP - Parser",
+    "false_positive_bad_intel_ioc": "FP - Bad Intel",
+    "duplicate": "Duplicate",
+    "informational_no_action": "Informational",
+    "inconclusive": "Inconclusive",
+}
+
+
+def soc_alert_detection_outcome_label(value: object) -> str:
+    """Return a compact analyst-facing label without discarding the model key."""
+    key = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+    if not key:
+        return "n/a"
+    return SOC_ALERT_DETECTION_OUTCOME_LABELS.get(key, key.replace("_", " ").title())
+
+
+def soc_alert_group_evidence_metadata(
+    conn: sqlite3.Connection | None,
+    rows: list[sqlite3.Row | dict],
+    ai_artifacts: dict[str, object] | None = None,
+    pcap_analysis: dict[str, object] | None = None,
+) -> dict[str, dict[str, object]]:
+    """Batch group-level PCAP size and latest AI outcome for one API page.
+
+    The dashboard must not issue one SQLite query per row. This helper resolves
+    the current page in two bounded queries and falls back to retained analysis
+    artifacts when a restored database predates the durable metadata tables.
+    """
+    def row_value(row: sqlite3.Row | dict, key: str) -> str:
+        if isinstance(row, dict):
+            return str(row.get(key) or "").strip()
+        return str(row[key] or "").strip() if key in row.keys() else ""
+
+    group_by_key: dict[str, str] = {}
+    group_by_alert: dict[str, str] = {}
+    metadata: dict[str, dict[str, object]] = {}
+    for row in rows:
+        group_key = row_value(row, "group_key")
+        group_id = soc_alert_group_id(group_key) if group_key else row_value(row, "group_id")
+        if not group_id:
+            continue
+        alert_id = row_value(row, "alert_id") or row_value(row, "representative_alert_id")
+        metadata[group_id] = {
+            "pcap_size_bytes": 0,
+            "detection_outcome": "",
+            "detection_outcome_label": "n/a",
+        }
+        if group_key:
+            group_by_key[group_key] = group_id
+        if alert_id:
+            group_by_alert[alert_id] = group_id
+
+    ai_artifacts = ai_artifacts if isinstance(ai_artifacts, dict) else {}
+    artifact_outcomes = ai_artifacts.get("detection_outcome_by_group_id")
+    if isinstance(artifact_outcomes, dict):
+        for group_id, record in metadata.items():
+            outcome = str(artifact_outcomes.get(group_id) or "").strip()
+            if outcome:
+                record["detection_outcome"] = outcome
+                record["detection_outcome_label"] = soc_alert_detection_outcome_label(outcome)
+
+    pcap_analysis = pcap_analysis if isinstance(pcap_analysis, dict) else {}
+    artifact_sizes_by_group = pcap_analysis.get("size_by_group_id")
+    artifact_sizes_by_alert = pcap_analysis.get("size_by_alert_id")
+    for group_id, record in metadata.items():
+        fallback_size = 0
+        if isinstance(artifact_sizes_by_group, dict):
+            fallback_size = int(artifact_sizes_by_group.get(group_id, 0) or 0)
+        if fallback_size <= 0 and isinstance(artifact_sizes_by_alert, dict):
+            fallback_size = sum(
+                int(artifact_sizes_by_alert.get(alert_id, 0) or 0)
+                for alert_id, alert_group_id in group_by_alert.items()
+                if alert_group_id == group_id
+            )
+        record["pcap_size_bytes"] = max(0, fallback_size)
+
+    if conn is None or not metadata:
+        return metadata
+
+    def where_terms(columns: list[tuple[str, list[str]]]) -> tuple[str, list[str]]:
+        clauses: list[str] = []
+        arguments: list[str] = []
+        for column, values in columns:
+            if not values:
+                continue
+            clauses.append(f"{column} IN ({','.join('?' for _ in values)})")
+            arguments.extend(values)
+        return " OR ".join(clauses), arguments
+
+    group_ids = sorted(metadata)
+    group_keys = sorted(group_by_key)
+    alert_ids = sorted(group_by_alert)
+
+    if sqlite_table_exists(conn, "pcap_requests"):
+        where_sql, arguments = where_terms([
+            ("group_id", group_ids),
+            ("group_key", group_keys),
+            ("alert_id", alert_ids),
+        ])
+        if where_sql:
+            try:
+                pcap_rows = conn.execute(
+                    f"""
+                    SELECT request_id, alert_id, group_id, group_key, artifact_path,
+                           artifact_sha256, artifact_size_bytes
+                    FROM pcap_requests
+                    WHERE ({where_sql}) AND COALESCE(artifact_size_bytes, 0) > 0
+                    """,
+                    arguments,
+                ).fetchall()
+            except sqlite3.Error:
+                pcap_rows = []
+            db_sizes: dict[str, int] = {}
+            seen_artifacts: set[tuple[str, str]] = set()
+            for item in pcap_rows:
+                stored_group_id = str(item["group_id"] or "").strip()
+                stored_group_key = str(item["group_key"] or "").strip()
+                stored_alert_id = str(item["alert_id"] or "").strip()
+                group_id = (
+                    stored_group_id if stored_group_id in metadata else
+                    group_by_key.get(stored_group_key) or group_by_alert.get(stored_alert_id) or ""
+                )
+                if not group_id:
+                    continue
+                identity = (
+                    str(item["artifact_sha256"] or "").strip()
+                    or str(item["artifact_path"] or "").strip()
+                    or str(item["request_id"] or "").strip()
+                )
+                artifact_key = (group_id, identity)
+                if not identity or artifact_key in seen_artifacts:
+                    continue
+                seen_artifacts.add(artifact_key)
+                db_sizes[group_id] = db_sizes.get(group_id, 0) + max(0, int(item["artifact_size_bytes"] or 0))
+            for group_id, size_bytes in db_sizes.items():
+                metadata[group_id]["pcap_size_bytes"] = size_bytes
+
+    if sqlite_table_exists(conn, "ai_analysis_runs"):
+        where_sql, arguments = where_terms([("group_id", group_ids), ("alert_id", alert_ids)])
+        if where_sql:
+            role_filter = ""
+            if "agent_role" in sqlite_table_columns(conn, "ai_analysis_runs"):
+                # The SOC Alerts outcome column represents SOC triage. A later
+                # Incident Responder run must not silently replace that value.
+                role_filter = " AND COALESCE(NULLIF(agent_role, ''), 'soc-analyst') = 'soc-analyst'"
+            try:
+                analysis_rows = conn.execute(
+                    f"""
+                    SELECT group_id, alert_id, detection_outcome, generated_at, created_at
+                    FROM ai_analysis_runs
+                    WHERE ({where_sql}) AND COALESCE(detection_outcome, '') <> ''{role_filter}
+                    ORDER BY COALESCE(NULLIF(generated_at, ''), created_at) DESC, rowid DESC
+                    """,
+                    arguments,
+                ).fetchall()
+            except sqlite3.Error:
+                analysis_rows = []
+            resolved_groups: set[str] = set()
+            for item in analysis_rows:
+                stored_group_id = str(item["group_id"] or "").strip()
+                stored_alert_id = str(item["alert_id"] or "").strip()
+                group_id = stored_group_id if stored_group_id in metadata else group_by_alert.get(stored_alert_id, "")
+                if not group_id or group_id in resolved_groups:
+                    continue
+                outcome = str(item["detection_outcome"] or "").strip()
+                if not outcome:
+                    continue
+                resolved_groups.add(group_id)
+                metadata[group_id]["detection_outcome"] = outcome
+                metadata[group_id]["detection_outcome_label"] = soc_alert_detection_outcome_label(outcome)
+
+    return metadata
+
+
 def soc_alert_group_row_to_api(
     row: sqlite3.Row | dict,
     statuses: dict,
     ai_reports: dict | None = None,
-    pcap_analysis: dict[str, set[str]] | None = None,
+    pcap_analysis: dict[str, object] | None = None,
     pcap_requests: dict[str, dict] | None = None,
     ai_artifacts: dict[str, object] | None = None,
+    evidence_metadata: dict[str, dict[str, object]] | None = None,
 ) -> dict:
     group_key = row["group_key"]
     group_id = soc_alert_group_id(group_key)
@@ -5661,6 +6533,11 @@ def soc_alert_group_row_to_api(
     data.update(soc_alert_group_ai_status(row, group_id, ai_reports, ai_artifacts))
     data.update(soc_alert_public_enrichment_status(enrichment_json))
     data.update(soc_alert_pcap_status(group_id, row["alert_id"], pcap_analysis or {}, pcap_requests or {}))
+    data.update((evidence_metadata or {}).get(group_id, {
+        "pcap_size_bytes": 0,
+        "detection_outcome": "",
+        "detection_outcome_label": "n/a",
+    }))
     return data
 
 
@@ -5711,6 +6588,504 @@ def soc_alert_queue_analysis_response(group_id: str, payload: dict | None = None
         "ai_status_key": "queued",
         "ai_status_label": "Queued",
         "ai_status_detail": f"Manual SOC Analyst reanalysis queued at {now_iso_local()}",
+    }
+
+
+def soc_alert_escalate_response(group_id: str, payload: dict | None = None) -> tuple[int, dict]:
+    """Create or refresh one durable Incident Response case for an alert group."""
+    group_id = str(group_id or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{12}", group_id):
+        return soc_alert_api_error("Invalid SOC alert group id")
+    payload = payload if isinstance(payload, dict) else {}
+    try:
+        data = alert_store_post_json(
+            "/incidents/escalate",
+            {
+                "group_id": group_id,
+                "reason": str(payload.get("reason") or "Escalated from SOC Alerts for incident response")[:1000],
+                "requested_by": str(payload.get("requested_by") or "dashboard")[:100],
+                "related_limit": max(1, min(500, int(payload.get("related_limit", 250)))),
+                "pcap_analysis_limit": max(1, min(25, int(payload.get("pcap_analysis_limit", 25)))),
+            },
+            timeout=10.0,
+        )
+    except (TypeError, ValueError):
+        return soc_alert_api_error("Incident response queue limits must be integers", 400)
+    except RuntimeError as exc:
+        return soc_alert_api_error(f"Incident response escalation failed: {exc}", 503)
+    return 202, {
+        **data,
+        "agent_status": "queued",
+        "agent_status_label": "Queued",
+        "detail": f"Incident Responder analysis queued at {now_iso_local()}",
+    }
+
+
+def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
+    """Return one bounded page of durable Incident Response cases.
+
+    Case lists intentionally omit raw model JSON and packet evidence. The UI
+    loads the existing group-detail endpoint only after an analyst expands a
+    row, keeping routine polling inexpensive even with a large case history.
+    """
+    page = soc_alert_page((query.get("page") or ["1"])[0])
+    per_page = soc_alert_limit((query.get("per_page") or ["25"])[0], 25)
+    status_filter = str((query.get("status") or ["all"])[0] or "all").strip().lower()
+    if status_filter not in {"all", "open", "in_progress", "resolved"}:
+        return soc_alert_api_error("Invalid incident status filter")
+    try:
+        with soc_alert_db_connect() as conn:
+            if not sqlite_table_exists(conn, "incident_response_cases"):
+                return 200, {
+                    "ok": True,
+                    "incidents": [],
+                    "page": 1,
+                    "per_page": per_page,
+                    "total": 0,
+                    "pages": 1,
+                    "status_counts": {},
+                    "agent_status_counts": {},
+                    "schema_ready": False,
+                }
+            where_sql = "" if status_filter == "all" else "WHERE c.status = ?"
+            arguments: list[object] = [] if status_filter == "all" else [status_filter]
+            total = int(conn.execute(
+                f"SELECT COUNT(*) FROM incident_response_cases c {where_sql}",
+                arguments,
+            ).fetchone()[0])
+            status_counts = {
+                str(row[0] or "unknown"): int(row[1] or 0)
+                for row in conn.execute(
+                    "SELECT status, COUNT(*) FROM incident_response_cases GROUP BY status"
+                ).fetchall()
+            }
+            agent_status_counts = {
+                str(row[0] or "unknown"): int(row[1] or 0)
+                for row in conn.execute(
+                    "SELECT agent_status, COUNT(*) FROM incident_response_cases GROUP BY agent_status"
+                ).fetchall()
+            }
+            pages = max(1, (total + per_page - 1) // per_page)
+            page = min(page, pages)
+            offset = (page - 1) * per_page
+            summary_ready = sqlite_table_exists(conn, "alert_group_summary")
+            if summary_ready:
+                rows = conn.execute(
+                    f"""
+                    SELECT c.case_id, c.group_id, c.dashboard_group_id,
+                           c.representative_alert_id, c.status, c.agent_status,
+                           c.escalated_at, c.updated_at, c.escalated_by, c.reason,
+                           c.latest_analysis_id, c.latest_model,
+                           c.latest_generated_at, c.latest_error,
+                           COALESCE(g.rule_name, a.rule_name) AS rule_name,
+                           COALESCE(g.severity, a.severity) AS severity,
+                           COALESCE(g.severity_label, a.severity_label) AS severity_label,
+                           COALESCE(g.triage_level, a.triage_level) AS triage_level,
+                           COALESCE(g.source_ip, a.source_ip) AS source_ip,
+                           COALESCE(g.destination_ip, a.destination_ip) AS destination_ip,
+                           COALESCE(g.destination_port, a.destination_port) AS destination_port,
+                           COALESCE(g.raw_alert_count, a.seen_count, 0) AS raw_alert_count,
+                           COALESCE(g.total_seen_count, a.seen_count, 0) AS total_seen_count,
+                           COALESCE(g.first_seen, a.first_seen) AS first_seen,
+                           COALESCE(g.last_seen, a.last_seen) AS last_seen
+                    FROM incident_response_cases c
+                    LEFT JOIN alert_group_summary g ON g.group_id = c.dashboard_group_id
+                    LEFT JOIN alerts a ON a.alert_id = c.representative_alert_id
+                    {where_sql}
+                    ORDER BY
+                      CASE c.status WHEN 'open' THEN 0 WHEN 'in_progress' THEN 1 ELSE 2 END,
+                      CASE c.agent_status WHEN 'analyzing' THEN 0 WHEN 'queued' THEN 1
+                           WHEN 'failed' THEN 2 ELSE 3 END,
+                      c.updated_at DESC, c.case_id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    [*arguments, per_page, offset],
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"""
+                    SELECT c.case_id, c.group_id, c.dashboard_group_id,
+                           c.representative_alert_id, c.status, c.agent_status,
+                           c.escalated_at, c.updated_at, c.escalated_by, c.reason,
+                           c.latest_analysis_id, c.latest_model,
+                           c.latest_generated_at, c.latest_error
+                    FROM incident_response_cases c
+                    {where_sql}
+                    ORDER BY c.updated_at DESC, c.case_id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    [*arguments, per_page, offset],
+                ).fetchall()
+
+            analyses: dict[str, dict[str, object]] = {}
+            analysis_ids = sorted({str(row["latest_analysis_id"] or "") for row in rows if row["latest_analysis_id"]})
+            if analysis_ids and sqlite_table_exists(conn, "ai_analysis_runs"):
+                placeholders = ",".join("?" for _ in analysis_ids)
+                role_filter = ""
+                if "agent_role" in sqlite_table_columns(conn, "ai_analysis_runs"):
+                    role_filter = " AND agent_role = 'incident-responder'"
+                for analysis in conn.execute(
+                    f"""
+                    SELECT analysis_id, generated_at, model, detection_outcome,
+                           bluf, summary, confidence
+                    FROM ai_analysis_runs
+                    WHERE analysis_id IN ({placeholders}){role_filter}
+                    """,
+                    analysis_ids,
+                ).fetchall():
+                    analyses[str(analysis["analysis_id"])] = dict(analysis)
+
+            incidents: list[dict[str, object]] = []
+            for row in rows:
+                item = dict(row)
+                analysis = analyses.get(str(item.get("latest_analysis_id") or ""), {})
+                count = max(int(item.get("raw_alert_count") or 0), int(item.get("total_seen_count") or 0))
+                incidents.append({
+                    **item,
+                    "seen_count": count,
+                    "analysis_generated_at": analysis.get("generated_at") or item.get("latest_generated_at") or "",
+                    "analysis_model": analysis.get("model") or item.get("latest_model") or "",
+                    "detection_outcome": analysis.get("detection_outcome") or "",
+                    "analysis_bluf": analysis.get("bluf") or "",
+                    "analysis_summary": analysis.get("summary") or "",
+                    "analysis_confidence": analysis.get("confidence") or "",
+                })
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        return soc_alert_api_error(f"Incident Response data unavailable: {exc}", 503)
+    return 200, {
+        "ok": True,
+        "incidents": incidents,
+        "page": page,
+        "per_page": per_page,
+        "total": total,
+        "pages": pages,
+        "status_counts": status_counts,
+        "agent_status_counts": agent_status_counts,
+        "schema_ready": True,
+    }
+
+
+def _incident_html_text(value: object, fallback: str = "n/a") -> str:
+    text = str(value or "").strip() or fallback
+    return html.escape(text)
+
+
+def _incident_nonnegative_int(value: object) -> int:
+    """Render malformed evidence counters as zero instead of failing the case API."""
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _incident_html_list(values: object, fallback: str = "No findings were recorded.") -> str:
+    items = values if isinstance(values, list) else ([values] if values not in (None, "") else [])
+    rendered = []
+    for item in items[:100]:
+        if isinstance(item, (dict, list)):
+            text = json.dumps(item, sort_keys=True, default=str)
+        else:
+            text = str(item)
+        if text.strip():
+            rendered.append(f"<li>{html.escape(text.strip())}</li>")
+    return f'<ul class="ir-report-list">{"".join(rendered)}</ul>' if rendered else f"<p>{html.escape(fallback)}</p>"
+
+
+def _incident_report_section(title: str, body: str) -> str:
+    return (
+        '<section class="ir-report-subsection">'
+        f"<h4>{html.escape(title)}</h4>"
+        f'<div class="ir-report-subsection-body">{body}</div>'
+        "</section>"
+    )
+
+
+def render_incident_response_report_html(
+    case: dict[str, object],
+    response: dict[str, object],
+    analysis: dict[str, object],
+) -> tuple[str, int]:
+    """Render a fact-grounded responder report and immutable query audit.
+
+    All model and collector values are escaped here. Query DSL is formatted as
+    text, never interpreted as markup, and comes from the runner's trusted
+    post-inference audit rather than model prose.
+    """
+    report = response.get("incident_response_report")
+    report = report if isinstance(report, dict) else {}
+    metadata = (
+        '<div class="ir-analysis-meta">'
+        f'<span><b>Case:</b> {_incident_html_text(case.get("case_id"))}</span>'
+        f'<span><b>Generated:</b> {_incident_html_text(analysis.get("generated_at") or case.get("latest_generated_at"))}</span>'
+        f'<span><b>Model:</b> {_incident_html_text(analysis.get("model") or case.get("latest_model"))}</span>'
+        f'<span><b>Confidence:</b> {_incident_html_text(report.get("confidence") or analysis.get("confidence"))}</span>'
+        "</div>"
+    )
+    if not report:
+        state = str(case.get("agent_status") or "queued").replace("_", " ")
+        error = str(case.get("latest_error") or "").strip()
+        message = error if error else f"Incident Responder analysis is {state}."
+        return (
+            '<section class="ir-investigation-report">'
+            "<h3>Incident Response Investigation</h3>"
+            f"{metadata}<p class=\"ir-analysis-empty\">{html.escape(message)}</p>"
+            "</section>",
+            0,
+        )
+
+    timeline_rows = []
+    timeline = report.get("factual_timeline") if isinstance(report.get("factual_timeline"), list) else []
+    for event in timeline[:200]:
+        if not isinstance(event, dict):
+            continue
+        timeline_rows.append(
+            "<tr>"
+            f"<td>{_incident_html_text(event.get('timestamp'))}</td>"
+            f"<td>{_incident_html_text(event.get('event'))}</td>"
+            f"<td>{_incident_html_text(event.get('source_pack') or 'supplied evidence')}</td>"
+            f"<td><code>{_incident_html_text(event.get('query_digest'))}</code></td>"
+            f"<td>{_incident_html_text(event.get('confidence') or 'low')}</td>"
+            "</tr>"
+        )
+    timeline_html = (
+        '<div class="ir-timeline-wrap"><table class="ir-timeline-table"><thead><tr>'
+        "<th>Time</th><th>Observed event</th><th>Evidence source</th><th>Query digest</th><th>Confidence</th>"
+        f"</tr></thead><tbody>{''.join(timeline_rows)}</tbody></table></div>"
+        if timeline_rows
+        else "<p>No fact-grounded timeline entries were returned.</p>"
+    )
+
+    sections = [
+        _incident_report_section("Executive BLUF", f"<p>{_incident_html_text(report.get('executive_bluf'))}</p>"),
+        _incident_report_section(
+            "Detection Outcome Reasoning",
+            f"<p>{_incident_html_text(report.get('detection_outcome_reasoning'))}</p>",
+        ),
+        _incident_report_section("Scope", f"<p>{_incident_html_text(report.get('scope'))}</p>"),
+        _incident_report_section("Affected Systems", _incident_html_list(report.get("affected_systems"))),
+        _incident_report_section("Methodology", _incident_html_list(report.get("methodology"))),
+        _incident_report_section("Factual Timeline", timeline_html),
+    ]
+    for title, key in (
+        ("Security Onion Findings", "security_onion_findings"),
+        ("OSquery Findings", "osquery_findings"),
+        ("PCAP Findings", "pcap_findings"),
+        ("Host Findings", "host_findings"),
+        ("Correlation Findings", "correlation_findings"),
+        ("Containment Recommendations", "containment_recommendations"),
+        ("Eradication Recommendations", "eradication_recommendations"),
+        ("Recovery Recommendations", "recovery_recommendations"),
+        ("Follow-up Queries", "follow_up_queries"),
+        ("Evidence Gaps", "evidence_gaps"),
+    ):
+        sections.append(_incident_report_section(title, _incident_html_list(report.get(key))))
+    sections.append(
+        _incident_report_section(
+            "Conclusion",
+            f"<p>{_incident_html_text(report.get('conclusion'))}</p>"
+            f'<p><b>Confidence:</b> {_incident_html_text(report.get("confidence") or "low")}</p>',
+        )
+    )
+
+    audit = response.get("_incident_query_audit")
+    audit = audit if isinstance(audit, dict) else {}
+    query_blocks = []
+    queries = audit.get("queries") if isinstance(audit.get("queries"), list) else []
+    for position, query in enumerate(queries[:100], 1):
+        if not isinstance(query, dict):
+            continue
+        window = query.get("window") if isinstance(query.get("window"), dict) else {}
+        dsl = query.get("query_dsl") if isinstance(query.get("query_dsl"), dict) else {}
+        dsl_text = html.escape(json.dumps(dsl, indent=2, sort_keys=True, default=str))
+        query_blocks.append(
+            '<article class="ir-query-record">'
+            f'<h4>Query {position}: {_incident_html_text(query.get("pack") or "evidence pack")}</h4>'
+            '<div class="ir-query-meta">'
+            f'<span><b>Status:</b> {_incident_html_text(query.get("status") or "unknown")}</span>'
+            f'<span><b>Digest:</b> <code>{_incident_html_text(query.get("query_digest"))}</code></span>'
+            f'<span><b>Window:</b> {_incident_html_text(window.get("start"))} to {_incident_html_text(window.get("end"))}</span>'
+            f'<span><b>Hits:</b> {_incident_nonnegative_int(query.get("total_hits"))} total / '
+            f'{_incident_nonnegative_int(query.get("returned_hits"))} returned</span>'
+            "</div>"
+            "<h5>KQL (analyst-readable equivalent)</h5>"
+            f'<pre class="ir-query-code"><code>{_incident_html_text(query.get("kql_equivalent"))}</code></pre>'
+            "<h5>Elasticsearch Query DSL (exact executed request)</h5>"
+            f'<pre class="ir-query-code"><code>{dsl_text}</code></pre>'
+            "</article>"
+        )
+    audit_html = (
+        '<section class="ir-query-audit">'
+        "<h3>Security Onion Query Audit</h3>"
+        '<div class="ir-analysis-meta">'
+        f'<span><b>Source:</b> {_incident_html_text(audit.get("trusted_source"))}</span>'
+        f'<span><b>Read only:</b> {_incident_html_text(audit.get("read_only", True))}</span>'
+        f'<span><b>Complete:</b> {_incident_html_text(audit.get("complete", False))}</span>'
+        f'<span><b>Partial:</b> {_incident_html_text(audit.get("partial", True))}</span>'
+        "</div>"
+        + ("".join(query_blocks) if query_blocks else "<p>No restricted Security Onion queries were recorded.</p>")
+        + "</section>"
+    )
+
+    osquery_audit = response.get("_incident_osquery_audit")
+    osquery_audit = osquery_audit if isinstance(osquery_audit, dict) else {}
+    osquery_blocks = []
+    osquery_queries = (
+        osquery_audit.get("queries")
+        if isinstance(osquery_audit.get("queries"), list)
+        else []
+    )
+    for position, query in enumerate(osquery_queries[:32], 1):
+        if not isinstance(query, dict):
+            continue
+        rows = query.get("rows_preview") if isinstance(query.get("rows_preview"), list) else []
+        rows_text = html.escape(json.dumps(rows[:25], indent=2, sort_keys=True, default=str))
+        error = str(query.get("error") or "").strip()
+        error_html = (
+            f'<p class="ir-query-error"><b>Error:</b> {html.escape(error)}</p>'
+            if error
+            else ""
+        )
+        preview_html = (
+            "<h5>Bounded Result Preview</h5>"
+            f'<pre class="ir-query-code"><code>{rows_text}</code></pre>'
+            if rows
+            else "<p>No rows were returned by this reviewed pack.</p>"
+        )
+        osquery_blocks.append(
+            '<article class="ir-query-record">'
+            f'<h4>OSquery {position}: {_incident_html_text(query.get("pack") or "reviewed pack")}</h4>'
+            '<div class="ir-query-meta">'
+            f'<span><b>Target:</b> {_incident_html_text(query.get("target"))}</span>'
+            f'<span><b>Status:</b> {_incident_html_text(query.get("status") or "unknown")}</span>'
+            f'<span><b>Digest:</b> <code>{_incident_html_text(query.get("query_digest"))}</code></span>'
+            f'<span><b>Rows:</b> {_incident_nonnegative_int(query.get("total_rows"))} total / '
+            f'{_incident_nonnegative_int(query.get("returned_rows"))} returned</span>'
+            f'<span><b>Duration:</b> {_incident_nonnegative_int(query.get("duration_ms"))} ms</span>'
+            f'<span><b>Truncated:</b> {_incident_html_text(query.get("truncated", False))}</span>'
+            "</div>"
+            "<h5>OSquery SQL (exact executed command)</h5>"
+            f'<pre class="ir-query-code"><code>{_incident_html_text(query.get("query"))}</code></pre>'
+            f"{preview_html}{error_html}"
+            "</article>"
+        )
+    osquery_audit_html = (
+        '<section class="ir-query-audit">'
+        "<h3>OSquery Command Audit</h3>"
+        '<div class="ir-analysis-meta">'
+        f'<span><b>Source:</b> {_incident_html_text(osquery_audit.get("trusted_source"))}</span>'
+        f'<span><b>Read only:</b> {_incident_html_text(osquery_audit.get("read_only", True))}</span>'
+        f'<span><b>Contract:</b> {_incident_html_text(osquery_audit.get("query_contract"))}</span>'
+        "</div>"
+        + (
+            "".join(osquery_blocks)
+            if osquery_blocks
+            else "<p>No validated live OSquery commands were recorded.</p>"
+        )
+        + "</section>"
+    )
+    return (
+        '<section class="ir-investigation-report">'
+        "<h3>Incident Response Investigation</h3>"
+        f"{metadata}{''.join(sections)}"
+        "</section>"
+        f"{audit_html}{osquery_audit_html}",
+        len(query_blocks) + len(osquery_blocks),
+    )
+
+
+def render_prior_soc_analysis_html(response: dict[str, object], analysis: dict[str, object]) -> str:
+    sections = [
+        _incident_report_section("BLUF", f"<p>{_incident_html_text(response.get('bluf') or analysis.get('bluf'))}</p>"),
+        _incident_report_section("Assessment", f"<p>{_incident_html_text(response.get('summary') or analysis.get('summary'))}</p>"),
+        _incident_report_section("Likely Meaning", f"<p>{_incident_html_text(response.get('likely_meaning'))}</p>"),
+        _incident_report_section("Severity Reasoning", f"<p>{_incident_html_text(response.get('severity_reasoning'))}</p>"),
+        _incident_report_section("Alert Frequency Assessment", f"<p>{_incident_html_text(response.get('alert_frequency_assessment'))}</p>"),
+        _incident_report_section("Public Enrichment Findings", _incident_html_list(response.get("public_enrichment_findings"))),
+        _incident_report_section("PCAP Analysis Findings", _incident_html_list(response.get("pcap_analysis_findings"))),
+        _incident_report_section("False Positive Possibilities", _incident_html_list(response.get("false_positive_possibilities"))),
+        _incident_report_section("Recommended Next Steps", _incident_html_list(response.get("recommended_next_steps"))),
+        _incident_report_section("Evidence Used", _incident_html_list(response.get("evidence_used"))),
+        _incident_report_section("Evidence Gaps", _incident_html_list(response.get("evidence_gaps"))),
+        _incident_report_section("Recommended Tuning Actions", _incident_html_list(response.get("recommended_tuning_actions"))),
+    ]
+    return '<div class="ir-prior-analysis">' + "".join(sections) + "</div>"
+
+
+def soc_incident_detail_response(case_id: str) -> tuple[int, dict]:
+    """Return one bounded IR report, its exact query audit, and prior SOC analysis."""
+    case_id = str(case_id or "").strip().lower()
+    if not re.fullmatch(r"ir-[a-z0-9_-]{1,64}", case_id):
+        return soc_alert_api_error("Invalid incident case id")
+    try:
+        with soc_alert_db_connect() as conn:
+            if not sqlite_table_exists(conn, "incident_response_cases"):
+                return soc_alert_api_error("Incident Response schema is unavailable", 503)
+            case_row = conn.execute(
+                "SELECT * FROM incident_response_cases WHERE case_id = ?", (case_id,)
+            ).fetchone()
+            if not case_row:
+                return soc_alert_api_error("Incident case not found", 404)
+            case = dict(case_row)
+            run_columns = sqlite_table_columns(conn, "ai_analysis_runs")
+            analysis: dict[str, object] = {}
+            response: dict[str, object] = {}
+            prior_analysis: dict[str, object] = {}
+            prior_response: dict[str, object] = {}
+            if run_columns:
+                select_columns = [
+                    column for column in (
+                        "analysis_id", "group_id", "agent_role", "generated_at", "model",
+                        "detection_outcome", "bluf", "summary", "confidence", "response_json",
+                    ) if column in run_columns
+                ]
+                select_sql = ", ".join(select_columns)
+                latest_id = str(case.get("latest_analysis_id") or "").strip()
+                if latest_id and select_sql:
+                    row = conn.execute(
+                        f"SELECT {select_sql} FROM ai_analysis_runs WHERE analysis_id = ?", (latest_id,)
+                    ).fetchone()
+                    analysis = dict(row) if row else {}
+                if not analysis and "group_id" in run_columns and "agent_role" in run_columns:
+                    row = conn.execute(
+                        f"SELECT {select_sql} FROM ai_analysis_runs "
+                        "WHERE group_id = ? AND agent_role = 'incident-responder' "
+                        "ORDER BY generated_at DESC LIMIT 1",
+                        (case.get("group_id"),),
+                    ).fetchone()
+                    analysis = dict(row) if row else {}
+                if analysis.get("response_json"):
+                    try:
+                        parsed = json.loads(str(analysis["response_json"]))
+                        response = parsed if isinstance(parsed, dict) else {}
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        response = {}
+                if "group_id" in run_columns and "agent_role" in run_columns:
+                    row = conn.execute(
+                        f"SELECT {select_sql} FROM ai_analysis_runs "
+                        "WHERE group_id = ? AND agent_role = 'soc-analyst' "
+                        "ORDER BY generated_at DESC LIMIT 1",
+                        (case.get("group_id"),),
+                    ).fetchone()
+                    prior_analysis = dict(row) if row else {}
+                    if prior_analysis.get("response_json"):
+                        try:
+                            parsed = json.loads(str(prior_analysis["response_json"]))
+                            prior_response = parsed if isinstance(parsed, dict) else {}
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            prior_response = {}
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        return soc_alert_api_error(f"Incident Response detail unavailable: {exc}", 503)
+
+    incident_html, query_count = render_incident_response_report_html(case, response, analysis)
+    prior_html = render_prior_soc_analysis_html(prior_response, prior_analysis)
+    return 200, {
+        "ok": True,
+        "case_id": case_id,
+        "agent_status": case.get("agent_status") or "queued",
+        "analysis_available": bool(response.get("incident_response_report")),
+        "query_count": query_count,
+        "incident_html": incident_html,
+        "prior_ai_html": prior_html,
     }
 
 
@@ -5774,12 +7149,20 @@ def soc_alert_enriched_page_rows(page_rows: list[sqlite3.Row]) -> list[sqlite3.R
         return []
     try:
         with soc_alert_db_connect() as conn:
-            enriched_page_rows = []
-            for row in page_rows:
-                item = dict(row)
-                item["enrichment_json"] = item.get("enrichment_json") or soc_alert_group_enrichment_json(conn, item.get("group_key"))
-                enriched_page_rows.append(item)
-            return enriched_page_rows
+            enrichment_by_group = soc_alert_group_enrichment_json_map(
+                conn,
+                [row["group_key"] for row in page_rows if "group_key" in row.keys()],
+            )
+            return [
+                {
+                    **dict(row),
+                    "enrichment_json": (
+                        dict(row).get("enrichment_json")
+                        or enrichment_by_group.get(str(row["group_key"] or ""), "")
+                    ),
+                }
+                for row in page_rows
+            ]
     except Exception:
         return [dict(row) for row in page_rows]
 
@@ -5803,6 +7186,11 @@ def soc_alert_group_query_snapshot(
 ) -> SocAlertQuerySnapshot:
     statuses = load_soc_alert_statuses()
     status_counts = soc_alert_status_bucket_counts(rows, statuses)
+    # Active-card metrics describe work still requiring analyst action. Compute
+    # them from the complete filtered query before applying the selected analyst
+    # bucket, cursor, or page slice so UI pagination can never change the totals.
+    active_rows = soc_alert_filter_group_rows(rows, statuses, "open", "", "")
+    active_severity_summary = soc_alert_visible_severity_summary(active_rows)
     filtered_rows = soc_alert_filter_group_rows(rows, statuses, analyst_status, cursor_seen, cursor_id)
     severity_summary = soc_alert_visible_severity_summary(filtered_rows)
     total_matching = len(filtered_rows)
@@ -5813,6 +7201,9 @@ def soc_alert_group_query_snapshot(
     return SocAlertQuerySnapshot(
         statuses=statuses,
         status_counts=status_counts,
+        active_total=len(active_rows),
+        active_severity_counts=active_severity_summary["counts"],
+        active_highest_severity=active_severity_summary["highest"],
         severity_counts=severity_summary["counts"],
         highest_severity=severity_summary["highest"],
         top_endpoints=soc_alert_top_endpoint_metrics(filtered_rows),
@@ -5840,8 +7231,20 @@ def soc_alert_group_query_payload(
     try:
         with soc_alert_db_connect() as conn:
             pcap_requests = soc_alert_pcap_request_statuses(conn, snapshot.page_rows)
+            evidence_metadata = soc_alert_group_evidence_metadata(
+                conn,
+                snapshot.page_rows,
+                ai_artifacts,
+                pcap_analysis,
+            )
     except Exception:
         pcap_requests = {}
+        evidence_metadata = soc_alert_group_evidence_metadata(
+            None,
+            snapshot.page_rows,
+            ai_artifacts,
+            pcap_analysis,
+        )
     return {
         "ok": True,
         "source": source,
@@ -5850,6 +7253,9 @@ def soc_alert_group_query_payload(
         "count": len(snapshot.page_rows),
         "total_matching": snapshot.total_matching,
         "status_counts": snapshot.status_counts,
+        "active_total": snapshot.active_total,
+        "active_severity_counts": snapshot.active_severity_counts,
+        "active_highest_severity": snapshot.active_highest_severity,
         "severity_counts": snapshot.severity_counts,
         "highest_severity": snapshot.highest_severity,
         "top_endpoints": snapshot.top_endpoints,
@@ -5861,7 +7267,15 @@ def soc_alert_group_query_payload(
         "direction": sort_direction,
         "next_cursor": snapshot.next_cursor,
         "alerts": [
-            soc_alert_group_row_to_api(row, snapshot.statuses, ai_reports, pcap_analysis, pcap_requests, ai_artifacts)
+            soc_alert_group_row_to_api(
+                row,
+                snapshot.statuses,
+                ai_reports,
+                pcap_analysis,
+                pcap_requests,
+                ai_artifacts,
+                evidence_metadata,
+            )
             for row in snapshot.page_rows
         ],
     }
@@ -6329,7 +7743,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/cyber-threat-intel-prompt", "/api/soc-settings/incident-responder-prompt", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith("/ack")):
+        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-incidents", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-incidents/") and parsed.path.endswith("/detail")) or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith(("/ack", "/escalate"))):
             if parsed.path == "/admin" and not self._admin_authenticated():
                 self.send_response(HTTPStatus.FOUND)
                 self.send_header("Location", "/admin/login")
@@ -6350,7 +7764,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/cyber-threat-intel-prompt", "/api/soc-settings/incident-responder-prompt", "/api/soc-settings/ai-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and not (parsed.path.startswith("/api/soc-alerts/") and (parsed.path.endswith("/ack") or parsed.path.endswith("/pcap") or parsed.path.endswith("/analyze"))):
+        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and parsed.path not in SOC_SETTINGS_PROMPT_API_PATHS and not (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))):
             return self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain; charset=utf-8")
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -6359,7 +7773,7 @@ class PortalHandler(BaseHTTPRequestHandler):
         if length <= 0 or length > 50000:
             if parsed.path == "/api/admin/start-service":
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
-            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/analyst-prompt", "/api/soc-settings/siem-engineer-prompt", "/api/soc-settings/threat-hunter-prompt", "/api/soc-settings/cyber-threat-intel-prompt", "/api/soc-settings/incident-responder-prompt", "/api/soc-settings/ai-model") or (parsed.path.startswith("/api/soc-alerts/") and (parsed.path.endswith("/ack") or parsed.path.endswith("/pcap") or parsed.path.endswith("/analyze"))):
+            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))):
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
             if parsed.path.startswith("/api/resource-library/"):
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
@@ -6397,6 +7811,16 @@ class PortalHandler(BaseHTTPRequestHandler):
             if status < 400:
                 SOC_ALERT_RESPONSE_CACHE.clear()
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/escalate"):
+            try:
+                payload = json.loads(raw or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            encoded_id = parsed.path[len("/api/soc-alerts/"):-len("/escalate")].strip("/")
+            status, data = soc_alert_escalate_response(unquote(encoded_id), payload)
+            if status < 400:
+                SOC_ALERT_RESPONSE_CACHE.clear()
+            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path == "/api/soc-alerts/status":
             try:
                 payload = json.loads(raw or "{}")
@@ -6406,50 +7830,14 @@ class PortalHandler(BaseHTTPRequestHandler):
             if ok:
                 SOC_ALERT_RESPONSE_CACHE.clear()
             return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if parsed.path == "/api/soc-settings/analyst-prompt":
+        if parsed.path in SOC_SETTINGS_PROMPT_API_PATHS:
             try:
                 payload = json.loads(raw or "{}")
             except json.JSONDecodeError:
                 payload = {}
             if not self._admin_authenticated():
                 return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
-            ok, data = save_soc_analyst_prompt(payload.get("prompt", ""))
-            return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if parsed.path == "/api/soc-settings/siem-engineer-prompt":
-            try:
-                payload = json.loads(raw or "{}")
-            except json.JSONDecodeError:
-                payload = {}
-            if not self._admin_authenticated():
-                return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
-            ok, data = save_siem_engineer_prompt(payload.get("prompt", ""))
-            return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if parsed.path == "/api/soc-settings/threat-hunter-prompt":
-            try:
-                payload = json.loads(raw or "{}")
-            except json.JSONDecodeError:
-                payload = {}
-            if not self._admin_authenticated():
-                return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
-            ok, data = save_threat_hunter_prompt(payload.get("prompt", ""))
-            return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if parsed.path == "/api/soc-settings/cyber-threat-intel-prompt":
-            try:
-                payload = json.loads(raw or "{}")
-            except json.JSONDecodeError:
-                payload = {}
-            if not self._admin_authenticated():
-                return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
-            ok, data = save_cyber_threat_intel_prompt(payload.get("prompt", ""))
-            return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if parsed.path == "/api/soc-settings/incident-responder-prompt":
-            try:
-                payload = json.loads(raw or "{}")
-            except json.JSONDecodeError:
-                payload = {}
-            if not self._admin_authenticated():
-                return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
-            ok, data = save_incident_responder_prompt(payload.get("prompt", ""))
+            ok, data = save_settings_prompt(parsed.path, payload.get("prompt", ""))
             return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path == "/api/soc-settings/ai-model":
             try:
@@ -6459,6 +7847,15 @@ class PortalHandler(BaseHTTPRequestHandler):
             if not self._admin_authenticated():
                 return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
             ok, data = save_soc_ai_settings(payload)
+            return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if parsed.path == "/api/soc-settings/agent-model":
+            try:
+                payload = json.loads(raw or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            if not self._admin_authenticated():
+                return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
+            ok, data = save_soc_agent_model(payload)
             return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path == "/api/admin/start-service":
             try:
@@ -6564,20 +7961,8 @@ class PortalHandler(BaseHTTPRequestHandler):
             return self._send_soc_alert_events()
         if path == "/api/soc-alerts/status":
             return self._send(HTTPStatus.OK, json.dumps(soc_alert_status_response(), indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/soc-settings/analyst-prompt":
-            data = read_soc_analyst_prompt()
-            return self._send(HTTPStatus.OK if data.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/soc-settings/siem-engineer-prompt":
-            data = read_siem_engineer_prompt()
-            return self._send(HTTPStatus.OK if data.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/soc-settings/threat-hunter-prompt":
-            data = read_threat_hunter_prompt()
-            return self._send(HTTPStatus.OK if data.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/soc-settings/cyber-threat-intel-prompt":
-            data = read_cyber_threat_intel_prompt()
-            return self._send(HTTPStatus.OK if data.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/soc-settings/incident-responder-prompt":
-            data = read_incident_responder_prompt()
+        if path in SOC_SETTINGS_PROMPT_API_PATHS:
+            data = read_settings_prompt(path)
             return self._send(HTTPStatus.OK if data.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/soc-settings/agent-memory":
             status, data = read_agent_memory((query.get("key") or [""])[0])
@@ -6586,7 +7971,8 @@ class PortalHandler(BaseHTTPRequestHandler):
             data = read_soc_ai_settings()
             return self._send(HTTPStatus.OK if data.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/soc-settings/ollama-models":
-            return self._send(HTTPStatus.OK, json.dumps(ollama_models_response(), indent=2).encode(), "application/json; charset=utf-8")
+            force_refresh = (query.get("refresh") or [""])[0].strip().lower() in {"1", "true", "yes"}
+            return self._send(HTTPStatus.OK, json.dumps(ollama_models_response(force_refresh), indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/soc-alerts":
             status, payload = cached_soc_alerts_query_response(query)
             return self._send(status, payload, "application/json; charset=utf-8")
@@ -6595,6 +7981,13 @@ class PortalHandler(BaseHTTPRequestHandler):
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/soc-alerts/suppressions":
             status, data = soc_alert_suppressions_response(query)
+            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if path == "/api/soc-incidents":
+            status, data = soc_incidents_query_response(query)
+            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if path.startswith("/api/soc-incidents/") and path.endswith("/detail"):
+            case_id = unquote(path[len("/api/soc-incidents/"):-len("/detail")].strip("/"))
+            status, data = soc_incident_detail_response(case_id)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path.startswith("/api/soc-alerts/") and path.endswith("/detail"):
             group_id = unquote(path[len("/api/soc-alerts/"):-len("/detail")].strip("/"))

@@ -35,25 +35,17 @@ GET_API_ROUTES = {
     "/api/soc-alerts/metrics",
     "/api/soc-alerts/status",
     "/api/soc-alerts/suppressions",
+    "/api/soc-incidents",
     "/api/soc-settings/agent-memory",
     "/api/soc-settings/ai-model",
-    "/api/soc-settings/analyst-prompt",
-    "/api/soc-settings/cyber-threat-intel-prompt",
-    "/api/soc-settings/incident-responder-prompt",
     "/api/soc-settings/ollama-models",
-    "/api/soc-settings/siem-engineer-prompt",
-    "/api/soc-settings/threat-hunter-prompt",
-}
+} | set(runtime.SOC_SETTINGS_PROMPT_API_PATHS)
 POST_API_ROUTES = {
     "/api/soc-alerts/status",
+    "/api/soc-settings/agent-model",
     "/api/soc-settings/ai-model",
-    "/api/soc-settings/analyst-prompt",
-    "/api/soc-settings/cyber-threat-intel-prompt",
-    "/api/soc-settings/incident-responder-prompt",
-    "/api/soc-settings/siem-engineer-prompt",
-    "/api/soc-settings/threat-hunter-prompt",
-}
-POST_ALERT_SUFFIXES = ("/ack", "/analyze", "/pcap")
+} | set(runtime.SOC_SETTINGS_PROMPT_API_PATHS)
+POST_ALERT_SUFFIXES = ("/ack", "/analyze", "/pcap", "/escalate")
 
 
 def configure_runtime_paths(dashboard_root: Path) -> None:
@@ -64,6 +56,7 @@ def configure_runtime_paths(dashboard_root: Path) -> None:
     runtime.SOC_ALERT_STATIC_STATUS_FILE = root / "soc-alerts-status.json"
     runtime.SOC_ALERT_N8N_BEACON_FILE = root / "n8n-beacon.json"
     runtime.SOC_ALERT_N8N_BEACON_HISTORY_FILE = root / "n8n-beacon-history.json"
+    runtime.SOC_ALERT_PCAP_WORKFLOW_STATE_FILE = root / "pcap-workflow-state.json"
     runtime.SOC_ALERT_STATUS_FILE = HOME / "n8n-local" / "alert_store_data" / ".soc_alert_status.json"
     runtime.SCAN_ROOTS = [root]
     runtime.LAST_UPDATED_FILE = root / ".last_updated"
@@ -79,6 +72,8 @@ def configure_runtime_paths(dashboard_root: Path) -> None:
 
 def is_soc_get_api(path: str) -> bool:
     if path in GET_API_ROUTES:
+        return True
+    if path.startswith("/api/soc-incidents/") and path.endswith("/detail"):
         return True
     return path.startswith("/api/soc-alerts/") and not path.endswith(POST_ALERT_SUFFIXES)
 

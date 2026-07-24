@@ -47,6 +47,12 @@ screenshots, and video on failure. Short phone-landscape acceptance also
 requires the first alert to begin in the initial viewport and the metric cards
 to use a compact horizontal summary strip.
 
+Mobile navigation acceptance opens the hamburger drawer at compact portrait,
+modern iPhone portrait, and short phone-landscape sizes. It verifies that the
+navigation list owns its vertical scroll, every menu row retains at least a
+44px touch target, and the final `Flow` item can be scrolled into view and used
+for navigation without creating page-level horizontal overflow.
+
 Desktop acceptance additionally deep-scrolls an expanded Detailed Alert Report
 and verifies that the selected-alert band is flush with the visible sticky
 header or viewport top. The pinned band must copy the rendered source-table

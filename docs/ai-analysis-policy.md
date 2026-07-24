@@ -106,7 +106,80 @@ If matching PCAP analysis artifacts exist, the prompt package includes a compact
 TShark, never inside the LLM runner. Zeek is treated as the primary structured
 source for conversations, DNS, TLS, HTTP, notices, and weird logs. TShark is
 used as corroborating packet-level context for protocol hierarchy, conversations,
-and bounded packet-field samples.
+and bounded packet-field samples. Its single streaming field pass also records
+bounded summaries of all observed DNS activity, HTTP/1 and HTTP/2 User-Agent
+values, TLS handshake/supported/record versions, and abnormal-size ICMP/ICMPv6
+frames. The default abnormal ICMP threshold is 256 frame bytes and can be
+changed with `ICMP_ABNORMAL_MIN_FRAME_BYTES`.
+
+Parsing covers every local PCAP artifact for the request. Zeek consumes every
+generated JSON log row using bounded heavy-hitter aggregation. TShark consumes
+every packet through a streaming field export and keeps a deterministic sample
+distributed across the full capture instead of a first-packet sample. Coverage
+metadata records files processed, records or packets decoded, observed bytes,
+capture time bounds, malformed rows, sample size, and whether both parser passes
+completed. These metrics are evidence-quality facts and must be considered when
+the model identifies evidence gaps.
+
+When local MaxMind ASN, City, and Country `.mmdb` databases are configured, the
+parser adds bounded, offline network-ownership and geographic context for
+globally routable IP addresses. It never submits an indicator to MaxMind or
+another network service. The three lookup results are merged into one compact
+record per IP; raw database records are not placed in prompts or reports.
+Missing databases, unavailable reader support, and unmatched addresses are
+explicit nonfatal evidence gaps. GeoIP is approximate and abnormal ICMP size is
+only a behavioral lead; neither may independently establish maliciousness,
+attribution, severity, or a block recommendation.
+
+Packet-derived values are untrusted, attacker-controlled evidence. A hostname,
+URI, filename, protocol field, or message from a capture must never override the
+system prompt or cause a command, URL, path, filter, or parser option to run.
+Parsers run offline with a stripped environment and bounded process resources;
+macOS deployments also deny parser network access with `sandbox-exec`.
+
+The local model can request at most one follow-up evidence round. The runtime
+supports only fixed, read-only operations over a sanitized derived-evidence
+index and returns at most four queries with 20 rows each under a 32 KiB result
+budget. The allowlist includes coverage, connection, protocol, packet-sample,
+DNS, HTTP, TLS, file, notice, weird, ICMP-anomaly, User-Agent, TLS-version, and
+GeoIP summaries. It does not retain raw PCAPs for interactive model access and does not
+translate model text into shell, Zeek, or TShark syntax. Hosted second-opinion
+requests exclude packet samples, follow-up query results, local tool/path
+metadata, the private query index, and raw payload fields.
+
+Incident Response uses a separate trusted evidence path. Before the assigned
+Incident Responder model runs, the worker gathers five fixed Elastic packs and
+seven fixed local OSquery packs through two dedicated forced-command SSH keys.
+For this baseline layer, the caller and model cannot provide an index, field,
+KQL expression, Query DSL object, OSquery SQL, target, filesystem path, parser
+option, or command. The exact datasets and seven SQL statements are pinned in
+`docs/incident-response-query-and-model-routing.md`.
+
+Every returned pack includes an analyst-readable KQL equivalent and the exact
+Elasticsearch Query DSL executed by the Security Onion wrapper. The Incident
+Response report must display both under **Security Onion Query Audit**. The DSL
+is the authoritative execution record; KQL communicates intent and must not be
+represented as a separately executed search. Missing, partial, malformed, or
+failed packs are explicit evidence gaps and must not be silently omitted or
+filled by model inference.
+
+Every OSquery result must retain the reviewed pack name, exact SQL, local
+target, execution status, query digest, bounded result metadata, and explicit
+error state. The report shows those values under **OSquery Command Audit**.
+These fixed packs inspect Security Onion itself.
+
+The Incident Responder may request one optional live endpoint OSQuery round.
+This is a separate, disabled-by-default contract: exact operator aliases map to
+exact Fleet agent IDs only on Security Onion, and the Mac, relay, and Security
+Onion independently enforce the same SELECT-only table allowlist, query count,
+row, response-byte, and runtime ceilings. Wildcards, all-endpoint targets,
+mutations, comments, CTEs, compound queries, subqueries, and unknown tables are
+rejected. A failed or unavailable live query is an explicit evidence gap, not a
+license to infer missing facts.
+
+All Ollama/local-model invocations share one host-wide inference lock. Codex
+CLI and GPT CLI use an independent provider lane and may run concurrently with
+one local analysis. Jobs never silently cross providers.
 
 When a parsed PCAP evidence artifact is newer than the matching local AI
 analysis artifact, the scheduled AI runner treats that analysis as stale. The
@@ -279,11 +352,16 @@ DR repo copy:
 n8n/bin/run-local-ai-analysis.py
 ```
 
-Default local model:
+Current primary local model:
 
 ```text
-devstral:latest via local Ollama at http://127.0.0.1:11434
+devstral-small-2:24b-instruct-2512-q4_K_M via local Ollama at http://127.0.0.1:11434
 ```
+
+All five Cyber Security Agent roles use `gemma4:31b` as their configured
+second-opinion model. The reviewer is conditional: it runs only when the
+primary result has low confidence, is inconclusive, or explicitly requests an
+independent opinion.
 
 Editable AI model routing:
 
@@ -291,22 +369,67 @@ Editable AI model routing:
 $HOME/n8n-local/config/ai_model_settings.json
 ```
 
-The Settings page can choose:
+The Settings page exposes independent provider controls:
 
-- `ollama`: local Ollama only.
-- `cloud`: a configured frontier/cloud CLI only. The CLI must read the bounded
-  prompt package JSON from stdin and return one valid analysis JSON object on
-  stdout.
-- `hybrid`: local-first analysis. Ollama runs first; the cloud CLI is called
-  only for Critical/High alerts or when the local model recommends a hosted
-  second opinion, unless the hybrid policy is changed to cloud-on-recommendation
-  only.
+- `Ollama` is a collapsed-by-default section containing the live local model
+  inventory. Operators can enable one or more models for the approved global
+  roster.
+- `GPT CLI` is a separate collapsed-by-default section with an independent
+  enable toggle. The CLI must read the bounded prompt package JSON from stdin
+  and return one valid analysis JSON object on stdout.
+- Every Cyber Security Agent has one primary assignment and may have one
+  optional second-opinion assignment selected from that enabled roster. Both
+  selectors live in the agent's expanded Settings panel, with the reviewer
+  directly below `Assigned model`. The reviewer must differ from the primary
+  model, and `Not assigned` is the safe default.
+- The active SOC Analyst worker executes only the model assigned to
+  `soc-analyst`; it does not silently switch models or privacy boundaries after
+  a failure. Other role assignments are persisted for their manual or planned
+  workflows.
+- If an assigned route is later disabled, normalization assigns that role to
+  the first still-enabled Ollama model, or GPT CLI when it is the only enabled
+  route. At least one route must remain enabled.
 
-The Settings page orders these controls as Analysis Mode, Ollama Settings, then
-Cloud Provider Settings. The Ollama model selector is a dropdown populated from
-`ollama ls` through `/api/soc-settings/ollama-models`; if the saved model is not
-currently returned by Ollama, the UI preserves it as the selected configured
-value so an offline model is not silently replaced.
+For the active SOC Analyst, the configured second-opinion route runs only when
+the validated primary result reports low confidence, classifies the detection
+as inconclusive, or explicitly requests another opinion. The reviewer receives
+the same bounded evidence and relevant memory but never receives the primary
+conclusion. This independent pass prevents anchoring and returns a complete
+structured response. Deterministic code then compares material and advisory
+fields, records `agreement`, `partial_disagreement`, or
+`material_disagreement`, and names every disputed field. The primary result
+remains authoritative, a reviewer cannot recursively request another model,
+and reviewer failure is recorded without failing or re-queuing the successful
+primary analysis.
+Other agent roles persist the same routing contract for their manual or
+planned execution paths.
+
+Reviewer lessons are not written directly to memory. A reviewer candidate must
+come from a complete high-confidence response, agree with the primary on all
+material fields, and pass the existing grounding, redaction, deduplication,
+expiry, and size gates. Reviewer effectiveness is recorded independently in
+SQLite table `ai_second_opinion_runs`, including both routes, outcomes,
+confidence values, trigger, comparison status, disputed fields, runtime, and
+promoted-memory count.
+
+The Ollama inventory is populated from `ollama ls` through
+`/api/soc-settings/ollama-models`, refreshes every 60 seconds while Settings is
+open, and can be refreshed manually. A configured model that is temporarily
+absent remains visible as unavailable instead of being silently disabled.
+Onion Sentinel also reads bounded `/api/show` metadata and places an amber
+warning beside models that cannot satisfy the current chat-based JSON analysis
+exchange. The assessment requires text completion, a chat template, and at
+least a 32,768-token context window; tool calling is not required because PCAP
+follow-up operations are executed by the fixed local query broker. Hovering or
+focusing the warning explains the failed requirement. Assessments are cached
+for five minutes, while a manual model refresh invalidates the cache.
+Compatibility fields `mode` and `ollama_model` remain in the JSON file for
+older tooling, but they are derived from `enabled_ollama_models` and
+`gpt_cli_enabled`. Primary assignments are stored in `agent_models`; optional
+reviewers are stored in `agent_second_opinion_models`. Both maps use stable
+route identifiers such as
+`ollama:devstral-small-2:24b-instruct-2512-q4_K_M`, `ollama:gemma4:31b`, and
+`gpt-cli`.
 
 Editable SOC Analyst system prompt:
 
@@ -338,8 +461,18 @@ Editable Incident Responder system prompt:
 $HOME/n8n-local/config/incident_responder_system_prompt.md
 ```
 
+Each role also has an independent reviewer prompt beside its primary prompt:
+
+```text
+$HOME/n8n-local/config/soc_analyst_second_opinion_prompt.md
+$HOME/n8n-local/config/incident_responder_second_opinion_prompt.md
+$HOME/n8n-local/config/siem_engineer_second_opinion_prompt.md
+$HOME/n8n-local/config/cyber_threat_intel_second_opinion_prompt.md
+$HOME/n8n-local/config/threat_hunter_second_opinion_prompt.md
+```
+
 The SOC Alerts Settings page exposes model routing controls in a collapsed
-`AI Analysis Model Selection` panel plus collapsed editable prompt sections for
+`AI Analysis Model Selection` panel plus editable prompt sections for
 the SOC Analyst, Incident Responder, SIEM Engineer, Cyber Threat Intel Analyst,
 and Threat Hunter roles under `Cyber Security Agents`:
 
@@ -350,14 +483,20 @@ http://10.77.7.225:8766/settings.html
 Save behavior:
 
 - The web UI calls `/api/soc-settings/ai-model` for model routing.
-- The web UI calls `/api/soc-settings/analyst-prompt` for the SOC Analyst system prompt.
-- The web UI calls `/api/soc-settings/incident-responder-prompt` for the Incident Responder system prompt.
-- The web UI calls `/api/soc-settings/siem-engineer-prompt` for the SIEM Engineer system prompt.
-- The web UI calls `/api/soc-settings/cyber-threat-intel-prompt` for the Cyber Threat Intel Analyst system prompt.
-- The web UI calls `/api/soc-settings/threat-hunter-prompt` for the Threat Hunter system prompt.
+- The web UI calls `/api/soc-settings/agent-model` with one allowlisted role and
+  one enabled route to change a single agent assignment without overwriting
+  unrelated settings.
+- Each role exposes a primary prompt endpoint and a fixed
+  `<role>-second-opinion-prompt` endpoint. Both are allowlisted; arbitrary file
+  paths are never accepted.
+- In every expanded agent panel, `Main system prompt` appears first and
+  `Second-opinion system prompt` directly below it. Both editors are collapsed
+  by default, and their path controls open only the matching editor.
 - Saving requires an Onion Sentinel Administration session.
 - The Onion Sentinel service writes settings files atomically and rejects empty prompts or prompts larger than 20 KB.
-- The next AI analysis run uses the saved model routing and prompt automatically because `run-local-ai-analysis.py` reads both files immediately before each model request.
+- The next SOC Analyst run uses its exact saved assignment and prompt
+  automatically because `run-local-ai-analysis.py` reads both files immediately
+  before each model request.
 - `build-ai-investigation-prompt.py` also includes the same prompt in each prompt package so analyst-visible prompt artifacts match the actual system message.
 
 The SIEM Engineer prompt is reserved for a periodic engineering review every
@@ -376,17 +515,24 @@ geolocation, malware names, reputation, or enrichment results that were not
 supplied.
 
 The Incident Responder prompt is reserved for senior response planning and case
-execution guidance. It may recommend external tooling such as custom host
-artifact collection scripts, but direct execution is a TODO until a dedicated
-incident response host is connected, authenticated, logged, and approved.
+execution guidance. A dashboard escalation creates or reopens one durable case
+for the stable alert group and queues an `incident_response_analysis` job. The
+prompt includes the full grouped timeline and frequency, prior model analyses,
+public enrichment, parsed PCAP evidence, analyst notes, correlation context,
+and bounded role/shared memory. It may recommend external tooling such as
+custom host artifact collection scripts, but direct execution remains a TODO
+until a dedicated incident response host is connected, authenticated, logged,
+and approved.
 
 The Settings page shows collapsed trigger summaries for each Cyber Security
 Agent so operators can distinguish live triggers from planned/manual workflows:
 SOC Analyst runs from new eligible alerts through the scheduled AI worker,
-Incident Responder is manual until the IR host integration exists, SIEM Engineer
-is planned for a 6 hour cron review after analysis backlog clears, Cyber Threat
-Intel is manual until scheduled intelligence briefs are built, and Threat Hunter
-is manual until automated hunts are built.
+Incident Responder runs when an operator escalates a grouped detection, SIEM
+Engineer is planned for a 6 hour cron review after analysis backlog clears,
+Cyber Threat Intel is manual until scheduled intelligence briefs are built, and
+Threat Hunter is manual until automated hunts are built. Incident Responder
+analysis is role-isolated in `ai_analysis_runs.agent_role`; it cannot replace
+the SOC Analyst outcome shown in the SOC Alerts table.
 
 SOC Alerts table rows also provide a manual `Analyze` action. The action posts
 only the dashboard group id to the Mac Studio Onion Sentinel API, which resolves the newest

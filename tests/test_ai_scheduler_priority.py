@@ -27,6 +27,7 @@ def load_scheduler():
 class AiSchedulerPriorityTest(unittest.TestCase):
     def setUp(self) -> None:
         self.scheduler = load_scheduler()
+        self.tempdir = tempfile.TemporaryDirectory()
         self.conn = sqlite3.connect(":memory:")
         self.conn.row_factory = sqlite3.Row
         self.conn.execute(
@@ -62,16 +63,18 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             )
             """
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            self.args = SimpleNamespace(
-                levels="critical,high,medium,low,informational",
-                hours=87600,
-                include_tests=True,
-                analysis_dir=Path(tmpdir),
-            )
+        self.args = SimpleNamespace(
+            levels="critical,high,medium,low,informational",
+            hours=87600,
+            include_tests=True,
+            analysis_dir=Path(self.tempdir.name),
+            provider_lane="any",
+            ai_settings_file=Path(self.tempdir.name) / "ai_model_settings.json",
+        )
 
     def tearDown(self) -> None:
         self.conn.close()
+        self.tempdir.cleanup()
 
     def insert_alert(
         self,
@@ -148,6 +151,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         group_id: str,
         *,
         payload: dict | None = None,
+        job_type: str = "ai_analysis",
         status: str = "pending",
         next_attempt_at: str = "2020-01-01  00:00:00Z",
         processing_started_at: str | None = None,
@@ -159,9 +163,10 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                 job_type, dedupe_key, status, payload_json, priority,
                 attempt_count, max_attempts, next_attempt_at,
                 processing_started_at, rerun_requested, requested_at
-            ) VALUES ('ai_analysis', ?, ?, ?, 0, 0, 8, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, 0, 0, 8, ?, ?, ?, ?)
             """,
             (
+                job_type,
                 group_id,
                 status,
                 json.dumps(payload or {}),
@@ -171,6 +176,42 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                 next_attempt_at,
             ),
         )
+
+    def test_indexed_provider_lanes_claim_only_assigned_agent_roles(self) -> None:
+        self.enable_indexed_scheduler()
+        self.insert_alert("soc-alert", "high", "2026-07-19  11:00:00Z", 90)
+        self.insert_alert("ir-alert", "high", "2026-07-19  10:00:00Z", 90)
+        self.set_stable_group("soc-alert", "soc-group")
+        self.set_stable_group("ir-alert", "ir-group")
+        self.insert_indexed_job(
+            "soc-group",
+            payload={"agent_role": "soc-analyst"},
+        )
+        self.insert_indexed_job(
+            "ir-group",
+            payload={"agent_role": "incident-responder"},
+            job_type="incident_response_analysis",
+        )
+        self.args.ai_settings_file.write_text(
+            json.dumps(
+                {
+                    "agent_models": {
+                        "soc-analyst": "ollama:local-model",
+                        "incident-responder": "codex-cli",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.conn.commit()
+
+        self.args.provider_lane = "cli"
+        cli_selected = self.scheduler.select_next_alert_indexed(self.conn, self.args)
+        self.args.provider_lane = "ollama"
+        ollama_selected = self.scheduler.select_next_alert_indexed(self.conn, self.args)
+
+        self.assertEqual(cli_selected["alert_id"], "ir-alert")
+        self.assertEqual(ollama_selected["alert_id"], "soc-alert")
 
     def test_indexed_contract_rejects_partial_schema(self) -> None:
         self.conn.execute("ALTER TABLE alerts ADD COLUMN stable_group_id TEXT")
