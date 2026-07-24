@@ -255,6 +255,10 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
         self.assertIn("/api/soc-settings/agent-model", script)
         self.assertIn("body: JSON.stringify({role, model, second_opinion_model: secondOpinionModel})", script)
         self.assertIn("data-agent-model-status", script)
+        self.assertIn("element.classList.toggle('error', kind === 'error');", script)
+        self.assertIn("element.classList.toggle('ok', kind === 'ok');", script)
+        self.assertNotIn("element.classList.toggle('is-error'", script)
+        self.assertNotIn("element.classList.toggle('is-ok'", script)
 
     def test_model_inventory_renders_workflow_compatibility_warnings(self) -> None:
         script = self.builder.SETTINGS_PAGE_JS

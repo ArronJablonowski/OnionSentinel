@@ -2,6 +2,7 @@
 """Regression checks for editable SOC settings prompt helpers."""
 from __future__ import annotations
 
+import io
 import importlib.util
 import json
 import sys
@@ -22,6 +23,24 @@ def load_portal():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+class SettingsPostRequest:
+    """Minimal request stub for exercising the Settings POST route policy."""
+
+    def __init__(self, path: str, payload: dict, *, settings_authorized: bool = True):
+        body = json.dumps(payload).encode("utf-8")
+        self.path = path
+        self.headers = {"Content-Length": str(len(body))}
+        self.rfile = io.BytesIO(body)
+        self.settings_authorized = settings_authorized
+        self.response: tuple[int, dict] | None = None
+
+    def _soc_settings_write_authorized(self) -> bool:
+        return self.settings_authorized
+
+    def _send(self, status: int, body: bytes, _content_type: str = "") -> None:
+        self.response = (int(status), json.loads(body.decode("utf-8")))
 
 
 class SocSettingsPromptApiTest(unittest.TestCase):
@@ -99,6 +118,86 @@ class SocSettingsPromptApiTest(unittest.TestCase):
         ok, payload = self.portal.save_settings_prompt(route, "must not write")
         self.assertFalse(ok)
         self.assertIn("Unknown", payload["error"])
+
+    def test_authorized_settings_save_routes_cover_every_save_family(self) -> None:
+        cases = [
+            (
+                "/api/soc-settings/ai-model",
+                {"mode": "ollama"},
+                "save_soc_ai_settings",
+            ),
+            (
+                "/api/soc-settings/agent-model",
+                {"role": "soc-analyst", "model": "ollama:test"},
+                "save_soc_agent_model",
+            ),
+            *[
+                (route, {"prompt": f"Prompt for {route}"}, "save_settings_prompt")
+                for route in sorted(self.portal.SOC_SETTINGS_PROMPT_API_PATHS)
+            ],
+        ]
+
+        for route, payload, saver_name in cases:
+            with self.subTest(route=route):
+                request = SettingsPostRequest(route, payload)
+                with mock.patch.object(
+                    self.portal,
+                    saver_name,
+                    return_value=(True, {"ok": True, "message": "Saved."}),
+                ) as save:
+                    self.portal.PortalHandler.do_POST(request)
+
+                self.assertEqual(request.response, (200, {"ok": True, "message": "Saved."}))
+                save.assert_called_once()
+
+    def test_shared_handler_rejects_settings_writes_without_authorization(self) -> None:
+        cases = [
+            (
+                "/api/soc-settings/ai-model",
+                {"mode": "ollama"},
+                "save_soc_ai_settings",
+            ),
+            (
+                "/api/soc-settings/agent-model",
+                {"role": "soc-analyst", "model": "ollama:test"},
+                "save_soc_agent_model",
+            ),
+            (
+                "/api/soc-settings/analyst-prompt",
+                {"prompt": "Test prompt"},
+                "save_settings_prompt",
+            ),
+        ]
+
+        for route, payload, saver_name in cases:
+            with self.subTest(route=route):
+                request = SettingsPostRequest(route, payload, settings_authorized=False)
+                with mock.patch.object(self.portal, saver_name) as save:
+                    self.portal.PortalHandler.do_POST(request)
+
+                self.assertIsNotNone(request.response)
+                status, body = request.response
+                self.assertEqual(status, 403)
+                self.assertFalse(body["ok"])
+                self.assertIn("Sign in to Administration", body["error"])
+                save.assert_not_called()
+
+    def test_shared_handler_settings_policy_follows_admin_session(self) -> None:
+        class AdminSession:
+            def __init__(self, authenticated: bool):
+                self.authenticated = authenticated
+
+            def _admin_authenticated(self) -> bool:
+                return self.authenticated
+
+        for authenticated in (False, True):
+            with self.subTest(authenticated=authenticated):
+                self.assertEqual(
+                    self.portal.PortalHandler._soc_settings_write_authorized(
+                        AdminSession(authenticated)
+                    ),
+                    authenticated,
+                )
 
     def test_agent_memory_read_is_allowlisted_and_read_only(self) -> None:
         self.portal.SOC_ANALYST_MEMORY_FILE.write_text("# SOC Analyst Memory\n\nKnown pattern.\n", encoding="utf-8")

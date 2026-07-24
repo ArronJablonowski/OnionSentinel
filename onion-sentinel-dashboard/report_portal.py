@@ -7862,6 +7862,10 @@ class PortalHandler(BaseHTTPRequestHandler):
         self._redirect("/admin/login")
         return False
 
+    def _soc_settings_write_authorized(self) -> bool:
+        """Require an Administration session unless a dedicated service narrows the policy."""
+        return self._admin_authenticated()
+
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-incidents", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-incidents/") and parsed.path.endswith("/detail")) or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith(("/ack", "/escalate"))):
@@ -7956,7 +7960,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 payload = json.loads(raw or "{}")
             except json.JSONDecodeError:
                 payload = {}
-            if not self._admin_authenticated():
+            if not self._soc_settings_write_authorized():
                 return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
             ok, data = save_settings_prompt(parsed.path, payload.get("prompt", ""))
             return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
@@ -7965,7 +7969,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 payload = json.loads(raw or "{}")
             except json.JSONDecodeError:
                 payload = {}
-            if not self._admin_authenticated():
+            if not self._soc_settings_write_authorized():
                 return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
             ok, data = save_soc_ai_settings(payload)
             return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
@@ -7974,7 +7978,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 payload = json.loads(raw or "{}")
             except json.JSONDecodeError:
                 payload = {}
-            if not self._admin_authenticated():
+            if not self._soc_settings_write_authorized():
                 return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
             ok, data = save_soc_agent_model(payload)
             return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")

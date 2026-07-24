@@ -280,7 +280,11 @@ Save API: /api/soc-settings/analyst-prompt
 ```
 
 - The Settings page shows the current `SOC Analyst` system prompt in an editable code block.
-- Saving requires a valid Onion Sentinel Administration session. If Save returns `Sign in to Administration`, open `http://10.77.7.225:8766/admin`, sign in, then save again from Settings.
+- Settings saves do not require an Administration session until the sign-in
+  flow is launched. This exception is limited to the dedicated port `8766`
+  handler. Browser saves must still be same-origin JSON, but the trusted LAN is
+  the current authorization boundary because those checks prevent CSRF rather
+  than authenticate a user.
 - `<example_identifier>.py` loads this file immediately before calling Ollama, so new analyses use the updated prompt without restarting n8n or launchd.
 - `<example_identifier>.py` also records the same prompt text in the prompt package `instructions.role` field so evidence bundles and model calls stay aligned.
 - The DR installer creates the file on a fresh Mac Studio but does not overwrite an existing tuned production prompt.

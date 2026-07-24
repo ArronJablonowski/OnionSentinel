@@ -147,7 +147,7 @@ input{{background:#07131d;color:#edf7ff;border:1px solid #315064;padding:10px}}b
 def render_admin_status() -> bytes:
     body = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Onion Sentinel Administration</title></head><body><h1>Onion Sentinel Administration</h1>
-<p>Authenticated. Settings changes are enabled for this browser session.</p>
+<p>Authenticated. Administration access is enabled for this browser session.</p>
 <p><a href="/settings.html">Open Settings</a></p><form method="post" action="/admin/logout">
 <input type="hidden" name="token" value="TOKEN"><button type="submit">Sign out</button></form></body></html>"""
     return body.replace("TOKEN", html.escape(runtime.ensure_admin_token())).encode("utf-8")
@@ -155,6 +155,16 @@ def render_admin_status() -> bytes:
 
 class OnionSentinelHandler(runtime.PortalHandler):
     server_version = "OnionSentinel/1.0"
+
+    def _soc_settings_write_authorized(self) -> bool:
+        """Allow Settings saves until the dedicated service ships its sign-in UI.
+
+        This override is intentionally limited to the port 8766 service. Its
+        ``do_POST`` validates JSON and same-origin browser metadata before
+        delegating to the shared route implementation. Administration actions
+        continue to use the inherited session checks.
+        """
+        return True
 
     @property
     def dashboard_root(self) -> Path:

@@ -814,7 +814,11 @@ Settings page behavior:
   after all eligible alerts/detections have finished AI analysis. It reviews
   alerts, enrichments, notes, acknowledgments, suppressions, and related context
   before recommending current-rule tuning or new detection creation.
-- Requires an Onion Sentinel Administration session for saves.
+- Settings saves are session-free until the Settings sign-in flow is launched.
+  This exception exists only in the dedicated port `8766` handler. Browser
+  writes still require same-origin JSON, which prevents ordinary browser CSRF
+  but is not user authentication; the trusted LAN is the current authorization
+  boundary. The shared fallback handler remains session-protected.
 - Does not require an n8n or scheduler restart; the AI runner reads the model
   routing and prompt files for each analysis request.
 

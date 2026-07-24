@@ -703,9 +703,14 @@ Model API:    /api/soc-settings/ai-model
 Ollama list:  /api/soc-settings/ollama-models
 ```
 
-The portal API saves prompt and model-routing settings atomically after Onion
-Sentinel Administration authentication. The Settings page keeps the `AI
-Analysis Model Selection` panel and the full `SOC Analyst System Prompt`,
+The portal API saves prompt and model-routing settings atomically. Until the
+Settings sign-in flow is launched, the dedicated service accepts these
+same-origin JSON saves without an Administration session. This exception is
+limited to port `8766`; the shared fallback handler remains session-protected.
+The browser checks prevent ordinary CSRF but do not authenticate a deliberate
+LAN client, so the trusted LAN is the current authorization boundary. The
+Settings page keeps the `AI Analysis Model Selection` panel and the full
+`SOC Analyst System Prompt`,
 `Incident Responder`, `SIEM Engineer System Prompt`, `Cyber Threat Intel
 Analyst`, and `Threat Hunter System Prompt` sections collapsed by default.
 Inside model selection, Ollama and GPT CLI are separate collapsed provider

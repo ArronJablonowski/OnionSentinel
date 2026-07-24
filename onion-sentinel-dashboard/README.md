@@ -99,6 +99,13 @@ dependency.
   arbitrary runtime file. The GeoIP status endpoint returns
   only path metadata, not database contents, and the database files remain
   private runtime artifacts.
+- Settings saves are available without an Administration session until the
+  Settings sign-in flow is launched. This bypass exists only in the dedicated
+  port `8766` handler; the shared fallback handler remains session-protected.
+  Browser writes must use `application/json` and pass same-origin checks. Those
+  checks prevent ordinary browser CSRF but do not authenticate a deliberate LAN
+  client, so access to the trusted LAN is the current authorization boundary.
+  Administration service and system actions remain authenticated.
 
 ## Maintenance Notes
 

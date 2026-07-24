@@ -511,7 +511,12 @@ Save behavior:
 - In every expanded agent panel, `Main system prompt` appears first and
   `Second-opinion system prompt` directly below it. Both editors are collapsed
   by default, and their path controls open only the matching editor.
-- Saving requires an Onion Sentinel Administration session.
+- Settings saves do not require an Administration session until the Settings
+  sign-in flow is launched. This temporary policy exists only on the dedicated
+  Onion Sentinel service on port `8766`; the shared fallback handler retains its
+  session requirement. Browser writes must use same-origin JSON, but that is
+  CSRF protection rather than user authentication. Network access to port
+  `8766` is therefore the current trusted-LAN authorization boundary.
 - The Onion Sentinel service writes settings files atomically and rejects empty prompts or prompts larger than 20 KB.
 - The next SOC Analyst run uses its exact saved assignment and prompt
   automatically because `run-local-ai-analysis.py` reads both files immediately

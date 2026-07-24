@@ -470,8 +470,11 @@ Implemented runtime prompt path:
 $HOME/n8n-local/config/soc_analyst_system_prompt.md
 ```
 
-The SOC Alerts Settings page lets an authenticated Onion Sentinel admin edit and
-save this `SOC Analyst` system prompt:
+The SOC Alerts Settings page lets an operator edit and save this `SOC Analyst`
+system prompt. Until the Settings sign-in flow is launched, these saves rely on
+trusted-LAN access to the dedicated port `8766` service rather than an
+Administration session. Its same-origin JSON checks protect browsers from
+ordinary CSRF but are not user authentication:
 
 ```text
 http://10.77.7.225:8766/settings.html

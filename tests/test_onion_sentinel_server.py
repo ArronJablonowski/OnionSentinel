@@ -60,7 +60,25 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertTrue(server.is_soc_post_api("/api/soc-settings/agent-model"))
         self.assertTrue(server.is_soc_post_api("/api/soc-settings/ai-model"))
         self.assertFalse(server.is_soc_post_api("/api/resource-library/remove"))
+        self.assertFalse(server.is_soc_post_api("/api/admin/start-service"))
         self.assertFalse(server.is_soc_post_api("/admin/action"))
+
+    def test_dedicated_settings_bypass_does_not_replace_admin_auth(self):
+        class NoAdminSession:
+            def _admin_authenticated(self):
+                raise AssertionError("Dedicated Settings bypass checked an admin session")
+
+        self.assertTrue(
+            server.OnionSentinelHandler._soc_settings_write_authorized(NoAdminSession())
+        )
+        self.assertIs(
+            server.OnionSentinelHandler._admin_authenticated,
+            server.runtime.PortalHandler._admin_authenticated,
+        )
+        self.assertIs(
+            server.OnionSentinelHandler._require_admin_auth,
+            server.runtime.PortalHandler._require_admin_auth,
+        )
 
     def test_all_role_primary_and_reviewer_prompt_routes_are_allowlisted(self):
         routes = {

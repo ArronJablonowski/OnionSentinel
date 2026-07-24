@@ -6713,8 +6713,8 @@ SETTINGS_PAGE_JS = '''
     const element = document.querySelector(`[data-agent-model-status="${role}"]`);
     if (!element) return;
     element.textContent = message;
-    element.classList.toggle('is-error', kind === 'error');
-    element.classList.toggle('is-ok', kind === 'ok');
+    element.classList.toggle('error', kind === 'error');
+    element.classList.toggle('ok', kind === 'ok');
   }
   async function saveAgentModel(role, button) {
     const select = agentModelSelects.find(element => element.dataset.agentRole === role);
