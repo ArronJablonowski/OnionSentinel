@@ -13,6 +13,75 @@ STACK_DIR="${STACK_DIR:-$HOME/n8n-local}"
 LAUNCHD_DIR="${HOME}/Library/LaunchAgents"
 DASHBOARD_RUNTIME_DIR="${STACK_DIR}/onion-sentinel-dashboard"
 
+# Every deployed runtime must carry the exact code release that produced its
+# reports and reanalysis ledger. A commit-less disaster recovery is allowed
+# only through the explicit, auditable escape hatch below.
+RUNTIME_RELEASE_ID="${ONION_SENTINEL_RELEASE_ID:-}"
+if [[ -z "$RUNTIME_RELEASE_ID" ]]; then
+  if [[ "${ALLOW_UNVERSIONED_RECOVERY:-0}" != "1" ]]; then
+    echo "Refusing install: set ONION_SENTINEL_RELEASE_ID to the exact tested release." >&2
+    echo "For commit-less disaster recovery only, set ALLOW_UNVERSIONED_RECOVERY=1." >&2
+    exit 2
+  fi
+  RUNTIME_RELEASE_ID="unversioned"
+  echo "WARNING: installing an unversioned disaster-recovery runtime; redeploy an exact release as soon as possible." >&2
+fi
+/usr/bin/python3 "$REPO_DIR/n8n/bin/set-runtime-release-id.py" \
+  --release-id "$RUNTIME_RELEASE_ID" \
+  --validate-only
+
+# These three jobs execute files replaced below. Stop only those code consumers
+# before the first runtime copy; unrelated monitoring, PCAP, dashboard, backup,
+# and Docker services stay up until their normal final reload phase.
+critical_launch_agents_down() {
+  local plist
+  local label
+  for plist in \
+    com.arron.soc.alert-store.plist \
+    com.arron.soc.ai-analysis.plist \
+    com.arron.soc.ai-analysis-cli.plist
+  do
+    launchctl unload "$LAUNCHD_DIR/$plist" >/dev/null 2>&1 || true
+  done
+  for label in \
+    com.arron.soc.alert-store \
+    com.arron.soc.ai-analysis \
+    com.arron.soc.ai-analysis-cli
+  do
+    launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+  done
+}
+
+critical_launch_agents_are_down() {
+  local label
+  for label in \
+    com.arron.soc.alert-store \
+    com.arron.soc.ai-analysis \
+    com.arron.soc.ai-analysis-cli
+  do
+    if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+keep_critical_agents_down_on_failure() {
+  local exit_code=$?
+  if (( exit_code != 0 )); then
+    critical_launch_agents_down
+    echo "Install failed; alert-store and both AI LaunchAgents remain stopped." >&2
+  fi
+  return $exit_code
+}
+
+trap keep_critical_agents_down_on_failure EXIT
+critical_launch_agents_down
+if ! critical_launch_agents_are_down; then
+  echo "Refusing install: could not stop alert-store and both AI LaunchAgents." >&2
+  exit 1
+fi
+
 mkdir -p "$STACK_DIR/alert_store/config" "$STACK_DIR/alert_store/lib" "$STACK_DIR/bin" "$STACK_DIR/config" "$STACK_DIR/config/maxmind" "$STACK_DIR/logs" "$STACK_DIR/run" "$STACK_DIR/python" "$STACK_DIR/alert_store_data" "$STACK_DIR/n8n_data" "$STACK_DIR/soc-alerts" "$STACK_DIR/soc-alerts/agent-memory" "$STACK_DIR/soc-alerts/pcap-analysis" "$STACK_DIR/pcap-evidence/artifacts"
 chmod 0700 "$STACK_DIR/run"
 chmod 0750 "$STACK_DIR/config/maxmind"
@@ -84,10 +153,25 @@ do
     cp "$REPO_DIR/n8n/config/$reviewer_prompt" "$STACK_DIR/config/$reviewer_prompt"
   fi
 done
+# Upgrade the Incident Responder reviewer only when the live file still
+# matches the exact previously shipped baseline. Preserve any operator-edited
+# prompt and report that decision instead of silently overwriting it.
+/usr/bin/python3 "$REPO_DIR/n8n/bin/upgrade-runtime-policy.py" \
+  --source "$REPO_DIR/n8n/config/incident_responder_second_opinion_prompt.md" \
+  --destination "$STACK_DIR/config/incident_responder_second_opinion_prompt.md" \
+  --accepted-prior-sha256 "c13d5fcd90644db6fcd745fdc5c6ce978ccdd62a3f3e115dfce0aec634f77421"
 if [[ ! -f "$STACK_DIR/config/ai_model_settings.json" ]]; then
   cp "$REPO_DIR/n8n/config/ai_model_settings.json" "$STACK_DIR/config/ai_model_settings.json"
   chmod 0600 "$STACK_DIR/config/ai_model_settings.json"
 fi
+# The former repository template assigned the Incident Responder reviewer to
+# gemma4 and left gpt-5.6-sol disabled at medium effort. Upgrade that complete,
+# byte-exact template only. Any settings change, including an operator-selected
+# Sol route or effort, changes the digest and is therefore preserved.
+/usr/bin/python3 "$REPO_DIR/n8n/bin/upgrade-runtime-policy.py" \
+  --source "$REPO_DIR/n8n/config/ai_model_settings.json" \
+  --destination "$STACK_DIR/config/ai_model_settings.json" \
+  --accepted-prior-sha256 "fd9f93123b22c0664d147fdcd012d1c016329566ffaea97cb4bfa7c5d7daaf2b"
 cp "$REPO_DIR/n8n/config/detection_playbooks.json" "$STACK_DIR/config/detection_playbooks.json"
 if [[ ! -f "$STACK_DIR/config/asset_inventory.json" ]]; then
   cp "$REPO_DIR/n8n/config/asset_inventory.example.json" "$STACK_DIR/config/asset_inventory.json"
@@ -163,13 +247,20 @@ cp "$REPO_DIR/n8n/bin/report-production-soak.py" "$STACK_DIR/bin/report-producti
 cp "$REPO_DIR/n8n/bin/run-recovery-restore-drill.py" "$STACK_DIR/bin/run-recovery-restore-drill.py"
 cp "$REPO_DIR/n8n/bin/run-alert-store-host.zsh" "$STACK_DIR/bin/run-alert-store-host.zsh"
 cp "$REPO_DIR/n8n/bin/maintain-alert-store-sqlite.zsh" "$STACK_DIR/bin/maintain-alert-store-sqlite.zsh"
-cp "$REPO_DIR/n8n/bin/build-ai-investigation-prompt.py" "$STACK_DIR/bin/build-ai-investigation-prompt.py"
 cp "$REPO_DIR/n8n/bin/detection_validation.py" "$STACK_DIR/bin/detection_validation.py"
 cp "$REPO_DIR/n8n/bin/asset_inventory.py" "$STACK_DIR/bin/asset_inventory.py"
 cp "$REPO_DIR/n8n/bin/incident_evidence_contract.py" "$STACK_DIR/bin/incident_evidence_contract.py"
 cp "$REPO_DIR/n8n/bin/collect-incident-evidence.py" "$STACK_DIR/bin/collect-incident-evidence.py"
-cp "$REPO_DIR/n8n/bin/investigation_query_contract.py" "$STACK_DIR/bin/investigation_query_contract.py"
-cp "$REPO_DIR/n8n/bin/collect-investigation-pivots.py" "$STACK_DIR/bin/collect-investigation-pivots.py"
+cp "$REPO_DIR/n8n/bin/install-investigation-query-runtime.py" "$STACK_DIR/bin/install-investigation-query-runtime.py"
+# The Security Onion forced command and these three Mac files are one exact
+# wire protocol.  Missing configuration means v1, and every v1 install restores
+# the checksum-pinned repository compatibility bundle so local drift cannot
+# silently change the protocol.  V2 is copied only after an operator explicitly
+# selects its exact ID in incident-evidence.json.
+/usr/bin/python3 "$STACK_DIR/bin/install-investigation-query-runtime.py" \
+  --repo-root "$REPO_DIR" \
+  --runtime-bin "$STACK_DIR/bin" \
+  --config "$STACK_DIR/config/incident-evidence.json"
 cp "$REPO_DIR/n8n/bin/live_osquery_contract.py" "$STACK_DIR/bin/live_osquery_contract.py"
 cp "$REPO_DIR/n8n/bin/live_osquery_client.py" "$STACK_DIR/bin/live_osquery_client.py"
 cp "$REPO_DIR/n8n/bin/collect-live-osquery.py" "$STACK_DIR/bin/collect-live-osquery.py"
@@ -181,6 +272,8 @@ cp "$REPO_DIR/n8n/bin/auto-run-ai-analysis.py" "$STACK_DIR/bin/auto-run-ai-analy
 cp "$REPO_DIR/n8n/bin/agent_memory.py" "$STACK_DIR/bin/agent_memory.py"
 cp "$REPO_DIR/n8n/bin/manage-agent-memory.py" "$STACK_DIR/bin/manage-agent-memory.py"
 cp "$REPO_DIR/n8n/bin/verify-agent-memory.py" "$STACK_DIR/bin/verify-agent-memory.py"
+cp "$REPO_DIR/n8n/bin/set-runtime-release-id.py" "$STACK_DIR/bin/set-runtime-release-id.py"
+cp "$REPO_DIR/n8n/bin/upgrade-runtime-policy.py" "$STACK_DIR/bin/upgrade-runtime-policy.py"
 cp "$REPO_DIR/n8n/bin/backfill-ai-correlation-context.py" "$STACK_DIR/bin/backfill-ai-correlation-context.py"
 cp "$REPO_DIR/n8n/bin/process-pcap-evidence.py" "$STACK_DIR/bin/process-pcap-evidence.py"
 cp "$REPO_DIR/n8n/bin/pcap_analysis_core.py" "$STACK_DIR/bin/pcap_analysis_core.py"
@@ -255,6 +348,11 @@ PY
   chmod 0600 "$STACK_DIR/.env"
   echo "Created $STACK_DIR/.env from example. Edit it before expecting Telegram notifications." >&2
 fi
+# Persist the already validated release marker while preserving every
+# operator-owned secret and comment in the live .env.
+/usr/bin/python3 "$STACK_DIR/bin/set-runtime-release-id.py" \
+  --env-file "$STACK_DIR/.env" \
+  --release-id "$RUNTIME_RELEASE_ID"
 
 mkdir -p "$LAUNCHD_DIR"
 for plist in \
@@ -294,12 +392,9 @@ PATH="/opt/homebrew/bin:$PATH" /opt/homebrew/bin/npm --prefix "$STACK_DIR/alert_
 # Reload LaunchAgents so Docker/n8n are monitored after future reboots.
 launchctl unload "$LAUNCHD_DIR/com.arron.n8n.ensure-stack.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.n8n.monitor-stack.plist" >/dev/null 2>&1 || true
-launchctl unload "$LAUNCHD_DIR/com.arron.soc.alert-store.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.alert-store-maintenance.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.pcap-analysis.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.pcap-retention.plist" >/dev/null 2>&1 || true
-launchctl unload "$LAUNCHD_DIR/com.arron.soc.ai-analysis.plist" >/dev/null 2>&1 || true
-launchctl unload "$LAUNCHD_DIR/com.arron.soc.ai-analysis-cli.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.dashboard-refresh.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.web-guard.plist" >/dev/null 2>&1 || true

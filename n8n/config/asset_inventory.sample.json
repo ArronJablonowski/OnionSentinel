@@ -1,0 +1,31 @@
+{
+  "schema": "onion-sentinel-asset-inventory-v1",
+  "version": 1,
+  "generated_at": "",
+  "assets": [
+    {
+      "asset_id": "example-workstation",
+      "valid_from": "2026-01-01T00:00:00Z",
+      "valid_until": null,
+      "identifiers": {
+        "ip_addresses": [
+          "192.0.2.10"
+        ],
+        "mac_addresses": [],
+        "hostnames": [
+          "workstation.example.invalid"
+        ]
+      },
+      "role": "example only - replace with an operator-approved role",
+      "platform": "example only - replace with observed inventory data",
+      "owner_ref": "replace-with-operator-approved-owner-reference",
+      "criticality": "unknown",
+      "expected_services": [],
+      "expected_behaviors": [],
+      "source_type": "example",
+      "source_ref": "replace-with-authoritative-source-reference",
+      "confidence": "low",
+      "share_with_hosted_models": false
+    }
+  ]
+}

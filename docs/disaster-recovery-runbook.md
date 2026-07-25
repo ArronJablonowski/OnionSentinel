@@ -57,13 +57,39 @@ On the Mac Studio:
 
 ```bash
 cd /path/to/OnionSentinel
-./n8n/bin/install-macstudio-stack.zsh
+release_id="$(git rev-parse --verify HEAD)"
+ONION_SENTINEL_RELEASE_ID="$release_id" ./n8n/bin/install-macstudio-stack.zsh
 ```
 
 The installer requires Homebrew Node.js 20.17 or newer and restores the
 alert-store dependency tree with the committed `package-lock.json` via
 `npm ci --omit=dev`. Treat a Node version-gate or lockfile failure as a blocked
 restore; do not fall back to an unlocked `npm install`.
+
+The explicit release ID is non-secret and is persisted as the dedicated
+`ONION_SENTINEL_RELEASE_ID` entry in the live `.env` without rewriting any
+other key. Incident reanalysis runs store that exact release so accuracy
+changes can be compared to the code that produced them. A production
+deployment without an exact release ID is incomplete. The installer validates
+the release before changing the runtime or stopping services.
+
+Only when a disaster-recovery checkout has no recoverable release identifier,
+use the explicit escape hatch:
+
+```bash
+ALLOW_UNVERSIONED_RECOVERY=1 ./n8n/bin/install-macstudio-stack.zsh
+```
+
+That exact value persists `ONION_SENTINEL_RELEASE_ID=unversioned` and emits a
+warning. No other missing-release bypass is accepted. Use it only to restore
+service, then redeploy promptly with an exact tested release ID.
+
+Before copying mutable alert-store or AI runtime code, the installer stops only
+the alert-store and the Ollama and Codex AI LaunchAgents. Other LaunchAgents
+remain undisturbed until the final reload phase. If validation, copying,
+dependency installation, Docker startup, or LaunchAgent reload fails, those
+three code consumers remain stopped; correct the failure and rerun the installer
+successfully rather than starting a partially updated runtime.
 
 Create the SOC report directory used by n8n and expose it through the
 Obsidian-facing Documents path:
@@ -229,6 +255,15 @@ $HOME/n8n-local/config/siem_engineer_second_opinion_prompt.md
 $HOME/n8n-local/config/cyber_threat_intel_second_opinion_prompt.md
 $HOME/n8n-local/config/threat_hunter_second_opinion_prompt.md
 ```
+
+Fresh installs seed the Incident Responder reviewer as
+`codex-cli:gpt-5.6-sol:xhigh` and enable that exact Sol catalog entry. During an
+upgrade, the installer changes `ai_model_settings.json` only when the complete
+file is byte-for-byte identical to the approved former repository template
+(Incident Responder reviewer `ollama:gemma4:31b`, Sol disabled at `medium`).
+Any differing file is treated as operator-owned and left unchanged, including
+an existing custom Sol route or reasoning effort. Review preserved routing in
+Settings and make any desired change explicitly.
 
 After deployment, `verify-agent-memory.py` verifies every primary/reviewer
 prompt pair as well as each role memory and the shared memory file. A missing

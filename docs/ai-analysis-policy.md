@@ -197,16 +197,39 @@ removed before every model call. A model may request no more than three rounds,
 policy broker and returns bounded evidence plus collector-owned provenance to
 the same assigned model route.
 
+The Mac-side installer treats the query protocol as an explicit wire-version
+contract. It reads `investigation_query_contract` from the permission-restricted
+`config/incident-evidence.json`; a missing value means
+`onion-sentinel-investigation-pivots-v1`. V1 uses the checksum-pinned
+compatibility contract and collector with the current hardened prompt builder
+and runner. The builder projects only v1 fields and the runner does not
+advertise or require v2-only `anchor_time`, role provenance, coverage metadata,
+or `anchor_nearest`. The installer accepts v2 only when the config contains the
+exact `onion-sentinel-investigation-pivots-v2` ID. That cutover must follow
+installation and verification of the matching Security Onion forced-command
+wrapper; protocol errors never trigger an automatic downgrade.
+
 Elastic and OQL pivots choose one of the reviewed pivot packs:
 `alert_context`, `network_flow`, `dns_activity`, `system_auth`, `zeek_tls`,
 `zeek_http`, `zeek_files`, `zeek_ssh`, `zeek_stun`, `zeek_quic`,
 `zeek_anomalies`, `osquery_history`, or `cross_sensor_timeline`. Each request
 also chooses a reviewed purpose, exact trusted or broker-discovered
 observables, an independently bounded UTC window no longer than 24 hours, a
-fixed aggregation, and a small result size. An optional `event_tuple` may bind
-an authenticated event's source and destination roles, ports, transport,
-protocol, community ID, and rule ID as ANDed exact constraints. It cannot mix
-values from different trusted rows.
+fixed aggregation, and a small result size. Event samples can be newest-first,
+chronological, or, for compiled Elastic DSL only, ranked nearest the trusted
+alert timestamp. Counts are exact aggregates with no event bodies. An optional
+`event_tuple` may bind an authenticated event's source and destination roles,
+ports, transport, protocol, Community ID, and rule identifier as exact
+constraints. Rule identifiers match the exact `rule.id` or `rule.uuid` field.
+It cannot mix values from different trusted rows.
+
+Security Onion maps Zeek `id.orig_*` and `id.resp_*` into ECS source and
+destination fields, so those fields mean connection originator and responder.
+A Suricata alert can instead describe the individual packet that matched.
+Every trusted tuple therefore carries explicit role semantics. Cross-sensor
+and packet-to-Zeek correlations compile only an exact
+`network.community_id` join; when Community ID is unavailable the combination
+is unsupported rather than silently reversing or guessing roles.
 
 The model cannot provide an index, field, KQL/OQL expression, Query DSL object,
 script, wildcard, or mutation. The Mac binds the proposal to its hidden
@@ -223,6 +246,14 @@ executes a locally compiled semantic equivalent through
 or a separate OQL endpoint executed. The exact Query DSL, index scope, endpoint,
 OQL/KQL equivalents, execution semantics, result counts, truncation, shard
 state, duration, and digests remain in the trusted audit.
+
+Every query result also records explicit coverage semantics: exact aggregate,
+exact zero, complete event set, bounded sample, or partial execution, together
+with newest-first, chronological, or anchor-nearest selection. An empty result
+is evidence of absence only when Elasticsearch returned an exact zero for the
+exact authorized filters and time window. Unsupported pack/observable
+combinations, empty compiled Boolean clauses, timeouts, output limits, shard
+failures, and partial results are evidence gaps.
 
 Endpoint OSQuery is another backend in the same loop. It remains
 disabled-by-default: exact operator aliases map to exact Fleet agent IDs only
@@ -249,12 +280,14 @@ settings-file path to the analysis child that it used for lane selection, so
 selection and execution cannot read different assignments. Jobs never silently
 cross providers.
 
-Running-analysis logs resolve their provider, model, and route from the
-assigned agent before inference starts, then replace those values with stamped
-response provenance when the run completes. The dashboard AI Activity, Reports,
-and Flow views use that same SOC Analyst assignment instead of the compatibility
-`ollama_model` field. A configured Ollama second opinion is reported separately
-and does not change the primary model provenance.
+Running-analysis logs first publish a model-free `preparing` phase, then stamp
+the exact provider, model, route, and phase immediately before an inference
+call. Completed history uses response or runtime observations and keeps the
+configured assignment in separate `assigned_*` fields; a failure before
+inference displays `No model started` rather than claiming the assigned model
+ran. The dashboard AI Activity, Reports, and Flow views use those observations
+instead of the compatibility `ollama_model` field. A configured second opinion
+is reported separately and does not change the primary model provenance.
 
 When a parsed PCAP evidence artifact is newer than the matching local AI
 analysis artifact, the scheduled AI runner treats that analysis as stale. The
@@ -433,10 +466,19 @@ Current primary local model:
 devstral-small-2:24b-instruct-2512-q4_K_M via local Ollama at http://127.0.0.1:11434
 ```
 
-All five Cyber Security Agent roles use `gemma4:31b` as their configured
-second-opinion model. The reviewer is conditional: it runs only when the
-primary result has low confidence, is inconclusive, or explicitly requests an
-independent opinion.
+The Incident Responder uses
+`codex-cli:gpt-5.6-sol:xhigh` as its independent reviewer. The other four Cyber
+Security Agent roles retain `gemma4:31b` as their seeded reviewer. A reviewer
+is conditional: it runs for low confidence, inconclusive results, explicit
+review requests, consequential response/tuning actions, deterministic
+contradictions, or high-severity closure decisions.
+
+Fresh installs enable this exact Sol reviewer route. Upgrades replace model
+settings only when the entire runtime file matches the approved former
+repository template, where the Incident Responder reviewer was
+`ollama:gemma4:31b` and Sol was disabled at `medium`. Any operator-modified
+settings file—including an existing custom Sol route or reasoning effort—is
+preserved and must be changed explicitly through Settings if desired.
 
 Editable AI model routing:
 
@@ -475,7 +517,9 @@ fields, records `agreement`, `partial_disagreement`, or
 `material_disagreement`, and names every disputed field. The primary result
 remains authoritative, a reviewer cannot recursively request another model,
 and reviewer failure is recorded without failing or re-queuing the successful
-primary analysis.
+primary analysis. A missing, invalid, ungrounded, or insufficient-confidence
+required review blocks automatic closure, containment, tuning, and memory
+writeback until an analyst adjudicates the case.
 Other agent roles persist the same routing contract for their manual or
 planned execution paths.
 
@@ -519,6 +563,12 @@ analysis, prior model conclusions, or memory-derived conclusions. A route with
 the same provider/model identity as the primary is rejected even when one
 route used a configured default alias. Material disagreement blocks automatic
 tuning and memory promotion until an append-only analyst adjudication exists.
+The reviewer must echo the current case/evidence binding, enumerate material
+observables, and cite only current collector-owned evidence references.
+Multiple citations derived from one source class—for example `alert` and
+`alert:<id>`—count as one corroborating source and cannot independently support
+high confidence. Foreign IP, domain/FQDN, or Community ID values fail the
+review contract and receive one bounded repair attempt before failing closed.
 Adjudications retain the analyst-confirmed factored verdict dimensions
 independently. Private replay export never manufactures missing factor labels
 from the legacy Detection Outcome.
@@ -780,7 +830,11 @@ $HOME/n8n-local/soc-alerts/llm-analysis-logs/current-analysis.json
 
 The runner validates required response keys before writing output. It can also
 accept a saved response via `--response-json`, which is useful for Hermes/manual
-testing without calling Ollama.
+testing without calling Ollama. A saved response never counts as an independent
+reviewer execution. If the same primary result would require a live reviewer,
+the runner records a failed required review, caps confidence, neutralizes
+containment and tuning, and blocks closure and memory writeback pending human
+adjudication.
 
 Each run also appends one operational audit row to `llm-analysis-log.jsonl` and
 updates `current-analysis.json`. The log records the alert/group being analyzed,

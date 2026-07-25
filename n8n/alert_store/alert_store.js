@@ -438,6 +438,14 @@ const supportedAgentRoles = new Set([
   'cyber-threat-intel',
   'threat-hunter',
 ]);
+const reviewerFailureStatuses = new Set([
+  'failed',
+  'invalid',
+  'invalid_response',
+  'not_configured',
+  'not_independent',
+  'review_required_failed',
+]);
 
 async function signalWorker(wakePath, eventName) {
   if (!wakePath) return false;
@@ -547,6 +555,19 @@ function normalizeJsonTimestamps(value) {
 
 function jsonText(value) {
   return JSON.stringify(normalizeJsonTimestamps(value ?? null));
+}
+
+function canonicalJsonText(value) {
+  const canonicalize = (item) => {
+    if (Array.isArray(item)) return item.map((entry) => canonicalize(entry));
+    if (item && typeof item === 'object') {
+      return Object.fromEntries(
+        Object.keys(item).sort().map((key) => [key, canonicalize(item[key])]),
+      );
+    }
+    return item;
+  };
+  return JSON.stringify(canonicalize(normalizeJsonTimestamps(value ?? null)));
 }
 
 function writeJsonAtomic(filePath, payload) {
@@ -2096,6 +2117,81 @@ async function initDb() {
   `);
   await run('CREATE INDEX IF NOT EXISTS idx_incident_events_case_created ON incident_response_events(case_id, created_at DESC)');
   await run(`
+    CREATE TABLE IF NOT EXISTS incident_reanalysis_runs (
+      run_id TEXT PRIMARY KEY,
+      release_id TEXT NOT NULL,
+      scope TEXT NOT NULL CHECK(scope IN ('single_case', 'all_cases')),
+      status TEXT NOT NULL DEFAULT 'queued'
+        CHECK(status IN ('queued', 'running', 'completed', 'partial', 'failed')),
+      requested_by TEXT,
+      reason TEXT,
+      total_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_incident_reanalysis_runs_created ON incident_reanalysis_runs(created_at DESC)');
+  await run(`
+    CREATE TABLE IF NOT EXISTS incident_reanalysis_run_cases (
+      run_id TEXT NOT NULL,
+      case_id TEXT NOT NULL,
+      group_id TEXT NOT NULL,
+      dashboard_group_id TEXT NOT NULL,
+      representative_alert_id TEXT NOT NULL,
+      status TEXT NOT NULL
+        CHECK(status IN ('queued', 'running', 'completed', 'failed', 'skipped')),
+      skip_reason TEXT,
+      latest_error TEXT,
+      queued_at TEXT,
+      started_at TEXT,
+      completed_at TEXT,
+      latest_attempt_id TEXT,
+      analysis_id TEXT,
+      executed_model TEXT,
+      executed_provider TEXT,
+      executed_model_path TEXT,
+      result_generated_at TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(run_id, case_id),
+      FOREIGN KEY(run_id) REFERENCES incident_reanalysis_runs(run_id),
+      FOREIGN KEY(case_id) REFERENCES incident_response_cases(case_id)
+    )
+  `);
+  await ensureColumn('incident_reanalysis_run_cases', 'latest_attempt_id', 'TEXT');
+  await ensureColumn('incident_reanalysis_run_cases', 'analysis_id', 'TEXT');
+  await ensureColumn('incident_reanalysis_run_cases', 'executed_model', 'TEXT');
+  await ensureColumn('incident_reanalysis_run_cases', 'executed_provider', 'TEXT');
+  await ensureColumn('incident_reanalysis_run_cases', 'executed_model_path', 'TEXT');
+  await ensureColumn('incident_reanalysis_run_cases', 'result_generated_at', 'TEXT');
+  await run('CREATE INDEX IF NOT EXISTS idx_incident_reanalysis_cases_status ON incident_reanalysis_run_cases(run_id, status)');
+  await run('CREATE INDEX IF NOT EXISTS idx_incident_reanalysis_cases_case ON incident_reanalysis_run_cases(case_id, updated_at DESC)');
+  await run(`
+    CREATE TABLE IF NOT EXISTS incident_reanalysis_attempts (
+      attempt_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      case_id TEXT NOT NULL,
+      group_id TEXT NOT NULL,
+      durable_attempt_count INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL
+        CHECK(status IN ('running', 'completed', 'failed')),
+      latest_error TEXT,
+      analysis_id TEXT,
+      executed_model TEXT,
+      executed_provider TEXT,
+      executed_model_path TEXT,
+      result_generated_at TEXT,
+      started_at TEXT NOT NULL,
+      completed_at TEXT,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(run_id, case_id)
+        REFERENCES incident_reanalysis_run_cases(run_id, case_id)
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_incident_reanalysis_attempts_case ON incident_reanalysis_attempts(run_id, case_id, started_at DESC)');
+  await run('CREATE INDEX IF NOT EXISTS idx_incident_reanalysis_attempts_group ON incident_reanalysis_attempts(group_id, started_at DESC)');
+  await run('CREATE UNIQUE INDEX IF NOT EXISTS idx_incident_reanalysis_attempts_analysis ON incident_reanalysis_attempts(analysis_id) WHERE analysis_id IS NOT NULL');
+  await run(`
     CREATE TABLE IF NOT EXISTS ai_second_opinion_runs (
       analysis_id TEXT PRIMARY KEY,
       group_id TEXT NOT NULL,
@@ -2103,6 +2199,7 @@ async function initDb() {
       agent_role TEXT NOT NULL,
       trigger TEXT,
       status TEXT NOT NULL,
+      reviewer_error TEXT,
       primary_model TEXT,
       primary_model_path TEXT,
       primary_outcome TEXT,
@@ -2122,6 +2219,7 @@ async function initDb() {
       updated_at TEXT NOT NULL
     )
   `);
+  await ensureColumn('ai_second_opinion_runs', 'reviewer_error', 'TEXT');
   await run('CREATE INDEX IF NOT EXISTS idx_ai_second_opinion_generated ON ai_second_opinion_runs(generated_at DESC)');
   await run('CREATE INDEX IF NOT EXISTS idx_ai_second_opinion_agreement ON ai_second_opinion_runs(agreement, generated_at DESC)');
   await run('CREATE INDEX IF NOT EXISTS idx_ai_second_opinion_group ON ai_second_opinion_runs(group_id, generated_at DESC)');
@@ -2310,6 +2408,10 @@ async function initDb() {
     transitionLeaseSeconds: aiAnalysisLeaseSeconds,
   });
   await durableJobs.install();
+  // durableJobs.install() performs startup lease recovery before the periodic
+  // alert-store watchdog runs. Reconcile the immutable IR attempt ledger in
+  // the same startup pass so recovered jobs cannot leave runs stuck running.
+  await reconcileRecoveredIncidentReanalysisAttempts();
   pipelineMetrics = createPipelineMetrics({
     run,
     all,
@@ -2452,6 +2554,122 @@ async function recordAiAnalysisResult(payload) {
   if (!groupId) throw new Error('analysis alert has no stable group identity');
   const requestedAgentRole = safeString(payload?.agent_role || 'soc-analyst', 64).toLowerCase();
   const agentRole = supportedAgentRoles.has(requestedAgentRole) ? requestedAgentRole : 'soc-analyst';
+  const model = safeString(payload?.model || response._analysis_model, 200);
+  const modelPath = safeString(payload?.model_path || response._analysis_model_path, 100);
+  const detectionOutcome = safeString(response.detection_outcome, 100);
+  const bluf = safeString(response.bluf, 4000);
+  const summary = safeString(response.summary, 8000);
+  const confidence = safeString(response.confidence, 16).toLowerCase();
+  const artifactPath = safeString(payload?.artifact_path, 2048);
+  const evidenceHash = safeString(payload?.evidence_hash, 128).toLowerCase();
+  const responseJson = jsonText(response);
+
+  // analysis_id is an immutable acceptance key, not an upsert handle. An
+  // exact replay is a read-only success; any changed provenance or content is
+  // rejected before second-opinion, case, event, or correlation state can be
+  // rewritten.
+  const accepted = await get(
+    `SELECT analysis_id, group_id, alert_id, agent_role, generated_at, model,
+            model_path, detection_outcome, bluf, summary, confidence,
+            artifact_path, evidence_hash, response_json
+     FROM ai_analysis_runs WHERE analysis_id = ?`,
+    [analysisId],
+  );
+  if (accepted) {
+    const existingResponse = parseJsonObject(accepted.response_json);
+    const comparisons = {
+      group_id: [safeString(accepted.group_id, 64), groupId],
+      alert_id: [safeString(accepted.alert_id, 1024), alertId],
+      agent_role: [safeString(accepted.agent_role, 64), agentRole],
+      generated_at: [
+        normalizeTimestampValue(accepted.generated_at),
+        normalizeTimestampValue(generatedAt),
+      ],
+      model: [safeString(accepted.model, 200), model],
+      model_path: [safeString(accepted.model_path, 100), modelPath],
+      detection_outcome: [
+        safeString(accepted.detection_outcome, 100),
+        detectionOutcome,
+      ],
+      bluf: [safeString(accepted.bluf, 4000), bluf],
+      summary: [safeString(accepted.summary, 8000), summary],
+      confidence: [safeString(accepted.confidence, 16).toLowerCase(), confidence],
+      artifact_path: [safeString(accepted.artifact_path, 2048), artifactPath],
+      evidence_hash: [
+        safeString(accepted.evidence_hash, 128).toLowerCase(),
+        evidenceHash,
+      ],
+      response_json: [
+        canonicalJsonText(existingResponse),
+        canonicalJsonText(response),
+      ],
+    };
+    const changedFields = Object.entries(comparisons)
+      .filter(([, values]) => values[0] !== values[1])
+      .map(([field]) => field);
+    if (changedFields.length) {
+      const error = new Error(
+        `analysis_id already exists with different immutable fields: ${changedFields.join(', ')}`,
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+    const existingAttempt = await get(
+      `SELECT attempt_id, run_id, case_id, started_at,
+              rowid AS attempt_order
+       FROM incident_reanalysis_attempts WHERE analysis_id = ?`,
+      [analysisId],
+    );
+    const hasAttemptField = Object.prototype.hasOwnProperty.call(
+      payload || {},
+      'reanalysis_attempt_id',
+    );
+    const suppliedAttemptId = safeString(
+      payload?.reanalysis_attempt_id,
+      80,
+    ).toLowerCase();
+    if (suppliedAttemptId && !/^ira-[a-f0-9]{40}$/.test(suppliedAttemptId)) {
+      const error = new Error('reanalysis_attempt_id is invalid');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (
+      (existingAttempt && hasAttemptField
+        && suppliedAttemptId !== existingAttempt.attempt_id)
+      || (!existingAttempt && suppliedAttemptId)
+    ) {
+      const error = new Error(
+        'analysis_id replay does not match its immutable reanalysis attempt',
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+    const incidentReanalysisBinding = existingAttempt
+      ? await incidentReanalysisBindingAuthority(existingAttempt)
+      : null;
+    const secondOpinionRow = await get(
+      'SELECT 1 AS present FROM ai_second_opinion_runs WHERE analysis_id = ?',
+      [analysisId],
+    );
+    const correlationRow = await get(
+      'SELECT COUNT(*) AS count FROM alert_correlations WHERE analysis_id = ?',
+      [analysisId],
+    );
+    return {
+      ok: true,
+      status: 'analysis_indexed',
+      idempotent: true,
+      analysis_id: analysisId,
+      group_id: groupId,
+      correlations: Number(correlationRow?.count || 0),
+      second_opinion_recorded: Boolean(secondOpinionRow),
+      reanalysis_run_id: incidentReanalysisBinding?.run_id || null,
+      reanalysis_attempt_id: incidentReanalysisBinding?.attempt_id || null,
+      reanalysis_authoritative: incidentReanalysisBinding
+        ? incidentReanalysisBinding.authoritative !== false
+        : null,
+    };
+  }
 
   await run(
     `INSERT INTO ai_analysis_runs (
@@ -2459,35 +2677,22 @@ async function recordAiAnalysisResult(payload) {
        detection_outcome, bluf, summary, confidence, artifact_path,
        evidence_hash, response_json, created_at
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(analysis_id) DO UPDATE SET
-       group_id = excluded.group_id,
-       alert_id = excluded.alert_id,
-       agent_role = excluded.agent_role,
-       generated_at = excluded.generated_at,
-       model = excluded.model,
-       model_path = excluded.model_path,
-       detection_outcome = excluded.detection_outcome,
-       bluf = excluded.bluf,
-       summary = excluded.summary,
-       confidence = excluded.confidence,
-       artifact_path = excluded.artifact_path,
-       evidence_hash = excluded.evidence_hash,
-       response_json = excluded.response_json`,
+     ON CONFLICT(analysis_id) DO NOTHING`,
     [
       analysisId,
       groupId,
       alertId,
       agentRole,
       generatedAt,
-      safeString(payload?.model || response._analysis_model, 200),
-      safeString(payload?.model_path || response._analysis_model_path, 100),
-      safeString(response.detection_outcome, 100),
-      safeString(response.bluf, 4000),
-      safeString(response.summary, 8000),
-      safeString(response.confidence, 16).toLowerCase(),
-      safeString(payload?.artifact_path, 2048),
-      safeString(payload?.evidence_hash, 128).toLowerCase(),
-      jsonText(response),
+      model,
+      modelPath,
+      detectionOutcome,
+      bluf,
+      summary,
+      confidence,
+      artifactPath,
+      evidenceHash,
+      responseJson,
       nowUtc(),
     ],
   );
@@ -2510,19 +2715,20 @@ async function recordAiAnalysisResult(payload) {
     const now = nowUtc();
     await run(
       `INSERT INTO ai_second_opinion_runs (
-         analysis_id, group_id, alert_id, agent_role, trigger, status,
+         analysis_id, group_id, alert_id, agent_role, trigger, status, reviewer_error,
          primary_model, primary_model_path, primary_outcome, primary_confidence,
          reviewer_model, reviewer_model_path, reviewer_outcome, reviewer_confidence,
          agreement, material_disagreement, disputed_fields_json, comparison_json,
          reviewer_runtime_seconds, memory_candidates_promoted, generated_at,
          created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(analysis_id) DO UPDATE SET
          group_id = excluded.group_id,
          alert_id = excluded.alert_id,
          agent_role = excluded.agent_role,
          trigger = excluded.trigger,
          status = excluded.status,
+         reviewer_error = excluded.reviewer_error,
          primary_model = excluded.primary_model,
          primary_model_path = excluded.primary_model_path,
          primary_outcome = excluded.primary_outcome,
@@ -2546,6 +2752,7 @@ async function recordAiAnalysisResult(payload) {
         agentRole,
         safeString(secondOpinion.trigger, 1000),
         safeString(secondOpinion.status || 'unknown', 32),
+        safeString(secondOpinion.error, 1000),
         safeString(payload?.model || response._analysis_model, 200),
         safeString(payload?.model_path || response._analysis_model_path, 100),
         safeString(response.detection_outcome, 100),
@@ -2568,27 +2775,55 @@ async function recordAiAnalysisResult(payload) {
     secondOpinionRecorded = true;
   }
 
+  let incidentReanalysisBinding = null;
   if (agentRole === 'incident-responder') {
+    const executedModel = safeString(payload?.model || response._analysis_model, 200);
+    const executedModelPath = safeString(payload?.model_path || response._analysis_model_path, 100);
+    incidentReanalysisBinding = await bindIncidentReanalysisResult({
+      groupId,
+      analysisId,
+      model: executedModel,
+      modelPath: executedModelPath,
+      expectedAttemptId: safeString(payload?.reanalysis_attempt_id, 80).toLowerCase(),
+      allowLegacyFallback: !Object.prototype.hasOwnProperty.call(
+        payload || {},
+        'reanalysis_attempt_id',
+      ),
+      analysisStartedAt: safeString(payload?.analysis_started_at, 64),
+      generatedAt,
+    });
     const caseRow = await get('SELECT case_id FROM incident_response_cases WHERE group_id = ?', [groupId]);
     if (caseRow?.case_id) {
       const updatedAt = nowUtc();
-      await run(
-        `UPDATE incident_response_cases
-         SET agent_status = 'analyzed', latest_analysis_id = ?, latest_model = ?,
-             latest_generated_at = ?, latest_error = NULL, updated_at = ?
-         WHERE case_id = ?`,
-        [
-          analysisId,
-          safeString(payload?.model || response._analysis_model, 200),
-          generatedAt,
-          updatedAt,
-          caseRow.case_id,
-        ],
-      );
+      if (!incidentReanalysisBinding || incidentReanalysisBinding.authoritative !== false) {
+        await run(
+          `UPDATE incident_response_cases
+           SET agent_status = 'analyzed', latest_analysis_id = ?, latest_model = ?,
+               latest_generated_at = ?, latest_error = NULL, updated_at = ?
+           WHERE case_id = ?`,
+          [
+            analysisId,
+            executedModel,
+            generatedAt,
+            updatedAt,
+            caseRow.case_id,
+          ],
+        );
+      }
       await run(
         `INSERT INTO incident_response_events (case_id, event_type, actor, detail_json, created_at)
          VALUES (?, 'analysis_completed', 'incident-responder', ?, ?)`,
-        [caseRow.case_id, jsonText({analysis_id: analysisId, generated_at: generatedAt}), updatedAt],
+        [
+          caseRow.case_id,
+          jsonText({
+            analysis_id: analysisId,
+            generated_at: generatedAt,
+            reanalysis_run_id: incidentReanalysisBinding?.run_id || null,
+            reanalysis_attempt_id: incidentReanalysisBinding?.attempt_id || null,
+            authoritative: incidentReanalysisBinding?.authoritative !== false,
+          }),
+          updatedAt,
+        ],
       );
     }
   }
@@ -2639,6 +2874,11 @@ async function recordAiAnalysisResult(payload) {
     group_id: groupId,
     correlations,
     second_opinion_recorded: secondOpinionRecorded,
+    reanalysis_run_id: incidentReanalysisBinding?.run_id || null,
+    reanalysis_attempt_id: incidentReanalysisBinding?.attempt_id || null,
+    reanalysis_authoritative: incidentReanalysisBinding
+      ? incidentReanalysisBinding.authoritative !== false
+      : null,
   };
 }
 
@@ -2870,31 +3110,48 @@ function validIncidentCaseId(value) {
   return /^ir-[a-z0-9_-]{1,64}$/.test(caseId) ? caseId : '';
 }
 
-async function stableGroupHasPendingHumanDisagreement(stableId) {
+async function stableGroupHasPendingHumanReview(stableId) {
   const groupId = safeString(stableId, 64).toLowerCase();
   if (!groupId) return false;
   const analysis = await get(
     `SELECT analysis_id
      FROM ai_analysis_runs
-     WHERE group_id = ?
+     WHERE (
+         group_id = ?
+         OR group_id IN (
+           SELECT legacy_group_id FROM alert_group_alias
+           WHERE stable_group_id = ?
+         )
+       )
        AND COALESCE(NULLIF(agent_role, ''), 'soc-analyst') = 'soc-analyst'
      ORDER BY generated_at DESC, created_at DESC LIMIT 1`,
-    [groupId],
+    [groupId, groupId],
   );
   const analysisId = safeString(analysis?.analysis_id, 160);
   if (!analysisId) return false;
   const secondOpinion = await get(
-    `SELECT material_disagreement
+    `SELECT status, material_disagreement
      FROM ai_second_opinion_runs WHERE analysis_id = ?`,
     [analysisId],
   );
-  if (!Boolean(Number(secondOpinion?.material_disagreement || 0))) return false;
+  const requiresHumanReview = (
+    Boolean(Number(secondOpinion?.material_disagreement || 0))
+    || reviewerFailureStatuses.has(safeString(secondOpinion?.status, 64).toLowerCase())
+  );
+  if (!requiresHumanReview) return false;
   const adjudication = await get(
     `SELECT adjudication_id
      FROM analyst_adjudications
-     WHERE stable_group_id = ? AND analysis_id = ?
+     WHERE (
+         stable_group_id = ?
+         OR stable_group_id IN (
+           SELECT legacy_group_id FROM alert_group_alias
+           WHERE stable_group_id = ?
+         )
+       )
+       AND analysis_id = ?
      ORDER BY created_at DESC, rowid DESC LIMIT 1`,
-    [groupId, analysisId],
+    [groupId, groupId, analysisId],
   );
   return !adjudication;
 }
@@ -2946,9 +3203,9 @@ async function analystReviewState({
     analysis = await get(
       `SELECT analysis_id, generated_at, detection_outcome, confidence, response_json
        FROM ai_analysis_runs
-       WHERE analysis_id = ? AND group_id = ?
+       WHERE analysis_id = ?
          AND COALESCE(NULLIF(agent_role, ''), 'soc-analyst') = 'incident-responder'`,
-      [resolvedCase.latest_analysis_id, stableId],
+      [resolvedCase.latest_analysis_id],
     );
   }
   if (!analysis) {
@@ -2956,9 +3213,16 @@ async function analystReviewState({
     analysis = await get(
       `SELECT analysis_id, generated_at, detection_outcome, confidence, response_json
        FROM ai_analysis_runs
-       WHERE group_id = ? AND COALESCE(NULLIF(agent_role, ''), 'soc-analyst') = ?
+       WHERE (
+           group_id = ?
+           OR group_id IN (
+             SELECT legacy_group_id FROM alert_group_alias
+             WHERE stable_group_id = ?
+           )
+         )
+         AND COALESCE(NULLIF(agent_role, ''), 'soc-analyst') = ?
        ORDER BY generated_at DESC, created_at DESC LIMIT 1`,
-      [stableId, role],
+      [stableId, stableId, role],
     );
   }
   const analysisId = safeString(analysis?.analysis_id, 160);
@@ -2966,7 +3230,7 @@ async function analystReviewState({
     ? await get(
       `SELECT status, primary_outcome, primary_confidence, reviewer_outcome,
               reviewer_confidence, agreement, material_disagreement,
-              disputed_fields_json, generated_at
+              disputed_fields_json, reviewer_error, generated_at
        FROM ai_second_opinion_runs WHERE analysis_id = ?`,
       [analysisId],
     )
@@ -2985,12 +3249,14 @@ async function analystReviewState({
     : null;
   const materialDisagreement = Boolean(Number(secondOpinion?.material_disagreement || 0));
   const reviewerAgreement = safeString(secondOpinion?.agreement, 64).toLowerCase();
+  const reviewerStatus = safeString(secondOpinion?.status, 64).toLowerCase();
   let finalStatus = 'unreviewed';
   if (adjudication) finalStatus = 'adjudicated';
   else if (materialDisagreement) finalStatus = 'disputed_pending_human';
-  else if (secondOpinion?.status === 'completed' && reviewerAgreement === 'agreement') {
+  else if (reviewerFailureStatuses.has(reviewerStatus)) finalStatus = 'review_required_failed';
+  else if (reviewerStatus === 'completed' && reviewerAgreement === 'agreement') {
     finalStatus = 'model_consensus';
-  } else if (secondOpinion?.status === 'completed') {
+  } else if (reviewerStatus === 'completed') {
     finalStatus = 'reviewer_advisory';
   }
   const primaryOutcome = secondOpinion?.primary_outcome || analysis?.detection_outcome || '';
@@ -3014,6 +3280,7 @@ async function analystReviewState({
     primary_handling: safeString(primaryResponse.handling, 64),
     primary_duplicate_of: primaryResponse.duplicate_of ?? null,
     reviewer_status: secondOpinion?.status || 'not_requested',
+    reviewer_error: secondOpinion?.reviewer_error || '',
     reviewer_outcome: secondOpinion?.reviewer_outcome || '',
     reviewer_confidence: secondOpinion?.reviewer_confidence || '',
     agreement: secondOpinion?.agreement || '',
@@ -3273,8 +3540,8 @@ async function updateIncidentCaseStatus(payload) {
       dashboardGroupId: incident.dashboard_group_id,
       caseId,
     });
-    if (review.final_status === 'disputed_pending_human') {
-      const error = new Error('material model disagreement requires explicit analyst adjudication before resolution');
+    if (['disputed_pending_human', 'review_required_failed'].includes(review.final_status)) {
+      const error = new Error('required independent review needs explicit analyst adjudication before resolution');
       error.statusCode = 409;
       throw error;
     }
@@ -3378,8 +3645,8 @@ async function updateAnalystStatus(payload) {
     if (status === 'suppressed' && !reason) throw new Error('suppression reason is required');
     if (status === 'suppressed') {
       const review = await analystReviewState({dashboardGroupId: groupId});
-      if (review.final_status === 'disputed_pending_human') {
-        const error = new Error('material model disagreement requires explicit analyst adjudication before suppression');
+      if (['disputed_pending_human', 'review_required_failed'].includes(review.final_status)) {
+        const error = new Error('required independent review needs explicit analyst adjudication before suppression');
         error.statusCode = 409;
         throw error;
       }
@@ -3540,10 +3807,38 @@ async function transitionDurableJobStatus(
   retryable = true,
 ) {
   let resolvedKey = dedupeKey;
+  if (
+    jobType === 'incident_response_analysis'
+    && status === 'processing'
+    && !leaseToken
+  ) {
+    const candidate = await get(
+      `SELECT id, job_type, dedupe_key, payload_json, status
+       FROM durable_jobs
+       WHERE job_type = ? AND dedupe_key = ?`,
+      [jobType, resolvedKey],
+    );
+    if (
+      candidate
+      && (
+        await retireCompletedIncidentReanalysisJob(candidate)
+        || await retireSupersededIncidentReanalysisJob(candidate)
+      )
+    ) {
+      return {
+        updated: false,
+        resolvedKey,
+        leaseToken: null,
+        retiredCompleted: true,
+        claim: null,
+      };
+    }
+  }
   let transition = await durableJobs.transition(
     jobType, resolvedKey, status, error, leaseToken, retryable,
   );
   let updated = Boolean(transition?.updated);
+  let claim = null;
   if (!updated && ['ai_analysis', 'incident_response_analysis'].includes(jobType)) {
     // Workers deployed before stable V2 group identities report the legacy
     // dashboard key. Resolve that key at the write boundary so rolling
@@ -3562,7 +3857,9 @@ async function transitionDurableJobStatus(
   }
   if (updated) {
     const job = await get(
-      'SELECT status, attempt_count, updated_at, last_completed_at FROM durable_jobs WHERE job_type = ? AND dedupe_key = ?',
+      `SELECT id, dedupe_key, status, attempt_count, updated_at, last_completed_at,
+              payload_json, last_error
+       FROM durable_jobs WHERE job_type = ? AND dedupe_key = ?`,
       [jobType, resolvedKey],
     );
     const eventType = status === 'processing' ? 'started' : status;
@@ -3577,6 +3874,36 @@ async function transitionDurableJobStatus(
       void signalAiWorkers('ai-rerun-pending');
     }
     if (jobType === 'incident_response_analysis') {
+      const progressLeaseToken = leaseToken || transition?.leaseToken || '';
+      const progress = await updateIncidentReanalysisProgress({
+        job,
+        requestedStatus: status,
+        error,
+        leaseToken: progressLeaseToken,
+        groupId: resolvedKey,
+        newLease: status === 'processing' && !leaseToken,
+      });
+      if (
+        status === 'completed'
+        && job?.status === 'pending'
+        && await retireSupersededIncidentReanalysisJob({
+          ...job,
+          job_type: jobType,
+          dedupe_key: resolvedKey,
+        })
+      ) {
+        job.status = 'completed';
+      }
+      if (status === 'processing' && job?.status === 'processing') {
+        claim = {
+          job_type: jobType,
+          dedupe_key: resolvedKey,
+          payload: incidentReanalysisJobPayload(job),
+          reanalysis_attempt_id: progress?.attempt_id || null,
+          reanalysis_run_id: progress?.run_id || null,
+          case_id: progress?.case_id || null,
+        };
+      }
       const agentStatus = {
         pending: 'queued',
         processing: 'analyzing',
@@ -3597,17 +3924,24 @@ async function transitionDurableJobStatus(
       }
     }
   }
-  return {updated, resolvedKey, leaseToken: transition?.leaseToken || null};
+  return {
+    updated,
+    resolvedKey,
+    leaseToken: transition?.leaseToken || null,
+    claim,
+  };
 }
 
 async function recoverExpiredDurableJobs() {
   if (durableJobRecoveryActive || !durableJobs) return;
   durableJobRecoveryActive = true;
   try {
-    const summary = await withSqliteWriteGate(() => withImmediateTransaction(
-      () => durableJobs.recoverExpired(),
-    ));
-    if (!summary.recovered && !summary.failed) return;
+    const summary = await withSqliteWriteGate(() => withImmediateTransaction(async () => {
+      const recovered = await durableJobs.recoverExpired();
+      recovered.reanalysis_attempts = await reconcileRecoveredIncidentReanalysisAttempts();
+      return recovered;
+    }));
+    if (!summary.recovered && !summary.failed && !summary.reanalysis_attempts) return;
     console.warn(`${nowUtc()} durable job lease recovery: ${JSON.stringify(summary)}`);
     if (summary.job_types.ai_analysis || summary.job_types.incident_response_analysis) {
       void signalAiWorkers('ai-lease-recovered');
@@ -3811,6 +4145,1060 @@ async function queueIncidentResponseForGroup({
     escalated_at: incident.escalated_at,
     requested_at: requestedAt,
   };
+}
+
+function incidentReanalysisReleaseId() {
+  const candidate = safeString(
+    process.env.ONION_SENTINEL_RELEASE_ID || 'unversioned',
+    100,
+  ).replace(/[^A-Za-z0-9._:-]+/g, '-').replace(/^-+|-+$/g, '');
+  return candidate || 'unversioned';
+}
+
+async function incidentReanalysisRunSnapshot(runId) {
+  const runRow = await get(
+    `SELECT run_id, release_id, scope, status, requested_by, reason,
+            total_count, created_at, updated_at, completed_at
+     FROM incident_reanalysis_runs WHERE run_id = ?`,
+    [runId],
+  );
+  if (!runRow) return null;
+  const counts = {queued: 0, running: 0, completed: 0, failed: 0, skipped: 0};
+  const rows = await all(
+    `SELECT status, COUNT(*) AS count
+     FROM incident_reanalysis_run_cases WHERE run_id = ? GROUP BY status`,
+    [runId],
+  );
+  for (const row of rows) {
+    if (Object.prototype.hasOwnProperty.call(counts, row.status)) {
+      counts[row.status] = Number(row.count || 0);
+    }
+  }
+  return {
+    ...runRow,
+    total_count: Number(runRow.total_count || 0),
+    counts,
+  };
+}
+
+async function refreshIncidentReanalysisRun(runId) {
+  if (!runId) return null;
+  const snapshot = await incidentReanalysisRunSnapshot(runId);
+  if (!snapshot) return null;
+  const counts = snapshot.counts;
+  const terminal = counts.completed + counts.failed + counts.skipped;
+  let status = 'queued';
+  if (counts.running > 0) status = 'running';
+  else if (counts.queued > 0) status = 'queued';
+  else if (snapshot.total_count === 0) status = 'completed';
+  else if (counts.failed === snapshot.total_count) status = 'failed';
+  else if (terminal >= snapshot.total_count && (counts.failed > 0 || counts.skipped > 0)) status = 'partial';
+  else if (terminal >= snapshot.total_count) status = 'completed';
+  const updatedAt = nowUtc();
+  const completedAt = ['completed', 'partial', 'failed'].includes(status) ? updatedAt : null;
+  await run(
+    `UPDATE incident_reanalysis_runs
+     SET status = ?, updated_at = ?, completed_at = ?
+     WHERE run_id = ?`,
+    [status, updatedAt, completedAt, runId],
+  );
+  return incidentReanalysisRunSnapshot(runId);
+}
+
+async function supersedeIncidentReanalysisCase(caseId, replacementRunId, updatedAt) {
+  const priorRuns = await all(
+    `SELECT DISTINCT run_id FROM incident_reanalysis_run_cases
+     WHERE case_id = ? AND status = 'queued' AND run_id != ?`,
+    [caseId, replacementRunId],
+  );
+  if (!priorRuns.length) return;
+  await run(
+    `UPDATE incident_reanalysis_run_cases
+     SET status = 'skipped', skip_reason = ?, latest_error = NULL,
+         completed_at = ?, updated_at = ?
+     WHERE case_id = ? AND status = 'queued' AND run_id != ?`,
+    [
+      `Superseded by newer reanalysis run ${replacementRunId}`,
+      updatedAt,
+      updatedAt,
+      caseId,
+      replacementRunId,
+    ],
+  );
+  for (const item of priorRuns) {
+    await refreshIncidentReanalysisRun(String(item.run_id || ''));
+  }
+}
+
+async function requestIncidentReanalysis(payload, requestedCaseId = '') {
+  const caseId = requestedCaseId ? validIncidentCaseId(requestedCaseId) : '';
+  if (requestedCaseId && !caseId) {
+    const error = new Error('valid incident case_id is required');
+    error.statusCode = 400;
+    throw error;
+  }
+  const requestedBy = safeString(payload?.requested_by || 'dashboard', 100);
+  const reason = safeString(
+    payload?.reason || (
+      caseId
+        ? 'Analyst requested fresh Incident Responder analysis'
+        : 'Analyst requested fresh analysis of all incident cases'
+    ),
+    1000,
+  );
+  // Release lineage is server-owned deployment metadata. Never allow a
+  // dashboard/API caller to spoof the code revision attributed to a run.
+  const releaseId = incidentReanalysisReleaseId();
+  const requestedAt = nowUtc();
+  const runId = `irr-${crypto.randomUUID()}`;
+  const scope = caseId ? 'single_case' : 'all_cases';
+  const cases = caseId
+    ? await all(
+      `SELECT c.*, CASE WHEN a.alert_id IS NULL THEN 0 ELSE 1 END AS representative_exists,
+              a.stable_group_id AS representative_group_id,
+              a.stable_group_key AS representative_group_key
+       FROM incident_response_cases AS c
+       LEFT JOIN alerts AS a ON a.alert_id = c.representative_alert_id
+       WHERE c.case_id = ?`,
+      [caseId],
+    )
+    : await all(
+      `SELECT c.*, CASE WHEN a.alert_id IS NULL THEN 0 ELSE 1 END AS representative_exists,
+              a.stable_group_id AS representative_group_id,
+              a.stable_group_key AS representative_group_key
+       FROM incident_response_cases AS c
+       LEFT JOIN alerts AS a ON a.alert_id = c.representative_alert_id
+       ORDER BY c.escalated_at ASC, c.case_id ASC`,
+    );
+  if (caseId && !cases.length) {
+    const error = new Error('incident case not found');
+    error.statusCode = 404;
+    throw error;
+  }
+  await run(
+    `INSERT INTO incident_reanalysis_runs (
+       run_id, release_id, scope, status, requested_by, reason,
+       total_count, created_at, updated_at
+     ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)`,
+    [
+      runId,
+      releaseId,
+      scope,
+      requestedBy,
+      reason,
+      cases.length,
+      requestedAt,
+      requestedAt,
+    ],
+  );
+  for (const incident of cases) {
+    const storedCaseId = validIncidentCaseId(incident.case_id);
+    const storedGroupId = safeString(incident.group_id, 64).toLowerCase();
+    const representativeGroupId = safeString(
+      incident.representative_group_id,
+      64,
+    ).toLowerCase();
+    const groupId = representativeGroupId || storedGroupId;
+    const dashboardGroupId = safeString(incident.dashboard_group_id, 64).toLowerCase();
+    const representativeAlertId = safeString(incident.representative_alert_id, 256);
+    const identityDrift = Boolean(
+      representativeGroupId && representativeGroupId !== storedGroupId,
+    );
+    let skipReason = '';
+    if (!storedCaseId) skipReason = 'Stored case identifier is invalid';
+    else if (!groupId) skipReason = 'Stored stable group identifier is missing';
+    else if (!representativeAlertId || !Number(incident.representative_exists || 0)) {
+      skipReason = 'Stored representative alert no longer exists';
+    }
+    if (skipReason) {
+      await run(
+        `INSERT INTO incident_reanalysis_run_cases (
+           run_id, case_id, group_id, dashboard_group_id,
+           representative_alert_id, status, skip_reason, completed_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, 'skipped', ?, ?, ?)`,
+        [
+          runId,
+          String(incident.case_id || ''),
+          groupId,
+          dashboardGroupId,
+          representativeAlertId,
+          skipReason,
+          requestedAt,
+          requestedAt,
+        ],
+      );
+      continue;
+    }
+    if (identityDrift) {
+      const conflictingCase = await get(
+        `SELECT case_id FROM incident_response_cases
+         WHERE group_id = ? AND case_id != ?`,
+        [representativeGroupId, storedCaseId],
+      );
+      if (conflictingCase) {
+        const error = new Error(
+          'representative alert identity now belongs to another incident case',
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+      await run(
+        `UPDATE incident_response_cases
+         SET group_id = ?, updated_at = ?
+         WHERE case_id = ? AND group_id = ?`,
+        [representativeGroupId, requestedAt, storedCaseId, storedGroupId],
+      );
+      const representativeGroupKey = safeString(
+        incident.representative_group_key,
+        2048,
+      );
+      if (storedGroupId && representativeGroupKey) {
+        await run(
+          `INSERT INTO alert_group_alias (
+             legacy_group_id, stable_group_id, stable_group_key, updated_at
+           ) VALUES (?, ?, ?, ?)
+           ON CONFLICT(legacy_group_id) DO UPDATE SET
+             stable_group_id = excluded.stable_group_id,
+             stable_group_key = excluded.stable_group_key,
+             updated_at = excluded.updated_at`,
+          [
+            storedGroupId,
+            representativeGroupId,
+            representativeGroupKey,
+            requestedAt,
+          ],
+        );
+      }
+    }
+    await supersedeIncidentReanalysisCase(storedCaseId, runId, requestedAt);
+    if (identityDrift && storedGroupId) {
+      // Pending work under the former stable identity can no longer join an
+      // authoritative alert row. Retire it atomically with the new queue
+      // owner. A processing lease is intentionally left alone: its immutable
+      // attempt may finish non-authoritatively while this new run stays queued.
+      await run(
+        `UPDATE durable_jobs
+         SET status = 'completed', lease_expires_at = NULL, lease_token = NULL,
+             last_error = NULL, completed_at = COALESCE(completed_at, ?),
+             last_completed_at = COALESCE(last_completed_at, ?),
+             processing_started_at = NULL, rerun_requested = 0, updated_at = ?
+         WHERE job_type = 'incident_response_analysis'
+           AND dedupe_key = ? AND status = 'pending'`,
+        [
+          requestedAt,
+          requestedAt,
+          requestedAt,
+          storedGroupId,
+        ],
+      );
+    }
+    await run(
+      `INSERT INTO incident_reanalysis_run_cases (
+         run_id, case_id, group_id, dashboard_group_id,
+         representative_alert_id, status, queued_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)`,
+      [
+        runId,
+        storedCaseId,
+        groupId,
+        dashboardGroupId,
+        representativeAlertId,
+        requestedAt,
+        requestedAt,
+      ],
+    );
+    await durableJobs.enqueue('incident_response_analysis', groupId, {
+      agent_role: 'incident-responder',
+      case_id: storedCaseId,
+      alert_id: representativeAlertId,
+      group_id: groupId,
+      dashboard_group_id: dashboardGroupId,
+      reanalysis_run_id: runId,
+      reanalysis_release_id: releaseId,
+      manual_reanalysis: true,
+      requested_by: requestedBy,
+      requested_at: requestedAt,
+      reason,
+      related_limit: 500,
+      pcap_analysis_limit: 25,
+    }, {priority: 1200, maxAttempts: 12});
+    await run(
+      `UPDATE incident_response_cases
+       SET agent_status = 'queued', latest_error = NULL, updated_at = ?
+       WHERE case_id = ?`,
+      [requestedAt, storedCaseId],
+    );
+    await run(
+      `INSERT INTO incident_response_events (
+         case_id, event_type, actor, detail_json, created_at
+       ) VALUES (?, 'reanalysis_queued', ?, ?, ?)`,
+      [
+        storedCaseId,
+        requestedBy,
+        jsonText({run_id: runId, release_id: releaseId, reason}),
+        requestedAt,
+      ],
+    );
+    await pipelineMetrics.record('incident_response_analysis', 'enqueued', groupId, {
+      eventKey: `incident_response_analysis:reanalysis:${runId}:${storedCaseId}`,
+    });
+  }
+  return {
+    ok: true,
+    ...(await refreshIncidentReanalysisRun(runId)),
+  };
+}
+
+function incidentReanalysisJobPayload(job) {
+  if (!job?.payload_json) return {};
+  try {
+    const payload = JSON.parse(job.payload_json);
+    return payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+async function retireCompletedIncidentReanalysisJob(job) {
+  const payload = incidentReanalysisJobPayload(job);
+  if (payload?.manual_reanalysis !== true) return false;
+  const runId = safeString(payload?.reanalysis_run_id, 80);
+  const caseId = validIncidentCaseId(payload?.case_id);
+  if (!runId || !caseId) return false;
+  const completed = await get(
+    `SELECT analysis_id
+     FROM incident_reanalysis_run_cases
+     WHERE run_id = ? AND case_id = ?
+       AND status = 'completed' AND analysis_id IS NOT NULL`,
+    [runId, caseId],
+  );
+  if (!completed?.analysis_id) return false;
+  const updatedAt = nowUtc();
+  const result = await run(
+    `UPDATE durable_jobs
+     SET status = 'completed', lease_expires_at = NULL, lease_token = NULL,
+         last_error = NULL, completed_at = COALESCE(completed_at, ?),
+         last_completed_at = COALESCE(last_completed_at, ?),
+         processing_started_at = NULL, rerun_requested = 0, updated_at = ?
+     WHERE id = ? AND job_type = 'incident_response_analysis'
+       AND status IN ('pending', 'processing') AND payload_json = ?`,
+    [
+      updatedAt,
+      updatedAt,
+      updatedAt,
+      Number(job.id || 0),
+      String(job.payload_json || ''),
+    ],
+  );
+  return Number(result.changes || 0) === 1;
+}
+
+async function retireSupersededIncidentReanalysisJob(job) {
+  if (job?.status !== 'pending') return false;
+  const payload = incidentReanalysisJobPayload(job);
+  if (payload?.manual_reanalysis !== true) return false;
+  const runId = safeString(payload?.reanalysis_run_id, 80);
+  const caseId = validIncidentCaseId(payload?.case_id);
+  if (!runId || !caseId) return false;
+  const superseded = await get(
+    `SELECT 1 AS present
+     FROM incident_reanalysis_run_cases
+     WHERE run_id = ? AND case_id = ? AND status = 'skipped'`,
+    [runId, caseId],
+  );
+  if (!superseded) return false;
+  const updatedAt = nowUtc();
+  const result = await run(
+    `UPDATE durable_jobs
+     SET status = 'completed', lease_expires_at = NULL, lease_token = NULL,
+         last_error = NULL, completed_at = COALESCE(completed_at, ?),
+         last_completed_at = COALESCE(last_completed_at, ?),
+         processing_started_at = NULL, rerun_requested = 0, updated_at = ?
+     WHERE id = ? AND job_type = 'incident_response_analysis'
+       AND status = 'pending' AND payload_json = ?`,
+    [
+      updatedAt,
+      updatedAt,
+      updatedAt,
+      Number(job.id || 0),
+      String(job.payload_json || ''),
+    ],
+  );
+  return Number(result.changes || 0) === 1;
+}
+
+function incidentReanalysisAttemptId(leaseToken) {
+  const token = safeString(leaseToken, 128);
+  if (!token) return '';
+  // Persist only a one-way lease fingerprint. The worker's bearer-like lease
+  // token remains transient while still providing immutable attempt identity.
+  return `ira-${crypto.createHash('sha256').update(token).digest('hex').slice(0, 40)}`;
+}
+
+function incidentAnalysisProvider(modelPath) {
+  const route = safeString(modelPath, 100).toLowerCase();
+  if (route === 'frontier-codex-cli') return 'codex-cli';
+  if (route === 'ollama') return 'ollama';
+  return route;
+}
+
+async function closeStaleIncidentReanalysisAttempts(groupId, currentRunId, currentCaseId, updatedAt) {
+  const stale = await all(
+    `SELECT attempt_id, run_id, case_id
+     FROM incident_reanalysis_attempts
+     WHERE group_id = ? AND status = 'running'`,
+    [groupId],
+  );
+  if (!stale.length) return;
+  const staleError = 'Prior durable processing lease ended before completion';
+  const affectedRuns = new Set();
+  for (const attempt of stale) {
+    await run(
+      `UPDATE incident_reanalysis_attempts
+       SET status = 'failed', latest_error = ?, completed_at = ?, updated_at = ?
+       WHERE attempt_id = ? AND status = 'running'`,
+      [staleError, updatedAt, updatedAt, attempt.attempt_id],
+    );
+    if (attempt.run_id === currentRunId && attempt.case_id === currentCaseId) continue;
+    await run(
+      `UPDATE incident_reanalysis_run_cases
+       SET status = 'failed', latest_error = ?, completed_at = ?, updated_at = ?
+       WHERE run_id = ? AND case_id = ?
+         AND status NOT IN ('completed', 'skipped')`,
+      [staleError, updatedAt, updatedAt, attempt.run_id, attempt.case_id],
+    );
+    affectedRuns.add(String(attempt.run_id || ''));
+  }
+  for (const runId of affectedRuns) {
+    await refreshIncidentReanalysisRun(runId);
+  }
+}
+
+async function beginIncidentReanalysisAttempt(job, leaseToken, groupId) {
+  const payload = incidentReanalysisJobPayload(job);
+  const runId = safeString(payload?.reanalysis_run_id, 80);
+  const caseId = validIncidentCaseId(payload?.case_id);
+  const attemptId = incidentReanalysisAttemptId(leaseToken);
+  if (!attemptId) return null;
+  if (!runId || !caseId) {
+    // A normal escalation may follow a recovered reanalysis lease for the
+    // same deduped group. Close that stale ownership before its later result
+    // could be mistaken for the normal escalation's output.
+    await closeStaleIncidentReanalysisAttempts(
+      safeString(groupId, 64).toLowerCase(),
+      '',
+      '',
+      nowUtc(),
+    );
+    return null;
+  }
+  const runCase = await get(
+    `SELECT group_id, status
+     FROM incident_reanalysis_run_cases
+     WHERE run_id = ? AND case_id = ?`,
+    [runId, caseId],
+  );
+  if (!runCase || !['queued', 'running', 'failed'].includes(String(runCase.status || ''))) {
+    return null;
+  }
+  const boundGroupId = safeString(runCase.group_id || groupId, 64).toLowerCase();
+  if (!boundGroupId || (groupId && boundGroupId !== groupId)) return null;
+  const updatedAt = nowUtc();
+  await closeStaleIncidentReanalysisAttempts(boundGroupId, runId, caseId, updatedAt);
+  await run(
+    `INSERT INTO incident_reanalysis_attempts (
+       attempt_id, run_id, case_id, group_id, durable_attempt_count,
+       status, started_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, 'running', ?, ?)
+     ON CONFLICT(attempt_id) DO NOTHING`,
+    [
+      attemptId,
+      runId,
+      caseId,
+      boundGroupId,
+      Math.max(0, Number(job?.attempt_count || 0)),
+      updatedAt,
+      updatedAt,
+    ],
+  );
+  await run(
+    `UPDATE incident_reanalysis_run_cases
+     SET status = 'running', skip_reason = NULL, latest_error = NULL,
+         started_at = COALESCE(started_at, ?), completed_at = NULL,
+         latest_attempt_id = ?, updated_at = ?
+     WHERE run_id = ? AND case_id = ?
+       AND status IN ('queued', 'running', 'failed')`,
+    [updatedAt, attemptId, updatedAt, runId, caseId],
+  );
+  await refreshIncidentReanalysisRun(runId);
+  return {attempt_id: attemptId, run_id: runId, case_id: caseId};
+}
+
+async function heartbeatIncidentReanalysisAttempt(leaseToken) {
+  const attemptId = incidentReanalysisAttemptId(leaseToken);
+  if (!attemptId) return null;
+  const updatedAt = nowUtc();
+  await run(
+    `UPDATE incident_reanalysis_attempts
+     SET updated_at = ?
+     WHERE attempt_id = ? AND status = 'running'`,
+    [updatedAt, attemptId],
+  );
+  return get(
+    `SELECT attempt_id, run_id, case_id
+     FROM incident_reanalysis_attempts WHERE attempt_id = ?`,
+    [attemptId],
+  );
+}
+
+async function finishIncidentReanalysisAttempt(job, requestedStatus, error, leaseToken) {
+  const attemptId = incidentReanalysisAttemptId(leaseToken);
+  if (!attemptId) return null;
+  const attempt = await get(
+    `SELECT attempt_id, run_id, case_id, status
+     FROM incident_reanalysis_attempts WHERE attempt_id = ?`,
+    [attemptId],
+  );
+  if (!attempt) return null;
+  const updatedAt = nowUtc();
+  if (requestedStatus === 'completed') {
+    await run(
+      `UPDATE incident_reanalysis_attempts
+       SET status = 'completed', latest_error = NULL,
+           completed_at = COALESCE(completed_at, ?), updated_at = ?
+       WHERE attempt_id = ?`,
+      [updatedAt, updatedAt, attemptId],
+    );
+    await run(
+      `UPDATE incident_reanalysis_run_cases
+       SET status = 'completed', latest_error = NULL,
+           completed_at = COALESCE(completed_at, ?),
+           latest_attempt_id = ?, updated_at = ?
+       WHERE run_id = ? AND case_id = ? AND status != 'skipped'`,
+      [updatedAt, attemptId, updatedAt, attempt.run_id, attempt.case_id],
+    );
+  } else if (requestedStatus === 'failed') {
+    const latestError = safeString(error || job?.last_error || 'analysis attempt failed', 1000);
+    await run(
+      `UPDATE incident_reanalysis_attempts
+       SET status = CASE WHEN status = 'completed' THEN status ELSE 'failed' END,
+           latest_error = CASE WHEN status = 'completed' THEN latest_error ELSE ? END,
+           completed_at = CASE WHEN status = 'completed' THEN completed_at ELSE ? END,
+           updated_at = ?
+       WHERE attempt_id = ?`,
+      [latestError, updatedAt, updatedAt, attemptId],
+    );
+    if (attempt.status !== 'completed') {
+      const currentPayload = incidentReanalysisJobPayload(job);
+      const retryOwnsSameRun = (
+        job?.status === 'pending'
+        && safeString(currentPayload?.reanalysis_run_id, 80) === attempt.run_id
+        && validIncidentCaseId(currentPayload?.case_id) === attempt.case_id
+      );
+      const caseStatus = retryOwnsSameRun ? 'queued' : 'failed';
+      await run(
+        `UPDATE incident_reanalysis_run_cases
+         SET status = ?, latest_error = ?,
+             completed_at = CASE WHEN ? = 'queued' THEN NULL ELSE ? END,
+             latest_attempt_id = ?, updated_at = ?
+         WHERE run_id = ? AND case_id = ?
+           AND status NOT IN ('completed', 'skipped')`,
+        [
+          caseStatus,
+          latestError,
+          caseStatus,
+          updatedAt,
+          attemptId,
+          updatedAt,
+          attempt.run_id,
+          attempt.case_id,
+        ],
+      );
+    }
+  }
+  await refreshIncidentReanalysisRun(attempt.run_id);
+  return attempt;
+}
+
+async function queueCurrentIncidentReanalysisRun(job) {
+  const payload = incidentReanalysisJobPayload(job);
+  const runId = safeString(payload?.reanalysis_run_id, 80);
+  const caseId = validIncidentCaseId(payload?.case_id);
+  if (!runId || !caseId) return null;
+  const updatedAt = nowUtc();
+  await run(
+    `UPDATE incident_reanalysis_run_cases
+     SET status = 'queued', latest_error = NULL, completed_at = NULL, updated_at = ?
+     WHERE run_id = ? AND case_id = ? AND status = 'failed'`,
+    [updatedAt, runId, caseId],
+  );
+  await refreshIncidentReanalysisRun(runId);
+  return {run_id: runId, case_id: caseId};
+}
+
+async function reconcileRecoveredIncidentReanalysisAttempts() {
+  if (!durableJobs) return 0;
+  let reconciled = 0;
+  const affectedCases = new Map();
+  // A result is committed before the worker acknowledges its durable lease.
+  // If the worker exits in that narrow window, recovery must retire the
+  // already-satisfied job instead of launching duplicate inference with a new
+  // lease that has no valid immutable attempt.
+  const satisfiableJobs = await all(
+    `SELECT id, job_type, dedupe_key, payload_json, status
+     FROM durable_jobs
+     WHERE job_type = 'incident_response_analysis'
+       AND status IN ('pending', 'processing')`,
+  );
+  for (const job of satisfiableJobs) {
+    if (
+      await retireCompletedIncidentReanalysisJob(job)
+      || await retireSupersededIncidentReanalysisJob(job)
+    ) {
+      reconciled += 1;
+    }
+  }
+  // Repair the narrow crash window between durable lease acquisition and
+  // attempt-ledger insertion before evaluating stranded older attempts.
+  const processingJobs = await all(
+    `SELECT dedupe_key, payload_json, status, attempt_count, lease_token, last_error
+     FROM durable_jobs
+     WHERE job_type = 'incident_response_analysis' AND status = 'processing'`,
+  );
+  for (const job of processingJobs) {
+    const currentAttemptId = incidentReanalysisAttemptId(job.lease_token);
+    if (!currentAttemptId) continue;
+    const currentAttempt = await get(
+      `SELECT 1 AS present FROM incident_reanalysis_attempts
+       WHERE attempt_id = ?`,
+      [currentAttemptId],
+    );
+    if (!currentAttempt) {
+      const repaired = await beginIncidentReanalysisAttempt(
+        job,
+        job.lease_token,
+        safeString(job.dedupe_key, 64).toLowerCase(),
+      );
+      if (repaired) {
+        affectedCases.set(repaired.case_id, {
+          group_id: safeString(job.dedupe_key, 64).toLowerCase(),
+          latest_error: '',
+        });
+        reconciled += 1;
+      }
+    }
+  }
+
+  const runningAttempts = await all(
+    `SELECT a.attempt_id, a.run_id, a.case_id, a.group_id,
+            d.status AS durable_status, d.payload_json,
+            d.lease_token, d.last_error
+     FROM incident_reanalysis_attempts AS a
+     LEFT JOIN durable_jobs AS d
+       ON d.job_type = 'incident_response_analysis'
+      AND d.dedupe_key = a.group_id
+     WHERE a.status = 'running'`,
+  );
+  const affectedRuns = new Set();
+  for (const attempt of runningAttempts) {
+    const ownsCurrentLease = (
+      attempt.durable_status === 'processing'
+      && incidentReanalysisAttemptId(attempt.lease_token) === attempt.attempt_id
+    );
+    if (ownsCurrentLease) continue;
+    const updatedAt = nowUtc();
+    const currentCase = await get(
+      `SELECT group_id FROM incident_response_cases WHERE case_id = ?`,
+      [attempt.case_id],
+    );
+    const newerRunCase = await get(
+      `SELECT 1 AS present
+       FROM incident_reanalysis_run_cases
+       WHERE case_id = ? AND run_id != ? AND status != 'skipped'
+         AND rowid > COALESCE((
+           SELECT rowid FROM incident_reanalysis_run_cases
+           WHERE run_id = ? AND case_id = ?
+         ), 0)
+       LIMIT 1`,
+      [
+        attempt.case_id,
+        attempt.run_id,
+        attempt.run_id,
+        attempt.case_id,
+      ],
+    );
+    const currentCaseGroup = safeString(
+      currentCase?.group_id,
+      64,
+    ).toLowerCase();
+    const migratedToSuccessor = Boolean(
+      currentCaseGroup
+      && currentCaseGroup !== safeString(attempt.group_id, 64).toLowerCase()
+      && newerRunCase,
+    );
+    const currentPayload = incidentReanalysisJobPayload(attempt);
+    const durableOwnsSameRun = (
+      !migratedToSuccessor
+      && safeString(currentPayload?.reanalysis_run_id, 80) === attempt.run_id
+      && validIncidentCaseId(currentPayload?.case_id) === attempt.case_id
+    );
+    const durableCompleted = (
+      attempt.durable_status === 'completed'
+      && durableOwnsSameRun
+    );
+    const latestError = durableCompleted
+      ? null
+      : migratedToSuccessor
+        ? 'Worker lease expired after stable identity migrated to a successor run'
+        : safeString(
+          attempt.last_error || 'worker lease expired before completion',
+          1000,
+        );
+    await run(
+      `UPDATE incident_reanalysis_attempts
+       SET status = ?, latest_error = ?, completed_at = ?, updated_at = ?
+       WHERE attempt_id = ? AND status = 'running'`,
+      [
+        durableCompleted ? 'completed' : 'failed',
+        latestError,
+        updatedAt,
+        updatedAt,
+        attempt.attempt_id,
+      ],
+    );
+    const retryOwnsSameRun = (
+      attempt.durable_status === 'pending'
+      && durableOwnsSameRun
+    );
+    const caseStatus = durableCompleted
+      ? 'completed'
+      : retryOwnsSameRun ? 'queued' : 'failed';
+    await run(
+      `UPDATE incident_reanalysis_run_cases
+       SET status = ?, latest_error = ?,
+           completed_at = CASE WHEN ? = 'queued' THEN NULL ELSE ? END,
+           latest_attempt_id = ?, updated_at = ?
+       WHERE run_id = ? AND case_id = ?
+         AND status NOT IN ('completed', 'skipped')`,
+      [
+        caseStatus,
+        latestError,
+        caseStatus,
+        updatedAt,
+        attempt.attempt_id,
+        updatedAt,
+        attempt.run_id,
+        attempt.case_id,
+      ],
+    );
+    if (migratedToSuccessor && attempt.durable_status === 'pending') {
+      await run(
+        `UPDATE durable_jobs
+         SET status = 'completed', lease_expires_at = NULL, lease_token = NULL,
+             last_error = NULL, completed_at = COALESCE(completed_at, ?),
+             last_completed_at = COALESCE(last_completed_at, ?),
+             processing_started_at = NULL, rerun_requested = 0, updated_at = ?
+         WHERE job_type = 'incident_response_analysis'
+           AND dedupe_key = ? AND status = 'pending' AND payload_json = ?`,
+        [
+          updatedAt,
+          updatedAt,
+          updatedAt,
+          safeString(attempt.group_id, 64).toLowerCase(),
+          String(attempt.payload_json || ''),
+        ],
+      );
+    }
+    affectedCases.set(attempt.case_id, {
+      group_id: migratedToSuccessor
+        ? currentCaseGroup
+        : safeString(attempt.group_id, 64).toLowerCase(),
+      latest_error: latestError,
+    });
+    affectedRuns.add(String(attempt.run_id || ''));
+    reconciled += 1;
+  }
+  for (const runId of affectedRuns) {
+    await refreshIncidentReanalysisRun(runId);
+  }
+  // Multiple immutable attempts may refer to the same mutable deduped job.
+  // Publish case status once, after all attempt reconciliation, from the
+  // durable job that currently owns the queue slot. This prevents closing a
+  // stale attempt from overwriting a replacement lease's "analyzing" state.
+  for (const [caseId, affected] of affectedCases.entries()) {
+    const currentJob = await get(
+      `SELECT status, payload_json, last_error
+       FROM durable_jobs
+       WHERE job_type = 'incident_response_analysis' AND dedupe_key = ?`,
+      [affected.group_id],
+    );
+    const currentPayload = incidentReanalysisJobPayload(currentJob);
+    const currentCaseId = validIncidentCaseId(currentPayload?.case_id);
+    const durableOwnsCase = !currentCaseId || currentCaseId === caseId;
+    const agentStatus = durableOwnsCase
+      ? ({
+        pending: 'queued',
+        processing: 'analyzing',
+        completed: 'analyzed',
+        failed: 'failed',
+      }[currentJob?.status] || 'failed')
+      : 'failed';
+    const latestError = agentStatus === 'failed'
+      ? safeString(
+        currentJob?.last_error || affected.latest_error
+          || 'worker lease expired before completion',
+        1000,
+      )
+      : null;
+    await run(
+      `UPDATE incident_response_cases
+       SET agent_status = ?, latest_error = ?, updated_at = ?
+       WHERE case_id = ?`,
+      [agentStatus, latestError, nowUtc(), caseId],
+    );
+  }
+  return reconciled;
+}
+
+async function updateIncidentReanalysisProgress({
+  job,
+  requestedStatus,
+  error = '',
+  leaseToken = '',
+  groupId = '',
+  newLease = false,
+}) {
+  if (requestedStatus === 'processing') {
+    if (newLease) return beginIncidentReanalysisAttempt(job, leaseToken, groupId);
+    return heartbeatIncidentReanalysisAttempt(leaseToken);
+  }
+  if (['completed', 'failed'].includes(requestedStatus)) {
+    return finishIncidentReanalysisAttempt(job, requestedStatus, error, leaseToken);
+  }
+  if (requestedStatus === 'pending') return queueCurrentIncidentReanalysisRun(job);
+  return null;
+}
+
+async function incidentReanalysisBindingAuthority(attempt) {
+  if (!attempt?.attempt_id || !attempt?.case_id || !attempt?.started_at) {
+    return {
+      attempt_id: attempt?.attempt_id || null,
+      run_id: attempt?.run_id || null,
+      case_id: attempt?.case_id || null,
+      authoritative: true,
+    };
+  }
+  const newerAttempt = await get(
+    `SELECT 1 AS present
+     FROM incident_reanalysis_attempts
+     WHERE case_id = ? AND attempt_id != ?
+       AND (
+         julianday(replace(started_at, '  ', 'T'))
+           > julianday(replace(?, '  ', 'T'))
+         OR (
+           julianday(replace(started_at, '  ', 'T'))
+             = julianday(replace(?, '  ', 'T'))
+           AND rowid > ?
+         )
+       )
+     LIMIT 1`,
+    [
+      attempt.case_id,
+      attempt.attempt_id,
+      attempt.started_at,
+      attempt.started_at,
+      Number(attempt.attempt_order || 0),
+    ],
+  );
+  const newerRunCase = await get(
+    `SELECT 1 AS present
+     FROM incident_reanalysis_run_cases
+     WHERE case_id = ? AND run_id != ? AND status != 'skipped'
+       AND rowid > COALESCE((
+         SELECT rowid FROM incident_reanalysis_run_cases
+         WHERE run_id = ? AND case_id = ?
+       ), 0)
+     LIMIT 1`,
+    [
+      attempt.case_id,
+      attempt.run_id,
+      attempt.run_id,
+      attempt.case_id,
+    ],
+  );
+  return {
+    attempt_id: attempt.attempt_id,
+    run_id: attempt.run_id,
+    case_id: attempt.case_id,
+    authoritative: !newerAttempt && !newerRunCase,
+  };
+}
+
+async function bindIncidentReanalysisResult({
+  groupId,
+  analysisId,
+  model,
+  modelPath,
+  expectedAttemptId,
+  allowLegacyFallback,
+  analysisStartedAt,
+  generatedAt,
+}) {
+  if (!groupId || !analysisId) return null;
+  const suppliedAttemptId = safeString(expectedAttemptId, 80).toLowerCase();
+  let attempt;
+  if (suppliedAttemptId) {
+    if (!/^ira-[a-f0-9]{40}$/.test(suppliedAttemptId)) {
+      const error = new Error('reanalysis_attempt_id is invalid');
+      error.statusCode = 400;
+      throw error;
+    }
+    attempt = await get(
+      `SELECT attempt_id, run_id, case_id, group_id, started_at, analysis_id,
+              rowid AS attempt_order
+       FROM incident_reanalysis_attempts
+       WHERE attempt_id = ?`,
+      [suppliedAttemptId],
+    );
+    let strictCaseIdentityMatch = false;
+    if (attempt && safeString(attempt.group_id, 64).toLowerCase() !== groupId) {
+      const currentCaseIdentity = await get(
+        `SELECT 1 AS present
+         FROM incident_response_cases AS c
+         JOIN alerts AS a ON a.alert_id = c.representative_alert_id
+         WHERE c.case_id = ? AND c.group_id = ? AND a.stable_group_id = ?`,
+        [attempt.case_id, groupId, groupId],
+      );
+      strictCaseIdentityMatch = Boolean(currentCaseIdentity);
+    }
+    if (
+      !attempt
+      || (
+        safeString(attempt.group_id, 64).toLowerCase() !== groupId
+        && !strictCaseIdentityMatch
+      )
+    ) {
+      const error = new Error('reanalysis_attempt_id does not match the analyzed alert group');
+      error.statusCode = 409;
+      throw error;
+    }
+    if (attempt.analysis_id) {
+      if (attempt.analysis_id === analysisId) {
+        return incidentReanalysisBindingAuthority(attempt);
+      }
+      const error = new Error('reanalysis attempt is already bound to another analysis');
+      error.statusCode = 409;
+      throw error;
+    }
+  } else if (allowLegacyFallback) {
+    const existing = await get(
+      `SELECT attempt_id, run_id, case_id, started_at,
+              rowid AS attempt_order
+       FROM incident_reanalysis_attempts WHERE analysis_id = ? AND group_id = ?`,
+      [analysisId, groupId],
+    );
+    if (existing) return incidentReanalysisBindingAuthority(existing);
+    const parsedAnalysisStartedAt = parseProjectTimestamp(analysisStartedAt);
+    const parsedGeneratedAt = parseProjectTimestamp(generatedAt);
+    const attemptCutoff = parsedAnalysisStartedAt
+      ? formatProjectTimestamp(parsedAnalysisStartedAt)
+      : parsedGeneratedAt ? formatProjectTimestamp(parsedGeneratedAt) : nowUtc();
+    // Timestamp matching is retained only for deferred results created by a
+    // rolling-upgrade runner that predates exact attempt-id propagation.
+    attempt = await get(
+      `SELECT attempt_id, run_id, case_id, started_at,
+              rowid AS attempt_order
+       FROM incident_reanalysis_attempts
+       WHERE group_id = ? AND analysis_id IS NULL
+         AND status IN ('running', 'completed', 'failed')
+         AND julianday(replace(started_at, '  ', 'T'))
+             <= julianday(replace(?, '  ', 'T'))
+         AND (
+           status = 'running'
+           OR (
+             completed_at IS NOT NULL
+             AND julianday(replace(?, '  ', 'T'))
+                 <= julianday(replace(completed_at, '  ', 'T'))
+           )
+         )
+       ORDER BY julianday(replace(started_at, '  ', 'T')) DESC, rowid DESC
+       LIMIT 1`,
+      [groupId, attemptCutoff, attemptCutoff],
+    );
+  } else {
+    return null;
+  }
+  if (!attempt) return null;
+  const executedModel = safeString(model, 200);
+  const executedModelPath = safeString(modelPath, 100);
+  const executedProvider = incidentAnalysisProvider(executedModelPath);
+  const updatedAt = nowUtc();
+  const bound = await run(
+    `UPDATE incident_reanalysis_attempts
+     SET status = 'completed', latest_error = NULL, analysis_id = ?,
+         executed_model = ?, executed_provider = ?, executed_model_path = ?,
+         result_generated_at = ?, completed_at = ?, updated_at = ?
+     WHERE attempt_id = ? AND analysis_id IS NULL`,
+    [
+      analysisId,
+      executedModel,
+      executedProvider,
+      executedModelPath,
+      generatedAt,
+      updatedAt,
+      updatedAt,
+      attempt.attempt_id,
+    ],
+  );
+  if (Number(bound.changes || 0) !== 1) return null;
+  const newerAttempt = await get(
+    `SELECT 1 AS present
+     FROM incident_reanalysis_attempts
+     WHERE run_id = ? AND case_id = ? AND attempt_id != ?
+       AND status = 'running'
+       AND (
+         julianday(replace(started_at, '  ', 'T'))
+           > julianday(replace(?, '  ', 'T'))
+         OR (
+           julianday(replace(started_at, '  ', 'T'))
+             = julianday(replace(?, '  ', 'T'))
+           AND rowid > ?
+         )
+       )
+     LIMIT 1`,
+    [
+      attempt.run_id,
+      attempt.case_id,
+      attempt.attempt_id,
+      attempt.started_at,
+      attempt.started_at,
+      Number(attempt.attempt_order || 0),
+    ],
+  );
+  if (!newerAttempt) {
+    await run(
+      `UPDATE incident_reanalysis_run_cases
+       SET status = 'completed', latest_error = NULL, completed_at = ?,
+           latest_attempt_id = ?, analysis_id = ?, executed_model = ?,
+           executed_provider = ?, executed_model_path = ?,
+           result_generated_at = ?, updated_at = ?
+       WHERE run_id = ? AND case_id = ? AND status != 'skipped'`,
+      [
+        updatedAt,
+        attempt.attempt_id,
+        analysisId,
+        executedModel,
+        executedProvider,
+        executedModelPath,
+        generatedAt,
+        updatedAt,
+        attempt.run_id,
+        attempt.case_id,
+      ],
+    );
+  }
+  await refreshIncidentReanalysisRun(attempt.run_id);
+  return incidentReanalysisBindingAuthority(attempt);
 }
 
 async function drainEnrichmentJobs() {
@@ -4169,11 +5557,11 @@ async function applySuppressionPolicy(alert, now) {
     transport_protocol: nestedField(alert, 'network.transport')
       || nestedField(alert, 'network.iana_number'),
   });
-  if (await stableGroupHasPendingHumanDisagreement(candidateStableGroupId)) {
+  if (await stableGroupHasPendingHumanReview(candidateStableGroupId)) {
     return {
       status: 'accepted',
       reason: 'automatic suppression blocked pending explicit analyst adjudication',
-      review_status: 'disputed_pending_human',
+      review_status: 'pending_human_review',
     };
   }
 
@@ -5636,6 +7024,24 @@ async function handleRequest(request, response) {
       sendJson(response, 202, result);
       return;
     }
+    if (request.method === 'POST' && parsedUrl.pathname === '/incidents/reanalyze') {
+      const payload = await readJsonBody(request);
+      const result = await withSqliteWriteGate(() => withImmediateTransaction(
+        () => requestIncidentReanalysis(payload, payload?.case_id),
+      ));
+      void signalAiWorkers('incident-response-case-reanalysis');
+      sendJson(response, 202, result);
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/incidents/reanalyze-all') {
+      const payload = await readJsonBody(request);
+      const result = await withSqliteWriteGate(() => withImmediateTransaction(
+        () => requestIncidentReanalysis(payload),
+      ));
+      void signalAiWorkers('incident-response-bulk-reanalysis');
+      sendJson(response, 202, result);
+      return;
+    }
     if (request.method === 'POST' && parsedUrl.pathname === '/pcap/request') {
       // Queues a bounded PCAP evidence request. This endpoint never shells out
       // or contacts Security Onion; relay-side fulfillment will use its own
@@ -5672,6 +7078,7 @@ async function handleRequest(request, response) {
         dedupe_key: transition.resolvedKey,
         status,
         lease_token: transition.leaseToken,
+        claim: transition.claim || null,
       });
       return;
     }

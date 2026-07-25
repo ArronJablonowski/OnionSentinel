@@ -17,6 +17,7 @@ DASHBOARD_DIR = REPO_ROOT / "onion-sentinel-dashboard"
 BUILDER_PATH = DASHBOARD_DIR / "scripts" / "build_soc_alerts_dashboard.py"
 PORTAL_PATH = DASHBOARD_DIR / "report_portal.py"
 ALERT_STORE_PATH = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
+AI_RUNNER_PATH = REPO_ROOT / "n8n" / "bin" / "run-local-ai-analysis.py"
 
 
 def load_module(name: str, path: Path):
@@ -101,6 +102,8 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn("data-review-case=", page)
         self.assertIn("reviewBadges(item)", page)
         self.assertIn("disputed_pending_human", page)
+        self.assertIn("review_required_failed", page)
+        self.assertIn("reviewerError", page)
         self.assertIn("Freshness:", page)
         self.assertIn("Coverage:", page)
         self.assertIn("'X-Onion-Sentinel-Request':'dashboard'", page)
@@ -114,6 +117,14 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn("effective_outcome", page)
         self.assertIn("if(saving)return", page)
         self.assertIn("resolutionReason.required=false", page)
+        self.assertIn('id="ir-reanalyze-all"', page)
+        self.assertIn('id="ir-reanalysis-progress"', page)
+        self.assertIn('data-reanalyze-case=', page)
+        self.assertIn("/api/soc-incidents/reanalyze-all", page)
+        self.assertIn("/api/soc-incidents/reanalysis-runs", page)
+        self.assertIn("<span>Run <code>", page)
+        self.assertIn("<span>Release <code>", page)
+        self.assertIn("counts.skipped", page)
         self.assertLess(page.index("Incident Responder</h1>"), page.index('id="incident-response-view"'))
 
     def test_alert_rows_and_case_page_keep_the_full_escalation_contract(self) -> None:
@@ -240,7 +251,7 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
                 }],
             },
             "_investigation_query_audit": {
-                "query_contract": "onion-sentinel-investigation-pivots-v1",
+                "query_contract": "onion-sentinel-investigation-pivots-v2",
                 "provider_neutral": True,
                 "model_route": "codex-cli:gpt-5.6-sol:high",
                 "rounds_completed": 1,
@@ -736,6 +747,120 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn("durableJobs.enqueue('incident_response_analysis'", source)
         self.assertIn("agent_role: 'incident-responder'", source)
         self.assertIn("parsedUrl.pathname === '/incidents/escalate'", source)
+
+    def test_case_bound_reanalysis_has_durable_run_progress_contract(self) -> None:
+        source = ALERT_STORE_PATH.read_text(encoding="utf-8")
+        runner_source = AI_RUNNER_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("CREATE TABLE IF NOT EXISTS incident_reanalysis_runs", source)
+        self.assertIn("CREATE TABLE IF NOT EXISTS incident_reanalysis_run_cases", source)
+        self.assertIn("CREATE TABLE IF NOT EXISTS incident_reanalysis_attempts", source)
+        self.assertIn("async function requestIncidentReanalysis", source)
+        self.assertIn("reanalysis_run_id: runId", source)
+        self.assertIn("case_id: storedCaseId", source)
+        self.assertIn("alert_id: representativeAlertId", source)
+        self.assertIn("group_id: groupId", source)
+        self.assertIn("dashboard_group_id: dashboardGroupId", source)
+        self.assertIn("async function updateIncidentReanalysisProgress", source)
+        self.assertIn("async function bindIncidentReanalysisResult", source)
+        self.assertIn("incidentReanalysisAttemptId(leaseToken)", source)
+        self.assertIn("WHERE case_id = ? AND status = 'queued' AND run_id != ?", source)
+        self.assertNotIn(
+            "WHERE case_id = ? AND status IN ('queued', 'running') AND run_id != ?",
+            source,
+        )
+        self.assertIn("const releaseId = incidentReanalysisReleaseId();", source)
+        self.assertIn("process.env.ONION_SENTINEL_RELEASE_ID || 'unversioned'", source)
+        self.assertNotIn("incidentReanalysisReleaseId(payload?.release_id)", source)
+        self.assertIn(
+            '"reanalysis_attempt_id": reanalysis_attempt_id or None',
+            runner_source,
+        )
+        self.assertIn('"analysis_started_at": analysis_started_at', runner_source)
+        self.assertIn("parsedUrl.pathname === '/incidents/reanalyze'", source)
+        self.assertIn("parsedUrl.pathname === '/incidents/reanalyze-all'", source)
+
+    def test_portal_does_not_forward_client_supplied_release_id(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        def mutation(path, payload, **_kwargs):
+            captured.append((path, payload))
+            return 202, {"ok": True}
+
+        with (
+            mock.patch.object(
+                self.portal,
+                "_soc_incident_case_group_id",
+                return_value=(200, "stable-group"),
+            ),
+            mock.patch.object(
+                self.portal,
+                "_soc_alert_store_mutation",
+                side_effect=mutation,
+            ),
+        ):
+            status, _payload = self.portal.soc_incident_reanalysis_response(
+                "ir-case",
+                {
+                    "release_id": "forged-browser-release",
+                    "requested_by": "dashboard",
+                },
+            )
+            bulk_status, _bulk_payload = (
+                self.portal.soc_incident_bulk_reanalysis_response(
+                    {"release_id": "forged-browser-release"}
+                )
+            )
+
+        self.assertEqual(status, 202)
+        self.assertEqual(bulk_status, 202)
+        self.assertEqual(len(captured), 2)
+        for _path, forwarded in captured:
+            self.assertNotIn("release_id", forwarded)
+
+    def test_reanalysis_progress_api_reports_exact_case_counts(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE incident_reanalysis_runs (
+              run_id TEXT PRIMARY KEY, release_id TEXT NOT NULL, scope TEXT NOT NULL,
+              status TEXT NOT NULL, requested_by TEXT, reason TEXT,
+              total_count INTEGER NOT NULL, created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL, completed_at TEXT
+            );
+            CREATE TABLE incident_reanalysis_run_cases (
+              run_id TEXT NOT NULL, case_id TEXT NOT NULL, group_id TEXT NOT NULL,
+              dashboard_group_id TEXT NOT NULL, representative_alert_id TEXT NOT NULL,
+              status TEXT NOT NULL, skip_reason TEXT, latest_error TEXT,
+              queued_at TEXT, started_at TEXT, completed_at TEXT, updated_at TEXT NOT NULL
+            );
+            INSERT INTO incident_reanalysis_runs VALUES (
+              'irr-11111111-1111-1111-1111-111111111111', 'release-unit',
+              'all_cases', 'running', 'qa', 'Rerun every case', 4,
+              '2026-07-25T12:00:00Z', '2026-07-25T12:01:00Z', NULL
+            );
+            INSERT INTO incident_reanalysis_run_cases VALUES
+              ('irr-11111111-1111-1111-1111-111111111111', 'ir-a', 'stable-a', 'aaaaaaaaaaaa', 'alert-a', 'completed', NULL, NULL, '2026-07-25T12:00:00Z', '2026-07-25T12:00:10Z', '2026-07-25T12:00:30Z', '2026-07-25T12:00:30Z'),
+              ('irr-11111111-1111-1111-1111-111111111111', 'ir-b', 'stable-b', 'aaaaaaaaaaaa', 'alert-b', 'running', NULL, NULL, '2026-07-25T12:00:00Z', '2026-07-25T12:00:40Z', NULL, '2026-07-25T12:00:40Z'),
+              ('irr-11111111-1111-1111-1111-111111111111', 'ir-c', 'stable-c', 'aaaaaaaaaaaa', 'alert-c', 'queued', NULL, NULL, '2026-07-25T12:00:00Z', NULL, NULL, '2026-07-25T12:00:00Z'),
+              ('irr-11111111-1111-1111-1111-111111111111', 'ir-d', 'stable-d', 'aaaaaaaaaaaa', 'alert-d', 'skipped', 'missing representative', NULL, NULL, NULL, '2026-07-25T12:00:00Z', '2026-07-25T12:00:00Z');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        status, payload = self.portal.soc_incident_reanalysis_runs_response({})
+
+        self.assertEqual(status, 200)
+        run = payload["latest_run"]
+        self.assertEqual(run["run_id"], "irr-11111111-1111-1111-1111-111111111111")
+        self.assertEqual(run["release_id"], "release-unit")
+        self.assertEqual(run["total_count"], 4)
+        self.assertEqual(
+            run["counts"],
+            {"queued": 1, "running": 1, "completed": 1, "failed": 0, "skipped": 1},
+        )
+        self.assertEqual(len(payload["cases"]), 4)
 
 
 if __name__ == "__main__":

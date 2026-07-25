@@ -227,7 +227,7 @@ class DetectionValidationTests(unittest.TestCase):
         self.assertEqual(parsed["contents"][0]["modifiers"]["offset"], "16")
         self.assertEqual(parsed["state_operations"][0]["operation"], "set")
 
-    def test_bpfdoor_false_positive_pattern_is_a_deterministic_intent_mismatch(self) -> None:
+    def test_bpfdoor_code_zero_remains_unknown_without_xbit_trace(self) -> None:
         rows = []
         for sequence, marker_offset in ((2, 5), (3, None), (4, None)):
             payload = bytearray(b"A" * 320)
@@ -253,9 +253,22 @@ class DetectionValidationTests(unittest.TestCase):
         )
         self.assertEqual(features["markers"], [])
         self.assertEqual(result["event_status"], "observed")
-        self.assertEqual(result["rule_intent_match"], "mismatch")
-        self.assertTrue(result["rule_drift"]["detected"])
-        self.assertIn("icmp.code", result["rule_drift"]["missing_installed_constraints"])
+        self.assertEqual(result["rule_intent_match"], "unknown")
+        self.assertFalse(result["rule_drift"]["detected"])
+        heartbeat = next(
+            item
+            for item in result["predicate_results"]
+            if item["id"] == "bpfdoor-heartbeat-invalid-code"
+        )
+        self.assertFalse(heartbeat["required"])
+        self.assertEqual(heartbeat["status"], "mismatched")
+        state = next(
+            item
+            for item in result["predicate_results"]
+            if item["field"] == "xbits.state"
+        )
+        self.assertTrue(state["required"])
+        self.assertEqual(state["status"], "unknown")
         self.assertFalse(features["raw_payloads_included"])
         serialized = json.dumps(result)
         raw_message = json.loads(json.loads(rows[0]["raw_event_json"])["message"])

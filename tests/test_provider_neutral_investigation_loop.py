@@ -505,6 +505,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                 "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
                 "id": "alert-1",
             },
+            "anchor_time": "2026-07-24T18:30:00.000Z",
             "time_envelope": {
                 "start": "2026-07-24T17:00:00.000Z",
                 "end": "2026-07-24T20:00:00.000Z",
@@ -580,6 +581,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                 "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
                 "id": "alert-1",
             },
+            "anchor_time": "2026-07-24T18:30:00.000Z",
             "time_envelope": {
                 "start": "2026-07-24T17:00:00.000Z",
                 "end": "2026-07-24T20:00:00.000Z",
@@ -599,6 +601,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                     "transport": "tcp",
                     "protocol": "tls",
                 },
+                "role_semantics": "packet_direction",
                 "source": "trusted_context",
                 "evidence_ref": "context:event-tuple:flow-1",
             }],
@@ -1533,19 +1536,22 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         self.assertEqual(
             capability["permitted_event_tuples"],
             [{
-                "source_ip": "192.0.2.10",
-                "destination_ip": "198.51.100.20",
-                "source_port": 49152,
-                "destination_port": 443,
-                "transport": "tcp",
-                "protocol": "tls",
-                "community_id": "1:trusted-flow=",
-                "rule_id": "2016150",
+                "event_tuple": {
+                    "source_ip": "192.0.2.10",
+                    "destination_ip": "198.51.100.20",
+                    "source_port": 49152,
+                    "destination_port": 443,
+                    "transport": "tcp",
+                    "protocol": "tls",
+                    "community_id": "1:trusted-flow=",
+                    "rule_id": "2016150",
+                },
+                "role_semantics": "packet_direction",
             }],
         )
         self.assertEqual(
             local["permitted_event_tuples"][0]["event_tuple"],
-            capability["permitted_event_tuples"][0],
+            capability["permitted_event_tuples"][0]["event_tuple"],
         )
         self.assertIn(
             "never merge",

@@ -6092,20 +6092,86 @@ def read_active_llm_analyses() -> list[dict]:
     return active
 
 
+def llm_agent_execution_state(record: object) -> dict:
+    """Describe the persisted agent/job owner for one observed execution."""
+    current = record if isinstance(record, dict) else {}
+    role = str(current.get("agent_role") or "").strip().lower().replace("_", "-")
+    labels = {
+        "soc-analyst": ("SOC Analyst", "ai_analysis", "SOC alert triage"),
+        "incident-responder": (
+            "Incident Responder",
+            "incident_response_analysis",
+            "Incident response investigation",
+        ),
+    }
+    agent_label, job_type, job_label = labels.get(
+        role,
+        ("Unknown agent", "unknown", "Unknown analysis job"),
+    )
+    return {
+        "agent_role": role or "unknown",
+        "agent_label": agent_label,
+        "job_type": job_type,
+        "job_label": job_label,
+    }
+
+
+def decorate_llm_analysis_record(record: object, *, live: bool) -> dict:
+    """Add display provenance while retaining the immutable raw audit fields."""
+    decorated = dict(record) if isinstance(record, dict) else {}
+    decorated.update(llm_agent_execution_state(decorated))
+    if live:
+        runtime = llm_runtime_model_state(decorated)
+        if runtime.get("running"):
+            decorated.update({
+                "runtime_model_label": runtime.get("label") or "Unknown model",
+                "phase_label": runtime.get("phase_label") or "Analysis",
+            })
+        else:
+            decorated.update({
+                "runtime_model_label": "No model running",
+                "phase_label": "Idle",
+            })
+        return decorated
+    # Completed rows retain the model/provider observed in the artifact. Treat
+    # them as a legacy running record only for neutral route-label formatting.
+    historical = dict(decorated)
+    historical["status"] = "running"
+    historical.pop("active_phase", None)
+    runtime = llm_runtime_model_state(historical)
+    model_observed = bool(
+        str(decorated.get("model") or "").strip()
+        or str(decorated.get("model_route") or "").strip()
+    )
+    decorated.update({
+        "runtime_model_label": (
+            runtime.get("label") or "Unknown model"
+            if model_observed
+            else "No model started"
+        ),
+        "phase_label": "Completed run",
+    })
+    return decorated
+
+
 def read_llm_current_analysis() -> dict:
     queue_size = current_llm_queue_size()
     active_runs = read_active_llm_analyses()
     if active_runs:
-        data = dict(active_runs[0])
+        decorated_runs = [
+            decorate_llm_analysis_record(record, live=True)
+            for record in active_runs
+        ]
+        data = dict(decorated_runs[0])
         data.update({
             "ok": True,
             "status": "running",
             "queue_size": queue_size,
-            "active_count": len(active_runs),
-            "active_runs": active_runs,
+            "active_count": len(decorated_runs),
+            "active_runs": decorated_runs,
         })
-        if len(active_runs) > 1:
-            runtimes = [llm_runtime_model_state(record) for record in active_runs]
+        if len(decorated_runs) > 1:
+            runtimes = [llm_runtime_model_state(record) for record in decorated_runs]
             labels = [str(runtime.get("label") or "") for runtime in runtimes]
             providers = list(dict.fromkeys(
                 str(runtime.get("provider") or "") for runtime in runtimes
@@ -6120,19 +6186,37 @@ def read_llm_current_analysis() -> dict:
                 "active_model": " + ".join(labels),
                 "active_provider": " + ".join(providers),
                 "active_model_route": " | ".join(routes),
+                "runtime_model_label": " + ".join(labels),
+                "phase_label": "Concurrent analyses",
+                "agent_label": " + ".join(dict.fromkeys(
+                    str(record.get("agent_label") or "")
+                    for record in decorated_runs
+                    if record.get("agent_label")
+                )),
+                "job_label": " + ".join(dict.fromkeys(
+                    str(record.get("job_label") or "")
+                    for record in decorated_runs
+                    if record.get("job_label")
+                )),
             })
         return data
 
     data = read_bounded_llm_analysis_record(SOC_ALERT_LLM_ANALYSIS_CURRENT_FILE)
     if not data:
-        return {"ok": True, "status": "idle", "alert": {}, "model": "n/a", "queue_size": queue_size}
+        return decorate_llm_analysis_record({
+            "ok": True,
+            "status": "idle",
+            "alert": {},
+            "model": "n/a",
+            "queue_size": queue_size,
+        }, live=True)
     data = dict(data)
     data["ok"] = True
     data["queue_size"] = queue_size
     if data.get("status") == "running" and not llm_analysis_process_active(str(data.get("prompt_package") or "")):
         data["status"] = "idle"
         data["stale_running_record"] = True
-    return data
+    return decorate_llm_analysis_record(data, live=True)
 
 
 def llm_runtime_model_state(current: object) -> dict:
@@ -6171,21 +6255,27 @@ def llm_runtime_model_state(current: object) -> dict:
     elif provider_key == "ollama" or model_path == "ollama":
         provider = "Ollama"
 
-    if phase == "post_processing" and not route and not model:
+    if phase in {"preparing", "post_processing"} and not route and not model:
+        phase_label = (
+            "Preparing analysis"
+            if phase == "preparing"
+            else "Finalizing analysis"
+        )
         return {
             "running": True,
             "phase": phase,
-            "phase_label": "Finalizing analysis",
+            "phase_label": phase_label,
             "route": "",
             "model": "",
             "provider": "",
             "label": "No model running",
-            "detail": "Finalizing analysis · No model running",
+            "detail": f"{phase_label} · No model running",
         }
     label = " · ".join(part for part in (provider, model) if part) or "Unknown model"
     if provider == "Codex CLI" and effort:
         label += f" ({effort})"
     phase_label = {
+        "preparing": "Preparing analysis",
         "second_opinion": "Second-opinion review",
         "live_follow_up": "Live-evidence follow-up",
         "primary_analysis": "Analyzing",
@@ -6315,7 +6405,14 @@ def llm_analysis_logs_response(query: dict[str, list[str]]) -> dict:
         "limit": limit,
         "total": total,
         "total_pages": total_pages,
-        "logs": logs,
+        "logs": [
+            decorate_llm_analysis_record(record, live=False)
+            for record in logs
+        ],
+        "active_runs": [
+            decorate_llm_analysis_record(record, live=True)
+            for record in read_active_llm_analyses()
+        ] if page == 1 else [],
     }
 
 
@@ -6374,10 +6471,13 @@ def update_soc_alert_status(payload: dict) -> tuple[bool, dict]:
                     review = soc_alert_review_state_for_group(conn, alert_id)
             except (FileNotFoundError, sqlite3.Error):
                 review = _soc_review_defaults()
-            if review.get("final_review_status") == "disputed_pending_human":
+            if review.get("final_review_status") in {
+                "disputed_pending_human",
+                "review_required_failed",
+            }:
                 return False, {
                     "ok": False,
-                    "error": "Material model disagreement requires explicit analyst adjudication before suppression.",
+                    "error": "Required independent review needs explicit analyst adjudication before suppression.",
                     "status": int(HTTPStatus.CONFLICT),
                 }
         write_soc_alert_status(alert_id, request_payload)
@@ -6965,6 +7065,7 @@ def _soc_review_defaults() -> dict[str, object]:
         "evidence_used_count": 0,
         "evidence_gap_count": 0,
         "reviewer_status": "not_requested",
+        "reviewer_error": "",
         "reviewer_outcome": "",
         "reviewer_confidence": "",
         "reviewer_agreement": "",
@@ -6973,6 +7074,54 @@ def _soc_review_defaults() -> dict[str, object]:
         "final_review_status": "unreviewed",
         "adjudication": None,
     }
+
+
+SOC_REVIEW_FAILURE_STATUSES = {
+    "failed",
+    "invalid",
+    "invalid_response",
+    "not_configured",
+    "not_independent",
+    "review_required_failed",
+}
+
+
+def _soc_embedded_reviewer(
+    response: dict[str, object],
+    analysis: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Normalize a persisted embedded reviewer result, including failure detail."""
+    analysis = analysis if isinstance(analysis, dict) else {}
+    embedded = response.get("_second_opinion")
+    embedded = embedded if isinstance(embedded, dict) else {}
+    comparison = embedded.get("comparison")
+    comparison = comparison if isinstance(comparison, dict) else {}
+    reviewer_response = embedded.get("response")
+    reviewer_response = (
+        reviewer_response if isinstance(reviewer_response, dict) else {}
+    )
+    return {
+        "status": embedded.get("status") or "not_requested",
+        "reviewer_error": str(embedded.get("error") or "")[:1000],
+        "primary_outcome": analysis.get("detection_outcome") or "",
+        "primary_confidence": analysis.get("confidence") or "",
+        "reviewer_outcome": reviewer_response.get("detection_outcome") or "",
+        "reviewer_confidence": reviewer_response.get("confidence") or "",
+        "agreement": comparison.get("agreement") or "",
+        "material_disagreement": bool(comparison.get("material_disagreement")),
+        "disputed_fields_json": json.dumps(
+            comparison.get("disputed_fields") or []
+        ),
+    }
+
+
+def _soc_reviewer_error_select(conn: sqlite3.Connection) -> str:
+    """Keep restored pre-migration databases readable."""
+    return (
+        "reviewer_error"
+        if "reviewer_error" in sqlite_table_columns(conn, "ai_second_opinion_runs")
+        else "'' AS reviewer_error"
+    )
 
 
 def _soc_review_final_status(
@@ -6985,7 +7134,10 @@ def _soc_review_final_status(
         return "adjudicated"
     if material_disagreement:
         return "disputed_pending_human"
-    if str(reviewer.get("status") or "").strip().lower() != "completed":
+    reviewer_status = str(reviewer.get("status") or "").strip().lower()
+    if reviewer_status in SOC_REVIEW_FAILURE_STATUSES:
+        return "review_required_failed"
+    if reviewer_status != "completed":
         return "unreviewed"
     if str(reviewer.get("agreement") or "").strip().lower() == "agreement":
         return "model_consensus"
@@ -7105,12 +7257,14 @@ def soc_alert_apply_review_metadata(
     })
     if analysis_ids and sqlite_table_exists(conn, "ai_second_opinion_runs"):
         placeholders = ",".join("?" for _ in analysis_ids)
+        reviewer_error_select = _soc_reviewer_error_select(conn)
         try:
             for item in conn.execute(
                 f"""
                 SELECT analysis_id, status, primary_outcome, primary_confidence,
                        reviewer_outcome, reviewer_confidence, agreement,
-                       material_disagreement, disputed_fields_json, generated_at
+                       material_disagreement, disputed_fields_json,
+                       {reviewer_error_select}, generated_at
                 FROM ai_second_opinion_runs
                 WHERE analysis_id IN ({placeholders})
                 """,
@@ -7175,21 +7329,11 @@ def soc_alert_apply_review_metadata(
         coverage = "gaps" if gap_count else ("complete" if used_count else "unknown")
 
         reviewer = review_by_analysis.get(analysis_id, {})
+        embedded_reviewer = _soc_embedded_reviewer(response, analysis)
         if not reviewer:
-            embedded = response.get("_second_opinion")
-            embedded = embedded if isinstance(embedded, dict) else {}
-            comparison = embedded.get("comparison")
-            comparison = comparison if isinstance(comparison, dict) else {}
-            reviewer_response = embedded.get("response")
-            reviewer_response = reviewer_response if isinstance(reviewer_response, dict) else {}
-            reviewer = {
-                "status": embedded.get("status") or "not_requested",
-                "reviewer_outcome": reviewer_response.get("detection_outcome") or "",
-                "reviewer_confidence": reviewer_response.get("confidence") or "",
-                "agreement": comparison.get("agreement") or "",
-                "material_disagreement": bool(comparison.get("material_disagreement")),
-                "disputed_fields_json": json.dumps(comparison.get("disputed_fields") or []),
-            }
+            reviewer = embedded_reviewer
+        elif not reviewer.get("reviewer_error"):
+            reviewer["reviewer_error"] = embedded_reviewer.get("reviewer_error") or ""
         adjudication = adjudication_by_analysis_group.get((
             analysis_id,
             stable_by_dashboard.get(dashboard_id) or dashboard_id,
@@ -7255,6 +7399,7 @@ def soc_alert_apply_review_metadata(
             "evidence_used_count": used_count,
             "evidence_gap_count": gap_count,
             "reviewer_status": str(reviewer.get("status") or "not_requested"),
+            "reviewer_error": str(reviewer.get("reviewer_error") or "")[:1000],
             "reviewer_outcome": str(reviewer.get("reviewer_outcome") or ""),
             "reviewer_confidence": str(reviewer.get("reviewer_confidence") or ""),
             "reviewer_agreement": str(reviewer.get("agreement") or ""),
@@ -7974,6 +8119,139 @@ def soc_incident_status_response(
     )
 
 
+def soc_incident_reanalysis_response(
+    case_id: str,
+    payload: dict | None = None,
+) -> tuple[int, dict]:
+    status, _group_id = _soc_incident_case_group_id(case_id)
+    if status != HTTPStatus.OK:
+        return soc_alert_api_error(
+            "Incident case not found" if status == HTTPStatus.NOT_FOUND else "Invalid incident case id",
+            status,
+        )
+    payload = payload if isinstance(payload, dict) else {}
+    return _soc_alert_store_mutation(
+        "/incidents/reanalyze",
+        {
+            "case_id": case_id,
+            "reason": str(
+                payload.get("reason")
+                or "Analyst requested fresh Incident Responder analysis"
+            )[:1000],
+            "requested_by": str(payload.get("requested_by") or "dashboard")[:100],
+        },
+        success_status=HTTPStatus.ACCEPTED,
+    )
+
+
+def soc_incident_bulk_reanalysis_response(
+    payload: dict | None = None,
+) -> tuple[int, dict]:
+    payload = payload if isinstance(payload, dict) else {}
+    return _soc_alert_store_mutation(
+        "/incidents/reanalyze-all",
+        {
+            "reason": str(
+                payload.get("reason")
+                or "Analyst requested fresh analysis of all incident cases"
+            )[:1000],
+            "requested_by": str(payload.get("requested_by") or "dashboard")[:100],
+        },
+        success_status=HTTPStatus.ACCEPTED,
+    )
+
+
+def soc_incident_reanalysis_runs_response(
+    query: dict[str, list[str]],
+) -> tuple[int, dict]:
+    run_id = str((query.get("run_id") or [""])[0] or "").strip().lower()
+    if run_id and not re.fullmatch(r"irr-[a-z0-9-]{1,64}", run_id):
+        return soc_alert_api_error("Invalid incident reanalysis run id")
+    try:
+        with soc_alert_db_connect() as conn:
+            if not sqlite_table_exists(conn, "incident_reanalysis_runs"):
+                return 200, {
+                    "ok": True,
+                    "latest_run": None,
+                    "runs": [],
+                    "cases": [],
+                    "schema_ready": False,
+                }
+            where_sql = "WHERE run_id = ?" if run_id else ""
+            arguments: list[object] = [run_id] if run_id else []
+            runs = [
+                dict(row)
+                for row in conn.execute(
+                    f"""
+                    SELECT run_id, release_id, scope, status, requested_by, reason,
+                           total_count, created_at, updated_at, completed_at
+                    FROM incident_reanalysis_runs
+                    {where_sql}
+                    ORDER BY created_at DESC, run_id DESC LIMIT 20
+                    """,
+                    arguments,
+                ).fetchall()
+            ]
+            run_ids = [str(item.get("run_id") or "") for item in runs]
+            counts_by_run: dict[str, dict[str, int]] = {
+                item: {
+                    "queued": 0,
+                    "running": 0,
+                    "completed": 0,
+                    "failed": 0,
+                    "skipped": 0,
+                }
+                for item in run_ids
+            }
+            if run_ids and sqlite_table_exists(conn, "incident_reanalysis_run_cases"):
+                placeholders = ",".join("?" for _ in run_ids)
+                for row in conn.execute(
+                    f"""
+                    SELECT run_id, status, COUNT(*) AS count
+                    FROM incident_reanalysis_run_cases
+                    WHERE run_id IN ({placeholders})
+                    GROUP BY run_id, status
+                    """,
+                    run_ids,
+                ).fetchall():
+                    run_counts = counts_by_run.get(str(row["run_id"] or ""))
+                    if run_counts is not None and str(row["status"] or "") in run_counts:
+                        run_counts[str(row["status"])] = int(row["count"] or 0)
+            for item in runs:
+                item["total_count"] = int(item.get("total_count") or 0)
+                item["counts"] = counts_by_run.get(str(item.get("run_id") or ""), {})
+            selected_run_id = run_id or (run_ids[0] if run_ids else "")
+            cases = []
+            if selected_run_id and sqlite_table_exists(conn, "incident_reanalysis_run_cases"):
+                cases = [
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT run_id, case_id, group_id, dashboard_group_id,
+                               representative_alert_id, status, skip_reason,
+                               latest_error, queued_at, started_at, completed_at,
+                               updated_at
+                        FROM incident_reanalysis_run_cases
+                        WHERE run_id = ?
+                        ORDER BY case_id ASC LIMIT 2000
+                        """,
+                        (selected_run_id,),
+                    ).fetchall()
+                ]
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        return soc_alert_api_error(
+            f"Incident reanalysis progress unavailable: {exc}",
+            HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+    return 200, {
+        "ok": True,
+        "latest_run": runs[0] if runs else None,
+        "runs": runs,
+        "cases": cases,
+        "schema_ready": True,
+    }
+
+
 def soc_incident_current_analysis(
     conn: sqlite3.Connection,
     case: dict[str, object],
@@ -8251,11 +8529,13 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
             second_opinions: dict[str, dict[str, object]] = {}
             if analysis_ids and sqlite_table_exists(conn, "ai_second_opinion_runs"):
                 placeholders = ",".join("?" for _ in analysis_ids)
+                reviewer_error_select = _soc_reviewer_error_select(conn)
                 for item in conn.execute(
                     f"""
                     SELECT analysis_id, status, primary_outcome, primary_confidence,
                            reviewer_outcome, reviewer_confidence, agreement,
-                           material_disagreement, disputed_fields_json, generated_at
+                           material_disagreement, disputed_fields_json,
+                           {reviewer_error_select}, generated_at
                     FROM ai_second_opinion_runs
                     WHERE analysis_id IN ({placeholders})
                     """,
@@ -8336,21 +8616,13 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                     else ("current" if analysis_generated else "not_analyzed")
                 )
                 reviewer = second_opinions.get(analysis_id, {})
+                embedded_reviewer = _soc_embedded_reviewer(response, analysis)
                 if not reviewer:
-                    embedded = response.get("_second_opinion")
-                    embedded = embedded if isinstance(embedded, dict) else {}
-                    comparison = embedded.get("comparison")
-                    comparison = comparison if isinstance(comparison, dict) else {}
-                    reviewer_response = embedded.get("response")
-                    reviewer_response = reviewer_response if isinstance(reviewer_response, dict) else {}
-                    reviewer = {
-                        "status": embedded.get("status") or "not_requested",
-                        "reviewer_outcome": reviewer_response.get("detection_outcome") or "",
-                        "reviewer_confidence": reviewer_response.get("confidence") or "",
-                        "agreement": comparison.get("agreement") or "",
-                        "material_disagreement": bool(comparison.get("material_disagreement")),
-                        "disputed_fields_json": json.dumps(comparison.get("disputed_fields") or []),
-                    }
+                    reviewer = embedded_reviewer
+                elif not reviewer.get("reviewer_error"):
+                    reviewer["reviewer_error"] = (
+                        embedded_reviewer.get("reviewer_error") or ""
+                    )
                 material_disagreement = str(
                     reviewer.get("material_disagreement") or ""
                 ).strip().lower() in {"1", "true", "yes"}
@@ -8438,6 +8710,11 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                         if fallback_review
                         else reviewer.get("status")
                     ) or "not_requested",
+                    "reviewer_error": (
+                        fallback_review.get("reviewer_error")
+                        if fallback_review
+                        else reviewer.get("reviewer_error")
+                    ) or "",
                     "reviewer_outcome": (
                         fallback_review.get("reviewer_outcome")
                         if fallback_review
@@ -8517,12 +8794,14 @@ def soc_incident_review_state(
 
     reviewer: dict[str, object] = {}
     if analysis_id and sqlite_table_exists(conn, "ai_second_opinion_runs"):
+        reviewer_error_select = _soc_reviewer_error_select(conn)
         try:
             row = conn.execute(
-                """
+                f"""
                 SELECT status, primary_outcome, primary_confidence,
                        reviewer_outcome, reviewer_confidence, agreement,
-                       material_disagreement, disputed_fields_json, generated_at
+                       material_disagreement, disputed_fields_json,
+                       {reviewer_error_select}, generated_at
                 FROM ai_second_opinion_runs
                 WHERE analysis_id = ?
                 """,
@@ -8531,23 +8810,11 @@ def soc_incident_review_state(
             reviewer = dict(row) if row else {}
         except sqlite3.Error:
             reviewer = {}
+    embedded_reviewer = _soc_embedded_reviewer(response, analysis)
     if not reviewer:
-        embedded = response.get("_second_opinion")
-        embedded = embedded if isinstance(embedded, dict) else {}
-        comparison = embedded.get("comparison")
-        comparison = comparison if isinstance(comparison, dict) else {}
-        reviewer_response = embedded.get("response")
-        reviewer_response = reviewer_response if isinstance(reviewer_response, dict) else {}
-        reviewer = {
-            "status": embedded.get("status") or "not_requested",
-            "primary_outcome": analysis.get("detection_outcome") or "",
-            "primary_confidence": analysis.get("confidence") or "",
-            "reviewer_outcome": reviewer_response.get("detection_outcome") or "",
-            "reviewer_confidence": reviewer_response.get("confidence") or "",
-            "agreement": comparison.get("agreement") or "",
-            "material_disagreement": bool(comparison.get("material_disagreement")),
-            "disputed_fields_json": json.dumps(comparison.get("disputed_fields") or []),
-        }
+        reviewer = embedded_reviewer
+    elif not reviewer.get("reviewer_error"):
+        reviewer["reviewer_error"] = embedded_reviewer.get("reviewer_error") or ""
     material = str(reviewer.get("material_disagreement") or "").strip().lower() in {
         "1", "true", "yes",
     }
@@ -8620,6 +8887,7 @@ def soc_incident_review_state(
         "evidence_used_count": used_count,
         "evidence_gap_count": gap_count,
         "reviewer_status": str(reviewer.get("status") or "not_requested"),
+        "reviewer_error": str(reviewer.get("reviewer_error") or "")[:1000],
         "reviewer_outcome": str(reviewer.get("reviewer_outcome") or ""),
         "reviewer_confidence": str(reviewer.get("reviewer_confidence") or ""),
         "reviewer_agreement": str(reviewer.get("agreement") or ""),
@@ -8714,6 +8982,7 @@ def render_analyst_review_panel(
     )
     status_labels = {
         "disputed_pending_human": "Disputed — human decision required",
+        "review_required_failed": "Independent review failed — human decision required",
         "adjudicated": "Adjudicated",
         "model_consensus": "Primary and reviewer agree",
         "reviewer_advisory": "Reviewer advisory — no material disagreement",
@@ -8740,6 +9009,7 @@ def render_analyst_review_panel(
     primary_duplicate_of = str(review.get("primary_duplicate_of") or "")
     reviewer_outcome = str(review.get("reviewer_outcome") or "")
     reviewer_confidence = str(review.get("reviewer_confidence") or "")
+    reviewer_error = str(review.get("reviewer_error") or "").strip()[:1000]
     agreement = str(
         review.get("reviewer_agreement")
         or review.get("agreement")
@@ -8753,7 +9023,8 @@ def render_analyst_review_panel(
     disputed_fields = review.get("disputed_fields")
     disputed_fields = disputed_fields if isinstance(disputed_fields, list) else []
     disputed = final_status == "disputed_pending_human"
-    role_attr = ' role="alert"' if disputed else ""
+    review_failed = final_status == "review_required_failed"
+    role_attr = ' role="alert"' if disputed or review_failed else ""
     disabled_attr = (
         ' disabled title="Run an analysis before recording an analyst decision"'
         if not analysis_id
@@ -8774,6 +9045,13 @@ def render_analyst_review_panel(
         + ", ".join(_incident_html_text(item) for item in disputed_fields[:20])
         + "</p>"
         if disputed_fields
+        else ""
+    )
+    reviewer_error_html = (
+        '<p class="analyst-review-failure"><b>Reviewer failure:</b> '
+        + _incident_html_text(reviewer_error)
+        + "</p>"
+        if reviewer_error
         else ""
     )
     adjudication_html = ""
@@ -8857,9 +9135,9 @@ def render_analyst_review_panel(
         f'<span class="review-badge review-freshness-{html.escape(freshness, quote=True)}">Freshness: {html.escape(freshness.replace("_", " "))}</span>'
         f'<span class="review-badge review-coverage-{html.escape(coverage, quote=True)}">Coverage: {html.escape(coverage.replace("_", " "))}</span>'
         "</div></div>"
-        f"{comparison}{disputed_fields_html}{adjudication_html}{case_resolution_html}"
+        f"{comparison}{reviewer_error_html}{disputed_fields_html}{adjudication_html}{case_resolution_html}"
         f'<button class="analyst-adjudicate-button" type="button" data-open-adjudication{disabled_attr}>'
-        f'{"Resolve disagreement" if disputed else "Record analyst decision"}'
+        f'{"Resolve required review" if disputed or review_failed else "Record analyst decision"}'
         "</button>"
         "</section>"
     )
@@ -10135,7 +10413,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-incidents", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-incidents/") and parsed.path.endswith("/detail")) or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith(("/ack", "/escalate"))):
+        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-incidents", "/api/soc-incidents/reanalysis-runs", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-incidents/") and parsed.path.endswith("/detail")) or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith(("/ack", "/escalate"))):
             if parsed.path == "/admin" and not self._admin_authenticated():
                 self.send_response(HTTPStatus.FOUND)
                 self.send_header("Location", "/admin/login")
@@ -10156,6 +10434,13 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        is_incident_reanalysis = (
+            parsed.path == "/api/soc-incidents/reanalyze-all"
+            or (
+                parsed.path.startswith("/api/soc-incidents/")
+                and parsed.path.endswith("/reanalyze")
+            )
+        )
         is_review_write = (
             parsed.path.startswith("/api/soc-alerts/")
             and parsed.path.endswith("/adjudicate")
@@ -10163,7 +10448,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             parsed.path.startswith("/api/soc-incidents/")
             and parsed.path.endswith(("/adjudicate", "/status"))
         )
-        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and parsed.path not in SOC_SETTINGS_PROMPT_API_PATHS and not (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) and not is_review_write:
+        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and parsed.path not in SOC_SETTINGS_PROMPT_API_PATHS and not (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) and not is_review_write and not is_incident_reanalysis:
             return self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain; charset=utf-8")
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -10172,7 +10457,7 @@ class PortalHandler(BaseHTTPRequestHandler):
         if length <= 0 or length > 50000:
             if parsed.path == "/api/admin/start-service":
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
-            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) or is_review_write:
+            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) or is_review_write or is_incident_reanalysis:
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
             if parsed.path.startswith("/api/resource-library/"):
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
@@ -10180,6 +10465,46 @@ class PortalHandler(BaseHTTPRequestHandler):
                 return self._send(HTTPStatus.BAD_REQUEST, render_admin_dashboard("Invalid admin action request size.", True))
             return self._send(HTTPStatus.BAD_REQUEST, render_admin_login("Invalid request size.", True))
         raw = self.rfile.read(length).decode("utf-8", errors="replace")
+        if is_incident_reanalysis:
+            if not self._soc_review_write_authorized():
+                return self._send(
+                    HTTPStatus.FORBIDDEN,
+                    json.dumps({
+                        "ok": False,
+                        "error": "Incident reanalysis requests must come from the same-origin dashboard.",
+                    }).encode(),
+                    "application/json; charset=utf-8",
+                )
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                payload = None
+            if not isinstance(payload, dict):
+                return self._send(
+                    HTTPStatus.BAD_REQUEST,
+                    json.dumps({
+                        "ok": False,
+                        "error": "Request body must be a JSON object.",
+                    }).encode(),
+                    "application/json; charset=utf-8",
+                )
+            if parsed.path == "/api/soc-incidents/reanalyze-all":
+                status, data = soc_incident_bulk_reanalysis_response(payload)
+            else:
+                encoded_id = parsed.path[
+                    len("/api/soc-incidents/"):-len("/reanalyze")
+                ].strip("/")
+                status, data = soc_incident_reanalysis_response(
+                    unquote(encoded_id),
+                    payload,
+                )
+            if status < 400:
+                SOC_ALERT_RESPONSE_CACHE.clear()
+            return self._send(
+                status,
+                json.dumps(data, indent=2).encode(),
+                "application/json; charset=utf-8",
+            )
         if is_review_write:
             if not self._soc_review_write_authorized():
                 return self._send(
@@ -10434,6 +10759,9 @@ class PortalHandler(BaseHTTPRequestHandler):
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/soc-incidents":
             status, data = soc_incidents_query_response(query)
+            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if path == "/api/soc-incidents/reanalysis-runs":
+            status, data = soc_incident_reanalysis_runs_response(query)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path.startswith("/api/soc-incidents/") and path.endswith("/adjudications"):
             case_id = unquote(

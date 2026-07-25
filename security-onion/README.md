@@ -73,9 +73,20 @@ and is not independently executed.
 ## Iterative Elastic and OQL Investigation Pivots
 
 The same incident-evidence forced command also accepts
-`onion-sentinel-investigation-pivots-v1` batches. This opens an iterative
+`onion-sentinel-investigation-pivots-v2` batches. This opens an iterative
 investigation path without turning the SSH key into a general Elastic, Hunt,
 or shell proxy.
+
+The Mac and Security Onion sides must use the same exact wire contract. The Mac
+installer reads the trusted runtime `incident-evidence.json` setting
+`investigation_query_contract`; an absent setting selects v1. Every v1
+selection validates and atomically installs the checksum-pinned,
+repository-owned v1 contract and collector, replacing modified or stale runtime
+copies, while still installing the hardened version-aware prompt builder and
+runner. V2 is installed only when the config explicitly contains
+`onion-sentinel-investigation-pivots-v2`. Set that value only after this v2
+forced-command wrapper is installed and verified on Security Onion. There is no
+automatic retry or downgrade based on an error response.
 
 The SOC Analyst or Incident Responder model may propose only:
 
@@ -87,11 +98,12 @@ The SOC Analyst or Incident Responder model may propose only:
 - one of six reviewed purposes (`validate_detection`,
   `establish_timeline`, `correlate_observable`, `measure_prevalence`,
   `identify_related_activity`, or `test_benign_hypothesis`);
-- fixed aggregation behavior `events`, `count`, or `timeline`;
+- fixed aggregation behavior `events`, `count`, `timeline`, or Elastic-only
+  `anchor_nearest`;
 - exact IP, domain, host, or user values;
 - optionally, a subset of one authenticated event tuple containing exact
   source/destination roles, ports, transport, protocol, community ID, or rule
-  ID;
+  ID (matched exactly against `rule.id` or `rule.uuid`);
 - one UTC window of no more than 24 hours; and
 - a result size from 1 through 100.
 
@@ -101,8 +113,12 @@ proposal with a trusted authorization context containing the case/group,
 representative alert anchor, time envelope, base observables, and any new exact
 observable previously discovered in authenticated evidence. Every observable
 is tagged as `trusted_context` or `prior_evidence` with a bounded evidence
-reference. Event tuples retain their trusted source and evidence reference and
-cannot be assembled as a cross-product from separate events. The Security
+reference. Event tuples retain their trusted source, evidence reference, and
+role semantics and cannot be assembled as a cross-product from separate
+events. Suricata packet direction is never projected onto Zeek
+originator/responder roles. Cross-sensor tuple pivots use
+`network.community_id`; a missing Community ID is an unsupported correlation
+instead of an invitation to reverse or guess endpoint roles. The Security
 Onion wrapper independently validates that manifest and rejects unused,
 missing, conflicting, role-swapped, wildcard, malformed, unsupported, or
 out-of-envelope values. It also rejects any returned hit that does not satisfy
@@ -122,6 +138,13 @@ The wrapper generates all three audit forms locally:
 - an analyst-readable KQL equivalent; and
 - actual Security Onion Hunt OQL using Lucene predicates and the allowlisted
   `| sortby @timestamp^` pipeline for chronological timelines.
+
+Each result distinguishes an exact aggregate, exact zero, complete event set,
+bounded sample, and partial/failed execution. The returned coverage metadata
+also records newest-first, chronological, or anchor-nearest selection. A zero
+is valid only when Elasticsearch reports an exact total for the exact
+authorized filters and time window; an empty bounded sample, unsupported pack
+combination, timeout, or shard failure is never treated as proof of absence.
 
 An `oql` request is labeled `compiled_oql_equivalent`: its semantic equivalent
 is executed through the reviewed Elasticsearch path. It is not represented as

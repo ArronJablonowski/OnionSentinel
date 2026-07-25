@@ -150,12 +150,6 @@ def _model_evidence(response: dict[str, Any]) -> dict[str, Any]:
             "pack": result["pack"],
             "purpose": result["purpose"],
             "aggregation": result["aggregation"],
-            "match_semantics": result["match_semantics"],
-            **(
-                {"anchor_time": result["anchor_time"]}
-                if result.get("anchor_time")
-                else {}
-            ),
             "window": result["window"],
             "observables": result["observables"],
             "observable_provenance": result["observable_provenance"],
@@ -173,7 +167,6 @@ def _model_evidence(response: dict[str, Any]) -> dict[str, Any]:
             "total_hits_relation": result["total_hits_relation"],
             "returned_hits": result["returned_hits"],
             "truncated": result["truncated"],
-            "result_coverage": result["result_coverage"],
             "model_returned_hits": len(compact_hits),
             "model_projection_truncated": len(result.get("hits", [])) > len(compact_hits),
             "query": selected_query,
@@ -204,12 +197,6 @@ def _query_audit(response: dict[str, Any]) -> list[dict[str, Any]]:
             "pack": result["pack"],
             "purpose": result["purpose"],
             "aggregation": result["aggregation"],
-            "match_semantics": result["match_semantics"],
-            **(
-                {"anchor_time": result["anchor_time"]}
-                if result.get("anchor_time")
-                else {}
-            ),
             "window": result["window"],
             "observables": result["observables"],
             "observable_provenance": result["observable_provenance"],
@@ -240,7 +227,6 @@ def _query_audit(response: dict[str, Any]) -> list[dict[str, Any]]:
             "total_hits_relation": result["total_hits_relation"],
             "returned_hits": result["returned_hits"],
             "truncated": result["truncated"],
-            "result_coverage": result["result_coverage"],
             "duration_ms": result["duration_ms"],
             "timed_out": result["timed_out"],
             "took_ms": result["took_ms"],

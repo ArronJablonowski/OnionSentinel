@@ -40,11 +40,20 @@ from detection_validation import (
     marker_specs,
     resolve_detection_playbook,
 )
-from investigation_query_contract import (
-    EVENT_TUPLE_FIELDS,
-    PACKS as INVESTIGATION_CONTRACT_PACKS,
-    SAFE_ATOM_RE as INVESTIGATION_EVENT_TUPLE_ATOM_RE,
+import investigation_query_contract as INVESTIGATION_CONTRACT
+
+
+INVESTIGATION_CONTRACT_PACKS = INVESTIGATION_CONTRACT.PACKS
+INVESTIGATION_EVENT_TUPLE_ATOM_RE = INVESTIGATION_CONTRACT.SAFE_ATOM_RE
+EVENT_TUPLE_PATHS = getattr(
+    INVESTIGATION_CONTRACT,
+    "EVENT_TUPLE_PATHS",
+    {
+        field: (path,)
+        for field, path in INVESTIGATION_CONTRACT.EVENT_TUPLE_FIELDS.items()
+    },
 )
+PACK_ROLE_MODE = getattr(INVESTIGATION_CONTRACT, "PACK_ROLE_MODE", {})
 
 
 HOME = Path.home()
@@ -68,7 +77,11 @@ MAX_ARTIFACT_JSON_BYTES = max(64 * 1024, int(os.environ.get("SOC_AI_MAX_ARTIFACT
 MAX_INCIDENT_EVIDENCE_BYTES = 8 * 1024 * 1024
 MAX_SYSTEM_PROMPT_BYTES = max(8 * 1024, int(os.environ.get("SOC_AI_MAX_SYSTEM_PROMPT_BYTES", str(64 * 1024))))
 LEGACY_ARTIFACT_SCAN_LIMIT = max(10, int(os.environ.get("SOC_AI_LEGACY_ARTIFACT_SCAN_LIMIT", "200")))
-INVESTIGATION_QUERY_CONTRACT = "onion-sentinel-investigation-pivots-v1"
+INVESTIGATION_QUERY_CONTRACT = INVESTIGATION_CONTRACT.INVESTIGATION_QUERY_CONTRACT
+INVESTIGATION_QUERY_V2 = (
+    INVESTIGATION_QUERY_CONTRACT
+    == "onion-sentinel-investigation-pivots-v2"
+)
 INVESTIGATION_QUERY_MAX_ROUNDS = 3
 INVESTIGATION_QUERY_MAX_TOTAL = 12
 INVESTIGATION_QUERY_MAX_PER_ROUND = 4
@@ -299,6 +312,14 @@ def parse_args() -> argparse.Namespace:
         help="Hard serialized prompt-package limit",
     )
     parser.add_argument("--include-tests", action="store_true", help="Include validation/test alerts")
+    parser.add_argument(
+        "--blind-reanalysis",
+        action="store_true",
+        help=(
+            "Build a rerun package without prior AI conclusions, model-authored "
+            "correlations, or unconfirmed model-observed memory"
+        ),
+    )
     parser.add_argument("--stdout", action="store_true", help="Print package JSON instead of writing a file")
     args = parser.parse_args()
     if args.hours <= 0:
@@ -1531,6 +1552,11 @@ def investigation_query_context(
             "rule_id": (
                 sqlite_value(row_value, "rule_id")
                 or _nested_alert_value(row_alert, "rule.id")
+                or (
+                    _nested_alert_value(row_alert, "rule.uuid")
+                    if INVESTIGATION_QUERY_V2
+                    else None
+                )
                 or row_alert.get("signature_id")
                 or _nested_alert_value(
                     row_alert,
@@ -1565,8 +1591,36 @@ def investigation_query_context(
                 text = str(raw_value).strip()
                 if INVESTIGATION_EVENT_TUPLE_ATOM_RE.fullmatch(text):
                     tuple_value[field] = text
+        dataset = str(
+            _nested_alert_value(row_alert, "event.dataset")
+            or (
+                _nested_alert_value(original_event, "event.dataset")
+                if isinstance(original_event, dict)
+                else ""
+            )
+            or ""
+        ).strip().lower()
+        # Some Security Onion exporter paths retain the backing index but omit
+        # event.dataset from the compact alert JSON.  Preserve the sensor's
+        # native role meaning in that case: Suricata source/destination can be
+        # the matching packet direction, while Zeek source/destination are
+        # connection originator/responder fields.
+        row_index_name = str(
+            row_alert.get("elastic_index")
+            or (
+                str(sqlite_value(row_value, "alert_id") or "").rpartition(":")[0]
+            )
+            or ""
+        ).strip().lower()
+        if dataset == "suricata.alert" or "suricata.alerts" in row_index_name:
+            role_semantics = "packet_direction"
+        elif dataset.startswith("zeek.") or "logs-zeek" in row_index_name:
+            role_semantics = "zeek_originator_responder"
+        else:
+            role_semantics = "event_native"
         if tuple_value and not any(
             item["event_tuple"] == tuple_value
+            and item["role_semantics"] == role_semantics
             for item in permitted_event_tuples
         ) and len(permitted_event_tuples) < 32:
             tuple_digest = hashlib.sha256(
@@ -1578,6 +1632,7 @@ def investigation_query_context(
             ).hexdigest()[:20]
             permitted_event_tuples.append({
                 "event_tuple": tuple_value,
+                "role_semantics": role_semantics,
                 "source": "trusted_context",
                 "evidence_ref": f"context:event-tuple:{tuple_digest}",
             })
@@ -1616,10 +1671,26 @@ def investigation_query_context(
         "group_id": str(group_id or ""),
         "actor_role": normalized_actor_role,
         "anchor": anchor,
+        **(
+            {"anchor_time": iso(selected_time)}
+            if INVESTIGATION_QUERY_V2
+            else {}
+        ),
         "time_envelope": {"start": iso(start), "end": iso(end)},
         "permitted_observables": permitted,
         "discovered_observables": [],
-        "permitted_event_tuples": permitted_event_tuples,
+        "permitted_event_tuples": [
+            (
+                item
+                if INVESTIGATION_QUERY_V2
+                else {
+                    "event_tuple": item["event_tuple"],
+                    "source": item["source"],
+                    "evidence_ref": item["evidence_ref"],
+                }
+            )
+            for item in permitted_event_tuples
+        ],
     }
     capability = {
         "query_contract": INVESTIGATION_QUERY_CONTRACT,
@@ -1651,7 +1722,27 @@ def investigation_query_context(
                 "packs": list(INVESTIGATION_QUERY_PACKS),
                 "pack_descriptions": dict(INVESTIGATION_QUERY_PACK_DESCRIPTIONS),
                 "purposes": list(INVESTIGATION_SECURITY_ONION_PURPOSES),
-                "aggregations": ["events", "count", "timeline"],
+                "aggregations": [
+                    "events",
+                    "count",
+                    "timeline",
+                    *(["anchor_nearest"] if INVESTIGATION_QUERY_V2 else []),
+                ],
+                "aggregation_semantics": {
+                    "events": "bounded newest-first sample with an exact total hit count",
+                    "count": "exact full-window count; returns no event bodies",
+                    "timeline": "bounded chronological sample with an exact total hit count",
+                    **(
+                        {
+                            "anchor_nearest": (
+                                "bounded events ranked nearest the trusted "
+                                "alert timestamp"
+                            )
+                        }
+                        if INVESTIGATION_QUERY_V2
+                        else {}
+                    ),
+                },
                 "max_window_hours": 24,
                 "max_events": 100,
                 "max_queries_per_round": 4,
@@ -1660,11 +1751,18 @@ def investigation_query_context(
                 "event_tuple_fields_by_pack": {
                     pack: [
                         field
-                        for field, path in EVENT_TUPLE_FIELDS.items()
-                        if path in INVESTIGATION_CONTRACT_PACKS[pack]["fields"]
+                        for field, paths in EVENT_TUPLE_PATHS.items()
+                        if set(paths).intersection(
+                            INVESTIGATION_CONTRACT_PACKS[pack]["fields"]
+                        )
                     ]
                     for pack in INVESTIGATION_QUERY_PACKS
                 },
+                **(
+                    {"role_mode_by_pack": dict(PACK_ROLE_MODE)}
+                    if INVESTIGATION_QUERY_V2
+                    else {}
+                ),
             },
             "oql": {
                 "enabled": security_query_enabled,
@@ -1672,6 +1770,11 @@ def investigation_query_context(
                 "pack_descriptions": dict(INVESTIGATION_QUERY_PACK_DESCRIPTIONS),
                 "purposes": list(INVESTIGATION_SECURITY_ONION_PURPOSES),
                 "aggregations": ["events", "count", "timeline"],
+                "aggregation_semantics": {
+                    "events": "bounded newest-first sample with an exact total hit count",
+                    "count": "exact full-window count; returns no event bodies",
+                    "timeline": "bounded chronological sample with an exact total hit count",
+                },
                 "max_window_hours": 24,
                 "max_events": 100,
                 "max_queries_per_round": 4,
@@ -1680,11 +1783,18 @@ def investigation_query_context(
                 "event_tuple_fields_by_pack": {
                     pack: [
                         field
-                        for field, path in EVENT_TUPLE_FIELDS.items()
-                        if path in INVESTIGATION_CONTRACT_PACKS[pack]["fields"]
+                        for field, paths in EVENT_TUPLE_PATHS.items()
+                        if set(paths).intersection(
+                            INVESTIGATION_CONTRACT_PACKS[pack]["fields"]
+                        )
                     ]
                     for pack in INVESTIGATION_QUERY_PACKS
                 },
+                **(
+                    {"role_mode_by_pack": dict(PACK_ROLE_MODE)}
+                    if INVESTIGATION_QUERY_V2
+                    else {}
+                ),
             },
             "pcap_zeek": {
                 "enabled": bool(pcap_available),
@@ -1709,14 +1819,45 @@ def investigation_query_context(
             "max_queries_per_round": INVESTIGATION_QUERY_MAX_PER_ROUND,
         },
         "permitted_observables": permitted,
-        "permitted_event_tuples": [
-            item["event_tuple"] for item in permitted_event_tuples
-        ],
+        "permitted_event_tuples": (
+            [
+                {
+                    "event_tuple": item["event_tuple"],
+                    "role_semantics": item["role_semantics"],
+                }
+                for item in permitted_event_tuples
+            ]
+            if INVESTIGATION_QUERY_V2
+            else [item["event_tuple"] for item in permitted_event_tuples]
+        ),
+        **(
+            {"anchor_time": local_context["anchor_time"]}
+            if INVESTIGATION_QUERY_V2
+            else {}
+        ),
         "time_envelope": local_context["time_envelope"],
         "restrictions": [
             "structured read-only broker requests only",
             "exact supplied or evidence-discovered observables only",
-            "optional event_tuple values must be copied from one advertised trusted tuple; supplied fields are ANDed and preserve source/destination roles",
+            (
+                "optional event_tuple values must be copied from one advertised "
+                "trusted tuple; packet direction is never projected onto Zeek "
+                "originator/responder roles, and cross-sensor tuples require "
+                "network.community_id"
+                if INVESTIGATION_QUERY_V2
+                else
+                "optional event_tuple values must be copied from one advertised "
+                "trusted tuple; supplied fields are ANDed and preserve "
+                "source/destination roles"
+            ),
+            *(
+                [
+                    "rule_id is matched exactly against either ECS rule.id or rule.uuid",
+                    "zero rows means no matching document for only the exact authorized filters and time window; bounded samples are not proof of complete absence",
+                ]
+                if INVESTIGATION_QUERY_V2
+                else []
+            ),
             "no shell, arbitrary Query DSL, parser arguments, paths, scripts, or raw packet payloads",
             "every executed query and result carries broker-owned provenance",
         ],
@@ -1784,7 +1925,7 @@ def model_policy(level: str | None) -> dict:
     }
 
 
-def agent_task(agent_role: str) -> str:
+def agent_task(agent_role: str, *, blind_reanalysis: bool = False) -> str:
     """Return the bounded objective for the selected role.
 
     Every role receives the same immutable evidence contract. Only the decision
@@ -1792,9 +1933,14 @@ def agent_task(agent_role: str) -> str:
     incomplete evidence collectors.
     """
     if agent_role == "incident-responder":
+        historical_context = (
+            "human analyst adjudications and operator-confirmed context"
+            if blind_reanalysis
+            else "prior SOC analyses"
+        )
         return (
             "Produce a senior incident-response investigation report for the complete alert group. "
-            "Use its full timeline and frequency, prior SOC analyses, public enrichment, "
+            f"Use its full timeline and frequency, {historical_context}, public enrichment, "
             "parsed PCAP evidence, analyst notes, correlations, memory, and the supplied "
             "read-only Security Onion query results. Build a fact-grounded timeline and "
             "determine scope, affected systems, likely impact, containment, eradication, "
@@ -1807,6 +1953,50 @@ def agent_task(agent_role: str) -> str:
         "next investigative steps, tuning actions, and whether an independent second-model "
         "opinion is warranted."
     )
+
+
+def blind_model_authored_context(
+    memory_context: dict,
+    correlation_context: dict,
+) -> tuple[dict, dict]:
+    """Remove prior model conclusions while retaining operator-confirmed context."""
+    memory = json.loads(json.dumps(memory_context))
+    for key in ("role_memory", "shared_memory"):
+        section = memory.get(key)
+        if not isinstance(section, dict):
+            continue
+        records = section.get("records")
+        if isinstance(records, list):
+            section["records"] = [
+                record
+                for record in records
+                if (
+                    isinstance(record, dict)
+                    and str(record.get("status") or "") == "operator-confirmed"
+                )
+            ]
+    memory["usage_guidance"] = (
+        "This is a blind reanalysis. Use only operator-authored notes and "
+        "operator-confirmed memory; do not infer any previous model conclusion."
+    )
+
+    correlation = json.loads(json.dumps(correlation_context))
+    candidates = correlation.get("candidates")
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            candidate.pop("prior_analysis", None)
+            candidate.pop("previous_correlation", None)
+            reasons = candidate.get("correlation_reasons")
+            if isinstance(reasons, list):
+                candidate["correlation_reasons"] = [
+                    reason
+                    for reason in reasons
+                    if str(reason).strip().lower()
+                    != "previous correlation record exists"
+                ]
+    return memory, correlation
 
 
 def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argparse.Namespace) -> dict:
@@ -1901,6 +2091,11 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
         },
         limit_bytes=args.memory_bytes,
     )
+    if args.blind_reanalysis:
+        memory_context, correlation_context = blind_model_authored_context(
+            memory_context,
+            correlation_context,
+        )
     incident_evidence = None
     if args.incident_evidence_file:
         incident_evidence = load_json_bounded(args.incident_evidence_file, MAX_INCIDENT_EVIDENCE_BYTES)
@@ -1946,7 +2141,12 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
                 "A shared memory candidate must be high-confidence, useful to multiple agent roles, grounded in supplied evidence, and contain no secrets, raw payloads, or live alert IDs.",
                 "Return an empty memory_candidates array when no durable reusable lesson was established.",
                 "Use grouped_alert_context.total_observations and raw_alert_rows when judging urgency, repeat behavior, and tuning.",
-                "Use analyst_state and prior_analyses as context; do not treat an earlier conclusion as stronger than current evidence.",
+                (
+                    "This is a blind reanalysis. Prior AI conclusions and unconfirmed "
+                    "model-authored context are intentionally absent; do not infer them."
+                    if args.blind_reanalysis
+                    else "Use analyst_state and prior_analyses as context; do not treat an earlier conclusion as stronger than current evidence."
+                ),
                 "Evaluate correlated_alert_context candidates using only their shared observables, timing, current evidence, and provenance. Prior analysis is a hypothesis, not a fact.",
                 "Do not claim correlation from a common port, protocol, ASN, CDN, public resolver, or rule name alone. State evidence for and against every proposed relationship.",
                 "Start the assessment with a BLUF classification. Classify whether the detection outcome is true-positive malicious, true-positive suspicious, true-positive authorized/benign, false positive, duplicate, informational/no-action, or inconclusive based on whether the rule correctly identified the intended behavior and whether the behavior appears malicious, suspicious, authorized, benign, or unknown.",
@@ -1957,9 +2157,13 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
                 "If evidence is missing, say what is missing.",
                 "Separate facts from hypotheses.",
                 "For every important hypothesis, state supporting evidence, contradicting evidence, and the next discriminator that could resolve it.",
+                "When evidence_reference_contract is present, every evidence_used entry must exactly match one listed ref. A zero-row result can document only the exact bounded absence and is not positive corroboration.",
                 "Return valid JSON only using the response_schema.",
             ],
-            "task": agent_task(args.agent_role),
+            "task": agent_task(
+                args.agent_role,
+                blind_reanalysis=args.blind_reanalysis,
+            ),
         },
         "response_schema": {
             "event_status": "observed|not_observed|unknown",
@@ -2053,12 +2257,28 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
         "detection_validation": detection_validation,
         "asset_context": asset_context,
         "analyst_state": analyst_state,
-        "prior_analyses": prior_analysis_context(conn, args.analysis_dir, selected),
+        "prior_analyses": (
+            []
+            if args.blind_reanalysis
+            else prior_analysis_context(conn, args.analysis_dir, selected)
+        ),
         "related_alerts": related_alerts(conn, selected, args.related_limit, args.include_tests),
         "correlated_alert_context": correlation_context,
         "recent_notifications": notification_context(conn, selected),
         "agent_memory": memory_context,
         "latest_daily_rollup": rollup,
+        "reanalysis_context": {
+            "blind": bool(args.blind_reanalysis),
+            "excluded_context": (
+                [
+                    "prior AI analyses",
+                    "prior model-authored correlation hypotheses",
+                    "unconfirmed model-observed memory",
+                ]
+                if args.blind_reanalysis
+                else []
+            ),
+        },
     }
     if args.agent_role == "incident-responder":
         if incident_evidence is None:

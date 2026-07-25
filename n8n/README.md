@@ -52,13 +52,21 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 
 ```bash
 cd /path/to/OnionSentinel
-n8n/bin/install-macstudio-stack.zsh
+release_id="$(git rev-parse --verify HEAD)"
+ONION_SENTINEL_RELEASE_ID="$release_id" n8n/bin/install-macstudio-stack.zsh
 ```
 
 The host-native alert-store requires Node.js 20.17 or newer. The installer
 copies the committed lockfile and runs `npm ci --omit=dev`; do not replace this
 with an unlocked production install. The locked `sqlite3` runtime has no known
 production dependency advisories at the time of this release.
+
+The installer validates and persists the exact release ID before deployment.
+For a commit-less disaster recovery only,
+`ALLOW_UNVERSIONED_RECOVERY=1 n8n/bin/install-macstudio-stack.zsh` explicitly
+persists `unversioned`; redeploy an exact tested release immediately afterward.
+Alert-store and both AI LaunchAgents are stopped before their mutable files are
+copied and remain stopped if installation fails.
 
 The installer creates or updates:
 
@@ -802,6 +810,17 @@ operator-selected value. The collector also carries the representative alert's
 Elasticsearch backing index and document ID that the restricted alert exporter
 stored outside the event `_source`. It never accepts an index or ID from model
 output.
+
+`incident-evidence.json` also selects the exact iterative-query wire contract.
+An absent `investigation_query_contract` is v1. Every v1 selection validates
+and atomically installs the checksum-pinned repository compatibility contract
+and collector, replacing any modified or stale runtime copies, then installs
+the current version-aware prompt builder and runner. The builder continues to
+support blind manual reanalysis while projecting only fields accepted by v1.
+V2 is installed only for the exact value
+`onion-sentinel-investigation-pivots-v2`, and only after the matching Security
+Onion forced-command wrapper has been installed and verified. An unknown value
+aborts the Mac install; transport failures never cause an automatic downgrade.
 
 The collector requests five immutable Elastic packs and seven immutable local
 OSquery packs. Security Onion creates every baseline command; model output is

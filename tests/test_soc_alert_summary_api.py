@@ -646,7 +646,28 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.conn.execute(
             """
             UPDATE ai_second_opinion_runs
-            SET agreement = 'material_disagreement', material_disagreement = 1
+            SET status = 'failed', agreement = '', material_disagreement = 0
+            WHERE analysis_id = 'analysis-disputed'
+            """
+        )
+        self.conn.commit()
+        _status, failed_payload = self.portal.soc_alerts_query_response(
+            {"limit": ["10"], "analyst_status": ["open"]}
+        )
+        failed_review = next(
+            alert for alert in failed_payload["alerts"]
+            if alert["representative_alert_id"] == "newest-alert"
+        )
+        self.assertEqual(
+            failed_review["final_review_status"],
+            "review_required_failed",
+        )
+        self.assertEqual(failed_review["reviewer_error"], "")
+        self.conn.execute(
+            """
+            UPDATE ai_second_opinion_runs
+            SET status = 'completed', agreement = 'material_disagreement',
+                material_disagreement = 1
             WHERE analysis_id = 'analysis-disputed'
             """
         )
@@ -1427,6 +1448,102 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(merged["counts"]["analyzing"], 1)
         self.assertEqual(merged["counts"]["queued"], 2)
 
+    def test_report_provenance_uses_observed_run_fields_not_current_settings(self) -> None:
+        historical = self.portal.decorate_llm_analysis_record(
+            {
+                "status": "success",
+                "agent_role": "incident-responder",
+                "mode": "codex-cli",
+                "model": "gpt-5.6-sol",
+                "model_path": "frontier-codex-cli",
+                "model_route": "codex-cli:gpt-5.6-sol:high",
+            },
+            live=False,
+        )
+        idle = self.portal.decorate_llm_analysis_record(
+            {
+                "status": "success",
+                "agent_role": "incident-responder",
+                "model": "gpt-5.6-sol",
+                "model_route": "codex-cli:gpt-5.6-sol:high",
+            },
+            live=True,
+        )
+
+        self.assertEqual(historical["agent_label"], "Incident Responder")
+        self.assertEqual(historical["job_type"], "incident_response_analysis")
+        self.assertEqual(historical["job_label"], "Incident response investigation")
+        self.assertEqual(
+            historical["runtime_model_label"],
+            "Codex CLI · gpt-5.6-sol (high)",
+        )
+        self.assertEqual(idle["runtime_model_label"], "No model running")
+        self.assertEqual(idle["phase_label"], "Idle")
+
+    def test_failed_report_without_observation_does_not_claim_assigned_model(self) -> None:
+        historical = self.portal.decorate_llm_analysis_record(
+            {
+                "status": "failure",
+                "agent_role": "incident-responder",
+                "model": "",
+                "model_path": "",
+                "model_route": "",
+                "model_started": False,
+                "assigned_model": "gpt-5.6-sol",
+                "assigned_model_path": "frontier-codex-cli",
+                "assigned_model_route": "codex-cli:gpt-5.6-sol:xhigh",
+            },
+            live=False,
+        )
+
+        self.assertEqual(historical["runtime_model_label"], "No model started")
+        self.assertNotIn(
+            "gpt-5.6-sol",
+            historical["runtime_model_label"],
+        )
+
+    def test_saved_response_report_shows_no_model_started(self) -> None:
+        historical = self.portal.decorate_llm_analysis_record(
+            {
+                "status": "success",
+                "agent_role": "soc-analyst",
+                "input_mode": "saved_response",
+                "model": "",
+                "model_path": "",
+                "model_route": "",
+                "model_started": False,
+                "assigned_model": "devstral:latest",
+                "assigned_model_path": "ollama",
+                "assigned_model_route": "ollama:devstral:latest",
+            },
+            live=False,
+        )
+
+        self.assertEqual(historical["runtime_model_label"], "No model started")
+        self.assertNotIn(
+            "devstral",
+            historical["runtime_model_label"],
+        )
+
+    def test_live_preparing_phase_claims_no_running_model(self) -> None:
+        runtime = self.portal.llm_runtime_model_state(
+            {
+                "status": "running",
+                "active_phase": "preparing",
+                "active_model": "",
+                "active_model_path": "",
+                "active_model_route": "",
+                "active_provider": "",
+            }
+        )
+
+        self.assertEqual(runtime["phase_label"], "Preparing analysis")
+        self.assertEqual(runtime["label"], "No model running")
+        self.assertEqual(
+            runtime["detail"],
+            "Preparing analysis · No model running",
+        )
+
     def test_active_run_files_report_both_concurrent_models(self) -> None:
         active_records = [
             {
@@ -1435,6 +1552,7 @@ class SocAlertSummaryApiTest(unittest.TestCase):
                 "runner_pid": 101,
                 "started_at": "2026-07-24  12:00:00-06:00",
                 "prompt_package": "/tmp/codex-prompt.json",
+                "agent_role": "soc-analyst",
                 "active_phase": "primary_analysis",
                 "active_model": "gpt-5.6-sol",
                 "active_model_path": "frontier-codex-cli",
@@ -1447,6 +1565,7 @@ class SocAlertSummaryApiTest(unittest.TestCase):
                 "runner_pid": 202,
                 "started_at": "2026-07-24  12:00:01-06:00",
                 "prompt_package": "/tmp/ollama-prompt.json",
+                "agent_role": "incident-responder",
                 "active_phase": "second_opinion",
                 "active_model": "gemma4:31b",
                 "active_model_path": "ollama",
@@ -1476,6 +1595,11 @@ class SocAlertSummaryApiTest(unittest.TestCase):
 
         self.assertEqual(current["status"], "running")
         self.assertEqual(current["active_count"], 2)
+        self.assertEqual(current["phase_label"], "Concurrent analyses")
+        self.assertIn("SOC Analyst", current["agent_label"])
+        self.assertIn("Incident Responder", current["agent_label"])
+        self.assertIn("SOC alert triage", current["job_label"])
+        self.assertIn("Incident response investigation", current["job_label"])
         self.assertEqual(
             [record["log_id"] for record in current["active_runs"]],
             ["codex-run", "ollama-run"],

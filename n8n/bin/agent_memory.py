@@ -78,6 +78,7 @@ SECRET_PATTERNS = (
     re.compile(r"(?:\.ds-logs|\balert[_ -]?id\s*[:=])", re.IGNORECASE),
 )
 CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
+ACTIVE_MEMORY_STATUSES = frozenset({"model-observed", "operator-confirmed"})
 DEFAULT_ROLE_RECORD_LIMIT = 200
 DEFAULT_SHARED_RECORD_LIMIT = 300
 
@@ -233,7 +234,15 @@ def load_memory_context(
     """Select relevant records instead of blindly injecting a file prefix."""
     manual, records = read_memory_file(path)
     now = dt.datetime.now().astimezone()
-    active = [record for record in records if not _record_is_expired(record, now)]
+    active = [
+        record
+        for record in records
+        if (
+            not _record_is_expired(record, now)
+            and str(record.get("status") or "model-observed")
+            in ACTIVE_MEMORY_STATUSES
+        )
+    ]
     query_tokens = _tokens(evidence)
     scored = [(_relevance_score(record, query_tokens), record) for record in active]
     scored.sort(
@@ -505,6 +514,158 @@ def _atomic_write_text(path: Path, text: str) -> None:
     finally:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
+
+
+def _is_poisoned_bpfdoor_code_zero_record(record: dict[str, Any]) -> bool:
+    """Match the narrow model-only BPFDoor/code-zero claim identified by audit."""
+    if str(record.get("status") or "") != "model-observed":
+        return False
+    combined = " ".join(
+        str(value or "")
+        for value in (
+            record.get("finding"),
+            record.get("use_when"),
+            " ".join(str(item) for item in record.get("evidence_basis", [])),
+            " ".join(str(item) for item in record.get("tags", [])),
+        )
+    ).lower()
+    if "bpfdoor" not in combined:
+        return False
+    code_zero = bool(
+        re.search(r"\b(?:icmp\s+)?code\s*(?:=|:|is|of)?\s*0\b", combined)
+    )
+    false_positive_claim = bool(
+        re.search(
+            r"\b(?:false\s*positive|logic\s*(?:error|mismatch)|"
+            r"rules?\s+out|does\s+not\s+match|required\s+code)\b",
+            combined,
+        )
+    )
+    return code_zero and false_positive_claim
+
+
+def quarantine_bpfdoor_code_zero_memory(
+    path: Path,
+    *,
+    apply: bool = False,
+    record_ids: Iterable[str] = (),
+    reason: str = (
+        "Quarantined by the BPFDoor predicate correction: ICMP code 0 alone "
+        "does not invalidate deployed SID 2069174 without the xbit-setting event."
+    ),
+) -> dict[str, Any]:
+    """Preview or quarantine only poisoned, model-observed BPFDoor memories.
+
+    Dry-run is the default. Additional audit-identified BPFDoor records may be
+    selected by exact ID; exact-ID selection still requires model-observed
+    status and BPFDoor text. Operator-confirmed records can never be selected,
+    and original metadata remains in the managed section for audit.
+    """
+    manual, records = read_memory_file(path)
+    del manual
+    explicit_ids = {
+        str(value or "").strip()
+        for value in record_ids
+        if str(value or "").strip()
+    }
+
+    def selected(record: dict[str, Any]) -> bool:
+        if str(record.get("status") or "") != "model-observed":
+            return False
+        if _is_poisoned_bpfdoor_code_zero_record(record):
+            return True
+        combined = " ".join(
+            str(value or "")
+            for value in (
+                record.get("finding"),
+                record.get("use_when"),
+                " ".join(
+                    str(item)
+                    for item in record.get("evidence_basis", [])
+                ),
+                " ".join(str(item) for item in record.get("tags", [])),
+            )
+        ).lower()
+        return (
+            str(record.get("id") or "") in explicit_ids
+            and "bpfdoor" in combined
+        )
+
+    predicate_matches = [
+        record
+        for record in records
+        if _is_poisoned_bpfdoor_code_zero_record(record)
+    ]
+    predicate_ids = {
+        str(record.get("id") or "")
+        for record in predicate_matches
+    }
+    explicit_matches = [
+        record
+        for record in records
+        if selected(record)
+        and str(record.get("id") or "") not in predicate_ids
+    ]
+    matches = [*predicate_matches, *explicit_matches]
+    result: dict[str, Any] = {
+        "path": str(path),
+        "dry_run": not apply,
+        "matched": len(matches),
+        "record_ids": [str(record.get("id") or "") for record in matches],
+        "predicate_match_ids": [
+            str(record.get("id") or "") for record in predicate_matches
+        ],
+        "explicit_id_match_ids": [
+            str(record.get("id") or "") for record in explicit_matches
+        ],
+        "applied": 0,
+    }
+    if not apply or not matches:
+        return result
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            before, managed, after = _split_managed(text)
+            current_records = _records_from_managed(managed)
+            now = project_now()
+            selected_ids = {
+                str(record.get("id") or "")
+                for record in matches
+            }
+            applied = 0
+            updated: list[dict[str, Any]] = []
+            for record in current_records:
+                current = dict(record)
+                if (
+                    str(current.get("id") or "") in selected_ids
+                    and selected(current)
+                ):
+                    current["status"] = "quarantined"
+                    current["quarantined_at"] = now
+                    current["quarantine_reason"] = _clean_text(reason, 500)
+                    applied += 1
+                updated.append(current)
+            managed_body = "\n\n".join(_record_markdown(record) for record in updated)
+            sections = [
+                before.rstrip(),
+                MANAGED_START,
+                managed_body,
+                MANAGED_END,
+                after.strip(),
+            ]
+            output = "\n\n".join(
+                section for section in sections if section
+            ).rstrip() + "\n"
+            _atomic_write_text(path, output)
+            result["applied"] = applied
+            result["dry_run"] = False
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    return result
 
 
 def initialize_memory_file(path: Path, title: str) -> dict[str, Any]:

@@ -225,6 +225,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         *,
         severity: str,
         payload: dict | None = None,
+        claimed_payload: dict | None = None,
         job_type: str = "ai_analysis",
         analysis_threshold: str = "medium",
     ) -> dict[str, object]:
@@ -295,8 +296,27 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             lease_token: str = "",
             job_type: str = "ai_analysis",
         ) -> bool | str:
-            del lease_token, job_type
-            return "threshold-test-lease" if status == "processing" else True
+            del lease_token
+            if status != "processing":
+                return True
+            authoritative_payload = dict(
+                claimed_payload if claimed_payload is not None else (payload or {})
+            )
+            authoritative_payload.setdefault("alert_id", alert_id)
+            authoritative_payload.setdefault("group_id", group_id)
+            return self.scheduler.ClaimedAiLease(
+                "threshold-test-lease",
+                job_payload=authoritative_payload,
+                resolved_key=group_id,
+                reanalysis_attempt_id=(
+                    self.scheduler.job_reanalysis_attempt_id(
+                        authoritative_payload,
+                        "threshold-test-lease",
+                    )
+                    if job_type == "incident_response_analysis"
+                    else ""
+                ),
+            )
 
         prompt_path = root / "prompt.json"
         incident_evidence_path = root / "incident-evidence.json"
@@ -410,6 +430,10 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         self.assertEqual(result["return_code"], 0)
         result["build_prompt"].assert_called_once()
         result["run_analysis"].assert_called_once()
+        self.assertEqual(
+            result["run_analysis"].call_args.kwargs["reanalysis_attempt_id"],
+            "",
+        )
 
     def test_manual_analyze_low_job_bypasses_medium_threshold(self) -> None:
         result = self.run_indexed_worker_once(
@@ -424,7 +448,12 @@ class AiSchedulerPriorityTest(unittest.TestCase):
     def test_incident_responder_low_job_bypasses_medium_threshold(self) -> None:
         result = self.run_indexed_worker_once(
             severity="low",
-            payload={"agent_role": "incident-responder"},
+            payload={
+                "agent_role": "incident-responder",
+                "manual_reanalysis": True,
+                "reanalysis_run_id": "irr-11111111-1111-1111-1111-111111111111",
+                "case_id": "ir-threshold-test",
+            },
             job_type="incident_response_analysis",
         )
 
@@ -432,6 +461,71 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         result["collect_incident_evidence"].assert_called_once()
         result["build_prompt"].assert_called_once()
         result["run_analysis"].assert_called_once()
+        self.assertEqual(
+            result["run_analysis"].call_args.kwargs["reanalysis_attempt_id"],
+            self.scheduler.incident_reanalysis_attempt_id("threshold-test-lease"),
+        )
+
+    def test_normal_incident_escalation_does_not_receive_reanalysis_attempt_id(
+        self,
+    ) -> None:
+        result = self.run_indexed_worker_once(
+            severity="low",
+            payload={"agent_role": "incident-responder"},
+            job_type="incident_response_analysis",
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["run_analysis"].assert_called_once()
+        self.assertEqual(
+            result["run_analysis"].call_args.kwargs["reanalysis_attempt_id"],
+            "",
+        )
+
+    def test_incident_worker_uses_claim_identity_when_payload_changes_preclaim(
+        self,
+    ) -> None:
+        selected_payload = {
+            "agent_role": "incident-responder",
+            "manual_reanalysis": True,
+            "reanalysis_run_id": "irr-11111111-1111-1111-1111-111111111111",
+            "case_id": "ir-selected-run",
+            "alert_id": "selected-alert",
+        }
+        claimed_payload = {
+            "agent_role": "incident-responder",
+            "manual_reanalysis": True,
+            "reanalysis_run_id": "irr-22222222-2222-2222-2222-222222222222",
+            "case_id": "ir-replacement-run",
+            "alert_id": "replacement-alert",
+        }
+
+        result = self.run_indexed_worker_once(
+            severity="critical",
+            payload=selected_payload,
+            claimed_payload=claimed_payload,
+            job_type="incident_response_analysis",
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        self.assertEqual(
+            result["collect_incident_evidence"].call_args.args[0],
+            "replacement-alert",
+        )
+        self.assertEqual(
+            result["build_prompt"].call_args.args[0],
+            "replacement-alert",
+        )
+        self.assertEqual(
+            result["build_prompt"].call_args.args[2]["reanalysis_run_id"],
+            claimed_payload["reanalysis_run_id"],
+        )
+        self.assertEqual(
+            result["run_analysis"].call_args.kwargs["reanalysis_attempt_id"],
+            self.scheduler.incident_reanalysis_attempt_id(
+                "threshold-test-lease"
+            ),
+        )
 
     def test_indexed_provider_lanes_claim_only_assigned_agent_roles(self) -> None:
         self.enable_indexed_scheduler()
@@ -522,6 +616,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         command = self.scheduler.analysis_command(
             Path(self.tempdir.name) / "prompt.json",
             args,
+            reanalysis_attempt_id="ira-" + ("a" * 40),
         )
 
         self.assertEqual(
@@ -531,6 +626,10 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         self.assertEqual(
             command[command.index("--max-prompt-bytes") + 1],
             str(1024 * 1024),
+        )
+        self.assertEqual(
+            command[command.index("--reanalysis-attempt-id") + 1],
+            "ira-" + ("a" * 40),
         )
 
     def test_indexed_contract_rejects_partial_schema(self) -> None:

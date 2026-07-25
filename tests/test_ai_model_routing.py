@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sys
 import tempfile
@@ -132,16 +133,25 @@ class AiModelRoutingTests(unittest.TestCase):
             settings["codex_cli_models"],
             [
                 {
-                    "enabled": model == "gpt-5.5",
+                    "enabled": model in {"gpt-5.5", "gpt-5.6-sol"},
                     "model": model,
-                    "reasoning_effort": "medium",
+                    "reasoning_effort": (
+                        "xhigh" if model == "gpt-5.6-sol" else "medium"
+                    ),
                 }
                 for model in self.runner.CODEX_CLI_MODEL_CATALOG
             ],
         )
         self.assertEqual(
             settings["agent_second_opinion_models"],
-            {role: reviewer for role in self.runner.CYBER_SECURITY_AGENT_ROLES},
+            {
+                role: (
+                    "codex-cli:gpt-5.6-sol:xhigh"
+                    if role == "incident-responder"
+                    else reviewer
+                )
+                for role in self.runner.CYBER_SECURITY_AGENT_ROLES
+            },
         )
 
     def test_parser_defaults_do_not_override_saved_model_roster(self) -> None:
@@ -467,6 +477,69 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertNotIn("sh", seen_command)
         self.assertNotIn("this must never execute", " ".join(seen_command))
 
+    def test_codex_reviewer_uses_strict_output_schema_and_explicit_effort(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "system_prompt_file": Path("/tmp/nonexistent-system-prompt.md"),
+                "timeout": 60,
+                "max_response_bytes": 1024 * 1024,
+            },
+        )()
+        settings = self.runner.default_ai_settings()
+        seen_command: list[str] = []
+        prompt_package = {
+            "response_schema": {
+                "review_case_id": "string",
+                "review_evidence_hash": "lowercase SHA-256",
+                "observables_used": [{"kind": "ip|domain|host|user|community_id", "value": "string"}],
+            },
+            "review_contract": {
+                "case_id": "case-1",
+                "evidence_hash": "a" * 64,
+            },
+        }
+
+        def fake_run(command, **kwargs):
+            seen_command.extend(command)
+            schema_path = Path(command[command.index("--output-schema") + 1])
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            self.assertEqual(schema["additionalProperties"], False)
+            self.assertEqual(
+                schema["properties"]["review_evidence_hash"]["pattern"],
+                "^[a-f0-9]{64}$",
+            )
+            output_path = Path(command[command.index("--output-last-message") + 1])
+            output_path.write_text(
+                json.dumps(
+                    {
+                        "review_case_id": "case-1",
+                        "review_evidence_hash": "a" * 64,
+                        "observables_used": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        with (
+            mock.patch.object(self.runner, "resolve_codex_cli", return_value="/usr/local/bin/codex"),
+            mock.patch.object(self.runner, "run_bounded_command", side_effect=fake_run),
+        ):
+            self.runner.cloud_cli_chat(
+                prompt_package,
+                args,
+                settings,
+                model="gpt-5.6-sol",
+                reasoning_effort="xhigh",
+                independent_review=True,
+            )
+
+        self.assertIn("--output-schema", seen_command)
+        self.assertIn("--ephemeral", seen_command)
+        self.assertIn('model_reasoning_effort="xhigh"', seen_command)
+
     def test_codex_failure_summary_does_not_persist_prompt_transcript(self) -> None:
         stderr = "\n".join(
             [
@@ -576,7 +649,7 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(seen_command[seen_command.index("--model") + 1], "gpt-5.6-sol")
         self.assertIn('model_reasoning_effort="xhigh"', seen_command)
 
-    def test_running_log_metadata_uses_exact_assigned_codex_route(self) -> None:
+    def test_running_log_separates_assignment_from_observed_execution(self) -> None:
         settings = self.runner.default_ai_settings()
         settings.update({
             "enabled_ollama_models": ["previous-local:latest"],
@@ -605,17 +678,68 @@ class AiModelRoutingTests(unittest.TestCase):
             resource_monitor=self.runner.SystemResourceMonitor(),
         )
 
-        self.assertEqual(record["mode"], "codex-cli")
-        self.assertEqual(record["model"], "gpt-5.6-sol")
-        self.assertEqual(record["model_path"], "frontier-codex-cli")
+        self.assertEqual(record["mode"], "")
+        self.assertEqual(record["model"], "")
+        self.assertEqual(record["model_path"], "")
         self.assertEqual(record["agent_role"], "soc-analyst")
-        self.assertEqual(record["model_route"], "codex-cli:gpt-5.6-sol:high")
-        self.assertNotEqual(record["model"], "previous-local:latest")
-        self.assertEqual(record["active_phase"], "primary_analysis")
-        self.assertEqual(record["active_model"], "gpt-5.6-sol")
-        self.assertEqual(record["active_model_path"], "frontier-codex-cli")
-        self.assertEqual(record["active_model_route"], "codex-cli:gpt-5.6-sol:high")
-        self.assertEqual(record["active_provider"], "codex-cli")
+        self.assertEqual(record["model_route"], "")
+        self.assertFalse(record["model_started"])
+        self.assertEqual(record["assigned_model"], "gpt-5.6-sol")
+        self.assertEqual(record["assigned_model_path"], "frontier-codex-cli")
+        self.assertEqual(
+            record["assigned_model_route"],
+            "codex-cli:gpt-5.6-sol:high",
+        )
+        self.assertNotEqual(record["assigned_model"], "previous-local:latest")
+        self.assertEqual(record["active_phase"], "preparing")
+        self.assertEqual(record["active_model"], "")
+        self.assertEqual(record["active_model_path"], "")
+        self.assertEqual(record["active_model_route"], "")
+        self.assertEqual(record["active_provider"], "")
+
+        started = self.runner.current_analysis_phase_record(
+            record,
+            settings,
+            phase="primary_analysis",
+            model_route=record["assigned_model_route"],
+        )
+        self.assertEqual(started["active_model"], "gpt-5.6-sol")
+        self.assertEqual(started["active_model_path"], "frontier-codex-cli")
+        self.assertEqual(
+            started["active_model_route"],
+            "codex-cli:gpt-5.6-sol:high",
+        )
+        self.assertEqual(started["active_provider"], "codex-cli")
+
+    def test_failed_log_without_runtime_observation_does_not_claim_assigned_model(self) -> None:
+        settings = self.runner.default_ai_settings()
+        settings["agent_models"]["soc-analyst"] = "codex-cli:gpt-5.6-sol:high"
+
+        record = self.runner.build_llm_log_record(
+            run_id="synthetic-failure",
+            status="failure",
+            started_at="2026-07-24  10:00:00-06:00",
+            finished_at="2026-07-24  10:00:01-06:00",
+            runtime_seconds=1,
+            prompt_path=Path("/tmp/synthetic-prompt.json"),
+            prompt_package={"agent_role": "soc-analyst"},
+            settings=settings,
+            response=None,
+            json_path=None,
+            md_path=None,
+            resource_monitor=self.runner.SystemResourceMonitor(),
+            error="prompt validation failed",
+        )
+
+        self.assertFalse(record["model_started"])
+        self.assertEqual(record["model"], "")
+        self.assertEqual(record["model_path"], "")
+        self.assertEqual(record["model_route"], "")
+        self.assertEqual(record["assigned_model"], "gpt-5.6-sol")
+        self.assertEqual(
+            record["assigned_model_route"],
+            "codex-cli:gpt-5.6-sol:high",
+        )
 
     def test_current_phase_switches_to_reviewer_without_relabeling_primary(self) -> None:
         settings = self.runner.default_ai_settings()
@@ -689,6 +813,138 @@ class AiModelRoutingTests(unittest.TestCase):
             written = json.loads(target.read_text(encoding="utf-8"))
             self.assertIn(written, payloads)
             self.assertEqual(list(target.parent.glob("*.tmp")), [])
+
+    def test_index_flush_quarantines_permanent_rejection_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            queue_dir = root / "pending"
+            quarantine_dir = root / "quarantine"
+            poison = {
+                "analysis_id": "a-poison-analysis",
+                "response": {"summary": "sensitive payload content"},
+            }
+            valid = {
+                "analysis_id": "b-valid-analysis",
+                "response": {"summary": "later valid result"},
+            }
+            self.runner.queue_analysis_index(poison, queue_dir)
+            self.runner.queue_analysis_index(valid, queue_dir)
+            submitted = []
+
+            def submit(payload, _url):
+                if payload["analysis_id"] == "a-poison-analysis":
+                    raise self.runner.AnalysisIndexSubmissionError(
+                        "analysis index HTTP 409",
+                        retryable=False,
+                        status_code=409,
+                        response_sha256="a" * 64,
+                    )
+                submitted.append(payload["analysis_id"])
+
+            with mock.patch.object(
+                self.runner,
+                "post_analysis_index",
+                side_effect=submit,
+            ):
+                published, failed, quarantined = (
+                    self.runner.flush_analysis_index_queue(
+                        "http://127.0.0.1:8787",
+                        queue_dir=queue_dir,
+                        quarantine_dir=quarantine_dir,
+                    )
+                )
+
+            self.assertEqual((published, failed, quarantined), (1, 0, 1))
+            self.assertEqual(submitted, ["b-valid-analysis"])
+            self.assertEqual(list(queue_dir.glob("*.json")), [])
+            rejected = list(quarantine_dir.glob("*.rejected.json"))
+            metadata = list(quarantine_dir.glob("*.metadata.json"))
+            self.assertEqual(len(rejected), 1)
+            self.assertEqual(len(metadata), 1)
+            self.assertEqual(quarantine_dir.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(rejected[0].stat().st_mode & 0o777, 0o600)
+            audit_text = metadata[0].read_text(encoding="utf-8")
+            audit = json.loads(audit_text)
+            self.assertEqual(audit["http_status"], 409)
+            self.assertEqual(
+                audit["classification"],
+                "deterministic_submission_rejection",
+            )
+            self.assertRegex(audit["payload_sha256"], r"^[a-f0-9]{64}$")
+            self.assertNotIn("sensitive payload content", audit_text)
+            self.assertNotIn("a-poison-analysis", audit_text)
+
+    def test_index_flush_preserves_order_on_transient_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            queue_dir = root / "pending"
+            quarantine_dir = root / "quarantine"
+            for analysis_id in ("a-transient-analysis", "b-later-analysis"):
+                self.runner.queue_analysis_index(
+                    {"analysis_id": analysis_id, "response": {}},
+                    queue_dir,
+                )
+
+            transient = self.runner.AnalysisIndexSubmissionError(
+                "analysis index HTTP 503",
+                retryable=True,
+                status_code=503,
+            )
+            with mock.patch.object(
+                self.runner,
+                "post_analysis_index",
+                side_effect=transient,
+            ) as submit:
+                result = self.runner.flush_analysis_index_queue(
+                    "http://127.0.0.1:8787",
+                    queue_dir=queue_dir,
+                    quarantine_dir=quarantine_dir,
+                )
+
+            self.assertEqual(result, (0, 1, 0))
+            self.assertEqual(submit.call_count, 1)
+            self.assertEqual(
+                [path.name for path in sorted(queue_dir.glob("*.json"))],
+                ["a-transient-analysis.json", "b-later-analysis.json"],
+            )
+            self.assertFalse(quarantine_dir.exists())
+
+    def test_index_http_errors_are_classified_without_response_content(self) -> None:
+        secret_body = b'{"error":"sensitive server detail"}'
+        for status_code, retryable in ((409, False), (429, True), (503, True)):
+            with self.subTest(status_code=status_code):
+                http_error = self.runner.urllib.error.HTTPError(
+                    "http://127.0.0.1:8787/analysis/result",
+                    status_code,
+                    "rejected",
+                    {},
+                    io.BytesIO(secret_body),
+                )
+                with (
+                    mock.patch.object(
+                        self.runner.urllib.request,
+                        "urlopen",
+                        side_effect=http_error,
+                    ),
+                    self.assertRaises(
+                        self.runner.AnalysisIndexSubmissionError
+                    ) as raised,
+                ):
+                    self.runner.post_analysis_index(
+                        {"analysis_id": "synthetic", "response": {}},
+                        "http://127.0.0.1:8787",
+                    )
+
+                self.assertEqual(raised.exception.status_code, status_code)
+                self.assertIs(raised.exception.retryable, retryable)
+                self.assertEqual(
+                    raised.exception.response_sha256,
+                    self.runner.hashlib.sha256(secret_body).hexdigest(),
+                )
+                self.assertNotIn(
+                    "sensitive server detail",
+                    str(raised.exception),
+                )
 
     def test_active_analysis_path_is_scoped_to_one_sanitized_run_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -879,15 +1135,31 @@ class AiModelRoutingTests(unittest.TestCase):
             confidence="high",
             confidence_score=0.9,
             detection_outcome="true_positive_suspicious",
+            event_status="observed",
+            detection_validity="matched_intent",
+            activity_disposition="suspicious",
+            handling="escalate",
+            duplicate_of=None,
+            hypotheses=[],
+            evidence_used=["alert", "alert:synthetic-review"],
             bluf="True Positive - Suspicious: independent review.",
             summary="Independent review",
             escalation_needed=True,
         )
         phases: list[tuple[str, str, str]] = []
 
-        with mock.patch.object(self.runner, "analyze_model_route", return_value=secondary) as analyze:
+        def reviewed_response(route, review_package, *unused_args, **unused_kwargs):
+            contract = review_package["review_contract"]
+            return {
+                **secondary,
+                "review_case_id": contract["case_id"],
+                "review_evidence_hash": contract["evidence_hash"],
+                "observables_used": [],
+            }
+
+        with mock.patch.object(self.runner, "analyze_model_route", side_effect=reviewed_response) as analyze:
             result = self.runner.apply_configured_second_opinion(
-                {},
+                {"alert": {"alert_id": "synthetic-review"}},
                 primary,
                 args,
                 settings,
@@ -906,7 +1178,13 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(analyze.call_args.kwargs["system_prompt_file"], reviewer_prompt)
         self.assertTrue(analyze.call_args.kwargs["independent_review"])
         self.assertEqual(result["_second_opinion"]["status"], "completed")
-        self.assertEqual(result["_second_opinion"]["response"]["confidence"], "high")
+        self.assertEqual(result["_second_opinion"]["response"]["confidence"], "medium")
+        self.assertEqual(
+            result["_second_opinion"]["response"]["_confidence_calibration"][
+                "evidence_signals"
+            ]["corroborating_evidence_source_count"],
+            1,
+        )
         self.assertFalse(result["_second_opinion"]["response"]["second_opinion_recommended"])
         self.assertEqual(
             result["_second_opinion"]["comparison"]["agreement"],
@@ -934,6 +1212,450 @@ class AiModelRoutingTests(unittest.TestCase):
                 ),
             ],
         )
+
+    def test_reviewer_foreign_case_retries_once_then_fails_closed(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {"second_opinion_prompt_file": Path("/tmp/reviewer.md")},
+        )()
+        settings = self.runner.default_ai_settings()
+        settings["enabled_ollama_models"] = ["primary:latest", "reviewer:latest"]
+        settings["agent_models"]["soc-analyst"] = "ollama:primary:latest"
+        settings["agent_second_opinion_models"]["soc-analyst"] = "ollama:reviewer:latest"
+        primary = self.runner.validate_response(
+            self.complete_response(
+                confidence="low",
+                confidence_score=0.3,
+                handling="contain",
+                memory_candidates=[
+                    {
+                        "scope": "agent",
+                        "category": "investigation_pivot",
+                        "finding": "Synthetic reusable lesson with enough bounded detail.",
+                        "use_when": "A later synthetic alert needs the same discriminator.",
+                        "evidence_basis": ["Synthetic evidence."],
+                        "confidence": "medium",
+                        "tags": ["synthetic"],
+                        "ttl_days": 30,
+                    }
+                ],
+            )
+        )
+        invalid = {
+            **self.complete_response(),
+            "event_status": "observed",
+            "detection_validity": "matched_intent",
+            "activity_disposition": "suspicious",
+            "handling": "escalate",
+            "duplicate_of": None,
+            "confidence_score": 0.9,
+            "hypotheses": [],
+            "review_case_id": "foreign-case",
+            "review_evidence_hash": "b" * 64,
+            "observables_used": [{"kind": "ip", "value": "10.0.0.50"}],
+        }
+
+        with mock.patch.object(
+            self.runner,
+            "analyze_model_route",
+            return_value=invalid,
+        ) as analyze:
+            result = self.runner.apply_configured_second_opinion(
+                {"alert": {"alert_id": "current-case", "source_ip": "192.0.2.10"}},
+                primary,
+                args,
+                settings,
+                "soc-analyst",
+            )
+
+        self.assertEqual(analyze.call_count, 2)
+        self.assertEqual(result["_second_opinion"]["status"], "failed")
+        self.assertEqual(result["final_disposition_status"], "review_required_failed")
+        self.assertEqual(result["confidence"], "low")
+        self.assertLessEqual(result["confidence_score"], 0.39)
+        self.assertEqual(result["handling"], "investigate")
+        self.assertEqual(result["memory_candidates"], [])
+        self.assertTrue(result["_automation_controls"]["automatic_closure_blocked"])
+        self.assertTrue(result["_automation_controls"]["containment_blocked"])
+        self.assertTrue(result["_automation_controls"]["memory_writeback_blocked"])
+
+    def test_reviewer_invalid_evidence_retries_once_then_fails_closed(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {"second_opinion_prompt_file": Path("/tmp/reviewer.md")},
+        )()
+        settings = self.runner.default_ai_settings()
+        settings["enabled_ollama_models"] = ["primary:latest", "reviewer:latest"]
+        settings["agent_models"]["soc-analyst"] = "ollama:primary:latest"
+        settings["agent_second_opinion_models"]["soc-analyst"] = "ollama:reviewer:latest"
+        primary = self.runner.validate_response(
+            self.complete_response(
+                confidence="low",
+                confidence_score=0.3,
+                handling="contain",
+            )
+        )
+
+        def invalid_response(_route, review_package, *_args, **_kwargs):
+            contract = review_package["review_contract"]
+            return {
+                **self.complete_response(
+                    confidence="high",
+                    confidence_score=0.9,
+                    evidence_used=["query:invented-digest"],
+                ),
+                "event_status": "observed",
+                "detection_validity": "matched_intent",
+                "activity_disposition": "suspicious",
+                "handling": "escalate",
+                "duplicate_of": None,
+                "hypotheses": [],
+                "review_case_id": contract["case_id"],
+                "review_evidence_hash": contract["evidence_hash"],
+                "observables_used": [],
+            }
+
+        with mock.patch.object(
+            self.runner,
+            "analyze_model_route",
+            side_effect=invalid_response,
+        ) as analyze:
+            result = self.runner.apply_configured_second_opinion(
+                {"alert": {"alert_id": "current-case"}},
+                primary,
+                args,
+                settings,
+                "soc-analyst",
+            )
+
+        self.assertEqual(analyze.call_count, 2)
+        self.assertEqual(result["_second_opinion"]["status"], "failed")
+        self.assertIn(
+            "outside the current contract",
+            result["_second_opinion"]["error"],
+        )
+        self.assertEqual(result["final_disposition_status"], "review_required_failed")
+        self.assertTrue(result["_automation_controls"]["automatic_closure_blocked"])
+        self.assertTrue(result["_automation_controls"]["containment_blocked"])
+
+    def test_reviewer_observable_overflow_cannot_hide_foreign_host(self) -> None:
+        review_package = self.runner.independent_reviewer_package(
+            {
+                "alert": {
+                    "alert_id": "observable-overflow-case",
+                    "host": "allowedhost",
+                },
+            }
+        )
+        contract = review_package["review_contract"]
+        allowed_host = next(
+            item
+            for item in contract["allowed_observables"]
+            if item["kind"] == "host"
+        )
+        response = {
+            **self.complete_response(
+                summary="The endpoint foreignhost performed the material activity.",
+                evidence_used=["alert", "alert:observable-overflow-case"],
+                confidence="high",
+                confidence_score=0.9,
+            ),
+            "event_status": "unknown",
+            "detection_validity": "unknown",
+            "activity_disposition": "unknown",
+            "handling": "investigate",
+            "duplicate_of": None,
+            "hypotheses": [],
+            "review_case_id": contract["case_id"],
+            "review_evidence_hash": contract["evidence_hash"],
+            # Duplicate valid entries previously filled the validated prefix,
+            # allowing the foreign final entry into the full-list membership set.
+            "observables_used": [
+                dict(allowed_host)
+                for _ in range(self.runner.REVIEW_OBSERVABLE_MAX)
+            ] + [{"kind": "host", "value": "foreignhost"}],
+        }
+
+        with self.assertRaisesRegex(
+            self.runner.ReviewerValidationError,
+            "observables_used exceeds the maximum",
+        ):
+            self.runner.validate_reviewer_response(response, review_package)
+
+    def test_reviewer_consequential_arrays_reject_overflow(self) -> None:
+        review_package = self.runner.independent_reviewer_package(
+            {"alert": {"alert_id": "review-array-overflow-case"}}
+        )
+        contract = review_package["review_contract"]
+        base = {
+            **self.complete_response(
+                evidence_used=["alert", "alert:review-array-overflow-case"],
+            ),
+            "event_status": "unknown",
+            "detection_validity": "unknown",
+            "activity_disposition": "unknown",
+            "handling": "investigate",
+            "duplicate_of": None,
+            "hypotheses": [],
+            "review_case_id": contract["case_id"],
+            "review_evidence_hash": contract["evidence_hash"],
+            "observables_used": [],
+        }
+
+        for field, value, expected in (
+            (
+                "evidence_used",
+                ["alert"] * (self.runner.REVIEW_EVIDENCE_USED_MAX + 1),
+                "evidence_used exceeds the maximum",
+            ),
+            (
+                "hypotheses",
+                [{}] * (self.runner.REVIEW_HYPOTHESES_MAX + 1),
+                "hypotheses exceeds the maximum",
+            ),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    self.runner.ReviewerValidationError,
+                    expected,
+                ):
+                    self.runner.validate_reviewer_response(
+                        {**base, field: value},
+                        review_package,
+                    )
+
+    def test_reviewer_foreign_narrative_domain_fails_closed(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {"second_opinion_prompt_file": Path("/tmp/reviewer.md")},
+        )()
+        settings = self.runner.default_ai_settings()
+        settings["enabled_ollama_models"] = ["primary:latest", "reviewer:latest"]
+        settings["agent_models"]["soc-analyst"] = "ollama:primary:latest"
+        settings["agent_second_opinion_models"]["soc-analyst"] = "ollama:reviewer:latest"
+        primary = self.runner.validate_response(
+            self.complete_response(confidence="low", confidence_score=0.3)
+        )
+
+        def invalid_response(_route, review_package, *_args, **_kwargs):
+            contract = review_package["review_contract"]
+            return {
+                **self.complete_response(
+                    confidence="high",
+                    confidence_score=0.9,
+                    evidence_used=["alert", "alert:domain-case"],
+                    summary="The supplied evidence proves contact with foreign.example.",
+                ),
+                "event_status": "observed",
+                "detection_validity": "matched_intent",
+                "activity_disposition": "suspicious",
+                "handling": "escalate",
+                "duplicate_of": None,
+                "hypotheses": [],
+                "review_case_id": contract["case_id"],
+                "review_evidence_hash": contract["evidence_hash"],
+                "observables_used": [],
+            }
+
+        with mock.patch.object(
+            self.runner,
+            "analyze_model_route",
+            side_effect=invalid_response,
+        ) as analyze:
+            result = self.runner.apply_configured_second_opinion(
+                {
+                    "alert": {
+                        "alert_id": "domain-case",
+                        "domain": "allowed.example",
+                    }
+                },
+                primary,
+                args,
+                settings,
+                "soc-analyst",
+            )
+
+        self.assertEqual(analyze.call_count, 2)
+        self.assertEqual(result["_second_opinion"]["status"], "failed")
+        self.assertIn(
+            "foreign domain or FQDN",
+            result["_second_opinion"]["error"],
+        )
+        self.assertEqual(result["final_disposition_status"], "review_required_failed")
+
+    def test_grounded_medium_confidence_agreement_cannot_unblock_automation(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {"second_opinion_prompt_file": Path("/tmp/reviewer.md")},
+        )()
+        settings = self.runner.default_ai_settings()
+        settings["enabled_ollama_models"] = ["primary:latest", "reviewer:latest"]
+        settings["agent_models"]["soc-analyst"] = "ollama:primary:latest"
+        settings["agent_second_opinion_models"]["soc-analyst"] = "ollama:reviewer:latest"
+        verdict = {
+            "detection_outcome": "inconclusive",
+            "event_status": "unknown",
+            "detection_validity": "unknown",
+            "activity_disposition": "unknown",
+            "handling": "investigate",
+            "duplicate_of": None,
+            "hypotheses": [],
+            "escalation_needed": False,
+        }
+        primary = self.runner.validate_response(
+            self.complete_response(
+                **verdict,
+                confidence="low",
+                confidence_score=0.3,
+            )
+        )
+
+        def reviewed_response(_route, review_package, *_args, **_kwargs):
+            contract = review_package["review_contract"]
+            return {
+                **self.complete_response(
+                    **verdict,
+                    confidence="medium",
+                    confidence_score=0.65,
+                    evidence_used=["alert", "alert:current-case"],
+                ),
+                "review_case_id": contract["case_id"],
+                "review_evidence_hash": contract["evidence_hash"],
+                "observables_used": [],
+            }
+
+        with mock.patch.object(
+            self.runner,
+            "analyze_model_route",
+            side_effect=reviewed_response,
+        ):
+            result = self.runner.apply_configured_second_opinion(
+                {"alert": {"alert_id": "current-case"}},
+                primary,
+                args,
+                settings,
+                "soc-analyst",
+            )
+
+        self.assertEqual(result["_second_opinion"]["status"], "invalid")
+        self.assertEqual(
+            result["_second_opinion"]["comparison"]["agreement"],
+            "partial_disagreement",
+        )
+        self.assertEqual(result["final_disposition_status"], "review_required_failed")
+        self.assertEqual(result["confidence"], "low")
+        self.assertLessEqual(result["confidence_score"], 0.39)
+        self.assertTrue(result["_automation_controls"]["automatic_closure_blocked"])
+        self.assertTrue(result["_automation_controls"]["memory_writeback_blocked"])
+
+    def test_saved_response_required_review_fails_closed(self) -> None:
+        saved_input = self.complete_response(
+                confidence="high",
+                confidence_score=0.9,
+                detection_outcome="true_positive_suspicious",
+                event_status="observed",
+                detection_validity="matched_intent",
+                activity_disposition="suspicious",
+                handling="contain",
+                escalation_needed=False,
+                memory_candidates=[
+                    {
+                        "scope": "agent",
+                        "category": "response_lesson",
+                        "confidence": "high",
+                        "finding": "Synthetic containment pattern must remain review-gated.",
+                        "use_when": "When the same synthetic alert recurs.",
+                        "evidence_basis": ["alert:synthetic-saved-response"],
+                    }
+                ],
+                _second_opinion={
+                    "status": "completed",
+                    "response": {"confidence": "high"},
+                    "comparison": {
+                        "agreement": "agreement",
+                        "material_disagreement": False,
+                    },
+                },
+                _analysis_model="spoofed-model",
+                _analysis_model_path="frontier-codex-cli",
+                _analysis_model_route="codex-cli:spoofed-model:xhigh",
+                _analysis_provider="codex-cli",
+                _automation_controls={"memory_writeback_blocked": False},
+            )
+        sanitized = self.runner.sanitize_saved_response_input(saved_input)
+        self.assertFalse(any(key.startswith("_") for key in sanitized))
+        primary = self.runner.validate_response(
+            sanitized
+        )
+        self.assertTrue(primary["memory_candidates"])
+
+        result = self.runner.apply_saved_response_review_gate(
+            {"alert": {"alert_id": "synthetic-saved-response"}},
+            primary,
+        )
+
+        self.assertEqual(result["final_disposition_status"], "review_required_failed")
+        self.assertEqual(result["confidence"], "low")
+        self.assertLessEqual(result["confidence_score"], 0.39)
+        self.assertEqual(result["handling"], "investigate")
+        self.assertEqual(result["memory_candidates"], [])
+        self.assertEqual(
+            result["_analysis_input_mode"],
+            self.runner.SAVED_RESPONSE_INPUT_MODE,
+        )
+        self.assertNotIn("_analysis_model", result)
+        self.assertNotIn("_analysis_model_path", result)
+        self.assertNotIn("_analysis_model_route", result)
+        self.assertNotIn("_analysis_provider", result)
+        self.assertEqual(result["_second_opinion"]["status"], "review_required_failed")
+        self.assertIn("consequential", result["_second_opinion"]["trigger"].lower())
+        self.assertTrue(result["_automation_controls"]["automatic_closure_blocked"])
+        self.assertTrue(result["_automation_controls"]["containment_blocked"])
+        self.assertTrue(result["_automation_controls"]["tuning_blocked"])
+        self.assertTrue(result["_automation_controls"]["memory_writeback_blocked"])
+
+        settings = self.runner.default_ai_settings()
+        settings["agent_models"]["soc-analyst"] = "ollama:assigned-only"
+        log_record = self.runner.build_llm_log_record(
+            run_id="synthetic-saved-response",
+            status="success",
+            started_at="2026-07-24  10:00:00-06:00",
+            finished_at="2026-07-24  10:00:01-06:00",
+            runtime_seconds=1,
+            prompt_path=Path("/tmp/synthetic-prompt.json"),
+            prompt_package={
+                "agent_role": "soc-analyst",
+                "alert": {"alert_id": "synthetic-saved-response"},
+            },
+            settings=settings,
+            response=result,
+            json_path=Path("/tmp/synthetic-result.json"),
+            md_path=Path("/tmp/synthetic-result.md"),
+            resource_monitor=self.runner.SystemResourceMonitor(),
+        )
+        self.assertEqual(log_record["input_mode"], "saved_response")
+        self.assertFalse(log_record["model_started"])
+        self.assertEqual(log_record["model"], "")
+        self.assertEqual(log_record["model_path"], "")
+        self.assertEqual(log_record["model_route"], "")
+        self.assertEqual(log_record["assigned_model"], "assigned-only")
+
+        index_payload = self.runner.analysis_index_payload(
+            "synthetic-saved-response",
+            {"agent_role": "soc-analyst", "alert": {"alert_id": "saved-alert"}},
+            result,
+            "",
+            "2026-07-24  10:00:00-06:00",
+            "2026-07-24  10:00:01-06:00",
+            Path("/tmp/synthetic-result.json"),
+        )
+        self.assertIsNone(index_payload["model"])
+        self.assertIsNone(index_payload["model_path"])
+        self.assertEqual(index_payload["input_mode"], "saved_response")
 
     def test_comparison_distinguishes_full_advisory_and_material_disagreement(self) -> None:
         primary = {
@@ -1095,12 +1817,84 @@ class AiModelRoutingTests(unittest.TestCase):
 
         self.assertEqual(uncited["confidence"], "medium")
         self.assertEqual(uncited["confidence_score"], 0.69)
-        self.assertIn("no_cited_evidence", uncited["_confidence_calibration"]["limiters"])
+        self.assertIn(
+            "no_valid_corroborating_evidence",
+            uncited["_confidence_calibration"]["limiters"],
+        )
         self.assertEqual(contradictory["confidence"], "medium")
         self.assertEqual(contradictory["confidence_score"], 0.69)
         self.assertIn(
             "unresolved_contradicting_evidence",
             contradictory["_confidence_calibration"]["limiters"],
+        )
+
+    def test_empty_query_container_cannot_bypass_corroboration_cap(self) -> None:
+        prompt = {
+            "investigation_query_results": {
+                "rounds": [
+                    {
+                        "results": [
+                            {
+                                "query_id": "zero-hit",
+                                "query_digest": "a" * 64,
+                                "pack": "network_flow",
+                                "status": "ok",
+                                "returned_hits": 0,
+                                "total_hits": 0,
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+        self.runner.attach_evidence_reference_contract(prompt)
+        catalog = {
+            item["ref"]: item
+            for item in prompt["evidence_reference_contract"]["references"]
+        }
+        self.assertNotIn("investigation_query_results", catalog)
+        query_ref = f"query:{'a' * 64}"
+        self.assertIn(query_ref, catalog)
+        self.assertFalse(catalog[query_ref]["corroborating"])
+
+        response = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.94,
+                detection_outcome="inconclusive",
+                evidence_used=[query_ref],
+            ),
+            prompt,
+        )
+        self.assertEqual(response["confidence_score"], 0.69)
+        self.assertIn(
+            "no_valid_corroborating_evidence",
+            response["_confidence_calibration"]["limiters"],
+        )
+
+    def test_two_citations_from_one_source_cannot_reach_high_confidence(self) -> None:
+        prompt = {"alert": {"alert_id": "same-source-alert"}}
+        self.runner.attach_evidence_reference_contract(prompt)
+        response = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.94,
+                evidence_used=["alert", "alert:same-source-alert"],
+            ),
+            prompt,
+        )
+
+        self.assertEqual(response["confidence"], "medium")
+        self.assertEqual(response["confidence_score"], 0.79)
+        self.assertIn(
+            "single_valid_corroborating_evidence_source",
+            response["_confidence_calibration"]["limiters"],
+        )
+        self.assertEqual(
+            response["_confidence_calibration"]["evidence_signals"][
+                "corroborating_evidence_source_count"
+            ],
+            1,
         )
 
     def test_review_trigger_covers_controls_and_high_severity_closures(self) -> None:
@@ -1469,6 +2263,12 @@ class AiModelRoutingTests(unittest.TestCase):
             self.complete_response(
                 confidence="medium",
                 confidence_score=0.65,
+                event_status="unknown",
+                detection_validity="unknown",
+                activity_disposition="unknown",
+                handling="investigate",
+                duplicate_of=None,
+                hypotheses=[],
                 incident_response_report=self.complete_incident_report(
                     confidence="high",
                 ),
@@ -1611,6 +2411,12 @@ class AiModelRoutingTests(unittest.TestCase):
                 confidence="high",
                 confidence_score=0.96,
                 detection_outcome="true_positive_suspicious",
+                event_status="observed",
+                detection_validity="matched_intent",
+                activity_disposition="suspicious",
+                handling="investigate",
+                duplicate_of=None,
+                hypotheses=[],
                 incident_response_report=self.complete_incident_report(),
             ),
             prompt,
@@ -1670,6 +2476,12 @@ class AiModelRoutingTests(unittest.TestCase):
                 confidence="high",
                 confidence_score=0.96,
                 detection_outcome="true_positive_suspicious",
+                event_status="observed",
+                detection_validity="matched_intent",
+                activity_disposition="suspicious",
+                handling="investigate",
+                duplicate_of=None,
+                hypotheses=[],
                 incident_response_report=self.complete_incident_report(),
             ),
             prompt,
@@ -1821,19 +2633,43 @@ class AiModelRoutingTests(unittest.TestCase):
             "detection_outcome": "inconclusive",
             "summary": "Primary result",
         })
-        secondary = {
-            "confidence": "high",
-            "detection_outcome": "inconclusive",
-            "summary": "Reviewer result",
-        }
+        secondary = self.complete_response(
+            confidence="high",
+            confidence_score=0.9,
+            detection_outcome="inconclusive",
+            event_status="unknown",
+            detection_validity="unknown",
+            activity_disposition="unknown",
+            handling="investigate",
+            duplicate_of=None,
+            hypotheses=[],
+            summary="Reviewer result",
+            evidence_used=["alert", "pcap_evidence:pcap-phase-review"],
+        )
+
+        def reviewed_response(route, review_package, *unused_args, **unused_kwargs):
+            contract = review_package["review_contract"]
+            return {
+                **secondary,
+                "review_case_id": contract["case_id"],
+                "review_evidence_hash": contract["evidence_hash"],
+                "observables_used": [],
+            }
 
         with mock.patch.object(
             self.runner,
             "analyze_model_route",
-            return_value=secondary,
+            side_effect=reviewed_response,
         ) as analyze:
             result = self.runner.apply_configured_second_opinion(
-                {},
+                {
+                    "alert": {"alert_id": "phase-review"},
+                    "pcap_evidence": {
+                        "request_id": "pcap-phase-review",
+                        "status": "completed",
+                        "records_returned": 1,
+                    },
+                },
                 primary,
                 args,
                 settings,

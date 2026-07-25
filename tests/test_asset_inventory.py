@@ -1,4 +1,5 @@
 import importlib.util
+import ipaddress
 import json
 import tempfile
 import unittest
@@ -7,6 +8,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "n8n" / "bin" / "asset_inventory.py"
+SCHEMA_PATH = ROOT / "n8n" / "config" / "asset_inventory.schema.json"
+EXAMPLE_PATH = ROOT / "n8n" / "config" / "asset_inventory.example.json"
+SAMPLE_PATH = ROOT / "n8n" / "config" / "asset_inventory.sample.json"
 SPEC = importlib.util.spec_from_file_location("asset_inventory", MODULE_PATH)
 asset_inventory = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -221,6 +225,41 @@ class AssetInventoryTests(unittest.TestCase):
             path.write_text(json.dumps(payload), encoding="utf-8")
             loaded = asset_inventory.load_asset_inventory(path)
         self.assertEqual(loaded["assets"][0]["identifiers"]["ip"], ["2001:db8::8"])
+
+    def test_committed_contract_keeps_runtime_seed_empty_and_sample_nonproduction(self):
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        example = json.loads(EXAMPLE_PATH.read_text(encoding="utf-8"))
+        sample = json.loads(SAMPLE_PATH.read_text(encoding="utf-8"))
+
+        self.assertEqual(schema["$schema"], "https://json-schema.org/draft/2020-12/schema")
+        self.assertEqual(
+            schema["properties"]["schema"]["const"],
+            asset_inventory.ASSET_INVENTORY_SCHEMA,
+        )
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(example["assets"], [])
+
+        validated = asset_inventory.validate_asset_inventory(sample)
+        self.assertEqual(len(validated["assets"]), 1)
+        asset = sample["assets"][0]
+        documentation_networks = tuple(
+            ipaddress.ip_network(value)
+            for value in (
+                "192.0.2.0/24",
+                "198.51.100.0/24",
+                "203.0.113.0/24",
+                "2001:db8::/32",
+            )
+        )
+        for address in asset["identifiers"]["ip_addresses"]:
+            parsed = ipaddress.ip_address(address)
+            self.assertTrue(any(parsed in network for network in documentation_networks))
+        for hostname in asset["identifiers"]["hostnames"]:
+            self.assertTrue(hostname.endswith(".invalid"))
+        self.assertEqual(asset["expected_services"], [])
+        self.assertEqual(asset["expected_behaviors"], [])
+        self.assertFalse(asset["share_with_hosted_models"])
+        self.assertEqual(asset["criticality"], "unknown")
 
 
 if __name__ == "__main__":

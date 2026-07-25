@@ -56,19 +56,19 @@
   },
   "cases": [
     {
-      "case_id": "bpfdoor-heartbeat-rule-logic-false-positive",
+      "case_id": "bpfdoor-heartbeat-xbit-unconfirmed-inconclusive",
       "label_source": "deterministic_fixture",
-      "label_provenance": "ET BPFDoor heartbeat code discriminator and marker-offset regression fixture",
+      "label_provenance": "Exact deployed SID 2069174 requires an unobserved ET.bpfdoor xbit chain; ICMP code 1 is supporting intelligence rather than an installed predicate",
       "allowed_evidence_refs": [
         "deterministic-validation"
       ],
       "expected": {
         "event_status": "observed",
-        "detection_validity": "logic_error",
+        "detection_validity": "unknown",
         "activity_disposition": "unknown",
         "handling": "investigate",
         "duplicate_of": null,
-        "detection_outcome": "false_positive_logic_rule"
+        "detection_outcome": "inconclusive"
       },
       "detection_validation_fixture": {
         "sid": "2069174",
@@ -85,21 +85,21 @@
       },
       "prompt_package": {},
       "primary_response": {
-        "detection_outcome": "true_positive_malicious",
+        "detection_outcome": "inconclusive",
         "event_status": "observed",
-        "detection_validity": "matched_intent",
-        "activity_disposition": "malicious",
-        "handling": "contain",
+        "detection_validity": "unknown",
+        "activity_disposition": "unknown",
+        "handling": "investigate",
         "duplicate_of": null,
         "confidence_score": 0.99,
-        "escalation_needed": true,
-        "tuning_recommendation": "drop",
-        "tuning_reason": "Alarmist recorded response that the deterministic guard must correct."
+        "escalation_needed": false,
+        "tuning_recommendation": "needs_more_data",
+        "tuning_reason": "The xbit-setting event or rule-engine trace is required before closing or escalating."
       },
       "reviewer_response": {
-        "detection_outcome": "false_positive_logic_rule",
+        "detection_outcome": "inconclusive",
         "event_status": "observed",
-        "detection_validity": "logic_error",
+        "detection_validity": "unknown",
         "activity_disposition": "unknown",
         "handling": "investigate",
         "duplicate_of": null,

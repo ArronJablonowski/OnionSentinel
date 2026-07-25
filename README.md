@@ -100,6 +100,34 @@ Onion Sentinel-specific investigation runtime is in
 the production baseline until the adapter, policy, security, shadow-testing,
 and rollback gates in that roadmap pass.
 
+## Asset Inventory Context
+
+The optional asset inventory is operator-owned, time-bounded investigation
+context. Its source contract is
+`n8n/config/asset_inventory.schema.json`. The committed
+`asset_inventory.example.json` is intentionally empty so a deployment can
+never acquire invented asset facts. `asset_inventory.sample.json` is a
+documentation-only template containing only IANA documentation addresses and
+`.invalid` names; never deploy it unchanged.
+
+Populate `$HOME/n8n-local/config/asset_inventory.json` only from an approved
+CMDB, DHCP/IPAM history, or another authoritative source. Validate the edited
+file before deployment:
+
+```bash
+python3 n8n/bin/asset_inventory.py "$HOME/n8n-local/config/asset_inventory.json"
+```
+
+Keep validity intervals accurate when IPs or hostnames are reassigned, keep
+`share_with_hosted_models` false unless that specific record is approved for
+hosted processing, and use non-secret references rather than personal data or
+credentials.
+
+Registered roles, services, and behaviors are hypotheses that help guide an
+investigation. A match never proves that observed activity was authorized,
+expected at that time, or benign; conclusions still require corroborating
+telemetry.
+
 ## Secret Handling
 
 Never commit these live files:

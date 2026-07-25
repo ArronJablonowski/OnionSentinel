@@ -21,7 +21,7 @@ import re
 from typing import Any
 
 
-INVESTIGATION_QUERY_CONTRACT = "onion-sentinel-investigation-pivots-v2"
+INVESTIGATION_QUERY_CONTRACT = "onion-sentinel-investigation-pivots-v1"
 INVESTIGATION_QUERY_OPERATION = "investigation_pivots"
 QUERY_PREFERENCE = "onion-sentinel-incident-evidence"
 MAX_QUERIES = 4
@@ -35,7 +35,7 @@ MAX_CONTEXT_OBSERVABLES_PER_KIND = 16
 MAX_DISCOVERED_OBSERVABLES = 32
 MAX_CONTEXT_EVENT_TUPLES = 32
 ALLOWED_DIALECTS = {"elastic", "oql"}
-ALLOWED_AGGREGATIONS = {"events", "count", "timeline", "anchor_nearest"}
+ALLOWED_AGGREGATIONS = {"events", "count", "timeline"}
 ALLOWED_PURPOSES = {
     "validate_detection",
     "establish_timeline",
@@ -46,11 +46,6 @@ ALLOWED_PURPOSES = {
 }
 ALLOWED_ACTOR_ROLES = {"soc_analyst", "incident_responder"}
 ALLOWED_STATUSES = {"ok", "timeout", "output_limit", "error", "invalid_response"}
-ALLOWED_ROLE_SEMANTICS = {
-    "event_native",
-    "packet_direction",
-    "zeek_originator_responder",
-}
 OBSERVABLE_KINDS = ("ips", "domains", "hosts", "users")
 OBSERVABLE_FIELDS = {
     "ips": [
@@ -83,18 +78,6 @@ EVENT_TUPLE_FIELDS = {
     # Security Onion maps a Suricata signature ID to ECS rule.id.
     "rule_id": "rule.id",
 }
-# Security Onion alert documents in the same deployment may identify a
-# detection with either ECS rule.id or rule.uuid.  A trusted rule identifier is
-# therefore matched against both exact keyword fields, while the public
-# EVENT_TUPLE_FIELDS mapping remains backwards compatible for callers that
-# render field labels.
-EVENT_TUPLE_PATHS = {
-    **{
-        field: (path,)
-        for field, path in EVENT_TUPLE_FIELDS.items()
-    },
-    "rule_id": ("rule.id", "rule.uuid"),
-}
 ALERT_INDEX_SCOPE = [
     "logs-suricata.alerts-so",
     "logs-detections.alerts-so",
@@ -115,7 +98,7 @@ PACKS = {
         "fields": [
             "@timestamp", "event.dataset", "event.kind", "event.category",
             "event.type", "event.action", "event.outcome", "event.severity",
-            "event.id", "event.code", "rule.id", "rule.uuid", "rule.name",
+            "event.id", "event.code", "rule.id", "rule.name",
             "rule.category", "rule.ruleset", "source.ip", "source.port",
             "source.domain", "source.mac", "destination.ip",
             "destination.port", "destination.domain", "destination.mac",
@@ -149,8 +132,7 @@ PACKS = {
             "host.id", "host.name", "host.hostname", "agent.id", "host.ip",
             "user.id", "user.name", "source.user.name",
             "destination.user.name", "client.user.name", "process.entity_id",
-            "process.name", "process.executable", "rule.id", "rule.uuid",
-            "rule.name",
+            "process.name", "process.executable",
         ],
     },
     "dns_activity": {
@@ -308,8 +290,7 @@ PACKS = {
         "fields": [
             "@timestamp", "event.dataset", "event.kind", "event.category",
             "event.type", "event.action", "event.outcome", "event.severity",
-            "event.id", "rule.id", "rule.uuid", "rule.name", "source.ip",
-            "source.port",
+            "event.id", "rule.id", "rule.name", "source.ip", "source.port",
             "source.domain", "destination.ip", "destination.port",
             "destination.domain", "client.ip", "client.domain", "server.ip",
             "server.domain", "url.domain", "tls.server.name",
@@ -324,27 +305,6 @@ PACKS = {
             "file.name", "file.path", "file.hash.sha256",
         ],
     },
-}
-
-# Source/destination in Zeek are connection originator/responder fields, while
-# a Suricata alert can describe the direction of the individual packet that
-# matched.  Do not silently project one meaning onto the other.  Community ID
-# is the reviewed cross-sensor join key because Security Onion enables it in
-# both Zeek and Suricata.
-PACK_ROLE_MODE = {
-    "alert_context": "event_native",
-    "network_flow": "cross_sensor",
-    "dns_activity": "cross_sensor",
-    "system_auth": "event_native",
-    "zeek_tls": "zeek_originator_responder",
-    "zeek_http": "zeek_originator_responder",
-    "zeek_files": "zeek_originator_responder",
-    "zeek_ssh": "zeek_originator_responder",
-    "zeek_stun": "zeek_originator_responder",
-    "zeek_quic": "zeek_originator_responder",
-    "zeek_anomalies": "zeek_originator_responder",
-    "osquery_history": "event_native",
-    "cross_sensor_timeline": "cross_sensor",
 }
 
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.:@+=-]{1,128}$")
@@ -559,24 +519,15 @@ def _normalize_context_event_tuples(
         item = _require_mapping(raw, f"authorization event tuple {index}")
         _require_exact_keys(
             item,
-            allowed={
-                "event_tuple", "role_semantics", "source", "evidence_ref",
-            },
-            required={
-                "event_tuple", "role_semantics", "source", "evidence_ref",
-            },
+            allowed={"event_tuple", "source", "evidence_ref"},
+            required={"event_tuple", "source", "evidence_ref"},
             label=f"authorization event tuple {index}",
         )
         source = str(item["source"] or "")
-        role_semantics = str(item["role_semantics"] or "")
         evidence_ref = str(item["evidence_ref"] or "")
         if source not in {"trusted_context", "prior_evidence"}:
             raise InvestigationQueryContractError(
                 "authorization event tuple source is unsupported"
-            )
-        if role_semantics not in ALLOWED_ROLE_SEMANTICS:
-            raise InvestigationQueryContractError(
-                "authorization event tuple role semantics are unsupported"
             )
         if not SAFE_EVIDENCE_REF_RE.fullmatch(evidence_ref):
             raise InvestigationQueryContractError(
@@ -587,7 +538,6 @@ def _normalize_context_event_tuples(
                 item["event_tuple"],
                 label=f"authorization event tuple {index}.event_tuple",
             ),
-            "role_semantics": role_semantics,
             "source": source,
             "evidence_ref": evidence_ref,
         }
@@ -638,12 +588,12 @@ def _normalize_authorization_context(value: object) -> dict[str, Any]:
         context,
         allowed={
             "context_id", "case_id", "group_id", "actor_role", "anchor",
-            "anchor_time", "time_envelope", "permitted_observables",
-            "discovered_observables", "permitted_event_tuples",
+            "time_envelope", "permitted_observables", "discovered_observables",
+            "permitted_event_tuples",
         },
         required={
-            "context_id", "case_id", "actor_role", "anchor", "anchor_time",
-            "time_envelope", "permitted_observables",
+            "context_id", "case_id", "actor_role", "anchor", "time_envelope",
+            "permitted_observables",
         },
         label="authorization context",
     )
@@ -655,14 +605,6 @@ def _normalize_authorization_context(value: object) -> dict[str, Any]:
     actor_role = str(context["actor_role"] or "").strip()
     if actor_role not in ALLOWED_ACTOR_ROLES:
         raise InvestigationQueryContractError("authorization actor_role is unsupported")
-    anchor_time = _parse_utc(
-        context["anchor_time"],
-        "authorization anchor_time",
-    )
-    if anchor_time < envelope_start or anchor_time > envelope_end:
-        raise InvestigationQueryContractError(
-            "authorization anchor_time escapes its time envelope"
-        )
     permitted = _normalize_observables(
         context["permitted_observables"],
         per_kind_limit=MAX_CONTEXT_OBSERVABLES_PER_KIND,
@@ -707,7 +649,6 @@ def _normalize_authorization_context(value: object) -> dict[str, Any]:
         ),
         "actor_role": actor_role,
         "anchor": _normalize_anchor(context["anchor"]),
-        "anchor_time": _iso_utc(anchor_time),
         "time_envelope": envelope,
         "permitted_observables": permitted,
         "discovered_observables": normalized_discoveries,
@@ -745,85 +686,10 @@ def pack_event_tuple_fields(pack_name: str) -> dict[str, str]:
     """Return tuple constraints that can also be authenticated in hit sources."""
     projected = set(PACKS[pack_name]["fields"])
     return {
-        key: EVENT_TUPLE_FIELDS[key]
-        for key, paths in EVENT_TUPLE_PATHS.items()
-        if projected.intersection(paths)
+        key: path
+        for key, path in EVENT_TUPLE_FIELDS.items()
+        if path in projected
     }
-
-
-def validate_pack_observables(
-    observables: dict[str, list[str]],
-    pack_name: str,
-    *,
-    label: str,
-) -> None:
-    """Reject values that the selected pack cannot possibly represent."""
-    fields_by_kind = pack_observable_fields(pack_name)
-    unsupported = sorted(
-        kind
-        for kind, values in observables.items()
-        if values and not fields_by_kind.get(kind)
-    )
-    if unsupported:
-        raise InvestigationQueryContractError(
-            f"{label} uses observable kind(s) unsupported by pack "
-            f"{pack_name}: {', '.join(unsupported)}"
-        )
-    if not any(
-        values and fields_by_kind.get(kind)
-        for kind, values in observables.items()
-    ):
-        raise InvestigationQueryContractError(
-            f"{label} has no queryable observable in pack {pack_name}"
-        )
-
-
-def tuple_match_semantics(
-    pack_name: str,
-    event_tuple: dict[str, Any] | None,
-    role_semantics: str | None,
-) -> str:
-    """Return the exact role/correlation interpretation used by the broker."""
-    if not event_tuple:
-        return "observable_exact_any_field"
-    mode = PACK_ROLE_MODE[pack_name]
-    role = str(role_semantics or "")
-    if mode == "cross_sensor" or (
-        mode == "zeek_originator_responder"
-        and role != "zeek_originator_responder"
-    ):
-        return "community_id_cross_sensor"
-    if mode == "zeek_originator_responder":
-        return "zeek_originator_responder_exact"
-    if role == "packet_direction":
-        return "packet_direction_exact"
-    return "event_native_exact"
-
-
-def _validate_tuple_role_compatibility(
-    event_tuple: dict[str, Any],
-    *,
-    pack_name: str,
-    role_semantics: str,
-    label: str,
-) -> None:
-    mode = PACK_ROLE_MODE[pack_name]
-    if mode == "cross_sensor":
-        if "community_id" not in event_tuple:
-            raise InvestigationQueryContractError(
-                f"{label} requires community_id for deterministic "
-                f"cross-sensor correlation in pack {pack_name}"
-            )
-        return
-    if (
-        mode == "zeek_originator_responder"
-        and role_semantics != "zeek_originator_responder"
-        and "community_id" not in event_tuple
-    ):
-        raise InvestigationQueryContractError(
-            f"{label} cannot project {role_semantics or 'unknown'} roles onto "
-            "Zeek originator/responder fields without community_id"
-        )
 
 
 def _event_tuple_authorization(
@@ -873,12 +739,6 @@ def _event_tuple_authorization(
         raise InvestigationQueryContractError(
             f"{label} must retain a trusted source or destination IP role"
         )
-    _validate_tuple_role_compatibility(
-        requested,
-        pack_name=pack_name,
-        role_semantics=selected["role_semantics"],
-        label=label,
-    )
     return selected
 
 
@@ -960,11 +820,6 @@ def authorize_investigation_query_request(
             require_one=True,
             label=f"investigation query {query_id} observables",
         )
-        validate_pack_observables(
-            observables,
-            pack,
-            label=f"investigation query {query_id}",
-        )
         provenance: dict[str, list[dict[str, str]]] = {
             kind: [] for kind in OBSERVABLE_KINDS
         }
@@ -996,10 +851,6 @@ def authorize_investigation_query_request(
             )
             if event_tuple_provenance not in used_event_tuple_authorizations:
                 used_event_tuple_authorizations.append(event_tuple_provenance)
-        if aggregation == "anchor_nearest" and dialect != "elastic":
-            raise InvestigationQueryContractError(
-                "anchor_nearest is available only through compiled Elastic DSL"
-            )
         try:
             size = int(query["size"])
         except (TypeError, ValueError) as exc:
@@ -1019,18 +870,7 @@ def authorize_investigation_query_request(
             "observable_provenance": provenance,
             "size": size,
             "aggregation": aggregation,
-            "match_semantics": tuple_match_semantics(
-                pack,
-                event_tuple,
-                (
-                    event_tuple_provenance.get("role_semantics")
-                    if event_tuple_provenance
-                    else None
-                ),
-            ),
         }
-        if aggregation == "anchor_nearest":
-            normalized_query["anchor_time"] = context["anchor_time"]
         if event_tuple is not None:
             normalized_query["event_tuple"] = event_tuple
             normalized_query["event_tuple_provenance"] = dict(
@@ -1060,7 +900,6 @@ def authorize_investigation_query_request(
         "group_id": context["group_id"],
         "actor_role": context["actor_role"],
         "anchor": context["anchor"],
-        "anchor_time": context["anchor_time"],
         "time_envelope": context["time_envelope"],
         "context_digest": canonical_digest(context_for_digest),
         "observables": sorted(
@@ -1105,8 +944,6 @@ def validate_investigation_query_request(
             )
         first = _require_mapping(allowed_windows[0], "allowed window")
         last = _require_mapping(allowed_windows[-1], "allowed window")
-        first_start = _parse_utc(first.get("start"), "allowed window start")
-        last_end = _parse_utc(last.get("end"), "allowed window end")
         authorization_context = {
             "context_id": "adapter-context",
             "case_id": "adapter-case",
@@ -1115,9 +952,6 @@ def validate_investigation_query_request(
                 "index": "logs-suricata.alerts-so",
                 "id": "adapter-anchor",
             },
-            "anchor_time": _iso_utc(
-                first_start + (last_end - first_start) / 2
-            ),
             "time_envelope": {"start": first.get("start"), "end": last.get("end")},
             "permitted_observables": allowed_observables,
             "discovered_observables": [],
@@ -1144,13 +978,12 @@ def validate_authorized_investigation_query_request(payload: object) -> dict[str
         authorization,
         allowed={
             "context_id", "case_id", "group_id", "actor_role", "anchor",
-            "anchor_time", "time_envelope", "context_digest", "observables",
-            "manifest_digest", "event_tuples",
+            "time_envelope", "context_digest", "observables", "manifest_digest",
+            "event_tuples",
         },
         required={
             "context_id", "case_id", "group_id", "actor_role", "anchor",
-            "anchor_time", "time_envelope", "context_digest", "observables",
-            "manifest_digest",
+            "time_envelope", "context_digest", "observables", "manifest_digest",
         },
         label="authorization manifest",
     )
@@ -1172,14 +1005,6 @@ def validate_authorized_investigation_query_request(payload: object) -> dict[str
     actor_role = str(authorization["actor_role"] or "")
     if actor_role not in ALLOWED_ACTOR_ROLES:
         raise InvestigationQueryContractError("authorization actor role is unsupported")
-    anchor_time = _parse_utc(
-        authorization["anchor_time"],
-        "authorization anchor_time",
-    )
-    if anchor_time < envelope_start or anchor_time > envelope_end:
-        raise InvestigationQueryContractError(
-            "authorization anchor_time escapes its time envelope"
-        )
     authorized_entries = authorization["observables"]
     if not isinstance(authorized_entries, list) or len(authorized_entries) > MAX_BATCH_OBSERVABLES:
         raise InvestigationQueryContractError("authorization observable manifest exceeds its limit")
@@ -1235,13 +1060,11 @@ def validate_authorized_investigation_query_request(payload: object) -> dict[str
             allowed={
                 "query_id", "dialect", "pack", "purpose", "window",
                 "observables", "observable_provenance", "size", "aggregation",
-                "event_tuple", "event_tuple_provenance", "match_semantics",
-                "anchor_time",
+                "event_tuple", "event_tuple_provenance",
             },
             required={
                 "query_id", "dialect", "pack", "purpose", "window",
                 "observables", "observable_provenance", "size", "aggregation",
-                "match_semantics",
             },
             label=f"authorized query {index}",
         )
@@ -1271,11 +1094,6 @@ def validate_authorized_investigation_query_request(payload: object) -> dict[str
             total_limit=MAX_QUERY_OBSERVABLES,
             require_one=True,
             label=f"authorized query {query_id} observables",
-        )
-        validate_pack_observables(
-            observables,
-            pack,
-            label=f"authorized query {query_id}",
         )
         provenance = _require_mapping(
             query["observable_provenance"],
@@ -1357,39 +1175,7 @@ def validate_authorized_investigation_query_request(payload: object) -> dict[str
                 raise InvestigationQueryContractError(
                     "authorized query event tuple dropped its trusted IP role"
                 )
-            _validate_tuple_role_compatibility(
-                event_tuple,
-                pack_name=pack,
-                role_semantics=event_tuple_provenance["role_semantics"],
-                label=f"authorized query {query_id} event_tuple",
-            )
             used_event_tuple_digests.add(canonical_digest(event_tuple_provenance))
-        expected_match_semantics = tuple_match_semantics(
-            pack,
-            event_tuple,
-            (
-                event_tuple_provenance.get("role_semantics")
-                if event_tuple_provenance
-                else None
-            ),
-        )
-        if query["match_semantics"] != expected_match_semantics:
-            raise InvestigationQueryContractError(
-                f"authorized query {query_id} match semantics are invalid"
-            )
-        if aggregation == "anchor_nearest":
-            if dialect != "elastic":
-                raise InvestigationQueryContractError(
-                    "anchor_nearest is available only through compiled Elastic DSL"
-                )
-            if query.get("anchor_time") != _iso_utc(anchor_time):
-                raise InvestigationQueryContractError(
-                    f"authorized query {query_id} anchor_time is invalid"
-                )
-        elif "anchor_time" in query:
-            raise InvestigationQueryContractError(
-                f"authorized query {query_id} unexpectedly supplied anchor_time"
-            )
         try:
             size = int(query["size"])
         except (TypeError, ValueError) as exc:
@@ -1407,10 +1193,7 @@ def validate_authorized_investigation_query_request(payload: object) -> dict[str
             "observable_provenance": clean_provenance,
             "size": size,
             "aggregation": aggregation,
-            "match_semantics": expected_match_semantics,
         }
-        if aggregation == "anchor_nearest":
-            clean_query["anchor_time"] = _iso_utc(anchor_time)
         if event_tuple is not None:
             clean_query["event_tuple"] = event_tuple
             clean_query["event_tuple_provenance"] = dict(
@@ -1441,7 +1224,6 @@ def validate_authorized_investigation_query_request(payload: object) -> dict[str
         ),
         "actor_role": actor_role,
         "anchor": _normalize_anchor(authorization["anchor"]),
-        "anchor_time": _iso_utc(anchor_time),
         "time_envelope": envelope,
         "context_digest": str(authorization["context_digest"]),
         "observables": clean_entries,
@@ -1479,58 +1261,22 @@ def observable_clause(
     for kind, fields in pack_observable_fields(pack_name).items():
         for value in observables.get(kind, []):
             should.extend({"term": {field: value}} for field in fields)
-    if not should:
-        raise InvestigationQueryContractError(
-            f"pack {pack_name} produced no observable query clauses"
-        )
     return {"bool": {"should": should, "minimum_should_match": 1}}
 
 
-def _event_tuple_query_fields(query: dict[str, Any]) -> list[str]:
-    event_tuple = query.get("event_tuple") or {}
-    if query.get("match_semantics") == "community_id_cross_sensor":
-        return ["community_id"]
-    return list(event_tuple)
-
-
-def _event_tuple_term_clause(field: str, value: Any) -> dict[str, Any]:
-    paths = EVENT_TUPLE_PATHS[field]
-    if len(paths) == 1:
-        return {"term": {paths[0]: value}}
-    return {
-        "bool": {
-            "should": [
-                {"term": {path: value}}
-                for path in paths
-            ],
-            "minimum_should_match": 1,
-        }
-    }
-
-
-def event_tuple_clause(query: dict[str, Any]) -> dict[str, Any]:
-    """Compile only role-compatible trusted tuple constraints."""
-    event_tuple = query.get("event_tuple") or {}
-    fields = _event_tuple_query_fields(query)
-    if not fields:
-        raise InvestigationQueryContractError(
-            "event tuple produced no role-compatible query clauses"
-        )
+def event_tuple_clause(event_tuple: dict[str, Any]) -> dict[str, Any]:
+    """Compile an exact tuple as an AND of fixed ECS term queries."""
     return {
         "bool": {
             "filter": [
-                _event_tuple_term_clause(field, event_tuple[field])
-                for field in fields
+                {"term": {EVENT_TUPLE_FIELDS[field]: value}}
+                for field, value in event_tuple.items()
             ]
         }
     }
 
 
 def dataset_clause(datasets: list[str]) -> dict[str, Any]:
-    if not datasets:
-        raise InvestigationQueryContractError(
-            "reviewed query pack has no datasets"
-        )
     return {
         "bool": {
             "should": [
@@ -1544,63 +1290,39 @@ def dataset_clause(datasets: list[str]) -> dict[str, Any]:
 
 def build_query_dsl(query: dict[str, Any]) -> dict[str, Any]:
     pack = PACKS[query["pack"]]
-    filters = [
-        {
-            "range": {
-                "@timestamp": {
-                    "gte": query["window"]["start"],
-                    "lte": query["window"]["end"],
-                }
-            }
-        },
-        dataset_clause(pack["datasets"]),
-        observable_clause(query["observables"], query["pack"]),
-        *(
-            [event_tuple_clause(query)]
-            if query.get("event_tuple")
-            else []
-        ),
-    ]
-    filtered_query: dict[str, Any] = {"bool": {"filter": filters}}
-    if query["aggregation"] == "anchor_nearest":
-        start = _parse_utc(query["window"]["start"], "query window start")
-        end = _parse_utc(query["window"]["end"], "query window end")
-        scale_seconds = max(1, round((end - start).total_seconds() / 2))
-        compiled_query: dict[str, Any] = {
-            "function_score": {
-                "query": filtered_query,
-                "gauss": {
-                    "@timestamp": {
-                        "origin": query["anchor_time"],
-                        "scale": f"{scale_seconds}s",
-                        "decay": 0.5,
-                    }
-                },
-                "boost_mode": "replace",
-            }
-        }
-    else:
-        compiled_query = filtered_query
     body: dict[str, Any] = {
         "size": 0 if query["aggregation"] == "count" else query["size"],
         "track_total_hits": True,
         "timeout": "30s",
         "_source": False if query["aggregation"] == "count" else pack["fields"],
-        "query": compiled_query,
+        "query": {
+            "bool": {
+                "filter": [
+                    {
+                        "range": {
+                            "@timestamp": {
+                                "gte": query["window"]["start"],
+                                "lte": query["window"]["end"],
+                            }
+                        }
+                    },
+                    dataset_clause(pack["datasets"]),
+                    observable_clause(query["observables"], query["pack"]),
+                    *(
+                        [event_tuple_clause(query["event_tuple"])]
+                        if query.get("event_tuple")
+                        else []
+                    ),
+                ]
+            }
+        },
     }
     if query["aggregation"] != "count":
-        if query["aggregation"] == "anchor_nearest":
-            body["sort"] = [
-                {"_score": "desc"},
-                {"@timestamp": {"order": "asc", "unmapped_type": "date"}},
-                "_shard_doc",
-            ]
-        else:
-            order = "asc" if query["aggregation"] == "timeline" else "desc"
-            body["sort"] = [
-                {"@timestamp": {"order": order, "unmapped_type": "date"}},
-                "_shard_doc",
-            ]
+        order = "asc" if query["aggregation"] == "timeline" else "desc"
+        body["sort"] = [
+            {"@timestamp": {"order": order, "unmapped_type": "date"}},
+            "_shard_doc",
+        ]
     return body
 
 
@@ -1613,28 +1335,6 @@ def _event_tuple_filter_value(field: str, value: Any) -> str:
     if field in {"source_port", "destination_port"}:
         return str(value)
     return _quote(str(value))
-
-
-def _render_event_tuple_filter(
-    query: dict[str, Any],
-    *,
-    separator: str,
-    field_separator: str,
-) -> str:
-    event_tuple = query.get("event_tuple") or {}
-    clauses: list[str] = []
-    for field in _event_tuple_query_fields(query):
-        value = _event_tuple_filter_value(field, event_tuple[field])
-        alternatives = [
-            f"{path}{field_separator}{value}"
-            for path in EVENT_TUPLE_PATHS[field]
-        ]
-        clauses.append(
-            alternatives[0]
-            if len(alternatives) == 1
-            else "(" + f" {separator} ".join(alternatives) + ")"
-        )
-    return f" {separator.replace('or', 'and').replace('OR', 'AND')} ".join(clauses)
 
 
 def kql_equivalent(query: dict[str, Any]) -> str:
@@ -1653,10 +1353,10 @@ def kql_equivalent(query: dict[str, Any]) -> str:
         f"({datasets}) and (" + " or ".join(observables) + ")"
     )
     if query.get("event_tuple"):
-        rendered += " and (" + _render_event_tuple_filter(
-            query,
-            separator="or",
-            field_separator=" : ",
+        rendered += " and (" + " and ".join(
+            f"{EVENT_TUPLE_FIELDS[field]} : "
+            f"{_event_tuple_filter_value(field, value)}"
+            for field, value in query["event_tuple"].items()
         ) + ")"
     return rendered
 
@@ -1683,10 +1383,10 @@ def oql_equivalent(query: dict[str, Any]) -> str:
         f"({datasets}) AND (" + " OR ".join(observables) + ")"
     )
     if query.get("event_tuple"):
-        rendered += " AND (" + _render_event_tuple_filter(
-            query,
-            separator="OR",
-            field_separator=":",
+        rendered += " AND (" + " AND ".join(
+            f"{EVENT_TUPLE_FIELDS[field]}:"
+            f"{_event_tuple_filter_value(field, value)}"
+            for field, value in query["event_tuple"].items()
         ) + ")"
     if query["aggregation"] == "timeline":
         rendered += " | sortby @timestamp^"
@@ -1814,69 +1514,15 @@ def _validate_hit_source(
         raise InvestigationQueryContractError(
             "investigation hit does not contain an authorized matching observable"
         )
-    event_tuple = expected_query.get("event_tuple") or {}
-    for field in _event_tuple_query_fields(expected_query):
-        expected = event_tuple[field]
+    for field, expected in (expected_query.get("event_tuple") or {}).items():
+        path = EVENT_TUPLE_FIELDS[field]
         if not any(
             _event_tuple_value_matches(field, expected, candidate)
-            for path in EVENT_TUPLE_PATHS[field]
             for candidate in _path_values(source_map, path)
         ):
             raise InvestigationQueryContractError(
                 "investigation hit does not match its authorized event tuple"
             )
-
-
-def result_coverage(
-    query: dict[str, Any],
-    *,
-    status: str,
-    total_hits: int,
-    total_hits_relation: str,
-    returned_hits: int,
-) -> dict[str, Any]:
-    """Describe bounded evidence coverage without treating zero as absence."""
-    exact_total = status == "ok" and total_hits_relation == "eq"
-    if status != "ok":
-        coverage_status = "partial"
-        interpretation = "query_execution_incomplete"
-    elif not exact_total:
-        coverage_status = "partial"
-        interpretation = "lower_bound_only"
-    elif query["aggregation"] == "count":
-        coverage_status = "exact_aggregate"
-        interpretation = "exact_count_for_authorized_filter_and_window"
-    elif total_hits == 0:
-        coverage_status = "exact_zero"
-        interpretation = (
-            "no_matching_documents_for_authorized_filter_and_window"
-        )
-    elif returned_hits < total_hits:
-        coverage_status = "bounded_sample"
-        interpretation = "sample_only_not_complete_event_set"
-    else:
-        coverage_status = "complete_events"
-        interpretation = "complete_matching_event_set"
-    strategy = {
-        "events": "newest_first",
-        "timeline": "chronological",
-        "anchor_nearest": "anchor_nearest",
-        "count": "exact_count",
-    }[query["aggregation"]]
-    return {
-        "coverage_status": coverage_status,
-        "match_semantics": query["match_semantics"],
-        "sample_strategy": strategy,
-        "scope": "authorized_exact_filters_and_time_window",
-        "exact_total_hits": exact_total,
-        "zero_hits": exact_total and total_hits == 0,
-        "event_bodies_complete": (
-            exact_total
-            and query["aggregation"] != "count"
-            and returned_hits == total_hits
-        ),
-        "interpretation": interpretation,
-    }
 
 
 def _validate_pivot_result(
@@ -1886,13 +1532,13 @@ def _validate_pivot_result(
     value = _require_mapping(result, f"result {expected_query['query_id']}")
     for field in (
         "query_id", "dialect", "pack", "purpose", "window", "observables",
-        "observable_provenance", "size", "aggregation", "match_semantics",
+        "observable_provenance", "size", "aggregation",
     ):
         if value.get(field) != expected_query[field]:
             raise InvestigationQueryContractError(
                 f"result {expected_query['query_id']} changed its authorized {field}"
             )
-    for field in ("event_tuple", "event_tuple_provenance", "anchor_time"):
+    for field in ("event_tuple", "event_tuple_provenance"):
         if value.get(field) != expected_query.get(field):
             raise InvestigationQueryContractError(
                 f"result {expected_query['query_id']} changed its authorized {field}"
@@ -1960,26 +1606,9 @@ def _validate_pivot_result(
     relation = value.get("total_hits_relation")
     if relation not in {"eq", "gte"}:
         raise InvestigationQueryContractError("result total-hits relation is invalid")
-    expected_truncated = (
-        relation != "eq"
-        or (
-            expected_query["aggregation"] != "count"
-            and value["total_hits"] > len(hits)
-        )
-    )
+    expected_truncated = relation != "eq" or value["total_hits"] > len(hits)
     if value.get("truncated") is not expected_truncated:
         raise InvestigationQueryContractError("result truncation flag is inconsistent")
-    expected_coverage = result_coverage(
-        expected_query,
-        status=status,
-        total_hits=value["total_hits"],
-        total_hits_relation=relation,
-        returned_hits=value["returned_hits"],
-    )
-    if value.get("result_coverage") != expected_coverage:
-        raise InvestigationQueryContractError(
-            "result evidence coverage semantics are inconsistent"
-        )
     if expected_query["aggregation"] == "count" and hits:
         raise InvestigationQueryContractError("count aggregation returned event bodies")
     for field in ("duration_ms", "took_ms"):
@@ -2313,7 +1942,6 @@ __all__ = [
     "ALLOWED_DIALECTS",
     "ALLOWED_PURPOSES",
     "EVENT_TUPLE_FIELDS",
-    "EVENT_TUPLE_PATHS",
     "INVESTIGATION_QUERY_CONTRACT",
     "InvestigationQueryContractError",
     "SAFE_ATOM_RE",
@@ -2323,9 +1951,6 @@ __all__ = [
     "kql_equivalent",
     "oql_equivalent",
     "pack_event_tuple_fields",
-    "result_coverage",
-    "tuple_match_semantics",
-    "validate_pack_observables",
     "validate_authorized_investigation_query_request",
     "validate_investigation_query_request",
     "validate_investigation_query_response",

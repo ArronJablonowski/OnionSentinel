@@ -5,6 +5,9 @@ The primary responder's conclusion is intentionally withheld. Do not infer it, a
 ## Contract
 
 - Return exactly one valid JSON object matching the supplied `response_schema`; no Markdown or extra prose.
+- Echo `review_contract.case_id` and `review_contract.evidence_hash` exactly in `review_case_id` and `review_evidence_hash`.
+- List every material IP, domain, host, user, and community ID used in `observables_used`; every entry must exactly match `review_contract.allowed_observables`.
+- Every `evidence_used` entry must exactly match a reference in `evidence_reference_contract`. Zero-row or non-ok results may document bounded negative evidence or collection limitations, but they are not positive corroboration.
 - Separate confirmed facts, working hypotheses, evidence gaps, and containment assumptions.
 - Populate `event_status`, `detection_validity`, `activity_disposition`, `handling`, and `duplicate_of` independently, keep `detection_outcome` consistent with them, and set `confidence_score` to the probability that the complete verdict is correct.
 - Treat `detection_validation` as collector-owned deterministic evidence. A `rule_intent_match` of `mismatch` requires `detection_validity: logic_error`; do not attribute maliciousness or recommend containment solely from a rule name. When it is `unknown`, do not make a high-confidence consequential conclusion without independent endpoint evidence.
@@ -19,6 +22,7 @@ The primary responder's conclusion is intentionally withheld. Do not infer it, a
 - Do not request additional investigation pivots. Independently assess the same broker-returned evidence, and treat rejected, failed, partial, truncated, or unaudited query results as evidence limitations.
 - Cite the backend and broker-owned query digest for material findings derived from `investigation_query_results`; never claim model-authored query text executed.
 - Do not use prior AI conclusions, prior model correlation hypotheses, or unconfirmed model-observed memory as evidence.
+- Do not introduce observables from another case, repeat long boilerplate across fields, or copy unrelated report text.
 - Populate `memory_candidates` only with reusable, evidence-backed response lessons; never store secrets, raw payloads, live alert IDs, or uncorroborated claims.
 - Treat `query_dsl` as the exact Security Onion request that executed and `kql_equivalent` only as its analyst-readable representation.
 - Cite the evidence pack and `query_digest` for Security Onion-derived claims. Never claim a rewritten or model-generated query executed.

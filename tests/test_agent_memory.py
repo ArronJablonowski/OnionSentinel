@@ -100,6 +100,87 @@ class AgentMemoryTests(unittest.TestCase):
         self.assertEqual(result["rejected"], 2)
         self.assertNotIn(MEMORY.MANAGED_START, self.role.read_text(encoding="utf-8"))
 
+    def test_bpfdoor_code_zero_quarantine_is_dry_run_first_and_model_only(self) -> None:
+        poisoned = self.candidate(
+            scope="shared",
+            finding=(
+                "BPFDoor SID 2069174 is a false positive when ICMP code 0 "
+                "does not match the required code."
+            ),
+        )
+        self.persist([poisoned])
+        _, records = MEMORY.read_memory_file(self.shared)
+        self.assertEqual(len(records), 1)
+
+        preview = MEMORY.quarantine_bpfdoor_code_zero_memory(self.shared)
+        self.assertTrue(preview["dry_run"])
+        self.assertEqual(preview["matched"], 1)
+        self.assertEqual(preview["predicate_match_ids"], preview["record_ids"])
+        self.assertEqual(preview["explicit_id_match_ids"], [])
+        _, unchanged = MEMORY.read_memory_file(self.shared)
+        self.assertEqual(unchanged[0]["status"], "model-observed")
+
+        applied = MEMORY.quarantine_bpfdoor_code_zero_memory(
+            self.shared,
+            apply=True,
+        )
+        self.assertEqual(applied["applied"], 1)
+        _, quarantined = MEMORY.read_memory_file(self.shared)
+        self.assertEqual(quarantined[0]["status"], "quarantined")
+        context = MEMORY.build_agent_memory_context(
+            agent_role="soc-analyst",
+            role_memory_file=self.role,
+            shared_memory_file=self.shared,
+            evidence={"rule": "BPFDoor", "icmp": {"code": 0}},
+        )
+        self.assertEqual(context["shared_memory"]["records"], [])
+
+        # An operator-confirmed record is never eligible for automated quarantine.
+        quarantined[0]["status"] = "operator-confirmed"
+        managed = MEMORY._record_markdown(quarantined[0])
+        self.shared.write_text(
+            f"# Shared Memory\n\n{MEMORY.MANAGED_START}\n\n{managed}\n\n{MEMORY.MANAGED_END}\n",
+            encoding="utf-8",
+        )
+        confirmed = MEMORY.quarantine_bpfdoor_code_zero_memory(
+            self.shared,
+            apply=True,
+            record_ids=[quarantined[0]["id"]],
+        )
+        self.assertEqual(confirmed["matched"], 0)
+        _, confirmed_records = MEMORY.read_memory_file(self.shared)
+        self.assertEqual(confirmed_records[0]["status"], "operator-confirmed")
+
+    def test_exact_id_can_quarantine_generic_model_only_bpfdoor_memory(self) -> None:
+        generic = self.candidate(
+            scope="shared",
+            finding=(
+                "ICMP heartbeat activity should be treated as suspicious until "
+                "endpoint evidence resolves the behavior."
+            ),
+        )
+        generic["evidence_basis"] = [
+            "The model associated the prior alert with BPFDoor without analyst adjudication."
+        ]
+        self.persist([generic])
+        _, records = MEMORY.read_memory_file(self.shared)
+        record_id = records[0]["id"]
+
+        no_id = MEMORY.quarantine_bpfdoor_code_zero_memory(self.shared)
+        self.assertEqual(no_id["matched"], 0)
+        explicit = MEMORY.quarantine_bpfdoor_code_zero_memory(
+            self.shared,
+            record_ids=[record_id],
+        )
+        self.assertEqual(explicit["predicate_match_ids"], [])
+        self.assertEqual(explicit["explicit_id_match_ids"], [record_id])
+        applied = MEMORY.quarantine_bpfdoor_code_zero_memory(
+            self.shared,
+            apply=True,
+            record_ids=[record_id],
+        )
+        self.assertEqual(applied["applied"], 1)
+
     def test_concurrent_writers_preserve_all_distinct_records(self) -> None:
         def write(index: int) -> dict:
             candidate = self.candidate(finding=f"Reusable TLS investigation pivot number {index} compares SNI and certificate history.")

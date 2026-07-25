@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onion-sentinel.invalid/schema/asset-inventory-v1.json",
+  "title": "Onion Sentinel asset inventory v1",
+  "description": "Operator-owned, time-bounded asset identity context. Registered expectations are investigation context only and never prove authorization or benign intent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "assets"
+  ],
+  "properties": {
+    "schema": {
+      "const": "onion-sentinel-asset-inventory-v1"
+    },
+    "version": {
+      "const": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "maxLength": 80,
+      "description": "Optional ISO-8601 generation time with a UTC offset; an empty string is accepted."
+    },
+    "assets": {
+      "type": "array",
+      "maxItems": 5000,
+      "items": {
+        "$ref": "#/$defs/asset"
+      }
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "description": "ISO-8601 timestamp including a UTC offset."
+    },
+    "boundedText": {
+      "type": "string",
+      "maxLength": 300
+    },
+    "identifiers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ip_addresses": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 45
+          }
+        },
+        "mac_addresses": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$"
+          }
+        },
+        "hostnames": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "ip_addresses"
+          ],
+          "properties": {
+            "ip_addresses": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "required": [
+            "mac_addresses"
+          ],
+          "properties": {
+            "mac_addresses": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "required": [
+            "hostnames"
+          ],
+          "properties": {
+            "hostnames": {
+              "minItems": 1
+            }
+          }
+        }
+      ]
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol"
+      ],
+      "properties": {
+        "protocol": {
+          "enum": [
+            "tcp",
+            "udp",
+            "icmp",
+            "icmpv6",
+            "any"
+          ]
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "purpose": {
+          "$ref": "#/$defs/boundedText"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "protocol": {
+                "enum": [
+                  "tcp",
+                  "udp",
+                  "any"
+                ]
+              }
+            },
+            "required": [
+              "protocol"
+            ]
+          },
+          "then": {
+            "required": [
+              "port"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "port"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "valid_from",
+        "identifiers"
+      ],
+      "properties": {
+        "asset_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "valid_from": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "valid_until": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identifiers": {
+          "$ref": "#/$defs/identifiers"
+        },
+        "role": {
+          "$ref": "#/$defs/boundedText"
+        },
+        "platform": {
+          "$ref": "#/$defs/boundedText"
+        },
+        "owner_ref": {
+          "$ref": "#/$defs/boundedText",
+          "description": "A non-secret reference to the approved owner record, not personal contact data."
+        },
+        "criticality": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical",
+            "unknown"
+          ]
+        },
+        "expected_services": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/service"
+          }
+        },
+        "expected_behaviors": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        },
+        "source_type": {
+          "$ref": "#/$defs/boundedText"
+        },
+        "source_ref": {
+          "$ref": "#/$defs/boundedText"
+        },
+        "confidence": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "share_with_hosted_models": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    }
+  }
+}

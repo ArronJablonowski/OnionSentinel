@@ -14,6 +14,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import urllib.error
 import urllib.request
@@ -270,6 +271,30 @@ def rows(conn: sqlite3.Connection, sql: str, params: Iterable[object] = ()) -> l
     return conn.execute(sql, tuple(params)).fetchall()
 
 
+class ClaimedAiLease(str):
+    """Lease token carrying the server-authoritative job snapshot it claimed."""
+
+    job_payload: dict[str, object]
+    resolved_key: str
+    reanalysis_attempt_id: str
+
+    def __new__(
+        cls,
+        token: str,
+        *,
+        job_payload: dict[str, object] | None = None,
+        resolved_key: str = "",
+        reanalysis_attempt_id: str = "",
+    ):
+        value = super().__new__(cls, token)
+        value.job_payload = (
+            job_payload if isinstance(job_payload, dict) else {}
+        )
+        value.resolved_key = str(resolved_key or "")
+        value.reanalysis_attempt_id = str(reanalysis_attempt_id or "")
+        return value
+
+
 def report_ai_job_status(
     base_url: str,
     group_id: str,
@@ -311,7 +336,25 @@ def report_ai_job_status(
                 claimed_token = str(result.get("lease_token") or "")
                 if not claimed_token:
                     raise RuntimeError("AI job processing transition did not return a lease token")
-                return claimed_token
+                claim = result.get("claim")
+                claim = claim if isinstance(claim, dict) else {}
+                claimed_payload = claim.get("payload")
+                return ClaimedAiLease(
+                    claimed_token,
+                    job_payload=(
+                        claimed_payload
+                        if isinstance(claimed_payload, dict)
+                        else {}
+                    ),
+                    resolved_key=str(
+                        claim.get("dedupe_key")
+                        or result.get("dedupe_key")
+                        or group_id
+                    ),
+                    reanalysis_attempt_id=str(
+                        claim.get("reanalysis_attempt_id") or ""
+                    ),
+                )
             return True
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
@@ -319,6 +362,27 @@ def report_ai_job_status(
         raise RuntimeError(f"AI job status returned HTTP {exc.code}") from exc
     except (urllib.error.URLError, BoundedHttpError) as exc:
         raise RuntimeError(f"AI job status request failed: {exc}") from exc
+
+
+def incident_reanalysis_attempt_id(lease_token: str) -> str:
+    """Return the non-secret fingerprint alert-store uses for one IR lease."""
+    token = str(lease_token or "").strip()
+    if not token:
+        return ""
+    return "ira-" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:40]
+
+
+def job_reanalysis_attempt_id(job_payload: dict, lease_token: str) -> str:
+    """Fingerprint only a validated manual reanalysis job, never escalation."""
+    if job_payload.get("manual_reanalysis") is not True:
+        return ""
+    run_id = str(job_payload.get("reanalysis_run_id") or "").strip().lower()
+    case_id = str(job_payload.get("case_id") or "").strip().lower()
+    if not re.fullmatch(r"irr-[a-f0-9-]{36}", run_id):
+        return ""
+    if not re.fullmatch(r"ir-[a-z0-9_-]{1,64}", case_id):
+        return ""
+    return incident_reanalysis_attempt_id(lease_token)
 
 
 NON_RETRYABLE_AI_FAILURE_MARKERS = (
@@ -1193,6 +1257,8 @@ def build_prompt(
     ]
     if incident_evidence_path is not None:
         cmd.extend(["--incident-evidence-file", str(incident_evidence_path)])
+    if job_payload.get("manual_reanalysis") is True:
+        cmd.append("--blind-reanalysis")
     if args.include_tests:
         cmd.append("--include-tests")
     proc = run_command(
@@ -1220,7 +1286,12 @@ def build_prompt(
     return prompt_path
 
 
-def analysis_command(prompt_path: Path, args: argparse.Namespace) -> list[str]:
+def analysis_command(
+    prompt_path: Path,
+    args: argparse.Namespace,
+    *,
+    reanalysis_attempt_id: str = "",
+) -> list[str]:
     runner = Path(__file__).with_name("run-local-ai-analysis.py")
     cmd = [
         sys.executable,
@@ -1245,11 +1316,23 @@ def analysis_command(prompt_path: Path, args: argparse.Namespace) -> list[str]:
     ]
     if args.model:
         cmd.extend(["--model", args.model])
+    if reanalysis_attempt_id:
+        cmd.extend(["--reanalysis-attempt-id", reanalysis_attempt_id])
     return cmd
 
 
-def run_analysis(prompt_path: Path, args: argparse.Namespace, *, progress_callback=None):
-    cmd = analysis_command(prompt_path, args)
+def run_analysis(
+    prompt_path: Path,
+    args: argparse.Namespace,
+    *,
+    progress_callback=None,
+    reanalysis_attempt_id: str = "",
+):
+    cmd = analysis_command(
+        prompt_path,
+        args,
+        reanalysis_attempt_id=reanalysis_attempt_id,
+    )
     # One durable analysis may now include the initial inference, as many as
     # three bounded evidence-pivot follow-ups, and an independent review.  The
     # child enforces the per-call timeout and query budgets; this outer watchdog
@@ -1465,6 +1548,7 @@ def main() -> int:
 
             processing_recorded = False
             processing_lease_token = ""
+            reanalysis_attempt_id = ""
             try:
                 processing_transition = report_ai_job_status(
                     args.alert_store_url,
@@ -1478,6 +1562,63 @@ def main() -> int:
                 )
                 if indexed_mode and durable_intent and not processing_recorded:
                     raise RuntimeError("durable AI job disappeared before its processing lease was recorded")
+                if durable_job_type == "incident_response_analysis":
+                    claimed_payload = getattr(
+                        processing_transition,
+                        "job_payload",
+                        {},
+                    )
+                    if not isinstance(claimed_payload, dict) or not claimed_payload:
+                        if job_payload.get("manual_reanalysis") is True:
+                            raise RuntimeError(
+                                "incident reanalysis claim did not return its "
+                                "server-authoritative job identity"
+                            )
+                    else:
+                        # The deduped payload may be replaced after SQLite
+                        # selection but before this processing transition. Use
+                        # only the payload atomically returned with the lease.
+                        job_payload = claimed_payload
+                        claimed_alert_id = str(
+                            job_payload.get("alert_id") or ""
+                        ).strip()
+                        if not claimed_alert_id:
+                            raise RuntimeError(
+                                "incident response claim omitted its alert identity"
+                            )
+                        alert_id = claimed_alert_id
+                        claimed_group_id = str(
+                            getattr(
+                                processing_transition,
+                                "resolved_key",
+                                "",
+                            )
+                            or ""
+                        ).strip()
+                        if claimed_group_id:
+                            selected_group_id = claimed_group_id
+                    if job_payload.get("manual_reanalysis") is True:
+                        expected_attempt_id = job_reanalysis_attempt_id(
+                            job_payload,
+                            processing_lease_token,
+                        )
+                        claimed_attempt_id = str(
+                            getattr(
+                                processing_transition,
+                                "reanalysis_attempt_id",
+                                "",
+                            )
+                            or ""
+                        ).strip()
+                        if (
+                            not expected_attempt_id
+                            or claimed_attempt_id != expected_attempt_id
+                        ):
+                            raise RuntimeError(
+                                "incident reanalysis lease identity did not "
+                                "match its server-bound attempt"
+                            )
+                        reanalysis_attempt_id = claimed_attempt_id
                 if automatic_analysis_below_floor:
                     report_ai_job_status(
                         args.alert_store_url,
@@ -1529,6 +1670,7 @@ def main() -> int:
                     prompt_path,
                     args,
                     progress_callback=renew_processing_lease if processing_recorded else None,
+                    reanalysis_attempt_id=reanalysis_attempt_id,
                 )
                 if proc.stdout:
                     print(proc.stdout, end="")

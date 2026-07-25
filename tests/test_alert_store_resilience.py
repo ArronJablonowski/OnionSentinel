@@ -120,14 +120,14 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("parsedUrl.pathname === '/incidents/status'", self.code)
         self.assertIn("disputed_pending_human", self.code)
         self.assertIn(
-            "material model disagreement requires explicit analyst adjudication before suppression",
+            "required independent review needs explicit analyst adjudication before suppression",
             self.code,
         )
         self.assertIn(
-            "material model disagreement requires explicit analyst adjudication before resolution",
+            "required independent review needs explicit analyst adjudication before resolution",
             self.code,
         )
-        self.assertIn("async function stableGroupHasPendingHumanDisagreement", self.code)
+        self.assertIn("async function stableGroupHasPendingHumanReview", self.code)
         self.assertIn(
             "automatic suppression blocked pending explicit analyst adjudication",
             self.code,
@@ -160,6 +160,7 @@ class AlertStoreResilienceTest(unittest.TestCase):
             "disputed_fields_json",
             "reviewer_runtime_seconds",
             "memory_candidates_promoted",
+            "reviewer_error",
         ):
             self.assertIn(field, self.code)
         self.assertIn("second_opinion_recorded: secondOpinionRecorded", self.code)

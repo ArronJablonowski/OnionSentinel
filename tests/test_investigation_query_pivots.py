@@ -26,6 +26,7 @@ if str(BIN_DIR) not in sys.path:
 from investigation_query_contract import (  # noqa: E402
     ALERT_INDEX_SCOPE,
     EVENT_TUPLE_FIELDS,
+    EVENT_TUPLE_PATHS,
     INVESTIGATION_QUERY_CONTRACT,
     OBSERVABLE_FIELDS,
     PACKS,
@@ -36,6 +37,7 @@ from investigation_query_contract import (  # noqa: E402
     kql_equivalent,
     oql_equivalent,
     query_endpoint,
+    result_coverage,
     validate_investigation_query_response,
 )
 
@@ -59,6 +61,7 @@ def context() -> dict:
             "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
             "id": "anchor-1",
         },
+        "anchor_time": "2026-07-24T12:00:00.000Z",
         "time_envelope": {
             "start": "2026-07-24T10:00:00.000Z",
             "end": "2026-07-24T16:00:00.000Z",
@@ -119,6 +122,7 @@ def role_aware_context() -> dict:
             "community_id": "1:trusted-flow=",
             "rule_id": "2016150",
         },
+        "role_semantics": "packet_direction",
         "source": "trusted_context",
         "evidence_ref": "context:event-tuple:trusted-flow",
     }]
@@ -191,6 +195,13 @@ def search_result_for(query: dict, *, hit: bool = True) -> dict:
         "total_hits_relation": "eq",
         "returned_hits": len(hits),
         "truncated": False,
+        "result_coverage": result_coverage(
+            query,
+            status="ok",
+            total_hits=len(hits),
+            total_hits_relation="eq",
+            returned_hits=len(hits),
+        ),
         "duration_ms": 5,
         "timed_out": False,
         "took_ms": 3,
@@ -407,7 +418,19 @@ class InvestigationQueryContractTests(unittest.TestCase):
         self.assertEqual(
             tuple_filter,
             [
-                {"term": {EVENT_TUPLE_FIELDS[field]: value}}
+                (
+                    {"term": {EVENT_TUPLE_PATHS[field][0]: value}}
+                    if len(EVENT_TUPLE_PATHS[field]) == 1
+                    else {
+                        "bool": {
+                            "should": [
+                                {"term": {path: value}}
+                                for path in EVENT_TUPLE_PATHS[field]
+                            ],
+                            "minimum_should_match": 1,
+                        }
+                    }
+                )
                 for field, value in expected_tuple.items()
             ],
         )
@@ -422,6 +445,7 @@ class InvestigationQueryContractTests(unittest.TestCase):
             'network.protocol : "tls"',
             'network.community_id : "1:trusted-flow="',
             'rule.id : "2016150"',
+            'rule.uuid : "2016150"',
         ):
             self.assertIn(text, kql)
             self.assertIn(text.replace(" : ", ":"), oql)
@@ -447,6 +471,7 @@ class InvestigationQueryContractTests(unittest.TestCase):
                 "transport": "udp",
                 "protocol": "dns",
             },
+            "role_semantics": "packet_direction",
             "source": "trusted_context",
             "evidence_ref": "context:event-tuple:second-flow",
         })
@@ -562,6 +587,139 @@ class InvestigationQueryContractTests(unittest.TestCase):
             {"term": {"dns.query.name": "example.test"}},
             observable_terms,
         )
+
+    def test_pack_rejects_observable_kinds_it_cannot_query(self) -> None:
+        candidate_context = context()
+        candidate_context["permitted_observables"] = {
+            "ips": [],
+            "domains": [],
+            "hosts": ["host-only"],
+            "users": [],
+        }
+        candidate_context["discovered_observables"] = []
+        candidate = proposal()
+        candidate["queries"][0].update({
+            "pack": "zeek_tls",
+            "observables": {
+                "ips": [],
+                "domains": [],
+                "hosts": ["host-only"],
+                "users": [],
+            },
+        })
+
+        with self.assertRaisesRegex(
+            InvestigationQueryContractError,
+            "unsupported by pack zeek_tls: hosts",
+        ):
+            authorize_investigation_query_request(
+                candidate,
+                candidate_context,
+            )
+
+    def test_empty_boolean_and_coverage_ambiguity_fail_closed(self) -> None:
+        query = authorize_investigation_query_request(
+            proposal(),
+            context(),
+        )["queries"][0]
+        empty_query = copy.deepcopy(query)
+        empty_query["observables"] = {
+            "ips": [],
+            "domains": [],
+            "hosts": [],
+            "users": [],
+        }
+        with self.assertRaisesRegex(
+            InvestigationQueryContractError,
+            "no observable query clauses",
+        ):
+            build_query_dsl(empty_query)
+
+        self.assertEqual(
+            result_coverage(
+                query,
+                status="ok",
+                total_hits=50,
+                total_hits_relation="eq",
+                returned_hits=25,
+            )["coverage_status"],
+            "bounded_sample",
+        )
+        incomplete = result_coverage(
+            query,
+            status="timeout",
+            total_hits=0,
+            total_hits_relation="eq",
+            returned_hits=0,
+        )
+        self.assertEqual(incomplete["coverage_status"], "partial")
+        self.assertFalse(incomplete["zero_hits"])
+
+    def test_cross_sensor_packet_tuple_compiles_only_community_id_join(self) -> None:
+        candidate = role_aware_proposal()
+        candidate["queries"][0]["pack"] = "network_flow"
+        request = authorize_investigation_query_request(
+            candidate,
+            role_aware_context(),
+        )
+        query = request["queries"][0]
+
+        self.assertEqual(
+            query["match_semantics"],
+            "community_id_cross_sensor",
+        )
+        tuple_filter = build_query_dsl(query)["query"]["bool"]["filter"][3]
+        self.assertEqual(
+            tuple_filter,
+            {
+                "bool": {
+                    "filter": [{
+                        "term": {
+                            "network.community_id": "1:trusted-flow=",
+                        }
+                    }]
+                }
+            },
+        )
+
+        missing_join = role_aware_proposal()
+        missing_join["queries"][0]["pack"] = "network_flow"
+        missing_join["queries"][0]["event_tuple"].pop("community_id")
+        with self.assertRaisesRegex(
+            InvestigationQueryContractError,
+            "requires community_id",
+        ):
+            authorize_investigation_query_request(
+                missing_join,
+                role_aware_context(),
+            )
+
+    def test_anchor_nearest_uses_trusted_anchor_and_is_elastic_only(self) -> None:
+        candidate = proposal()
+        candidate["queries"][0].update({
+            "dialect": "elastic",
+            "aggregation": "anchor_nearest",
+        })
+        query = authorize_investigation_query_request(
+            candidate,
+            context(),
+        )["queries"][0]
+        dsl = build_query_dsl(query)
+
+        self.assertEqual(query["anchor_time"], context()["anchor_time"])
+        self.assertEqual(query["match_semantics"], "observable_exact_any_field")
+        self.assertEqual(
+            dsl["query"]["function_score"]["gauss"]["@timestamp"]["origin"],
+            context()["anchor_time"],
+        )
+        self.assertEqual(dsl["sort"][0], {"_score": "desc"})
+
+        candidate["queries"][0]["dialect"] = "oql"
+        with self.assertRaisesRegex(
+            InvestigationQueryContractError,
+            "only through compiled Elastic DSL",
+        ):
+            authorize_investigation_query_request(candidate, context())
 
     def test_response_dsl_scope_and_projection_tampering_fail_closed(self) -> None:
         request = authorize_investigation_query_request(proposal(), context())
@@ -701,6 +859,7 @@ class SecurityOnionInvestigationPivotTests(unittest.TestCase):
         self.assertEqual(self.wrapper.PACKS, PACKS)
         self.assertEqual(self.wrapper.OBSERVABLE_FIELDS, OBSERVABLE_FIELDS)
         self.assertEqual(self.wrapper.EVENT_TUPLE_FIELDS, EVENT_TUPLE_FIELDS)
+        self.assertEqual(self.wrapper.EVENT_TUPLE_PATHS, EVENT_TUPLE_PATHS)
         self.assertEqual(
             PACKS["system_auth"]["indices"],
             ["logs-system.auth-*"],
@@ -780,6 +939,53 @@ class SecurityOnionInvestigationPivotTests(unittest.TestCase):
         self.assertEqual(result["execution_semantics"], "compiled_oql_equivalent")
         self.assertIn("event.dataset:", result["oql_equivalent"])
         self.assertNotIn("==", result["oql_equivalent"])
+        self.assertEqual(
+            result["result_coverage"]["coverage_status"],
+            "exact_zero",
+        )
+        self.assertTrue(result["result_coverage"]["zero_hits"])
+
+    def test_wrapper_count_is_exact_aggregate_not_truncated_sample(self) -> None:
+        candidate = proposal()
+        candidate["queries"][0]["aggregation"] = "count"
+        query = authorize_investigation_query_request(
+            candidate,
+            context(),
+        )["queries"][0]
+        response = {
+            "status": "ok",
+            "semantic_valid": True,
+            "total_hits": 37,
+            "total_hits_relation": "eq",
+            "returned_hits": 0,
+            "truncated": True,
+            "duration_ms": 5,
+            "timed_out": False,
+            "took_ms": 3,
+            "shards": {
+                "total": 2,
+                "successful": 2,
+                "skipped": 0,
+                "failed": 0,
+                "failures": [],
+            },
+            "hits": [],
+        }
+        with mock.patch.object(
+            self.wrapper,
+            "execute_search",
+            return_value=response,
+        ):
+            result = self.wrapper.execute_pivot_query(query)
+
+        self.assertFalse(result["truncated"])
+        self.assertEqual(
+            result["result_coverage"]["coverage_status"],
+            "exact_aggregate",
+        )
+        self.assertFalse(
+            result["result_coverage"]["event_bodies_complete"],
+        )
 
     def test_wrapper_controls_bind_positive_to_exact_index(self) -> None:
         anchor = context()["anchor"]
@@ -886,6 +1092,54 @@ class SecurityOnionInvestigationPivotTests(unittest.TestCase):
                 self.assertFalse(
                     self.wrapper.valid_pivot_hit_source(candidate, query)
                 )
+
+    def test_wrapper_accepts_rule_uuid_and_reversed_zeek_flow_via_community_id(self) -> None:
+        alert_query = authorize_investigation_query_request(
+            role_aware_proposal(),
+            role_aware_context(),
+        )["queries"][0]
+        alert_source = {
+            "@timestamp": "2026-07-24T11:30:00.000Z",
+            "event": {"dataset": "suricata.alert"},
+            "source": {"ip": "192.0.2.10", "port": 49152},
+            "destination": {"ip": "198.51.100.20", "port": 443},
+            "network": {
+                "transport": "tcp",
+                "protocol": "tls",
+                "community_id": "1:trusted-flow=",
+            },
+            "rule": {"uuid": "2016150"},
+        }
+        self.assertTrue(
+            self.wrapper.valid_pivot_hit_source(
+                alert_source,
+                alert_query,
+            )
+        )
+
+        candidate = role_aware_proposal()
+        candidate["queries"][0]["pack"] = "network_flow"
+        flow_query = authorize_investigation_query_request(
+            candidate,
+            role_aware_context(),
+        )["queries"][0]
+        reversed_zeek = {
+            "@timestamp": "2026-07-24T11:30:00.000Z",
+            "event": {"dataset": "zeek.conn"},
+            "source": {"ip": "198.51.100.20", "port": 443},
+            "destination": {"ip": "192.0.2.10", "port": 49152},
+            "network": {
+                "transport": "tcp",
+                "protocol": "tls",
+                "community_id": "1:trusted-flow=",
+            },
+        }
+        self.assertTrue(
+            self.wrapper.valid_pivot_hit_source(
+                reversed_zeek,
+                flow_query,
+            )
+        )
 
 
 class InvestigationPivotCollectorTests(unittest.TestCase):

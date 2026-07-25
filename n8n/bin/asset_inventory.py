@@ -8,10 +8,12 @@ and behaviors are context, never proof that observed activity was authorized.
 """
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 import ipaddress
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -482,3 +484,28 @@ def resolve_asset_context(
             "registered expectations as context only. They do not prove identity, authorization, benignness, or maliciousness."
         ),
     }
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Validate one inventory without printing its potentially sensitive facts."""
+    parser = argparse.ArgumentParser(
+        description="Validate an Onion Sentinel asset inventory JSON file.",
+    )
+    parser.add_argument("inventory", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        inventory = load_asset_inventory(args.inventory)
+        if inventory.get("inventory_status") != "loaded":
+            raise ValueError("asset inventory file does not exist")
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        print(f"invalid asset inventory: {exc}", file=sys.stderr)
+        return 1
+    print(
+        "valid Onion Sentinel asset inventory: "
+        f"{len(inventory.get('assets') or [])} record(s)"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

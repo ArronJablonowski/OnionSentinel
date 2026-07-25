@@ -5,8 +5,8 @@
   "playbooks": [
     {
       "id": "emerging-threats-bpfdoor-icmp-v1",
-      "version": 1,
-      "status": "deactivated-false-positive-risk",
+      "version": 2,
+      "status": "deployed-stateful-rule-false-positive-risk",
       "match": {
         "ruleset": "Emerging Threats",
         "sids": [
@@ -19,9 +19,10 @@
           5
         ]
       },
-      "intent": "Identify BPFDoor ICMP shell or heartbeat traffic using the family-specific ICMP structure rather than a coincidental payload substring.",
-      "known_false_positive_risk": "Ordinary ping filler can contain X: by chance and set the shared ET.bpfdoor state bit; the signature family was deactivated pending false-positive-safe tuning.",
-      "required_predicates": [
+      "intent": "Validate the exact deployed BPFDoor ICMP rule predicates and its stateful ET.bpfdoor xbit chain. Rapid7's invalid-code heartbeat is supporting threat intelligence, not an installed predicate when the deployed rule omits icode.",
+      "known_false_positive_risk": "An ordinary request payload can satisfy the upstream X: marker and set ET.bpfdoor; a later normal echo reply can then satisfy SID 2069174. The reply packet alone cannot prove either a true positive or a false positive without the xbit-setting event or rule-engine trace.",
+      "required_predicates": [],
+      "supporting_predicates": [
         {
           "id": "bpfdoor-heartbeat-invalid-code",
           "field": "icmp.code",
@@ -30,10 +31,9 @@
           "applies_to_sids": [
             "2069174"
           ],
-          "reason": "The BPFDoor heartbeat reply discriminator is the invalid ICMP code 1; ordinary echo replies use code 0."
-        }
-      ],
-      "supporting_predicates": [
+          "required": false,
+          "reason": "Invalid ICMP code 1 is a documented BPFDoor heartbeat artifact, but it is not required unless the exact deployed Suricata rule includes icode:1."
+        },
         {
           "id": "bpfdoor-shell-sequence",
           "field": "icmp.sequence",
@@ -60,7 +60,8 @@
         }
       ],
       "confidence_limiters": [
-        "Do not attribute BPFDoor when the required heartbeat code is absent.",
+        "For SID 2069174, validate the upstream ET.bpfdoor xbit-setting event or a trusted Suricata rule-engine trace; code 0 alone does not establish a logic mismatch.",
+        "Treat invalid ICMP code 1 as supporting BPFDoor evidence only when it was observed or required by the exact deployed rule.",
         "A coincidental X: byte pair at a variable payload offset is evidence against a stable command marker.",
         "Endpoint process, persistence, binary, or BPF telemetry is required before a malicious attribution can be high confidence."
       ],

@@ -59,12 +59,12 @@ class AnalysisReplayEvaluationTests(unittest.TestCase):
         self.assertEqual(report["over_escalations"], [])
         self.assertEqual(
             report["deterministic_guard_cases"],
-            ["bpfdoor-heartbeat-rule-logic-false-positive"],
+            [],
         )
         self.assertTrue(results[0]["detection_validation_rebuilt"])
         self.assertEqual(
             results[0]["rebuilt_detection_validation"]["rule_intent_match"],
-            "mismatch",
+            "unknown",
         )
         self.assertIsNotNone(report["calibration"]["brier_score"])
 
