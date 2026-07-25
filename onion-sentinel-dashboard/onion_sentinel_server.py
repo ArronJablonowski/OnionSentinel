@@ -37,19 +37,21 @@ GET_API_ROUTES = {
     "/api/soc-alerts/status",
     "/api/soc-alerts/suppressions",
     "/api/soc-incidents",
+    "/api/soc-incidents/reanalysis-runs",
     "/api/soc-settings/agent-memory",
     "/api/soc-settings/ai-model",
     "/api/soc-settings/ollama-models",
 } | set(runtime.SOC_SETTINGS_PROMPT_API_PATHS)
 POST_API_ROUTES = {
     "/api/soc-alerts/status",
+    "/api/soc-incidents/reanalyze-all",
     "/api/soc-settings/agent-model",
     "/api/soc-settings/ai-model",
 } | set(runtime.SOC_SETTINGS_PROMPT_API_PATHS)
 ALERT_GET_SUFFIXES = ("/detail", "/adjudications")
 ALERT_POST_SUFFIXES = ("/ack", "/analyze", "/pcap", "/escalate", "/adjudicate")
 INCIDENT_GET_SUFFIXES = ("/detail", "/adjudications")
-INCIDENT_POST_SUFFIXES = ("/adjudicate", "/status")
+INCIDENT_POST_SUFFIXES = ("/adjudicate", "/status", "/reanalyze")
 ALERT_ROUTE_ID_PATTERN = re.compile(r"[A-Za-z0-9._:@=-]{1,256}")
 INCIDENT_ROUTE_ID_PATTERN = re.compile(r"ir-[a-z0-9_-]{1,64}", re.IGNORECASE)
 

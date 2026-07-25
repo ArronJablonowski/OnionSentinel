@@ -47,6 +47,7 @@ class OnionSentinelServerTests(unittest.TestCase):
     def test_only_soc_api_routes_are_exposed(self):
         self.assertTrue(server.is_soc_get_api("/api/soc-alerts"))
         self.assertTrue(server.is_soc_get_api("/api/soc-incidents"))
+        self.assertTrue(server.is_soc_get_api("/api/soc-incidents/reanalysis-runs"))
         self.assertTrue(server.is_soc_get_api("/api/soc-incidents/ir-example/detail"))
         self.assertTrue(server.is_soc_get_api("/api/soc-incidents/ir-example/adjudications"))
         self.assertTrue(server.is_soc_get_api("/api/soc-alerts/example/detail"))
@@ -62,6 +63,8 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertTrue(server.is_soc_post_api("/api/soc-alerts/example/adjudicate"))
         self.assertTrue(server.is_soc_post_api("/api/soc-incidents/ir-example/adjudicate"))
         self.assertTrue(server.is_soc_post_api("/api/soc-incidents/ir-example/status"))
+        self.assertTrue(server.is_soc_post_api("/api/soc-incidents/ir-example/reanalyze"))
+        self.assertTrue(server.is_soc_post_api("/api/soc-incidents/reanalyze-all"))
         self.assertTrue(server.is_soc_post_api("/api/soc-settings/agent-model"))
         self.assertTrue(server.is_soc_post_api("/api/soc-settings/ai-model"))
         self.assertFalse(server.is_soc_post_api("/api/resource-library/remove"))
@@ -84,6 +87,7 @@ class OnionSentinelServerTests(unittest.TestCase):
             "/api/soc-alerts/0123456789ab/adjudicate",
             "/api/soc-incidents/ir-example/adjudicate",
             "/api/soc-incidents/ir-example/status",
+            "/api/soc-incidents/ir-example/reanalyze",
         )
         for route in allowed_get:
             self.assertTrue(server.is_soc_get_api(route), route)
