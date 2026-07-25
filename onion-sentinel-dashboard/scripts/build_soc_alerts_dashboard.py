@@ -435,7 +435,9 @@ SOC_ANALYSIS_SEVERITY_LABELS = {
     'informational': 'Informational',
 }
 CODEX_CLI_REASONING_EFFORTS = ('low', 'medium', 'high', 'xhigh')
+HERMES_AGENT_REASONING_EFFORT = 'medium'
 CODEX_CLI_MODEL_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
+CLI_HARNESS_MODEL_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,239}$')
 CODEX_CLI_MODEL_CATALOG = (
     'gpt-5.5',
     'gpt-5.6-sol',
@@ -463,7 +465,14 @@ def default_soc_ai_settings() -> dict:
             for model in CODEX_CLI_MODEL_CATALOG
         ],
         'gpt_cli_enabled': False,
-        'hybrid_policy': 'cloud_for_critical_high_or_recommended',
+        'hermes_agent_enabled': False,
+        'hermes_agent_path': 'hermes',
+        'hermes_agent_model': 'gpt-5.5',
+        'hermes_agent_reasoning_effort': 'medium',
+        'openclaw_enabled': False,
+        'openclaw_path': 'openclaw',
+        'openclaw_model': 'ollama/gemma4:26b-mlx',
+        'openclaw_reasoning_effort': 'medium',
         'soc_analyst_analysis_min_severity': 'informational',
         'soc_analyst_pcap_min_severity': 'informational',
         'soc_analyst_incident_min_severity': 'disabled',
@@ -509,6 +518,62 @@ def _boolean_setting(value: object, default: bool = False) -> bool:
 
 def _codex_cli_route(model: str, effort: str) -> str:
     return f'codex-cli:{model}:{effort}'
+
+
+def _hermes_agent_route(model: str, effort: str) -> str:
+    return f'hermes-agent:{model}:{effort}'
+
+
+def _openclaw_route(model: str, effort: str) -> str:
+    return f'openclaw:{model}:{effort}'
+
+
+def _normalized_cli_path(value: object, basename: str) -> str:
+    """Return a safe configured executable name or its provider default."""
+    configured = str(value or basename).strip()
+    path = Path(configured)
+    if (
+        not configured
+        or len(configured) > 1024
+        or re.search(r'[\x00-\x1f\x7f]', configured)
+        or (path.is_absolute() and path.name != basename)
+        or (
+            path.is_absolute()
+            and not re.fullmatch(r'/[A-Za-z0-9._/+-]+', configured)
+        )
+        or (not path.is_absolute() and configured != basename)
+    ):
+        return basename
+    return configured
+
+
+def _normalized_provider_model(value: object, fallback: str) -> str:
+    configured = str(value or fallback).strip()
+    if not CLI_HARNESS_MODEL_PATTERN.fullmatch(configured):
+        return fallback
+    return configured
+
+
+def _normalized_openclaw_model(value: object) -> str:
+    """Return an explicit Ollama route accepted by the isolated adapter."""
+    fallback = 'ollama/gemma4:26b-mlx'
+    configured = _normalized_provider_model(value, fallback)
+    return (
+        configured
+        if configured.lower().startswith('ollama/')
+        and len(configured) > len('ollama/')
+        else fallback
+    )
+
+
+def _normalized_hermes_model(value: object) -> str:
+    configured = str(value or 'gpt-5.5').strip()
+    return configured if configured in CODEX_CLI_MODEL_CATALOG else 'gpt-5.5'
+
+
+def _normalized_reasoning_effort(value: object) -> str:
+    effort = str(value or 'medium').strip().lower()
+    return effort if effort in CODEX_CLI_REASONING_EFFORTS else 'medium'
 
 
 def _normalized_codex_cli_models(
@@ -559,6 +624,16 @@ def enabled_agent_model_routes(settings: dict) -> list[str]:
         for entry in settings.get('codex_cli_models', [])
         if isinstance(entry, dict) and entry.get('enabled') is True
     )
+    if _boolean_setting(settings.get('hermes_agent_enabled')):
+        routes.append(_hermes_agent_route(
+            _normalized_hermes_model(settings.get('hermes_agent_model')),
+            HERMES_AGENT_REASONING_EFFORT,
+        ))
+    if _boolean_setting(settings.get('openclaw_enabled')):
+        routes.append(_openclaw_route(
+            _normalized_openclaw_model(settings.get('openclaw_model')),
+            _normalized_reasoning_effort(settings.get('openclaw_reasoning_effort')),
+        ))
     return routes
 
 
@@ -582,6 +657,52 @@ def _canonical_agent_route(route: object, enabled_routes: list[str]) -> str:
             ),
             normalized,
         )
+    for provider in ('hermes-agent', 'openclaw'):
+        prefix = f'{provider}:'
+        if normalized.startswith(prefix) and normalized not in enabled_routes:
+            return next(
+                (
+                    candidate
+                    for candidate in enabled_routes
+                    if candidate.startswith(prefix)
+                ),
+                normalized,
+            )
+    return normalized
+
+
+def model_route_identity(route: object, settings: dict | None = None) -> str:
+    """Mirror the runtime's provider/model identity for reviewer isolation."""
+    normalized = str(route or '').strip().lower()
+    if normalized.startswith('codex-cli:'):
+        try:
+            model, effort = normalized.removeprefix('codex-cli:').rsplit(':', 1)
+        except ValueError:
+            return normalized
+        if model and effort in CODEX_CLI_REASONING_EFFORTS:
+            return f'openai-codex:{model}'
+    if normalized in {'gpt-cli', 'codex-cli'}:
+        configured = str(
+            (settings or {}).get('codex_cli_model') or 'configured-default'
+        ).strip().lower()
+        return f'openai-codex:{configured}'
+    if normalized.startswith('hermes-agent:'):
+        try:
+            model, effort = normalized.removeprefix('hermes-agent:').rsplit(':', 1)
+        except ValueError:
+            return normalized
+        if model and effort in CODEX_CLI_REASONING_EFFORTS:
+            return f'openai-codex:{model}'
+    if normalized.startswith('openclaw:'):
+        try:
+            model, effort = normalized.removeprefix('openclaw:').rsplit(':', 1)
+        except ValueError:
+            return normalized
+        if model and effort in CODEX_CLI_REASONING_EFFORTS:
+            if '/' in model:
+                provider, name = model.split('/', 1)
+                return f'{provider}:{name}'
+            return f'openclaw:{model}'
     return normalized
 
 
@@ -600,6 +721,7 @@ def normalize_agent_second_opinion_models(
     value: object,
     enabled_routes: list[str],
     primary_assignments: dict[str, str],
+    settings: dict | None = None,
 ) -> dict[str, str]:
     """Keep optional secondary routes enabled, distinct, and fail-closed.
 
@@ -613,7 +735,11 @@ def normalize_agent_second_opinion_models(
         route = _canonical_agent_route(raw.get(role), enabled_routes)
         assignments[role] = (
             route
-            if route in enabled_routes and route != primary_assignments.get(role)
+            if (
+                route in enabled_routes
+                and model_route_identity(route, settings)
+                != model_route_identity(primary_assignments.get(role), settings)
+            )
             else ''
         )
     return assignments
@@ -632,6 +758,8 @@ def load_soc_ai_settings() -> dict:
                 'enabled_ollama_models',
                 'codex_cli_models',
                 'gpt_cli_enabled',
+                'hermes_agent_enabled',
+                'openclaw_enabled',
                 'agent_models',
                 'agent_second_opinion_models',
             }:
@@ -650,25 +778,17 @@ def load_soc_ai_settings() -> dict:
         if isinstance(data, dict) and 'gpt_cli_enabled' in data
         else legacy_mode in {'cloud', 'hybrid'}
     )
-    if settings['hybrid_policy'] not in {'cloud_for_critical_high_or_recommended', 'cloud_when_recommended_only'}:
-        settings['hybrid_policy'] = 'cloud_for_critical_high_or_recommended'
     settings['ollama_model'] = enabled_models[0] if enabled_models else (settings['ollama_model'] or 'devstral:latest')
     settings['ollama_url'] = settings['ollama_url'] or 'http://127.0.0.1:11434'
-    codex_path = str(settings.get('codex_cli_path') or 'codex').strip()
-    if (not codex_path) or (
-        not Path(codex_path).is_absolute() and codex_path != 'codex'
-    ) or (
-        Path(codex_path).is_absolute() and Path(codex_path).name != 'codex'
-    ):
-        codex_path = 'codex'
+    codex_path = _normalized_cli_path(settings.get('codex_cli_path'), 'codex')
     codex_model = str(
         settings.get('codex_cli_model')
         or settings.get('cloud_model')
         or 'gpt-5.5'
     ).strip() or 'gpt-5.5'
-    codex_effort = str(settings.get('codex_cli_reasoning_effort') or 'medium').strip().lower()
-    if codex_effort not in {'low', 'medium', 'high', 'xhigh'}:
-        codex_effort = 'medium'
+    codex_effort = _normalized_reasoning_effort(
+        settings.get('codex_cli_reasoning_effort')
+    )
     codex_cli_models = _normalized_codex_cli_models(
         data.get('codex_cli_models') if isinstance(data, dict) and 'codex_cli_models' in data else None,
         legacy_model=codex_model,
@@ -676,7 +796,22 @@ def load_soc_ai_settings() -> dict:
         legacy_enabled=legacy_gpt_enabled,
     )
     gpt_cli_enabled = any(entry['enabled'] for entry in codex_cli_models)
-    if not enabled_models and not gpt_cli_enabled:
+    hermes_agent_enabled = (
+        _boolean_setting(data.get('hermes_agent_enabled'))
+        if isinstance(data, dict)
+        else False
+    )
+    openclaw_enabled = (
+        _boolean_setting(data.get('openclaw_enabled'))
+        if isinstance(data, dict)
+        else False
+    )
+    if (
+        not enabled_models
+        and not gpt_cli_enabled
+        and not hermes_agent_enabled
+        and not openclaw_enabled
+    ):
         enabled_models = [settings['ollama_model'] or 'devstral:latest']
     selected_codex = next(
         (entry for entry in codex_cli_models if entry['enabled']),
@@ -690,7 +825,36 @@ def load_soc_ai_settings() -> dict:
     settings['enabled_ollama_models'] = enabled_models
     settings['codex_cli_models'] = codex_cli_models
     settings['gpt_cli_enabled'] = gpt_cli_enabled
-    settings['mode'] = 'hybrid' if enabled_models and gpt_cli_enabled else ('cloud' if gpt_cli_enabled else 'ollama')
+    settings['hermes_agent_enabled'] = hermes_agent_enabled
+    settings['hermes_agent_path'] = _normalized_cli_path(
+        settings.get('hermes_agent_path'),
+        'hermes',
+    )
+    settings['hermes_agent_model'] = _normalized_hermes_model(
+        settings.get('hermes_agent_model')
+    )
+    settings['hermes_agent_reasoning_effort'] = HERMES_AGENT_REASONING_EFFORT
+    settings['openclaw_enabled'] = openclaw_enabled
+    settings['openclaw_path'] = _normalized_cli_path(
+        settings.get('openclaw_path'),
+        'openclaw',
+    )
+    settings['openclaw_model'] = _normalized_openclaw_model(
+        settings.get('openclaw_model')
+    )
+    settings['openclaw_reasoning_effort'] = _normalized_reasoning_effort(
+        settings.get('openclaw_reasoning_effort')
+    )
+    local_enabled = bool(enabled_models) or openclaw_enabled
+    hosted_enabled = (
+        gpt_cli_enabled
+        or hermes_agent_enabled
+    )
+    settings['mode'] = (
+        'hybrid'
+        if local_enabled and hosted_enabled
+        else ('cloud' if hosted_enabled else 'ollama')
+    )
     settings['codex_cli_path'] = codex_path
     settings['codex_cli_model'] = codex_model
     settings['codex_cli_reasoning_effort'] = codex_effort
@@ -719,6 +883,7 @@ def load_soc_ai_settings() -> dict:
         data.get('agent_second_opinion_models') if isinstance(data, dict) else None,
         routes,
         settings['agent_models'],
+        settings,
     )
     return settings
 
@@ -753,26 +918,51 @@ def _codex_cli_route_parts(route: str, settings: dict) -> tuple[str, str] | None
     return None
 
 
-def agent_model_route_label(settings: dict, role: str) -> str:
-    """Describe one agent's persisted exact model assignment."""
-    route = str((settings.get('agent_models') or {}).get(role) or '').strip()
+def _provider_cli_route_parts(
+    route: str,
+    provider: str,
+) -> tuple[str, str] | None:
+    """Parse one exact hosted-provider route without constraining its namespace."""
+    prefix = f'{provider}:'
+    if not route.startswith(prefix):
+        return None
+    try:
+        model, effort = route.removeprefix(prefix).rsplit(':', 1)
+    except ValueError:
+        return None
+    if (
+        CLI_HARNESS_MODEL_PATTERN.fullmatch(model)
+        and effort in CODEX_CLI_REASONING_EFFORTS
+    ):
+        return model, effort
+    return None
+
+
+def _agent_route_label(route: str, settings: dict) -> str | None:
     if route.startswith('ollama:'):
         return f"Ollama: {route.removeprefix('ollama:')}"
     if codex_parts := _codex_cli_route_parts(route, settings):
         model, effort = codex_parts
         return f'Codex CLI: {model} ({effort})'
-    return 'No analysis model assigned'
+    if hermes_parts := _provider_cli_route_parts(route, 'hermes-agent'):
+        model, effort = hermes_parts
+        return f'Hermes Agent: {model} ({effort})'
+    if openclaw_parts := _provider_cli_route_parts(route, 'openclaw'):
+        model, effort = openclaw_parts
+        return f'OpenClaw: {model} ({effort})'
+    return None
+
+
+def agent_model_route_label(settings: dict, role: str) -> str:
+    """Describe one agent's persisted exact model assignment."""
+    route = str((settings.get('agent_models') or {}).get(role) or '').strip()
+    return _agent_route_label(route, settings) or 'No analysis model assigned'
 
 
 def agent_second_opinion_model_route_label(settings: dict, role: str) -> str:
     """Describe one agent's optional reviewer route without inventing a fallback."""
     route = str((settings.get('agent_second_opinion_models') or {}).get(role) or '').strip()
-    if route.startswith('ollama:'):
-        return f"Ollama: {route.removeprefix('ollama:')}"
-    if codex_parts := _codex_cli_route_parts(route, settings):
-        model, effort = codex_parts
-        return f'Codex CLI: {model} ({effort})'
-    return 'None selected'
+    return _agent_route_label(route, settings) or 'None selected'
 
 
 def agent_model_option_rows(settings: dict, role: str, *, second_opinion: bool = False) -> str:
@@ -784,16 +974,15 @@ def agent_model_option_rows(settings: dict, role: str, *, second_opinion: bool =
     if second_opinion:
         options.append('<option value="">Not assigned</option>')
     for route in enabled_agent_model_routes(settings):
-        if second_opinion and route == primary:
+        if (
+            second_opinion
+            and model_route_identity(route, settings)
+            == model_route_identity(primary, settings)
+        ):
             continue
-        if route.startswith('ollama:'):
-            label = f"Ollama: {route.removeprefix('ollama:')}"
-        else:
-            codex_parts = _codex_cli_route_parts(route, settings)
-            if not codex_parts:
-                continue
-            model, effort = codex_parts
-            label = f'Codex CLI: {model} ({effort})'
+        label = _agent_route_label(route, settings)
+        if not label:
+            continue
         options.append(
             f'<option value="{html.escape(route, quote=True)}"{" selected" if route == selected else ""}>'
             f'{html.escape(label)}</option>'
@@ -967,6 +1156,16 @@ def codex_cli_model_rows(models: list[dict]) -> str:
     return ''.join(rows)
 
 
+def reasoning_effort_options(selected: str) -> str:
+    """Render the shared bounded reasoning-effort selector vocabulary."""
+    normalized = _normalized_reasoning_effort(selected)
+    return ''.join(
+        f'<option value="{value}"{" selected" if value == normalized else ""}>'
+        f'{"Extra high" if value == "xhigh" else value.title()}</option>'
+        for value in CODEX_CLI_REASONING_EFFORTS
+    )
+
+
 def current_soc_analysis_model(settings: dict | None = None) -> dict[str, str]:
     """Describe the SOC Analyst's assigned provider, model, and exact route."""
     settings = settings or load_soc_ai_settings()
@@ -992,6 +1191,26 @@ def current_soc_analysis_model(settings: dict | None = None) -> dict[str, str]:
             'label': f'Codex CLI · {model} ({effort})',
             'route': _codex_cli_route(model, effort),
         }
+    if hermes_parts := _provider_cli_route_parts(route, 'hermes-agent'):
+        model, effort = hermes_parts
+        return {
+            'provider': 'Hermes Agent',
+            'provider_key': 'hermes-agent',
+            'model': model,
+            'model_detail': f'{model} ({effort})',
+            'label': f'Hermes Agent · {model} ({effort})',
+            'route': _hermes_agent_route(model, effort),
+        }
+    if openclaw_parts := _provider_cli_route_parts(route, 'openclaw'):
+        model, effort = openclaw_parts
+        return {
+            'provider': 'OpenClaw',
+            'provider_key': 'openclaw',
+            'model': model,
+            'model_detail': f'{model} ({effort})',
+            'label': f'OpenClaw · {model} ({effort})',
+            'route': _openclaw_route(model, effort),
+        }
 
     # A malformed or missing assignment should not make the dashboard claim a
     # configured provider. Fall back only to stamped analysis provenance.
@@ -1016,10 +1235,15 @@ def current_soc_analysis_model(settings: dict | None = None) -> dict[str, str]:
             ).strip()
             if not model:
                 continue
-            provider = 'Codex CLI' if model_path == 'frontier-codex-cli' else 'Ollama'
+            provider, provider_key = {
+                'frontier-codex-cli': ('Codex CLI', 'codex-cli'),
+                'hermes-agent': ('Hermes Agent', 'hermes-agent'),
+                'openclaw': ('OpenClaw', 'openclaw'),
+                'ollama': ('Ollama', 'ollama'),
+            }.get(model_path.lower(), ('Unknown provider', 'unknown'))
             return {
                 'provider': provider,
-                'provider_key': 'codex-cli' if provider == 'Codex CLI' else 'ollama',
+                'provider_key': provider_key,
                 'model': model,
                 'model_detail': model,
                 'label': f'{provider} · {model}',
@@ -3500,6 +3724,9 @@ def llm_agent_label(log: dict[str, object]) -> str:
     return {
         'soc-analyst': 'SOC Analyst',
         'incident-responder': 'Incident Responder',
+        'siem-engineer': 'SIEM Engineer',
+        'cyber-threat-intel': 'Cyber Threat Intel',
+        'threat-hunter': 'Threat Hunter',
     }.get(role, 'Unknown agent')
 
 
@@ -3509,6 +3736,9 @@ def llm_job_label(log: dict[str, object]) -> str:
     return {
         'soc-analyst': 'SOC alert triage',
         'incident-responder': 'Incident response investigation',
+        'siem-engineer': 'Detection engineering analysis',
+        'cyber-threat-intel': 'Threat-intelligence analysis',
+        'threat-hunter': 'Threat-hunting analysis',
     }.get(role, 'Unknown analysis job')
 
 
@@ -3550,17 +3780,37 @@ def llm_executed_model_label(log: dict[str, object], *, live: bool = False) -> s
         if routed_model:
             model = routed_model
         provider = 'Codex CLI'
+    elif route.startswith('hermes-agent:'):
+        try:
+            routed_model, effort = route.removeprefix('hermes-agent:').rsplit(':', 1)
+        except ValueError:
+            routed_model = ''
+        if routed_model:
+            model = routed_model
+        provider = 'Hermes Agent'
+    elif route.startswith('openclaw:'):
+        try:
+            routed_model, effort = route.removeprefix('openclaw:').rsplit(':', 1)
+        except ValueError:
+            routed_model = ''
+        if routed_model:
+            model = routed_model
+        provider = 'OpenClaw'
     elif route.startswith('ollama:'):
         model = route.removeprefix('ollama:').strip() or model
         provider = 'Ollama'
     elif provider_key in {'codex-cli', 'gpt-cli'} or model_path == 'frontier-codex-cli':
         provider = 'Codex CLI'
+    elif provider_key in {'hermes-agent', 'openai-codex'} or model_path == 'hermes-agent':
+        provider = 'Hermes Agent'
+    elif provider_key == 'openclaw' or model_path == 'openclaw':
+        provider = 'OpenClaw'
     elif provider_key == 'ollama' or model_path == 'ollama':
         provider = 'Ollama'
     if not model:
         return 'No model running' if live else 'No model started'
     label = ' · '.join(part for part in (provider, model) if part) or model
-    if provider == 'Codex CLI' and effort:
+    if provider in {'Codex CLI', 'Hermes Agent', 'OpenClaw'} and effort:
         label += f' ({effort})'
     return label
 
@@ -3808,10 +4058,16 @@ REPORTS_PAGE_ASSETS = '''
   const agentLabel = log => log?.agent_label || ({
     'soc-analyst':'SOC Analyst',
     'incident-responder':'Incident Responder',
+    'siem-engineer':'SIEM Engineer',
+    'cyber-threat-intel':'Cyber Threat Intel',
+    'threat-hunter':'Threat Hunter',
   }[String(log?.agent_role || '').replaceAll('_','-').toLowerCase()] || 'Unknown agent');
   const jobLabel = log => log?.job_label || ({
     'soc-analyst':'SOC alert triage',
     'incident-responder':'Incident response investigation',
+    'siem-engineer':'Detection engineering analysis',
+    'cyber-threat-intel':'Threat-intelligence analysis',
+    'threat-hunter':'Threat-hunting analysis',
   }[String(log?.agent_role || '').replaceAll('_','-').toLowerCase()] || 'Unknown analysis job');
   const executedModel = (log, live=false) => {
     if (log?.runtime_model_label) return String(log.runtime_model_label);
@@ -3828,16 +4084,30 @@ REPORTS_PAGE_ASSETS = '''
       if (parts.length > 1) effort = parts.pop() || '';
       model = parts.join(':') || model;
       provider = 'Codex CLI';
+    } else if (route.startsWith('hermes-agent:')) {
+      const parts = route.slice('hermes-agent:'.length).split(':');
+      if (parts.length > 1) effort = parts.pop() || '';
+      model = parts.join(':') || model;
+      provider = 'Hermes Agent';
+    } else if (route.startsWith('openclaw:')) {
+      const parts = route.slice('openclaw:'.length).split(':');
+      if (parts.length > 1) effort = parts.pop() || '';
+      model = parts.join(':') || model;
+      provider = 'OpenClaw';
     } else if (route.startsWith('ollama:')) {
       model = route.slice('ollama:'.length) || model;
       provider = 'Ollama';
     } else if (providerKey === 'codex-cli' || providerKey === 'gpt-cli' || path === 'frontier-codex-cli') {
       provider = 'Codex CLI';
+    } else if (providerKey === 'hermes-agent' || providerKey === 'openai-codex' || path === 'hermes-agent') {
+      provider = 'Hermes Agent';
+    } else if (providerKey === 'openclaw' || path === 'openclaw') {
+      provider = 'OpenClaw';
     } else if (providerKey === 'ollama' || path === 'ollama') {
       provider = 'Ollama';
     }
     if (!model) return live ? 'No model running' : 'No model started';
-    return `${provider ? provider + ' · ' : ''}${model}${provider === 'Codex CLI' && effort ? ' (' + effort + ')' : ''}`;
+    return `${provider ? provider + ' · ' : ''}${model}${['Codex CLI', 'Hermes Agent', 'OpenClaw'].includes(provider) && effort ? ' (' + effort + ')' : ''}`;
   };
   const rowHtml = log => {
     const alert = log.alert || {};
@@ -6340,7 +6610,6 @@ def settings_page_section() -> str:
         ),
     }
     ai_path = html.escape(display_path(SOC_AI_SETTINGS_FILE))
-    hybrid_policy = ai_settings['hybrid_policy']
     installed_models = list_ollama_models()
     enabled_models = _normalized_enabled_models(ai_settings.get('enabled_ollama_models'))
     model_toggle_rows = ollama_model_toggle_rows(installed_models, enabled_models)
@@ -6348,8 +6617,42 @@ def settings_page_section() -> str:
     enabled_codex_models = [entry for entry in codex_models if entry.get('enabled') is True]
     codex_model_rows = codex_cli_model_rows(codex_models)
     ollama_state = f'{len(enabled_models)} enabled' if enabled_models else 'Disabled'
-    gpt_cli_state = f'{len(enabled_codex_models)} enabled' if enabled_codex_models else 'Disabled'
+    hermes_agent_enabled = _boolean_setting(ai_settings.get('hermes_agent_enabled'))
+    openclaw_enabled = _boolean_setting(ai_settings.get('openclaw_enabled'))
+    cli_route_count = (
+        len(enabled_codex_models)
+        + int(hermes_agent_enabled)
+        + int(openclaw_enabled)
+    )
+    gpt_cli_state = f'{cli_route_count} enabled' if cli_route_count else 'Disabled'
     codex_cli_path = html.escape(str(ai_settings.get('codex_cli_path') or 'codex'))
+    hermes_agent_path = html.escape(
+        str(ai_settings.get('hermes_agent_path') or 'hermes'),
+        quote=True,
+    )
+    selected_hermes_agent_model = _normalized_hermes_model(
+        ai_settings.get('hermes_agent_model')
+    )
+    hermes_agent_model_options = ''.join(
+        f'<option value="{html.escape(model, quote=True)}"'
+        f'{" selected" if model == selected_hermes_agent_model else ""}>'
+        f'{html.escape(model)}</option>'
+        for model in CODEX_CLI_MODEL_CATALOG
+    )
+    hermes_agent_effort_options = (
+        '<option value="medium" selected>Medium (required)</option>'
+    )
+    openclaw_path = html.escape(
+        str(ai_settings.get('openclaw_path') or 'openclaw'),
+        quote=True,
+    )
+    openclaw_model = html.escape(
+        str(ai_settings.get('openclaw_model') or 'ollama/gemma4:26b-mlx'),
+        quote=True,
+    )
+    openclaw_effort_options = reasoning_effort_options(
+        str(ai_settings.get('openclaw_reasoning_effort') or 'medium')
+    )
     maxmind_asn_db_path = html.escape(ai_settings['maxmind_geoip_asn_db_path'])
     maxmind_city_db_path = html.escape(ai_settings['maxmind_geoip_city_db_path'])
     maxmind_country_db_path = html.escape(ai_settings['maxmind_geoip_country_db_path'])
@@ -6412,14 +6715,53 @@ def settings_page_section() -> str:
               <div class="settings-codex-model-list" id="ai-codex-cli-models" aria-label="Available Codex CLI models">
                 {codex_model_rows}
               </div>
-              <div class="settings-grid">
-                <label class="settings-field settings-field-wide">Hybrid policy
-                  <select id="ai-hybrid-policy">
-                    <option value="cloud_for_critical_high_or_recommended" {'selected' if hybrid_policy == 'cloud_for_critical_high_or_recommended' else ''}>Use Codex CLI for Critical/High or when local recommends it</option>
-                    <option value="cloud_when_recommended_only" {'selected' if hybrid_policy == 'cloud_when_recommended_only' else ''}>Use Codex CLI only when local recommends it</option>
-                  </select>
-                </label>
-              </div>
+              <section class="settings-agent-runtime-list" aria-labelledby="agent-runtime-settings-title">
+                <div class="settings-agent-runtime-heading">
+                  <span class="settings-kicker">Compatible agent runtimes</span>
+                  <strong id="agent-runtime-settings-title">Hermes Agent and OpenClaw</strong>
+                  <small>Enable each runtime independently before it can be assigned to any Onion Sentinel agent duty.</small>
+                </div>
+                <div class="settings-agent-runtime-card" data-hermes-agent-settings>
+                  <label class="settings-provider-toggle-row" for="ai-hermes-agent-enabled">
+                    <span><strong>Hermes Agent</strong><small>One exact Hermes route for primary analysis or independent review</small></span>
+                    <span class="settings-switch">
+                      <input id="ai-hermes-agent-enabled" type="checkbox" data-hermes-agent-enabled aria-label="Enable Hermes Agent"{' checked' if hermes_agent_enabled else ''}>
+                      <span aria-hidden="true"></span>
+                    </span>
+                  </label>
+                  <div class="settings-grid settings-runtime-grid">
+                    <label class="settings-field">Executable
+                      <input id="ai-hermes-agent-path" type="text" value="{hermes_agent_path}" placeholder="hermes">
+                    </label>
+                    <label class="settings-field">Model
+                      <select id="ai-hermes-agent-model">{hermes_agent_model_options}</select>
+                    </label>
+                    <label class="settings-field">Reasoning
+                      <select id="ai-hermes-agent-reasoning-effort" disabled>{hermes_agent_effort_options}</select>
+                    </label>
+                  </div>
+                </div>
+                <div class="settings-agent-runtime-card" data-openclaw-settings>
+                  <label class="settings-provider-toggle-row" for="ai-openclaw-enabled">
+                    <span><strong>OpenClaw</strong><small>One isolated, explicit Ollama route for primary analysis or independent review; it uses this Mac's GPU and memory</small></span>
+                    <span class="settings-switch">
+                      <input id="ai-openclaw-enabled" type="checkbox" data-openclaw-enabled aria-label="Enable OpenClaw"{' checked' if openclaw_enabled else ''}>
+                      <span aria-hidden="true"></span>
+                    </span>
+                  </label>
+                  <div class="settings-grid settings-runtime-grid">
+                    <label class="settings-field">Executable
+                      <input id="ai-openclaw-path" type="text" value="{openclaw_path}" placeholder="openclaw">
+                    </label>
+                    <label class="settings-field">Model (ollama/model)
+                      <input id="ai-openclaw-model" type="text" value="{openclaw_model}" placeholder="ollama/gemma4:26b-mlx">
+                    </label>
+                    <label class="settings-field">Reasoning
+                      <select id="ai-openclaw-reasoning-effort">{openclaw_effort_options}</select>
+                    </label>
+                  </div>
+                </div>
+              </section>
               <div class="settings-note">Enable each listed Codex CLI model separately and choose its reasoning effort. Only enabled models appear in agent selectors. The adapter invokes <code>codex exec --model</code> with the selected model and reasoning override, ephemeral read-only sandbox, bounded output, and no operator-defined shell command.</div>
             </div>
           </details>
@@ -6745,6 +7087,7 @@ SETTINGS_PAGE_CSS = '''
 .settings-provider-list{display:grid;gap:12px;margin:0 20px 18px}.settings-provider-details{overflow:hidden;border:1px solid rgba(148,163,184,.16);border-radius:12px;background:#071018}.settings-details .settings-provider-details>summary{list-style:none;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 18px;cursor:pointer}.settings-provider-details>summary::-webkit-details-marker{display:none}.settings-details .settings-provider-details>summary:before{content:'▸';flex:0 0 auto;color:#8ff4ff;font-size:14px;transition:transform .16s ease}.settings-details .settings-provider-details[open]>summary:before{transform:rotate(90deg)}.settings-provider-summary-copy{display:grid;min-width:0;margin-right:auto}.settings-provider-summary-copy strong{margin-top:4px!important;color:#f4f8ff;font-size:18px!important;letter-spacing:0!important}.settings-provider-summary-copy small{margin-top:3px;color:#91a4ba;font-size:12px;line-height:1.35}.settings-provider-state{flex:0 0 auto;border:1px solid rgba(34,211,238,.24);border-radius:999px;padding:6px 10px;color:#8ff4ff;background:rgba(34,211,238,.05);font-size:11px;font-weight:900;letter-spacing:0}.settings-provider-state.is-disabled{border-color:rgba(148,163,184,.20);color:#91a4ba;background:rgba(148,163,184,.04)}.settings-provider-body{display:grid;gap:16px;border-top:1px solid rgba(148,163,184,.12);padding:18px}.settings-provider-toolbar{display:grid;grid-template-columns:minmax(240px,1fr) max-content;gap:12px;align-items:end}.settings-secondary-button{min-height:44px;border:1px solid rgba(34,211,238,.35);border-radius:10px;padding:10px 14px;color:#dce9f8;background:#0c1722;font-size:12px;font-weight:900;cursor:pointer}.settings-secondary-button:hover,.settings-secondary-button:focus-visible{border-color:#8ff4ff;color:#8ff4ff;outline:none}.settings-secondary-button:disabled{cursor:wait;opacity:.65}.settings-model-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.settings-model-option,.settings-provider-toggle-row{display:flex;align-items:center;justify-content:space-between;gap:14px;min-width:0;border:1px solid rgba(148,163,184,.12);border-radius:10px;padding:11px 12px;background:#0a141e;cursor:pointer}.settings-model-option:hover,.settings-provider-toggle-row:hover{border-color:rgba(34,211,238,.34)}.settings-model-option-copy,.settings-provider-toggle-row>span:first-child{display:grid;min-width:0}.settings-model-name-line{display:flex;align-items:center;gap:7px;min-width:0}.settings-model-name-line strong{min-width:0}.settings-model-warning{display:inline-grid;place-items:center;width:18px;height:18px;flex:0 0 18px;border:1px solid rgba(246,199,109,.72);border-radius:50%;color:#f6c76d;background:rgba(246,199,109,.08);font:950 12px/1 Inter,ui-sans-serif,system-ui,sans-serif;cursor:help}.settings-model-warning:hover,.settings-model-warning:focus-visible{border-color:#ffd978;color:#ffd978;background:rgba(246,199,109,.15);outline:none;box-shadow:0 0 0 2px rgba(246,199,109,.12)}.settings-model-option-copy strong,.settings-provider-toggle-row strong{overflow:hidden;color:#dce9f8;font:800 12px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;text-overflow:ellipsis;white-space:nowrap}.settings-model-option-copy small,.settings-provider-toggle-row small{margin-top:3px;color:#7f91a6;font-size:10px;line-height:1.3}.settings-model-option[data-installed="false"] .settings-model-option-copy small,.settings-model-option[data-compatible="false"] .settings-model-option-copy small{color:#f6c76d}.settings-switch{position:relative;display:inline-flex;width:42px;height:24px;flex:0 0 42px}.settings-switch input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}.settings-switch>span{display:block;width:42px;height:24px;border:1px solid rgba(148,163,184,.30);border-radius:999px;background:#14202c;transition:border-color .16s,background .16s}.settings-switch>span:after{content:'';display:block;width:18px;height:18px;margin:2px;border-radius:50%;background:#91a4ba;transition:transform .16s,background .16s}.settings-switch input:checked+span{border-color:rgba(34,211,238,.72);background:rgba(34,211,238,.18)}.settings-switch input:checked+span:after{transform:translateX(18px);background:#8ff4ff}.settings-switch input:focus-visible+span{outline:2px solid #8ff4ff;outline-offset:2px}.settings-provider-toggle-row{padding:14px}.settings-provider-toggle-row strong{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:13px}.settings-model-empty{grid-column:1/-1;padding:12px;color:#91a4ba}.settings-provider-details .settings-note{margin-top:0}.settings-provider-details .settings-grid{margin-top:0}@media(max-width:760px){.settings-provider-list{margin:0 12px 16px}.settings-details .settings-provider-details>summary{grid-template-columns:auto minmax(0,1fr);padding:14px}.settings-provider-state{grid-column:2}.settings-provider-toolbar,.settings-model-list{grid-template-columns:1fr}.settings-secondary-button{width:100%}.settings-provider-body{padding:14px}.settings-model-option-copy strong{white-space:normal;overflow-wrap:anywhere}}
 .settings-agent-prompt-list{display:grid;gap:10px;margin:0 20px}.settings-agent-prompt-details .prompt-editor-label,.settings-agent-prompt-details .prompt-editor,.settings-agent-prompt-details .settings-actions{margin-left:0!important;margin-right:0!important}.settings-agent-prompt-details .prompt-editor{width:100%;min-height:420px}.settings-agent-prompt-details .settings-actions{margin-top:0}.settings-agent-prompt-details>.settings-provider-body{gap:12px}@media(max-width:760px){.settings-agent-prompt-list{margin:0 12px}.settings-agent-prompt-details .prompt-editor{min-height:360px}}
 .settings-provider-toolbar.settings-codex-toolbar{grid-template-columns:minmax(240px,1fr)}.settings-codex-model-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.settings-codex-model-option{display:grid;grid-template-columns:minmax(0,1fr) max-content;align-items:center;cursor:default}.settings-codex-effort{display:flex;align-items:center;gap:8px;margin-top:7px;color:#7f91a6;font-size:10px;font-weight:850;text-transform:uppercase;letter-spacing:.04em}.settings-codex-effort select{min-height:32px;max-width:132px;border:1px solid rgba(148,163,184,.22);border-radius:8px;padding:5px 28px 5px 8px;color:#dce9f8;background:#071018;font-size:11px;font-weight:800}.settings-codex-switch{align-self:center}@media(max-width:760px){.settings-codex-model-list{grid-template-columns:1fr}}@media(max-width:420px){.settings-codex-effort{align-items:flex-start;flex-direction:column}.settings-codex-effort select{max-width:none;width:100%}}
+.settings-agent-runtime-list{display:grid;gap:10px;border-top:1px solid rgba(148,163,184,.12);padding-top:16px}.settings-agent-runtime-heading{display:grid;gap:4px}.settings-agent-runtime-heading strong{color:#f4f8ff;font-size:15px}.settings-agent-runtime-heading small{color:#91a4ba;font-size:11px;line-height:1.4}.settings-agent-runtime-card{display:grid;gap:12px;border:1px solid rgba(148,163,184,.12);border-radius:12px;padding:12px;background:rgba(10,20,30,.65)}.settings-agent-runtime-card .settings-provider-toggle-row{border:0;padding:2px;background:transparent}.settings-runtime-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.settings-runtime-grid .settings-field{font-size:10px}@media(max-width:760px){.settings-runtime-grid{grid-template-columns:1fr}}
 .settings-agent-model-control{display:grid;grid-template-columns:minmax(260px,420px) auto minmax(0,1fr);align-items:end;gap:12px;margin:0 20px 18px}.settings-agent-model-fields{display:grid;gap:12px;min-width:0}.settings-agent-model-control .settings-secondary-button{align-self:end}.settings-agent-model-help{align-self:center;color:#7f91a6;font-size:12px;line-height:1.45}.settings-agent-model-control .settings-save-status:empty{display:none}@media(max-width:760px){.settings-agent-model-control{grid-template-columns:1fr;margin:0 12px 16px}.settings-agent-model-control .settings-secondary-button{width:100%}.settings-agent-model-help{display:none}}
 .settings-agent-policy-control{display:grid;gap:14px;margin:0 20px 18px;border:1px solid rgba(34,211,238,.16);border-radius:12px;padding:16px;background:#071018}.settings-agent-policy-copy h3{margin:5px 0;color:#f4f8ff;font-size:17px}.settings-agent-policy-copy p{margin:0;color:#91a4ba;font-size:12px}.settings-agent-policy-control .settings-actions{margin-top:0}.settings-agent-policy-control .settings-save-status:empty{display:none}@media(max-width:760px){.settings-agent-policy-control{margin:0 12px 16px}.settings-agent-policy-control .settings-secondary-button{width:100%}}
 </style>
@@ -6766,7 +7109,14 @@ SETTINGS_PAGE_JS = '''
   const codexCliPath = document.querySelector('#ai-codex-cli-path');
   const codexCliModels = document.querySelector('#ai-codex-cli-models');
   const codexCliCatalog = ['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
-  const hybridPolicy = document.querySelector('#ai-hybrid-policy');
+  const hermesAgentEnabled = document.querySelector('#ai-hermes-agent-enabled');
+  const hermesAgentPath = document.querySelector('#ai-hermes-agent-path');
+  const hermesAgentModel = document.querySelector('#ai-hermes-agent-model');
+  const hermesAgentReasoningEffort = document.querySelector('#ai-hermes-agent-reasoning-effort');
+  const openclawEnabled = document.querySelector('#ai-openclaw-enabled');
+  const openclawPath = document.querySelector('#ai-openclaw-path');
+  const openclawModel = document.querySelector('#ai-openclaw-model');
+  const openclawReasoningEffort = document.querySelector('#ai-openclaw-reasoning-effort');
   const socAnalysisMinSeverity = document.querySelector('#soc-analyst-analysis-min-severity');
   const socPcapMinSeverity = document.querySelector('#soc-analyst-pcap-min-severity');
   const socIncidentMinSeverity = document.querySelector('#soc-analyst-incident-min-severity');
@@ -6967,7 +7317,11 @@ SETTINGS_PAGE_JS = '''
       ollamaEnabledSummary.classList.toggle('is-disabled', !enabledModels.length);
     }
     if (gptCliEnabledSummary) {
-      const enabledCount = currentCodexCliModels().filter(entry => entry.enabled).length;
+      const enabledCount = (
+        currentCodexCliModels().filter(entry => entry.enabled).length
+        + Number(Boolean(hermesAgentEnabled?.checked))
+        + Number(Boolean(openclawEnabled?.checked))
+      );
       gptCliEnabledSummary.textContent = enabledCount ? `${enabledCount} enabled` : 'Disabled';
       gptCliEnabledSummary.classList.toggle('is-disabled', enabledCount === 0);
     }
@@ -6997,6 +7351,16 @@ SETTINGS_PAGE_JS = '''
     normalizeCodexCliModels(settings?.codex_cli_models)
       .filter(entry => entry.enabled)
       .forEach(entry => routes.push(`codex-cli:${entry.model}:${entry.reasoning_effort}`));
+    if (settings?.hermes_agent_enabled === true) {
+      const model = String(settings.hermes_agent_model || 'gpt-5.5').trim();
+      const effort = String(settings.hermes_agent_reasoning_effort || 'medium').trim();
+      routes.push(`hermes-agent:${model}:${effort}`);
+    }
+    if (settings?.openclaw_enabled === true) {
+      const model = String(settings.openclaw_model || 'ollama/gemma4:26b-mlx').trim();
+      const effort = String(settings.openclaw_reasoning_effort || 'medium').trim();
+      routes.push(`openclaw:${model}:${effort}`);
+    }
     return routes;
   }
   function canonicalAgentRoute(route, routes = []) {
@@ -7009,6 +7373,48 @@ SETTINGS_PAGE_JS = '''
       parts.pop();
       const model = parts.join(':');
       return routes.find(candidate => candidate.startsWith(`codex-cli:${model}:`)) || normalized;
+    }
+    for (const provider of ['hermes-agent', 'openclaw']) {
+      const prefix = `${provider}:`;
+      if (normalized.startsWith(prefix) && !routes.includes(normalized)) {
+        return routes.find(candidate => candidate.startsWith(prefix)) || normalized;
+      }
+    }
+    return normalized;
+  }
+  function modelRouteIdentity(route, settings = {}) {
+    const normalized = String(route || '').trim().toLowerCase();
+    if (normalized.startsWith('codex-cli:')) {
+      const parts = normalized.slice('codex-cli:'.length).split(':');
+      const effort = parts.pop() || '';
+      const model = parts.join(':');
+      if (model && ['low', 'medium', 'high', 'xhigh'].includes(effort)) {
+        return `openai-codex:${model}`;
+      }
+    }
+    if (['gpt-cli', 'codex-cli'].includes(normalized)) {
+      const model = String(settings.codex_cli_model || 'configured-default').trim().toLowerCase();
+      return `openai-codex:${model}`;
+    }
+    if (normalized.startsWith('hermes-agent:')) {
+      const parts = normalized.slice('hermes-agent:'.length).split(':');
+      const effort = parts.pop() || '';
+      const model = parts.join(':');
+      if (model && ['low', 'medium', 'high', 'xhigh'].includes(effort)) {
+        return `openai-codex:${model}`;
+      }
+    }
+    if (normalized.startsWith('openclaw:')) {
+      const parts = normalized.slice('openclaw:'.length).split(':');
+      const effort = parts.pop() || '';
+      const model = parts.join(':');
+      if (model && ['low', 'medium', 'high', 'xhigh'].includes(effort)) {
+        if (model.includes('/')) {
+          const separator = model.indexOf('/');
+          return `${model.slice(0, separator)}:${model.slice(separator + 1)}`;
+        }
+        return `openclaw:${model}`;
+      }
     }
     return normalized;
   }
@@ -7025,7 +7431,13 @@ SETTINGS_PAGE_JS = '''
     return Object.fromEntries(agentRoles.map(role => {
       const route = canonicalAgentRoute(source[role], routes);
       const primary = canonicalAgentRoute(primaryAssignments?.[role], routes);
-      return [role, routes.includes(route) && route !== primary ? route : ''];
+      return [
+        role,
+        routes.includes(route)
+          && modelRouteIdentity(route) !== modelRouteIdentity(primary)
+          ? route
+          : ''
+      ];
     }));
   }
   function agentModelRouteLabel(route, settings) {
@@ -7035,6 +7447,18 @@ SETTINGS_PAGE_JS = '''
       const effort = parts.pop() || 'medium';
       const model = parts.join(':');
       return `Codex CLI: ${model} (${effort})`;
+    }
+    if (route.startsWith('hermes-agent:')) {
+      const parts = route.slice('hermes-agent:'.length).split(':');
+      const effort = parts.pop() || 'medium';
+      const model = parts.join(':');
+      return `Hermes Agent: ${model} (${effort})`;
+    }
+    if (route.startsWith('openclaw:')) {
+      const parts = route.slice('openclaw:'.length).split(':');
+      const effort = parts.pop() || 'medium';
+      const model = parts.join(':');
+      return `OpenClaw: ${model} (${effort})`;
     }
     if (['gpt-cli', 'codex-cli'].includes(route)) {
       const model = String(settings?.codex_cli_model || settings?.cloud_model || 'gpt-5.5').trim();
@@ -7080,7 +7504,10 @@ SETTINGS_PAGE_JS = '''
     agentSecondOpinionSelects.forEach(select => {
       const role = select.dataset.agentRole || '';
       const primary = normalized[role] || '';
-      const availableRoutes = routes.filter(route => route !== primary);
+      const primaryIdentity = modelRouteIdentity(primary, settings);
+      const availableRoutes = routes.filter(
+        route => modelRouteIdentity(route, settings) !== primaryIdentity
+      );
       select.replaceChildren();
       const emptyOption = document.createElement('option');
       emptyOption.value = '';
@@ -7117,8 +7544,15 @@ SETTINGS_PAGE_JS = '''
       reasoning_effort: 'medium'
     };
     const gptEnabled = enabledCodexModels.length > 0;
+    const hermesEnabled = Boolean(hermesAgentEnabled?.checked);
+    const openclawIsEnabled = Boolean(openclawEnabled?.checked);
+    const selectedOpenClawModel = openclawModel?.value.trim() || 'ollama/gemma4:26b-mlx';
+    const hostedEnabled = gptEnabled || hermesEnabled;
+    const localModelsForMode = enabledModels.length || openclawIsEnabled
+      ? ['local-enabled']
+      : [];
     const settings = {
-      mode: derivedAnalysisMode(enabledModels, gptEnabled),
+      mode: derivedAnalysisMode(localModelsForMode, hostedEnabled),
       ollama_model: enabledModels[0] || configuredEnabledModels[0] || 'devstral:latest',
       enabled_ollama_models: enabledModels,
       ollama_url: ollamaUrl?.value.trim() || 'http://127.0.0.1:11434',
@@ -7130,7 +7564,14 @@ SETTINGS_PAGE_JS = '''
       codex_cli_reasoning_effort: primaryCodex.reasoning_effort,
       codex_cli_models: codexModels,
       gpt_cli_enabled: gptEnabled,
-      hybrid_policy: hybridPolicy?.value || 'cloud_for_critical_high_or_recommended',
+      hermes_agent_enabled: hermesEnabled,
+      hermes_agent_path: hermesAgentPath?.value.trim() || 'hermes',
+      hermes_agent_model: hermesAgentModel?.value.trim() || 'gpt-5.5',
+      hermes_agent_reasoning_effort: hermesAgentReasoningEffort?.value || 'medium',
+      openclaw_enabled: openclawIsEnabled,
+      openclaw_path: openclawPath?.value.trim() || 'openclaw',
+      openclaw_model: selectedOpenClawModel,
+      openclaw_reasoning_effort: openclawReasoningEffort?.value || 'medium',
       soc_analyst_analysis_min_severity: socAnalysisMinSeverity?.value || 'informational',
       soc_analyst_pcap_min_severity: socPcapMinSeverity?.value || 'informational',
       soc_analyst_incident_min_severity: socIncidentMinSeverity?.value || 'disabled',
@@ -7147,7 +7588,8 @@ SETTINGS_PAGE_JS = '''
     if (!settings) return;
     const mode = String(settings.mode || 'ollama').trim().toLowerCase();
     configuredEnabledModels = normalizeModelList(settings.enabled_ollama_models);
-    if (!configuredEnabledModels.length && mode !== 'cloud') {
+    const openclawProvidesLocal = settings.openclaw_enabled === true;
+    if (!configuredEnabledModels.length && mode !== 'cloud' && !openclawProvidesLocal) {
       configuredEnabledModels = [String(settings.ollama_model || 'devstral:latest').trim()];
     }
     if (ollamaModels) {
@@ -7165,7 +7607,20 @@ SETTINGS_PAGE_JS = '''
           enabled: settings.gpt_cli_enabled === true || (settings.gpt_cli_enabled == null && ['cloud', 'hybrid'].includes(mode))
         }];
     renderCodexCliModels(codexEntries);
-    if (hybridPolicy) hybridPolicy.value = settings.hybrid_policy || 'cloud_for_critical_high_or_recommended';
+    if (hermesAgentEnabled) hermesAgentEnabled.checked = settings.hermes_agent_enabled === true;
+    if (hermesAgentPath) hermesAgentPath.value = settings.hermes_agent_path || 'hermes';
+    if (hermesAgentModel) hermesAgentModel.value = settings.hermes_agent_model || 'gpt-5.5';
+    if (hermesAgentReasoningEffort) {
+      hermesAgentReasoningEffort.value = settings.hermes_agent_reasoning_effort || 'medium';
+    }
+    if (openclawEnabled) openclawEnabled.checked = settings.openclaw_enabled === true;
+    if (openclawPath) openclawPath.value = settings.openclaw_path || 'openclaw';
+    if (openclawModel) {
+      openclawModel.value = settings.openclaw_model || 'ollama/gemma4:26b-mlx';
+    }
+    if (openclawReasoningEffort) {
+      openclawReasoningEffort.value = settings.openclaw_reasoning_effort || 'medium';
+    }
     if (socAnalysisMinSeverity) {
       socAnalysisMinSeverity.value = settings.soc_analyst_analysis_min_severity || 'informational';
     }
@@ -7189,7 +7644,13 @@ SETTINGS_PAGE_JS = '''
       ...settings,
       enabled_ollama_models: configuredEnabledModels,
       codex_cli_models: currentCodexCliModels(),
-      gpt_cli_enabled: currentCodexCliModels().some(entry => entry.enabled)
+      gpt_cli_enabled: currentCodexCliModels().some(entry => entry.enabled),
+      hermes_agent_enabled: Boolean(hermesAgentEnabled?.checked),
+      hermes_agent_model: hermesAgentModel?.value.trim() || 'gpt-5.5',
+      hermes_agent_reasoning_effort: hermesAgentReasoningEffort?.value || 'medium',
+      openclaw_enabled: Boolean(openclawEnabled?.checked),
+      openclaw_model: openclawModel?.value.trim() || 'ollama/gemma4:26b-mlx',
+      openclaw_reasoning_effort: openclawReasoningEffort?.value || 'medium'
     });
     modelSelectionDirty = false;
     updateProviderSummaries();
@@ -7219,13 +7680,14 @@ SETTINGS_PAGE_JS = '''
     if (!saveAiButton && !saveMaxmindButton) return;
     try {
       const response = await fetch('/api/soc-settings/ai-model', {cache: 'no-store'});
-      const data = await response.json();
-      if (data.ok && data.settings) {
-        applyAiSettings(data.settings);
-        applyGeoIpDatabaseStatuses(data.geoip_databases, data.geoip_database);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok || !data.settings) {
+        throw new Error(data.error || `Model settings refresh failed with HTTP ${response.status}`);
       }
-    } catch (_) {
-      setAiStatus('Could not refresh model settings from the Onion Sentinel API.', 'error');
+      applyAiSettings(data.settings);
+      applyGeoIpDatabaseStatuses(data.geoip_databases, data.geoip_database);
+    } catch (error) {
+      setAiStatus(String(error.message || error), 'error');
     }
   }
   async function refreshOllamaModels(announce = false) {
@@ -7312,13 +7774,26 @@ SETTINGS_PAGE_JS = '''
     }
   }
   function validateAiSettings(payload) {
-    if (!payload.enabled_ollama_models.length && !payload.gpt_cli_enabled) {
-      return 'Enable at least one Ollama model or Codex CLI model.';
-    }
     if (
-      payload.gpt_cli_enabled
-      && payload.codex_cli_path !== 'codex'
-      && !/^[/].*[/]codex$/.test(payload.codex_cli_path)
+      !payload.enabled_ollama_models.length
+      && !payload.gpt_cli_enabled
+      && !payload.hermes_agent_enabled
+      && !payload.openclaw_enabled
+    ) {
+      return 'Enable at least one Ollama model, Codex CLI model, Hermes Agent, or OpenClaw.';
+    }
+    const absoluteExecutablePattern = /^\\/[A-Za-z0-9._\\/+-]+$/;
+    const validExecutable = (value, basename) => (
+      value === basename
+      || (
+        value.startsWith('/')
+        && value.endsWith(`/${basename}`)
+        && absoluteExecutablePattern.test(value)
+        && !/[\\x00-\\x1f\\x7f]/.test(value)
+      )
+    );
+    if (
+      !validExecutable(payload.codex_cli_path, 'codex')
     ) {
       return 'Codex CLI executable must be "codex" or an absolute path ending in /codex.';
     }
@@ -7337,6 +7812,49 @@ SETTINGS_PAGE_JS = '''
         return 'Each Codex CLI model must appear exactly once.';
       }
       seenCodexModels.add(entry.model);
+    }
+    const providerSettings = [
+      {
+        label: 'Hermes Agent',
+        executable: payload.hermes_agent_path,
+        basename: 'hermes',
+        model: payload.hermes_agent_model,
+        effort: payload.hermes_agent_reasoning_effort
+      },
+      {
+        label: 'OpenClaw',
+        executable: payload.openclaw_path,
+        basename: 'openclaw',
+        model: payload.openclaw_model,
+        effort: payload.openclaw_reasoning_effort
+      }
+    ];
+    for (const provider of providerSettings) {
+      if (!validExecutable(provider.executable, provider.basename)) {
+        return `${provider.label} executable must be "${provider.basename}" or an absolute path ending in /${provider.basename}.`;
+      }
+      const modelIsValid = provider.label === 'Hermes Agent'
+        ? codexCliCatalog.includes(provider.model)
+        : /^ollama\\/[A-Za-z0-9][A-Za-z0-9._:\\/+-]{0,232}$/.test(provider.model);
+      if (!modelIsValid) {
+        return provider.label === 'OpenClaw'
+          ? 'OpenClaw currently supports explicit ollama/<model> routes only.'
+          : `${provider.label} model is invalid.`;
+      }
+      if (!['low', 'medium', 'high', 'xhigh'].includes(provider.effort)) {
+        return `${provider.label} reasoning effort is invalid.`;
+      }
+    }
+    if (payload.hermes_agent_reasoning_effort !== 'medium') {
+      return 'Hermes Agent reasoning effort must be medium for this installed CLI.';
+    }
+    const normalizedOllamaUrl = String(payload.ollama_url || '').replace(/\\/+$/, '');
+    if (
+      payload.openclaw_enabled
+      && !['http://127.0.0.1:11434', 'http://localhost:11434']
+        .includes(normalizedOllamaUrl)
+    ) {
+      return 'OpenClaw requires a loopback Ollama endpoint on port 11434.';
     }
     const thresholds = ['disabled', 'critical', 'high', 'medium', 'low', 'informational'];
     if (
@@ -7394,8 +7912,15 @@ SETTINGS_PAGE_JS = '''
       setAgentModelStatus(role, 'Choose an enabled model.', 'error');
       return;
     }
-    if (secondOpinionModel && secondOpinionModel === model) {
-      setAgentModelStatus(role, 'Primary and second-opinion models must differ.', 'error');
+    if (
+      secondOpinionModel
+      && modelRouteIdentity(secondOpinionModel) === modelRouteIdentity(model)
+    ) {
+      setAgentModelStatus(
+        role,
+        'Primary and second-opinion models must resolve to different provider/model identities.',
+        'error'
+      );
       return;
     }
     button.disabled = true;
@@ -7562,6 +8087,27 @@ SETTINGS_PAGE_JS = '''
     updateProviderSummaries();
     const settings = currentAiSettings();
     syncAgentModelControls(settings.agent_models, settings.agent_second_opinion_models, settings);
+  });
+  [
+    hermesAgentEnabled,
+    hermesAgentPath,
+    hermesAgentModel,
+    hermesAgentReasoningEffort,
+    openclawEnabled,
+    openclawPath,
+    openclawModel,
+    openclawReasoningEffort
+  ].forEach(control => {
+    control?.addEventListener('change', () => {
+      updateProviderSummaries();
+      const settings = currentAiSettings();
+      syncAgentModelControls(
+        settings.agent_models,
+        settings.agent_second_opinion_models,
+        settings
+      );
+      setAiStatus('Unsaved');
+    });
   });
   promptConfigurations.forEach(config => {
     config.button.addEventListener('click', () => savePromptEditor(config));

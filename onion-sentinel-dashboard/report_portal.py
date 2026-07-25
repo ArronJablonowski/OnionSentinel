@@ -19,6 +19,7 @@ import secrets
 import shlex
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
@@ -111,6 +112,10 @@ CYBER_THREAT_INTEL_MEMORY_FILE = AGENT_MEMORY_DIR / "cyber-threat-intel-memory.m
 THREAT_HUNTER_MEMORY_FILE = AGENT_MEMORY_DIR / "threat-hunter-memory.md"
 SHARED_AGENT_MEMORY_FILE = AGENT_MEMORY_DIR / "shared-agent-memory.md"
 SOC_AI_SETTINGS_FILE = HOME / "n8n-local" / "config" / "ai_model_settings.json"
+DEFAULT_HERMES_AUTH_FILE = (
+    HOME / "n8n-local" / "private" / "hermes-agent" / "auth.json"
+)
+HERMES_AUTH_MAX_BYTES = 2 * 1024 * 1024
 SOC_ANALYST_PROMPT_MAX_BYTES = 20000
 AGENT_MEMORY_VIEW_MAX_BYTES = 1024 * 1024
 SOC_ALERT_API_MAX_LIMIT = 500
@@ -1344,7 +1349,15 @@ CYBER_SECURITY_AGENT_ROLES = (
 )
 SOC_AI_SETTINGS_LOCK = threading.RLock()
 CODEX_CLI_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
+HERMES_AGENT_REASONING_EFFORT = "medium"
 CODEX_CLI_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+CLI_HARNESS_MODEL_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,239}$"
+)
+OPENCLAW_SUPPORTED_OLLAMA_URLS = frozenset({
+    "http://127.0.0.1:11434",
+    "http://localhost:11434",
+})
 CODEX_CLI_MODEL_CATALOG = (
     "gpt-5.5",
     "gpt-5.6-sol",
@@ -1382,7 +1395,14 @@ def default_soc_ai_settings() -> dict:
             for model in CODEX_CLI_MODEL_CATALOG
         ],
         "gpt_cli_enabled": False,
-        "hybrid_policy": "cloud_for_critical_high_or_recommended",
+        "hermes_agent_enabled": False,
+        "hermes_agent_path": "hermes",
+        "hermes_agent_model": "gpt-5.5",
+        "hermes_agent_reasoning_effort": "medium",
+        "openclaw_enabled": False,
+        "openclaw_path": "openclaw",
+        "openclaw_model": "ollama/gemma4:26b-mlx",
+        "openclaw_reasoning_effort": "medium",
         # Automatic base analysis is independently configurable from evidence
         # collection and case creation.
         "soc_analyst_analysis_min_severity": "informational",
@@ -1447,6 +1467,49 @@ def _codex_cli_route(model: str, effort: str) -> str:
     return f"codex-cli:{model}:{effort}"
 
 
+def _hermes_agent_route(model: str, effort: str) -> str:
+    return f"hermes-agent:{model}:{effort}"
+
+
+def _openclaw_route(model: str, effort: str) -> str:
+    return f"openclaw:{model}:{effort}"
+
+
+def _valid_cli_executable_path(value: str, basename: str) -> bool:
+    """Accept only an exact command name or an absolute path to that command."""
+    if (
+        not value
+        or len(value) > 1024
+        or re.search(r"[\x00-\x1f\x7f]", value)
+    ):
+        return False
+    path = Path(value)
+    if not path.is_absolute():
+        return value == basename
+    return bool(
+        path.name == basename
+        and re.fullmatch(r"/[A-Za-z0-9._/+-]+", value)
+    )
+
+
+def _valid_provider_model(value: str) -> bool:
+    """Validate an argv-safe provider model identifier, including namespaced models."""
+    return bool(
+        value
+        and len(value) <= 240
+        and not re.search(r"[\x00-\x1f\x7f]", value)
+    )
+
+
+def _valid_openclaw_model(value: str) -> bool:
+    """Limit the isolated OpenClaw adapter to credential-free Ollama routes."""
+    return bool(
+        CLI_HARNESS_MODEL_PATTERN.fullmatch(value)
+        and value.lower().startswith("ollama/")
+        and len(value) > len("ollama/")
+    )
+
+
 def _normalize_codex_cli_models(
     value: object,
     *,
@@ -1494,6 +1557,13 @@ def _normalize_codex_cli_models(
 def _enabled_agent_model_routes(
     enabled_ollama_models: list[str],
     codex_cli_models: list[dict],
+    *,
+    hermes_agent_enabled: bool = False,
+    hermes_agent_model: str = "gpt-5.5",
+    hermes_agent_reasoning_effort: str = "medium",
+    openclaw_enabled: bool = False,
+    openclaw_model: str = "ollama/gemma4:26b-mlx",
+    openclaw_reasoning_effort: str = "medium",
 ) -> list[str]:
     """Return stable route identifiers that agents may be assigned to."""
     routes = [f"ollama:{model}" for model in enabled_ollama_models]
@@ -1502,6 +1572,20 @@ def _enabled_agent_model_routes(
         for entry in codex_cli_models
         if entry.get("enabled") is True
     )
+    if hermes_agent_enabled:
+        routes.append(
+            _hermes_agent_route(
+                hermes_agent_model,
+                hermes_agent_reasoning_effort,
+            )
+        )
+    if openclaw_enabled:
+        routes.append(
+            _openclaw_route(
+                openclaw_model,
+                openclaw_reasoning_effort,
+            )
+        )
     return routes
 
 
@@ -1526,6 +1610,55 @@ def _canonical_agent_route(route: object, enabled_routes: list[str]) -> str:
             ),
             normalized,
         )
+    for provider in ("hermes-agent", "openclaw"):
+        prefix = f"{provider}:"
+        if normalized.startswith(prefix) and normalized not in enabled_routes:
+            return next(
+                (
+                    candidate
+                    for candidate in enabled_routes
+                    if candidate.startswith(prefix)
+                ),
+                normalized,
+            )
+    return normalized
+
+
+def _model_route_identity(
+    route: object,
+    settings: dict | None = None,
+) -> str:
+    """Return the effort-independent provider/model identity used by runtime."""
+    normalized = str(route or "").strip().lower()
+    if normalized.startswith("codex-cli:"):
+        try:
+            model, effort = normalized.removeprefix("codex-cli:").rsplit(":", 1)
+        except ValueError:
+            return normalized
+        if model and effort in CODEX_CLI_REASONING_EFFORTS:
+            return f"openai-codex:{model}"
+    if normalized in {"gpt-cli", "codex-cli"}:
+        configured = str(
+            (settings or {}).get("codex_cli_model") or "configured-default"
+        ).strip().lower()
+        return f"openai-codex:{configured}"
+    if normalized.startswith("hermes-agent:"):
+        try:
+            model, effort = normalized.removeprefix("hermes-agent:").rsplit(":", 1)
+        except ValueError:
+            return normalized
+        if model and effort in CODEX_CLI_REASONING_EFFORTS:
+            return f"openai-codex:{model}"
+    if normalized.startswith("openclaw:"):
+        try:
+            model, effort = normalized.removeprefix("openclaw:").rsplit(":", 1)
+        except ValueError:
+            return normalized
+        if model and effort in CODEX_CLI_REASONING_EFFORTS:
+            if "/" in model:
+                provider, name = model.split("/", 1)
+                return f"{provider}:{name}"
+            return f"openclaw:{model}"
     return normalized
 
 
@@ -1544,6 +1677,7 @@ def _normalize_agent_second_opinion_models(
     value: object,
     enabled_routes: list[str],
     primary_assignments: dict[str, str],
+    settings: dict | None = None,
 ) -> dict[str, str]:
     """Validate optional secondary routes without inventing a fallback."""
     raw = value if isinstance(value, dict) else {}
@@ -1552,7 +1686,11 @@ def _normalize_agent_second_opinion_models(
         route = _canonical_agent_route(raw.get(role), enabled_routes)
         assignments[role] = (
             route
-            if route in enabled_routes and route != primary_assignments.get(role)
+            if (
+                route in enabled_routes
+                and _model_route_identity(route, settings)
+                != _model_route_identity(primary_assignments.get(role), settings)
+            )
             else ""
         )
     return assignments
@@ -1567,6 +1705,8 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
             "enabled_ollama_models",
             "codex_cli_models",
             "gpt_cli_enabled",
+            "hermes_agent_enabled",
+            "openclaw_enabled",
             "agent_models",
             "agent_second_opinion_models",
         }:
@@ -1591,8 +1731,6 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
         if "gpt_cli_enabled" in payload
         else legacy_mode in {"cloud", "hybrid"}
     )
-    if settings["hybrid_policy"] not in {"cloud_for_critical_high_or_recommended", "cloud_when_recommended_only"}:
-        return False, {"ok": False, "error": "Hybrid policy is invalid."}
     if not settings["ollama_url"].startswith(("http://", "https://")):
         return False, {"ok": False, "error": "Ollama URL must start with http:// or https://."}
     codex_cli_path = str(settings.get("codex_cli_path") or "codex").strip()
@@ -1605,28 +1743,12 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
     codex_cli_effort = str(
         settings.get("codex_cli_reasoning_effort") or "medium"
     ).strip().lower()
-    if (
-        not codex_cli_path
-        or len(codex_cli_path) > 1024
-        or re.search(r"[\x00-\x1f\x7f]", codex_cli_path)
-    ):
-        return False, {"ok": False, "error": "Codex CLI executable path is invalid."}
-    if Path(codex_cli_path).is_absolute():
-        if Path(codex_cli_path).name != "codex":
-            return False, {
-                "ok": False,
-                "error": "Codex CLI path must end in /codex.",
-            }
-    elif codex_cli_path != "codex":
+    if not _valid_cli_executable_path(codex_cli_path, "codex"):
         return False, {
             "ok": False,
             "error": "Codex CLI path must be 'codex' or an absolute path ending in /codex.",
         }
-    if (
-        not codex_cli_model
-        or len(codex_cli_model) > 240
-        or re.search(r"[\x00-\x1f\x7f]", codex_cli_model)
-    ):
+    if not _valid_provider_model(codex_cli_model):
         return False, {"ok": False, "error": "Codex CLI model is invalid."}
     if codex_cli_effort not in CODEX_CLI_REASONING_EFFORTS:
         return False, {
@@ -1648,15 +1770,122 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
             ),
         }
     gpt_cli_enabled = any(entry["enabled"] for entry in codex_cli_models)
-    if not enabled_ollama_models and not gpt_cli_enabled:
+    hermes_agent_enabled = _boolean_setting(payload.get("hermes_agent_enabled"))
+    hermes_agent_path = str(
+        payload.get("hermes_agent_path")
+        if "hermes_agent_path" in payload
+        else settings["hermes_agent_path"]
+    ).strip()
+    hermes_agent_model = str(
+        payload.get("hermes_agent_model")
+        if "hermes_agent_model" in payload
+        else settings["hermes_agent_model"]
+    ).strip()
+    hermes_agent_effort = str(
+        payload.get("hermes_agent_reasoning_effort")
+        if "hermes_agent_reasoning_effort" in payload
+        else settings["hermes_agent_reasoning_effort"]
+    ).strip().lower()
+    openclaw_enabled = _boolean_setting(payload.get("openclaw_enabled"))
+    openclaw_path = str(
+        payload.get("openclaw_path")
+        if "openclaw_path" in payload
+        else settings["openclaw_path"]
+    ).strip()
+    openclaw_model = str(
+        payload.get("openclaw_model")
+        if "openclaw_model" in payload
+        else settings["openclaw_model"]
+    ).strip()
+    openclaw_effort = str(
+        payload.get("openclaw_reasoning_effort")
+        if "openclaw_reasoning_effort" in payload
+        else settings["openclaw_reasoning_effort"]
+    ).strip().lower()
+    for label, executable, basename in (
+        ("Hermes Agent", hermes_agent_path, "hermes"),
+        ("OpenClaw", openclaw_path, "openclaw"),
+    ):
+        if not _valid_cli_executable_path(executable, basename):
+            return False, {
+                "ok": False,
+                "error": (
+                    f"{label} path must be '{basename}' or an absolute path "
+                    f"ending in /{basename}."
+                ),
+            }
+    if hermes_agent_model not in CODEX_CLI_MODEL_CATALOG:
         return False, {
             "ok": False,
-            "error": "Enable at least one Ollama model or Codex CLI model.",
+            "error": "Hermes Agent model is not in the supported Codex model catalog.",
+        }
+    if not _valid_openclaw_model(openclaw_model):
+        return False, {
+            "ok": False,
+            "error": (
+                "OpenClaw currently supports explicit ollama/<model> routes "
+                "only; hosted OpenClaw credentials are not admitted into the "
+                "isolated runtime."
+            ),
+        }
+    if (
+        openclaw_enabled
+        and settings["ollama_url"].rstrip("/")
+        not in OPENCLAW_SUPPORTED_OLLAMA_URLS
+    ):
+        return False, {
+            "ok": False,
+            "error": (
+                "OpenClaw requires the loopback Ollama endpoint "
+                "http://127.0.0.1:11434 or http://localhost:11434."
+            ),
+        }
+    if hermes_agent_effort != HERMES_AGENT_REASONING_EFFORT:
+        return False, {
+            "ok": False,
+            "error": (
+                "Hermes Agent reasoning effort must be medium because the "
+                "installed one-shot CLI does not enforce other effort values."
+            ),
+        }
+    if openclaw_effort not in CODEX_CLI_REASONING_EFFORTS:
+        return False, {
+            "ok": False,
+            "error": (
+                "OpenClaw reasoning effort must be low, medium, high, or xhigh."
+            ),
+        }
+    if (
+        not enabled_ollama_models
+        and not gpt_cli_enabled
+        and not hermes_agent_enabled
+        and not openclaw_enabled
+    ):
+        return False, {
+            "ok": False,
+            "error": (
+                "Enable at least one Ollama model, Codex CLI model, "
+                "Hermes Agent, or OpenClaw."
+            ),
         }
     settings["enabled_ollama_models"] = enabled_ollama_models
     settings["codex_cli_models"] = codex_cli_models
     settings["gpt_cli_enabled"] = gpt_cli_enabled
-    settings["mode"] = _derive_model_mode(enabled_ollama_models, gpt_cli_enabled)
+    settings["hermes_agent_enabled"] = hermes_agent_enabled
+    settings["hermes_agent_path"] = hermes_agent_path
+    settings["hermes_agent_model"] = hermes_agent_model
+    settings["hermes_agent_reasoning_effort"] = hermes_agent_effort
+    settings["openclaw_enabled"] = openclaw_enabled
+    settings["openclaw_path"] = openclaw_path
+    settings["openclaw_model"] = openclaw_model
+    settings["openclaw_reasoning_effort"] = openclaw_effort
+    settings["mode"] = _derive_model_mode(
+        enabled_ollama_models + (["openclaw-local"] if openclaw_enabled else []),
+        (
+            gpt_cli_enabled
+            or hermes_agent_enabled
+        ),
+    )
     if enabled_ollama_models:
         settings["ollama_model"] = enabled_ollama_models[0]
     enabled_codex = next(
@@ -1679,6 +1908,12 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
     enabled_routes = _enabled_agent_model_routes(
         enabled_ollama_models,
         codex_cli_models,
+        hermes_agent_enabled=hermes_agent_enabled,
+        hermes_agent_model=hermes_agent_model,
+        hermes_agent_reasoning_effort=hermes_agent_effort,
+        openclaw_enabled=openclaw_enabled,
+        openclaw_model=openclaw_model,
+        openclaw_reasoning_effort=openclaw_effort,
     )
     settings["agent_models"] = _normalize_agent_models(
         payload.get("agent_models"),
@@ -1688,6 +1923,7 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
         payload.get("agent_second_opinion_models"),
         enabled_routes,
         settings["agent_models"],
+        settings,
     )
     for setting_key, label in (
         ("soc_analyst_analysis_min_severity", "automatic AI analysis"),
@@ -1720,6 +1956,10 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
         "cloud_command",
         "codex_cli_model",
         "codex_cli_reasoning_effort",
+        "hermes_agent_model",
+        "hermes_agent_reasoning_effort",
+        "openclaw_model",
+        "openclaw_reasoning_effort",
     ):
         settings[key] = settings[key][:240]
     return True, settings
@@ -1779,7 +2019,14 @@ def read_soc_ai_settings() -> dict:
             return {"ok": False, "error": f"Could not read SOC AI settings: {exc}", "path": str(SOC_AI_SETTINGS_FILE)}
     ok, normalized = normalize_soc_ai_settings(raw)
     if not ok:
-        normalized = default_soc_ai_settings()
+        return {
+            "ok": False,
+            "error": str(
+                (normalized.get("error") if isinstance(normalized, dict) else "")
+                or "SOC AI settings validation failed."
+            ),
+            "path": str(SOC_AI_SETTINGS_FILE),
+        }
     return {
         "ok": True,
         "settings": normalized,
@@ -1978,12 +2225,159 @@ def _write_soc_ai_settings(normalized: dict) -> tuple[bool, dict]:
     }
 
 
+def _resolve_cli_harness_for_settings(
+    configured: object,
+    basename: str,
+) -> Path | None:
+    """Resolve one harness without executing it, in the runner's fixed order."""
+    executable = str(configured or basename).strip()
+    path = Path(executable)
+    if path.is_absolute():
+        candidates = [path]
+    else:
+        candidates: list[Path] = []
+        discovered = shutil.which(basename)
+        if discovered:
+            candidates.append(Path(discovered))
+        candidates.extend([
+            HOME / ".local" / "bin" / basename,
+            Path("/opt/homebrew/bin") / basename,
+            Path("/usr/local/bin") / basename,
+        ])
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate_text = str(candidate)
+        if candidate_text in seen:
+            continue
+        seen.add(candidate_text)
+        if (
+            candidate.name == basename
+            and candidate.is_file()
+            and os.access(candidate, os.X_OK)
+        ):
+            return candidate
+    return None
+
+
+def _hermes_auth_readiness_error() -> str:
+    """Return a safe operator-facing error for the dedicated Hermes credential."""
+    try:
+        metadata = DEFAULT_HERMES_AUTH_FILE.lstat()
+    except FileNotFoundError:
+        return (
+            "Hermes Agent authentication is unavailable at "
+            "~/n8n-local/private/hermes-agent/auth.json."
+        )
+    except OSError:
+        return "Hermes Agent authentication file could not be inspected."
+    mode = stat.S_IMODE(metadata.st_mode)
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        return "Hermes Agent authentication must be a regular, non-symlink file."
+    if mode != 0o600:
+        return (
+            "Hermes Agent authentication permissions are unsafe; "
+            "set the file mode to 0600."
+        )
+    if metadata.st_size <= 0 or metadata.st_size > HERMES_AUTH_MAX_BYTES:
+        return "Hermes Agent authentication file is empty or exceeds 2 MiB."
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            DEFAULT_HERMES_AUTH_FILE,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        opened_metadata = os.fstat(descriptor)
+        opened_mode = stat.S_IMODE(opened_metadata.st_mode)
+        if (
+            not stat.S_ISREG(opened_metadata.st_mode)
+            or opened_mode != 0o600
+        ):
+            return (
+                "Hermes Agent authentication must remain a regular "
+                "owner-only file."
+            )
+        chunks: list[bytes] = []
+        remaining = HERMES_AUTH_MAX_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+    except OSError:
+        return "Hermes Agent authentication file is not safely readable."
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if not raw or len(raw) > HERMES_AUTH_MAX_BYTES:
+        return "Hermes Agent authentication file is empty or exceeds 2 MiB."
+    try:
+        auth_store = json.loads(raw.decode("utf-8", errors="strict"))
+    except (UnicodeError, json.JSONDecodeError):
+        return "Hermes Agent authentication file is not valid bounded JSON."
+    if not isinstance(auth_store, dict):
+        return "Hermes Agent authentication JSON root must be an object."
+    providers = auth_store.get("providers")
+    provider_state = (
+        providers.get("openai-codex")
+        if isinstance(providers, dict)
+        else None
+    )
+    credential_pool = auth_store.get("credential_pool")
+    pool_entries = (
+        credential_pool.get("openai-codex")
+        if isinstance(credential_pool, dict)
+        else None
+    )
+    pool_is_valid = isinstance(pool_entries, list) and not any(
+        not isinstance(entry, dict)
+        or (
+            entry.get("provider") is not None
+            and str(entry.get("provider")).strip() != "openai-codex"
+        )
+        for entry in pool_entries
+    )
+    if isinstance(pool_entries, list) and not pool_is_valid:
+        return "Hermes Agent openai-codex credential pool is invalid."
+    has_provider = isinstance(provider_state, dict) and bool(provider_state)
+    has_pool = pool_is_valid and bool(pool_entries)
+    if not (has_provider or has_pool):
+        return (
+            "Hermes Agent authentication does not contain dedicated "
+            "openai-codex credentials."
+        )
+    return ""
+
+
+def _enabled_cli_harnesses_ready(settings: dict) -> tuple[bool, str]:
+    """Fail a settings save when an enabled harness cannot start."""
+    for enabled_key, path_key, basename, label in (
+        ("hermes_agent_enabled", "hermes_agent_path", "hermes", "Hermes Agent"),
+        ("openclaw_enabled", "openclaw_path", "openclaw", "OpenClaw"),
+    ):
+        if not _boolean_setting(settings.get(enabled_key)):
+            continue
+        if _resolve_cli_harness_for_settings(settings.get(path_key), basename) is None:
+            return False, (
+                f"{label} is enabled but its executable is unavailable. "
+                f"Install {basename} or configure an executable absolute path."
+            )
+        if basename == "hermes":
+            if auth_error := _hermes_auth_readiness_error():
+                return False, auth_error
+    return True, ""
+
+
 def save_soc_ai_settings(payload: object) -> tuple[bool, dict]:
     """Atomically save the complete SOC AI model-routing configuration."""
     with SOC_AI_SETTINGS_LOCK:
         ok, normalized = normalize_soc_ai_settings(payload if isinstance(payload, dict) else {})
         if not ok:
             return False, normalized
+        ready, readiness_error = _enabled_cli_harnesses_ready(normalized)
+        if not ready:
+            return False, {"ok": False, "error": readiness_error}
         return _write_soc_ai_settings(normalized)
 
 
@@ -2009,9 +2403,18 @@ def save_soc_agent_model(payload: object) -> tuple[bool, dict]:
         ok, current = normalize_soc_ai_settings(raw)
         if not ok:
             return False, current
+        ready, readiness_error = _enabled_cli_harnesses_ready(current)
+        if not ready:
+            return False, {"ok": False, "error": readiness_error}
         enabled_routes = _enabled_agent_model_routes(
             current["enabled_ollama_models"],
             current["codex_cli_models"],
+            hermes_agent_enabled=current["hermes_agent_enabled"],
+            hermes_agent_model=current["hermes_agent_model"],
+            hermes_agent_reasoning_effort=current["hermes_agent_reasoning_effort"],
+            openclaw_enabled=current["openclaw_enabled"],
+            openclaw_model=current["openclaw_model"],
+            openclaw_reasoning_effort=current["openclaw_reasoning_effort"],
         )
         if model_route not in enabled_routes:
             return False, {
@@ -2023,10 +2426,17 @@ def save_soc_agent_model(payload: object) -> tuple[bool, dict]:
                 "ok": False,
                 "error": "That second-opinion model is not enabled. Save the global model roster first.",
             }
-        if second_model_route == model_route:
+        if (
+            second_model_route
+            and _model_route_identity(second_model_route, current)
+            == _model_route_identity(model_route, current)
+        ):
             return False, {
                 "ok": False,
-                "error": "The second-opinion model must differ from the assigned primary model.",
+                "error": (
+                    "The second-opinion model must differ from the assigned "
+                    "primary and resolve to a different provider/model identity."
+                ),
             }
         current["agent_models"][role] = model_route
         current["agent_second_opinion_models"][role] = second_model_route
@@ -6103,6 +6513,21 @@ def llm_agent_execution_state(record: object) -> dict:
             "incident_response_analysis",
             "Incident response investigation",
         ),
+        "siem-engineer": (
+            "SIEM Engineer",
+            "siem_engineering",
+            "Detection engineering analysis",
+        ),
+        "cyber-threat-intel": (
+            "Cyber Threat Intel",
+            "cyber_threat_intel",
+            "Threat-intelligence analysis",
+        ),
+        "threat-hunter": (
+            "Threat Hunter",
+            "threat_hunt",
+            "Threat-hunting analysis",
+        ),
     }
     agent_label, job_type, job_label = labels.get(
         role,
@@ -6247,11 +6672,31 @@ def llm_runtime_model_state(current: object) -> dict:
         if routed_model:
             model = routed_model
         provider = "Codex CLI"
+    elif route.startswith("hermes-agent:"):
+        try:
+            routed_model, effort = route.removeprefix("hermes-agent:").rsplit(":", 1)
+        except ValueError:
+            routed_model = ""
+        if routed_model:
+            model = routed_model
+        provider = "Hermes Agent"
+    elif route.startswith("openclaw:"):
+        try:
+            routed_model, effort = route.removeprefix("openclaw:").rsplit(":", 1)
+        except ValueError:
+            routed_model = ""
+        if routed_model:
+            model = routed_model
+        provider = "OpenClaw"
     elif route.startswith("ollama:"):
         model = route.removeprefix("ollama:").strip() or model
         provider = "Ollama"
     elif provider_key in {"codex-cli", "gpt-cli"} or model_path == "frontier-codex-cli":
         provider = "Codex CLI"
+    elif provider_key in {"hermes-agent", "openai-codex"} or model_path == "hermes-agent":
+        provider = "Hermes Agent"
+    elif provider_key == "openclaw" or model_path == "openclaw":
+        provider = "OpenClaw"
     elif provider_key == "ollama" or model_path == "ollama":
         provider = "Ollama"
 
@@ -6272,7 +6717,7 @@ def llm_runtime_model_state(current: object) -> dict:
             "detail": f"{phase_label} · No model running",
         }
     label = " · ".join(part for part in (provider, model) if part) or "Unknown model"
-    if provider == "Codex CLI" and effort:
+    if provider in {"Codex CLI", "Hermes Agent", "OpenClaw"} and effort:
         label += f" ({effort})"
     phase_label = {
         "preparing": "Preparing analysis",

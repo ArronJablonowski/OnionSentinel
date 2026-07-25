@@ -412,6 +412,13 @@ class AiModelRoutingTests(unittest.TestCase):
             "enabled_ollama_models": ["primary:latest"],
             "gpt_cli_enabled": True,
             "cloud_command": "gpt-cli analyze",
+            "codex_cli_models": [
+                {
+                    "model": "gpt-5.5",
+                    "reasoning_effort": "medium",
+                    "enabled": True,
+                },
+            ],
             "agent_models": {
                 role: ("codex-cli" if role == "soc-analyst" else "ollama:primary:latest")
                 for role in self.runner.CYBER_SECURITY_AGENT_ROLES
@@ -431,6 +438,8 @@ class AiModelRoutingTests(unittest.TestCase):
             {},
             args,
             settings,
+            model="gpt-5.5",
+            reasoning_effort="medium",
             system_prompt_file=None,
             independent_review=False,
         )
@@ -625,6 +634,13 @@ class AiModelRoutingTests(unittest.TestCase):
             **self.runner.default_ai_settings(),
             "codex_cli_model": "legacy-model",
             "codex_cli_reasoning_effort": "low",
+            "codex_cli_models": [
+                {
+                    "model": "gpt-5.6-sol",
+                    "reasoning_effort": "xhigh",
+                    "enabled": True,
+                },
+            ],
         }
         seen_command = []
 
@@ -648,6 +664,1218 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(response["_analysis_model"], "gpt-5.6-sol")
         self.assertEqual(seen_command[seen_command.index("--model") + 1], "gpt-5.6-sol")
         self.assertIn('model_reasoning_effort="xhigh"', seen_command)
+
+    def test_missing_harness_settings_default_to_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            settings_path = Path(temp_name) / "ai_model_settings.json"
+            settings_path.write_text(
+                json.dumps({
+                    "enabled_ollama_models": ["local:latest"],
+                    "openclaw_agent_id": "../legacy-agent",
+                }),
+                encoding="utf-8",
+            )
+
+            settings = self.runner.load_ai_settings(settings_path)
+
+        self.assertIs(settings["hermes_agent_enabled"], False)
+        self.assertIs(settings["openclaw_enabled"], False)
+        self.assertNotIn("openclaw_agent_id", settings)
+        self.assertNotIn(
+            "hermes-agent:",
+            " ".join(self.runner.enabled_agent_model_routes(settings)),
+        )
+        self.assertNotIn(
+            "openclaw:",
+            " ".join(self.runner.enabled_agent_model_routes(settings)),
+        )
+
+    def test_enabled_harnesses_add_only_their_exact_routes(self) -> None:
+        settings = self.runner.default_ai_settings()
+        self.runner.normalize_cli_harness_settings(
+            settings,
+            {
+                "hermes_agent_enabled": True,
+                "hermes_agent_model": "gpt-5.6-sol",
+                "hermes_agent_reasoning_effort": "medium",
+                "openclaw_enabled": True,
+                "openclaw_model": "ollama/gemma4:26b-mlx",
+                "openclaw_reasoning_effort": "high",
+            },
+        )
+
+        routes = self.runner.enabled_agent_model_routes(settings)
+
+        self.assertIn("hermes-agent:gpt-5.6-sol:medium", routes)
+        self.assertIn("openclaw:ollama/gemma4:26b-mlx:high", routes)
+        self.assertEqual(
+            [route for route in routes if route.startswith("hermes-agent:")],
+            ["hermes-agent:gpt-5.6-sol:medium"],
+        )
+        self.assertEqual(
+            [route for route in routes if route.startswith("openclaw:")],
+            ["openclaw:ollama/gemma4:26b-mlx:high"],
+        )
+
+    def test_hermes_settings_reject_unenforced_reasoning_efforts(self) -> None:
+        for effort in ("low", "high", "xhigh"):
+            with (
+                self.subTest(effort=effort),
+                self.assertRaisesRegex(
+                    self.runner.RuntimeArtifactError,
+                    "supports medium reasoning effort only",
+                ),
+            ):
+                self.runner.normalize_cli_harness_settings(
+                    self.runner.default_ai_settings(),
+                    {
+                        "hermes_agent_enabled": True,
+                        "hermes_agent_model": "gpt-5.6-sol",
+                        "hermes_agent_reasoning_effort": effort,
+                    },
+                )
+
+    def test_openclaw_settings_reject_non_ollama_provider_routes(self) -> None:
+        for model in (
+            "openai/gpt-5.6-sol",
+            "openai-codex/gpt-5.6-sol",
+            "local/gpt-oss:20b",
+            "lmstudio/gpt-oss:20b",
+        ):
+            with (
+                self.subTest(model=model),
+                self.assertRaisesRegex(
+                    self.runner.RuntimeArtifactError,
+                    "explicit ollama/<model> routes only",
+                ),
+            ):
+                self.runner.normalize_cli_harness_settings(
+                    self.runner.default_ai_settings(),
+                    {
+                        "openclaw_enabled": True,
+                        "openclaw_model": model,
+                    },
+                )
+
+    def test_each_harness_dispatches_every_agent_role_without_provider_fallback(
+        self,
+    ) -> None:
+        args = type("Args", (), {})()
+        harnesses = (
+            {
+                "name": "hermes-agent",
+                "route": "hermes-agent:gpt-5.6-sol:medium",
+                "model": "gpt-5.6-sol",
+                "effort": "medium",
+                "provider": "openai-codex",
+                "adapter": "hermes_agent_chat",
+            },
+            {
+                "name": "openclaw",
+                "route": "openclaw:ollama/gemma4:26b-mlx:high",
+                "model": "ollama/gemma4:26b-mlx",
+                "effort": "high",
+                "provider": "ollama",
+                "adapter": "openclaw_infer_chat",
+            },
+        )
+        for harness in harnesses:
+            for role in self.runner.CYBER_SECURITY_AGENT_ROLES:
+                with self.subTest(harness=harness["name"], role=role):
+                    settings = self.runner.default_ai_settings()
+                    settings.update({
+                        "hermes_agent_enabled": harness["name"] == "hermes-agent",
+                        "hermes_agent_model": "gpt-5.6-sol",
+                        "hermes_agent_reasoning_effort": "medium",
+                        "openclaw_enabled": harness["name"] == "openclaw",
+                        "openclaw_model": "ollama/gemma4:26b-mlx",
+                        "openclaw_reasoning_effort": "high",
+                    })
+                    settings["agent_models"][role] = harness["route"]
+                    prompt = {
+                        "agent_role": role,
+                        "system_prompt_file": f"/synthetic/{role}-system.md",
+                        "second_opinion_system_prompt_file": (
+                            f"/synthetic/{role}-review.md"
+                        ),
+                        "agent_memory_file": f"/synthetic/{role}-memory.md",
+                    }
+                    observed = {
+                        "_analysis_model": harness["model"],
+                        "_analysis_model_path": harness["name"],
+                        "_analysis_provider": harness["provider"],
+                        "_analysis_harness": harness["name"],
+                    }
+                    with (
+                        mock.patch.object(
+                            self.runner,
+                            "hermes_agent_chat",
+                            return_value=observed,
+                        ) as hermes_adapter,
+                        mock.patch.object(
+                            self.runner,
+                            "openclaw_infer_chat",
+                            return_value=observed,
+                        ) as openclaw_adapter,
+                        mock.patch.object(
+                            self.runner,
+                            "cloud_cli_chat",
+                        ) as codex_adapter,
+                        mock.patch.object(
+                            self.runner,
+                            "_ollama_chat_for_model",
+                        ) as ollama_adapter,
+                        mock.patch.object(
+                            self.runner,
+                            "apply_investigation_query_loop",
+                            side_effect=lambda _prompt, response, *_args, **_kwargs: response,
+                        ) as query_loop,
+                    ):
+                        result = self.runner.analyze_with_config(
+                            prompt,
+                            args,
+                            agent_role=role,
+                            settings=settings,
+                        )
+
+                    selected = (
+                        hermes_adapter
+                        if harness["adapter"] == "hermes_agent_chat"
+                        else openclaw_adapter
+                    )
+                    unselected = (
+                        openclaw_adapter
+                        if selected is hermes_adapter
+                        else hermes_adapter
+                    )
+                    selected.assert_called_once()
+                    self.assertIs(selected.call_args.args[0], prompt)
+                    self.assertEqual(
+                        selected.call_args.kwargs["model"],
+                        harness["model"],
+                    )
+                    self.assertEqual(
+                        selected.call_args.kwargs["reasoning_effort"],
+                        harness["effort"],
+                    )
+                    unselected.assert_not_called()
+                    codex_adapter.assert_not_called()
+                    ollama_adapter.assert_not_called()
+                    query_loop.assert_called_once()
+                    self.assertEqual(query_loop.call_args.args[4], role)
+                    self.assertIs(result, observed)
+                    index = self.runner.analysis_index_payload(
+                        f"synthetic-{harness['name']}-{role}",
+                        prompt,
+                        result,
+                        "",
+                        "2026-07-25  10:00:00-06:00",
+                        "2026-07-25  10:00:01-06:00",
+                        Path("/tmp/synthetic-result.json"),
+                    )
+                    self.assertEqual(index["agent_role"], role)
+                    self.assertEqual(index["provider"], harness["provider"])
+                    self.assertEqual(index["harness"], harness["name"])
+
+    def test_disabled_harness_routes_cannot_dispatch(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "system_prompt_file": Path("/tmp/nonexistent-system-prompt.md"),
+                "timeout": 60,
+                "max_response_bytes": 1024 * 1024,
+            },
+        )()
+        settings = self.runner.default_ai_settings()
+
+        for route, expected in (
+            (
+                "hermes-agent:gpt-5.6-sol:medium",
+                "Configured analysis model route is not enabled",
+            ),
+            (
+                "openclaw:ollama/gemma4:26b-mlx:xhigh",
+                "Configured analysis model route is not enabled",
+            ),
+        ):
+            with (
+                self.subTest(route=route),
+                mock.patch.object(self.runner, "resolve_cli_harness") as resolve,
+                self.assertRaisesRegex(SystemExit, expected),
+            ):
+                self.runner.analyze_model_route(
+                    route,
+                    {"response_schema": {"type": "object"}},
+                    args,
+                    settings,
+                )
+            resolve.assert_not_called()
+
+    def test_hermes_nonmedium_route_fails_before_execution(self) -> None:
+        settings = {
+            **self.runner.default_ai_settings(),
+            "hermes_agent_enabled": True,
+            "hermes_agent_model": "gpt-5.6-sol",
+            "hermes_agent_reasoning_effort": "medium",
+        }
+        with (
+            mock.patch.object(self.runner, "resolve_cli_harness") as resolve,
+            self.assertRaisesRegex(
+                SystemExit,
+                "Configured analysis model route is not enabled",
+            ),
+        ):
+            self.runner.analyze_model_route(
+                "hermes-agent:gpt-5.6-sol:xhigh",
+                {"response_schema": {"type": "object"}},
+                type("Args", (), {})(),
+                settings,
+            )
+        resolve.assert_not_called()
+
+    def test_hermes_route_is_tool_empty_isolated_and_records_provenance(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "system_prompt_file": Path("/tmp/nonexistent-system-prompt.md"),
+                "timeout": 60,
+                "max_response_bytes": 1024 * 1024,
+            },
+        )()
+        settings = {
+            **self.runner.default_ai_settings(),
+            "hermes_agent_enabled": True,
+            "hermes_agent_path": "/usr/local/bin/hermes",
+            "hermes_agent_model": "gpt-5.6-sol",
+            "hermes_agent_reasoning_effort": "medium",
+        }
+        captured: dict[str, object] = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = list(command)
+            captured["stdin_text"] = kwargs.get("stdin_text")
+            captured["env"] = dict(kwargs.get("env") or {})
+            captured["cwd"] = kwargs.get("cwd")
+            hermes_home = Path(captured["env"]["HERMES_HOME"])
+            captured["config"] = (hermes_home / "config.yaml").read_text(
+                encoding="utf-8"
+            )
+            captured["config_mode"] = (
+                (hermes_home / "config.yaml").stat().st_mode & 0o777
+            )
+            captured["auth"] = json.loads(
+                (hermes_home / "auth.json").read_text(encoding="utf-8")
+            )
+            captured["auth_mode"] = (
+                (hermes_home / "auth.json").stat().st_mode & 0o777
+            )
+            captured["directory_modes"] = {
+                key: Path(captured["env"][key]).stat().st_mode & 0o777
+                for key in (
+                    "HOME",
+                    "CODEX_HOME",
+                    "HERMES_HOME",
+                    "XDG_CONFIG_HOME",
+                    "XDG_CACHE_HOME",
+                    "XDG_DATA_HOME",
+                    "XDG_STATE_HOME",
+                    "XDG_RUNTIME_DIR",
+                    "TMPDIR",
+                )
+            }
+            usage_path = Path(command[command.index("--usage-file") + 1])
+            usage_path.write_text(
+                json.dumps(
+                    {
+                        "completed": True,
+                        "failed": False,
+                        "provider": "openai-codex",
+                        "model": "gpt-5.6-sol",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return type(
+                "Completed",
+                (),
+                {
+                    "returncode": 0,
+                    "stdout": '{"summary":"Hermes synthetic result"}',
+                    "stderr": "",
+                },
+            )()
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            auth_file = Path(temp_name) / "auth.json"
+            auth_file.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "active_provider": "nous",
+                        "providers": {
+                            "openai-codex": {
+                                "tokens": {
+                                    "access_token": "dedicated-test-token",
+                                },
+                            },
+                            "nous": {"access_token": "must-not-copy"},
+                        },
+                        "credential_pool": {
+                            "openai-codex": [
+                                {
+                                    "id": "codex-test",
+                                    "access_token": "dedicated-pool-token",
+                                },
+                            ],
+                            "nous": [
+                                {
+                                    "id": "nous-test",
+                                    "access_token": "must-not-copy",
+                                },
+                            ],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            auth_file.chmod(0o600)
+            with (
+                mock.patch.object(
+                    self.runner,
+                    "DEFAULT_HERMES_AUTH_FILE",
+                    auth_file,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "resolve_cli_harness",
+                    return_value="/usr/local/bin/hermes",
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "run_bounded_command",
+                    side_effect=fake_run,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "_unload_ollama_model",
+                ),
+            ):
+                response = self.runner.analyze_model_route(
+                    "hermes-agent:gpt-5.6-sol:medium",
+                    {
+                        "response_schema": {"type": "object"},
+                        "alert": {"rule_name": "Synthetic"},
+                    },
+                    args,
+                    settings,
+                )
+                captured["dedicated_auth"] = json.loads(
+                    auth_file.read_text(encoding="utf-8")
+                )
+                captured["dedicated_auth_mode"] = (
+                    auth_file.stat().st_mode & 0o777
+                )
+                captured["auth_lock_mode"] = (
+                    (auth_file.parent / "auth.lock").stat().st_mode & 0o777
+                )
+
+        command = captured["command"]
+        self.assertEqual(command[0], "/usr/local/bin/hermes")
+        self.assertIn("--oneshot", command)
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-sol")
+        self.assertEqual(
+            command[command.index("--provider") + 1],
+            "openai-codex",
+        )
+        self.assertEqual(
+            command[command.index("--toolsets") + 1],
+            "context_engine",
+        )
+        self.assertIn("--safe-mode", command)
+        self.assertNotIn("--ignore-rules", command)
+        self.assertNotIn("terminal", command)
+        self.assertNotIn("browser", command)
+        self.assertIsNone(captured["stdin_text"])
+        payload = json.loads(command[command.index("--oneshot") + 1])
+        self.assertEqual(payload["reasoning_effort"], "medium")
+        self.assertEqual(
+            payload["prompt_package"]["alert"]["rule_name"],
+            "Synthetic",
+        )
+        self.assertNotIn("HERMES_IGNORE_RULES", captured["env"])
+        self.assertEqual(
+            captured["env"]["HOME"],
+            str(Path(captured["env"]["HERMES_HOME"]) / "home"),
+        )
+        self.assertEqual(
+            captured["env"]["CODEX_HOME"],
+            str(Path(captured["env"]["HOME"]) / ".codex"),
+        )
+        self.assertEqual(
+            captured["env"]["HERMES_REAL_HOME"],
+            captured["env"]["HOME"],
+        )
+        self.assertEqual(captured["env"]["PYTHON_DOTENV_DISABLED"], "1")
+        for key in (
+            "HOME",
+            "CODEX_HOME",
+            "HERMES_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_RUNTIME_DIR",
+            "TMPDIR",
+        ):
+            self.assertTrue(
+                Path(captured["env"][key]).is_relative_to(captured["cwd"]),
+                key,
+            )
+        self.assertEqual(set(captured["directory_modes"].values()), {0o700})
+        self.assertEqual(captured["config_mode"], 0o600)
+        self.assertFalse(captured["cwd"].exists())
+        self.assertIn("context:\n  engine: compressor", captured["config"])
+        self.assertNotIn("max_turns:", captured["config"])
+        self.assertNotIn("reasoning_effort:", captured["config"])
+        self.assertIn("memory_enabled: false", captured["config"])
+        self.assertIn("user_profile_enabled: false", captured["config"])
+        self.assertIn("home_mode: profile", captured["config"])
+        self.assertNotIn("tools:", captured["config"])
+        self.assertEqual(
+            set(captured["auth"]["providers"]),
+            {"openai-codex"},
+        )
+        self.assertEqual(
+            set(captured["auth"]["credential_pool"]),
+            {"openai-codex"},
+        )
+        self.assertEqual(captured["auth"]["active_provider"], "openai-codex")
+        self.assertEqual(captured["auth_mode"], 0o600)
+        self.assertEqual(captured["dedicated_auth"], captured["auth"])
+        self.assertEqual(captured["dedicated_auth_mode"], 0o600)
+        self.assertEqual(captured["auth_lock_mode"], 0o600)
+        self.assertIn("--usage-file", command)
+        self.assertEqual(response["_analysis_model"], "gpt-5.6-sol")
+        self.assertEqual(response["_analysis_model_path"], "hermes-agent")
+        self.assertEqual(response["_analysis_provider"], "openai-codex")
+        self.assertEqual(response["_analysis_harness"], "hermes-agent")
+
+    def test_hermes_dedicated_auth_never_falls_back_to_user_stores(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "system_prompt_file": Path("/tmp/nonexistent-system-prompt.md"),
+                "timeout": 60,
+                "max_response_bytes": 1024 * 1024,
+            },
+        )()
+        settings = {
+            **self.runner.default_ai_settings(),
+            "hermes_agent_enabled": True,
+            "hermes_agent_model": "gpt-5.6-sol",
+            "hermes_agent_reasoning_effort": "medium",
+        }
+        with tempfile.TemporaryDirectory() as temp_name:
+            temporary = Path(temp_name)
+            dedicated = temporary / "private" / "hermes-agent" / "auth.json"
+            for fallback in (
+                temporary / ".hermes" / "auth.json",
+                temporary / ".codex" / "auth.json",
+            ):
+                fallback.parent.mkdir(parents=True)
+                fallback.write_text(
+                    json.dumps(
+                        {
+                            "providers": {
+                                "openai-codex": {
+                                    "tokens": {"access_token": "fallback-token"},
+                                },
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                fallback.chmod(0o600)
+            with (
+                mock.patch.object(
+                    self.runner,
+                    "DEFAULT_HERMES_AUTH_FILE",
+                    dedicated,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "resolve_cli_harness",
+                    return_value="/usr/local/bin/hermes",
+                ),
+                mock.patch.object(self.runner, "run_bounded_command") as run,
+                self.assertRaisesRegex(
+                    SystemExit,
+                    "dedicated authentication is unavailable",
+                ),
+            ):
+                self.runner.hermes_agent_chat(
+                    {},
+                    args,
+                    settings,
+                    model="gpt-5.6-sol",
+                    reasoning_effort="medium",
+                )
+
+        run.assert_not_called()
+
+    def test_hermes_dedicated_auth_requires_regular_owner_only_file(self) -> None:
+        valid_store = {
+            "providers": {
+                "openai-codex": {
+                    "tokens": {"access_token": "dedicated-test-token"},
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp_name:
+            temporary = Path(temp_name)
+            auth_file = temporary / "auth.json"
+            auth_file.write_text(json.dumps(valid_store), encoding="utf-8")
+            auth_file.chmod(0o640)
+            with self.assertRaisesRegex(
+                self.runner.RuntimeArtifactError,
+                "mode 0600",
+            ):
+                self.runner._load_dedicated_hermes_auth(auth_file)
+
+            auth_file.chmod(0o600)
+            symlink = temporary / "linked-auth.json"
+            symlink.symlink_to(auth_file)
+            with self.assertRaisesRegex(
+                self.runner.RuntimeArtifactError,
+                "regular file",
+            ):
+                self.runner._load_dedicated_hermes_auth(symlink)
+
+    def test_hermes_persists_rotated_auth_atomically_on_command_failure(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "system_prompt_file": Path("/tmp/nonexistent-system-prompt.md"),
+                "timeout": 60,
+                "max_response_bytes": 1024 * 1024,
+            },
+        )()
+        settings = {
+            **self.runner.default_ai_settings(),
+            "hermes_agent_enabled": True,
+            "hermes_agent_model": "gpt-5.6-sol",
+            "hermes_agent_reasoning_effort": "medium",
+        }
+
+        def fake_failure(_command, **kwargs):
+            isolated_auth = Path(kwargs["env"]["HERMES_HOME"]) / "auth.json"
+            rotated = json.loads(isolated_auth.read_text(encoding="utf-8"))
+            rotated["providers"]["openai-codex"]["tokens"][
+                "access_token"
+            ] = "rotated-test-token"
+            rotated["providers"]["unexpected"] = {
+                "access_token": "must-not-persist",
+            }
+            isolated_auth.write_text(json.dumps(rotated), encoding="utf-8")
+            return type(
+                "Completed",
+                (),
+                {
+                    "returncode": 7,
+                    "stdout": "",
+                    "stderr": "synthetic provider failure",
+                },
+            )()
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            auth_file = Path(temp_name) / "auth.json"
+            auth_file.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "providers": {
+                            "openai-codex": {
+                                "tokens": {
+                                    "access_token": "initial-test-token",
+                                },
+                            },
+                            "nous": {"access_token": "must-not-persist"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            auth_file.chmod(0o600)
+            with (
+                mock.patch.object(
+                    self.runner,
+                    "DEFAULT_HERMES_AUTH_FILE",
+                    auth_file,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "resolve_cli_harness",
+                    return_value="/usr/local/bin/hermes",
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "run_bounded_command",
+                    side_effect=fake_failure,
+                ),
+                self.assertRaisesRegex(
+                    SystemExit,
+                    "Hermes Agent exited with code 7",
+                ),
+            ):
+                self.runner.hermes_agent_chat(
+                    {},
+                    args,
+                    settings,
+                    model="gpt-5.6-sol",
+                    reasoning_effort="medium",
+                )
+
+            persisted = json.loads(auth_file.read_text(encoding="utf-8"))
+            self.assertEqual(
+                persisted["providers"]["openai-codex"]["tokens"][
+                    "access_token"
+                ],
+                "rotated-test-token",
+            )
+            self.assertEqual(set(persisted["providers"]), {"openai-codex"})
+            self.assertEqual(auth_file.stat().st_mode & 0o777, 0o600)
+            self.assertFalse(
+                any(auth_file.parent.glob(f".{auth_file.name}.*.tmp"))
+            )
+
+    def test_hermes_usage_provenance_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            usage_path = Path(temp_name) / "usage.json"
+            cases = (
+                (
+                    {
+                        "completed": False,
+                        "failed": False,
+                        "provider": "openai-codex",
+                        "model": "gpt-5.6-sol",
+                    },
+                    "completed invocation",
+                ),
+                (
+                    {
+                        "completed": True,
+                        "failed": True,
+                        "provider": "openai-codex",
+                        "model": "gpt-5.6-sol",
+                    },
+                    "completed invocation",
+                ),
+                (
+                    {
+                        "completed": True,
+                        "failed": False,
+                        "provider": "openai",
+                        "model": "gpt-5.6-sol",
+                    },
+                    "different provider/model",
+                ),
+                (
+                    {
+                        "completed": True,
+                        "failed": False,
+                        "provider": "openai-codex",
+                        "model": "gpt-5.6-terra",
+                    },
+                    "different provider/model",
+                ),
+            )
+            for usage, expected in cases:
+                with self.subTest(usage=usage):
+                    usage_path.write_text(
+                        json.dumps(usage),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(SystemExit, expected):
+                        self.runner._verified_hermes_usage(
+                            usage_path,
+                            expected_model="gpt-5.6-sol",
+                        )
+
+    def test_openclaw_infer_uses_ephemeral_profile_and_observed_provenance(
+        self,
+    ) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "system_prompt_file": Path("/tmp/nonexistent-system-prompt.md"),
+                "timeout": 60,
+                "max_response_bytes": 1024 * 1024,
+            },
+        )()
+        settings = {
+            **self.runner.default_ai_settings(),
+            "openclaw_enabled": True,
+            "openclaw_path": "/usr/local/bin/openclaw",
+            "openclaw_model": "ollama/gemma4:26b-mlx",
+            "openclaw_reasoning_effort": "high",
+        }
+        captured: dict[str, object] = {}
+        envelope = {
+            "ok": True,
+            "provider": "ollama",
+            "model": "gemma4:26b-mlx",
+            "outputs": [
+                {"text": '{"summary":"OpenClaw synthetic result"}'},
+            ],
+        }
+
+        def fake_run(command, **kwargs):
+            captured["command"] = list(command)
+            captured["kwargs"] = kwargs
+            environment = dict(kwargs["env"])
+            captured["env"] = environment
+            captured["cwd"] = Path(kwargs["cwd"])
+            config_path = Path(environment["OPENCLAW_CONFIG_PATH"])
+            captured["config"] = json.loads(
+                config_path.read_text(encoding="utf-8")
+            )
+            captured["config_mode"] = config_path.stat().st_mode & 0o777
+            captured["directory_modes"] = {
+                key: Path(environment[key]).stat().st_mode & 0o777
+                for key in (
+                    "HOME",
+                    "CODEX_HOME",
+                    "OPENCLAW_STATE_DIR",
+                    "OPENCLAW_OAUTH_DIR",
+                    "OPENCLAW_AGENT_DIR",
+                    "OPENCLAW_WORKSPACE_DIR",
+                    "XDG_CONFIG_HOME",
+                    "XDG_CACHE_HOME",
+                    "XDG_DATA_HOME",
+                    "XDG_STATE_HOME",
+                    "XDG_RUNTIME_DIR",
+                    "TMPDIR",
+                )
+            }
+            return type(
+                "Completed",
+                (),
+                {
+                    "returncode": 0,
+                    "stdout": json.dumps(envelope),
+                    "stderr": "",
+                },
+            )()
+
+        with tempfile.TemporaryDirectory() as operator_home_name:
+            operator_home = Path(operator_home_name)
+            operator_state = operator_home / ".openclaw"
+            operator_state.mkdir(mode=0o700)
+            (operator_state / "openclaw.json").write_text(
+                '{"operator_profile_marker":"must-not-load"}',
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.dict(
+                    self.runner.os.environ,
+                    {
+                        "HOME": str(operator_home),
+                        "XDG_CONFIG_HOME": str(operator_home / "xdg-config"),
+                        "OPENAI_API_KEY": "operator-secret-must-not-copy",
+                    },
+                    clear=False,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "resolve_cli_harness",
+                    return_value="/usr/local/bin/openclaw",
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "run_bounded_command",
+                    side_effect=fake_run,
+                ),
+            ):
+                response = self.runner.analyze_model_route(
+                    "openclaw:ollama/gemma4:26b-mlx:high",
+                    {
+                        "response_schema": {"type": "object"},
+                        "alert": {"rule_name": "Synthetic"},
+                    },
+                    args,
+                    settings,
+                )
+
+        command = captured["command"]
+        self.assertEqual(
+            command[:5],
+            [
+                "/usr/local/bin/openclaw",
+                "infer",
+                "model",
+                "run",
+                "--local",
+            ],
+        )
+        self.assertEqual(
+            command[command.index("--model") + 1],
+            "ollama/gemma4:26b-mlx",
+        )
+        self.assertEqual(command[command.index("--thinking") + 1], "high")
+        self.assertIn("--json", command)
+        self.assertNotIn("agent", command)
+        self.assertNotIn("stdin_text", captured["kwargs"])
+        environment = captured["env"]
+        working_directory = captured["cwd"]
+        self.assertEqual(environment["HOME"], environment["OPENCLAW_HOME"])
+        self.assertNotEqual(environment["HOME"], str(operator_home))
+        self.assertNotIn("OPENAI_API_KEY", environment)
+        self.assertEqual(environment["OLLAMA_API_KEY"], "ollama-local")
+        self.assertEqual(environment["OPENCLAW_OFFLINE"], "1")
+        self.assertNotIn("OPENCLAW_LOAD_SHELL_ENV", environment)
+        self.assertEqual(environment["HTTP_PROXY"], "")
+        self.assertEqual(environment["HTTPS_PROXY"], "")
+        self.assertEqual(environment["NO_PROXY"], "127.0.0.1,localhost,::1")
+        for key in (
+            "HOME",
+            "CODEX_HOME",
+            "OPENCLAW_STATE_DIR",
+            "OPENCLAW_CONFIG_PATH",
+            "OPENCLAW_OAUTH_DIR",
+            "OPENCLAW_AGENT_DIR",
+            "OPENCLAW_WORKSPACE_DIR",
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_RUNTIME_DIR",
+            "TMPDIR",
+        ):
+            self.assertTrue(
+                Path(environment[key]).is_relative_to(working_directory),
+                key,
+            )
+        self.assertEqual(captured["config"], {})
+        self.assertEqual(captured["config_mode"], 0o600)
+        self.assertEqual(set(captured["directory_modes"].values()), {0o700})
+        self.assertFalse(working_directory.exists())
+        prompt = json.loads(command[command.index("--prompt") + 1])
+        self.assertEqual(
+            prompt["prompt_package"]["alert"]["rule_name"],
+            "Synthetic",
+        )
+        self.assertEqual(
+            response["_analysis_model"],
+            "ollama/gemma4:26b-mlx",
+        )
+        self.assertEqual(response["_analysis_model_path"], "openclaw")
+        self.assertEqual(response["_analysis_provider"], "ollama")
+        self.assertEqual(response["_analysis_harness"], "openclaw")
+
+    def test_openclaw_rejects_observed_model_mismatch(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "system_prompt_file": Path("/tmp/nonexistent-system-prompt.md"),
+                "timeout": 60,
+                "max_response_bytes": 1024 * 1024,
+            },
+        )()
+        settings = {
+            **self.runner.default_ai_settings(),
+            "openclaw_enabled": True,
+            "openclaw_model": "ollama/gemma4:26b-mlx",
+            "openclaw_reasoning_effort": "xhigh",
+        }
+        completed = type(
+            "Completed",
+            (),
+            {
+                "returncode": 0,
+                "stdout": json.dumps(
+                    {
+                        "ok": True,
+                        "provider": "anthropic",
+                        "model": "claude-sonnet-4",
+                        "outputs": [{"text": '{"summary":"wrong model"}'}],
+                    }
+                ),
+                "stderr": "",
+            },
+        )()
+
+        with (
+            mock.patch.object(
+                self.runner,
+                "resolve_cli_harness",
+                return_value="/usr/local/bin/openclaw",
+            ),
+            mock.patch.object(
+                self.runner,
+                "run_bounded_command",
+                return_value=completed,
+            ),
+            mock.patch.object(
+                self.runner,
+                "_unload_ollama_model",
+            ),
+            self.assertRaisesRegex(
+                SystemExit,
+                "different provider/model",
+            ),
+        ):
+            self.runner.analyze_model_route(
+                "openclaw:ollama/gemma4:26b-mlx:xhigh",
+                {"response_schema": {"type": "object"}},
+                args,
+                settings,
+            )
+
+    def test_openclaw_rejects_foreign_provider_with_expected_namespaced_model(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(SystemExit, "different provider/model"):
+            self.runner._verified_openclaw_observation(
+                {
+                    "provider": "openai",
+                    "model": "ollama/gemma4:26b-mlx",
+                },
+                "ollama/gemma4:26b-mlx",
+            )
+
+    def test_openclaw_hosted_route_fails_before_executable_resolution(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "system_prompt_file": Path("/tmp/nonexistent-system-prompt.md"),
+                "timeout": 60,
+                "max_response_bytes": 1024 * 1024,
+            },
+        )()
+        settings = {
+            **self.runner.default_ai_settings(),
+            "openclaw_enabled": True,
+            "openclaw_model": "openai/gpt-5.6-sol",
+            "openclaw_reasoning_effort": "high",
+        }
+        with (
+            mock.patch.object(self.runner, "resolve_cli_harness") as resolve,
+            mock.patch.object(self.runner, "run_bounded_command") as run,
+            self.assertRaisesRegex(
+                SystemExit,
+                "explicit ollama/<model> routes only",
+            ),
+        ):
+            self.runner.openclaw_infer_chat(
+                {},
+                args,
+                settings,
+                model="openai/gpt-5.6-sol",
+                reasoning_effort="high",
+            )
+        resolve.assert_not_called()
+        run.assert_not_called()
+
+    def test_openclaw_nondefault_ollama_endpoint_fails_closed(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "system_prompt_file": Path("/tmp/nonexistent-system-prompt.md"),
+                "timeout": 60,
+                "max_response_bytes": 1024 * 1024,
+            },
+        )()
+        settings = {
+            **self.runner.default_ai_settings(),
+            "openclaw_enabled": True,
+            "openclaw_model": "ollama/gemma4:26b-mlx",
+            "openclaw_reasoning_effort": "high",
+            "ollama_url": "http://10.77.7.99:11434",
+        }
+        with (
+            mock.patch.object(self.runner, "resolve_cli_harness") as resolve,
+            self.assertRaisesRegex(
+                SystemExit,
+                "only the loopback Ollama endpoint",
+            ),
+        ):
+            self.runner._openclaw_infer_unlocked(
+                {},
+                args,
+                settings,
+                model="ollama/gemma4:26b-mlx",
+                reasoning_effort="high",
+            )
+        resolve.assert_not_called()
+
+    def test_local_openclaw_serializes_and_unloads_ollama_model(self) -> None:
+        args = type("Args", (), {"timeout": 45})()
+        settings = {
+            **self.runner.default_ai_settings(),
+            "openclaw_enabled": True,
+            "openclaw_model": "ollama/gemma4:26b-mlx",
+            "openclaw_reasoning_effort": "medium",
+        }
+        completed = {"summary": "local OpenClaw"}
+        with tempfile.TemporaryDirectory() as temp_name:
+            lock_path = Path(temp_name) / "ollama.lock"
+            with (
+                mock.patch.object(
+                    self.runner,
+                    "DEFAULT_OLLAMA_INFERENCE_LOCK",
+                    lock_path,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "_openclaw_infer_unlocked",
+                    return_value=completed,
+                ) as infer,
+                mock.patch.object(
+                    self.runner,
+                    "_unload_ollama_model",
+                ) as unload,
+            ):
+                response = self.runner.openclaw_infer_chat(
+                    {},
+                    args,
+                    settings,
+                    model="ollama/gemma4:26b-mlx",
+                    reasoning_effort="medium",
+                )
+
+            self.assertTrue(lock_path.is_file())
+            self.assertEqual(lock_path.stat().st_mode & 0o777, 0o600)
+
+        self.assertIs(response, completed)
+        infer.assert_called_once()
+        unload.assert_called_once_with(
+            settings,
+            "gemma4:26b-mlx",
+            timeout=45.0,
+        )
+
+    def test_openclaw_ollama_route_still_uses_hosted_evidence_boundary(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "system_prompt_file": Path("/tmp/nonexistent-system-prompt.md"),
+                "timeout": 60,
+                "max_response_bytes": 1024 * 1024,
+            },
+        )()
+        settings = {
+            **self.runner.default_ai_settings(),
+            "openclaw_enabled": True,
+            "openclaw_model": "ollama/gemma4:26b-mlx",
+            "openclaw_reasoning_effort": "medium",
+        }
+        captured: dict[str, object] = {}
+
+        def fake_run(command, **_kwargs):
+            captured["prompt"] = json.loads(
+                command[command.index("--prompt") + 1]
+            )
+            return type(
+                "Completed",
+                (),
+                {
+                    "returncode": 0,
+                    "stdout": json.dumps(
+                        {
+                            "ok": True,
+                            "provider": "ollama",
+                            "model": "gemma4:26b-mlx",
+                            "outputs": [
+                                {"text": '{"summary":"local harness result"}'},
+                            ],
+                        }
+                    ),
+                    "stderr": "",
+                },
+            )()
+
+        with (
+            mock.patch.object(
+                self.runner,
+                "resolve_cli_harness",
+                return_value="/usr/local/bin/openclaw",
+            ),
+            mock.patch.object(
+                self.runner,
+                "run_bounded_command",
+                side_effect=fake_run,
+            ),
+        ):
+            self.runner._openclaw_infer_unlocked(
+                {
+                    "response_schema": {"type": "object"},
+                    "raw_payload": "must-not-cross-harness-boundary",
+                },
+                args,
+                settings,
+                model="ollama/gemma4:26b-mlx",
+                reasoning_effort="medium",
+            )
+
+        self.assertTrue(
+            self.runner.model_route_is_hosted(
+                "openclaw:ollama/gemma4:26b-mlx:medium",
+                settings,
+            )
+        )
+        self.assertTrue(
+            self.runner.openclaw_model_uses_ollama_runtime(
+                "ollama/gemma4:26b-mlx"
+            )
+        )
+        prompt_package = captured["prompt"]["prompt_package"]
+        self.assertNotIn("raw_payload", prompt_package)
+        self.assertNotIn(
+            "must-not-cross-harness-boundary",
+            json.dumps(captured["prompt"]),
+        )
+
+    def test_harness_identity_collides_with_same_underlying_reviewer_model(self) -> None:
+        settings = {
+            **self.runner.default_ai_settings(),
+            "codex_cli_model": "gpt-5.6-sol",
+        }
+
+        codex = self.runner.model_route_identity(
+            "codex-cli:gpt-5.6-sol:medium",
+            settings,
+        )
+
+        self.assertEqual(
+            codex,
+            self.runner.model_route_identity(
+                "hermes-agent:gpt-5.6-sol:medium",
+                settings,
+            ),
+        )
+        self.assertEqual(
+            codex,
+            self.runner.model_route_identity(
+                "openclaw:openai-codex/gpt-5.6-sol:high",
+                settings,
+            ),
+        )
+        self.assertNotEqual(
+            codex,
+            self.runner.model_route_identity(
+                "openclaw:openai/gpt-5.6-sol:high",
+                settings,
+            ),
+        )
 
     def test_running_log_separates_assignment_from_observed_execution(self) -> None:
         settings = self.runner.default_ai_settings()
@@ -1655,7 +2883,26 @@ class AiModelRoutingTests(unittest.TestCase):
         )
         self.assertIsNone(index_payload["model"])
         self.assertIsNone(index_payload["model_path"])
+        self.assertIsNone(index_payload["provider"])
+        self.assertIsNone(index_payload["harness"])
         self.assertEqual(index_payload["input_mode"], "saved_response")
+
+        observed_payload = self.runner.analysis_index_payload(
+            "synthetic-hermes-response",
+            {"agent_role": "soc-analyst", "alert": {"alert_id": "observed"}},
+            {
+                "_analysis_model": "gpt-5.6-sol",
+                "_analysis_model_path": "hermes-agent",
+                "_analysis_provider": "openai-codex",
+                "_analysis_harness": "hermes-agent",
+            },
+            "",
+            "2026-07-24  10:00:00-06:00",
+            "2026-07-24  10:00:01-06:00",
+            Path("/tmp/synthetic-hermes-result.json"),
+        )
+        self.assertEqual(observed_payload["provider"], "openai-codex")
+        self.assertEqual(observed_payload["harness"], "hermes-agent")
 
     def test_comparison_distinguishes_full_advisory_and_material_disagreement(self) -> None:
         primary = {

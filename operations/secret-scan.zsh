@@ -40,7 +40,11 @@ if find . \
   -path '*/.playwright-artifacts' -prune -o \
   -path '*/playwright-report' -prune -o \
   -path '*/test-results' -prune -o \
-  \( -name '.env' -o -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' -o -name 'id_*' -o -name '*.pem' -o -name '*.key' \) \
+  \( -path '*/.hermes/*' -o -path '*/.openclaw/*' -o -path '*/.codex/*' \
+     -o -name '.env' -o -name 'auth.json' -o -name 'auth-profiles.json' \
+     -o -name 'credentials.json' -o -name '*.token' \
+     -o -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' \
+     -o -name 'id_*' -o -name '*.pem' -o -name '*.key' \) \
   -type f -print | rg . ; then
   echo
   echo "Forbidden runtime or credential file found. Remove it or add a safe example suffix." >&2

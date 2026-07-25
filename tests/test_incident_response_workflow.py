@@ -777,6 +777,13 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
             runner_source,
         )
         self.assertIn('"analysis_started_at": analysis_started_at', runner_source)
+        self.assertIn('"provider": response.get("_analysis_provider")', runner_source)
+        self.assertIn('"harness": response.get("_analysis_harness")', runner_source)
+        self.assertIn("payload?.provider || response._analysis_provider", source)
+        self.assertIn(
+            "incidentAnalysisProvider(executedModelPath, provider)",
+            source,
+        )
         self.assertIn("parsedUrl.pathname === '/incidents/reanalyze'", source)
         self.assertIn("parsedUrl.pathname === '/incidents/reanalyze-all'", source)
 

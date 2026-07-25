@@ -224,6 +224,7 @@ class IncidentReanalysisLineageTests(unittest.TestCase):
         *,
         model: str,
         model_path: str,
+        provider: str | None = None,
         reanalysis_attempt_id: str | None,
         analysis_started_at: str,
         generated_at: str,
@@ -237,6 +238,7 @@ class IncidentReanalysisLineageTests(unittest.TestCase):
             "generated_at": generated_at,
             "model": model,
             "model_path": model_path,
+            "provider": provider,
             "artifact_path": f"/synthetic/{analysis_id}.json",
             "evidence_hash": "a" * 64,
             "response": {
@@ -595,7 +597,8 @@ class IncidentReanalysisLineageTests(unittest.TestCase):
         payload = self.analysis_payload(
             "lineage-immutable-analysis",
             model="gpt-5.6-sol",
-            model_path="frontier-codex-cli",
+            model_path="hermes-agent",
+            provider="openai-codex",
             reanalysis_attempt_id=running["latest_attempt_id"],
             analysis_started_at=running["started_at"],
             generated_at=self.generated_at(5),
@@ -631,7 +634,8 @@ class IncidentReanalysisLineageTests(unittest.TestCase):
             ).fetchone()
             attempt = connection.execute(
                 """
-                SELECT analysis_id, executed_model
+                SELECT analysis_id, executed_model, executed_provider,
+                       executed_model_path
                 FROM incident_reanalysis_attempts
                 WHERE attempt_id = ?
                 """,
@@ -644,10 +648,15 @@ class IncidentReanalysisLineageTests(unittest.TestCase):
                 """,
                 (self.case_id,),
             ).fetchone()[0]
-        self.assertEqual(stored, ("gpt-5.6-sol", "frontier-codex-cli"))
+        self.assertEqual(stored, ("gpt-5.6-sol", "hermes-agent"))
         self.assertEqual(
             attempt,
-            ("lineage-immutable-analysis", "gpt-5.6-sol"),
+            (
+                "lineage-immutable-analysis",
+                "gpt-5.6-sol",
+                "openai-codex",
+                "hermes-agent",
+            ),
         )
         self.assertEqual(final_event_count, event_count)
         self.assertEqual(

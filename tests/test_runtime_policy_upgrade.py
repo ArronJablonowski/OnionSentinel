@@ -89,6 +89,32 @@ class RuntimePolicyUpgradeTests(unittest.TestCase):
     @staticmethod
     def prior_model_settings() -> dict:
         settings = json.loads(MODEL_SETTINGS.read_text(encoding="utf-8"))
+        for key in (
+            "hermes_agent_enabled",
+            "hermes_agent_path",
+            "hermes_agent_model",
+            "hermes_agent_reasoning_effort",
+            "openclaw_enabled",
+            "openclaw_path",
+            "openclaw_model",
+            "openclaw_reasoning_effort",
+        ):
+            settings.pop(key, None)
+        # The prior template exposed this now-retired, behaviorally inert key
+        # immediately before the MaxMind paths. Preserve the old insertion order
+        # so the approved byte-for-byte digest still describes that template.
+        settings = {
+            key: value
+            for existing_key, existing_value in settings.items()
+            for key, value in (
+                (
+                    ("hybrid_policy", "cloud_for_critical_high_or_recommended"),
+                    (existing_key, existing_value),
+                )
+                if existing_key == "maxmind_geoip_asn_db_path"
+                else ((existing_key, existing_value),)
+            )
+        }
         settings["agent_second_opinion_models"]["incident-responder"] = (
             "ollama:gemma4:31b"
         )

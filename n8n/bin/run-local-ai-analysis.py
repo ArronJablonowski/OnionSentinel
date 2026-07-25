@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -78,6 +79,9 @@ DEFAULT_ANALYSIS_INDEX_QUARANTINE_DIR = (
 DEFAULT_SYSTEM_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system_prompt.md"
 DEFAULT_SECOND_OPINION_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_second_opinion_prompt.md"
 DEFAULT_AI_SETTINGS_FILE = HOME / "n8n-local" / "config" / "ai_model_settings.json"
+DEFAULT_HERMES_AUTH_FILE = (
+    HOME / "n8n-local" / "private" / "hermes-agent" / "auth.json"
+)
 DEFAULT_OLLAMA_INFERENCE_LOCK = Path(
     os.environ.get(
         "OLLAMA_INFERENCE_LOCK_PATH",
@@ -122,6 +126,19 @@ CODEX_CLI_MODEL_CATALOG = (
     "gpt-5.6-terra",
     "gpt-5.6-luna",
 )
+CLI_HARNESS_MODEL_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,239}$"
+)
+OPENCLAW_OLLAMA_PROVIDER_PREFIX = "ollama/"
+OPENCLAW_SUPPORTED_OLLAMA_URLS = frozenset({
+    "http://127.0.0.1:11434",
+    "http://localhost:11434",
+})
+OPENCLAW_MAX_PROMPT_ARGUMENT_BYTES = 700 * 1024
+HERMES_MAX_PROMPT_ARGUMENT_BYTES = 700 * 1024
+HERMES_MAX_AUTH_BYTES = 2 * 1024 * 1024
+HERMES_MAX_USAGE_BYTES = 64 * 1024
+HERMES_AGENT_REASONING_EFFORT = "medium"
 INVESTIGATION_QUERY_RESULT_SCHEMA = "onion-sentinel-investigation-query-results-v1"
 MAX_INVESTIGATION_QUERY_ROUNDS = 3
 MAX_INVESTIGATION_QUERIES_TOTAL = 12
@@ -828,6 +845,8 @@ def analysis_index_payload(
         "generated_at": generated_at,
         "model": response.get("_analysis_model"),
         "model_path": response.get("_analysis_model_path"),
+        "provider": response.get("_analysis_provider"),
+        "harness": response.get("_analysis_harness"),
         "input_mode": response.get("_analysis_input_mode"),
         "artifact_path": str(artifact_path),
         "evidence_hash": evidence_hash,
@@ -1008,10 +1027,17 @@ def build_llm_log_record(
             model = active_model
             model_path = active_model_path
             observed_route = active_model_route
+    response_provider = str((response or {}).get("_analysis_provider") or "").strip()
     mode = (
         "codex-cli"
         if model_path == "frontier-codex-cli"
-        else "ollama" if model_path == "ollama" else ""
+        else "hermes-agent"
+        if model_path == "hermes-agent"
+        else "openclaw"
+        if model_path == "openclaw"
+        else "ollama"
+        if model_path == "ollama"
+        else response_provider
     )
     input_mode = str((response or {}).get("_analysis_input_mode") or "").strip()
     record = {
@@ -1024,6 +1050,8 @@ def build_llm_log_record(
         "mode": mode,
         "model": model,
         "model_path": model_path,
+        "provider": response_provider,
+        "harness": str((response or {}).get("_analysis_harness") or "").strip(),
         "agent_role": agent_role,
         "model_route": observed_route,
         "model_started": bool(model and (model_path or observed_route)),
@@ -1169,6 +1197,14 @@ def default_ai_settings() -> dict[str, Any]:
             for model in CODEX_CLI_MODEL_CATALOG
         ],
         "gpt_cli_enabled": False,
+        "hermes_agent_enabled": False,
+        "hermes_agent_path": "hermes",
+        "hermes_agent_model": "gpt-5.5",
+        "hermes_agent_reasoning_effort": "medium",
+        "openclaw_enabled": False,
+        "openclaw_path": "openclaw",
+        "openclaw_model": "ollama/gemma4:26b-mlx",
+        "openclaw_reasoning_effort": "medium",
         "hybrid_policy": "cloud_for_critical_high_or_recommended",
         "agent_models": {
             role: f"ollama:{default_model}" for role in CYBER_SECURITY_AGENT_ROLES
@@ -1209,6 +1245,78 @@ def boolean_setting(value: Any, default: bool = False) -> bool:
 
 def codex_cli_route(model: str, effort: str) -> str:
     return f"codex-cli:{model}:{effort}"
+
+
+def cli_harness_route(provider: str, model: str, effort: str) -> str:
+    """Return one stable route for a bounded third-party CLI harness."""
+    return f"{provider}:{model}:{effort}"
+
+
+def parse_cli_harness_route(
+    route: str,
+    provider: str,
+) -> tuple[str, str] | None:
+    """Return the exact model/effort encoded in a Hermes or OpenClaw route."""
+    prefix = f"{provider}:"
+    if not route.startswith(prefix):
+        return None
+    try:
+        model, effort = route.removeprefix(prefix).rsplit(":", 1)
+    except ValueError:
+        return None
+    if (
+        not CLI_HARNESS_MODEL_PATTERN.fullmatch(model)
+        or effort not in CODEX_CLI_REASONING_EFFORTS
+        or (
+            provider == "hermes-agent"
+            and effort != HERMES_AGENT_REASONING_EFFORT
+        )
+    ):
+        return None
+    return model, effort
+
+
+def openclaw_model_uses_ollama_runtime(model: str) -> bool:
+    """Return whether OpenClaw consumes the host's serialized Ollama GPU lane."""
+    normalized = str(model or "").strip().lower()
+    return normalized.startswith(OPENCLAW_OLLAMA_PROVIDER_PREFIX)
+
+
+def validate_isolated_openclaw_route(
+    model: str,
+    settings: dict[str, Any],
+) -> None:
+    """Admit only credential-free loopback Ollama into isolated OpenClaw."""
+    if (
+        not CLI_HARNESS_MODEL_PATTERN.fullmatch(model)
+        or not openclaw_model_uses_ollama_runtime(model)
+        or len(model) <= len(OPENCLAW_OLLAMA_PROVIDER_PREFIX)
+    ):
+        raise SystemExit(
+            "OpenClaw currently supports explicit ollama/<model> routes only; "
+            "hosted OpenClaw credentials are not admitted into the isolated runtime"
+        )
+    ollama_url = str(
+        settings.get("ollama_url") or DEFAULT_OLLAMA_URL
+    ).strip().rstrip("/")
+    if ollama_url not in OPENCLAW_SUPPORTED_OLLAMA_URLS:
+        raise SystemExit(
+            "OpenClaw's isolated runtime supports only the loopback Ollama "
+            "endpoint http://127.0.0.1:11434"
+        )
+
+
+def model_route_is_hosted(route: str, settings: dict[str, Any]) -> bool:
+    """Return the evidence boundary for an exact configured route."""
+    normalized = canonical_model_route(route, enabled_agent_model_routes(settings))
+    if normalized.startswith(("codex-cli:", "hermes-agent:")):
+        return True
+    if parse_cli_harness_route(normalized, "openclaw"):
+        # OpenClaw is a third-party harness boundary even when its selected
+        # provider happens to be a host-local Ollama runtime. Evidence
+        # redaction therefore never depends on the model provider prefix.
+        return True
+    return False
 
 
 def normalized_codex_cli_models(
@@ -1265,11 +1373,27 @@ def enabled_agent_model_routes(settings: dict[str, Any]) -> list[str]:
         for entry in settings.get("codex_cli_models", [])
         if isinstance(entry, dict) and entry.get("enabled") is True
     )
+    if boolean_setting(settings.get("hermes_agent_enabled")):
+        routes.append(
+            cli_harness_route(
+                "hermes-agent",
+                str(settings.get("hermes_agent_model") or "gpt-5.5"),
+                HERMES_AGENT_REASONING_EFFORT,
+            )
+        )
+    if boolean_setting(settings.get("openclaw_enabled")):
+        routes.append(
+            cli_harness_route(
+                "openclaw",
+                str(settings.get("openclaw_model") or "ollama/gemma4:26b-mlx"),
+                str(settings.get("openclaw_reasoning_effort") or "medium"),
+            )
+        )
     return routes
 
 
 def canonical_model_route(value: Any, routes: list[str] | None = None) -> str:
-    """Map a retired provider-only label to the first enabled Codex route."""
+    """Map provider-only and stale-effort labels to an enabled exact route."""
     route = str(value or "").strip()
     if route in {"gpt-cli", "codex-cli"} and routes is not None:
         return next(
@@ -1289,6 +1413,19 @@ def canonical_model_route(value: Any, routes: list[str] | None = None) -> str:
             ),
             route,
         )
+    if routes is not None:
+        for provider in ("hermes-agent", "openclaw"):
+            prefix = f"{provider}:"
+            if route == provider:
+                return next(
+                    (candidate for candidate in routes if candidate.startswith(prefix)),
+                    route,
+                )
+            if route.startswith(prefix) and route not in routes:
+                return next(
+                    (candidate for candidate in routes if candidate.startswith(prefix)),
+                    route,
+                )
     return "codex-cli" if route == "gpt-cli" else route
 
 
@@ -1323,6 +1460,14 @@ def assigned_model_metadata(
     if parsed := parse_codex_cli_route(route):
         model, _ = parsed
         return model, "frontier-codex-cli", "codex-cli"
+    if parsed := parse_cli_harness_route(route, "hermes-agent"):
+        model, _ = parsed
+        return model, "hermes-agent", "openai-codex"
+    if parsed := parse_cli_harness_route(route, "openclaw"):
+        model, _ = parsed
+        return model, "openclaw", (
+            model.split("/", 1)[0] if "/" in model else "openclaw"
+        )
     if route == "codex-cli":
         model = str(settings.get("codex_cli_model") or settings.get("cloud_model") or "").strip()
         if model:
@@ -1343,6 +1488,14 @@ def model_route_metadata(
     if parsed := parse_codex_cli_route(canonical):
         model, _ = parsed
         return canonical, model, "frontier-codex-cli", "codex-cli"
+    if parsed := parse_cli_harness_route(canonical, "hermes-agent"):
+        model, _ = parsed
+        return canonical, model, "hermes-agent", "openai-codex"
+    if parsed := parse_cli_harness_route(canonical, "openclaw"):
+        model, _ = parsed
+        return canonical, model, "openclaw", (
+            model.split("/", 1)[0] if "/" in model else "openclaw"
+        )
     if canonical == "codex-cli":
         model = str(settings.get("codex_cli_model") or settings.get("cloud_model") or "").strip()
         if model:
@@ -1461,15 +1614,33 @@ def apply_model_roster(settings: dict[str, Any], raw: dict[str, Any]) -> dict[st
     else:
         legacy_model = str(raw.get("ollama_model") or settings.get("ollama_model") or FALLBACK_OLLAMA_MODEL).strip()
         enabled_models = [] if legacy_mode == "cloud" else normalized_model_roster([legacy_model])
-    gpt_enabled = any(
+    codex_enabled = any(
         isinstance(entry, dict) and entry.get("enabled") is True
         for entry in settings.get("codex_cli_models", [])
     )
-    if not enabled_models and not gpt_enabled:
-        raise RuntimeArtifactError("AI settings must enable at least one Ollama model or GPT CLI")
+    hermes_enabled = boolean_setting(settings.get("hermes_agent_enabled"))
+    openclaw_enabled = boolean_setting(settings.get("openclaw_enabled"))
+    if not enabled_models and not codex_enabled and not hermes_enabled and not openclaw_enabled:
+        raise RuntimeArtifactError("AI settings must enable at least one analysis model route")
+    openclaw_ollama = (
+        openclaw_enabled
+        and openclaw_model_uses_ollama_runtime(
+            str(settings.get("openclaw_model") or "")
+        )
+    )
+    local_enabled = bool(enabled_models) or openclaw_ollama
+    hosted_enabled = (
+        codex_enabled
+        or hermes_enabled
+        or (openclaw_enabled and not openclaw_ollama)
+    )
     settings["enabled_ollama_models"] = enabled_models
-    settings["gpt_cli_enabled"] = gpt_enabled
-    settings["mode"] = "hybrid" if enabled_models and gpt_enabled else ("cloud" if gpt_enabled else "ollama")
+    settings["gpt_cli_enabled"] = codex_enabled
+    settings["mode"] = (
+        "hybrid"
+        if local_enabled and hosted_enabled
+        else ("cloud" if hosted_enabled else "ollama")
+    )
     if enabled_models:
         settings["ollama_model"] = enabled_models[0]
     settings["agent_models"] = normalize_agent_models(
@@ -1505,7 +1676,10 @@ def normalize_codex_cli_settings(settings: dict[str, Any], raw: dict[str, Any]) 
         if not value or len(value) > limit or re.search(r"[\x00-\x1f\x7f]", value):
             raise RuntimeArtifactError(f"{label} is invalid")
     if Path(executable).is_absolute():
-        if Path(executable).name != "codex":
+        if (
+            Path(executable).name != "codex"
+            or not re.fullmatch(r"/[A-Za-z0-9._/+-]+", executable)
+        ):
             raise RuntimeArtifactError("Codex CLI path must resolve from an executable named codex")
     elif executable != "codex":
         raise RuntimeArtifactError("Codex CLI path must be 'codex' or an absolute path ending in /codex")
@@ -1545,6 +1719,93 @@ def normalize_codex_cli_settings(settings: dict[str, Any], raw: dict[str, Any]) 
     settings["cloud_command"] = ""
 
 
+def _normalize_harness_executable(value: Any, basename: str) -> str:
+    """Validate an exact executable path without accepting flags or shell text."""
+    executable = str(value or basename).strip()
+    label = "Hermes Agent" if basename == "hermes" else "OpenClaw"
+    if (
+        not executable
+        or len(executable) > 1024
+        or re.search(r"[\x00-\x1f\x7f]", executable)
+    ):
+        raise RuntimeArtifactError(f"{label} executable path is invalid")
+    if Path(executable).is_absolute():
+        if (
+            Path(executable).name != basename
+            or not re.fullmatch(r"/[A-Za-z0-9._/+-]+", executable)
+        ):
+            raise RuntimeArtifactError(f"{label} path must end in /{basename}")
+    elif executable != basename:
+        raise RuntimeArtifactError(
+            f"{label} path must be '{basename}' or an absolute path ending in /{basename}"
+        )
+    return executable
+
+
+def normalize_cli_harness_settings(
+    settings: dict[str, Any],
+    raw: dict[str, Any],
+) -> None:
+    """Normalize the two optional, independently enabled agent harnesses."""
+    hermes_model = str(
+        raw.get("hermes_agent_model")
+        or settings.get("hermes_agent_model")
+        or "gpt-5.5"
+    ).strip()
+    hermes_effort = str(
+        raw.get("hermes_agent_reasoning_effort")
+        or settings.get("hermes_agent_reasoning_effort")
+        or "medium"
+    ).strip().lower()
+    openclaw_model = str(
+        raw.get("openclaw_model")
+        or settings.get("openclaw_model")
+        or "ollama/gemma4:26b-mlx"
+    ).strip()
+    openclaw_effort = str(
+        raw.get("openclaw_reasoning_effort")
+        or settings.get("openclaw_reasoning_effort")
+        or "medium"
+    ).strip().lower()
+    if hermes_model not in CODEX_CLI_MODEL_CATALOG:
+        raise RuntimeArtifactError(
+            "Hermes Agent model is not in the supported Codex model catalog"
+        )
+    if (
+        not CLI_HARNESS_MODEL_PATTERN.fullmatch(openclaw_model)
+        or not openclaw_model_uses_ollama_runtime(openclaw_model)
+        or len(openclaw_model) <= len(OPENCLAW_OLLAMA_PROVIDER_PREFIX)
+    ):
+        raise RuntimeArtifactError(
+            "OpenClaw currently supports explicit ollama/<model> routes only; "
+            "hosted OpenClaw credentials are not admitted into the isolated runtime"
+        )
+    if hermes_effort != HERMES_AGENT_REASONING_EFFORT:
+        raise RuntimeArtifactError(
+            "Hermes Agent one-shot runtime supports medium reasoning effort only"
+        )
+    if openclaw_effort not in CODEX_CLI_REASONING_EFFORTS:
+        raise RuntimeArtifactError(
+            "OpenClaw reasoning effort must be low, medium, high, or xhigh"
+        )
+    settings.update({
+        "hermes_agent_enabled": boolean_setting(raw.get("hermes_agent_enabled")),
+        "hermes_agent_path": _normalize_harness_executable(
+            raw.get("hermes_agent_path") or settings.get("hermes_agent_path"),
+            "hermes",
+        ),
+        "hermes_agent_model": hermes_model,
+        "hermes_agent_reasoning_effort": hermes_effort,
+        "openclaw_enabled": boolean_setting(raw.get("openclaw_enabled")),
+        "openclaw_path": _normalize_harness_executable(
+            raw.get("openclaw_path") or settings.get("openclaw_path"),
+            "openclaw",
+        ),
+        "openclaw_model": openclaw_model,
+        "openclaw_reasoning_effort": openclaw_effort,
+    })
+
+
 def load_ai_settings(path: Path) -> dict[str, Any]:
     """Load model routing settings written by the SOC Settings page."""
     settings = default_ai_settings()
@@ -1561,6 +1822,8 @@ def load_ai_settings(path: Path) -> dict[str, Any]:
             "enabled_ollama_models",
             "codex_cli_models",
             "gpt_cli_enabled",
+            "hermes_agent_enabled",
+            "openclaw_enabled",
             "agent_models",
             "agent_second_opinion_models",
         }:
@@ -1568,6 +1831,7 @@ def load_ai_settings(path: Path) -> dict[str, Any]:
         if key in settings and value is not None:
             settings[key] = str(value).strip() if isinstance(value, str) else value
     normalize_codex_cli_settings(settings, data)
+    normalize_cli_harness_settings(settings, data)
     apply_model_roster(settings, data)
     if settings.get("hybrid_policy") not in {"cloud_for_critical_high_or_recommended", "cloud_when_recommended_only"}:
         settings["hybrid_policy"] = "cloud_for_critical_high_or_recommended"
@@ -1596,6 +1860,40 @@ def resolve_codex_cli(settings: dict[str, Any]) -> str:
             return str(candidate)
     checked = ", ".join(str(candidate) for candidate in candidates)
     raise SystemExit(f"Codex CLI executable is unavailable; checked: {checked}")
+
+
+def resolve_cli_harness(
+    settings: dict[str, Any],
+    *,
+    setting_key: str,
+    basename: str,
+    label: str,
+) -> str:
+    """Resolve only the operator-approved exact third-party executable."""
+    configured = _normalize_harness_executable(
+        settings.get(setting_key) or basename,
+        basename,
+    )
+    if Path(configured).is_absolute():
+        candidates = [Path(configured).expanduser()]
+    else:
+        candidates: list[Path] = []
+        if discovered := shutil.which(basename):
+            candidates.append(Path(discovered))
+        candidates.extend([
+            Path.home() / ".local" / "bin" / basename,
+            Path("/opt/homebrew/bin") / basename,
+            Path("/usr/local/bin") / basename,
+        ])
+    for candidate in candidates:
+        if (
+            candidate.name == basename
+            and candidate.is_file()
+            and os.access(candidate, os.X_OK)
+        ):
+            return str(candidate)
+    checked = ", ".join(str(candidate) for candidate in candidates)
+    raise SystemExit(f"{label} executable is unavailable; checked: {checked}")
 
 
 def effective_ai_settings(args: argparse.Namespace) -> dict[str, Any]:
@@ -4373,7 +4671,7 @@ def apply_investigation_query_loop(
         )
         baseline = dict(prompt_package)
         baseline.pop("investigation_query_results", None)
-        hosted_route = route.startswith("codex-cli:")
+        hosted_route = model_route_is_hosted(route, settings)
         baseline_bytes = len(
             json.dumps(
                 model_safe_copy(baseline, hosted=hosted_route),
@@ -4746,28 +5044,15 @@ def response_output_json_schema(template: dict[str, Any]) -> dict[str, Any]:
     return root
 
 
-def cloud_cli_chat(
+def cli_analysis_payload(
     prompt_package: dict[str, Any],
     args: argparse.Namespace,
-    settings: dict[str, Any],
     *,
-    model: str | None = None,
-    reasoning_effort: str | None = None,
+    hosted: bool,
     system_prompt_file: Path | None = None,
     independent_review: bool = False,
 ) -> dict[str, Any]:
-    """Run Codex through a fixed, ephemeral, read-only argv contract."""
-    executable = resolve_codex_cli(settings)
-    model = str(model or settings.get("codex_cli_model") or "gpt-5.5").strip()
-    effort = str(
-        reasoning_effort
-        or settings.get("codex_cli_reasoning_effort")
-        or "medium"
-    ).strip().lower()
-    if not CODEX_CLI_MODEL_PATTERN.fullmatch(model):
-        raise SystemExit("Codex CLI model name is invalid")
-    if effort not in CODEX_CLI_REASONING_EFFORTS:
-        raise SystemExit("Codex CLI reasoning effort is invalid")
+    """Build one provider-neutral, tool-disabled CLI analysis request."""
     live_follow_up = isinstance(prompt_package.get("live_osquery_follow_up"), dict)
     investigation_follow_up = isinstance(
         prompt_package.get("investigation_follow_up"),
@@ -4804,11 +5089,42 @@ def cloud_cli_chat(
             "tool access, arbitrary query syntax, or raw packet payloads."
         )
     )
-    stdin_payload = {
+    return {
         "task": task,
         "system_prompt": load_system_prompt(system_prompt_file or args.system_prompt_file),
-        "prompt_package": model_safe_copy(prompt_package, hosted=True),
+        "prompt_package": model_safe_copy(prompt_package, hosted=hosted),
     }
+
+
+def cloud_cli_chat(
+    prompt_package: dict[str, Any],
+    args: argparse.Namespace,
+    settings: dict[str, Any],
+    *,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    system_prompt_file: Path | None = None,
+    independent_review: bool = False,
+) -> dict[str, Any]:
+    """Run Codex through a fixed, ephemeral, read-only argv contract."""
+    executable = resolve_codex_cli(settings)
+    model = str(model or settings.get("codex_cli_model") or "gpt-5.5").strip()
+    effort = str(
+        reasoning_effort
+        or settings.get("codex_cli_reasoning_effort")
+        or "medium"
+    ).strip().lower()
+    if not CODEX_CLI_MODEL_PATTERN.fullmatch(model):
+        raise SystemExit("Codex CLI model name is invalid")
+    if effort not in CODEX_CLI_REASONING_EFFORTS:
+        raise SystemExit("Codex CLI reasoning effort is invalid")
+    stdin_payload = cli_analysis_payload(
+        prompt_package,
+        args,
+        hosted=True,
+        system_prompt_file=system_prompt_file,
+        independent_review=independent_review,
+    )
     with tempfile.TemporaryDirectory(prefix="onion-sentinel-codex-") as temp_name:
         work_dir = Path(temp_name)
         final_message = work_dir / "final-response.json"
@@ -4883,6 +5199,740 @@ def cloud_cli_chat(
     return response
 
 
+def sanitized_cli_harness_env(
+    executable: str,
+    *,
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Return a minimal environment for an operator-approved CLI harness."""
+    allowed = (
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    )
+    env = {
+        key: value
+        for key in allowed
+        if (value := os.environ.get(key))
+    }
+    path_parts = [
+        str(Path(executable).parent),
+        str(Path.home() / ".local" / "bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ]
+    env["PATH"] = ":".join(dict.fromkeys(path_parts))
+    env["NO_COLOR"] = "1"
+    if extra:
+        env.update(extra)
+    return env
+
+
+def summarize_cli_harness_failure(
+    label: str,
+    stderr: str,
+    returncode: int,
+) -> str:
+    """Classify a harness failure without copying prompt-bearing output."""
+    lowered = str(stderr or "").lower()
+    if "context window" in lowered or "maximum context" in lowered:
+        return "model context window exhausted"
+    if any(token in lowered for token in ("rate limit", "usage limit", "too many requests")):
+        return "provider rate or usage limit reached"
+    if any(token in lowered for token in ("authentication", "unauthorized", "login required", "invalid api key")):
+        return "provider authentication failed"
+    if any(token in lowered for token in ("model not found", "unknown model", "does not exist", "model unavailable")):
+        return "configured model is unavailable or unauthorized"
+    return f"{label} exited with code {returncode}"
+
+
+def _filtered_hermes_auth_store(
+    raw: dict[str, Any],
+    *,
+    require_credentials: bool = True,
+) -> dict[str, Any]:
+    """Keep only the dedicated OpenAI Codex provider and credential pool."""
+    providers = raw.get("providers")
+    provider_state = (
+        providers.get("openai-codex")
+        if isinstance(providers, dict)
+        else None
+    )
+    credential_pool = raw.get("credential_pool")
+    pool_entries = (
+        credential_pool.get("openai-codex")
+        if isinstance(credential_pool, dict)
+        else None
+    )
+    if isinstance(pool_entries, list) and any(
+        not isinstance(entry, dict)
+        or (
+            entry.get("provider") is not None
+            and str(entry.get("provider")).strip() != "openai-codex"
+        )
+        for entry in pool_entries
+    ):
+        raise RuntimeArtifactError(
+            "dedicated Hermes openai-codex credential pool is invalid"
+        )
+    has_provider = isinstance(provider_state, dict) and bool(provider_state)
+    has_pool = isinstance(pool_entries, list) and bool(pool_entries)
+    if require_credentials and not (has_provider or has_pool):
+        raise RuntimeArtifactError(
+            "dedicated Hermes auth store does not contain openai-codex credentials"
+        )
+    raw_version = raw.get("version")
+    version = (
+        raw_version
+        if isinstance(raw_version, int)
+        and not isinstance(raw_version, bool)
+        and raw_version > 0
+        else 1
+    )
+    filtered: dict[str, Any] = {
+        "version": version,
+        "active_provider": "openai-codex",
+        "providers": {},
+    }
+    if has_provider:
+        filtered["providers"]["openai-codex"] = provider_state
+    if has_pool:
+        filtered["credential_pool"] = {
+            "openai-codex": pool_entries,
+        }
+    return filtered
+
+
+def _load_bounded_regular_json(
+    path: Path,
+    *,
+    max_bytes: int,
+    label: str,
+    required_mode: int | None = None,
+) -> dict[str, Any]:
+    """Read one non-symlink JSON file through its verified descriptor."""
+    try:
+        admitted = path.lstat()
+    except OSError as exc:
+        raise RuntimeArtifactError(f"{label} is missing") from exc
+    if stat.S_ISLNK(admitted.st_mode) or not stat.S_ISREG(admitted.st_mode):
+        raise RuntimeArtifactError(f"{label} must be a regular file")
+    if required_mode is not None and stat.S_IMODE(admitted.st_mode) != required_mode:
+        raise RuntimeArtifactError(
+            f"{label} must have mode {required_mode:04o}"
+        )
+    if admitted.st_size > max_bytes:
+        raise RuntimeArtifactError(f"{label} exceeds its size limit")
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino)
+            != (admitted.st_dev, admitted.st_ino)
+        ):
+            raise RuntimeArtifactError(f"{label} changed during admission")
+        if (
+            required_mode is not None
+            and stat.S_IMODE(opened.st_mode) != required_mode
+        ):
+            raise RuntimeArtifactError(
+                f"{label} must have mode {required_mode:04o}"
+            )
+        if opened.st_size > max_bytes:
+            raise RuntimeArtifactError(f"{label} exceeds its size limit")
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > max_bytes:
+            raise RuntimeArtifactError(f"{label} exceeds its size limit")
+        try:
+            value = json.loads(raw.decode("utf-8", errors="strict"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeArtifactError(f"{label} is not valid JSON") from exc
+        if not isinstance(value, dict):
+            raise RuntimeArtifactError(f"{label} JSON root must be an object")
+        return value
+    except OSError as exc:
+        raise RuntimeArtifactError(f"{label} is not safely readable") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _load_dedicated_hermes_auth(path: Path) -> dict[str, Any]:
+    """Read the explicit Onion Sentinel Hermes credential store only."""
+    return _filtered_hermes_auth_store(
+        _load_bounded_regular_json(
+            path,
+            max_bytes=HERMES_MAX_AUTH_BYTES,
+            label="dedicated Hermes authentication",
+            required_mode=0o600,
+        )
+    )
+
+
+def _write_dedicated_hermes_auth(
+    path: Path,
+    auth_store: dict[str, Any],
+) -> None:
+    """Atomically persist a filtered, owner-only Hermes credential store."""
+    if path.is_symlink():
+        raise RuntimeArtifactError(
+            "dedicated Hermes authentication path must not be a symlink"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.parent.is_symlink():
+        raise RuntimeArtifactError(
+            "dedicated Hermes authentication directory must not be a symlink"
+        )
+    path.parent.chmod(0o700)
+    filtered = _filtered_hermes_auth_store(auth_store)
+    fd, temp_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(json.dumps(filtered, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        path.chmod(0o600)
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            # Some filesystems do not support directory fsync. The auth file
+            # itself has already been fsynced and atomically replaced.
+            pass
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        temporary.unlink(missing_ok=True)
+
+
+def _verified_hermes_usage(
+    path: Path,
+    *,
+    expected_model: str,
+) -> dict[str, Any]:
+    """Require Hermes' bounded usage sidecar to attest the exact invocation."""
+    try:
+        usage = _load_bounded_regular_json(
+            path,
+            max_bytes=HERMES_MAX_USAGE_BYTES,
+            label="Hermes Agent usage provenance artifact",
+        )
+    except RuntimeArtifactError as exc:
+        raise SystemExit(
+            "Hermes Agent returned an invalid usage provenance artifact"
+        ) from exc
+    if usage.get("completed") is not True or usage.get("failed") is not False:
+        raise SystemExit(
+            "Hermes Agent usage provenance did not attest a completed invocation"
+        )
+    provider = str(usage.get("provider") or "").strip()
+    observed_model = str(usage.get("model") or "").strip()
+    if provider != "openai-codex" or observed_model != expected_model:
+        raise SystemExit(
+            "Hermes Agent executed a different provider/model than the assigned route"
+        )
+    return usage
+
+
+def hermes_agent_chat(
+    prompt_package: dict[str, Any],
+    args: argparse.Namespace,
+    settings: dict[str, Any],
+    *,
+    model: str,
+    reasoning_effort: str,
+    system_prompt_file: Path | None = None,
+    independent_review: bool = False,
+) -> dict[str, Any]:
+    """Run Hermes as an isolated, tool-empty, one-shot OpenAI Codex harness."""
+    if not boolean_setting(settings.get("hermes_agent_enabled")):
+        raise SystemExit("Hermes Agent is disabled in AI Analysis Model Selection")
+    if (
+        model != str(settings.get("hermes_agent_model") or "")
+        or reasoning_effort
+        != str(settings.get("hermes_agent_reasoning_effort") or "").lower()
+    ):
+        raise SystemExit("Hermes Agent route is not the enabled configured route")
+    if model not in CODEX_CLI_MODEL_CATALOG:
+        raise SystemExit("Hermes Agent model is not supported")
+    if reasoning_effort != HERMES_AGENT_REASONING_EFFORT:
+        raise SystemExit(
+            "Hermes Agent one-shot runtime supports medium reasoning effort only"
+        )
+    executable = resolve_cli_harness(
+        settings,
+        setting_key="hermes_agent_path",
+        basename="hermes",
+        label="Hermes Agent",
+    )
+    payload = cli_analysis_payload(
+        prompt_package,
+        args,
+        hosted=True,
+        system_prompt_file=system_prompt_file,
+        independent_review=independent_review,
+    )
+    payload["reasoning_effort"] = reasoning_effort
+    serialized = json.dumps(payload, separators=(",", ":"))
+    if len(serialized.encode("utf-8")) > HERMES_MAX_PROMPT_ARGUMENT_BYTES:
+        raise SystemExit(
+            "Hermes Agent analysis request exceeds the installed CLI's safe prompt argument limit"
+        )
+    hermes_auth = DEFAULT_HERMES_AUTH_FILE
+    auth_parent = hermes_auth.parent
+    if auth_parent.is_symlink():
+        raise SystemExit(
+            "Hermes Agent dedicated authentication directory must not be a symlink"
+        )
+    auth_parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    auth_parent.chmod(0o700)
+    auth_lock = hermes_auth.with_name("auth.lock")
+    if auth_lock.is_symlink():
+        raise SystemExit(
+            "Hermes Agent dedicated authentication lock must not be a symlink"
+        )
+    lock_flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        lock_flags |= os.O_NOFOLLOW
+    try:
+        auth_lock_fd = os.open(auth_lock, lock_flags, 0o600)
+        os.fchmod(auth_lock_fd, 0o600)
+    except OSError as exc:
+        raise SystemExit(
+            "Hermes Agent dedicated authentication lock is unavailable"
+        ) from exc
+    with os.fdopen(auth_lock_fd, "a+", encoding="utf-8") as auth_lock_handle:
+        fcntl.flock(auth_lock_handle, fcntl.LOCK_EX)
+        try:
+            try:
+                dedicated_auth = _load_dedicated_hermes_auth(hermes_auth)
+            except RuntimeArtifactError as exc:
+                raise SystemExit(
+                    "Hermes Agent dedicated authentication is unavailable at "
+                    f"{hermes_auth}; provision the isolated openai-codex login "
+                    "described in the runtime roadmap"
+                ) from exc
+            with tempfile.TemporaryDirectory(
+                prefix="onion-sentinel-hermes-"
+            ) as temp_name:
+                work_dir = Path(temp_name)
+                hermes_home = work_dir / "hermes-home"
+                isolated_home = hermes_home / "home"
+                codex_home = isolated_home / ".codex"
+                xdg_config = work_dir / "xdg-config"
+                xdg_cache = work_dir / "xdg-cache"
+                xdg_data = work_dir / "xdg-data"
+                xdg_state = work_dir / "xdg-state"
+                xdg_runtime = work_dir / "xdg-runtime"
+                isolated_tmp = work_dir / "tmp"
+                for directory in (
+                    hermes_home,
+                    isolated_home,
+                    codex_home,
+                    xdg_config,
+                    xdg_cache,
+                    xdg_data,
+                    xdg_state,
+                    xdg_runtime,
+                    isolated_tmp,
+                ):
+                    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    directory.chmod(0o700)
+                isolated_auth = hermes_home / "auth.json"
+                atomic_write_json(isolated_auth, dedicated_auth)
+                isolated_auth.chmod(0o600)
+                config_path = hermes_home / "config.yaml"
+                config_path.write_text(
+                    "model:\n"
+                    f"  provider: openai-codex\n  default: {model}\n"
+                    "context:\n"
+                    "  engine: compressor\n"
+                    "memory:\n"
+                    "  memory_enabled: false\n"
+                    "  user_profile_enabled: false\n"
+                    "compression:\n"
+                    "  enabled: false\n"
+                    "terminal:\n"
+                    "  home_mode: profile\n",
+                    encoding="utf-8",
+                )
+                config_path.chmod(0o600)
+                usage_path = work_dir / "usage.json"
+                cmd = [
+                    executable,
+                    "--oneshot",
+                    serialized,
+                    "--model",
+                    model,
+                    "--provider",
+                    "openai-codex",
+                    "--toolsets",
+                    "context_engine",
+                    "--safe-mode",
+                    "--usage-file",
+                    str(usage_path),
+                ]
+                proc = None
+                invocation_error: BaseException | None = None
+                try:
+                    proc = run_bounded_command(
+                        cmd,
+                        timeout_seconds=args.timeout,
+                        max_stdout_bytes=args.max_response_bytes,
+                        max_stderr_bytes=DEFAULT_CLOUD_MAX_STDERR_BYTES,
+                        cwd=work_dir,
+                        env=sanitized_cli_harness_env(
+                            executable,
+                            extra={
+                                "HOME": str(isolated_home),
+                                "CODEX_HOME": str(codex_home),
+                                "HERMES_HOME": str(hermes_home),
+                                "HERMES_REAL_HOME": str(isolated_home),
+                                "XDG_CONFIG_HOME": str(xdg_config),
+                                "XDG_CACHE_HOME": str(xdg_cache),
+                                "XDG_DATA_HOME": str(xdg_data),
+                                "XDG_STATE_HOME": str(xdg_state),
+                                "XDG_RUNTIME_DIR": str(xdg_runtime),
+                                "TMPDIR": str(isolated_tmp),
+                                # Hermes 0.18.2 otherwise consults the
+                                # installed source tree's .env in addition to
+                                # HERMES_HOME. Disable python-dotenv loading;
+                                # the dedicated auth.json remains explicit.
+                                "PYTHON_DOTENV_DISABLED": "1",
+                            },
+                        ),
+                    )
+                except BaseException as exc:
+                    invocation_error = exc
+                auth_persist_error: BaseException | None = None
+                try:
+                    rotated_auth = _load_dedicated_hermes_auth(isolated_auth)
+                    _write_dedicated_hermes_auth(
+                        hermes_auth,
+                        rotated_auth,
+                    )
+                except (OSError, RuntimeArtifactError) as exc:
+                    auth_persist_error = exc
+                if auth_persist_error is not None:
+                    raise SystemExit(
+                        "Hermes Agent credential rotation could not be "
+                        "persisted to its dedicated auth store"
+                    ) from auth_persist_error
+                if isinstance(invocation_error, FileNotFoundError):
+                    raise SystemExit(
+                        f"Hermes Agent executable was not found: {executable}"
+                    ) from invocation_error
+                if isinstance(invocation_error, BoundedProcessError):
+                    raise SystemExit(
+                        f"Hermes Agent analysis failed: {invocation_error}"
+                    ) from invocation_error
+                if invocation_error is not None:
+                    raise invocation_error
+                if proc is None:
+                    raise SystemExit(
+                        "Hermes Agent analysis failed before execution completed"
+                    )
+                if proc.returncode != 0:
+                    detail = summarize_cli_harness_failure(
+                        "Hermes Agent",
+                        proc.stderr,
+                        proc.returncode,
+                    )
+                    raise SystemExit(f"Hermes Agent analysis failed: {detail}")
+                usage = _verified_hermes_usage(
+                    usage_path,
+                    expected_model=model,
+                )
+                response = extract_json_object(proc.stdout)
+        finally:
+            fcntl.flock(auth_lock_handle, fcntl.LOCK_UN)
+    response["_analysis_model"] = str(usage["model"])
+    response["_analysis_model_path"] = "hermes-agent"
+    response["_analysis_provider"] = str(usage["provider"])
+    response["_analysis_harness"] = "hermes-agent"
+    return response
+
+
+def _openclaw_output_text(envelope: dict[str, Any]) -> str:
+    """Extract only text outputs from OpenClaw's documented JSON envelope."""
+    outputs = envelope.get("outputs")
+    if isinstance(outputs, list):
+        texts = [
+            str(item.get("text") or "")
+            for item in outputs
+            if isinstance(item, dict) and item.get("text") is not None
+        ]
+        if any(texts):
+            return "\n".join(text for text in texts if text)
+    for key in ("text", "output", "response"):
+        if isinstance(envelope.get(key), str) and envelope[key].strip():
+            return envelope[key]
+    raise SystemExit("OpenClaw completed without a text model output")
+
+
+def _verified_openclaw_observation(
+    envelope: dict[str, Any],
+    expected_model: str,
+) -> tuple[str, str]:
+    """Verify and return OpenClaw's observed provider/model identity."""
+    provider = str(envelope.get("provider") or "").strip()
+    observed_model = str(envelope.get("model") or "").strip()
+    if not provider or not observed_model:
+        raise SystemExit("OpenClaw response omitted observed provider/model provenance")
+    expected_provider, separator, expected_name = expected_model.partition("/")
+    observed_name = observed_model
+    observed_prefix, observed_separator, namespaced_name = observed_model.partition("/")
+    if observed_separator:
+        if observed_prefix.lower() != "ollama":
+            raise SystemExit(
+                "OpenClaw executed a different provider/model than the assigned route"
+            )
+        observed_name = namespaced_name
+    if (
+        provider.lower() != "ollama"
+        or separator != "/"
+        or expected_provider.lower() != "ollama"
+        or not expected_name
+        or observed_name.lower() != expected_name.lower()
+    ):
+        raise SystemExit(
+            "OpenClaw executed a different provider/model than the assigned route"
+        )
+    return "ollama", f"ollama/{observed_name}"
+
+
+def _openclaw_infer_unlocked(
+    prompt_package: dict[str, Any],
+    args: argparse.Namespace,
+    settings: dict[str, Any],
+    *,
+    model: str,
+    reasoning_effort: str,
+    system_prompt_file: Path | None = None,
+    independent_review: bool = False,
+) -> dict[str, Any]:
+    validate_isolated_openclaw_route(model, settings)
+    executable = resolve_cli_harness(
+        settings,
+        setting_key="openclaw_path",
+        basename="openclaw",
+        label="OpenClaw",
+    )
+    payload = cli_analysis_payload(
+        prompt_package,
+        args,
+        # OpenClaw remains a hosted-harness trust boundary even when it
+        # dispatches to Ollama on this host.
+        hosted=True,
+        system_prompt_file=system_prompt_file,
+        independent_review=independent_review,
+    )
+    serialized = json.dumps(payload, separators=(",", ":"))
+    if len(serialized.encode("utf-8")) > OPENCLAW_MAX_PROMPT_ARGUMENT_BYTES:
+        raise SystemExit(
+            "OpenClaw analysis request exceeds the installed CLI's safe prompt argument limit"
+        )
+    with tempfile.TemporaryDirectory(prefix="onion-sentinel-openclaw-") as temp_name:
+        work_dir = Path(temp_name)
+        isolated_home = work_dir / "home"
+        codex_home = isolated_home / ".codex"
+        state_dir = work_dir / "state"
+        oauth_dir = state_dir / "oauth"
+        agent_dir = state_dir / "agents" / "main" / "agent"
+        workspace_dir = work_dir / "workspace"
+        xdg_config = work_dir / "xdg-config"
+        xdg_cache = work_dir / "xdg-cache"
+        xdg_data = work_dir / "xdg-data"
+        xdg_state = work_dir / "xdg-state"
+        xdg_runtime = work_dir / "xdg-runtime"
+        isolated_tmp = work_dir / "tmp"
+        for directory in (
+            isolated_home,
+            codex_home,
+            state_dir,
+            oauth_dir,
+            agent_dir,
+            workspace_dir,
+            xdg_config,
+            xdg_cache,
+            xdg_data,
+            xdg_state,
+            xdg_runtime,
+            isolated_tmp,
+        ):
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            directory.chmod(0o700)
+        config_path = state_dir / "openclaw.json"
+        atomic_write_json(config_path, {})
+        config_path.chmod(0o600)
+        cmd = [
+            executable,
+            "infer",
+            "model",
+            "run",
+            "--local",
+            "--model",
+            model,
+            "--thinking",
+            reasoning_effort,
+            "--prompt",
+            serialized,
+            "--json",
+        ]
+        try:
+            proc = run_bounded_command(
+                cmd,
+                timeout_seconds=args.timeout,
+                max_stdout_bytes=args.max_response_bytes,
+                max_stderr_bytes=DEFAULT_CLOUD_MAX_STDERR_BYTES,
+                cwd=work_dir,
+                env=sanitized_cli_harness_env(
+                    executable,
+                    extra={
+                        "HOME": str(isolated_home),
+                        "CODEX_HOME": str(codex_home),
+                        "OPENCLAW_HOME": str(isolated_home),
+                        "OPENCLAW_STATE_DIR": str(state_dir),
+                        "OPENCLAW_CONFIG_PATH": str(config_path),
+                        "OPENCLAW_OAUTH_DIR": str(oauth_dir),
+                        "OPENCLAW_AGENT_DIR": str(agent_dir),
+                        "OPENCLAW_WORKSPACE_DIR": str(workspace_dir),
+                        "XDG_CONFIG_HOME": str(xdg_config),
+                        "XDG_CACHE_HOME": str(xdg_cache),
+                        "XDG_DATA_HOME": str(xdg_data),
+                        "XDG_STATE_HOME": str(xdg_state),
+                        "XDG_RUNTIME_DIR": str(xdg_runtime),
+                        "TMPDIR": str(isolated_tmp),
+                        "OPENCLAW_OFFLINE": "1",
+                        # The documented marker enables implicit discovery of
+                        # the loopback-only Ollama catalog without importing
+                        # any operator OpenClaw profile or provider secret.
+                        "OLLAMA_API_KEY": "ollama-local",
+                        "HTTP_PROXY": "",
+                        "HTTPS_PROXY": "",
+                        "http_proxy": "",
+                        "https_proxy": "",
+                        "NO_PROXY": "127.0.0.1,localhost,::1",
+                        "no_proxy": "127.0.0.1,localhost,::1",
+                    },
+                ),
+            )
+        except FileNotFoundError as exc:
+            raise SystemExit(f"OpenClaw executable was not found: {executable}") from exc
+        except BoundedProcessError as exc:
+            raise SystemExit(f"OpenClaw analysis failed: {exc}") from exc
+    if proc.returncode != 0:
+        detail = summarize_cli_harness_failure(
+            "OpenClaw",
+            proc.stderr,
+            proc.returncode,
+        )
+        raise SystemExit(f"OpenClaw analysis failed: {detail}")
+    try:
+        envelope = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit("OpenClaw returned an invalid JSON execution envelope") from exc
+    if not isinstance(envelope, dict) or envelope.get("ok") is not True:
+        raise SystemExit("OpenClaw reported an unsuccessful model invocation")
+    provider, observed_model = _verified_openclaw_observation(envelope, model)
+    response = extract_json_object(_openclaw_output_text(envelope))
+    response["_analysis_model"] = observed_model
+    response["_analysis_model_path"] = "openclaw"
+    response["_analysis_provider"] = provider
+    response["_analysis_harness"] = "openclaw"
+    return response
+
+
+def openclaw_infer_chat(
+    prompt_package: dict[str, Any],
+    args: argparse.Namespace,
+    settings: dict[str, Any],
+    *,
+    model: str,
+    reasoning_effort: str,
+    system_prompt_file: Path | None = None,
+    independent_review: bool = False,
+) -> dict[str, Any]:
+    """Run OpenClaw statelessly; serialize only explicit Ollama-backed routes."""
+    if not boolean_setting(settings.get("openclaw_enabled")):
+        raise SystemExit("OpenClaw is disabled in AI Analysis Model Selection")
+    if (
+        model != str(settings.get("openclaw_model") or "")
+        or reasoning_effort
+        != str(settings.get("openclaw_reasoning_effort") or "").lower()
+    ):
+        raise SystemExit("OpenClaw route is not the enabled configured route")
+    if not CLI_HARNESS_MODEL_PATTERN.fullmatch(model):
+        raise SystemExit("OpenClaw model is invalid")
+    if reasoning_effort not in CODEX_CLI_REASONING_EFFORTS:
+        raise SystemExit("OpenClaw reasoning effort is invalid")
+    validate_isolated_openclaw_route(model, settings)
+    DEFAULT_OLLAMA_INFERENCE_LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with DEFAULT_OLLAMA_INFERENCE_LOCK.open("a+", encoding="utf-8") as lock_handle:
+        DEFAULT_OLLAMA_INFERENCE_LOCK.chmod(0o600)
+        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        try:
+            return _openclaw_infer_unlocked(
+                prompt_package,
+                args,
+                settings,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                system_prompt_file=system_prompt_file,
+                independent_review=independent_review,
+            )
+        finally:
+            try:
+                ollama_model = model.split("/", 1)[1]
+                _unload_ollama_model(
+                    settings,
+                    ollama_model,
+                    timeout=float(getattr(args, "timeout", 30) or 30),
+                )
+            finally:
+                fcntl.flock(lock_handle, fcntl.LOCK_UN)
+
+
 def analyze_model_route(
     route: str,
     prompt_package: dict[str, Any],
@@ -4893,6 +5943,13 @@ def analyze_model_route(
     independent_review: bool = False,
 ) -> dict[str, Any]:
     """Execute one exact enabled route without implicit provider failover."""
+    enabled_routes = enabled_agent_model_routes(settings)
+    if route in {"gpt-cli", "codex-cli"}:
+        route = canonical_model_route(route, enabled_routes)
+    if route not in enabled_routes:
+        raise SystemExit(
+            f"Configured analysis model route is not enabled: {route or 'none'}"
+        )
     if route in {"gpt-cli", "codex-cli"}:
         return cloud_cli_chat(
             prompt_package,
@@ -4907,6 +5964,34 @@ def analyze_model_route(
             raise SystemExit("Configured Codex CLI route is invalid")
         model, effort = parsed
         return cloud_cli_chat(
+            prompt_package,
+            args,
+            settings,
+            model=model,
+            reasoning_effort=effort,
+            system_prompt_file=system_prompt_file,
+            independent_review=independent_review,
+        )
+    if route.startswith("hermes-agent:"):
+        parsed = parse_cli_harness_route(route, "hermes-agent")
+        if not parsed:
+            raise SystemExit("Configured Hermes Agent route is invalid")
+        model, effort = parsed
+        return hermes_agent_chat(
+            prompt_package,
+            args,
+            settings,
+            model=model,
+            reasoning_effort=effort,
+            system_prompt_file=system_prompt_file,
+            independent_review=independent_review,
+        )
+    if route.startswith("openclaw:"):
+        parsed = parse_cli_harness_route(route, "openclaw")
+        if not parsed:
+            raise SystemExit("Configured OpenClaw route is invalid")
+        model, effort = parsed
+        return openclaw_infer_chat(
             prompt_package,
             args,
             settings,
@@ -4945,12 +6030,20 @@ def model_route_identity(
     normalized = str(route or "").strip().lower()
     parsed = parse_codex_cli_route(normalized) if normalized.startswith("codex-cli:") else None
     if parsed:
-        return f"codex-cli:{parsed[0].lower()}"
+        return f"openai-codex:{parsed[0].lower()}"
     if normalized in {"gpt-cli", "codex-cli"}:
         configured_model = str(
             (settings or {}).get("codex_cli_model") or "configured-default"
         ).strip().lower()
-        return f"codex-cli:{configured_model}"
+        return f"openai-codex:{configured_model}"
+    if parsed := parse_cli_harness_route(normalized, "hermes-agent"):
+        return f"openai-codex:{parsed[0].lower()}"
+    if parsed := parse_cli_harness_route(normalized, "openclaw"):
+        model = parsed[0].lower()
+        if "/" in model:
+            provider, name = model.split("/", 1)
+            return f"{provider}:{name}"
+        return f"openclaw:{model}"
     if normalized.startswith("ollama:"):
         return normalized
     return normalized

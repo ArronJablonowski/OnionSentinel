@@ -161,6 +161,82 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
         self.assertNotIn("appendCodexCliModel", script)
         self.assertNotIn("addCodexCliModelButton", script)
 
+    def test_hermes_and_openclaw_have_independent_settings_toggles(self) -> None:
+        settings = {
+            **self.builder.default_soc_ai_settings(),
+            "hermes_agent_enabled": True,
+            "hermes_agent_model": "gpt-5.6-sol",
+            "hermes_agent_reasoning_effort": "medium",
+            "openclaw_enabled": False,
+            "openclaw_model": "ollama/gemma4:26b-mlx",
+            "openclaw_reasoning_effort": "xhigh",
+        }
+        with (
+            mock.patch.object(self.builder, "load_soc_ai_settings", return_value=settings),
+            mock.patch.object(
+                self.builder,
+                "list_ollama_models",
+                return_value=["devstral:latest"],
+            ),
+        ):
+            rendered = self.builder.settings_page_section()
+
+        self.assertIn("Compatible agent runtimes", rendered)
+        self.assertIn('id="ai-hermes-agent-enabled"', rendered)
+        self.assertIn("data-hermes-agent-enabled", rendered)
+        self.assertIn('aria-label="Enable Hermes Agent" checked', rendered)
+        self.assertIn('id="ai-openclaw-enabled"', rendered)
+        self.assertIn("data-openclaw-enabled", rendered)
+        self.assertNotIn('aria-label="Enable OpenClaw" checked', rendered)
+        self.assertIn("One isolated, explicit Ollama route", rendered)
+        for field_id in (
+            "ai-hermes-agent-path",
+            "ai-hermes-agent-model",
+            "ai-hermes-agent-reasoning-effort",
+            "ai-openclaw-path",
+            "ai-openclaw-model",
+            "ai-openclaw-reasoning-effort",
+        ):
+            self.assertIn(f'id="{field_id}"', rendered)
+        self.assertIn(
+            'id="ai-hermes-agent-reasoning-effort" disabled',
+            rendered,
+        )
+        self.assertIn(
+            '<option value="medium" selected>Medium (required)</option>',
+            rendered,
+        )
+        self.assertNotIn("ai-openclaw-agent-id", rendered)
+        self.assertNotIn("openclaw_agent_id", self.builder.SETTINGS_PAGE_JS)
+        self.assertIn("hermes_agent_enabled: hermesEnabled", self.builder.SETTINGS_PAGE_JS)
+        self.assertIn("openclaw_enabled: openclawIsEnabled", self.builder.SETTINGS_PAGE_JS)
+        self.assertNotIn('id="ai-hybrid-policy"', rendered)
+        self.assertNotIn("hybrid_policy", self.builder.SETTINGS_PAGE_JS)
+        self.assertIn(
+            "OpenClaw currently supports explicit ollama/<model> routes only.",
+            self.builder.SETTINGS_PAGE_JS,
+        )
+        self.assertIn(
+            "payload.hermes_agent_reasoning_effort !== 'medium'",
+            self.builder.SETTINGS_PAGE_JS,
+        )
+        self.assertIn(
+            "OpenClaw requires a loopback Ollama endpoint on port 11434.",
+            self.builder.SETTINGS_PAGE_JS,
+        )
+
+    def test_dashboard_never_exposes_a_non_ollama_openclaw_assignment(self) -> None:
+        settings = {
+            **self.builder.default_soc_ai_settings(),
+            "openclaw_enabled": True,
+            "openclaw_model": "openai/gpt-5.6-sol",
+        }
+
+        self.assertEqual(
+            self.builder.enabled_agent_model_routes(settings)[-1],
+            "openclaw:ollama/gemma4:26b-mlx:medium",
+        )
+
     def test_soc_automation_section_has_independent_analysis_threshold(self) -> None:
         settings = {
             **self.builder.default_soc_ai_settings(),
@@ -278,6 +354,164 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
         self.assertIn("Codex CLI: gpt-5.6-sol (high)", options)
         self.assertIn("Codex CLI: gpt-5.6-terra (low)", options)
         self.assertNotIn("Codex CLI: gpt-5.6-luna (xhigh)", options)
+
+    def test_only_enabled_agent_runtime_routes_appear_in_agent_selectors(self) -> None:
+        settings = {
+            **self.builder.default_soc_ai_settings(),
+            "enabled_ollama_models": ["primary:latest"],
+            "hermes_agent_enabled": True,
+            "hermes_agent_model": "gpt-5.6-sol",
+            "hermes_agent_reasoning_effort": "medium",
+            "openclaw_enabled": False,
+            "openclaw_model": "ollama/gemma4:26b-mlx",
+            "openclaw_reasoning_effort": "xhigh",
+            "agent_models": {
+                role: "hermes-agent:gpt-5.6-sol:medium"
+                for role in self.builder.CYBER_SECURITY_AGENT_ROLES
+            },
+        }
+
+        self.assertEqual(
+            self.builder.enabled_agent_model_routes(settings),
+            [
+                "ollama:primary:latest",
+                "hermes-agent:gpt-5.6-sol:medium",
+            ],
+        )
+        options = self.builder.agent_model_option_rows(settings, "soc-analyst")
+        self.assertIn("Hermes Agent: gpt-5.6-sol (medium)", options)
+        self.assertNotIn("OpenClaw:", options)
+        self.assertEqual(
+            self.builder.agent_model_route_label(settings, "soc-analyst"),
+            "Hermes Agent: gpt-5.6-sol (medium)",
+        )
+
+        settings["openclaw_enabled"] = True
+        settings["agent_second_opinion_models"]["soc-analyst"] = (
+            "openclaw:ollama/gemma4:26b-mlx:xhigh"
+        )
+        options = self.builder.agent_model_option_rows(
+            settings,
+            "soc-analyst",
+            second_opinion=True,
+        )
+        self.assertIn("OpenClaw: ollama/gemma4:26b-mlx (xhigh)", options)
+        self.assertEqual(
+            self.builder.agent_second_opinion_model_route_label(
+                settings,
+                "soc-analyst",
+            ),
+            "OpenClaw: ollama/gemma4:26b-mlx (xhigh)",
+        )
+
+    def test_reviewer_options_exclude_same_underlying_model_identity(self) -> None:
+        settings = {
+            **self.builder.default_soc_ai_settings(),
+            "enabled_ollama_models": ["gemma4:31b"],
+            "codex_cli_models": [{
+                "model": "gpt-5.6-sol",
+                "reasoning_effort": "high",
+                "enabled": True,
+            }],
+            "hermes_agent_enabled": True,
+            "hermes_agent_model": "gpt-5.6-sol",
+            "hermes_agent_reasoning_effort": "medium",
+            "openclaw_enabled": True,
+            "openclaw_model": "ollama/gemma4:31b",
+            "agent_models": {
+                role: "codex-cli:gpt-5.6-sol:high"
+                for role in self.builder.CYBER_SECURITY_AGENT_ROLES
+            },
+        }
+
+        self.assertEqual(
+            self.builder.model_route_identity(
+                "codex-cli:gpt-5.6-sol:high",
+                settings,
+            ),
+            self.builder.model_route_identity(
+                "hermes-agent:gpt-5.6-sol:medium",
+                settings,
+            ),
+        )
+        options = self.builder.agent_model_option_rows(
+            settings,
+            "soc-analyst",
+            second_opinion=True,
+        )
+        self.assertNotIn("Hermes Agent:", options)
+        self.assertIn("OpenClaw:", options)
+
+        settings.update({
+            "openclaw_model": "ollama/gemma4:31b",
+            "agent_models": {
+                role: "ollama:gemma4:31b"
+                for role in self.builder.CYBER_SECURITY_AGENT_ROLES
+            },
+        })
+        options = self.builder.agent_model_option_rows(
+            settings,
+            "soc-analyst",
+            second_opinion=True,
+        )
+        self.assertNotIn("OpenClaw:", options)
+        self.assertIn("Codex CLI:", options)
+
+    def test_harness_routes_migrate_with_provider_model_and_effort_changes(self) -> None:
+        routes = [
+            "ollama:local:latest",
+            "hermes-agent:gpt-5.6-terra:medium",
+            "openclaw:ollama/gemma4:31b:high",
+        ]
+        primary = self.builder.normalize_agent_models(
+            {
+                "soc-analyst": "hermes-agent:gpt-5.5:medium",
+                "incident-responder": "ollama:local:latest",
+            },
+            routes,
+        )
+        reviewers = self.builder.normalize_agent_second_opinion_models(
+            {
+                "incident-responder": "openclaw:ollama/gemma4:26b-mlx:low",
+            },
+            routes,
+            primary,
+        )
+
+        self.assertEqual(
+            primary["soc-analyst"],
+            "hermes-agent:gpt-5.6-terra:medium",
+        )
+        self.assertEqual(
+            reviewers["incident-responder"],
+            "openclaw:ollama/gemma4:31b:high",
+        )
+        script = self.builder.SETTINGS_PAGE_JS
+        self.assertIn("function modelRouteIdentity(route, settings = {})", script)
+        self.assertIn(
+            "return routes.find(candidate => candidate.startsWith(prefix)) || normalized;",
+            script,
+        )
+
+    def test_dashboard_executable_path_normalization_matches_runtime_allowlist(self) -> None:
+        self.assertEqual(
+            self.builder._normalized_cli_path(
+                "/opt/onion-sentinel+tools/bin/hermes",
+                "hermes",
+            ),
+            "/opt/onion-sentinel+tools/bin/hermes",
+        )
+        for unsafe in (
+            "/opt/@scope/bin/hermes",
+            "/opt/percent%dir/bin/hermes",
+            "/opt/comma,dir/bin/hermes",
+            "/opt/equal=dir/bin/hermes",
+        ):
+            with self.subTest(unsafe=unsafe):
+                self.assertEqual(
+                    self.builder._normalized_cli_path(unsafe, "hermes"),
+                    "hermes",
+                )
 
     def test_legacy_codex_roster_expands_to_the_fixed_catalog(self) -> None:
         entries = self.builder._normalized_codex_cli_models(

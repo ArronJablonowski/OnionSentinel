@@ -263,6 +263,131 @@ class SocSettingsPromptApiTest(unittest.TestCase):
             )
         self.assertEqual(saved["geoip_database"], saved["geoip_databases"]["city"])
 
+    def test_enabled_openclaw_save_requires_resolvable_executable_without_running_it(self) -> None:
+        settings = self.portal.default_soc_ai_settings()
+        settings.update({
+            "openclaw_enabled": True,
+            "openclaw_path": "/usr/local/absent/openclaw",
+        })
+
+        ok, response = self.portal.save_soc_ai_settings(settings)
+
+        self.assertFalse(ok)
+        self.assertIn("executable is unavailable", response["error"])
+        executable = Path(self.tmp.name) / "bin" / "openclaw"
+        executable.parent.mkdir()
+        executable.write_text("#!/bin/sh\n", encoding="utf-8")
+        executable.chmod(0o755)
+        settings["openclaw_path"] = "openclaw"
+        with (
+            mock.patch.object(
+                self.portal.shutil,
+                "which",
+                return_value=str(executable),
+            ),
+            mock.patch.object(
+                self.portal.subprocess,
+                "run",
+                side_effect=AssertionError("settings readiness must not execute"),
+            ),
+        ):
+            ok, response = self.portal.save_soc_ai_settings(settings)
+
+        self.assertTrue(ok, response)
+
+    def test_enabled_hermes_save_requires_safe_dedicated_credentials(self) -> None:
+        executable = Path(self.tmp.name) / "bin" / "hermes"
+        executable.parent.mkdir()
+        executable.write_text("#!/bin/sh\n", encoding="utf-8")
+        executable.chmod(0o755)
+        auth_file = Path(self.tmp.name) / "private" / "hermes-agent" / "auth.json"
+        auth_file.parent.mkdir(parents=True)
+        auth_file.write_text("{}", encoding="utf-8")
+        auth_file.chmod(0o600)
+        settings = self.portal.default_soc_ai_settings()
+        settings.update({
+            "hermes_agent_enabled": True,
+            "hermes_agent_path": str(executable),
+        })
+
+        with mock.patch.object(
+            self.portal,
+            "DEFAULT_HERMES_AUTH_FILE",
+            auth_file,
+        ):
+            ok, response = self.portal.save_soc_ai_settings(settings)
+            self.assertFalse(ok)
+            self.assertIn("openai-codex credentials", response["error"])
+
+            credential_marker = "fixture-secret-must-not-leak"
+            valid_auth = json.dumps({
+                "providers": {
+                    "openai-codex": {"access_token": credential_marker},
+                },
+            })
+            symlink_target = auth_file.with_name("actual-auth.json")
+            symlink_target.write_text(valid_auth, encoding="utf-8")
+            symlink_target.chmod(0o600)
+            auth_file.unlink()
+            auth_file.symlink_to(symlink_target)
+            ok, response = self.portal.save_soc_ai_settings(settings)
+            self.assertFalse(ok)
+            self.assertIn("non-symlink", response["error"])
+
+            auth_file.unlink()
+            auth_file.write_text(valid_auth, encoding="utf-8")
+            auth_file.chmod(0o400)
+            ok, response = self.portal.save_soc_ai_settings(settings)
+            self.assertFalse(ok)
+            self.assertIn("permissions are unsafe", response["error"])
+
+            auth_file.chmod(0o644)
+            ok, response = self.portal.save_soc_ai_settings(settings)
+            self.assertFalse(ok)
+            self.assertIn("permissions are unsafe", response["error"])
+            self.assertNotIn(credential_marker, json.dumps(response))
+
+            auth_file.write_text(json.dumps({
+                "credential_pool": {
+                    "openai-codex": [{
+                        "provider": "another-provider",
+                        "access_token": credential_marker,
+                    }],
+                },
+            }), encoding="utf-8")
+            auth_file.chmod(0o600)
+            ok, response = self.portal.save_soc_ai_settings(settings)
+            self.assertFalse(ok)
+            self.assertIn("credential pool is invalid", response["error"])
+            self.assertNotIn(credential_marker, json.dumps(response))
+
+            auth_file.write_text(valid_auth, encoding="utf-8")
+            auth_file.chmod(0o600)
+            with mock.patch.object(
+                self.portal.subprocess,
+                "run",
+                side_effect=AssertionError("settings readiness must not execute"),
+            ):
+                ok, response = self.portal.save_soc_ai_settings(settings)
+
+        self.assertTrue(ok, response)
+        self.assertNotIn(credential_marker, json.dumps(response))
+
+    def test_read_ai_settings_reports_normalization_failure_without_defaults(self) -> None:
+        self.portal.SOC_AI_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        self.portal.SOC_AI_SETTINGS_FILE.write_text(json.dumps({
+            "ollama_url": "file://private-value",
+            "enabled_ollama_models": ["local:latest"],
+        }), encoding="utf-8")
+
+        response = self.portal.read_soc_ai_settings()
+
+        self.assertFalse(response["ok"])
+        self.assertIn("Ollama URL", response["error"])
+        self.assertEqual(response["path"], str(self.portal.SOC_AI_SETTINGS_FILE))
+        self.assertNotIn("settings", response)
+        self.assertNotIn("private-value", json.dumps(response))
+
     def test_ai_settings_report_three_ready_maxmind_databases_without_reading_contents(self) -> None:
         settings = self.portal.default_soc_ai_settings()
         databases = {}
@@ -433,6 +558,262 @@ class SocSettingsPromptApiTest(unittest.TestCase):
         )
         self.assertTrue(normalized["gpt_cli_enabled"])
 
+    def test_hermes_and_openclaw_toggles_are_authoritative_for_agent_routes(self) -> None:
+        settings = self.portal.default_soc_ai_settings()
+        settings.update({
+            "hermes_agent_enabled": True,
+            "hermes_agent_path": "/usr/local/bin/hermes",
+            "hermes_agent_model": "gpt-5.6-sol",
+            "hermes_agent_reasoning_effort": "medium",
+            "openclaw_enabled": True,
+            "openclaw_path": "/opt/homebrew/bin/openclaw",
+            "openclaw_model": "ollama/gemma4:26b-mlx",
+            "openclaw_reasoning_effort": "xhigh",
+        })
+        settings["agent_models"]["soc-analyst"] = (
+            "hermes-agent:gpt-5.6-sol:medium"
+        )
+        settings["agent_models"]["incident-responder"] = (
+            "openclaw:ollama/gemma4:26b-mlx:xhigh"
+        )
+        settings["agent_second_opinion_models"]["soc-analyst"] = (
+            "openclaw:ollama/gemma4:26b-mlx:xhigh"
+        )
+
+        ok, normalized = self.portal.normalize_soc_ai_settings(settings)
+
+        self.assertTrue(ok)
+        self.assertTrue(normalized["hermes_agent_enabled"])
+        self.assertTrue(normalized["openclaw_enabled"])
+        self.assertEqual(
+            normalized["agent_models"]["soc-analyst"],
+            "hermes-agent:gpt-5.6-sol:medium",
+        )
+        self.assertEqual(
+            normalized["agent_models"]["incident-responder"],
+            "openclaw:ollama/gemma4:26b-mlx:xhigh",
+        )
+        self.assertEqual(
+            normalized["agent_second_opinion_models"]["soc-analyst"],
+            "openclaw:ollama/gemma4:26b-mlx:xhigh",
+        )
+
+        normalized["openclaw_enabled"] = False
+        ok, disabled = self.portal.normalize_soc_ai_settings(normalized)
+
+        self.assertTrue(ok)
+        self.assertNotEqual(
+            disabled["agent_models"]["incident-responder"],
+            "openclaw:ollama/gemma4:26b-mlx:xhigh",
+        )
+        self.assertEqual(
+            disabled["agent_second_opinion_models"]["soc-analyst"],
+            "",
+        )
+
+    def test_second_opinion_routes_require_distinct_underlying_model_identity(self) -> None:
+        cases = (
+            (
+                "codex-cli:gpt-5.6-sol:high",
+                "hermes-agent:gpt-5.6-sol:medium",
+                {
+                    "codex_cli_models": [{
+                        "model": "gpt-5.6-sol",
+                        "reasoning_effort": "high",
+                        "enabled": True,
+                    }],
+                    "hermes_agent_enabled": True,
+                    "hermes_agent_model": "gpt-5.6-sol",
+                    "hermes_agent_reasoning_effort": "medium",
+                },
+            ),
+            (
+                "ollama:gemma4:31b",
+                "openclaw:ollama/gemma4:31b:medium",
+                {
+                    "enabled_ollama_models": ["gemma4:31b"],
+                    "openclaw_enabled": True,
+                    "openclaw_model": "ollama/gemma4:31b",
+                },
+            ),
+        )
+        for primary, reviewer, overrides in cases:
+            with self.subTest(primary=primary, reviewer=reviewer):
+                settings = self.portal.default_soc_ai_settings()
+                settings.update(overrides)
+                settings["agent_models"]["soc-analyst"] = primary
+                settings["agent_second_opinion_models"]["soc-analyst"] = reviewer
+
+                ok, normalized = self.portal.normalize_soc_ai_settings(settings)
+
+                self.assertTrue(ok)
+                self.assertEqual(
+                    normalized["agent_second_opinion_models"]["soc-analyst"],
+                    "",
+                )
+
+    def test_harness_assignment_migrates_with_its_sole_configured_route(self) -> None:
+        settings = self.portal.default_soc_ai_settings()
+        settings.update({
+            "hermes_agent_enabled": True,
+            "hermes_agent_model": "gpt-5.5",
+            "hermes_agent_reasoning_effort": "medium",
+            "openclaw_enabled": True,
+            "openclaw_model": "ollama/gemma4:26b-mlx",
+            "openclaw_reasoning_effort": "low",
+        })
+        settings["agent_models"]["soc-analyst"] = "hermes-agent:gpt-5.5:medium"
+        settings["agent_second_opinion_models"]["incident-responder"] = (
+            "openclaw:ollama/gemma4:26b-mlx:low"
+        )
+
+        ok, original = self.portal.normalize_soc_ai_settings(settings)
+        self.assertTrue(ok)
+        original.update({
+            "hermes_agent_model": "gpt-5.6-terra",
+            "hermes_agent_reasoning_effort": "medium",
+            "openclaw_model": "ollama/gemma4:31b",
+            "openclaw_reasoning_effort": "high",
+        })
+
+        ok, migrated = self.portal.normalize_soc_ai_settings(original)
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            migrated["agent_models"]["soc-analyst"],
+            "hermes-agent:gpt-5.6-terra:medium",
+        )
+        self.assertEqual(
+            migrated["agent_second_opinion_models"]["incident-responder"],
+            "openclaw:ollama/gemma4:31b:high",
+        )
+
+    def test_openclaw_rejects_non_ollama_provider_routes(self) -> None:
+        settings = self.portal.default_soc_ai_settings()
+        settings.update({
+            "openclaw_enabled": True,
+            "openclaw_model": "openai/gpt-5.6-sol",
+        })
+
+        ok, response = self.portal.normalize_soc_ai_settings(settings)
+
+        self.assertFalse(ok)
+        self.assertIn("explicit ollama/<model> routes only", response["error"])
+
+    def test_openclaw_rejects_non_loopback_ollama_endpoint(self) -> None:
+        settings = self.portal.default_soc_ai_settings()
+        settings.update({
+            "openclaw_enabled": True,
+            "openclaw_model": "ollama/gemma4:26b-mlx",
+            "ollama_url": "http://192.0.2.50:11434",
+        })
+
+        ok, response = self.portal.normalize_soc_ai_settings(settings)
+
+        self.assertFalse(ok)
+        self.assertIn("loopback Ollama endpoint", response["error"])
+
+    def test_missing_agent_runtime_settings_migrate_disabled(self) -> None:
+        legacy = self.portal.default_soc_ai_settings()
+        for key in (
+            "hermes_agent_enabled",
+            "hermes_agent_path",
+            "hermes_agent_model",
+            "hermes_agent_reasoning_effort",
+            "openclaw_enabled",
+            "openclaw_path",
+            "openclaw_model",
+            "openclaw_reasoning_effort",
+        ):
+            legacy.pop(key)
+
+        ok, normalized = self.portal.normalize_soc_ai_settings(legacy)
+
+        self.assertTrue(ok)
+        self.assertFalse(normalized["hermes_agent_enabled"])
+        self.assertEqual(normalized["hermes_agent_path"], "hermes")
+        self.assertEqual(normalized["hermes_agent_model"], "gpt-5.5")
+        self.assertFalse(normalized["openclaw_enabled"])
+        self.assertEqual(normalized["openclaw_path"], "openclaw")
+        self.assertEqual(normalized["openclaw_model"], "ollama/gemma4:26b-mlx")
+        self.assertNotIn("openclaw_agent_id", normalized)
+
+    def test_legacy_openclaw_agent_id_is_ignored_for_stateless_inference(self) -> None:
+        settings = self.portal.default_soc_ai_settings()
+        settings["openclaw_agent_id"] = "../legacy-agent"
+
+        ok, normalized = self.portal.normalize_soc_ai_settings(settings)
+
+        self.assertTrue(ok)
+        self.assertNotIn("openclaw_agent_id", normalized)
+
+    def test_each_agent_runtime_can_be_the_only_provider_for_every_duty(self) -> None:
+        cases = (
+            (
+                {"hermes_agent_enabled": True},
+                "hermes-agent:gpt-5.5:medium",
+                "cloud",
+            ),
+            (
+                {"openclaw_enabled": True},
+                "openclaw:ollama/gemma4:26b-mlx:medium",
+                "ollama",
+            ),
+        )
+        for overrides, expected_route, expected_mode in cases:
+            with self.subTest(route=expected_route):
+                settings = self.portal.default_soc_ai_settings()
+                settings["enabled_ollama_models"] = []
+                settings["codex_cli_models"] = []
+                settings.update(overrides)
+
+                ok, normalized = self.portal.normalize_soc_ai_settings(settings)
+
+                self.assertTrue(ok)
+                self.assertEqual(normalized["mode"], expected_mode)
+                self.assertEqual(
+                    set(normalized["agent_models"].values()),
+                    {expected_route},
+                )
+
+    def test_agent_runtime_settings_reject_unsafe_executables_and_fields(self) -> None:
+        invalid_settings = (
+            ("hermes_agent_path", "hermes --unsafe", "Hermes Agent"),
+            ("hermes_agent_path", "/tmp/not-hermes", "Hermes Agent"),
+            ("hermes_agent_path", "/tmp/$(id)/hermes", "Hermes Agent"),
+            ("hermes_agent_path", "/tmp/@scope/hermes", "Hermes Agent"),
+            ("hermes_agent_path", "/tmp/percent%dir/hermes", "Hermes Agent"),
+            ("openclaw_path", "openclaw;sh", "OpenClaw"),
+            ("openclaw_path", "/tmp/not-openclaw", "OpenClaw"),
+            ("openclaw_path", "/tmp/agent tools/openclaw", "OpenClaw"),
+            ("openclaw_path", "/tmp/comma,dir/openclaw", "OpenClaw"),
+            ("openclaw_path", "/tmp/equal=dir/openclaw", "OpenClaw"),
+            ("hermes_agent_model", "bad\nmodel", "Hermes Agent"),
+            ("hermes_agent_model", "other-provider/model", "Hermes Agent"),
+            ("hermes_agent_reasoning_effort", "high", "Hermes Agent"),
+            ("openclaw_model", "bad\x00model", "OpenClaw"),
+            ("openclaw_model", "ollama/model;command", "OpenClaw"),
+            ("openclaw_model", "openai/gpt-5.6-sol", "OpenClaw"),
+        )
+        for key, value, expected in invalid_settings:
+            with self.subTest(key=key, value=repr(value)):
+                settings = self.portal.default_soc_ai_settings()
+                settings[key] = value
+
+                ok, response = self.portal.normalize_soc_ai_settings(settings)
+
+                self.assertFalse(ok)
+                self.assertIn(expected, response["error"])
+
+    def test_retired_hybrid_policy_is_ignored_and_not_persisted(self) -> None:
+        settings = self.portal.default_soc_ai_settings()
+        settings["hybrid_policy"] = "invalid-legacy-value"
+
+        ok, normalized = self.portal.normalize_soc_ai_settings(settings)
+
+        self.assertTrue(ok)
+        self.assertNotIn("hybrid_policy", normalized)
+
     def test_changing_codex_effort_preserves_the_assigned_model(self) -> None:
         settings = self.portal.default_soc_ai_settings()
         settings["enabled_ollama_models"] = ["primary:latest"]
@@ -526,6 +907,34 @@ class SocSettingsPromptApiTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("must differ", response["error"])
 
+    def test_agent_model_save_rejects_cross_harness_identity_collision(self) -> None:
+        settings = self.portal.default_soc_ai_settings()
+        settings["codex_cli_models"] = [{
+            "model": "gpt-5.6-sol",
+            "reasoning_effort": "high",
+            "enabled": True,
+        }]
+        settings.update({
+            "hermes_agent_enabled": True,
+            "hermes_agent_model": "gpt-5.6-sol",
+            "hermes_agent_reasoning_effort": "medium",
+        })
+        with mock.patch.object(
+            self.portal,
+            "_enabled_cli_harnesses_ready",
+            return_value=(True, ""),
+        ):
+            saved, _ = self.portal.save_soc_ai_settings(settings)
+            self.assertTrue(saved)
+            ok, response = self.portal.save_soc_agent_model({
+                "role": "soc-analyst",
+                "model": "codex-cli:gpt-5.6-sol:high",
+                "second_opinion_model": "hermes-agent:gpt-5.6-sol:medium",
+            })
+
+        self.assertFalse(ok)
+        self.assertIn("provider/model identity", response["error"])
+
     def test_agent_model_save_rejects_unknown_role_and_disabled_route(self) -> None:
         saved, _ = self.portal.save_soc_ai_settings(self.portal.default_soc_ai_settings())
         self.assertTrue(saved)
@@ -534,6 +943,8 @@ class SocSettingsPromptApiTest(unittest.TestCase):
             ({"role": "unknown", "model": "ollama:devstral:latest"}, "role is invalid"),
             ({"role": "soc-analyst", "model": "ollama:disabled:latest"}, "not enabled"),
             ({"role": "soc-analyst", "model": "codex-cli:gpt-5.6-sol:medium"}, "not enabled"),
+            ({"role": "soc-analyst", "model": "hermes-agent:gpt-5.5:medium"}, "not enabled"),
+            ({"role": "soc-analyst", "model": "openclaw:ollama/gemma4:26b-mlx:medium"}, "not enabled"),
         ):
             ok, response = self.portal.save_soc_agent_model(payload)
             self.assertFalse(ok)

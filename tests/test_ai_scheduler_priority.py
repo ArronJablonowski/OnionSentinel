@@ -602,6 +602,124 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                 )
                 self.assertEqual(self.scheduler.cli_agent_roles(settings_path), set())
 
+    def test_cli_lane_includes_enabled_hermes_but_not_openclaw(self) -> None:
+        self.args.ai_settings_file.write_text(
+            json.dumps(
+                {
+                    "codex_cli_models": [],
+                    "hermes_agent_enabled": True,
+                    "hermes_agent_model": "gpt-5.6-sol",
+                    "hermes_agent_reasoning_effort": "medium",
+                    "openclaw_enabled": True,
+                    "openclaw_model": "openai/gpt-5.6-terra",
+                    "openclaw_reasoning_effort": "high",
+                    "agent_models": {
+                        "soc-analyst": "hermes-agent:gpt-5.6-sol:medium",
+                        "incident-responder": "openclaw:openai/gpt-5.6-terra:high",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            self.scheduler.cli_agent_roles(self.args.ai_settings_file),
+            {"soc-analyst"},
+        )
+
+    def test_cli_lane_rejects_unsupported_hermes_reasoning_effort(self) -> None:
+        self.args.ai_settings_file.write_text(
+            json.dumps(
+                {
+                    "codex_cli_models": [],
+                    "hermes_agent_enabled": True,
+                    "hermes_agent_model": "gpt-5.6-sol",
+                    "hermes_agent_reasoning_effort": "xhigh",
+                    "agent_models": {
+                        "soc-analyst": "hermes-agent:gpt-5.6-sol:xhigh",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            self.scheduler.cli_agent_roles(self.args.ai_settings_file),
+            set(),
+        )
+
+    def test_local_openclaw_route_stays_out_of_hosted_cli_lane(self) -> None:
+        self.args.ai_settings_file.write_text(
+            json.dumps(
+                {
+                    "codex_cli_models": [],
+                    "hermes_agent_enabled": False,
+                    "openclaw_enabled": True,
+                    "openclaw_model": "ollama/gemma4:26b-mlx",
+                    "openclaw_reasoning_effort": "medium",
+                    "agent_models": {
+                        "soc-analyst": "openclaw:ollama/gemma4:26b-mlx:medium",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            self.scheduler.cli_agent_roles(self.args.ai_settings_file),
+            set(),
+        )
+
+    def test_unsupported_openclaw_routes_never_enter_hosted_cli_lane(self) -> None:
+        for model in ("local/gpt-oss:20b", "lmstudio/gpt-oss:20b"):
+            route = f"openclaw:{model}:medium"
+            with self.subTest(model=model):
+                self.args.ai_settings_file.write_text(
+                    json.dumps(
+                        {
+                            "codex_cli_models": [],
+                            "hermes_agent_enabled": False,
+                            "openclaw_enabled": True,
+                            "openclaw_model": model,
+                            "openclaw_reasoning_effort": "medium",
+                            "agent_models": {"soc-analyst": route},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                self.assertEqual(
+                    self.scheduler.cli_agent_roles(
+                        self.args.ai_settings_file
+                    ),
+                    set(),
+                )
+
+    def test_disabled_harnesses_never_enter_hosted_cli_lane(self) -> None:
+        self.args.ai_settings_file.write_text(
+            json.dumps(
+                {
+                    "codex_cli_models": [],
+                    "hermes_agent_enabled": False,
+                    "hermes_agent_model": "gpt-5.6-sol",
+                    "hermes_agent_reasoning_effort": "xhigh",
+                    "openclaw_enabled": False,
+                    "openclaw_model": "openai/gpt-5.6-terra",
+                    "openclaw_reasoning_effort": "high",
+                    "agent_models": {
+                        "soc-analyst": "hermes-agent:gpt-5.6-sol:xhigh",
+                        "incident-responder": "openclaw:openai/gpt-5.6-terra:high",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            self.scheduler.cli_agent_roles(self.args.ai_settings_file),
+            set(),
+        )
+
     def test_analysis_child_uses_scheduler_settings_and_prompt_limit(self) -> None:
         settings_path = Path(self.tempdir.name) / "custom-ai-settings.json"
         args = SimpleNamespace(

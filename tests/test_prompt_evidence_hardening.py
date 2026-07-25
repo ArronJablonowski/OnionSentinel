@@ -77,6 +77,19 @@ def alert_row():
 
 
 class PromptEvidenceHardeningTests(unittest.TestCase):
+    def test_each_specialist_role_has_a_bounded_role_specific_objective(self):
+        expectations = {
+            "incident-responder": "incident-response investigation",
+            "siem-engineer": "detection-engineering assessment",
+            "cyber-threat-intel": "threat-intelligence assessment",
+            "threat-hunter": "threat-hunting assessment",
+        }
+        for role, phrase in expectations.items():
+            with self.subTest(role=role):
+                task = builder.agent_task(role)
+                self.assertIn(phrase, task)
+                self.assertIn("never claim", task.lower())
+
     def test_compact_alert_retains_rule_context_but_not_packet_message(self):
         compact = builder.compact_alert(alert_row())
         self.assertEqual(compact["rule_context"]["sid"], "999999")

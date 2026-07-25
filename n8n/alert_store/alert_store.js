@@ -2779,11 +2779,16 @@ async function recordAiAnalysisResult(payload) {
   if (agentRole === 'incident-responder') {
     const executedModel = safeString(payload?.model || response._analysis_model, 200);
     const executedModelPath = safeString(payload?.model_path || response._analysis_model_path, 100);
+    const executedProvider = safeString(
+      payload?.provider || response._analysis_provider,
+      100,
+    );
     incidentReanalysisBinding = await bindIncidentReanalysisResult({
       groupId,
       analysisId,
       model: executedModel,
       modelPath: executedModelPath,
+      provider: executedProvider,
       expectedAttemptId: safeString(payload?.reanalysis_attempt_id, 80).toLowerCase(),
       allowLegacyFallback: !Object.prototype.hasOwnProperty.call(
         payload || {},
@@ -4535,9 +4540,13 @@ function incidentReanalysisAttemptId(leaseToken) {
   return `ira-${crypto.createHash('sha256').update(token).digest('hex').slice(0, 40)}`;
 }
 
-function incidentAnalysisProvider(modelPath) {
+function incidentAnalysisProvider(modelPath, observedProvider = '') {
+  const observed = safeString(observedProvider, 100).toLowerCase();
+  if (observed) return observed;
   const route = safeString(modelPath, 100).toLowerCase();
   if (route === 'frontier-codex-cli') return 'codex-cli';
+  if (route === 'hermes-agent') return 'openai-codex';
+  if (route === 'openclaw') return 'openclaw';
   if (route === 'ollama') return 'ollama';
   return route;
 }
@@ -5039,6 +5048,7 @@ async function bindIncidentReanalysisResult({
   analysisId,
   model,
   modelPath,
+  provider,
   expectedAttemptId,
   allowLegacyFallback,
   analysisStartedAt,
@@ -5131,7 +5141,7 @@ async function bindIncidentReanalysisResult({
   if (!attempt) return null;
   const executedModel = safeString(model, 200);
   const executedModelPath = safeString(modelPath, 100);
-  const executedProvider = incidentAnalysisProvider(executedModelPath);
+  const executedProvider = incidentAnalysisProvider(executedModelPath, provider);
   const updatedAt = nowUtc();
   const bound = await run(
     `UPDATE incident_reanalysis_attempts

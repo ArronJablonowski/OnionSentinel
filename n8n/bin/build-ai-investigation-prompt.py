@@ -1948,6 +1948,31 @@ def agent_task(agent_role: str, *, blind_reanalysis: bool = False) -> str:
             "facts from hypotheses. Never claim a query or response action occurred unless "
             "the supplied evidence records it."
         )
+    if agent_role == "siem-engineer":
+        return (
+            "Produce a detection-engineering assessment of this alert group. "
+            "Evaluate the exact deployed rule predicates, evidence coverage, false-positive "
+            "drivers, severity and scoring, then propose bounded tuning or validation steps "
+            "with expected impact and rollback criteria. Preserve detection coverage and "
+            "never claim a rule change or query execution occurred unless supplied evidence "
+            "records it."
+        )
+    if agent_role == "cyber-threat-intel":
+        return (
+            "Produce a threat-intelligence assessment for this alert group. Separate observed "
+            "telemetry from external reporting and hypotheses; assess indicator relevance, "
+            "confidence, recency, likely behaviors, collection gaps, and defensible pivots. "
+            "Avoid unsupported attribution and never claim enrichment or query results that "
+            "are not present in the supplied evidence."
+        )
+    if agent_role == "threat-hunter":
+        return (
+            "Produce a threat-hunting assessment for this alert group. Develop prioritized, "
+            "falsifiable hypotheses from observed facts, identify expected corroborating and "
+            "disconfirming evidence, and recommend bounded read-only pivots using the supplied "
+            "query contract. Clearly distinguish proposed queries from executed queries and "
+            "never claim results that are absent from the evidence."
+        )
     return (
         "Explain likely meaning, repeat frequency, false positive possibilities, urgency, "
         "next investigative steps, tuning actions, and whether an independent second-model "

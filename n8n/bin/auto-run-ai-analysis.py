@@ -165,7 +165,7 @@ def project_now() -> str:
 
 
 def cli_agent_roles(settings_path: Path) -> set[str]:
-    """Return roles explicitly assigned to the hosted Codex/GPT CLI lane.
+    """Return roles explicitly assigned to a hosted CLI inference lane.
 
     Settings are treated as untrusted runtime input. A missing, oversized, or
     malformed file fails closed to the local lane so a configuration accident
@@ -194,10 +194,20 @@ def cli_agent_roles(settings_path: Path) -> set[str]:
             and effort in CODEX_CLI_REASONING_EFFORTS
         ):
             enabled_codex_routes.add(f"codex-cli:{model}:{effort}")
+    enabled_hosted_routes = set(enabled_codex_routes)
+    if raw.get("hermes_agent_enabled") is True:
+        model = str(raw.get("hermes_agent_model") or "gpt-5.5").strip()
+        effort = str(raw.get("hermes_agent_reasoning_effort") or "medium").strip().lower()
+        if model in CODEX_CLI_MODEL_CATALOG and effort == "medium":
+            enabled_hosted_routes.add(f"hermes-agent:{model}:{effort}")
+    # The isolated OpenClaw adapter currently admits explicit ollama/ routes
+    # only. Those runs consume the serialized local GPU lane and must never be
+    # classified as hosted CLI work, even if an untrusted settings file names
+    # a different OpenClaw provider.
     cli_roles: set[str] = set()
     for role in AGENT_ROLES:
         route = str(routes.get(role) or "").strip()
-        if route.lower() in {"gpt-cli", "codex-cli"} or route in enabled_codex_routes:
+        if route.lower() in {"gpt-cli", "codex-cli"} or route in enabled_hosted_routes:
             cli_roles.add(role)
     return cli_roles
 
