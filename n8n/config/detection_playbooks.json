@@ -1,0 +1,73 @@
+{
+  "schema": "onion-sentinel-detection-playbooks-v1",
+  "version": 1,
+  "generated_at": "2026-07-24",
+  "playbooks": [
+    {
+      "id": "emerging-threats-bpfdoor-icmp-v1",
+      "version": 1,
+      "status": "deactivated-false-positive-risk",
+      "match": {
+        "ruleset": "Emerging Threats",
+        "sids": [
+          "2069172",
+          "2069173",
+          "2069174",
+          "2069175"
+        ],
+        "revisions": [
+          5
+        ]
+      },
+      "intent": "Identify BPFDoor ICMP shell or heartbeat traffic using the family-specific ICMP structure rather than a coincidental payload substring.",
+      "known_false_positive_risk": "Ordinary ping filler can contain X: by chance and set the shared ET.bpfdoor state bit; the signature family was deactivated pending false-positive-safe tuning.",
+      "required_predicates": [
+        {
+          "id": "bpfdoor-heartbeat-invalid-code",
+          "field": "icmp.code",
+          "operator": "equals",
+          "expected": 1,
+          "applies_to_sids": [
+            "2069174"
+          ],
+          "reason": "The BPFDoor heartbeat reply discriminator is the invalid ICMP code 1; ordinary echo replies use code 0."
+        }
+      ],
+      "supporting_predicates": [
+        {
+          "id": "bpfdoor-shell-sequence",
+          "field": "icmp.sequence",
+          "operator": "contains",
+          "expected": 1234,
+          "applies_to_sids": [
+            "2069172",
+            "2069173"
+          ],
+          "required": false,
+          "reason": "The documented BPFDoor ICMP shell uses the hardcoded sequence value 1234."
+        }
+      ],
+      "marker_predicates": [
+        {
+          "id": "bpfdoor-command-marker",
+          "hex": "583a",
+          "expected_offset": 16,
+          "applies_to_sids": [
+            "2069175"
+          ],
+          "required": false,
+          "reason": "A command marker must appear at the expected structural offset; X: at arbitrary offsets in random ping data is not sufficient."
+        }
+      ],
+      "confidence_limiters": [
+        "Do not attribute BPFDoor when the required heartbeat code is absent.",
+        "A coincidental X: byte pair at a variable payload offset is evidence against a stable command marker.",
+        "Endpoint process, persistence, binary, or BPF telemetry is required before a malicious attribution can be high confidence."
+      ],
+      "references": [
+        "https://community.emergingthreats.net/t/sig-bpfdoor-icmpshell-icmp-artifacts-from-rapid7-whitepaper/3271",
+        "https://www.rapid7.com/blog/post/tr-new-whitepaper-stealthy-bpfdoor-variants/"
+      ]
+    }
+  ]
+}

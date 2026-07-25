@@ -3,13 +3,15 @@
 
 This forced-command wrapper is intentionally not a general query proxy.  It
 accepts only exact observables and named evidence packs, builds Elasticsearch
-Query DSL locally, and records an equivalent KQL filter for analyst audit.
-Security Onion remains read-only and neither the caller nor an LLM can choose
-indices, fields, DSL, shell arguments, or result sizes.
+Query DSL locally, uses fixed per-pack indices, validates shard/hit metadata,
+and records an equivalent KQL filter for analyst audit. Security Onion remains
+read-only and neither the caller nor an LLM can choose indices, fields, DSL,
+shell arguments, or result sizes.
 """
 from __future__ import annotations
 
 import datetime as dt
+import fnmatch
 import hashlib
 import json
 import glob
@@ -29,24 +31,55 @@ OSQUERY_TIMEOUT_SECONDS = 20
 MAX_OSQUERY_OUTPUT_BYTES = 2 * 1024 * 1024
 MAX_OSQUERY_ROWS = 200
 SO_QUERY = Path("/usr/sbin/so-elasticsearch-query")
+QUERY_CONTRACT = "onion-sentinel-incident-evidence-v2"
+QUERY_PREFERENCE = "onion-sentinel-incident-evidence"
+ALERT_INDEX_SCOPE = [
+    "logs-suricata.alerts-so",
+    "logs-detections.alerts-so",
+]
 PACKS = {
     "alert_context": {
+        "indices": ALERT_INDEX_SCOPE,
         "datasets": ["suricata.alert"],
         "fields": ["@timestamp", "event.*", "rule.*", "source.*", "destination.*", "network.*", "message"],
     },
     "network_flow": {
+        "indices": [
+            "logs-zeek.connection-*",
+            "logs-endpoint.events.network-*",
+            *ALERT_INDEX_SCOPE,
+        ],
         "datasets": ["zeek.connection", "endpoint.events.network", "suricata.alert"],
         "fields": ["@timestamp", "event.*", "source.*", "destination.*", "network.*", "host.*", "process.*", "message"],
     },
     "dns_activity": {
+        "indices": [
+            "logs-zeek.dns-*",
+            "logs-endpoint.events.network-*",
+        ],
         "datasets": ["zeek.dns", "endpoint.events.network"],
         "fields": ["@timestamp", "event.*", "dns.*", "url.*", "source.*", "destination.*", "host.*", "process.*", "message"],
     },
     "osquery_history": {
+        "indices": [
+            "logs-endpoint.events.process-*",
+            "logs-endpoint.events.file-*",
+            "logs-endpoint.events.network-*",
+            "logs-osquery_manager.result-*",
+            "logs-osquery_manager.response-*",
+        ],
         "datasets": ["endpoint.events.process", "endpoint.events.file", "endpoint.events.network", "osquery_manager.result", "osquery_manager.response"],
         "fields": ["@timestamp", "event.*", "host.*", "user.*", "process.*", "file.*", "source.*", "destination.*", "message"],
     },
     "cross_sensor_timeline": {
+        "indices": [
+            *ALERT_INDEX_SCOPE,
+            "logs-zeek.connection-*",
+            "logs-zeek.dns-*",
+            "logs-endpoint.events.network-*",
+            "logs-endpoint.events.process-*",
+            "logs-endpoint.events.file-*",
+        ],
         "datasets": ["suricata.alert", "zeek.connection", "zeek.dns", "endpoint.events.network", "endpoint.events.process", "endpoint.events.file"],
         "fields": ["@timestamp", "event.*", "rule.*", "source.*", "destination.*", "network.*", "dns.*", "url.*", "host.*", "user.*", "process.*", "file.*", "message"],
     },
@@ -90,6 +123,7 @@ OBSERVABLE_FIELDS = {
     "users": ["user.id", "user.name"],
 }
 SAFE_VALUE = re.compile(r"^[A-Za-z0-9_.:@-]{1,255}$")
+SAFE_ELASTIC_ID = re.compile(r"^[A-Za-z0-9_.:@+=-]{1,512}$")
 
 
 def fail(message: str, code: int = 2) -> None:
@@ -124,7 +158,42 @@ def read_request() -> dict:
     return data
 
 
-def validated_request(data: dict) -> tuple[list[str], list[str], list[dict], dict[str, list[str]], int]:
+def index_matches_scope(index_name: str, index_scope: list[str]) -> bool:
+    """Return whether an Elasticsearch backing index belongs to a reviewed scope."""
+    return any(
+        fnmatch.fnmatchcase(index_name, pattern)
+        or fnmatch.fnmatchcase(index_name, f".ds-{pattern}-*")
+        for pattern in index_scope
+    )
+
+
+def validated_anchor(value: object) -> dict[str, str] | None:
+    """Validate the collector-owned representative alert identifier.
+
+    Missing anchors remain protocol-compatible with older collectors, but the
+    response can never be semantically valid or complete without one.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        fail("anchor must be an object")
+    index_name = str(value.get("index") or "").strip()
+    document_id = str(value.get("id") or "").strip()
+    if (
+        not index_name
+        or "*" in index_name
+        or "?" in index_name
+        or not index_matches_scope(index_name, ALERT_INDEX_SCOPE)
+    ):
+        fail("anchor index is not an allowlisted Security Onion alert index")
+    if not SAFE_ELASTIC_ID.fullmatch(document_id):
+        fail("anchor id is invalid")
+    return {"index": index_name, "id": document_id}
+
+
+def validated_request(
+    data: dict,
+) -> tuple[list[str], list[str], list[dict], dict[str, list[str]], int, dict[str, str] | None]:
     packs = data.get("packs") or list(PACKS)
     if not isinstance(packs, list) or not packs or len(packs) > len(PACKS):
         fail("packs must be a non-empty bounded list")
@@ -183,7 +252,8 @@ def validated_request(data: dict) -> tuple[list[str], list[str], list[dict], dic
         fail("size must be an integer")
     if size < 1 or size > MAX_HITS:
         fail(f"size must be between 1 and {MAX_HITS}")
-    return packs, osquery_packs, clean_windows, clean_observables, size
+    anchor = validated_anchor(data.get("anchor"))
+    return packs, osquery_packs, clean_windows, clean_observables, size, anchor
 
 
 def observable_clause(observables: dict[str, list[str]]) -> dict:
@@ -211,26 +281,104 @@ def kql_equivalent(window: dict, datasets: list[str], observables: dict[str, lis
     return f'@timestamp >= "{window["start"]}" and @timestamp <= "{window["end"]}" and ({dataset}) and (' + " or ".join(obs) + ")"
 
 
-def execute_pack(pack_name: str, window: dict, observables: dict[str, list[str]], size: int) -> dict:
-    pack = PACKS[pack_name]
-    body = {
-        "size": size,
-        "track_total_hits": True,
-        "timeout": "30s",
-        "sort": [{"@timestamp": {"order": "asc", "unmapped_type": "date"}}, {"_id": "asc"}],
-        "_source": pack["fields"],
-        "query": {"bool": {"filter": [
-            {"range": {"@timestamp": {"gte": window["start"], "lte": window["end"]}}},
-            dataset_clause(pack["datasets"]),
-            observable_clause(observables),
-        ]}},
+def query_endpoint(index_scope: list[str]) -> str:
+    indices = ",".join(index_scope)
+    return (
+        f"{indices}/_search"
+        f"?ignore_unavailable=true&expand_wildcards=open&preference={QUERY_PREFERENCE}"
+    )
+
+
+def canonical_digest(value: object) -> str:
+    encoded = json.dumps(value, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def search_audit(body: dict, index_scope: list[str]) -> dict:
+    endpoint = query_endpoint(index_scope)
+    return {
+        "query_digest": canonical_digest(body),
+        "execution_digest": canonical_digest({
+            "index_scope": index_scope,
+            "query_endpoint": endpoint,
+            "query_dsl": body,
+        }),
+        "query_dsl": body,
+        "index_scope": list(index_scope),
+        "query_endpoint": endpoint,
     }
+
+
+def bounded_error(value: object) -> str:
+    if isinstance(value, str):
+        return value[:1000]
+    try:
+        return json.dumps(value, separators=(",", ":"), sort_keys=True)[:1000]
+    except (TypeError, ValueError):
+        return str(value)[:1000]
+
+
+def empty_search_result(body: dict, index_scope: list[str], status: str, duration_ms: int, **extra) -> dict:
+    return {
+        **search_audit(body, index_scope),
+        "status": status,
+        "semantic_valid": False,
+        "total_hits": 0,
+        "total_hits_relation": "eq",
+        "returned_hits": 0,
+        "truncated": False,
+        "duration_ms": duration_ms,
+        "timed_out": status == "timeout",
+        "took_ms": 0,
+        "shards": {
+            "total": 0,
+            "successful": 0,
+            "skipped": 0,
+            "failed": 0,
+            "failures": [],
+        },
+        "hits": [],
+        **extra,
+    }
+
+
+def parse_shards(value: object) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError("Elasticsearch response is missing _shards metadata")
+    parsed = {}
+    for field in ("total", "successful", "failed"):
+        item = value.get(field)
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            raise ValueError(f"Elasticsearch _shards.{field} is invalid")
+        parsed[field] = item
+    skipped = value.get("skipped", 0)
+    if isinstance(skipped, bool) or not isinstance(skipped, int) or skipped < 0:
+        raise ValueError("Elasticsearch _shards.skipped is invalid")
+    if parsed["failed"] > parsed["total"] or parsed["successful"] > parsed["total"]:
+        raise ValueError("Elasticsearch shard counts are inconsistent")
+    failures = value.get("failures") or []
+    if not isinstance(failures, list):
+        raise ValueError("Elasticsearch _shards.failures is invalid")
+    parsed["skipped"] = skipped
+    parsed["failures"] = [
+        {
+            "index": str(item.get("index") or "")[:255],
+            "type": str(((item.get("reason") or {}).get("type") if isinstance(item.get("reason"), dict) else "") or "")[:255],
+            "reason": str(((item.get("reason") or {}).get("reason") if isinstance(item.get("reason"), dict) else item.get("reason")) or "")[:1000],
+        }
+        for item in failures[:20]
+        if isinstance(item, dict)
+    ]
+    return parsed
+
+
+def execute_search(body: dict, index_scope: list[str]) -> dict:
+    audit = search_audit(body, index_scope)
     encoded = json.dumps(body, separators=(",", ":"), sort_keys=True)
-    digest = hashlib.sha256(encoded.encode()).hexdigest()
     started = time.monotonic()
     try:
         proc = subprocess.run(
-            [str(SO_QUERY), "/_search", "-d", encoded],
+            [str(SO_QUERY), audit["query_endpoint"], "-d", encoded],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -238,26 +386,306 @@ def execute_pack(pack_name: str, window: dict, observables: dict[str, list[str]]
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return {"pack": pack_name, "status": "timeout", "query_digest": digest, "query_dsl": body, "hits": [], "duration_ms": QUERY_TIMEOUT_SECONDS * 1000}
+        return empty_search_result(
+            body,
+            index_scope,
+            "timeout",
+            QUERY_TIMEOUT_SECONDS * 1000,
+            error="Elasticsearch query exceeded the wrapper timeout",
+        )
     duration_ms = round((time.monotonic() - started) * 1000)
     if len(proc.stdout) > MAX_OUTPUT_BYTES:
-        return {"pack": pack_name, "status": "output_limit", "query_digest": digest, "query_dsl": body, "hits": [], "duration_ms": duration_ms}
+        return empty_search_result(
+            body,
+            index_scope,
+            "output_limit",
+            duration_ms,
+            error="Elasticsearch response exceeded the wrapper output limit",
+        )
     if proc.returncode != 0:
         error = proc.stderr.decode("utf-8", "replace")[:1000]
-        return {"pack": pack_name, "status": "error", "query_digest": digest, "query_dsl": body, "hits": [], "duration_ms": duration_ms, "error": error}
+        return empty_search_result(body, index_scope, "error", duration_ms, error=error)
     try:
         parsed = json.loads(proc.stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return {"pack": pack_name, "status": "invalid_response", "query_digest": digest, "query_dsl": body, "hits": [], "duration_ms": duration_ms, "error": str(exc)}
-    raw_hits = ((parsed.get("hits") or {}).get("hits") or []) if isinstance(parsed, dict) else []
+        return empty_search_result(body, index_scope, "invalid_response", duration_ms, error=str(exc))
+    if not isinstance(parsed, dict):
+        return empty_search_result(
+            body,
+            index_scope,
+            "invalid_response",
+            duration_ms,
+            error="Elasticsearch response root must be an object",
+        )
+    if parsed.get("error") is not None:
+        return empty_search_result(
+            body,
+            index_scope,
+            "error",
+            duration_ms,
+            error=bounded_error(parsed.get("error")),
+        )
+    try:
+        shards = parse_shards(parsed.get("_shards"))
+    except ValueError as exc:
+        return empty_search_result(body, index_scope, "invalid_response", duration_ms, error=str(exc))
+    timed_out = parsed.get("timed_out")
+    if not isinstance(timed_out, bool):
+        return empty_search_result(
+            body,
+            index_scope,
+            "invalid_response",
+            duration_ms,
+            shards=shards,
+            error="Elasticsearch timed_out flag is missing or invalid",
+        )
+    took_ms = parsed.get("took")
+    if isinstance(took_ms, bool) or not isinstance(took_ms, int) or took_ms < 0:
+        return empty_search_result(
+            body,
+            index_scope,
+            "invalid_response",
+            duration_ms,
+            timed_out=timed_out,
+            shards=shards,
+            error="Elasticsearch took value is missing or invalid",
+        )
+    if timed_out:
+        return empty_search_result(
+            body,
+            index_scope,
+            "timeout",
+            duration_ms,
+            timed_out=True,
+            took_ms=took_ms,
+            shards=shards,
+            error="Elasticsearch reported a timed-out partial response",
+        )
+    if shards["failed"]:
+        return empty_search_result(
+            body,
+            index_scope,
+            "error",
+            duration_ms,
+            took_ms=took_ms,
+            shards=shards,
+            error=f"Elasticsearch returned {shards['failed']} failed shard(s)",
+        )
+    if shards["total"] == 0 or shards["successful"] == 0:
+        return empty_search_result(
+            body,
+            index_scope,
+            "invalid_response",
+            duration_ms,
+            took_ms=took_ms,
+            shards=shards,
+            error="Elasticsearch query matched no searchable shards in its reviewed index scope",
+        )
+    hits_root = parsed.get("hits")
+    if not isinstance(hits_root, dict) or not isinstance(hits_root.get("hits"), list):
+        return empty_search_result(
+            body,
+            index_scope,
+            "invalid_response",
+            duration_ms,
+            took_ms=took_ms,
+            shards=shards,
+            error="Elasticsearch hits.hits must be an array",
+        )
+    raw_hits = hits_root["hits"]
+    requested_size = body.get("size")
+    if (
+        isinstance(requested_size, bool)
+        or not isinstance(requested_size, int)
+        or requested_size < 0
+        or len(raw_hits) > requested_size
+    ):
+        return empty_search_result(
+            body,
+            index_scope,
+            "invalid_response",
+            duration_ms,
+            took_ms=took_ms,
+            shards=shards,
+            error="Elasticsearch returned more hits than the reviewed request size",
+        )
     hits = []
-    for hit in raw_hits[:size]:
-        if isinstance(hit, dict):
-            hits.append({"id": str(hit.get("_id") or ""), "index": str(hit.get("_index") or ""), "source": hit.get("_source") if isinstance(hit.get("_source"), dict) else {}})
-    total = (parsed.get("hits") or {}).get("total", 0) if isinstance(parsed, dict) else 0
+    for hit in raw_hits:
+        if not isinstance(hit, dict):
+            return empty_search_result(
+                body,
+                index_scope,
+                "invalid_response",
+                duration_ms,
+                took_ms=took_ms,
+                shards=shards,
+                error="Elasticsearch hit entries must be objects",
+            )
+        document_id = str(hit.get("_id") or "")
+        index_name = str(hit.get("_index") or "")
+        source = hit.get("_source")
+        if (
+            not document_id
+            or not index_name
+            or not isinstance(source, dict)
+            or not index_matches_scope(index_name, index_scope)
+        ):
+            return empty_search_result(
+                body,
+                index_scope,
+                "invalid_response",
+                duration_ms,
+                took_ms=took_ms,
+                shards=shards,
+                error=f"Elasticsearch returned an invalid or out-of-scope hit index: {index_name[:255]}",
+            )
+        hits.append({"id": document_id, "index": index_name, "source": source})
+    total = hits_root.get("total")
+    relation = "eq"
     if isinstance(total, dict):
-        total = total.get("value", 0)
-    return {"pack": pack_name, "status": "ok", "query_digest": digest, "query_dsl": body, "total_hits": int(total or 0), "returned_hits": len(hits), "truncated": int(total or 0) > len(hits), "duration_ms": duration_ms, "hits": hits}
+        relation = total.get("relation")
+        total = total.get("value")
+    if (
+        isinstance(total, bool)
+        or not isinstance(total, int)
+        or total < len(hits)
+        or relation not in {"eq", "gte"}
+    ):
+        return empty_search_result(
+            body,
+            index_scope,
+            "invalid_response",
+            duration_ms,
+            took_ms=took_ms,
+            shards=shards,
+            error="Elasticsearch hits.total metadata is invalid",
+        )
+    return {
+        **audit,
+        "status": "ok",
+        "semantic_valid": True,
+        "total_hits": total,
+        "total_hits_relation": relation,
+        "returned_hits": len(hits),
+        "truncated": relation != "eq" or total > len(hits),
+        "duration_ms": duration_ms,
+        "timed_out": False,
+        "took_ms": took_ms,
+        "shards": shards,
+        "hits": hits,
+    }
+
+
+def execute_pack(pack_name: str, window: dict, observables: dict[str, list[str]], size: int) -> dict:
+    pack = PACKS[pack_name]
+    body = {
+        "size": size,
+        "track_total_hits": True,
+        "timeout": "30s",
+        "sort": [{"@timestamp": {"order": "asc", "unmapped_type": "date"}}, "_shard_doc"],
+        "_source": pack["fields"],
+        "query": {"bool": {"filter": [
+            {"range": {"@timestamp": {"gte": window["start"], "lte": window["end"]}}},
+            dataset_clause(pack["datasets"]),
+            observable_clause(observables),
+        ]}},
+    }
+    return {"pack": pack_name, **execute_search(body, pack["indices"])}
+
+
+def execute_controls(anchor: dict[str, str] | None) -> dict:
+    if anchor is None:
+        missing = {
+            "status": "not_requested",
+            "passed": False,
+            "semantic_valid": False,
+            "error": "A representative Security Onion alert anchor was not supplied",
+        }
+        return {
+            "anchor": None,
+            "positive_anchor": dict(missing),
+            "negative_filter": dict(missing),
+        }
+
+    positive_body = {
+        "size": 1,
+        "track_total_hits": True,
+        "timeout": "30s",
+        "_source": ["@timestamp", "event.dataset"],
+        "query": {"ids": {"values": [anchor["id"]]}},
+    }
+    positive = execute_search(positive_body, ALERT_INDEX_SCOPE)
+    exact_hits = [
+        item for item in positive.get("hits", [])
+        if item.get("id") == anchor["id"] and item.get("index") == anchor["index"]
+    ]
+    positive["passed"] = (
+        positive.get("status") == "ok"
+        and positive.get("total_hits_relation") == "eq"
+        and positive.get("total_hits") == 1
+        and len(exact_hits) == 1
+    )
+    if positive.get("status") == "ok" and not positive["passed"]:
+        positive["error"] = "The exact representative alert anchor was not returned exactly once"
+
+    # An intentionally contradictory query proves that the endpoint applied
+    # the supplied filters rather than replaying or substituting the positive
+    # control response.
+    negative_body = {
+        "size": 1,
+        "track_total_hits": True,
+        "timeout": "30s",
+        "_source": ["@timestamp", "event.dataset"],
+        "query": {
+            "bool": {
+                "filter": [{"ids": {"values": [anchor["id"]]}}],
+                "must_not": [{"ids": {"values": [anchor["id"]]}}],
+            },
+        },
+    }
+    negative = execute_search(negative_body, ALERT_INDEX_SCOPE)
+    negative["passed"] = (
+        negative.get("status") == "ok"
+        and negative.get("total_hits_relation") == "eq"
+        and negative.get("total_hits") == 0
+        and negative.get("returned_hits") == 0
+    )
+    if negative.get("status") == "ok" and not negative["passed"]:
+        negative["error"] = "The contradictory negative control unexpectedly returned hits"
+    return {
+        "anchor": anchor,
+        "positive_anchor": positive,
+        "negative_filter": negative,
+    }
+
+
+def semantic_validity(results: list[dict], osquery_results: list[dict], controls: dict) -> dict:
+    query_execution_valid = all(
+        result.get("status") == "ok" and result.get("semantic_valid") is True
+        for result in results
+    )
+    osquery_valid = all(result.get("status") == "ok" for result in osquery_results)
+    controls_valid = all(
+        (controls.get(name) or {}).get("passed") is True
+        for name in ("positive_anchor", "negative_filter")
+    )
+    coverage_valid = query_execution_valid and osquery_valid
+    semantic_valid = controls_valid and coverage_valid
+    reasons = []
+    if not controls_valid:
+        reasons.append("representative alert controls did not both pass")
+    if not query_execution_valid:
+        reasons.append("one or more Elasticsearch packs failed semantic validation")
+    if not osquery_valid:
+        reasons.append("one or more fixed local OSquery packs failed")
+    return {
+        "transport_valid": True,
+        "controls_valid": controls_valid,
+        "query_execution_valid": query_execution_valid,
+        "coverage_valid": coverage_valid,
+        "semantic_valid": semantic_valid,
+        "reasons": reasons,
+    }
 
 
 def osquery_binary() -> Path | None:
@@ -368,7 +796,7 @@ def main() -> int:
     binary = osquery_binary()
     if binary is None:
         fail("managed Elastic Agent osqueryd is unavailable", 3)
-    packs, osquery_packs, windows, observables, size = validated_request(read_request())
+    packs, osquery_packs, windows, observables, size, anchor = validated_request(read_request())
     results = []
     for window_index, window in enumerate(windows):
         for pack_name in packs:
@@ -383,7 +811,9 @@ def main() -> int:
         execute_osquery_pack(binary, pack_name)
         for pack_name in osquery_packs
     ]
-    complete = all(result["status"] == "ok" for result in [*results, *osquery_results])
+    controls = execute_controls(anchor)
+    validity = semantic_validity(results, osquery_results, controls)
+    complete = validity["semantic_valid"]
     response = {
         # A failed evidence pack is an explicit investigative gap, not a
         # transport failure. Returning a successful protocol response lets the
@@ -392,11 +822,13 @@ def main() -> int:
         "complete": complete,
         "partial": not complete,
         "read_only": True,
-        "query_contract": "onion-sentinel-incident-evidence-v2",
+        "query_contract": QUERY_CONTRACT,
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "observables": observables,
         "results": results,
         "osquery_results": osquery_results,
+        "controls": controls,
+        "semantic_validity": validity,
     }
     output = json.dumps(response, separators=(",", ":"), sort_keys=True).encode()
     if len(output) > MAX_OUTPUT_BYTES:

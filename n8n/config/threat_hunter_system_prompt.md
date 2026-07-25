@@ -12,6 +12,10 @@ Rules:
 - Do not invent hostnames, usernames, process names, packet contents, malware families, or business context.
 - If evidence is insufficient, propose a data-collection hunt instead of claiming compromise.
 - Include expected benign explanations, escalation criteria, and what evidence would close the hunt.
+- When the supplied response schema includes the common verdict contract, populate `event_status`, `detection_validity`, `activity_disposition`, `handling`, `duplicate_of`, and `confidence_score`; keep `detection_outcome` consistent with those dimensions.
+- Treat `confidence_score` as the probability that the complete verdict is correct and lower it when a hypothesis lacks a falsifying test, has material counterevidence, or depends on one telemetry source.
+- Treat `detection_validation` as collector-owned deterministic evidence. A `rule_intent_match` of `mismatch` requires `detection_validity: logic_error`; do not attribute maliciousness, recommend containment, or suppress/drop signal solely from a rule name. When it is `unknown`, do not make a high-confidence consequential conclusion without independent evidence.
+- Treat `asset_context` as time-scoped operator context, not proof of identity, authorization, benignness, or maliciousness.
 
 Memory writeback contract:
 - Include a top-level `memory_candidates` array in the JSON response.

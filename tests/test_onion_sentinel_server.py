@@ -48,7 +48,9 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertTrue(server.is_soc_get_api("/api/soc-alerts"))
         self.assertTrue(server.is_soc_get_api("/api/soc-incidents"))
         self.assertTrue(server.is_soc_get_api("/api/soc-incidents/ir-example/detail"))
+        self.assertTrue(server.is_soc_get_api("/api/soc-incidents/ir-example/adjudications"))
         self.assertTrue(server.is_soc_get_api("/api/soc-alerts/example/detail"))
+        self.assertTrue(server.is_soc_get_api("/api/soc-alerts/example/adjudications"))
         self.assertTrue(server.is_soc_get_api("/api/soc-settings/agent-memory"))
         self.assertFalse(server.is_soc_get_api("/api/reports"))
         self.assertFalse(server.is_soc_get_api("/api/resource-library/favorites"))
@@ -57,11 +59,63 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertTrue(server.is_soc_post_api("/api/soc-alerts/example/analyze"))
         self.assertTrue(server.is_soc_post_api("/api/soc-alerts/example/pcap"))
         self.assertTrue(server.is_soc_post_api("/api/soc-alerts/example/escalate"))
+        self.assertTrue(server.is_soc_post_api("/api/soc-alerts/example/adjudicate"))
+        self.assertTrue(server.is_soc_post_api("/api/soc-incidents/ir-example/adjudicate"))
+        self.assertTrue(server.is_soc_post_api("/api/soc-incidents/ir-example/status"))
         self.assertTrue(server.is_soc_post_api("/api/soc-settings/agent-model"))
         self.assertTrue(server.is_soc_post_api("/api/soc-settings/ai-model"))
         self.assertFalse(server.is_soc_post_api("/api/resource-library/remove"))
         self.assertFalse(server.is_soc_post_api("/api/admin/start-service"))
         self.assertFalse(server.is_soc_post_api("/admin/action"))
+
+    def test_dynamic_soc_routes_require_one_exact_resource_segment(self):
+        allowed_get = (
+            "/api/soc-alerts/0123456789ab",
+            "/api/soc-alerts/0123456789ab/detail",
+            "/api/soc-alerts/0123456789ab/adjudications",
+            "/api/soc-incidents/ir-example/detail",
+            "/api/soc-incidents/ir-example/adjudications",
+        )
+        allowed_post = (
+            "/api/soc-alerts/0123456789ab/ack",
+            "/api/soc-alerts/0123456789ab/analyze",
+            "/api/soc-alerts/0123456789ab/pcap",
+            "/api/soc-alerts/0123456789ab/escalate",
+            "/api/soc-alerts/0123456789ab/adjudicate",
+            "/api/soc-incidents/ir-example/adjudicate",
+            "/api/soc-incidents/ir-example/status",
+        )
+        for route in allowed_get:
+            self.assertTrue(server.is_soc_get_api(route), route)
+        for route in allowed_post:
+            self.assertTrue(server.is_soc_post_api(route), route)
+
+        wrong_method = (
+            "/api/soc-alerts/0123456789ab/adjudicate",
+            "/api/soc-incidents/ir-example/status",
+        )
+        for route in wrong_method:
+            self.assertFalse(server.is_soc_get_api(route), route)
+        self.assertFalse(
+            server.is_soc_post_api("/api/soc-alerts/0123456789ab/adjudications")
+        )
+        self.assertFalse(
+            server.is_soc_post_api("/api/soc-incidents/ir-example/adjudications")
+        )
+
+        malformed = (
+            "/api/soc-alerts//adjudicate",
+            "/api/soc-alerts/0123456789ab/nested/adjudicate",
+            "/api/soc-alerts/0123456789ab%2Fnested/adjudicate",
+            "/api/soc-alerts/0123456789ab/unknown",
+            "/api/soc-incidents//adjudications",
+            "/api/soc-incidents/not-a-case/adjudications",
+            "/api/soc-incidents/ir-example/nested/adjudications",
+            "/api/soc-incidents/ir-example%2Fnested/adjudications",
+        )
+        for route in malformed:
+            self.assertFalse(server.is_soc_get_api(route), route)
+            self.assertFalse(server.is_soc_post_api(route), route)
 
     def test_dedicated_settings_bypass_does_not_replace_admin_auth(self):
         class NoAdminSession:

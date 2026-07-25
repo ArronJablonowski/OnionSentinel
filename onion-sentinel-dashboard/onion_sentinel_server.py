@@ -12,6 +12,7 @@ import html
 import json
 import mimetypes
 import os
+import re
 import shutil
 from http import HTTPStatus
 from pathlib import Path
@@ -45,7 +46,12 @@ POST_API_ROUTES = {
     "/api/soc-settings/agent-model",
     "/api/soc-settings/ai-model",
 } | set(runtime.SOC_SETTINGS_PROMPT_API_PATHS)
-POST_ALERT_SUFFIXES = ("/ack", "/analyze", "/pcap", "/escalate")
+ALERT_GET_SUFFIXES = ("/detail", "/adjudications")
+ALERT_POST_SUFFIXES = ("/ack", "/analyze", "/pcap", "/escalate", "/adjudicate")
+INCIDENT_GET_SUFFIXES = ("/detail", "/adjudications")
+INCIDENT_POST_SUFFIXES = ("/adjudicate", "/status")
+ALERT_ROUTE_ID_PATTERN = re.compile(r"[A-Za-z0-9._:@=-]{1,256}")
+INCIDENT_ROUTE_ID_PATTERN = re.compile(r"ir-[a-z0-9_-]{1,64}", re.IGNORECASE)
 
 
 def configure_runtime_paths(dashboard_root: Path) -> None:
@@ -70,18 +76,86 @@ def configure_runtime_paths(dashboard_root: Path) -> None:
     runtime.ADMIN_SESSION_COOKIE = "onion_sentinel_admin"
 
 
+def _dynamic_route_identifier(path: str, prefix: str, suffix: str = "") -> str | None:
+    """Return one decoded resource identifier only for an exact dynamic route."""
+    if not path.startswith(prefix):
+        return None
+    remainder = path[len(prefix):]
+    if suffix:
+        if not remainder.endswith(suffix):
+            return None
+        remainder = remainder[:-len(suffix)]
+    if not remainder or "/" in remainder:
+        return None
+    identifier = unquote(remainder)
+    if not identifier or "/" in identifier or "\\" in identifier:
+        return None
+    return identifier
+
+
+def _matches_dynamic_route(
+    path: str,
+    prefix: str,
+    suffix: str,
+    identifier_pattern: re.Pattern[str],
+) -> bool:
+    identifier = _dynamic_route_identifier(path, prefix, suffix)
+    return identifier is not None and identifier_pattern.fullmatch(identifier) is not None
+
+
 def is_soc_get_api(path: str) -> bool:
     if path in GET_API_ROUTES:
         return True
-    if path.startswith("/api/soc-incidents/") and path.endswith("/detail"):
+    if any(
+        _matches_dynamic_route(
+            path,
+            "/api/soc-incidents/",
+            suffix,
+            INCIDENT_ROUTE_ID_PATTERN,
+        )
+        for suffix in INCIDENT_GET_SUFFIXES
+    ):
         return True
-    return path.startswith("/api/soc-alerts/") and not path.endswith(POST_ALERT_SUFFIXES)
+    if any(
+        _matches_dynamic_route(
+            path,
+            "/api/soc-alerts/",
+            suffix,
+            ALERT_ROUTE_ID_PATTERN,
+        )
+        for suffix in ALERT_GET_SUFFIXES
+    ):
+        return True
+    return _matches_dynamic_route(
+        path,
+        "/api/soc-alerts/",
+        "",
+        ALERT_ROUTE_ID_PATTERN,
+    )
 
 
 def is_soc_post_api(path: str) -> bool:
     if path in POST_API_ROUTES:
         return True
-    return path.startswith("/api/soc-alerts/") and path.endswith(POST_ALERT_SUFFIXES)
+    if any(
+        _matches_dynamic_route(
+            path,
+            "/api/soc-alerts/",
+            suffix,
+            ALERT_ROUTE_ID_PATTERN,
+        )
+        for suffix in ALERT_POST_SUFFIXES
+    ):
+        return True
+    return any(
+        _matches_dynamic_route(
+            path,
+            "/api/soc-incidents/",
+            suffix,
+            INCIDENT_ROUTE_ID_PATTERN,
+        )
+        for suffix in INCIDENT_POST_SUFFIXES
+    )
 
 
 def is_same_origin_json_request(headers: object) -> tuple[bool, int, str]:

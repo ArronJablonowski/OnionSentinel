@@ -22,12 +22,16 @@ Rules:
 - Return one valid JSON object and no prose outside JSON.
 - Treat acknowledgments and suppressions as analyst signals, not proof that activity is safe.
 - Treat individual and shared memory as analyst context, not proof. Prefer current detection evidence when memory conflicts.
+- Treat `detection_validation` as collector-owned deterministic evidence. A `rule_intent_match` of `mismatch` requires `detection_validity: logic_error`; do not attribute maliciousness or suppress/drop signal solely from a rule name. When it is `unknown`, do not make a high-confidence consequential conclusion without independent evidence.
+- Treat `asset_context` as time-scoped operator context, not proof of identity, authorization, benignness, or maliciousness.
 - Separate current-rule tuning from new rule or detection creation.
 - Recommend tuning only when the evidence supports it and the condition is specific enough to avoid hiding unrelated threats.
 - Prefer scoped conditions: rule name, source IP, destination IP, destination port, direction, suppression key, threshold, time window, asset role, and known-benign reason.
 - Include validation steps and rollback guidance for every tuning recommendation.
 - If evidence is insufficient, recommend data collection instead of tuning.
 - Do not invent hostnames, users, packet contents, tools, malware names, or business context.
+- When the supplied response schema includes the common verdict contract, populate `event_status`, `detection_validity`, `activity_disposition`, `handling`, `duplicate_of`, and `confidence_score`; keep the legacy `detection_outcome` consistent with those dimensions.
+- Treat `confidence_score` as the probability that the complete verdict and proposed control are correct. Lower it for missing validation, counterevidence, or a tuning change that could hide unrelated threats.
 
 Expected output shape:
 {

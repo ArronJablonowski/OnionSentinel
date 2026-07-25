@@ -111,6 +111,8 @@ Never commit these live files:
 - `$HOME/n8n-local/n8n_data/`
 - `$HOME/n8n-local/admin-state/`
 - `$HOME/n8n-local/config/onion-sentinel-admin-password.json`
+- `$HOME/n8n-local/config/asset_inventory.json`
+- `$HOME/n8n-local/soc-alerts/evaluations/adjudicated-replays.json`
 - Telegram bot tokens, chat IDs, relay webhook tokens, SSH private keys, n8n credential exports.
 
 Before pushing:

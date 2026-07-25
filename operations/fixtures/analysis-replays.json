@@ -1,0 +1,293 @@
+{
+  "schema": "onion-sentinel-analysis-replays-v1",
+  "version": 1,
+  "suite_name": "core-production-shaped-regressions",
+  "prompt_defaults": {
+    "package_type": "soc-ai-investigation-prompt",
+    "agent_role": "soc-analyst",
+    "alert": {
+      "alert_id": "synthetic-replay",
+      "triage_level": "high"
+    },
+    "pcap_evidence": {
+      "parsed_evidence": []
+    },
+    "asset_context": {
+      "inventory_status": "loaded",
+      "matched_assets": [],
+      "conflicts": []
+    }
+  },
+  "response_defaults": {
+    "bluf": "Replay fixture verdict.",
+    "summary": "Recorded production-shaped response used for offline regression evaluation.",
+    "likely_meaning": "The disposition follows the supplied replay evidence.",
+    "severity_reasoning": "Severity is evaluated independently from signature validity.",
+    "alert_frequency_assessment": "Frequency does not change the deterministic signature result.",
+    "public_enrichment_findings": [],
+    "pcap_analysis_findings": [],
+    "false_positive_possibilities": [],
+    "recommended_next_steps": [
+      "Validate the decisive evidence discriminator."
+    ],
+    "evidence_used": [
+      "deterministic-validation"
+    ],
+    "evidence_gaps": [],
+    "confidence": "high",
+    "confidence_score": 0.9,
+    "escalation_needed": false,
+    "hosted_second_opinion_recommended": false,
+    "second_opinion_recommended": false,
+    "second_opinion_reason": "",
+    "tuning_recommendation": "none",
+    "tuning_reason": "No automated tuning is authorized by this replay.",
+    "recommended_tuning_actions": [],
+    "correlation_assessment": {
+      "correlation_found": false,
+      "confidence": "low",
+      "related_groups": [],
+      "shared_evidence": [],
+      "contradicting_evidence": [],
+      "attack_chain_hypothesis": "",
+      "recommended_pivots": []
+    },
+    "memory_candidates": []
+  },
+  "cases": [
+    {
+      "case_id": "bpfdoor-heartbeat-rule-logic-false-positive",
+      "label_source": "deterministic_fixture",
+      "label_provenance": "ET BPFDoor heartbeat code discriminator and marker-offset regression fixture",
+      "allowed_evidence_refs": [
+        "deterministic-validation"
+      ],
+      "expected": {
+        "event_status": "observed",
+        "detection_validity": "logic_error",
+        "activity_disposition": "unknown",
+        "handling": "investigate",
+        "duplicate_of": null,
+        "detection_outcome": "false_positive_logic_rule"
+      },
+      "detection_validation_fixture": {
+        "sid": "2069174",
+        "revision": 5,
+        "ruleset": "Emerging Threats",
+        "name": "ET MALWARE BPFDoor ICMP Echo Reply, Heartbeat (Outbound)",
+        "rule": "alert icmp $HOME_NET any -> any any (msg:\"ET MALWARE BPFDoor ICMP Echo Reply, Heartbeat (Outbound)\"; xbits:isset,ET.bpfdoor,track ip_src; itype:0; sid:2069174; rev:5;)",
+        "packets": [
+          {
+            "linktype": 1,
+            "packet_base64": "lp6uwP5rkOx3iQlUCABFAABcAAEAAEABAADAAAIpwAACKgAAAACOSQACQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQQ=="
+          }
+        ]
+      },
+      "prompt_package": {},
+      "primary_response": {
+        "detection_outcome": "true_positive_malicious",
+        "event_status": "observed",
+        "detection_validity": "matched_intent",
+        "activity_disposition": "malicious",
+        "handling": "contain",
+        "duplicate_of": null,
+        "confidence_score": 0.99,
+        "escalation_needed": true,
+        "tuning_recommendation": "drop",
+        "tuning_reason": "Alarmist recorded response that the deterministic guard must correct."
+      },
+      "reviewer_response": {
+        "detection_outcome": "false_positive_logic_rule",
+        "event_status": "observed",
+        "detection_validity": "logic_error",
+        "activity_disposition": "unknown",
+        "handling": "investigate",
+        "duplicate_of": null,
+        "confidence": "medium",
+        "confidence_score": 0.72
+      }
+    },
+    {
+      "case_id": "validated-malicious-detection",
+      "label_source": "synthetic_control",
+      "label_provenance": "Positive control with matched rule intent and corroborated endpoint evidence",
+      "allowed_evidence_refs": [
+        "deterministic-validation",
+        "endpoint-process-evidence"
+      ],
+      "expected": {
+        "event_status": "observed",
+        "detection_validity": "matched_intent",
+        "activity_disposition": "malicious",
+        "handling": "contain",
+        "duplicate_of": null,
+        "detection_outcome": "true_positive_malicious"
+      },
+      "prompt_package": {
+        "detection_validation": {
+          "schema": "onion-sentinel-detection-validation-v1",
+          "event_status": "observed",
+          "event_observed": true,
+          "rule_intent_match": "match",
+          "predicate_results": [
+            {
+              "id": "positive-control",
+              "status": "matched",
+              "required": true,
+              "source": "playbook"
+            }
+          ],
+          "rule_drift": {
+            "detected": false,
+            "missing_installed_constraints": []
+          }
+        }
+      },
+      "primary_response": {
+        "detection_outcome": "true_positive_malicious",
+        "event_status": "observed",
+        "detection_validity": "matched_intent",
+        "activity_disposition": "malicious",
+        "handling": "contain",
+        "duplicate_of": null,
+        "evidence_used": [
+          "deterministic-validation",
+          "endpoint-process-evidence"
+        ],
+        "confidence_score": 0.91,
+        "escalation_needed": true
+      }
+    },
+    {
+      "case_id": "validated-authorized-service",
+      "label_source": "synthetic_control",
+      "label_provenance": "Positive signature match with separate operator authorization evidence",
+      "allowed_evidence_refs": [
+        "deterministic-validation",
+        "change-record"
+      ],
+      "expected": {
+        "event_status": "observed",
+        "detection_validity": "matched_intent",
+        "activity_disposition": "authorized_benign",
+        "handling": "no_action",
+        "duplicate_of": null,
+        "detection_outcome": "true_positive_authorized_benign"
+      },
+      "prompt_package": {
+        "detection_validation": {
+          "schema": "onion-sentinel-detection-validation-v1",
+          "event_status": "observed",
+          "event_observed": true,
+          "rule_intent_match": "match",
+          "predicate_results": [],
+          "rule_drift": {
+            "detected": false,
+            "missing_installed_constraints": []
+          }
+        }
+      },
+      "primary_response": {
+        "detection_outcome": "true_positive_authorized_benign",
+        "event_status": "observed",
+        "detection_validity": "matched_intent",
+        "activity_disposition": "authorized_benign",
+        "handling": "no_action",
+        "duplicate_of": null,
+        "evidence_used": [
+          "deterministic-validation",
+          "change-record"
+        ],
+        "confidence_score": 0.88
+      }
+    },
+    {
+      "case_id": "known-detection-miss",
+      "label_source": "synthetic_control",
+      "label_provenance": "Malicious endpoint behavior outside the applicable detection",
+      "allowed_evidence_refs": [
+        "endpoint-process-evidence",
+        "detection-coverage-gap"
+      ],
+      "expected": {
+        "event_status": "observed",
+        "detection_validity": "not_applicable",
+        "activity_disposition": "malicious",
+        "handling": "escalate",
+        "duplicate_of": null,
+        "detection_outcome": "false_negative"
+      },
+      "prompt_package": {
+        "detection_validation": {
+          "schema": "onion-sentinel-detection-validation-v1",
+          "event_status": "unknown",
+          "event_observed": null,
+          "rule_intent_match": "unknown",
+          "predicate_results": [],
+          "rule_drift": {
+            "detected": false,
+            "missing_installed_constraints": []
+          }
+        }
+      },
+      "primary_response": {
+        "detection_outcome": "false_negative",
+        "event_status": "observed",
+        "detection_validity": "not_applicable",
+        "activity_disposition": "malicious",
+        "handling": "escalate",
+        "duplicate_of": null,
+        "evidence_used": [
+          "endpoint-process-evidence",
+          "detection-coverage-gap"
+        ],
+        "confidence_score": 0.86,
+        "escalation_needed": true
+      }
+    },
+    {
+      "case_id": "insufficient-evidence-remains-inconclusive",
+      "label_source": "synthetic_control",
+      "label_provenance": "Missing packet and endpoint discriminators",
+      "allowed_evidence_refs": [
+        "deterministic-validation"
+      ],
+      "expected": {
+        "event_status": "unknown",
+        "detection_validity": "unknown",
+        "activity_disposition": "unknown",
+        "handling": "investigate",
+        "duplicate_of": null,
+        "detection_outcome": "inconclusive"
+      },
+      "prompt_package": {
+        "detection_validation": {
+          "schema": "onion-sentinel-detection-validation-v1",
+          "event_status": "unknown",
+          "event_observed": null,
+          "rule_intent_match": "unknown",
+          "predicate_results": [],
+          "rule_drift": {
+            "detected": false,
+            "missing_installed_constraints": []
+          }
+        }
+      },
+      "primary_response": {
+        "detection_outcome": "inconclusive",
+        "event_status": "unknown",
+        "detection_validity": "unknown",
+        "activity_disposition": "unknown",
+        "handling": "investigate",
+        "duplicate_of": null,
+        "confidence": "medium",
+        "confidence_score": 0.61,
+        "evidence_gaps": [
+          "Packet and endpoint discriminators are unavailable."
+        ],
+        "second_opinion_recommended": true,
+        "second_opinion_reason": "An independent model could test alternate explanations."
+      }
+    }
+  ]
+}

@@ -524,6 +524,180 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(newest["detection_outcome"], "false_positive_logic_rule")
         self.assertEqual(newest["detection_outcome_label"], "FP - Rule")
 
+    def test_disagreement_freshness_and_adjudication_guard_follow_current_analysis(self) -> None:
+        group_key = "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        group_id = self.portal.soc_alert_group_id(group_key)
+        stable_group_id = "stable-detection-unit"
+        self.conn.executescript(
+            """
+            CREATE TABLE alert_group_alias (
+              legacy_group_id TEXT PRIMARY KEY,
+              stable_group_id TEXT NOT NULL
+            );
+            CREATE TABLE ai_second_opinion_runs (
+              analysis_id TEXT PRIMARY KEY,
+              status TEXT,
+              primary_outcome TEXT,
+              primary_confidence TEXT,
+              reviewer_outcome TEXT,
+              reviewer_confidence TEXT,
+              agreement TEXT,
+              material_disagreement INTEGER,
+              disputed_fields_json TEXT,
+              generated_at TEXT
+            );
+            CREATE TABLE analyst_adjudications (
+              adjudication_id TEXT PRIMARY KEY,
+              dashboard_group_id TEXT NOT NULL,
+              stable_group_id TEXT NOT NULL,
+              case_id TEXT,
+              analysis_id TEXT NOT NULL,
+              outcome_override TEXT NOT NULL,
+              confidence TEXT NOT NULL,
+              rationale TEXT NOT NULL,
+              evidence_gap TEXT,
+              next_action TEXT,
+              reviewer TEXT NOT NULL,
+              event_status TEXT,
+              detection_validity TEXT,
+              activity_disposition TEXT,
+              handling TEXT,
+              duplicate_of TEXT,
+              case_resolution_reason TEXT,
+              created_at TEXT NOT NULL
+            );
+            """
+        )
+        self.conn.execute(
+            "INSERT INTO alert_group_alias VALUES (?, ?)",
+            (group_id, stable_group_id),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO ai_analysis_runs (
+              analysis_id, group_id, alert_id, generated_at, model,
+              detection_outcome, confidence, evidence_hash, response_json, created_at
+            ) VALUES (?, ?, 'newest-alert', ?, 'primary-model', ?, 'high',
+                      'evidence-unit', ?, ?)
+            """,
+            (
+                "analysis-disputed",
+                stable_group_id,
+                "2026-07-03  11:59:00Z",
+                "true_positive_suspicious",
+                json.dumps({
+                    "evidence_used": ["alert", "flow"],
+                    "evidence_gaps": ["endpoint process tree unavailable"],
+                }),
+                "2026-07-03  11:59:00Z",
+            ),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO ai_second_opinion_runs VALUES (
+              'analysis-disputed', 'completed', 'true_positive_suspicious',
+              'high', 'false_positive_logic_rule', 'medium', 'disagree',
+              1, '["detection_outcome"]', '2026-07-03  11:59:30Z'
+            )
+            """
+        )
+        self.conn.commit()
+
+        status, payload = self.portal.soc_alerts_query_response(
+            {"limit": ["10"], "analyst_status": ["open"]}
+        )
+        newest = next(
+            alert for alert in payload["alerts"]
+            if alert["representative_alert_id"] == "newest-alert"
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(newest["analysis_id"], "analysis-disputed")
+        self.assertEqual(newest["freshness_status"], "stale")
+        self.assertEqual(newest["coverage_status"], "gaps")
+        self.assertEqual(newest["primary_outcome"], "true_positive_suspicious")
+        self.assertEqual(newest["reviewer_outcome"], "false_positive_logic_rule")
+        self.assertEqual(newest["final_review_status"], "disputed_pending_human")
+
+        ok, conflict = self.portal.update_soc_alert_status({
+            "id": group_id,
+            "status": "suppressed",
+            "reason": "should require analyst review",
+        })
+        self.assertFalse(ok)
+        self.assertEqual(conflict["status"], 409)
+
+        self.conn.execute(
+            """
+            UPDATE ai_second_opinion_runs
+            SET agreement = 'partial_disagreement', material_disagreement = 0
+            WHERE analysis_id = 'analysis-disputed'
+            """
+        )
+        self.conn.commit()
+        _status, advisory_payload = self.portal.soc_alerts_query_response(
+            {"limit": ["10"], "analyst_status": ["open"]}
+        )
+        advisory = next(
+            alert for alert in advisory_payload["alerts"]
+            if alert["representative_alert_id"] == "newest-alert"
+        )
+        self.assertEqual(advisory["final_review_status"], "reviewer_advisory")
+        self.conn.execute(
+            """
+            UPDATE ai_second_opinion_runs
+            SET agreement = 'material_disagreement', material_disagreement = 1
+            WHERE analysis_id = 'analysis-disputed'
+            """
+        )
+        self.conn.commit()
+
+        self.conn.execute(
+            """
+            INSERT INTO analyst_adjudications (
+              adjudication_id, dashboard_group_id, stable_group_id, case_id,
+              analysis_id, outcome_override, confidence, rationale,
+              evidence_gap, next_action, reviewer, event_status,
+              detection_validity, activity_disposition, handling, duplicate_of,
+              case_resolution_reason, created_at
+            ) VALUES (
+              'adj-unit', ?, ?, NULL, 'analysis-disputed',
+              'false_positive_logic_rule', 'high',
+              'Corroborated by flow evidence.',
+              'Endpoint process tree unavailable', 'Acquire endpoint telemetry',
+              'unit-analyst', 'observed', 'logic_error', 'benign', 'no_action',
+              NULL, NULL, '2026-07-03  12:02:00Z'
+            )
+            """,
+            ("f" * 12, stable_group_id),
+        )
+        self.conn.commit()
+
+        status, payload = self.portal.soc_alerts_query_response(
+            {"limit": ["10"], "analyst_status": ["open"]}
+        )
+        newest = next(
+            alert for alert in payload["alerts"]
+            if alert["representative_alert_id"] == "newest-alert"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(newest["final_review_status"], "adjudicated")
+        self.assertEqual(newest["detection_outcome"], "true_positive_suspicious")
+        self.assertEqual(newest["effective_outcome"], "false_positive_logic_rule")
+        self.assertEqual(newest["effective_outcome_label"], "FP - Rule")
+        self.assertEqual(newest["adjudication"]["reviewer"], "unit-analyst")
+        self.assertEqual(newest["adjudication"]["detection_validity"], "logic_error")
+        history_status, history = self.portal.soc_adjudication_history_response(group_id)
+        self.assertEqual(history_status, 200)
+        self.assertEqual(history["history"][0]["adjudication_id"], "adj-unit")
+
+        ok, _payload = self.portal.update_soc_alert_status({
+            "id": group_id,
+            "status": "suppressed",
+            "reason": "adjudicated handling",
+        })
+        self.assertTrue(ok)
+
     def test_alert_list_batches_page_enrichment_without_per_group_lookup(self) -> None:
         group_key = "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
         for alert_id, last_seen, external_intel in (

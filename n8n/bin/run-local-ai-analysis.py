@@ -184,6 +184,52 @@ DETECTION_OUTCOME_VALUES = {
     "informational_no_action",
     "inconclusive",
 }
+EVENT_STATUS_VALUES = {"observed", "not_observed", "unknown"}
+DETECTION_VALIDITY_VALUES = {
+    "matched_intent",
+    "logic_error",
+    "parser_error",
+    "intel_error",
+    "not_applicable",
+    "unknown",
+}
+ACTIVITY_DISPOSITION_VALUES = {
+    "malicious",
+    "suspicious",
+    "authorized_benign",
+    "benign",
+    "unknown",
+}
+HANDLING_VALUES = {"contain", "escalate", "investigate", "monitor", "no_action"}
+FACTORED_VERDICT_KEYS = {
+    "event_status",
+    "detection_validity",
+    "activity_disposition",
+    "handling",
+    "duplicate_of",
+}
+CONFIDENCE_SCORE_BY_LABEL = {"low": 0.3, "medium": 0.65, "high": 0.9}
+CONFIDENCE_CALIBRATION_VERSION = "evidence-caps-v2"
+CONFIDENCE_HIGH_THRESHOLD = 0.8
+CONFIDENCE_LOW_THRESHOLD = 0.4
+DECISION_CRITICAL_KEYS = {
+    "detection_outcome",
+    "bluf",
+    "summary",
+    "evidence_used",
+    "evidence_gaps",
+    "confidence",
+    "escalation_needed",
+}
+CONTROL_TUNING_VALUES = {"suppress", "drop"}
+CONSEQUENTIAL_CLOSURE_OUTCOMES = {
+    "true_positive_authorized_benign",
+    "false_positive_logic_rule",
+    "false_positive_data_parser",
+    "false_positive_bad_intel_ioc",
+    "duplicate",
+    "informational_no_action",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -1334,11 +1380,47 @@ HOSTED_FORBIDDEN_KEYS = {
     "raw_payload",
     "payload",
     "live_osquery_requests",
+    "hex",
+    "printable",
+    "raw_rule",
+    "rule_text",
 }
 
 
-def model_safe_copy(value: Any, *, hosted: bool = False) -> Any:
-    """Copy evidence while removing local capabilities and sensitive packet samples."""
+def _redact_unshared_asset_owners(asset_context: Any) -> Any:
+    """Remove owner aliases that operators did not approve for external review."""
+    if not isinstance(asset_context, dict):
+        return asset_context
+    sanitized = dict(asset_context)
+    matched_assets = sanitized.get("matched_assets")
+    if not isinstance(matched_assets, list):
+        return sanitized
+    sanitized_assets: list[Any] = []
+    for raw_asset in matched_assets:
+        if not isinstance(raw_asset, dict):
+            sanitized_assets.append(raw_asset)
+            continue
+        asset = dict(raw_asset)
+        if asset.get("share_with_hosted_models") is not True:
+            asset.pop("owner_ref", None)
+        sanitized_assets.append(asset)
+    sanitized["matched_assets"] = sanitized_assets
+    return sanitized
+
+
+def model_safe_copy(
+    value: Any,
+    *,
+    hosted: bool = False,
+    reviewer_safe: bool = False,
+) -> Any:
+    """Copy model evidence while enforcing transport-specific disclosure rules.
+
+    ``detection_validation`` is deterministic collector evidence and remains
+    available on every route. Asset owner aliases are more sensitive: a hosted
+    model or independent reviewer receives them only when that individual asset
+    record explicitly opts in.
+    """
     if isinstance(value, dict):
         output = {}
         for raw_key, item in value.items():
@@ -1347,10 +1429,25 @@ def model_safe_copy(value: Any, *, hosted: bool = False) -> Any:
                 continue
             if hosted and (key in HOSTED_FORBIDDEN_KEYS or key.startswith("_pcap_query_")):
                 continue
-            output[key] = model_safe_copy(item, hosted=hosted)
+            output[key] = model_safe_copy(
+                item,
+                hosted=hosted,
+                reviewer_safe=reviewer_safe,
+            )
+        if (hosted or reviewer_safe) and "asset_context" in output:
+            output["asset_context"] = _redact_unshared_asset_owners(
+                output["asset_context"]
+            )
         return output
     if isinstance(value, list):
-        return [model_safe_copy(item, hosted=hosted) for item in value]
+        return [
+            model_safe_copy(
+                item,
+                hosted=hosted,
+                reviewer_safe=reviewer_safe,
+            )
+            for item in value
+        ]
     return value
 
 
@@ -1721,7 +1818,7 @@ def analyze_model_route(
             raise SystemExit("Configured Ollama route has an empty model name")
         review_package = prompt_package
         if independent_review:
-            review_package = model_safe_copy(prompt_package)
+            review_package = model_safe_copy(prompt_package, reviewer_safe=True)
             review_package["second_opinion_review"] = {
                 "mode": "independent",
                 "instruction": "Analyze the supplied evidence independently; the primary conclusion is withheld.",
@@ -1737,16 +1834,170 @@ def analyze_model_route(
     raise SystemExit(f"Unsupported or disabled analysis model route: {route or 'none'}")
 
 
-def second_opinion_trigger(response: dict[str, Any]) -> str:
+def model_route_identity(
+    route: Any,
+    settings: dict[str, Any] | None = None,
+) -> str:
+    """Return a reasoning-effort-independent identity for reviewer isolation."""
+    normalized = str(route or "").strip().lower()
+    parsed = parse_codex_cli_route(normalized) if normalized.startswith("codex-cli:") else None
+    if parsed:
+        return f"codex-cli:{parsed[0].lower()}"
+    if normalized in {"gpt-cli", "codex-cli"}:
+        configured_model = str(
+            (settings or {}).get("codex_cli_model") or "configured-default"
+        ).strip().lower()
+        return f"codex-cli:{configured_model}"
+    if normalized.startswith("ollama:"):
+        return normalized
+    return normalized
+
+
+def independent_reviewer_package(prompt_package: dict[str, Any]) -> dict[str, Any]:
+    """Build a blind evidence view without prior model conclusions.
+
+    The reviewer receives the same collector-owned alert, enrichment, PCAP, and
+    incident evidence as the primary. Previous AI conclusions, model-authored
+    memory, and the embedded primary system prompt are deliberately removed so
+    agreement represents an independent conclusion rather than anchoring.
+    """
+    review_package = model_safe_copy(prompt_package, reviewer_safe=True)
+    review_package.pop("prior_analyses", None)
+
+    instructions = review_package.get("instructions")
+    if isinstance(instructions, dict):
+        instructions.pop("role", None)
+        grounding = instructions.get("grounding")
+        if isinstance(grounding, list):
+            instructions["grounding"] = [
+                item
+                for item in grounding
+                if not any(
+                    marker in str(item).lower()
+                    for marker in ("prior_analyses", "previous_correlation", "earlier conclusion")
+                )
+            ]
+
+    correlation = review_package.get("correlated_alert_context")
+    if isinstance(correlation, dict):
+        candidates = correlation.get("candidates")
+        if isinstance(candidates, list):
+            sanitized_candidates: list[Any] = []
+            for raw_candidate in candidates:
+                if not isinstance(raw_candidate, dict):
+                    sanitized_candidates.append(raw_candidate)
+                    continue
+                candidate = dict(raw_candidate)
+                candidate.pop("prior_analysis", None)
+                candidate.pop("previous_correlation", None)
+                reasons = candidate.get("correlation_reasons")
+                if isinstance(reasons, list):
+                    candidate["correlation_reasons"] = [
+                        reason
+                        for reason in reasons
+                        if str(reason).strip().lower() != "previous correlation record exists"
+                    ]
+                sanitized_candidates.append(candidate)
+            correlation["candidates"] = sanitized_candidates
+
+    memory = review_package.get("agent_memory")
+    if isinstance(memory, dict):
+        for key in ("role_memory", "shared_memory"):
+            context = memory.get(key)
+            if not isinstance(context, dict):
+                continue
+            records = context.get("records")
+            if isinstance(records, list):
+                context["records"] = [
+                    record
+                    for record in records
+                    if isinstance(record, dict)
+                    and str(record.get("status") or "").strip().lower() == "operator-confirmed"
+                ]
+        memory["usage_guidance"] = (
+            "Use only operator-authored notes and operator-confirmed memory as context. "
+            "Corroborate every material conclusion with current collector-owned evidence."
+        )
+
+    review_package["second_opinion_review"] = {
+        "mode": "blind_independent",
+        "primary_conclusion_withheld": True,
+        "excluded_context": [
+            "current primary response",
+            "prior AI analyses",
+            "prior model correlation hypotheses",
+            "unconfirmed model-observed memory",
+        ],
+    }
+    return review_package
+
+
+def second_opinion_trigger(
+    response: dict[str, Any],
+    prompt_package: dict[str, Any] | None = None,
+) -> str:
     """Return the deterministic reason an independent review is warranted."""
     explicit_reason = str(response.get("second_opinion_reason") or "").strip()[:1000]
     if bool(response.get("second_opinion_recommended")) or bool(response.get("hosted_second_opinion_recommended")):
         return explicit_reason or "The primary model explicitly requested another opinion."
+    verdict_validation = (
+        response.get("_verdict_validation")
+        if isinstance(response.get("_verdict_validation"), dict)
+        else {}
+    )
+    if verdict_validation.get("material_contradiction"):
+        return "Runtime verdict checks found a material contradiction."
+    deterministic_guard = (
+        verdict_validation.get("deterministic_evidence_guard")
+        if isinstance(
+            verdict_validation.get("deterministic_evidence_guard"),
+            dict,
+        )
+        else {}
+    )
+    if (
+        deterministic_guard.get("rule_intent_match") == "mismatch"
+        and deterministic_guard.get("override_applied")
+    ):
+        return "Deterministic rule-intent validation overrode the model verdict."
+    if (
+        deterministic_guard.get("rule_intent_match") == "unknown"
+        and deterministic_guard.get("confidence_cap") is not None
+    ):
+        return (
+            "Deterministic evidence could not establish rule intent for a "
+            "consequential conclusion."
+        )
     if str(response.get("confidence") or "").strip().lower() == "low":
         return "The primary model reported low confidence."
     outcome_key = re.sub(r"[^a-z0-9]+", "_", str(response.get("detection_outcome") or "").lower()).strip("_")
     if outcome_key == "inconclusive":
         return "The primary model classified the detection as inconclusive."
+    calibration = (
+        response.get("_confidence_calibration")
+        if isinstance(response.get("_confidence_calibration"), dict)
+        else {}
+    )
+    calibration_limiters = (
+        calibration.get("limiters")
+        if isinstance(calibration.get("limiters"), list)
+        else []
+    )
+    if any(
+        str(item).startswith(("critical_schema_repair", "invalid_", "material_verdict_contradiction"))
+        for item in calibration_limiters
+    ):
+        return "Runtime evidence checks capped confidence because decisive output was invalid or incomplete."
+    handling = str(response.get("handling") or "").strip().lower()
+    if handling in {"contain", "escalate"} or bool(response.get("escalation_needed")):
+        return "The primary model recommended a consequential response action."
+    tuning = str(response.get("tuning_recommendation") or "").strip().lower()
+    if tuning in CONTROL_TUNING_VALUES:
+        return "The primary model recommended suppressing or dropping detection signal."
+    alert = prompt_package.get("alert") if isinstance(prompt_package, dict) else {}
+    triage_level = str(alert.get("triage_level") or "").strip().lower() if isinstance(alert, dict) else ""
+    if triage_level in {"critical", "high"} and outcome_key in CONSEQUENTIAL_CLOSURE_OUTCOMES:
+        return "A high-severity detection received a consequential closure disposition."
     return ""
 
 
@@ -1776,12 +2027,22 @@ def compare_analysis_results(
     can change analyst handling. Correlation and tuning differences remain
     visible but advisory so nuanced reviewer output does not create false alarms.
     """
+    tuning_is_material = any(
+        str(response.get("tuning_recommendation") or "").strip().lower() in CONTROL_TUNING_VALUES
+        for response in (primary_response, reviewer_response)
+    )
     checks = (
         ("detection_outcome", True),
+        ("event_status", True),
+        ("detection_validity", True),
+        ("activity_disposition", True),
+        ("handling", True),
+        ("duplicate_of", True),
         ("escalation_needed", True),
         ("correlation_assessment.correlation_found", False),
         ("confidence", False),
-        ("tuning_recommendation", False),
+        ("confidence_score", False),
+        ("tuning_recommendation", tuning_is_material),
     )
     disputed_fields: list[dict[str, Any]] = []
     for field, material in checks:
@@ -1815,12 +2076,24 @@ def compare_analysis_results(
         "summary": summary,
         "primary": {
             "detection_outcome": primary_response.get("detection_outcome"),
+            "event_status": primary_response.get("event_status"),
+            "detection_validity": primary_response.get("detection_validity"),
+            "activity_disposition": primary_response.get("activity_disposition"),
+            "handling": primary_response.get("handling"),
+            "duplicate_of": primary_response.get("duplicate_of"),
             "confidence": primary_response.get("confidence"),
+            "confidence_score": primary_response.get("confidence_score"),
             "escalation_needed": primary_response.get("escalation_needed"),
         },
         "reviewer": {
             "detection_outcome": reviewer_response.get("detection_outcome"),
+            "event_status": reviewer_response.get("event_status"),
+            "detection_validity": reviewer_response.get("detection_validity"),
+            "activity_disposition": reviewer_response.get("activity_disposition"),
+            "handling": reviewer_response.get("handling"),
+            "duplicate_of": reviewer_response.get("duplicate_of"),
             "confidence": reviewer_response.get("confidence"),
+            "confidence_score": reviewer_response.get("confidence_score"),
             "escalation_needed": reviewer_response.get("escalation_needed"),
         },
     }
@@ -1855,16 +2128,36 @@ def apply_configured_second_opinion(
     response. Its failure is captured in the artifact instead of failing or
     re-queuing an otherwise complete primary analysis.
     """
-    trigger = second_opinion_trigger(primary_response)
+    trigger = second_opinion_trigger(primary_response, prompt_package)
     if not trigger:
+        primary_response["final_disposition_status"] = "primary_not_reviewed"
         notify_analysis_phase(phase_callback, "post_processing")
         return primary_response
     route = str((settings.get("agent_second_opinion_models") or {}).get(agent_role) or "").strip()
     if not route:
+        primary_response["final_disposition_status"] = "review_required_not_configured"
         primary_response["_second_opinion"] = {
             "status": "not_configured",
             "trigger": trigger,
             "model_route": "",
+        }
+        notify_analysis_phase(
+            phase_callback,
+            "post_processing",
+            trigger_reason=trigger,
+        )
+        return primary_response
+    primary_route = str((settings.get("agent_models") or {}).get(agent_role) or "").strip()
+    if model_route_identity(primary_route, settings) == model_route_identity(
+        route,
+        settings,
+    ):
+        primary_response["final_disposition_status"] = "review_required_not_independent"
+        primary_response["_second_opinion"] = {
+            "status": "not_independent",
+            "trigger": trigger,
+            "model_route": route,
+            "error": "The configured reviewer resolves to the same provider/model identity as the primary.",
         }
         notify_analysis_phase(
             phase_callback,
@@ -1885,29 +2178,52 @@ def apply_configured_second_opinion(
         trigger,
     )
     started_monotonic = time.monotonic()
+    review_package = independent_reviewer_package(prompt_package)
     try:
         secondary = analyze_model_route(
             route,
-            prompt_package,
+            review_package,
             args,
             settings,
             system_prompt_file=reviewer_prompt,
             independent_review=True,
         )
-        secondary = validate_response(secondary)
+        secondary = validate_response(secondary, review_package)
         # A reviewer cannot recursively trigger more model calls.
         secondary["second_opinion_recommended"] = False
         secondary["hosted_second_opinion_recommended"] = False
+        comparison = compare_analysis_results(primary_response, secondary)
         primary_response["_second_opinion"] = {
             "status": "completed",
             "trigger": trigger,
             "model_route": route,
             "system_prompt_file": str(reviewer_prompt),
             "runtime_seconds": round(time.monotonic() - started_monotonic, 3),
-            "comparison": compare_analysis_results(primary_response, secondary),
+            "comparison": comparison,
             "response": secondary,
         }
+        if comparison["material_disagreement"]:
+            primary_response["final_disposition_status"] = "disputed_pending_human"
+            primary_response["escalation_needed"] = True
+            primary_response["tuning_recommendation"] = "needs_more_data"
+            primary_response["tuning_reason"] = (
+                "Automatic tuning is blocked because the primary and independent reviewer "
+                "materially disagree."
+            )
+            primary_response["recommended_tuning_actions"] = []
+            primary_response["memory_candidates"] = []
+            primary_response["_automation_controls"] = {
+                "tuning_blocked": True,
+                "memory_writeback_blocked": True,
+                "requires_human_review": True,
+                "reason": "material second-opinion disagreement",
+            }
+        elif comparison["agreement"] == "agreement":
+            primary_response["final_disposition_status"] = "corroborated"
+        else:
+            primary_response["final_disposition_status"] = "primary_with_advisory_disagreement"
     except SystemExit as exc:
+        primary_response["final_disposition_status"] = "review_failed"
         primary_response["_second_opinion"] = {
             "status": "failed",
             "trigger": trigger,
@@ -1917,6 +2233,7 @@ def apply_configured_second_opinion(
             "error": str(exc)[:1000],
         }
     except Exception as exc:
+        primary_response["final_disposition_status"] = "review_failed"
         primary_response["_second_opinion"] = {
             "status": "failed",
             "trigger": trigger,
@@ -2006,6 +2323,610 @@ def safe_nonnegative_int(value: Any) -> int:
         return 0
 
 
+def normalized_detection_outcome(value: Any) -> str:
+    """Return the canonical legacy outcome code or ``inconclusive``."""
+    outcome = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+    aliases = {
+        "true_positive_benign": "true_positive_authorized_benign",
+        "authorized_benign": "true_positive_authorized_benign",
+        "false_positive_rule_logic": "false_positive_logic_rule",
+        "false_positive_parser": "false_positive_data_parser",
+        "false_positive_intel": "false_positive_bad_intel_ioc",
+    }
+    outcome = aliases.get(outcome, outcome)
+    return outcome if outcome in DETECTION_OUTCOME_VALUES else "inconclusive"
+
+
+def legacy_verdict_factors(
+    outcome: str,
+    *,
+    escalation_needed: bool = False,
+) -> dict[str, Any]:
+    """Map a legacy disposition into the orthogonal verdict dimensions."""
+    handling_for_risk = "escalate" if escalation_needed else "investigate"
+    mapping: dict[str, tuple[str, str, str, str]] = {
+        "true_positive_malicious": ("observed", "matched_intent", "malicious", "contain"),
+        "true_positive_suspicious": (
+            "observed",
+            "matched_intent",
+            "suspicious",
+            handling_for_risk,
+        ),
+        "true_positive_authorized_benign": (
+            "observed",
+            "matched_intent",
+            "authorized_benign",
+            "no_action",
+        ),
+        "false_positive_logic_rule": ("observed", "logic_error", "unknown", "monitor"),
+        "false_positive_data_parser": ("unknown", "parser_error", "unknown", "investigate"),
+        "false_positive_bad_intel_ioc": ("observed", "intel_error", "unknown", "monitor"),
+        "false_negative": ("observed", "not_applicable", "malicious", "escalate"),
+        "duplicate": ("observed", "unknown", "unknown", "no_action"),
+        "informational_no_action": ("observed", "not_applicable", "benign", "no_action"),
+        "inconclusive": ("unknown", "unknown", "unknown", "investigate"),
+    }
+    event_status, detection_validity, activity_disposition, handling = mapping.get(
+        outcome,
+        mapping["inconclusive"],
+    )
+    return {
+        "event_status": event_status,
+        "detection_validity": detection_validity,
+        "activity_disposition": activity_disposition,
+        "handling": handling,
+        "duplicate_of": None,
+    }
+
+
+def derive_legacy_detection_outcome(factors: dict[str, Any]) -> str:
+    """Derive the compatibility outcome from normalized verdict dimensions."""
+    duplicate_of = str(factors.get("duplicate_of") or "").strip()
+    validity = str(factors.get("detection_validity") or "unknown")
+    event_status = str(factors.get("event_status") or "unknown")
+    disposition = str(factors.get("activity_disposition") or "unknown")
+    handling = str(factors.get("handling") or "investigate")
+
+    if duplicate_of:
+        return "duplicate"
+    if validity == "parser_error":
+        return "false_positive_data_parser"
+    if validity == "logic_error":
+        return "false_positive_logic_rule"
+    if validity == "intel_error":
+        return "false_positive_bad_intel_ioc"
+    if validity == "matched_intent" and event_status == "observed":
+        if disposition == "malicious":
+            return "true_positive_malicious"
+        if disposition == "suspicious":
+            return "true_positive_suspicious"
+        if disposition == "authorized_benign":
+            return "true_positive_authorized_benign"
+        if disposition == "benign" and handling == "no_action":
+            return "informational_no_action"
+    if validity == "not_applicable" and event_status == "observed":
+        if disposition == "malicious":
+            return "false_negative"
+        if disposition in {"benign", "authorized_benign"} and handling == "no_action":
+            return "informational_no_action"
+    return "inconclusive"
+
+
+def normalize_factored_verdict(response: dict[str, Any]) -> dict[str, Any]:
+    """Normalize factored verdict fields and reconcile the legacy outcome."""
+    raw_outcome = response.get("detection_outcome")
+    canonical_legacy = normalized_detection_outcome(raw_outcome)
+    invalid_fields: dict[str, Any] = {}
+    if re.sub(r"[^a-z0-9]+", "_", str(raw_outcome or "").strip().lower()).strip("_") not in (
+        DETECTION_OUTCOME_VALUES
+        | {
+            "true_positive_benign",
+            "authorized_benign",
+            "false_positive_rule_logic",
+            "false_positive_parser",
+            "false_positive_intel",
+        }
+    ):
+        invalid_fields["detection_outcome"] = raw_outcome
+
+    factors = legacy_verdict_factors(
+        canonical_legacy,
+        escalation_needed=boolean_setting(response.get("escalation_needed")),
+    )
+    supplied_fields: list[str] = []
+    enum_fields = (
+        ("event_status", EVENT_STATUS_VALUES),
+        ("detection_validity", DETECTION_VALIDITY_VALUES),
+        ("activity_disposition", ACTIVITY_DISPOSITION_VALUES),
+        ("handling", HANDLING_VALUES),
+    )
+    for key, allowed in enum_fields:
+        if key not in response:
+            continue
+        supplied_fields.append(key)
+        normalized = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            str(response.get(key) or "").strip().lower(),
+        ).strip("_")
+        if normalized in allowed:
+            factors[key] = normalized
+        else:
+            invalid_fields[key] = response.get(key)
+
+    if "duplicate_of" in response:
+        supplied_fields.append("duplicate_of")
+        duplicate_of = response.get("duplicate_of")
+        if duplicate_of in (None, ""):
+            factors["duplicate_of"] = None
+        elif isinstance(duplicate_of, (str, int)):
+            factors["duplicate_of"] = str(duplicate_of).strip()[:256] or None
+        else:
+            invalid_fields["duplicate_of"] = duplicate_of
+
+    derived_outcome = derive_legacy_detection_outcome(factors)
+    contradictions: list[str] = []
+    warnings: list[str] = []
+    if supplied_fields and derived_outcome != canonical_legacy:
+        contradictions.append(
+            f"factored verdict derives {derived_outcome}, but model supplied {canonical_legacy}"
+        )
+    if factors["event_status"] == "not_observed" and factors["detection_validity"] == "matched_intent":
+        contradictions.append("an unobserved event cannot be a validated detection-intent match")
+    if factors["activity_disposition"] == "malicious" and factors["handling"] in {"monitor", "no_action"}:
+        contradictions.append("malicious activity cannot use monitor/no_action handling")
+    if (
+        factors["activity_disposition"] in {"authorized_benign", "benign"}
+        and factors["handling"] == "contain"
+    ):
+        contradictions.append("benign or authorized activity cannot use contain handling")
+    if factors["duplicate_of"] and factors["handling"] in {"contain", "escalate"}:
+        contradictions.append("a duplicate record cannot independently authorize containment or escalation")
+    if canonical_legacy == "duplicate" and not factors["duplicate_of"]:
+        warnings.append("legacy duplicate outcome did not identify duplicate_of")
+
+    source = (
+        "legacy_derived"
+        if not supplied_fields
+        else ("model_factored" if len(supplied_fields) == len(FACTORED_VERDICT_KEYS) else "hybrid")
+    )
+    canonical_outcome = derived_outcome if supplied_fields else canonical_legacy
+    response.update(factors)
+    response["detection_outcome"] = canonical_outcome
+    response["_verdict_validation"] = {
+        "version": 1,
+        "source": source,
+        "model_detection_outcome": raw_outcome,
+        "canonical_legacy_outcome": canonical_outcome,
+        "derived_legacy_outcome": derived_outcome,
+        "supplied_factored_fields": sorted(supplied_fields),
+        "invalid_fields": invalid_fields,
+        "contradictions": contradictions,
+        "warnings": warnings,
+        "material_contradiction": bool(contradictions or invalid_fields),
+    }
+    return response
+
+
+def _has_trusted_endpoint_evidence(prompt_package: dict[str, Any] | None) -> bool:
+    """Return whether a collector supplied independent endpoint observations."""
+    if not isinstance(prompt_package, dict):
+        return False
+
+    def completed_result(value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        status = str(value.get("status") or "").strip().lower()
+        rows = value.get("rows")
+        return (
+            status in {"complete", "completed", "ok", "success", "succeeded"}
+            or (isinstance(rows, list) and bool(rows))
+        )
+
+    def endpoint_collection_has_evidence(value: Any) -> bool:
+        if isinstance(value, list):
+            return any(endpoint_collection_has_evidence(item) for item in value)
+        if not isinstance(value, dict):
+            return False
+        results = value.get("results")
+        if isinstance(results, list) and any(
+            completed_result(item) for item in results
+        ):
+            return True
+        for key in (
+            "rows",
+            "findings",
+            "observations",
+            "artifacts",
+            "processes",
+        ):
+            items = value.get(key)
+            if isinstance(items, list) and bool(items):
+                return True
+        return completed_result(value)
+
+    live_osquery = prompt_package.get("live_osquery_evidence")
+    if isinstance(live_osquery, dict):
+        results = live_osquery.get("results")
+        if isinstance(results, list) and any(completed_result(item) for item in results):
+            return True
+
+    incident_evidence = prompt_package.get("incident_response_evidence")
+    if isinstance(incident_evidence, dict):
+        security_onion = incident_evidence.get("security_onion_response")
+        if isinstance(security_onion, dict):
+            results = security_onion.get("osquery_results")
+            if isinstance(results, list) and any(completed_result(item) for item in results):
+                return True
+        for key in ("endpoint_evidence", "host_evidence", "osquery_evidence"):
+            evidence = incident_evidence.get(key)
+            if endpoint_collection_has_evidence(evidence):
+                return True
+
+    for key in ("endpoint_evidence", "host_evidence", "osquery_evidence"):
+        evidence = prompt_package.get(key)
+        if endpoint_collection_has_evidence(evidence):
+            return True
+    return False
+
+
+def _consequential_model_conclusion(response: dict[str, Any]) -> bool:
+    outcome = normalized_detection_outcome(response.get("detection_outcome"))
+    handling = str(response.get("handling") or "").strip().lower()
+    tuning = str(response.get("tuning_recommendation") or "").strip().lower()
+    return (
+        outcome != "inconclusive"
+        or handling in {"contain", "escalate"}
+        or bool(response.get("escalation_needed"))
+        or tuning in CONTROL_TUNING_VALUES
+    )
+
+
+def apply_deterministic_evidence_guard(
+    response: dict[str, Any],
+    prompt_package: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Reconcile model verdicts with collector-owned detection validation.
+
+    Rule-intent validation can establish whether observed packet semantics match
+    the deployed detection's intended threat behavior. It cannot establish
+    maliciousness by itself. The guard therefore overrides an invalid rule
+    match, preserves the model's original values for audit, and records an
+    explicit confidence cap for the later calibration pass.
+    """
+    if not isinstance(prompt_package, dict):
+        return response
+    detection_validation = prompt_package.get("detection_validation")
+    if not isinstance(detection_validation, dict):
+        return response
+
+    raw_intent_match = str(
+        detection_validation.get("rule_intent_match") or "unknown"
+    ).strip().lower()
+    intent_match = (
+        raw_intent_match
+        if raw_intent_match in {"match", "mismatch", "unknown"}
+        else "unknown"
+    )
+    raw_event_status = str(
+        detection_validation.get("event_status") or ""
+    ).strip().lower()
+    # ``event_observed`` was emitted by the first contract revision. True is
+    # useful positive evidence; false never means the event was not observed.
+    event_status = (
+        raw_event_status
+        if raw_event_status in {"observed", "unknown"}
+        else (
+            "observed"
+            if detection_validation.get("event_observed") is True
+            else "unknown"
+        )
+    )
+    confidence_limiters = bounded_text_list(
+        detection_validation.get("confidence_limiters"),
+        limit=20,
+        item_limit=1000,
+    )
+    rule = (
+        detection_validation.get("rule")
+        if isinstance(detection_validation.get("rule"), dict)
+        else {}
+    )
+    original = {
+        "detection_outcome": response.get("detection_outcome"),
+        "event_status": response.get("event_status"),
+        "detection_validity": response.get("detection_validity"),
+        "activity_disposition": response.get("activity_disposition"),
+        "handling": response.get("handling"),
+        "duplicate_of": response.get("duplicate_of"),
+        "escalation_needed": response.get("escalation_needed"),
+        "tuning_recommendation": response.get("tuning_recommendation"),
+        "recommended_tuning_actions": list(
+            response.get("recommended_tuning_actions")
+            if isinstance(response.get("recommended_tuning_actions"), list)
+            else []
+        ),
+    }
+    audit: dict[str, Any] = {
+        "schema": str(detection_validation.get("schema") or "")[:200],
+        "rule_intent_match": intent_match,
+        "event_status": event_status,
+        "rule": {
+            "sid": bounded_text(rule.get("sid"), 100),
+            "revision": rule.get("revision"),
+            "rule_sha256": bounded_text(rule.get("rule_sha256"), 128),
+        },
+        "confidence_limiters": confidence_limiters,
+        "model_verdict_before_guard": original,
+        "override_applied": False,
+        "blocked_controls": [],
+        "confidence_cap": None,
+        "confidence_cap_reasons": [],
+    }
+    verdict_validation = (
+        dict(response.get("_verdict_validation"))
+        if isinstance(response.get("_verdict_validation"), dict)
+        else {}
+    )
+    warnings = list(
+        verdict_validation.get("warnings")
+        if isinstance(verdict_validation.get("warnings"), list)
+        else []
+    )
+    contradictions = list(
+        verdict_validation.get("contradictions")
+        if isinstance(verdict_validation.get("contradictions"), list)
+        else []
+    )
+
+    if intent_match == "mismatch":
+        response["event_status"] = event_status
+        response["detection_validity"] = "logic_error"
+        if str(response.get("activity_disposition") or "").lower() in {
+            "malicious",
+            "suspicious",
+        }:
+            response["activity_disposition"] = "unknown"
+        response["duplicate_of"] = None
+        response["detection_outcome"] = "false_positive_logic_rule"
+        audit["confidence_cap"] = 0.79
+        audit["confidence_cap_reasons"].append(
+            "deterministic_rule_intent_mismatch"
+        )
+
+        original_handling = str(original.get("handling") or "").strip().lower()
+        if original_handling == "contain":
+            response["handling"] = "investigate"
+            response["escalation_needed"] = False
+            audit["blocked_controls"].append("contain")
+
+        original_tuning = str(
+            original.get("tuning_recommendation") or ""
+        ).strip().lower()
+        if original_tuning in CONTROL_TUNING_VALUES:
+            response["tuning_recommendation"] = "needs_more_data"
+            response["tuning_reason"] = (
+                "Automatic suppress/drop tuning is blocked because deterministic "
+                "rule-intent validation found a mismatch. Review the rule predicates "
+                "and supporting evidence before changing signal collection."
+            )
+            response["recommended_tuning_actions"] = []
+            audit["blocked_controls"].append(original_tuning)
+
+        original_outcome = normalized_detection_outcome(
+            original.get("detection_outcome")
+        )
+        unsupported_malicious = (
+            str(original.get("activity_disposition") or "").strip().lower()
+            == "malicious"
+            or original_outcome
+            in {"true_positive_malicious", "false_negative"}
+        ) and not _has_trusted_endpoint_evidence(prompt_package)
+        if unsupported_malicious:
+            audit["confidence_cap"] = 0.39
+            audit["confidence_cap_reasons"].append(
+                "malicious_attribution_without_trusted_endpoint_evidence"
+            )
+            contradiction = (
+                "model malicious attribution conflicts with deterministic "
+                "rule-intent mismatch and lacks trusted endpoint evidence"
+            )
+            if contradiction not in contradictions:
+                contradictions.append(contradiction)
+        warning = (
+            "collector-owned detection validation overrode the model verdict "
+            "because required rule-intent predicates mismatched"
+        )
+        if warning not in warnings:
+            warnings.append(warning)
+        controls = (
+            dict(response.get("_automation_controls"))
+            if isinstance(response.get("_automation_controls"), dict)
+            else {}
+        )
+        if audit["blocked_controls"]:
+            controls["requires_human_review"] = True
+            controls["reason"] = "deterministic rule-intent mismatch"
+        if original_tuning in CONTROL_TUNING_VALUES:
+            controls["tuning_blocked"] = True
+        if original_handling == "contain":
+            controls["containment_blocked"] = True
+        if controls:
+            response["_automation_controls"] = controls
+
+        guarded = {
+            key: response.get(key)
+            for key in (
+                "detection_outcome",
+                "event_status",
+                "detection_validity",
+                "activity_disposition",
+                "handling",
+                "duplicate_of",
+                "escalation_needed",
+                "tuning_recommendation",
+                "recommended_tuning_actions",
+            )
+        }
+        audit["guarded_verdict"] = guarded
+        audit["override_applied"] = guarded != original
+    elif intent_match == "unknown" and _consequential_model_conclusion(response):
+        audit["confidence_cap"] = 0.79
+        audit["confidence_cap_reasons"].append(
+            "deterministic_rule_intent_unknown_for_consequential_conclusion"
+        )
+
+    verdict_validation["warnings"] = warnings
+    verdict_validation["contradictions"] = contradictions
+    verdict_validation["material_contradiction"] = bool(
+        verdict_validation.get("material_contradiction") or contradictions
+    )
+    verdict_validation["deterministic_evidence_guard"] = audit
+    verdict_validation["canonical_legacy_outcome"] = response.get(
+        "detection_outcome"
+    )
+    verdict_validation["derived_legacy_outcome"] = derive_legacy_detection_outcome(
+        {
+            key: response.get(key)
+            for key in FACTORED_VERDICT_KEYS
+        }
+    )
+    response["_verdict_validation"] = verdict_validation
+    return response
+
+
+def confidence_label_for_score(score: float) -> str:
+    if score < CONFIDENCE_LOW_THRESHOLD:
+        return "low"
+    if score < CONFIDENCE_HIGH_THRESHOLD:
+        return "medium"
+    return "high"
+
+
+def calibrate_response_confidence(response: dict[str, Any]) -> dict[str, Any]:
+    """Apply deterministic evidence caps to the model's confidence claim."""
+    raw_label = str(response.get("confidence") or "low").strip().lower()
+    if raw_label not in CONFIDENCE_VALUES:
+        raw_label = "low"
+    invalid_score = False
+    supplied_score = response.get("confidence_score")
+    if supplied_score in (None, ""):
+        raw_score = CONFIDENCE_SCORE_BY_LABEL[raw_label]
+        score_source = "legacy_label_mapping"
+    else:
+        try:
+            raw_score = float(supplied_score)
+        except (TypeError, ValueError, OverflowError):
+            raw_score = CONFIDENCE_SCORE_BY_LABEL[raw_label]
+            invalid_score = True
+        if not 0.0 <= raw_score <= 1.0:
+            raw_score = CONFIDENCE_SCORE_BY_LABEL[raw_label]
+            invalid_score = True
+        score_source = "model_score" if not invalid_score else "invalid_model_score_fallback"
+
+    evidence_used = response.get("evidence_used") if isinstance(response.get("evidence_used"), list) else []
+    evidence_gaps = response.get("evidence_gaps") if isinstance(response.get("evidence_gaps"), list) else []
+    correlation = (
+        response.get("correlation_assessment")
+        if isinstance(response.get("correlation_assessment"), dict)
+        else {}
+    )
+    contradicting_evidence = (
+        correlation.get("contradicting_evidence")
+        if isinstance(correlation.get("contradicting_evidence"), list)
+        else []
+    )
+    verdict_validation = (
+        response.get("_verdict_validation")
+        if isinstance(response.get("_verdict_validation"), dict)
+        else {}
+    )
+    schema_repair = (
+        response.get("_schema_repair")
+        if isinstance(response.get("_schema_repair"), dict)
+        else {}
+    )
+    missing_keys = {
+        str(item)
+        for item in schema_repair.get("missing_keys", [])
+        if isinstance(schema_repair.get("missing_keys"), list)
+    }
+
+    maximum_score = 1.0
+    limiters: list[str] = []
+
+    def cap(value: float, reason: str) -> None:
+        nonlocal maximum_score
+        maximum_score = min(maximum_score, value)
+        if reason not in limiters:
+            limiters.append(reason)
+
+    if "_invalid_confidence" in response:
+        cap(0.39, "invalid_confidence_label")
+    if invalid_score:
+        cap(0.39, "invalid_confidence_score")
+    critical_missing = sorted(missing_keys & DECISION_CRITICAL_KEYS)
+    if critical_missing:
+        cap(0.39, "critical_schema_repair:" + ",".join(critical_missing))
+    if verdict_validation.get("material_contradiction"):
+        cap(0.39, "material_verdict_contradiction")
+    if verdict_validation.get("invalid_fields"):
+        cap(0.39, "invalid_factored_verdict")
+    deterministic_guard = (
+        verdict_validation.get("deterministic_evidence_guard")
+        if isinstance(
+            verdict_validation.get("deterministic_evidence_guard"),
+            dict,
+        )
+        else {}
+    )
+    deterministic_cap = deterministic_guard.get("confidence_cap")
+    if isinstance(deterministic_cap, (int, float)):
+        deterministic_reasons = deterministic_guard.get(
+            "confidence_cap_reasons"
+        )
+        if not isinstance(deterministic_reasons, list) or not deterministic_reasons:
+            deterministic_reasons = ["deterministic_evidence_guard"]
+        for reason in deterministic_reasons:
+            cap(float(deterministic_cap), str(reason)[:200])
+    if not evidence_used:
+        cap(0.69, "no_cited_evidence")
+    elif len(evidence_used) == 1:
+        cap(0.79, "single_cited_evidence_item")
+    if contradicting_evidence:
+        cap(0.69, "unresolved_contradicting_evidence")
+    outcome = normalized_detection_outcome(response.get("detection_outcome"))
+    if evidence_gaps and outcome in (
+        CONSEQUENTIAL_CLOSURE_OUTCOMES
+        | {"true_positive_malicious", "false_negative"}
+    ):
+        cap(0.79, "consequential_outcome_with_evidence_gaps")
+    if confidence_label_for_score(raw_score) != raw_label:
+        cap(0.79, "model_confidence_label_score_mismatch")
+
+    calibrated_score = round(min(max(raw_score, 0.0), maximum_score), 3)
+    calibrated_label = confidence_label_for_score(calibrated_score)
+    response["confidence_score"] = calibrated_score
+    response["confidence"] = calibrated_label
+    response["_confidence_calibration"] = {
+        "version": CONFIDENCE_CALIBRATION_VERSION,
+        "score_source": score_source,
+        "model_confidence": raw_label,
+        "model_confidence_score": round(raw_score, 3),
+        "calibrated_confidence": calibrated_label,
+        "calibrated_confidence_score": calibrated_score,
+        "maximum_confidence_score": round(maximum_score, 3),
+        "limiters": limiters,
+        "evidence_signals": {
+            "cited_evidence_count": len(evidence_used),
+            "evidence_gap_count": len(evidence_gaps),
+            "contradicting_evidence_count": len(contradicting_evidence),
+            "critical_schema_repair_keys": critical_missing,
+        },
+    }
+    return response
+
+
 def normalize_incident_response_report(value: Any) -> dict[str, Any]:
     """Normalize the responder report while retaining explicit evidence limits.
 
@@ -2092,6 +3013,11 @@ def incident_query_audit(prompt_package: dict[str, Any]) -> dict[str, Any]:
             continue
         query_dsl = result.get("query_dsl") if isinstance(result.get("query_dsl"), dict) else {}
         window = result.get("window") if isinstance(result.get("window"), dict) else {}
+        projection = (
+            result.get("prompt_projection")
+            if isinstance(result.get("prompt_projection"), dict)
+            else {}
+        )
         queries.append({
             "pack": bounded_text(result.get("pack"), 100),
             "status": bounded_text(result.get("status"), 40),
@@ -2105,6 +3031,10 @@ def incident_query_audit(prompt_package: dict[str, Any]) -> dict[str, Any]:
             },
             "total_hits": safe_nonnegative_int(result.get("total_hits")),
             "returned_hits": safe_nonnegative_int(result.get("returned_hits")),
+            "source_returned_hits": safe_nonnegative_int(
+                projection.get("source_returned_hits", result.get("returned_hits"))
+            ),
+            "prompt_projection_applied": bool(projection),
             "truncated": bool(result.get("truncated")),
             "duration_ms": safe_nonnegative_int(result.get("duration_ms")),
             "error": bounded_text(result.get("error"), 1000),
@@ -2316,7 +3246,10 @@ def apply_live_osquery_follow_up(
     return final_response
 
 
-def validate_response(response: dict[str, Any]) -> dict[str, Any]:
+def validate_response(
+    response: dict[str, Any],
+    prompt_package: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Normalize a model response without letting minor schema drift jam the queue.
 
     Local models occasionally omit a low-risk field such as tuning_reason. The
@@ -2368,10 +3301,30 @@ def validate_response(response: dict[str, Any]) -> dict[str, Any]:
     if normalized["tuning_recommendation"] not in TUNING_VALUES:
         normalized["_invalid_tuning_recommendation"] = normalized["tuning_recommendation"]
         normalized["tuning_recommendation"] = "needs_more_data"
-    outcome_key = re.sub(r"[^a-z0-9]+", "_", normalized["detection_outcome"].strip().lower()).strip("_")
-    if outcome_key not in DETECTION_OUTCOME_VALUES:
+    raw_outcome_key = re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        normalized["detection_outcome"].strip().lower(),
+    ).strip("_")
+    if (
+        raw_outcome_key not in DETECTION_OUTCOME_VALUES
+        and raw_outcome_key
+        not in {
+            "true_positive_benign",
+            "authorized_benign",
+            "false_positive_rule_logic",
+            "false_positive_parser",
+            "false_positive_intel",
+        }
+    ):
         normalized["_invalid_detection_outcome"] = normalized["detection_outcome"]
-        normalized["detection_outcome"] = "Inconclusive"
+    normalized = normalize_factored_verdict(normalized)
+    normalized = apply_deterministic_evidence_guard(
+        normalized,
+        prompt_package,
+    )
+    normalized = calibrate_response_confidence(normalized)
+    normalized.setdefault("final_disposition_status", "primary_unreviewed")
     return normalized
 
 
@@ -2905,7 +3858,7 @@ def main() -> int:
                 settings,
                 live_osquery_config,
             )
-        response = validate_response(response)
+        response = validate_response(response, prompt_package)
         if not args.response_json:
             response = apply_configured_second_opinion(
                 prompt_package,
@@ -2934,19 +3887,36 @@ def main() -> int:
                 and not response["_incident_osquery_audit"].get("queries")
             ):
                 raise RuntimeError("incident response OSquery audit contains no validated commands")
-        try:
-            response["_memory_writeback"] = persist_memory_candidates(
-                agent_role=agent_role,
-                role_memory_file=Path(str(prompt_package.get("agent_memory_file") or "")),
-                shared_memory_file=Path(str(prompt_package.get("shared_memory_file") or "")),
-                candidates=response.get("memory_candidates", []),
-                analysis_id=run_id,
-                source_artifact=str(prompt_path),
-            )
-        except Exception as exc:
-            # Memory is supplemental context. A writeback failure must remain
-            # visible in the artifact without discarding a completed analysis.
-            response["_memory_writeback"] = {"ok": False, "error": str(exc)[:500]}
+        automation_controls = (
+            response.get("_automation_controls")
+            if isinstance(response.get("_automation_controls"), dict)
+            else {}
+        )
+        if automation_controls.get("memory_writeback_blocked"):
+            response["_memory_writeback"] = {
+                "submitted": 0,
+                "accepted": 0,
+                "rejected": 0,
+                "skipped": True,
+                "eligibility_reason": str(
+                    automation_controls.get("reason")
+                    or "memory writeback blocked by analysis guardrail"
+                )[:500],
+            }
+        else:
+            try:
+                response["_memory_writeback"] = persist_memory_candidates(
+                    agent_role=agent_role,
+                    role_memory_file=Path(str(prompt_package.get("agent_memory_file") or "")),
+                    shared_memory_file=Path(str(prompt_package.get("shared_memory_file") or "")),
+                    candidates=response.get("memory_candidates", []),
+                    analysis_id=run_id,
+                    source_artifact=str(prompt_path),
+                )
+            except Exception as exc:
+                # Memory is supplemental context. A writeback failure must remain
+                # visible in the artifact without discarding a completed analysis.
+                response["_memory_writeback"] = {"ok": False, "error": str(exc)[:500]}
         second_opinion = response.get("_second_opinion")
         eligible, eligibility_reason = second_opinion_memory_eligibility(second_opinion)
         if isinstance(second_opinion, dict):

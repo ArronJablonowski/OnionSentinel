@@ -219,6 +219,144 @@ const pcapAnalysisWakePath = String(
   process.env.PCAP_ANALYSIS_WAKE_PATH || path.join(runtimeDir, 'run', 'pcap-analysis.wake'),
 ).trim();
 const analystStatusReasonMaxLength = 140;
+const analystAdjudicationTextMaxLength = 4000;
+const analystAdjudicationOutcomes = new Set([
+  'true_positive_malicious',
+  'true_positive_suspicious',
+  'true_positive_authorized_benign',
+  'false_positive_logic_rule',
+  'false_positive_data_parser',
+  'false_positive_bad_intel_ioc',
+  'false_negative',
+  'duplicate',
+  'informational_no_action',
+  'inconclusive',
+]);
+const analystAdjudicationConfidences = new Set(['low', 'medium', 'high']);
+const analystEventStatuses = new Set(['observed', 'not_observed', 'unknown']);
+const analystDetectionValidities = new Set([
+  'matched_intent',
+  'logic_error',
+  'parser_error',
+  'intel_error',
+  'not_applicable',
+  'unknown',
+]);
+const analystActivityDispositions = new Set([
+  'malicious',
+  'suspicious',
+  'authorized_benign',
+  'benign',
+  'unknown',
+]);
+const analystHandlingValues = new Set([
+  'contain',
+  'escalate',
+  'investigate',
+  'monitor',
+  'no_action',
+]);
+
+function analystLegacyVerdictFactors(outcome) {
+  const mapping = {
+    true_positive_malicious: ['observed', 'matched_intent', 'malicious', 'contain'],
+    true_positive_suspicious: ['observed', 'matched_intent', 'suspicious', 'investigate'],
+    true_positive_authorized_benign: [
+      'observed', 'matched_intent', 'authorized_benign', 'no_action',
+    ],
+    false_positive_logic_rule: ['observed', 'logic_error', 'unknown', 'monitor'],
+    false_positive_data_parser: ['unknown', 'parser_error', 'unknown', 'investigate'],
+    false_positive_bad_intel_ioc: ['observed', 'intel_error', 'unknown', 'monitor'],
+    false_negative: ['observed', 'not_applicable', 'malicious', 'escalate'],
+    duplicate: ['observed', 'unknown', 'unknown', 'no_action'],
+    informational_no_action: ['observed', 'not_applicable', 'benign', 'no_action'],
+    inconclusive: ['unknown', 'unknown', 'unknown', 'investigate'],
+  };
+  const [eventStatus, detectionValidity, activityDisposition, handling] = mapping[outcome];
+  return {
+    event_status: eventStatus,
+    detection_validity: detectionValidity,
+    activity_disposition: activityDisposition,
+    handling,
+    duplicate_of: null,
+  };
+}
+
+function deriveAnalystLegacyOutcome(factors) {
+  const duplicateOf = String(factors?.duplicate_of || '').trim();
+  const validity = String(factors?.detection_validity || 'unknown');
+  const eventStatus = String(factors?.event_status || 'unknown');
+  const disposition = String(factors?.activity_disposition || 'unknown');
+  const handling = String(factors?.handling || 'investigate');
+  if (duplicateOf) return 'duplicate';
+  if (validity === 'parser_error') return 'false_positive_data_parser';
+  if (validity === 'logic_error') return 'false_positive_logic_rule';
+  if (validity === 'intel_error') return 'false_positive_bad_intel_ioc';
+  if (validity === 'matched_intent' && eventStatus === 'observed') {
+    if (disposition === 'malicious') return 'true_positive_malicious';
+    if (disposition === 'suspicious') return 'true_positive_suspicious';
+    if (disposition === 'authorized_benign') {
+      return 'true_positive_authorized_benign';
+    }
+    if (disposition === 'benign' && handling === 'no_action') {
+      return 'informational_no_action';
+    }
+  }
+  if (validity === 'not_applicable' && eventStatus === 'observed') {
+    if (disposition === 'malicious') return 'false_negative';
+    if (['benign', 'authorized_benign'].includes(disposition) && handling === 'no_action') {
+      return 'informational_no_action';
+    }
+  }
+  return 'inconclusive';
+}
+
+function analystVerdictContradictions(outcome, explicitFactors) {
+  const supplied = Object.fromEntries(
+    Object.entries(explicitFactors || {}).filter(([, value]) => value !== null && value !== ''),
+  );
+  if (Object.keys(supplied).length === 0) return [];
+  const factors = {...analystLegacyVerdictFactors(outcome), ...supplied};
+  const derived = deriveAnalystLegacyOutcome(factors);
+  const contradictions = [];
+  if (derived !== outcome) {
+    contradictions.push(`factored verdict derives ${derived}, not ${outcome}`);
+  }
+  if (factors.event_status === 'not_observed' && factors.detection_validity === 'matched_intent') {
+    contradictions.push('an unobserved event cannot be a validated detection-intent match');
+  }
+  if (
+    factors.activity_disposition === 'malicious'
+    && ['monitor', 'no_action'].includes(factors.handling)
+  ) {
+    contradictions.push('malicious activity cannot use monitor/no_action handling');
+  }
+  if (
+    ['authorized_benign', 'benign'].includes(factors.activity_disposition)
+    && factors.handling === 'contain'
+  ) {
+    contradictions.push('benign or authorized activity cannot use contain handling');
+  }
+  if (factors.duplicate_of && ['contain', 'escalate'].includes(factors.handling)) {
+    contradictions.push(
+      'a duplicate record cannot independently authorize containment or escalation',
+    );
+  }
+  if (outcome.startsWith('false_positive_')) {
+    if (['malicious', 'suspicious'].includes(factors.activity_disposition)) {
+      contradictions.push(
+        'a false-positive label cannot classify activity as malicious or suspicious',
+      );
+    }
+    if (['contain', 'escalate'].includes(factors.handling)) {
+      contradictions.push(
+        'a false-positive label cannot authorize containment or escalation',
+      );
+    }
+  }
+  return contradictions;
+}
+
 const socAnalysisPolicy = createSocAnalysisPolicy({runtimeDir});
 
 const enrichmentSecrets = {
@@ -1942,6 +2080,9 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_incident_cases_status_updated ON incident_response_cases(status, updated_at DESC)');
   await run('CREATE INDEX IF NOT EXISTS idx_incident_cases_agent_status ON incident_response_cases(agent_status, updated_at DESC)');
   await run('CREATE INDEX IF NOT EXISTS idx_incident_cases_dashboard_group ON incident_response_cases(dashboard_group_id)');
+  await ensureColumn('incident_response_cases', 'resolution_reason', 'TEXT');
+  await ensureColumn('incident_response_cases', 'resolved_at', 'TEXT');
+  await ensureColumn('incident_response_cases', 'resolved_by', 'TEXT');
   await run(`
     CREATE TABLE IF NOT EXISTS incident_response_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1984,6 +2125,36 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_ai_second_opinion_generated ON ai_second_opinion_runs(generated_at DESC)');
   await run('CREATE INDEX IF NOT EXISTS idx_ai_second_opinion_agreement ON ai_second_opinion_runs(agreement, generated_at DESC)');
   await run('CREATE INDEX IF NOT EXISTS idx_ai_second_opinion_group ON ai_second_opinion_runs(group_id, generated_at DESC)');
+  await run(`
+    CREATE TABLE IF NOT EXISTS analyst_adjudications (
+      adjudication_id TEXT PRIMARY KEY,
+      dashboard_group_id TEXT NOT NULL,
+      stable_group_id TEXT NOT NULL,
+      case_id TEXT,
+      analysis_id TEXT NOT NULL,
+      outcome_override TEXT NOT NULL,
+      confidence TEXT NOT NULL,
+      rationale TEXT NOT NULL,
+      evidence_gap TEXT,
+      next_action TEXT,
+      reviewer TEXT NOT NULL,
+      event_status TEXT,
+      detection_validity TEXT,
+      activity_disposition TEXT,
+      handling TEXT,
+      duplicate_of TEXT,
+      case_resolution_reason TEXT,
+      created_at TEXT NOT NULL
+    )
+  `);
+  await ensureColumn('analyst_adjudications', 'event_status', 'TEXT');
+  await ensureColumn('analyst_adjudications', 'detection_validity', 'TEXT');
+  await ensureColumn('analyst_adjudications', 'activity_disposition', 'TEXT');
+  await ensureColumn('analyst_adjudications', 'handling', 'TEXT');
+  await ensureColumn('analyst_adjudications', 'duplicate_of', 'TEXT');
+  await run('CREATE INDEX IF NOT EXISTS idx_analyst_adjudications_group_created ON analyst_adjudications(dashboard_group_id, created_at DESC)');
+  await run('CREATE INDEX IF NOT EXISTS idx_analyst_adjudications_analysis_created ON analyst_adjudications(analysis_id, created_at DESC)');
+  await run('CREATE INDEX IF NOT EXISTS idx_analyst_adjudications_case_created ON analyst_adjudications(case_id, created_at DESC)');
   await run(`
     CREATE TABLE IF NOT EXISTS alert_correlations (
       source_group_id TEXT NOT NULL,
@@ -2694,6 +2865,457 @@ function validAnalystGroupId(value) {
   return /^[a-f0-9]{12}$/.test(groupId) ? groupId : '';
 }
 
+function validIncidentCaseId(value) {
+  const caseId = String(value || '').trim().toLowerCase();
+  return /^ir-[a-z0-9_-]{1,64}$/.test(caseId) ? caseId : '';
+}
+
+async function stableGroupHasPendingHumanDisagreement(stableId) {
+  const groupId = safeString(stableId, 64).toLowerCase();
+  if (!groupId) return false;
+  const analysis = await get(
+    `SELECT analysis_id
+     FROM ai_analysis_runs
+     WHERE group_id = ?
+       AND COALESCE(NULLIF(agent_role, ''), 'soc-analyst') = 'soc-analyst'
+     ORDER BY generated_at DESC, created_at DESC LIMIT 1`,
+    [groupId],
+  );
+  const analysisId = safeString(analysis?.analysis_id, 160);
+  if (!analysisId) return false;
+  const secondOpinion = await get(
+    `SELECT material_disagreement
+     FROM ai_second_opinion_runs WHERE analysis_id = ?`,
+    [analysisId],
+  );
+  if (!Boolean(Number(secondOpinion?.material_disagreement || 0))) return false;
+  const adjudication = await get(
+    `SELECT adjudication_id
+     FROM analyst_adjudications
+     WHERE stable_group_id = ? AND analysis_id = ?
+     ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    [groupId, analysisId],
+  );
+  return !adjudication;
+}
+
+async function analystReviewState({
+  dashboardGroupId,
+  stableGroupId = '',
+  caseId = '',
+} = {}) {
+  const dashboardId = validAnalystGroupId(dashboardGroupId);
+  if (!dashboardId) {
+    const error = new Error('valid dashboard group id is required');
+    error.statusCode = 400;
+    throw error;
+  }
+  let stableId = safeString(stableGroupId, 64).toLowerCase();
+  let resolvedCase = null;
+  if (caseId) {
+    const normalizedCaseId = validIncidentCaseId(caseId);
+    if (!normalizedCaseId) {
+      const error = new Error('valid incident case id is required');
+      error.statusCode = 400;
+      throw error;
+    }
+    resolvedCase = await get(
+      `SELECT case_id, group_id, dashboard_group_id, latest_analysis_id, status
+       FROM incident_response_cases WHERE case_id = ?`,
+      [normalizedCaseId],
+    );
+    if (!resolvedCase || resolvedCase.dashboard_group_id !== dashboardId) {
+      const error = new Error('incident case does not belong to the requested alert group');
+      error.statusCode = 404;
+      throw error;
+    }
+    stableId = safeString(resolvedCase.group_id, 64).toLowerCase();
+  }
+  if (!stableId) {
+    const representative = await resolveDashboardAlertGroup(dashboardId);
+    stableId = safeString(representative?.stable_group_id, 64).toLowerCase();
+  }
+  if (!stableId) {
+    const error = new Error('SOC alert group was not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  let analysis = null;
+  if (resolvedCase?.latest_analysis_id) {
+    analysis = await get(
+      `SELECT analysis_id, generated_at, detection_outcome, confidence, response_json
+       FROM ai_analysis_runs
+       WHERE analysis_id = ? AND group_id = ?
+         AND COALESCE(NULLIF(agent_role, ''), 'soc-analyst') = 'incident-responder'`,
+      [resolvedCase.latest_analysis_id, stableId],
+    );
+  }
+  if (!analysis) {
+    const role = resolvedCase ? 'incident-responder' : 'soc-analyst';
+    analysis = await get(
+      `SELECT analysis_id, generated_at, detection_outcome, confidence, response_json
+       FROM ai_analysis_runs
+       WHERE group_id = ? AND COALESCE(NULLIF(agent_role, ''), 'soc-analyst') = ?
+       ORDER BY generated_at DESC, created_at DESC LIMIT 1`,
+      [stableId, role],
+    );
+  }
+  const analysisId = safeString(analysis?.analysis_id, 160);
+  const secondOpinion = analysisId
+    ? await get(
+      `SELECT status, primary_outcome, primary_confidence, reviewer_outcome,
+              reviewer_confidence, agreement, material_disagreement,
+              disputed_fields_json, generated_at
+       FROM ai_second_opinion_runs WHERE analysis_id = ?`,
+      [analysisId],
+    )
+    : null;
+  const adjudication = analysisId
+    ? await get(
+      `SELECT adjudication_id, outcome_override, confidence, rationale,
+              evidence_gap, next_action, reviewer, event_status,
+              detection_validity, activity_disposition, handling, duplicate_of,
+              case_resolution_reason, created_at
+       FROM analyst_adjudications
+       WHERE ${resolvedCase ? 'case_id' : 'stable_group_id'} = ? AND analysis_id = ?
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+      [resolvedCase ? resolvedCase.case_id : stableId, analysisId],
+    )
+    : null;
+  const materialDisagreement = Boolean(Number(secondOpinion?.material_disagreement || 0));
+  const reviewerAgreement = safeString(secondOpinion?.agreement, 64).toLowerCase();
+  let finalStatus = 'unreviewed';
+  if (adjudication) finalStatus = 'adjudicated';
+  else if (materialDisagreement) finalStatus = 'disputed_pending_human';
+  else if (secondOpinion?.status === 'completed' && reviewerAgreement === 'agreement') {
+    finalStatus = 'model_consensus';
+  } else if (secondOpinion?.status === 'completed') {
+    finalStatus = 'reviewer_advisory';
+  }
+  const primaryOutcome = secondOpinion?.primary_outcome || analysis?.detection_outcome || '';
+  const primaryConfidence = secondOpinion?.primary_confidence || analysis?.confidence || '';
+  const primaryResponse = parseJsonObject(analysis?.response_json);
+
+  return {
+    dashboard_group_id: dashboardId,
+    stable_group_id: stableId,
+    case_id: resolvedCase?.case_id || null,
+    case_status: resolvedCase?.status || null,
+    analysis_id: analysisId,
+    analysis_generated_at: analysis?.generated_at || null,
+    primary_outcome: primaryOutcome,
+    primary_confidence: primaryConfidence,
+    effective_outcome: adjudication?.outcome_override || primaryOutcome,
+    effective_confidence: adjudication?.confidence || primaryConfidence,
+    primary_event_status: safeString(primaryResponse.event_status, 64),
+    primary_detection_validity: safeString(primaryResponse.detection_validity, 64),
+    primary_activity_disposition: safeString(primaryResponse.activity_disposition, 64),
+    primary_handling: safeString(primaryResponse.handling, 64),
+    primary_duplicate_of: primaryResponse.duplicate_of ?? null,
+    reviewer_status: secondOpinion?.status || 'not_requested',
+    reviewer_outcome: secondOpinion?.reviewer_outcome || '',
+    reviewer_confidence: secondOpinion?.reviewer_confidence || '',
+    agreement: secondOpinion?.agreement || '',
+    material_disagreement: materialDisagreement,
+    disputed_fields: parseJsonObject(
+      secondOpinion?.disputed_fields_json
+        ? `{"items":${secondOpinion.disputed_fields_json}}`
+        : '{"items":[]}',
+    ).items || [],
+    final_status: finalStatus,
+    adjudication: adjudication || null,
+  };
+}
+
+async function analystAdjudicationSnapshot(searchParams) {
+  const dashboardGroupId = validAnalystGroupId(searchParams.get('group_id'));
+  if (!dashboardGroupId) {
+    const error = new Error('valid dashboard group_id is required');
+    error.statusCode = 400;
+    throw error;
+  }
+  const requestedCaseId = String(searchParams.get('case_id') || '').trim();
+  const caseId = validIncidentCaseId(requestedCaseId);
+  if (requestedCaseId && !caseId) {
+    const error = new Error('valid incident case_id is required');
+    error.statusCode = 400;
+    throw error;
+  }
+  const review = await analystReviewState({dashboardGroupId, caseId});
+  const requestedLimit = Number(searchParams.get('limit') || 25);
+  const limit = Math.max(1, Math.min(100, Number.isFinite(requestedLimit) ? Math.trunc(requestedLimit) : 25));
+  const history = await all(
+    `SELECT adjudication_id, dashboard_group_id, stable_group_id, case_id,
+            analysis_id, outcome_override, confidence, rationale, evidence_gap,
+            next_action, reviewer, event_status, detection_validity,
+            activity_disposition, handling, duplicate_of,
+            case_resolution_reason, created_at
+     FROM analyst_adjudications
+     WHERE ${caseId ? 'case_id' : 'stable_group_id'} = ?
+     ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+    [caseId || review.stable_group_id, limit],
+  );
+  return {
+    ok: true,
+    review,
+    history,
+  };
+}
+
+async function recordAnalystAdjudication(payload) {
+  const dashboardGroupId = validAnalystGroupId(payload?.group_id);
+  if (!dashboardGroupId) {
+    const error = new Error('valid dashboard group_id is required');
+    error.statusCode = 400;
+    throw error;
+  }
+  const caseId = payload?.case_id ? validIncidentCaseId(payload.case_id) : '';
+  if (payload?.case_id && !caseId) {
+    const error = new Error('valid incident case_id is required');
+    error.statusCode = 400;
+    throw error;
+  }
+  const review = await analystReviewState({dashboardGroupId, caseId});
+  if (!review.analysis_id) {
+    const error = new Error('no current analysis is available to adjudicate');
+    error.statusCode = 409;
+    throw error;
+  }
+  const requestedAnalysisId = safeString(payload?.analysis_id, 160);
+  if (requestedAnalysisId && requestedAnalysisId !== review.analysis_id) {
+    const error = new Error('analysis changed; refresh before adjudicating');
+    error.statusCode = 409;
+    throw error;
+  }
+  const outcome = safeString(payload?.outcome_override, 100).toLowerCase();
+  if (!analystAdjudicationOutcomes.has(outcome)) {
+    const error = new Error('valid outcome_override is required');
+    error.statusCode = 400;
+    throw error;
+  }
+  const confidence = safeString(payload?.confidence, 16).toLowerCase();
+  if (!analystAdjudicationConfidences.has(confidence)) {
+    const error = new Error('confidence must be low, medium, or high');
+    error.statusCode = 400;
+    throw error;
+  }
+  const rationale = safeString(payload?.rationale, analystAdjudicationTextMaxLength);
+  const reviewer = safeString(payload?.reviewer, 100);
+  if (!rationale || !reviewer) {
+    const error = new Error('rationale and reviewer are required');
+    error.statusCode = 400;
+    throw error;
+  }
+  const evidenceGap = safeString(payload?.evidence_gap, analystAdjudicationTextMaxLength);
+  const nextAction = safeString(payload?.next_action, analystAdjudicationTextMaxLength);
+  const factoredFields = [
+    ['event_status', analystEventStatuses],
+    ['detection_validity', analystDetectionValidities],
+    ['activity_disposition', analystActivityDispositions],
+    ['handling', analystHandlingValues],
+  ];
+  const factoredVerdict = {};
+  for (const [field, allowed] of factoredFields) {
+    const value = safeString(payload?.[field], 64).toLowerCase();
+    if (value && !allowed.has(value)) {
+      const error = new Error(`invalid ${field}`);
+      error.statusCode = 400;
+      throw error;
+    }
+    factoredVerdict[field] = value || null;
+  }
+  const rawDuplicateOf = payload?.duplicate_of;
+  if (
+    rawDuplicateOf !== null
+    && rawDuplicateOf !== undefined
+    && typeof rawDuplicateOf !== 'string'
+  ) {
+    const error = new Error('duplicate_of must be a string identifier or null');
+    error.statusCode = 400;
+    throw error;
+  }
+  const duplicateOf = rawDuplicateOf === null || rawDuplicateOf === undefined
+    ? null
+    : safeString(rawDuplicateOf, 256);
+  if (payload?.duplicate_of !== null && payload?.duplicate_of !== undefined && !duplicateOf) {
+    const error = new Error('duplicate_of must be a non-empty identifier or null');
+    error.statusCode = 400;
+    throw error;
+  }
+  const verdictContradictions = analystVerdictContradictions(
+    outcome,
+    {...factoredVerdict, duplicate_of: duplicateOf},
+  );
+  if (verdictContradictions.length > 0) {
+    const error = new Error(
+      `outcome_override conflicts with explicit verdict factors: ${
+        verdictContradictions.join('; ')
+      }`,
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+  if (payload?.resolve_case !== undefined && typeof payload.resolve_case !== 'boolean') {
+    const error = new Error('resolve_case must be a JSON boolean');
+    error.statusCode = 400;
+    throw error;
+  }
+  const resolveCase = payload?.resolve_case === true;
+  const caseResolutionReason = safeString(payload?.case_resolution_reason, 2000);
+  if (resolveCase && (!caseId || !caseResolutionReason)) {
+    const error = new Error('case_id and case_resolution_reason are required to resolve a case');
+    error.statusCode = 400;
+    throw error;
+  }
+  const createdAt = nowUtc();
+  const adjudicationId = `adj-${crypto.randomUUID()}`;
+  await run(
+    `INSERT INTO analyst_adjudications (
+       adjudication_id, dashboard_group_id, stable_group_id, case_id, analysis_id,
+       outcome_override, confidence, rationale, evidence_gap, next_action,
+       reviewer, event_status, detection_validity, activity_disposition,
+       handling, duplicate_of, case_resolution_reason, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      adjudicationId,
+      dashboardGroupId,
+      review.stable_group_id,
+      caseId || null,
+      review.analysis_id,
+      outcome,
+      confidence,
+      rationale,
+      evidenceGap,
+      nextAction,
+      reviewer,
+      factoredVerdict.event_status,
+      factoredVerdict.detection_validity,
+      factoredVerdict.activity_disposition,
+      factoredVerdict.handling,
+      duplicateOf,
+      caseResolutionReason,
+      createdAt,
+    ],
+  );
+  if (caseId) {
+    await run(
+      `INSERT INTO incident_response_events (case_id, event_type, actor, detail_json, created_at)
+       VALUES (?, 'analyst_adjudicated', ?, ?, ?)`,
+      [
+        caseId,
+        reviewer,
+        jsonText({
+          adjudication_id: adjudicationId,
+          analysis_id: review.analysis_id,
+          outcome_override: outcome,
+          confidence,
+          ...factoredVerdict,
+          duplicate_of: duplicateOf,
+          resolve_case: resolveCase,
+        }),
+        createdAt,
+      ],
+    );
+  }
+  if (resolveCase) {
+    await run(
+      `UPDATE incident_response_cases
+       SET status = 'resolved', resolution_reason = ?, resolved_at = ?,
+           resolved_by = ?, updated_at = ?
+       WHERE case_id = ?`,
+      [caseResolutionReason, createdAt, reviewer, createdAt, caseId],
+    );
+    await run(
+      `INSERT INTO incident_response_events (case_id, event_type, actor, detail_json, created_at)
+       VALUES (?, 'resolved', ?, ?, ?)`,
+      [caseId, reviewer, jsonText({reason: caseResolutionReason, adjudication_id: adjudicationId}), createdAt],
+    );
+  }
+  return {
+    ok: true,
+    adjudication_id: adjudicationId,
+    review: await analystReviewState({dashboardGroupId, caseId}),
+  };
+}
+
+async function updateIncidentCaseStatus(payload) {
+  const caseId = validIncidentCaseId(payload?.case_id);
+  if (!caseId) {
+    const error = new Error('valid incident case_id is required');
+    error.statusCode = 400;
+    throw error;
+  }
+  const status = safeString(payload?.status, 32).toLowerCase();
+  if (!['open', 'in_progress', 'resolved'].includes(status)) {
+    const error = new Error('invalid incident case status');
+    error.statusCode = 400;
+    throw error;
+  }
+  const incident = await get(
+    'SELECT case_id, dashboard_group_id, status FROM incident_response_cases WHERE case_id = ?',
+    [caseId],
+  );
+  if (!incident) {
+    const error = new Error('incident case not found');
+    error.statusCode = 404;
+    throw error;
+  }
+  const actor = safeString(payload?.updated_by || 'dashboard', 100);
+  const resolutionReason = safeString(payload?.resolution_reason, 2000);
+  if (status === 'resolved') {
+    if (!resolutionReason) {
+      const error = new Error('resolution_reason is required');
+      error.statusCode = 400;
+      throw error;
+    }
+    const review = await analystReviewState({
+      dashboardGroupId: incident.dashboard_group_id,
+      caseId,
+    });
+    if (review.final_status === 'disputed_pending_human') {
+      const error = new Error('material model disagreement requires explicit analyst adjudication before resolution');
+      error.statusCode = 409;
+      throw error;
+    }
+  }
+  const updatedAt = nowUtc();
+  await run(
+    `UPDATE incident_response_cases
+     SET status = ?, resolution_reason = ?, resolved_at = ?, resolved_by = ?, updated_at = ?
+     WHERE case_id = ?`,
+    [
+      status,
+      status === 'resolved' ? resolutionReason : null,
+      status === 'resolved' ? updatedAt : null,
+      status === 'resolved' ? actor : null,
+      updatedAt,
+      caseId,
+    ],
+  );
+  await run(
+    `INSERT INTO incident_response_events (case_id, event_type, actor, detail_json, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [
+      caseId,
+      status === 'resolved' ? 'resolved' : 'status_changed',
+      actor,
+      jsonText({from: incident.status, to: status, resolution_reason: resolutionReason}),
+      updatedAt,
+    ],
+  );
+  return {
+    ok: true,
+    case_id: caseId,
+    status,
+    updated_at: updatedAt,
+    review: await analystReviewState({
+      dashboardGroupId: incident.dashboard_group_id,
+      caseId,
+    }),
+  };
+}
+
 async function analystStatusSnapshotUnlocked() {
   const rows = await all(`
     SELECT state.group_id, state.group_key, state.status, state.repeat_count,
@@ -2754,6 +3376,14 @@ async function updateAnalystStatus(payload) {
     }
     const reason = String(payload?.reason || '').trim().slice(0, analystStatusReasonMaxLength);
     if (status === 'suppressed' && !reason) throw new Error('suppression reason is required');
+    if (status === 'suppressed') {
+      const review = await analystReviewState({dashboardGroupId: groupId});
+      if (review.final_status === 'disputed_pending_human') {
+        const error = new Error('material model disagreement requires explicit analyst adjudication before suppression');
+        error.statusCode = 409;
+        throw error;
+      }
+    }
     if (status === 'open') {
       await run('DELETE FROM analyst_alert_group_state WHERE group_id = ?', [groupId]);
     } else {
@@ -3117,6 +3747,9 @@ async function queueIncidentResponseForGroup({
        updated_at = excluded.updated_at,
        escalated_by = excluded.escalated_by,
        reason = excluded.reason,
+       resolution_reason = CASE WHEN incident_response_cases.status = 'resolved' THEN NULL ELSE incident_response_cases.resolution_reason END,
+       resolved_at = CASE WHEN incident_response_cases.status = 'resolved' THEN NULL ELSE incident_response_cases.resolved_at END,
+       resolved_by = CASE WHEN incident_response_cases.status = 'resolved' THEN NULL ELSE incident_response_cases.resolved_by END,
        latest_error = NULL`,
     [
       caseId,
@@ -3514,6 +4147,24 @@ async function applySuppressionPolicy(alert, now) {
   // Markdown reports, but every alert row still lands in SQLite for evidence.
   const rule = findSuppressRule(alert);
   if (!rule) return {status: 'accepted'};
+  const candidateStableGroupId = stableGroupId({
+    rule_id: alert.rule_id,
+    rule_name: alert.rule_name,
+    event_dataset: alert.event_dataset,
+    source_ip: nestedField(alert, 'source.ip'),
+    destination_ip: nestedField(alert, 'destination.ip'),
+    destination_port: nestedField(alert, 'destination.port'),
+    network_protocol: nestedField(alert, 'network.protocol'),
+    transport_protocol: nestedField(alert, 'network.transport')
+      || nestedField(alert, 'network.iana_number'),
+  });
+  if (await stableGroupHasPendingHumanDisagreement(candidateStableGroupId)) {
+    return {
+      status: 'accepted',
+      reason: 'automatic suppression blocked pending explicit analyst adjudication',
+      review_status: 'disputed_pending_human',
+    };
+  }
 
   const key = suppressionKey(rule, alert);
   const ttlSeconds = Number(rule.ttl_seconds || rule.suppress_seconds || 1800);
@@ -4886,6 +5537,26 @@ async function handleRequest(request, response) {
     if (request.method === 'POST' && parsedUrl.pathname === '/analyst-status') {
       const payload = await readJsonBody(request);
       sendJson(response, 200, await updateAnalystStatus(payload));
+      return;
+    }
+    if (request.method === 'GET' && parsedUrl.pathname === '/adjudications') {
+      sendJson(response, 200, await analystAdjudicationSnapshot(parsedUrl.searchParams));
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/adjudications') {
+      const payload = await readJsonBody(request);
+      const result = await withSqliteWriteGate(() => withImmediateTransaction(
+        () => recordAnalystAdjudication(payload),
+      ));
+      sendJson(response, 201, result);
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/incidents/status') {
+      const payload = await readJsonBody(request);
+      const result = await withSqliteWriteGate(() => withImmediateTransaction(
+        () => updateIncidentCaseStatus(payload),
+      ));
+      sendJson(response, 200, result);
       return;
     }
     if (request.method === 'POST' && request.url === '/alert') {

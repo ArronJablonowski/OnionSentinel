@@ -97,6 +97,23 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn("@keyframes ai-status-analyzing-pulse", page)
         self.assertGreaterEqual(page.count("ir-agent-${esc(item.agent_status)}"), 2)
         self.assertIn('colspan="10"', page)
+        self.assertIn('id="analyst-adjudication-modal"', page)
+        self.assertIn("data-review-case=", page)
+        self.assertIn("reviewBadges(item)", page)
+        self.assertIn("disputed_pending_human", page)
+        self.assertIn("Freshness:", page)
+        self.assertIn("Coverage:", page)
+        self.assertIn("'X-Onion-Sentinel-Request':'dashboard'", page)
+        self.assertIn("/adjudicate", page)
+        self.assertIn("onion-sentinel:adjudicated", page)
+        self.assertIn('id="analyst-event-status"', page)
+        self.assertIn('id="analyst-detection-validity"', page)
+        self.assertIn('id="analyst-activity-disposition"', page)
+        self.assertIn('id="analyst-handling"', page)
+        self.assertIn('id="analyst-duplicate-of"', page)
+        self.assertIn("effective_outcome", page)
+        self.assertIn("if(saving)return", page)
+        self.assertIn("resolutionReason.required=false", page)
         self.assertLess(page.index("Incident Responder</h1>"), page.index('id="incident-response-view"'))
 
     def test_alert_rows_and_case_page_keep_the_full_escalation_contract(self) -> None:
@@ -295,6 +312,115 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertEqual(request["related_limit"], 250)
         self.assertEqual(request["pcap_analysis_limit"], 25)
 
+    def test_adjudication_proxy_validates_and_forwards_bounded_human_fields(self) -> None:
+        group_id = "a" * 12
+        with mock.patch.object(
+            self.portal,
+            "alert_store_post_json",
+            return_value={"ok": True, "adjudication_id": "adj-unit"},
+        ) as post:
+            status, payload = self.portal.soc_alert_adjudication_response(
+                group_id,
+                {
+                    "analysis_id": "analysis-unit",
+                    "outcome_override": "true_positive_suspicious",
+                    "confidence": "high",
+                    "rationale": "Corroborated by independent evidence.",
+                    "evidence_gap": "Endpoint telemetry unavailable.",
+                    "next_action": "Acquire endpoint telemetry.",
+                    "reviewer": "qa-analyst",
+                    "event_status": "observed",
+                    "detection_validity": "matched_intent",
+                    "activity_disposition": "suspicious",
+                    "handling": "investigate",
+                    "duplicate_of": None,
+                },
+            )
+
+        self.assertEqual(status, 201)
+        self.assertTrue(payload["ok"])
+        path, request = post.call_args.args
+        self.assertEqual(path, "/adjudications")
+        self.assertEqual(request["group_id"], group_id)
+        self.assertEqual(request["analysis_id"], "analysis-unit")
+        self.assertEqual(request["reviewer"], "qa-analyst")
+        self.assertEqual(request["event_status"], "observed")
+        self.assertEqual(request["detection_validity"], "matched_intent")
+        self.assertEqual(request["activity_disposition"], "suspicious")
+        self.assertEqual(request["handling"], "investigate")
+        self.assertIsNone(request["duplicate_of"])
+        self.assertFalse(request["resolve_case"])
+        self.assertEqual(post.call_args.kwargs["timeout"], 10.0)
+
+        status, payload = self.portal.soc_alert_adjudication_response(
+            group_id,
+            {
+                "outcome_override": "not-a-valid-outcome",
+                "confidence": "high",
+                "rationale": "invalid",
+                "reviewer": "qa",
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertFalse(payload["ok"])
+
+        status, payload = self.portal.soc_alert_adjudication_response(
+            group_id,
+            {
+                "outcome_override": "inconclusive",
+                "confidence": "low",
+                "rationale": "Still requires review.",
+                "reviewer": "qa",
+                "resolve_case": "false",
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("JSON boolean", payload["error"])
+
+        status, payload = self.portal.soc_alert_adjudication_response(
+            group_id,
+            {
+                "outcome_override": "inconclusive",
+                "confidence": "low",
+                "rationale": "Still requires review.",
+                "reviewer": "qa",
+                "event_status": "guessed",
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("event status", payload["error"])
+
+        with mock.patch.object(
+            self.portal,
+            "alert_store_post_json",
+        ) as contradictory_post:
+            status, payload = self.portal.soc_alert_adjudication_response(
+                group_id,
+                {
+                    "outcome_override": "false_positive_logic_rule",
+                    "confidence": "high",
+                    "rationale": "These labels must not be stored together.",
+                    "reviewer": "qa",
+                    "event_status": "observed",
+                    "detection_validity": "logic_error",
+                    "activity_disposition": "malicious",
+                    "handling": "contain",
+                },
+            )
+        self.assertEqual(status, 400)
+        self.assertIn("conflicts with the explicit verdict factors", payload["error"])
+        contradictory_post.assert_not_called()
+
+    def test_portal_review_routes_require_same_origin_json_marker(self) -> None:
+        source = PORTAL_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("def _soc_review_write_authorized", source)
+        self.assertIn('X-Onion-Sentinel-Request', source)
+        self.assertIn('fetch_site != "same-origin"', source)
+        self.assertIn('parsed_origin.netloc.lower() != request_host', source)
+        self.assertIn('endswith("/adjudicate")', source)
+        self.assertIn('endswith(("/adjudicate", "/status"))', source)
+
     def test_incident_list_returns_case_and_only_incident_responder_analysis(self) -> None:
         conn = sqlite3.connect(self.db_path)
         conn.executescript(
@@ -447,6 +573,86 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertEqual(case["destination_ip"], "198.51.100.30")
         self.assertEqual(case["destination_port"], 22)
         self.assertEqual(case["seen_count"], 6)
+
+    def test_incident_paths_ignore_unrelated_latest_analysis_pointer(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE incident_response_cases (
+              case_id TEXT PRIMARY KEY, group_id TEXT NOT NULL UNIQUE,
+              dashboard_group_id TEXT NOT NULL, representative_alert_id TEXT NOT NULL,
+              status TEXT NOT NULL, agent_status TEXT NOT NULL,
+              escalated_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+              escalated_by TEXT, reason TEXT, latest_analysis_id TEXT,
+              latest_model TEXT, latest_generated_at TEXT, latest_error TEXT
+            );
+            CREATE TABLE ai_analysis_runs (
+              analysis_id TEXT PRIMARY KEY, group_id TEXT, agent_role TEXT,
+              generated_at TEXT, created_at TEXT, model TEXT,
+              detection_outcome TEXT, bluf TEXT, summary TEXT, confidence TEXT,
+              response_json TEXT
+            );
+            INSERT INTO incident_response_cases VALUES (
+              'ir-pointer', 'stable-correct', 'dddddddddddd', 'alert-pointer',
+              'open', 'analyzed', '2026-07-22  13:00:00-06:00',
+              '2026-07-22  13:05:00-06:00', 'qa', 'Pointer validation',
+              'analysis-wrong', 'wrong-model',
+              '2026-07-22  13:05:00-06:00', NULL
+            );
+            """
+        )
+        correct_response = json.dumps({
+            "incident_response_report": {
+                "executive_bluf": "Correct group analysis.",
+                "conclusion": "Use the group-bound incident run.",
+                "confidence": "high",
+            },
+            "event_status": "observed",
+            "detection_validity": "matched_intent",
+            "activity_disposition": "suspicious",
+            "handling": "investigate",
+            "duplicate_of": None,
+        })
+        wrong_response = json.dumps({
+            "incident_response_report": {
+                "executive_bluf": "Unrelated analysis must not render.",
+                "conclusion": "Wrong group.",
+                "confidence": "high",
+            },
+        })
+        conn.execute(
+            "INSERT INTO ai_analysis_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "analysis-wrong", "stable-other", "incident-responder",
+                "2026-07-22  13:05:00-06:00", "2026-07-22  13:05:00-06:00",
+                "wrong-model", "true_positive_malicious", "wrong", "wrong",
+                "high", wrong_response,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO ai_analysis_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "analysis-correct", "stable-correct", "incident-responder",
+                "2026-07-22  13:04:00-06:00", "2026-07-22  13:04:00-06:00",
+                "correct-model", "true_positive_suspicious", "correct", "correct",
+                "high", correct_response,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        status, detail = self.portal.soc_incident_detail_response("ir-pointer")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["review"]["analysis_id"], "analysis-correct")
+        self.assertIn("Correct group analysis.", detail["incident_html"])
+        self.assertNotIn("Unrelated analysis must not render.", detail["incident_html"])
+
+        status, listing = self.portal.soc_incidents_query_response(
+            {"page": ["1"], "per_page": ["25"], "status": ["all"]}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(listing["incidents"][0]["analysis_id"], "analysis-correct")
+        self.assertEqual(listing["incidents"][0]["analysis_model"], "correct-model")
 
     def test_incident_list_is_empty_until_dr_schema_is_initialized(self) -> None:
         sqlite3.connect(self.db_path).close()

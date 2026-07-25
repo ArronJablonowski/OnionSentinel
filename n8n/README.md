@@ -30,6 +30,9 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `bin/send-telegram-notification.py` | Shared bounded Telegram sender that parses only allowlisted credentials as data, retries transient network failures, and emits concise status without tracebacks or secrets. |
 | `bin/maintain-pcap-evidence.py` | Runtime-only PCAP artifact and derived-analysis retention helper; dry-run by default. |
 | `bin/backfill-ai-correlation-context.py` | Idempotently indexes historical AI artifacts through alert-store without writing SQLite directly. |
+| `bin/detection_validation.py` | Deterministic deployed-rule and packet-predicate validator; emits bounded semantics and never exposes raw payloads. |
+| `bin/asset_inventory.py` | Strict time-aware asset inventory loader and exact identifier resolver. |
+| `bin/export-adjudicated-analysis-replays.py` | Exports append-only human adjudications into a private mode-0600 replay suite. |
 | `bin/agent_memory.py` | Shared role-aware Markdown memory library with relevance retrieval, validation, locking, deduplication, and expiry. |
 | `bin/manage-agent-memory.py` | Query/writeback CLI adapter for SOC Analyst, Incident Responder, SIEM Engineer, Cyber Threat Intel, and Threat Hunter workflows. |
 | `bin/verify-agent-memory.py` | Read-only deployment verifier for every agent prompt, role memory, shared memory, permissions, and retrieval contract. |
@@ -40,6 +43,8 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `config/incident_responder_system_prompt.md` | Incident responder prompt used for response planning and future host artifact collection guidance. |
 | `config/*_second_opinion_prompt.md` | Independent reviewer prompts for all five Cyber Security Agent roles. Reviewers receive the same bounded evidence without the primary conclusion. |
 | `config/ai_model_settings.json` | Enabled Ollama/GPT CLI roster, exact per-agent primary and optional second-opinion route assignments, legacy compatibility fields, and MaxMind paths. |
+| `config/detection_playbooks.json` | Versioned, code-owned exact-ID validation playbooks for signature-specific discriminators and rule-drift checks. |
+| `config/asset_inventory.example.json` | Empty sanitized template for the operator-owned runtime asset inventory. |
 | `agent-memory/` | Sanitized starter Markdown memory files for individual Cyber Security Agents plus shared cross-agent memory. Installed into `$HOME/n8n-local/soc-alerts/agent-memory` only if missing. |
 | `launchd/` | Mac Studio LaunchAgents for stack supervision, AI jobs, PCAP parsing, and dry-run PCAP retention. |
 
@@ -116,6 +121,60 @@ deterministic code compares material and advisory fields and writes reviewer
 effectiveness telemetry to SQLite `ai_second_opinion_runs`. Reviewer memory is
 promoted only after complete high-confidence agreement and the standard
 grounding, redaction, deduplication, expiry, and size gates.
+
+The runner separates five verdict dimensions: event occurrence, detection
+validity, activity disposition, handling, and duplicate identity. The legacy
+Detection Outcome remains a deterministic compatibility projection of those
+dimensions. Confidence is a numeric, calibrated score with evidence caps.
+Rule-intent mismatches override an incompatible model verdict, block model-
+proposed containment and suppress/drop controls, preserve the original model
+claim for audit, and require human review where appropriate.
+
+`config/detection_playbooks.json` is deployed on every install because it is
+reviewed code-owned policy. `config/asset_inventory.json` is operator-owned and
+is only seeded from the empty example when missing. Asset records require
+offset-aware validity intervals so an address reused by another host is
+resolved at the alert time. Repeating an `asset_id` with non-overlapping
+validity intervals records identifier history without making old and new
+addresses concurrently active. Overlapping intervals for the same asset are
+rejected, overlapping claims by different assets are surfaced as conflicts,
+and resolution output is capped with explicit truncation metadata. Registered
+roles and expected services are context, never proof of authorization or
+benignness. Owner aliases are removed from hosted/reviewer packages unless that
+individual asset explicitly sets `share_with_hosted_models`.
+
+Primary/reviewer material disagreement is persisted and shown as disputed.
+Suppressing an alert or resolving an incident is blocked until an analyst
+submits an append-only adjudication with outcome, confidence, rationale,
+evidence gap, next action, reviewer, and (for resolution) a case-resolution
+reason. The form also records the analyst-confirmed factored verdict fields;
+legacy rows that lack those factors remain unlabeled rather than having labels
+inferred from the compatibility outcome. Adjudication does not rewrite the
+model artifact.
+
+Run the sanitized checked-in regression suite without contacting any model or
+network service:
+
+```bash
+python3 operations/evaluate-analysis-replays.py --fail-on-regression
+```
+
+On the Mac Studio, build a private production-shaped suite from the latest
+append-only analyst decisions, then evaluate it from the repository:
+
+```bash
+$HOME/n8n-local/bin/export-adjudicated-analysis-replays.py
+python3 operations/evaluate-analysis-replays.py \
+  --fixtures "$HOME/n8n-local/soc-alerts/evaluations/adjudicated-replays.json"
+```
+
+That exported file contains live evidence, is written mode `0600`, and must
+never be committed. The evaluator reports per-dimension confusion matrices,
+precision/recall, dangerous dismissals, over-escalations, schema repair,
+unsupported evidence references, reviewer gain, Brier score, and expected
+calibration error. The checked-in BPFDoor case rebuilds deterministic
+validation from a synthetic packet and deployed-rule fixture, so parser and
+playbook regressions cannot pass behind a hard-coded validator result.
 
 The installer runs the verifier with `--initialize`. This idempotently creates
 missing memory files or adds managed boundaries to legacy files while preserving
@@ -693,7 +752,9 @@ Mac-to-relay forced-command key. Runtime configuration is rendered from
 `config/incident-evidence.example.json` to
 `$HOME/n8n-local/config/incident-evidence.json`; collected artifacts live under
 `$HOME/n8n-local/soc-alerts/incident-evidence` and are runtime data, not repo
-content.
+content. The collector also carries the representative alert's Elasticsearch
+backing index and document ID that the restricted alert exporter stored outside
+the event `_source`. It never accepts an index or ID from model output.
 
 The collector requests five immutable Elastic packs and seven immutable local
 OSquery packs. Security Onion creates every baseline command; model output is
@@ -712,7 +773,12 @@ entry must show:
 
 Query DSL and OSquery SQL are the authoritative records of what the restricted
 wrapper ran. KQL is an explanatory equivalent and is not a second executed
-query.
+query. A v2 artifact additionally records the fixed per-pack index scope,
+endpoint, shard metadata, execution-manifest digest, positive representative
+alert control, contradictory negative filter control, and semantic-validity
+state. `complete: true` is accepted only when both controls, every Elastic
+query, and every fixed local OSquery pack pass; a transport success or zero-hit
+response alone is insufficient.
 
 An Incident Responder response may propose one optional live endpoint OSQuery
 round. `bin/live_osquery_contract.py` validates the request before

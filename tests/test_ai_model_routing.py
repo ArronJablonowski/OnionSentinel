@@ -33,6 +33,26 @@ class AiModelRoutingTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.runner = load_runner()
 
+    def complete_response(self, **overrides):
+        response = {
+            **self.runner.DEFAULT_RESPONSE_VALUES,
+            "bluf": "Inconclusive: synthetic evidence requires review.",
+            "summary": "Synthetic complete response.",
+            "likely_meaning": "Synthetic activity.",
+            "severity_reasoning": "Synthetic severity rationale.",
+            "alert_frequency_assessment": "One synthetic observation.",
+            "evidence_used": ["alert.synthetic:E1", "alert.synthetic:E2"],
+            "evidence_gaps": [],
+            "confidence": "medium",
+            "confidence_score": 0.65,
+            "detection_outcome": "inconclusive",
+            "escalation_needed": False,
+            "tuning_recommendation": "needs_more_data",
+            "tuning_reason": "Synthetic fixture requires more data.",
+        }
+        response.update(overrides)
+        return response
+
     def test_repo_template_assigns_approved_models_to_every_agent(self) -> None:
         settings_path = REPO_ROOT / "n8n" / "config" / "ai_model_settings.json"
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
@@ -725,17 +745,20 @@ class AiModelRoutingTests(unittest.TestCase):
         settings["enabled_ollama_models"] = ["primary:latest", "reviewer:latest"]
         settings["agent_models"]["soc-analyst"] = "ollama:primary:latest"
         settings["agent_second_opinion_models"]["soc-analyst"] = "ollama:reviewer:latest"
-        primary = self.runner.validate_response({
-            "confidence": "low",
-            "detection_outcome": "inconclusive",
-            "summary": "Primary assessment",
-        })
-        secondary = {
-            "confidence": "high",
-            "detection_outcome": "true_positive_suspicious",
-            "bluf": "True Positive - Suspicious: independent review.",
-            "summary": "Independent review",
-        }
+        primary = self.runner.validate_response(self.complete_response(
+            confidence="low",
+            confidence_score=0.3,
+            detection_outcome="inconclusive",
+            summary="Primary assessment",
+        ))
+        secondary = self.complete_response(
+            confidence="high",
+            confidence_score=0.9,
+            detection_outcome="true_positive_suspicious",
+            bluf="True Positive - Suspicious: independent review.",
+            summary="Independent review",
+            escalation_needed=True,
+        )
         phases: list[tuple[str, str, str]] = []
 
         with mock.patch.object(self.runner, "analyze_model_route", return_value=secondary) as analyze:
@@ -748,14 +771,16 @@ class AiModelRoutingTests(unittest.TestCase):
                 phase_callback=lambda phase, route, trigger: phases.append((phase, route, trigger)),
             )
 
-        analyze.assert_called_once_with(
-            "ollama:reviewer:latest",
-            {},
-            args,
-            settings,
-            system_prompt_file=reviewer_prompt,
-            independent_review=True,
+        analyze.assert_called_once()
+        self.assertEqual(analyze.call_args.args[0], "ollama:reviewer:latest")
+        self.assertEqual(
+            analyze.call_args.args[1]["second_opinion_review"]["mode"],
+            "blind_independent",
         )
+        self.assertIs(analyze.call_args.args[2], args)
+        self.assertIs(analyze.call_args.args[3], settings)
+        self.assertEqual(analyze.call_args.kwargs["system_prompt_file"], reviewer_prompt)
+        self.assertTrue(analyze.call_args.kwargs["independent_review"])
         self.assertEqual(result["_second_opinion"]["status"], "completed")
         self.assertEqual(result["_second_opinion"]["response"]["confidence"], "high")
         self.assertFalse(result["_second_opinion"]["response"]["second_opinion_recommended"])
@@ -763,6 +788,13 @@ class AiModelRoutingTests(unittest.TestCase):
             result["_second_opinion"]["comparison"]["agreement"],
             "material_disagreement",
         )
+        self.assertEqual(result["final_disposition_status"], "disputed_pending_human")
+        self.assertTrue(result["escalation_needed"])
+        self.assertEqual(result["tuning_recommendation"], "needs_more_data")
+        self.assertEqual(result["recommended_tuning_actions"], [])
+        self.assertEqual(result["memory_candidates"], [])
+        self.assertTrue(result["_automation_controls"]["tuning_blocked"])
+        self.assertTrue(result["_automation_controls"]["memory_writeback_blocked"])
         self.assertEqual(
             phases,
             [
@@ -832,11 +864,12 @@ class AiModelRoutingTests(unittest.TestCase):
         args = type("Args", (), {})()
         settings = self.runner.default_ai_settings()
         settings["agent_second_opinion_models"]["soc-analyst"] = "ollama:reviewer:latest"
-        primary = self.runner.validate_response({
-            "confidence": "high",
-            "detection_outcome": "true_positive_authorized_benign",
-            "summary": "Supported conclusion",
-        })
+        primary = self.runner.validate_response(self.complete_response(
+            confidence="high",
+            confidence_score=0.9,
+            detection_outcome="true_positive_authorized_benign",
+            summary="Supported conclusion",
+        ))
         phases: list[tuple[str, str, str]] = []
 
         with mock.patch.object(self.runner, "analyze_model_route") as analyze:
@@ -855,17 +888,486 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(phases, [("post_processing", "", "")])
 
     def test_string_false_does_not_request_second_opinion(self) -> None:
-        response = self.runner.validate_response({
-            **self.runner.DEFAULT_RESPONSE_VALUES,
-            "confidence": "high",
-            "detection_outcome": "informational_no_action",
-            "second_opinion_recommended": "false",
-            "hosted_second_opinion_recommended": "false",
-        })
+        response = self.runner.validate_response(self.complete_response(
+            confidence="high",
+            confidence_score=0.9,
+            detection_outcome="informational_no_action",
+            second_opinion_recommended="false",
+            hosted_second_opinion_recommended="false",
+        ))
 
         self.assertFalse(response["second_opinion_recommended"])
         self.assertFalse(response["hosted_second_opinion_recommended"])
         self.assertEqual(self.runner.second_opinion_trigger(response), "")
+
+    def test_legacy_outcome_derives_canonical_factored_verdict(self) -> None:
+        response = self.runner.validate_response(self.complete_response(
+            confidence="high",
+            confidence_score=0.92,
+            detection_outcome="true_positive_malicious",
+            escalation_needed=True,
+        ))
+
+        self.assertEqual(response["detection_outcome"], "true_positive_malicious")
+        self.assertEqual(response["event_status"], "observed")
+        self.assertEqual(response["detection_validity"], "matched_intent")
+        self.assertEqual(response["activity_disposition"], "malicious")
+        self.assertEqual(response["handling"], "contain")
+        self.assertIsNone(response["duplicate_of"])
+        self.assertEqual(response["_verdict_validation"]["source"], "legacy_derived")
+        self.assertFalse(response["_verdict_validation"]["material_contradiction"])
+        self.assertEqual(response["confidence"], "high")
+        self.assertEqual(response["confidence_score"], 0.92)
+
+    def test_factored_verdict_mismatch_is_canonicalized_and_confidence_capped(self) -> None:
+        response = self.runner.validate_response(self.complete_response(
+            confidence="high",
+            confidence_score=0.95,
+            detection_outcome="true_positive_authorized_benign",
+            event_status="observed",
+            detection_validity="matched_intent",
+            activity_disposition="suspicious",
+            handling="investigate",
+            duplicate_of=None,
+        ))
+
+        self.assertEqual(response["detection_outcome"], "true_positive_suspicious")
+        validation = response["_verdict_validation"]
+        self.assertEqual(validation["source"], "model_factored")
+        self.assertTrue(validation["material_contradiction"])
+        self.assertIn("factored verdict derives", validation["contradictions"][0])
+        self.assertEqual(response["confidence"], "low")
+        self.assertEqual(response["confidence_score"], 0.39)
+        self.assertIn(
+            "material_verdict_contradiction",
+            response["_confidence_calibration"]["limiters"],
+        )
+        self.assertEqual(
+            self.runner.second_opinion_trigger(response),
+            "Runtime verdict checks found a material contradiction.",
+        )
+
+    def test_confidence_calibration_uses_evidence_caps(self) -> None:
+        uncited = self.runner.validate_response(self.complete_response(
+            confidence="high",
+            confidence_score=0.94,
+            detection_outcome="true_positive_suspicious",
+            evidence_used=[],
+        ))
+        contradictory = self.runner.validate_response(self.complete_response(
+            confidence="high",
+            confidence_score=0.94,
+            detection_outcome="true_positive_suspicious",
+            correlation_assessment={
+                "correlation_found": False,
+                "confidence": "low",
+                "related_groups": [],
+                "shared_evidence": [],
+                "contradicting_evidence": ["The endpoint baseline conflicts with the network hypothesis."],
+                "attack_chain_hypothesis": "",
+                "recommended_pivots": [],
+            },
+        ))
+
+        self.assertEqual(uncited["confidence"], "medium")
+        self.assertEqual(uncited["confidence_score"], 0.69)
+        self.assertIn("no_cited_evidence", uncited["_confidence_calibration"]["limiters"])
+        self.assertEqual(contradictory["confidence"], "medium")
+        self.assertEqual(contradictory["confidence_score"], 0.69)
+        self.assertIn(
+            "unresolved_contradicting_evidence",
+            contradictory["_confidence_calibration"]["limiters"],
+        )
+
+    def test_review_trigger_covers_controls_and_high_severity_closures(self) -> None:
+        containment = self.runner.validate_response(self.complete_response(
+            confidence="high",
+            confidence_score=0.9,
+            detection_outcome="true_positive_malicious",
+        ))
+        suppression = self.runner.validate_response(self.complete_response(
+            confidence="high",
+            confidence_score=0.9,
+            detection_outcome="true_positive_suspicious",
+            tuning_recommendation="suppress",
+        ))
+        closure = self.runner.validate_response(self.complete_response(
+            confidence="high",
+            confidence_score=0.9,
+            detection_outcome="true_positive_authorized_benign",
+        ))
+
+        self.assertEqual(
+            self.runner.second_opinion_trigger(containment),
+            "The primary model recommended a consequential response action.",
+        )
+        self.assertEqual(
+            self.runner.second_opinion_trigger(suppression),
+            "The primary model recommended suppressing or dropping detection signal.",
+        )
+        self.assertEqual(
+            self.runner.second_opinion_trigger(
+                closure,
+                {"alert": {"triage_level": "high"}},
+            ),
+            "A high-severity detection received a consequential closure disposition.",
+        )
+
+    def test_independent_reviewer_package_removes_model_anchoring_context(self) -> None:
+        package = {
+            "instructions": {
+                "role": "primary system prompt",
+                "grounding": [
+                    "Use current evidence.",
+                    "Use prior_analyses as context.",
+                    "Review previous_correlation.",
+                ],
+                "task": "Classify the alert.",
+            },
+            "prior_analyses": [{"detection_outcome": "true_positive_malicious"}],
+            "correlated_alert_context": {
+                "candidates": [{
+                    "group_id": "related",
+                    "correlation_reasons": [
+                        "shared host: workstation",
+                        "previous correlation record exists",
+                    ],
+                    "prior_analysis": {"summary": "Prior model conclusion"},
+                    "previous_correlation": {"model_hypothesis": "Prior chain"},
+                    "shared_observables": [{"type": "host", "value": "workstation"}],
+                }],
+            },
+            "agent_memory": {
+                "role_memory": {
+                    "manual_notes": "Operator-approved environment note.",
+                    "records": [
+                        {"status": "model-observed", "finding": "Model claim"},
+                        {"status": "operator-confirmed", "finding": "Confirmed context"},
+                    ],
+                },
+                "shared_memory": {
+                    "records": [{"status": "model-observed", "finding": "Shared model claim"}],
+                },
+            },
+            "alert": {"alert_id": "synthetic"},
+            "detection_validation": {
+                "schema": "onion-sentinel-detection-validation-v1",
+                "event_status": "observed",
+                "rule_intent_match": "mismatch",
+            },
+            "asset_context": {
+                "matched_assets": [
+                    {
+                        "asset_id": "private-owner",
+                        "owner_ref": "sensitive-team-alias",
+                        "share_with_hosted_models": False,
+                    },
+                    {
+                        "asset_id": "shared-owner",
+                        "owner_ref": "approved-team-alias",
+                        "share_with_hosted_models": True,
+                    },
+                ],
+            },
+        }
+
+        sanitized = self.runner.independent_reviewer_package(package)
+
+        self.assertNotIn("role", sanitized["instructions"])
+        self.assertNotIn("prior_analyses", sanitized)
+        self.assertEqual(sanitized["instructions"]["grounding"], ["Use current evidence."])
+        candidate = sanitized["correlated_alert_context"]["candidates"][0]
+        self.assertNotIn("prior_analysis", candidate)
+        self.assertNotIn("previous_correlation", candidate)
+        self.assertEqual(candidate["correlation_reasons"], ["shared host: workstation"])
+        self.assertEqual(
+            sanitized["agent_memory"]["role_memory"]["records"],
+            [{"status": "operator-confirmed", "finding": "Confirmed context"}],
+        )
+        self.assertEqual(sanitized["agent_memory"]["shared_memory"]["records"], [])
+        self.assertEqual(
+            sanitized["detection_validation"],
+            package["detection_validation"],
+        )
+        private_asset, shared_asset = sanitized["asset_context"]["matched_assets"]
+        self.assertNotIn("owner_ref", private_asset)
+        self.assertEqual(shared_asset["owner_ref"], "approved-team-alias")
+        self.assertEqual(
+            package["asset_context"]["matched_assets"][0]["owner_ref"],
+            "sensitive-team-alias",
+        )
+        self.assertIn("prior_analyses", package)
+        self.assertIn("role", package["instructions"])
+
+    def test_hosted_model_copy_redacts_only_unshared_asset_owners(self) -> None:
+        package = {
+            "detection_validation": {
+                "schema": "onion-sentinel-detection-validation-v1",
+                "event_status": "observed",
+                "rule_intent_match": "match",
+                "marker": {
+                    "hex": "73656e736974697665",
+                    "printable": "sensitive",
+                    "raw_rule": "content secret",
+                    "sha256": "a" * 64,
+                    "length": 9,
+                },
+            },
+            "asset_context": {
+                "matched_assets": [
+                    {
+                        "asset_id": "private",
+                        "owner_ref": "private-owner",
+                        "share_with_hosted_models": False,
+                    },
+                    {
+                        "asset_id": "shared",
+                        "owner_ref": "shared-owner",
+                        "share_with_hosted_models": True,
+                    },
+                ],
+            },
+        }
+
+        local_copy = self.runner.model_safe_copy(package)
+        hosted_copy = self.runner.model_safe_copy(package, hosted=True)
+
+        self.assertEqual(
+            local_copy["asset_context"]["matched_assets"][0]["owner_ref"],
+            "private-owner",
+        )
+        self.assertNotIn(
+            "owner_ref",
+            hosted_copy["asset_context"]["matched_assets"][0],
+        )
+        self.assertEqual(
+            hosted_copy["asset_context"]["matched_assets"][1]["owner_ref"],
+            "shared-owner",
+        )
+        hosted_marker = hosted_copy["detection_validation"]["marker"]
+        self.assertNotIn("hex", hosted_marker)
+        self.assertNotIn("printable", hosted_marker)
+        self.assertNotIn("raw_rule", hosted_marker)
+        self.assertEqual(hosted_marker["length"], 9)
+        self.assertIn("hex", local_copy["detection_validation"]["marker"])
+
+    def test_deterministic_mismatch_overrides_unsupported_malicious_controls(self) -> None:
+        prompt_package = {
+            "detection_validation": {
+                "schema": "onion-sentinel-detection-validation-v1",
+                "event_status": "observed",
+                "rule_intent_match": "mismatch",
+                "rule": {
+                    "sid": "2069174",
+                    "revision": 5,
+                    "rule_sha256": "a" * 64,
+                },
+                "confidence_limiters": [
+                    "Endpoint telemetry is required for malicious attribution.",
+                ],
+            },
+        }
+        response = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.97,
+                detection_outcome="true_positive_malicious",
+                escalation_needed=True,
+                tuning_recommendation="suppress",
+                recommended_tuning_actions=["Suppress the rule automatically."],
+            ),
+            prompt_package,
+        )
+
+        self.assertEqual(response["detection_outcome"], "false_positive_logic_rule")
+        self.assertEqual(response["event_status"], "observed")
+        self.assertEqual(response["detection_validity"], "logic_error")
+        self.assertEqual(response["activity_disposition"], "unknown")
+        self.assertEqual(response["handling"], "investigate")
+        self.assertFalse(response["escalation_needed"])
+        self.assertEqual(response["tuning_recommendation"], "needs_more_data")
+        self.assertEqual(response["recommended_tuning_actions"], [])
+        self.assertEqual(response["confidence"], "low")
+        self.assertEqual(response["confidence_score"], 0.39)
+        guard = response["_verdict_validation"]["deterministic_evidence_guard"]
+        self.assertEqual(
+            guard["model_verdict_before_guard"]["detection_outcome"],
+            "true_positive_malicious",
+        )
+        self.assertEqual(guard["blocked_controls"], ["contain", "suppress"])
+        self.assertIn(
+            "malicious_attribution_without_trusted_endpoint_evidence",
+            response["_confidence_calibration"]["limiters"],
+        )
+        self.assertTrue(response["_automation_controls"]["containment_blocked"])
+        self.assertTrue(response["_automation_controls"]["tuning_blocked"])
+
+    def test_deterministic_mismatch_caps_non_malicious_override_at_medium(self) -> None:
+        response = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.96,
+                detection_outcome="true_positive_suspicious",
+            ),
+            {
+                "detection_validation": {
+                    "event_status": "observed",
+                    "rule_intent_match": "mismatch",
+                },
+            },
+        )
+
+        self.assertEqual(response["detection_outcome"], "false_positive_logic_rule")
+        self.assertEqual(response["activity_disposition"], "unknown")
+        self.assertEqual(response["confidence"], "medium")
+        self.assertEqual(response["confidence_score"], 0.79)
+        self.assertFalse(
+            response["_verdict_validation"]["material_contradiction"]
+        )
+        self.assertEqual(
+            self.runner.second_opinion_trigger(response),
+            "Deterministic rule-intent validation overrode the model verdict.",
+        )
+
+    def test_trusted_endpoint_collection_avoids_unsupported_malicious_low_cap(self) -> None:
+        response = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.96,
+                detection_outcome="true_positive_malicious",
+                escalation_needed=True,
+            ),
+            {
+                "detection_validation": {
+                    "event_status": "observed",
+                    "rule_intent_match": "mismatch",
+                },
+                "live_osquery_evidence": {
+                    "results": [
+                        {
+                            "status": "completed",
+                            "rows": [],
+                            "query_digest": "trusted-endpoint-query",
+                        },
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response["detection_outcome"], "false_positive_logic_rule")
+        self.assertEqual(response["confidence"], "medium")
+        self.assertEqual(response["confidence_score"], 0.79)
+        self.assertNotIn(
+            "malicious_attribution_without_trusted_endpoint_evidence",
+            response["_confidence_calibration"]["limiters"],
+        )
+
+    def test_unknown_rule_intent_caps_and_reviews_consequential_conclusion(self) -> None:
+        response = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.94,
+                detection_outcome="true_positive_authorized_benign",
+            ),
+            {
+                "detection_validation": {
+                    "event_status": "unknown",
+                    "rule_intent_match": "unknown",
+                },
+            },
+        )
+
+        self.assertEqual(
+            response["detection_outcome"],
+            "true_positive_authorized_benign",
+        )
+        self.assertEqual(response["confidence"], "medium")
+        self.assertEqual(response["confidence_score"], 0.79)
+        self.assertIn(
+            "deterministic_rule_intent_unknown_for_consequential_conclusion",
+            response["_confidence_calibration"]["limiters"],
+        )
+        self.assertEqual(
+            self.runner.second_opinion_trigger(response),
+            "Deterministic evidence could not establish rule intent for a consequential conclusion.",
+        )
+
+    def test_same_codex_model_with_different_effort_is_not_an_independent_reviewer(self) -> None:
+        args = type("Args", (), {})()
+        settings = self.runner.default_ai_settings()
+        settings["agent_models"]["soc-analyst"] = "codex-cli:gpt-5.6-sol:medium"
+        settings["agent_second_opinion_models"]["soc-analyst"] = "codex-cli:gpt-5.6-sol:xhigh"
+        primary = self.runner.validate_response(self.complete_response(
+            confidence="high",
+            confidence_score=0.9,
+            detection_outcome="true_positive_malicious",
+        ))
+
+        with mock.patch.object(self.runner, "analyze_model_route") as analyze:
+            result = self.runner.apply_configured_second_opinion(
+                {},
+                primary,
+                args,
+                settings,
+                "soc-analyst",
+            )
+
+        analyze.assert_not_called()
+        self.assertEqual(result["final_disposition_status"], "review_required_not_independent")
+        self.assertEqual(result["_second_opinion"]["status"], "not_independent")
+
+    def test_configured_default_and_explicit_same_codex_model_are_not_independent(self) -> None:
+        args = type("Args", (), {})()
+        settings = self.runner.default_ai_settings()
+        settings["codex_cli_model"] = "gpt-5.5"
+        settings["agent_models"]["soc-analyst"] = "codex-cli"
+        settings["agent_second_opinion_models"][
+            "soc-analyst"
+        ] = "codex-cli:gpt-5.5:xhigh"
+        primary = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.9,
+                detection_outcome="true_positive_malicious",
+            )
+        )
+
+        with mock.patch.object(self.runner, "analyze_model_route") as analyze:
+            result = self.runner.apply_configured_second_opinion(
+                {},
+                primary,
+                args,
+                settings,
+                "soc-analyst",
+            )
+
+        analyze.assert_not_called()
+        self.assertEqual(
+            result["final_disposition_status"],
+            "review_required_not_independent",
+        )
+
+    def test_all_role_prompts_describe_factored_verdict_and_calibrated_confidence(self) -> None:
+        for role in (
+            "soc_analyst",
+            "incident_responder",
+            "siem_engineer",
+            "cyber_threat_intel",
+            "threat_hunter",
+        ):
+            for suffix in ("system_prompt.md", "second_opinion_prompt.md"):
+                prompt = (
+                    REPO_ROOT / "n8n" / "config" / f"{role}_{suffix}"
+                ).read_text(encoding="utf-8")
+                self.assertIn("event_status", prompt)
+                self.assertIn("detection_validity", prompt)
+                self.assertIn("activity_disposition", prompt)
+                self.assertIn("handling", prompt)
+                self.assertIn("duplicate_of", prompt)
+                self.assertIn("confidence_score", prompt)
+                self.assertIn("detection_validation", prompt)
+                self.assertIn("rule_intent_match", prompt)
+                self.assertIn("asset_context", prompt)
 
     def test_second_opinion_failure_preserves_primary_analysis(self) -> None:
         args = type("Args", (), {})()

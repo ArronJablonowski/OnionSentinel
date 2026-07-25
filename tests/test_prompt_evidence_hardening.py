@@ -1,0 +1,191 @@
+import base64
+import copy
+import importlib.util
+import json
+import sys
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+BIN_DIR = ROOT / "n8n" / "bin"
+MODULE_PATH = BIN_DIR / "build-ai-investigation-prompt.py"
+SPEC = importlib.util.spec_from_file_location("prompt_evidence_hardening", MODULE_PATH)
+builder = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader is not None
+sys.path.insert(0, str(BIN_DIR))
+SPEC.loader.exec_module(builder)
+
+
+def alert_row():
+    packet = b"\x00" * 14 + b"\x45" + b"\x00" * 63
+    rule = (
+        'alert icmp any any -> any any '
+        '(msg:"fixture"; itype:0; content:"X:"; offset:16; sid:999999; rev:3;)'
+    )
+    raw_message = {
+        "alert": {
+            "signature_id": 999999,
+            "rev": 3,
+            "signature": "fixture",
+            "rule": rule,
+        },
+        "packet": base64.b64encode(packet).decode("ascii"),
+        "packet_info": {"linktype": 1},
+    }
+    raw = {
+        "rule": {"rule": rule, "rev": 3, "ruleset": "fixture"},
+        "message": json.dumps(raw_message),
+    }
+    alert = {
+        "rule_id": "999999",
+        "rule_name": "fixture",
+        "rule_ruleset": "fixture",
+        "message": json.dumps(raw_message),
+        "source": {"mac": "00:11:22:33:44:55"},
+        "destination": {"mac": "00:11:22:33:44:66"},
+        "host": {"hostname": "workstation.example.test"},
+        "triage": {"reasons": ["fixture"]},
+    }
+    return {
+        "alert_id": "fixture-alert",
+        "timestamp": "2026-07-24  12:00:00-06:00",
+        "first_seen": "2026-07-24  12:00:00-06:00",
+        "last_seen": "2026-07-24  12:00:00-06:00",
+        "seen_count": 1,
+        "total_seen_count": 1,
+        "rule_id": "999999",
+        "rule_name": "fixture",
+        "event_dataset": "suricata.alert",
+        "severity": 2,
+        "severity_label": "medium",
+        "source_ip": "192.0.2.8",
+        "destination_ip": "192.0.2.53",
+        "destination_port": 53,
+        "transport_protocol": "udp",
+        "traffic_direction": "internal",
+        "triage_score": 50,
+        "triage_level": "medium",
+        "routing": "review",
+        "filter_status": "accepted",
+        "filter_reason": "",
+        "suppression_key": "fixture",
+        "stable_group_id": "abcdef123456",
+        "raw_event_json": json.dumps(raw),
+        "alert_json": json.dumps(alert),
+    }
+
+
+class PromptEvidenceHardeningTests(unittest.TestCase):
+    def test_compact_alert_retains_rule_context_but_not_packet_message(self):
+        compact = builder.compact_alert(alert_row())
+        self.assertEqual(compact["rule_context"]["sid"], "999999")
+        self.assertEqual(compact["rule_context"]["record_rule_id"], "999999")
+        self.assertEqual(compact["rule_context"]["revision"], 3)
+        deployed = compact["rule_context"]["deployed_rule"]
+        self.assertEqual(deployed["protocol"], "icmp")
+        self.assertEqual(deployed["content_predicates"][0]["length"], 2)
+        self.assertNotIn('"X:"', json.dumps(deployed))
+        self.assertNotIn("583a", json.dumps(deployed))
+        self.assertIsNone(compact["raw_alert_subset"]["message"])
+        serialized = json.dumps(compact)
+        self.assertNotIn('"packet"', serialized)
+        raw_packet = json.loads(
+            json.loads(alert_row()["raw_event_json"])["message"]
+        )["packet"]
+        self.assertNotIn(raw_packet, serialized)
+
+    def test_asset_inputs_use_only_explicit_endpoint_fields(self):
+        observables, events = builder.asset_observables_and_events([alert_row()])
+        values = {(item["type"], item["value"], item["role"]) for item in observables}
+        self.assertIn(("ip", "192.0.2.8", "source"), values)
+        self.assertIn(("ip", "192.0.2.53", "destination"), values)
+        self.assertIn(("hostname", "workstation.example.test", "host"), values)
+        self.assertNotIn(("hostname", "fixture", "observer"), values)
+        self.assertEqual(events[0]["destination_port"], 53)
+
+    def test_packet_validation_rows_are_bound_to_exact_rule_identity(self):
+        selected = alert_row()
+        selected_alert = json.loads(selected["alert_json"])
+        selected_raw = json.loads(selected["raw_event_json"])
+        context = builder.extract_rule_context(
+            selected_alert,
+            selected_raw,
+            selected["rule_id"],
+        )
+        other = copy.deepcopy(selected)
+        other_rule = (
+            'alert icmp any any -> any any '
+            '(msg:"other"; itype:0; sid:888888; rev:1;)'
+        )
+        other_alert = json.loads(other["alert_json"])
+        other_alert["rule_id"] = "888888"
+        other["rule_id"] = "888888"
+        other["alert_json"] = json.dumps(other_alert)
+        other_raw = json.loads(other["raw_event_json"])
+        other_message = json.loads(other_raw["message"])
+        other_message["alert"].update(
+            {"signature_id": 888888, "rev": 1, "rule": other_rule}
+        )
+        other_raw["message"] = json.dumps(other_message)
+        other_raw["rule"] = {
+            "rule": other_rule,
+            "rev": 1,
+            "ruleset": "fixture",
+        }
+        other["raw_event_json"] = json.dumps(other_raw)
+
+        rows, scope = builder.exact_detection_group_rows(
+            [selected, other],
+            context,
+        )
+
+        self.assertEqual([row["rule_id"] for row in rows], ["999999"])
+        self.assertEqual(scope["excluded_nonmatching_rows"], 1)
+
+    def test_packet_validation_accepts_security_onion_rule_uuid_with_matching_sid(self):
+        selected = alert_row()
+        rule_uuid = "93fcfa6f-e11d-4c24-9f55-0c83593fd3b5"
+        selected["rule_id"] = rule_uuid
+        selected_alert = json.loads(selected["alert_json"])
+        selected_alert["rule_id"] = rule_uuid
+        selected["alert_json"] = json.dumps(selected_alert)
+        selected_raw = json.loads(selected["raw_event_json"])
+        selected_raw["rule"]["id"] = rule_uuid
+        selected["raw_event_json"] = json.dumps(selected_raw)
+        context = builder.extract_rule_context(
+            selected_alert,
+            selected_raw,
+            selected["rule_id"],
+        )
+
+        rows, scope = builder.exact_detection_group_rows([selected], context)
+
+        self.assertEqual(context["sid"], "999999")
+        self.assertEqual(context["identity_conflicts"]["sid"], [])
+        self.assertEqual([row["rule_id"] for row in rows], [rule_uuid])
+        self.assertEqual(scope["exact_rule_rows"], 1)
+
+    def test_compact_pcap_retains_safe_icmp_semantics_and_detection_context(self):
+        compact = builder.compact_pcap_analysis(
+            {
+                "request": {"request_id": "pcap-fixture"},
+                "tshark": {
+                    "available": True,
+                    "icmp_semantics": {
+                        "raw_payloads_included": False,
+                        "type_code_counts": [{"type": "0", "code": "0", "count": 3}],
+                    },
+                },
+                "detection_context": {
+                    "rule": {"sid": "999999", "revision": 3},
+                    "playbook": None,
+                },
+            }
+        )
+        self.assertFalse(compact["tshark"]["icmp_semantics"]["raw_payloads_included"])
+        self.assertEqual(compact["detection_context"]["rule"]["sid"], "999999")
+
+
+if __name__ == "__main__":
+    unittest.main()

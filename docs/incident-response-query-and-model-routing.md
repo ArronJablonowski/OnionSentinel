@@ -26,19 +26,31 @@ erase or fabricate baseline findings.
 
 `security-onion/bin/export-incident-evidence` constructs these five searches:
 
-| Pack | Allowed datasets |
-| --- | --- |
-| `alert_context` | `suricata.alert` |
-| `network_flow` | `zeek.connection`, `endpoint.events.network`, `suricata.alert` |
-| `dns_activity` | `zeek.dns`, `endpoint.events.network` |
-| `osquery_history` | `endpoint.events.process`, `endpoint.events.file`, `endpoint.events.network`, `osquery_manager.result`, `osquery_manager.response` |
-| `cross_sensor_timeline` | `suricata.alert`, `zeek.connection`, `zeek.dns`, endpoint network/process/file events |
+| Pack | Reviewed index scope | Allowed datasets |
+| --- | --- | --- |
+| `alert_context` | `logs-suricata.alerts-so`, `logs-detections.alerts-so` | `suricata.alert` |
+| `network_flow` | Zeek connection, endpoint network, and the two alert data streams | `zeek.connection`, `endpoint.events.network`, `suricata.alert` |
+| `dns_activity` | Zeek DNS and endpoint network data streams | `zeek.dns`, `endpoint.events.network` |
+| `osquery_history` | Endpoint process/file/network and Osquery Manager result/response data streams | `endpoint.events.process`, `endpoint.events.file`, `endpoint.events.network`, `osquery_manager.result`, `osquery_manager.response` |
+| `cross_sensor_timeline` | The reviewed alert, Zeek connection/DNS, and endpoint network/process/file data streams | `suricata.alert`, `zeek.connection`, `zeek.dns`, endpoint network/process/file events |
 
 Each search is limited to approved fields, exact validated observables, no more
 than four windows of 24 hours each, no more than 16 observables in each
 category, and 200 hits. Reports retain an analyst-readable KQL equivalent and
 the exact executed Query DSL. Query DSL is the execution record; KQL is an
 explanation of intent.
+
+The caller also supplies the representative alert's Elasticsearch backing
+index and document ID as an anchor. Both values originate in the restricted
+alert-export wrapper, outside the event `_source`. Before evidence can be
+marked complete, the incident wrapper must retrieve that exact anchor once
+from the reviewed alert indices and then prove a contradictory positive/negative
+ID filter returns no records. Missing anchors, root errors, timeouts, failed
+shards, zero searchable shards, malformed hit metadata, and results from an
+index outside the pack's fixed scope are explicit evidence gaps. Consequently,
+`complete: true` means the fixed queries, controls, and local OSquery packs all
+passed semantic validation; it does not merely mean the SSH command returned
+successfully.
 
 ## Fixed Local OSQuery Packs
 

@@ -52,10 +52,23 @@ Elastic osquery/endpoint events for the bounded incident window.
 The caller cannot supply an index, field list, KQL expression, Query DSL
 object, OSquery SQL, host target, path, or shell command. Every Elastic result
 records the analyst-readable KQL equivalent and exact Query DSL submitted
-through `so-elasticsearch-query`. Every OSquery result records the reviewed
-pack, exact SQL, local target, status, query digest, bounded result metadata,
-and any explicit error. Query DSL and OSquery SQL are the authoritative command
-audits; KQL is explanatory and is not independently executed.
+through `so-elasticsearch-query`, plus the fixed per-pack index scope, exact
+endpoint, shard result, and execution-manifest digest. The wrapper rejects
+Elasticsearch root errors, timeouts, failed or zero shards, malformed hit
+metadata, and hits outside the reviewed scope instead of interpreting them as
+empty results.
+
+The collector may supply only one representative alert backing index/document
+ID produced by the restricted alert exporter. The incident wrapper validates
+that index against the fixed alert scope, confirms the exact document is
+retrievable once, and runs a contradictory ID-filter negative control. Both
+controls, every Elastic pack, and every local OSquery pack must pass before the
+response can set `complete: true`. An older anchorless request remains bounded
+and readable but is always returned as a semantically unverified partial
+result. Every OSquery result records the reviewed pack, exact SQL, local target,
+status, query digest, bounded result metadata, and any explicit error. Query
+DSL and OSquery SQL are the authoritative command audits; KQL is explanatory
+and is not independently executed.
 
 Live endpoint OSQuery is a separate Incident Responder capability based on
 `security-onion/ssh/authorized_keys.live-osquery.example`. It remains disabled

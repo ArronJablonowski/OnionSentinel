@@ -163,6 +163,13 @@ represented as a separately executed search. Missing, partial, malformed, or
 failed packs are explicit evidence gaps and must not be silently omitted or
 filled by model inference.
 
+The immutable collector artifact remains on disk. When a bounded model package
+retains only a sample of returned hits, the derived package updates
+`returned_hits` and `truncated` to describe the supplied sample and records the
+collector's original count plus a SHA-256 digest of the complete hit set in
+`prompt_projection`. The runner validates that projection before inference, so
+package compaction cannot silently break or weaken the evidence contract.
+
 Every OSquery result must retain the reviewed pack name, exact SQL, local
 target, execution status, query digest, bounded result metadata, and explicit
 error state. The report shows those values under **OSquery Command Audit**.
@@ -423,6 +430,57 @@ expiry, and size gates. Reviewer effectiveness is recorded independently in
 SQLite table `ai_second_opinion_runs`, including both routes, outcomes,
 confidence values, trigger, comparison status, disputed fields, runtime, and
 promoted-memory count.
+
+### Evidence and conclusion controls
+
+The prompt package carries two runtime-owned contexts that models may interpret
+but cannot rewrite:
+
+- `detection_validation` parses the deployed Suricata rule, records its
+  revision and digest, compares supported packet predicates and content search
+  windows against exact-scoped signature playbooks, and reports `match`,
+  `mismatch`, or `unknown`. Stateful predicates, unsupported comparators or
+  modifiers, incomplete packet coverage, and rule-identity conflicts force
+  `unknown` instead of being approximated. Only bounded counts, hashes, and
+  offsets are retained; raw payloads and full custom rule literals are not
+  placed in hosted prompts.
+- `asset_context` resolves explicitly registered endpoint identifiers at the
+  event timestamp. It records IP-reuse intervals, conflicts, roles,
+  criticality, and expected services without treating any of them as proof of
+  identity, authorization, or benign activity.
+
+The response uses orthogonal `event_status`, `detection_validity`,
+`activity_disposition`, `handling`, and `duplicate_of` fields. Runtime code
+derives the legacy Detection Outcome and calibrates `confidence_score`.
+Deterministic rule-intent mismatch wins over an incompatible model claim,
+blocks model-proposed containment and suppress/drop tuning, retains the
+pre-guard values for audit, and triggers independent or human review. Unknown
+deterministic evidence caps consequential conclusions instead of silently
+becoming a negative result.
+
+The independent reviewer receives the same collector evidence but no primary
+analysis, prior model conclusions, or memory-derived conclusions. A route with
+the same provider/model identity as the primary is rejected even when one
+route used a configured default alias. Material disagreement blocks automatic
+tuning and memory promotion until an append-only analyst adjudication exists.
+Adjudications retain the analyst-confirmed factored verdict dimensions
+independently. Private replay export never manufactures missing factor labels
+from the legacy Detection Outcome.
+
+The checked-in offline replay suite exercises the same response normalization,
+verdict guard, calibration, and reviewer comparison as production. Its
+deterministic-signature regression rebuilds validation from a sanitized
+synthetic packet and deployed-rule fixture instead of storing a precomputed
+validator result:
+
+```bash
+python3 operations/evaluate-analysis-replays.py --fail-on-regression
+```
+
+The Mac runtime can export its append-only adjudications to a private,
+mode-`0600` suite with `export-adjudicated-analysis-replays.py`. Live replay
+exports contain internal evidence and stay under
+`$HOME/n8n-local/soc-alerts/evaluations`; they are never repository content.
 
 The Ollama inventory is populated from `ollama ls` through
 `/api/soc-settings/ollama-models`, refreshes every 60 seconds while Settings is

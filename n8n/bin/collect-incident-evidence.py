@@ -45,6 +45,13 @@ WINDOW_DURATION = dt.timedelta(hours=24)
 WINDOW_PADDING = dt.timedelta(minutes=5)
 DOMAIN_RE = re.compile(r"(?i)^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 SAFE_ATOM_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,255}$")
+SAFE_ELASTIC_ID_RE = re.compile(r"^[A-Za-z0-9_.:@+=-]{1,512}$")
+ALERT_INDEX_RE = re.compile(
+    r"^(?:"
+    r"logs-(?:suricata\.alerts|detections\.alerts)-so"
+    r"|\.ds-logs-(?:suricata\.alerts|detections\.alerts)-so-\d{4}\.\d{2}\.\d{2}-\d{6}"
+    r")$"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -103,6 +110,36 @@ def selected_group(conn: sqlite3.Connection, alert_id: str) -> tuple[sqlite3.Row
     else:
         grouped = [selected]
     return selected, grouped or [selected]
+
+
+def representative_alert_anchor(selected: sqlite3.Row | dict) -> dict[str, str] | None:
+    """Recover the collector-owned Elasticsearch index/id from alert intake.
+
+    `export-recent-alerts` constructs these values from hit metadata outside
+    `_source`, so they are stronger anchors than any attacker-controlled packet
+    or message field. Older rows can fall back to the canonical `index:id`
+    alert identifier produced by the same wrapper.
+    """
+    keys = set(selected.keys())
+    index_name = ""
+    document_id = ""
+    if "alert_json" in keys:
+        try:
+            payload = json.loads(selected["alert_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        if isinstance(payload, dict):
+            index_name = str(payload.get("elastic_index") or "").strip()
+            document_id = str(payload.get("elastic_id") or "").strip()
+    if not index_name or not document_id:
+        alert_id = str(selected["alert_id"] if "alert_id" in keys else "").strip()
+        candidate_index, separator, candidate_id = alert_id.rpartition(":")
+        if separator:
+            index_name = index_name or candidate_index
+            document_id = document_id or candidate_id
+    if not ALERT_INDEX_RE.fullmatch(index_name) or not SAFE_ELASTIC_ID_RE.fullmatch(document_id):
+        return None
+    return {"index": index_name, "id": document_id}
 
 
 def add_unique(target: list[str], value: object, validator) -> None:
@@ -241,6 +278,7 @@ def main() -> int:
     if not any(exact_observables.values()):
         raise RuntimeError("no validated exact observables were available for restricted evidence queries")
     windows, coverage_note = evidence_windows(grouped)
+    anchor = representative_alert_anchor(selected)
     request = {
         "packs": [
             "alert_context",
@@ -253,6 +291,7 @@ def main() -> int:
         "windows": windows,
         "observables": exact_observables,
         "size": args.size,
+        "anchor": anchor,
     }
     key = Path(os.path.expandvars(os.path.expanduser(str(config["ssh_key"]))))
     known_hosts = Path(os.path.expandvars(os.path.expanduser(str(config["known_hosts"]))))

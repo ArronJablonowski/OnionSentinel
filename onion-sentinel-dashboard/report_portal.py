@@ -4671,6 +4671,54 @@ def ensure_soc_alert_status_table(conn: sqlite3.Connection) -> None:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_group_state_status ON analyst_alert_group_state(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_group_state_updated_at ON analyst_alert_group_state(updated_at)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS analyst_adjudications (
+          adjudication_id TEXT PRIMARY KEY,
+          dashboard_group_id TEXT NOT NULL,
+          stable_group_id TEXT NOT NULL,
+          case_id TEXT,
+          analysis_id TEXT NOT NULL,
+          outcome_override TEXT NOT NULL,
+          confidence TEXT NOT NULL,
+          rationale TEXT NOT NULL,
+          evidence_gap TEXT,
+          next_action TEXT,
+          reviewer TEXT NOT NULL,
+          event_status TEXT,
+          detection_validity TEXT,
+          activity_disposition TEXT,
+          handling TEXT,
+          duplicate_of TEXT,
+          case_resolution_reason TEXT,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
+    adjudication_columns = {
+        str(row[1]) for row in conn.execute(
+            "PRAGMA table_info(analyst_adjudications)"
+        ).fetchall()
+    }
+    for column in (
+        "event_status",
+        "detection_validity",
+        "activity_disposition",
+        "handling",
+        "duplicate_of",
+    ):
+        if column not in adjudication_columns:
+            conn.execute(
+                f"ALTER TABLE analyst_adjudications ADD COLUMN {column} TEXT"
+            )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_analyst_adjudications_group_created "
+        "ON analyst_adjudications(dashboard_group_id, created_at DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_analyst_adjudications_analysis_created "
+        "ON analyst_adjudications(analysis_id, created_at DESC)"
+    )
 
 
 def soc_alert_group_key_from_values(
@@ -5498,6 +5546,14 @@ def insert_pcap_request(conn: sqlite3.Connection, request: dict) -> sqlite3.Row:
     return conn.execute("SELECT * FROM pcap_requests WHERE request_id = ?", (request["request_id"],)).fetchone()
 
 
+class AlertStoreRequestError(RuntimeError):
+    """Preserve an alert-store HTTP status without exposing response bodies."""
+
+    def __init__(self, detail: str, status_code: int = 503):
+        super().__init__(detail)
+        self.status_code = int(status_code)
+
+
 def alert_store_post_json(path: str, payload: dict, timeout: float = 5.0) -> dict:
     """POST to the host alert-store and preserve its bounded error detail."""
     encoded = json.dumps(payload).encode("utf-8")
@@ -5516,11 +5572,14 @@ def alert_store_post_json(path: str, payload: dict, timeout: float = 5.0) -> dic
             detail = str(error_payload.get("reason") or error_payload.get("error") or exc.reason)
         except (OSError, BoundedResponseError):
             detail = str(exc.reason)
-        raise RuntimeError(detail) from exc
+        raise AlertStoreRequestError(detail, int(exc.code or 503)) from exc
     except (OSError, urllib_error.URLError, json.JSONDecodeError) as exc:
-        raise RuntimeError(str(exc)) from exc
+        raise AlertStoreRequestError(str(exc), 503) from exc
     if not isinstance(result, dict) or not result.get("ok"):
-        raise RuntimeError(str(result.get("reason") or result.get("error") or "alert-store rejected request"))
+        raise AlertStoreRequestError(
+            str(result.get("reason") or result.get("error") or "alert-store rejected request"),
+            400,
+        )
     return result
 
 
@@ -6309,12 +6368,28 @@ def update_soc_alert_status(payload: dict) -> tuple[bool, dict]:
     if not SOC_ALERT_STORE_API_URL:
         # Offline DR tests can explicitly disable the API. Production uses the
         # alert-store endpoint so only one process owns SQLite writes.
+        if raw_status == "suppressed":
+            try:
+                with soc_alert_db_connect() as conn:
+                    review = soc_alert_review_state_for_group(conn, alert_id)
+            except (FileNotFoundError, sqlite3.Error):
+                review = _soc_review_defaults()
+            if review.get("final_review_status") == "disputed_pending_human":
+                return False, {
+                    "ok": False,
+                    "error": "Material model disagreement requires explicit analyst adjudication before suppression.",
+                    "status": int(HTTPStatus.CONFLICT),
+                }
         write_soc_alert_status(alert_id, request_payload)
         return True, soc_alert_status_response()
     try:
         result = alert_store_post_json("/analyst-status", request_payload)
-    except RuntimeError as exc:
-        return False, {"ok": False, "error": f"Alert-store state update failed: {exc}"}
+    except AlertStoreRequestError as exc:
+        return False, {
+            "ok": False,
+            "error": f"Alert-store state update failed: {exc}",
+            "status": exc.status_code,
+        }
     return True, result
 
 
@@ -6830,6 +6905,7 @@ SOC_ALERT_DETECTION_OUTCOME_LABELS = {
     "false_positive_logic_rule": "FP - Rule",
     "false_positive_data_parser": "FP - Parser",
     "false_positive_bad_intel_ioc": "FP - Bad Intel",
+    "false_negative": "False Negative",
     "duplicate": "Duplicate",
     "informational_no_action": "Informational",
     "inconclusive": "Inconclusive",
@@ -6842,6 +6918,385 @@ def soc_alert_detection_outcome_label(value: object) -> str:
     if not key:
         return "n/a"
     return SOC_ALERT_DETECTION_OUTCOME_LABELS.get(key, key.replace("_", " ").title())
+
+
+def _soc_review_epoch(value: object) -> float:
+    try:
+        return parse_iso_timestamp(value).timestamp() if value else 0.0
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
+def _soc_review_json(value: object) -> dict:
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _soc_review_list_count(value: object) -> int:
+    if isinstance(value, list):
+        return len([item for item in value if str(item or "").strip()])
+    return 1 if str(value or "").strip() else 0
+
+
+def _soc_review_defaults() -> dict[str, object]:
+    return {
+        "analysis_id": "",
+        "analysis_confidence": "",
+        "analysis_generated_at": "",
+        "analysis_evidence_hash": "",
+        "primary_outcome": "",
+        "primary_confidence": "",
+        "primary_event_status": "",
+        "primary_detection_validity": "",
+        "primary_activity_disposition": "",
+        "primary_handling": "",
+        "primary_duplicate_of": None,
+        "effective_outcome": "",
+        "effective_outcome_label": "Not analyzed",
+        "effective_confidence": "",
+        "freshness_status": "not_analyzed",
+        "evidence_updated_at": "",
+        "coverage_status": "unknown",
+        "evidence_used_count": 0,
+        "evidence_gap_count": 0,
+        "reviewer_status": "not_requested",
+        "reviewer_outcome": "",
+        "reviewer_confidence": "",
+        "reviewer_agreement": "",
+        "material_disagreement": False,
+        "disputed_fields": [],
+        "final_review_status": "unreviewed",
+        "adjudication": None,
+    }
+
+
+def _soc_review_final_status(
+    reviewer: dict[str, object],
+    material_disagreement: bool,
+    adjudication: dict[str, object] | None,
+) -> str:
+    """Name consensus only when the independent reviewer explicitly agreed."""
+    if adjudication:
+        return "adjudicated"
+    if material_disagreement:
+        return "disputed_pending_human"
+    if str(reviewer.get("status") or "").strip().lower() != "completed":
+        return "unreviewed"
+    if str(reviewer.get("agreement") or "").strip().lower() == "agreement":
+        return "model_consensus"
+    return "reviewer_advisory"
+
+
+def soc_alert_apply_review_metadata(
+    conn: sqlite3.Connection,
+    rows: list[sqlite3.Row | dict],
+    metadata: dict[str, dict[str, object]],
+    group_by_alert: dict[str, str],
+) -> None:
+    """Attach current analysis, reviewer, adjudication, freshness, and coverage.
+
+    Every query is page-bounded. Missing migration tables degrade to explicit
+    unknown states so an older restored database remains readable.
+    """
+    if not metadata or not sqlite_table_exists(conn, "ai_analysis_runs"):
+        return
+
+    def row_value(row: sqlite3.Row | dict, key: str) -> str:
+        if isinstance(row, dict):
+            return str(row.get(key) or "").strip()
+        return str(row[key] or "").strip() if key in row.keys() else ""
+
+    group_ids = sorted(metadata)
+    stable_by_dashboard: dict[str, str] = {}
+    if sqlite_table_exists(conn, "alert_group_alias"):
+        placeholders = ",".join("?" for _ in group_ids)
+        try:
+            for item in conn.execute(
+                f"""
+                SELECT legacy_group_id, stable_group_id
+                FROM alert_group_alias
+                WHERE legacy_group_id IN ({placeholders})
+                """,
+                group_ids,
+            ):
+                stable_by_dashboard[str(item["legacy_group_id"])] = str(item["stable_group_id"] or "")
+        except sqlite3.Error:
+            pass
+    alert_columns = sqlite_table_columns(conn, "alerts")
+    if "stable_group_id" in alert_columns and group_by_alert:
+        alert_ids = sorted(group_by_alert)
+        placeholders = ",".join("?" for _ in alert_ids)
+        try:
+            for item in conn.execute(
+                f"SELECT alert_id, stable_group_id FROM alerts WHERE alert_id IN ({placeholders})",
+                alert_ids,
+            ):
+                dashboard_id = group_by_alert.get(str(item["alert_id"] or ""))
+                if dashboard_id and item["stable_group_id"]:
+                    stable_by_dashboard[dashboard_id] = str(item["stable_group_id"])
+        except sqlite3.Error:
+            pass
+    dashboards_by_stable: dict[str, list[str]] = {}
+    for dashboard_id, stable_id in stable_by_dashboard.items():
+        if stable_id:
+            dashboards_by_stable.setdefault(stable_id, []).append(dashboard_id)
+
+    run_columns = sqlite_table_columns(conn, "ai_analysis_runs")
+    select_columns = [
+        column for column in (
+            "analysis_id", "group_id", "alert_id", "agent_role", "generated_at",
+            "created_at", "model", "detection_outcome", "confidence",
+            "evidence_hash", "response_json",
+        ) if column in run_columns
+    ]
+    clauses: list[str] = []
+    arguments: list[object] = []
+    stable_ids = sorted(dashboards_by_stable)
+    representative_ids = sorted(group_by_alert)
+    if stable_ids and "group_id" in run_columns:
+        clauses.append(f"group_id IN ({','.join('?' for _ in stable_ids)})")
+        arguments.extend(stable_ids)
+    if representative_ids and "alert_id" in run_columns:
+        clauses.append(f"alert_id IN ({','.join('?' for _ in representative_ids)})")
+        arguments.extend(representative_ids)
+    if not clauses or not select_columns:
+        return
+    role_filter = (
+        " AND COALESCE(NULLIF(agent_role, ''), 'soc-analyst') = 'soc-analyst'"
+        if "agent_role" in run_columns else ""
+    )
+    order_column = "generated_at" if "generated_at" in run_columns else "rowid"
+    try:
+        analysis_rows = conn.execute(
+            f"""
+            SELECT {", ".join(select_columns)}
+            FROM ai_analysis_runs
+            WHERE ({" OR ".join(clauses)}){role_filter}
+            ORDER BY {order_column} DESC, rowid DESC
+            """,
+            arguments,
+        ).fetchall()
+    except sqlite3.Error:
+        analysis_rows = []
+
+    current_analysis: dict[str, dict[str, object]] = {}
+    for item in analysis_rows:
+        item_dict = dict(item)
+        dashboard_ids = list(
+            dashboards_by_stable.get(str(item_dict.get("group_id") or ""), [])
+        )
+        alert_dashboard_id = group_by_alert.get(str(item_dict.get("alert_id") or ""))
+        if alert_dashboard_id and alert_dashboard_id not in dashboard_ids:
+            dashboard_ids.append(alert_dashboard_id)
+        for dashboard_id in dashboard_ids:
+            if dashboard_id not in current_analysis:
+                current_analysis[dashboard_id] = item_dict
+
+    review_by_analysis: dict[str, dict[str, object]] = {}
+    analysis_ids = sorted({
+        str(item.get("analysis_id") or "")
+        for item in current_analysis.values()
+        if item.get("analysis_id")
+    })
+    if analysis_ids and sqlite_table_exists(conn, "ai_second_opinion_runs"):
+        placeholders = ",".join("?" for _ in analysis_ids)
+        try:
+            for item in conn.execute(
+                f"""
+                SELECT analysis_id, status, primary_outcome, primary_confidence,
+                       reviewer_outcome, reviewer_confidence, agreement,
+                       material_disagreement, disputed_fields_json, generated_at
+                FROM ai_second_opinion_runs
+                WHERE analysis_id IN ({placeholders})
+                """,
+                analysis_ids,
+            ):
+                review_by_analysis[str(item["analysis_id"])] = dict(item)
+        except sqlite3.Error:
+            pass
+
+    adjudication_by_analysis_group: dict[tuple[str, str], dict[str, object]] = {}
+    if analysis_ids and sqlite_table_exists(conn, "analyst_adjudications"):
+        placeholders = ",".join("?" for _ in analysis_ids)
+        try:
+            records = conn.execute(
+                f"""
+                SELECT adjudication_id, dashboard_group_id, stable_group_id, analysis_id,
+                       outcome_override, confidence, rationale, evidence_gap,
+                       next_action, reviewer, event_status, detection_validity,
+                       activity_disposition, handling, duplicate_of,
+                       case_resolution_reason, created_at
+                FROM analyst_adjudications
+                WHERE analysis_id IN ({placeholders})
+                ORDER BY created_at DESC, rowid DESC
+                """,
+                analysis_ids,
+            ).fetchall()
+            for item in records:
+                analysis_id = str(item["analysis_id"] or "")
+                stable_id = str(item["stable_group_id"] or "")
+                key = (analysis_id, stable_id)
+                if analysis_id and stable_id and key not in adjudication_by_analysis_group:
+                    adjudication_by_analysis_group[key] = dict(item)
+        except sqlite3.Error:
+            pass
+
+    last_seen_by_group: dict[str, str] = {}
+    for row in rows:
+        group_key = row_value(row, "group_key")
+        dashboard_id = soc_alert_group_id(group_key) if group_key else row_value(row, "group_id")
+        if dashboard_id in metadata:
+            last_seen_by_group[dashboard_id] = (
+                row_value(row, "group_last_seen")
+                or row_value(row, "last_seen")
+                or row_value(row, "timestamp")
+            )
+
+    for dashboard_id, analysis in current_analysis.items():
+        target = metadata.get(dashboard_id)
+        if target is None:
+            continue
+        analysis_id = str(analysis.get("analysis_id") or "")
+        response = _soc_review_json(analysis.get("response_json"))
+        evidence_used = response.get("evidence_used")
+        evidence_gaps = response.get("evidence_gaps")
+        used_count = _soc_review_list_count(evidence_used)
+        gap_count = _soc_review_list_count(evidence_gaps)
+        analysis_generated = str(analysis.get("generated_at") or analysis.get("created_at") or "")
+        evidence_updated = last_seen_by_group.get(dashboard_id, "")
+        freshness = "current"
+        if _soc_review_epoch(evidence_updated) > _soc_review_epoch(analysis_generated):
+            freshness = "stale"
+        coverage = "gaps" if gap_count else ("complete" if used_count else "unknown")
+
+        reviewer = review_by_analysis.get(analysis_id, {})
+        if not reviewer:
+            embedded = response.get("_second_opinion")
+            embedded = embedded if isinstance(embedded, dict) else {}
+            comparison = embedded.get("comparison")
+            comparison = comparison if isinstance(comparison, dict) else {}
+            reviewer_response = embedded.get("response")
+            reviewer_response = reviewer_response if isinstance(reviewer_response, dict) else {}
+            reviewer = {
+                "status": embedded.get("status") or "not_requested",
+                "reviewer_outcome": reviewer_response.get("detection_outcome") or "",
+                "reviewer_confidence": reviewer_response.get("confidence") or "",
+                "agreement": comparison.get("agreement") or "",
+                "material_disagreement": bool(comparison.get("material_disagreement")),
+                "disputed_fields_json": json.dumps(comparison.get("disputed_fields") or []),
+            }
+        adjudication = adjudication_by_analysis_group.get((
+            analysis_id,
+            stable_by_dashboard.get(dashboard_id) or dashboard_id,
+        ))
+        material = str(
+            reviewer.get("material_disagreement") or ""
+        ).strip().lower() in {"1", "true", "yes"}
+        final_status = _soc_review_final_status(reviewer, material, adjudication)
+        primary_outcome = str(
+            reviewer.get("primary_outcome")
+            or analysis.get("detection_outcome")
+            or ""
+        )
+        primary_confidence = str(
+            reviewer.get("primary_confidence")
+            or analysis.get("confidence")
+            or ""
+        )
+        effective_outcome = str(
+            adjudication.get("outcome_override")
+            if adjudication
+            else primary_outcome
+        )
+        effective_confidence = str(
+            adjudication.get("confidence")
+            if adjudication
+            else primary_confidence
+        )
+        try:
+            disputed_fields = json.loads(str(reviewer.get("disputed_fields_json") or "[]"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            disputed_fields = []
+        if not isinstance(disputed_fields, list):
+            disputed_fields = []
+        target.update({
+            "analysis_id": analysis_id,
+            "detection_outcome": str(analysis.get("detection_outcome") or ""),
+            "detection_outcome_label": soc_alert_detection_outcome_label(
+                analysis.get("detection_outcome")
+            ),
+            "primary_outcome": primary_outcome,
+            "primary_confidence": primary_confidence,
+            "primary_event_status": str(response.get("event_status") or ""),
+            "primary_detection_validity": str(
+                response.get("detection_validity") or ""
+            ),
+            "primary_activity_disposition": str(
+                response.get("activity_disposition") or ""
+            ),
+            "primary_handling": str(response.get("handling") or ""),
+            "primary_duplicate_of": response.get("duplicate_of"),
+            "effective_outcome": effective_outcome,
+            "effective_outcome_label": soc_alert_detection_outcome_label(
+                effective_outcome
+            ),
+            "effective_confidence": effective_confidence,
+            "analysis_confidence": str(analysis.get("confidence") or ""),
+            "analysis_generated_at": analysis_generated,
+            "analysis_evidence_hash": str(analysis.get("evidence_hash") or ""),
+            "freshness_status": freshness,
+            "evidence_updated_at": evidence_updated,
+            "coverage_status": coverage,
+            "evidence_used_count": used_count,
+            "evidence_gap_count": gap_count,
+            "reviewer_status": str(reviewer.get("status") or "not_requested"),
+            "reviewer_outcome": str(reviewer.get("reviewer_outcome") or ""),
+            "reviewer_confidence": str(reviewer.get("reviewer_confidence") or ""),
+            "reviewer_agreement": str(reviewer.get("agreement") or ""),
+            "material_disagreement": material,
+            "disputed_fields": disputed_fields[:20],
+            "final_review_status": final_status,
+            "adjudication": adjudication,
+        })
+
+
+def soc_alert_review_state_for_group(
+    conn: sqlite3.Connection,
+    group_id: str,
+) -> dict[str, object]:
+    """Return the same bounded review state used by the list API."""
+    defaults = _soc_review_defaults()
+    if not re.fullmatch(r"[a-f0-9]{12}", str(group_id or "")):
+        return defaults
+    if not sqlite_table_exists(conn, "alert_group_summary"):
+        return defaults
+    row = conn.execute(
+        "SELECT * FROM alert_group_summary WHERE group_id = ?",
+        (group_id,),
+    ).fetchone()
+    if not row:
+        return defaults
+    alert_id = str(row["representative_alert_id"] or "")
+    metadata = {
+        group_id: {
+            "pcap_size_bytes": 0,
+            "detection_outcome": "",
+            "detection_outcome_label": "n/a",
+            **defaults,
+        }
+    }
+    soc_alert_apply_review_metadata(
+        conn,
+        [row],
+        metadata,
+        {alert_id: group_id} if alert_id else {},
+    )
+    return metadata[group_id]
 
 
 def soc_alert_group_evidence_metadata(
@@ -6874,6 +7329,7 @@ def soc_alert_group_evidence_metadata(
             "pcap_size_bytes": 0,
             "detection_outcome": "",
             "detection_outcome_label": "n/a",
+            **_soc_review_defaults(),
         }
         if group_key:
             group_by_key[group_key] = group_id
@@ -6999,6 +7455,7 @@ def soc_alert_group_evidence_metadata(
                 metadata[group_id]["detection_outcome"] = outcome
                 metadata[group_id]["detection_outcome_label"] = soc_alert_detection_outcome_label(outcome)
 
+    soc_alert_apply_review_metadata(conn, rows, metadata, group_by_alert)
     return metadata
 
 
@@ -7067,6 +7524,7 @@ def soc_alert_group_row_to_api(
         "pcap_size_bytes": 0,
         "detection_outcome": "",
         "detection_outcome_label": "n/a",
+        **_soc_review_defaults(),
     }))
     return data
 
@@ -7151,6 +7609,508 @@ def soc_alert_escalate_response(group_id: str, payload: dict | None = None) -> t
     }
 
 
+SOC_ANALYST_ADJUDICATION_OUTCOMES = {
+    "true_positive_malicious",
+    "true_positive_suspicious",
+    "true_positive_authorized_benign",
+    "false_positive_logic_rule",
+    "false_positive_data_parser",
+    "false_positive_bad_intel_ioc",
+    "false_negative",
+    "duplicate",
+    "informational_no_action",
+    "inconclusive",
+}
+SOC_ANALYST_EVENT_STATUSES = {"observed", "not_observed", "unknown"}
+SOC_ANALYST_DETECTION_VALIDITIES = {
+    "matched_intent",
+    "logic_error",
+    "parser_error",
+    "intel_error",
+    "not_applicable",
+    "unknown",
+}
+SOC_ANALYST_ACTIVITY_DISPOSITIONS = {
+    "malicious",
+    "suspicious",
+    "authorized_benign",
+    "benign",
+    "unknown",
+}
+SOC_ANALYST_HANDLING_VALUES = {
+    "contain",
+    "escalate",
+    "investigate",
+    "monitor",
+    "no_action",
+}
+
+
+def _soc_legacy_verdict_factors(outcome: str) -> dict[str, str | None]:
+    """Return the canonical factored form used by the analysis runner."""
+    handling_for_risk = "investigate"
+    mapping: dict[str, tuple[str, str, str, str]] = {
+        "true_positive_malicious": (
+            "observed", "matched_intent", "malicious", "contain",
+        ),
+        "true_positive_suspicious": (
+            "observed", "matched_intent", "suspicious", handling_for_risk,
+        ),
+        "true_positive_authorized_benign": (
+            "observed", "matched_intent", "authorized_benign", "no_action",
+        ),
+        "false_positive_logic_rule": (
+            "observed", "logic_error", "unknown", "monitor",
+        ),
+        "false_positive_data_parser": (
+            "unknown", "parser_error", "unknown", "investigate",
+        ),
+        "false_positive_bad_intel_ioc": (
+            "observed", "intel_error", "unknown", "monitor",
+        ),
+        "false_negative": (
+            "observed", "not_applicable", "malicious", "escalate",
+        ),
+        "duplicate": ("observed", "unknown", "unknown", "no_action"),
+        "informational_no_action": (
+            "observed", "not_applicable", "benign", "no_action",
+        ),
+        "inconclusive": ("unknown", "unknown", "unknown", "investigate"),
+    }
+    event_status, detection_validity, activity_disposition, handling = mapping[
+        outcome
+    ]
+    return {
+        "event_status": event_status,
+        "detection_validity": detection_validity,
+        "activity_disposition": activity_disposition,
+        "handling": handling,
+        "duplicate_of": None,
+    }
+
+
+def _soc_derive_legacy_detection_outcome(
+    factors: dict[str, str | None],
+) -> str:
+    """Mirror the runner's deterministic compatibility-outcome derivation."""
+    duplicate_of = str(factors.get("duplicate_of") or "").strip()
+    validity = str(factors.get("detection_validity") or "unknown")
+    event_status = str(factors.get("event_status") or "unknown")
+    disposition = str(factors.get("activity_disposition") or "unknown")
+    handling = str(factors.get("handling") or "investigate")
+    if duplicate_of:
+        return "duplicate"
+    if validity == "parser_error":
+        return "false_positive_data_parser"
+    if validity == "logic_error":
+        return "false_positive_logic_rule"
+    if validity == "intel_error":
+        return "false_positive_bad_intel_ioc"
+    if validity == "matched_intent" and event_status == "observed":
+        if disposition == "malicious":
+            return "true_positive_malicious"
+        if disposition == "suspicious":
+            return "true_positive_suspicious"
+        if disposition == "authorized_benign":
+            return "true_positive_authorized_benign"
+        if disposition == "benign" and handling == "no_action":
+            return "informational_no_action"
+    if validity == "not_applicable" and event_status == "observed":
+        if disposition == "malicious":
+            return "false_negative"
+        if disposition in {"benign", "authorized_benign"} and handling == "no_action":
+            return "informational_no_action"
+    return "inconclusive"
+
+
+def _soc_adjudication_verdict_contradictions(
+    outcome: str,
+    explicit_factors: dict[str, str | None],
+) -> list[str]:
+    """Reject impossible combinations before they become durable labels."""
+    supplied = {
+        key: value
+        for key, value in explicit_factors.items()
+        if value not in (None, "")
+    }
+    if not supplied:
+        return []
+    factors = _soc_legacy_verdict_factors(outcome)
+    factors.update(supplied)
+    derived = _soc_derive_legacy_detection_outcome(factors)
+    contradictions: list[str] = []
+    if derived != outcome:
+        contradictions.append(
+            f"factored verdict derives {derived}, not {outcome}"
+        )
+    event_status = str(factors["event_status"])
+    validity = str(factors["detection_validity"])
+    disposition = str(factors["activity_disposition"])
+    handling = str(factors["handling"])
+    duplicate_of = str(factors.get("duplicate_of") or "").strip()
+    if event_status == "not_observed" and validity == "matched_intent":
+        contradictions.append(
+            "an unobserved event cannot be a validated detection-intent match"
+        )
+    if disposition == "malicious" and handling in {"monitor", "no_action"}:
+        contradictions.append(
+            "malicious activity cannot use monitor/no_action handling"
+        )
+    if disposition in {"authorized_benign", "benign"} and handling == "contain":
+        contradictions.append("benign or authorized activity cannot use contain handling")
+    if duplicate_of and handling in {"contain", "escalate"}:
+        contradictions.append(
+            "a duplicate record cannot independently authorize containment or escalation"
+        )
+    if outcome.startswith("false_positive_"):
+        if disposition in {"malicious", "suspicious"}:
+            contradictions.append(
+                "a false-positive label cannot authoritatively classify the activity as malicious or suspicious"
+            )
+        if handling in {"contain", "escalate"}:
+            contradictions.append(
+                "a false-positive label cannot independently authorize containment or escalation"
+            )
+    return contradictions
+
+
+def normalize_soc_adjudication_payload(
+    payload: dict | None,
+    *,
+    group_id: str,
+    case_id: str = "",
+) -> tuple[bool, dict]:
+    """Validate bounded human review fields before crossing the write boundary."""
+    payload = payload if isinstance(payload, dict) else {}
+    group_id = str(group_id or "").strip().lower()
+    case_id = str(case_id or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{12}", group_id):
+        return False, {"ok": False, "error": "Invalid SOC alert group id"}
+    if case_id and not re.fullmatch(r"ir-[a-z0-9_-]{1,64}", case_id):
+        return False, {"ok": False, "error": "Invalid incident case id"}
+    outcome = str(payload.get("outcome_override") or "").strip().lower()
+    confidence = str(payload.get("confidence") or "").strip().lower()
+    rationale = str(payload.get("rationale") or "").strip()[:4000]
+    evidence_gap = str(payload.get("evidence_gap") or "").strip()[:4000]
+    next_action = str(payload.get("next_action") or "").strip()[:4000]
+    reviewer = str(payload.get("reviewer") or "").strip()[:100]
+    resolution_reason = str(payload.get("case_resolution_reason") or "").strip()[:2000]
+    if "resolve_case" in payload and not isinstance(payload.get("resolve_case"), bool):
+        return False, {
+            "ok": False,
+            "error": "resolve_case must be a JSON boolean.",
+        }
+    resolve_case = payload.get("resolve_case") is True
+    analysis_id = str(payload.get("analysis_id") or "").strip()[:160]
+    factored_values: dict[str, str | None] = {}
+    for field, allowed in (
+        ("event_status", SOC_ANALYST_EVENT_STATUSES),
+        ("detection_validity", SOC_ANALYST_DETECTION_VALIDITIES),
+        ("activity_disposition", SOC_ANALYST_ACTIVITY_DISPOSITIONS),
+        ("handling", SOC_ANALYST_HANDLING_VALUES),
+    ):
+        value = str(payload.get(field) or "").strip().lower()
+        if value and value not in allowed:
+            return False, {
+                "ok": False,
+                "error": f"Select a valid {field.replace('_', ' ')}.",
+            }
+        factored_values[field] = value or None
+    duplicate_value = payload.get("duplicate_of")
+    if duplicate_value is None:
+        duplicate_of = None
+    elif isinstance(duplicate_value, str):
+        duplicate_of = duplicate_value.strip()[:256]
+        if not duplicate_of:
+            return False, {
+                "ok": False,
+                "error": "duplicate_of must be a non-empty string identifier or null.",
+            }
+    else:
+        return False, {
+            "ok": False,
+            "error": "duplicate_of must be a string identifier or null.",
+        }
+    if outcome not in SOC_ANALYST_ADJUDICATION_OUTCOMES:
+        return False, {"ok": False, "error": "Select a valid analyst outcome."}
+    if confidence not in {"low", "medium", "high"}:
+        return False, {"ok": False, "error": "Select low, medium, or high confidence."}
+    if not rationale or not reviewer:
+        return False, {"ok": False, "error": "Reviewer and rationale are required."}
+    contradictions = _soc_adjudication_verdict_contradictions(
+        outcome,
+        {**factored_values, "duplicate_of": duplicate_of},
+    )
+    if contradictions:
+        return False, {
+            "ok": False,
+            "error": (
+                "Analyst outcome conflicts with the explicit verdict factors: "
+                + "; ".join(contradictions)
+            )[:1000],
+        }
+    if resolve_case and (not case_id or not resolution_reason):
+        return False, {
+            "ok": False,
+            "error": "A case resolution reason is required when resolving a case.",
+        }
+    return True, {
+        "group_id": group_id,
+        "case_id": case_id or None,
+        "analysis_id": analysis_id,
+        "outcome_override": outcome,
+        "confidence": confidence,
+        "rationale": rationale,
+        "evidence_gap": evidence_gap,
+        "next_action": next_action,
+        "reviewer": reviewer,
+        **factored_values,
+        "duplicate_of": duplicate_of,
+        "resolve_case": resolve_case,
+        "case_resolution_reason": resolution_reason,
+    }
+
+
+def _soc_alert_store_mutation(
+    path: str,
+    payload: dict,
+    *,
+    success_status: int = 200,
+) -> tuple[int, dict]:
+    if not SOC_ALERT_STORE_API_URL:
+        return soc_alert_api_error(
+            "Alert-store API is required for append-only analyst review writes.",
+            503,
+        )
+    try:
+        result = alert_store_post_json(path, payload, timeout=10.0)
+    except AlertStoreRequestError as exc:
+        return soc_alert_api_error(str(exc), exc.status_code)
+    return success_status, result
+
+
+def soc_alert_adjudication_response(
+    group_id: str,
+    payload: dict | None = None,
+) -> tuple[int, dict]:
+    ok, normalized = normalize_soc_adjudication_payload(
+        payload,
+        group_id=str(group_id or "").strip().lower(),
+    )
+    if not ok:
+        return HTTPStatus.BAD_REQUEST, normalized
+    return _soc_alert_store_mutation(
+        "/adjudications",
+        normalized,
+        success_status=HTTPStatus.CREATED,
+    )
+
+
+def _soc_incident_case_group_id(case_id: str) -> tuple[int, str]:
+    case_id = str(case_id or "").strip().lower()
+    if not re.fullmatch(r"ir-[a-z0-9_-]{1,64}", case_id):
+        return HTTPStatus.BAD_REQUEST, ""
+    try:
+        with soc_alert_db_connect() as conn:
+            row = conn.execute(
+                "SELECT dashboard_group_id FROM incident_response_cases WHERE case_id = ?",
+                (case_id,),
+            ).fetchone()
+    except (FileNotFoundError, sqlite3.Error):
+        row = None
+    return (HTTPStatus.OK, str(row["dashboard_group_id"] or "")) if row else (HTTPStatus.NOT_FOUND, "")
+
+
+def soc_incident_adjudication_response(
+    case_id: str,
+    payload: dict | None = None,
+) -> tuple[int, dict]:
+    status, group_id = _soc_incident_case_group_id(case_id)
+    if status != HTTPStatus.OK:
+        return soc_alert_api_error(
+            "Incident case not found" if status == HTTPStatus.NOT_FOUND else "Invalid incident case id",
+            status,
+        )
+    ok, normalized = normalize_soc_adjudication_payload(
+        payload,
+        group_id=group_id,
+        case_id=case_id,
+    )
+    if not ok:
+        return HTTPStatus.BAD_REQUEST, normalized
+    return _soc_alert_store_mutation(
+        "/adjudications",
+        normalized,
+        success_status=HTTPStatus.CREATED,
+    )
+
+
+def soc_incident_status_response(
+    case_id: str,
+    payload: dict | None = None,
+) -> tuple[int, dict]:
+    status, _group_id = _soc_incident_case_group_id(case_id)
+    if status != HTTPStatus.OK:
+        return soc_alert_api_error(
+            "Incident case not found" if status == HTTPStatus.NOT_FOUND else "Invalid incident case id",
+            status,
+        )
+    payload = payload if isinstance(payload, dict) else {}
+    case_status = str(payload.get("status") or "").strip().lower()
+    resolution_reason = str(payload.get("resolution_reason") or "").strip()[:2000]
+    reviewer = str(payload.get("updated_by") or payload.get("reviewer") or "dashboard").strip()[:100]
+    if case_status not in {"open", "in_progress", "resolved"}:
+        return soc_alert_api_error("Invalid incident case status")
+    if case_status == "resolved" and not resolution_reason:
+        return soc_alert_api_error("A resolution reason is required.")
+    return _soc_alert_store_mutation(
+        "/incidents/status",
+        {
+            "case_id": case_id,
+            "status": case_status,
+            "resolution_reason": resolution_reason,
+            "updated_by": reviewer,
+        },
+    )
+
+
+def soc_incident_current_analysis(
+    conn: sqlite3.Connection,
+    case: dict[str, object],
+) -> dict[str, object]:
+    """Resolve a case's current IR run without trusting a stale foreign pointer."""
+    if not sqlite_table_exists(conn, "ai_analysis_runs"):
+        return {}
+    run_columns = sqlite_table_columns(conn, "ai_analysis_runs")
+    select_columns = [
+        column for column in (
+            "analysis_id", "group_id", "agent_role", "generated_at", "created_at",
+            "model", "detection_outcome", "bluf", "summary", "confidence",
+            "evidence_hash", "response_json",
+        ) if column in run_columns
+    ]
+    if not select_columns:
+        return {}
+    select_sql = ", ".join(select_columns)
+    group_id = str(case.get("group_id") or "").strip()
+    latest_id = str(case.get("latest_analysis_id") or "").strip()
+    if latest_id:
+        clauses = ["analysis_id = ?"]
+        arguments: list[object] = [latest_id]
+        if "group_id" in run_columns:
+            clauses.append("group_id = ?")
+            arguments.append(group_id)
+        if "agent_role" in run_columns:
+            clauses.append("agent_role = 'incident-responder'")
+        row = conn.execute(
+            f"SELECT {select_sql} FROM ai_analysis_runs "
+            f"WHERE {' AND '.join(clauses)} LIMIT 1",
+            arguments,
+        ).fetchone()
+        if row:
+            return dict(row)
+    if not group_id or "group_id" not in run_columns:
+        return {}
+    clauses = ["group_id = ?"]
+    arguments = [group_id]
+    if "agent_role" in run_columns:
+        clauses.append("agent_role = 'incident-responder'")
+    order_columns = [
+        column for column in ("generated_at", "created_at") if column in run_columns
+    ]
+    order_sql = ", ".join(f"{column} DESC" for column in order_columns)
+    order_sql = f"{order_sql}, rowid DESC" if order_sql else "rowid DESC"
+    row = conn.execute(
+        f"SELECT {select_sql} FROM ai_analysis_runs "
+        f"WHERE {' AND '.join(clauses)} ORDER BY {order_sql} LIMIT 1",
+        arguments,
+    ).fetchone()
+    return dict(row) if row else {}
+
+
+def soc_adjudication_history_response(
+    group_id: str,
+    *,
+    case_id: str = "",
+    limit: int = 25,
+) -> tuple[int, dict]:
+    group_id = str(group_id or "").strip().lower()
+    case_id = str(case_id or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{12}", group_id):
+        return soc_alert_api_error("Invalid SOC alert group id")
+    if case_id and not re.fullmatch(r"ir-[a-z0-9_-]{1,64}", case_id):
+        return soc_alert_api_error("Invalid incident case id")
+    limit = max(1, min(100, int(limit or 25)))
+    try:
+        with soc_alert_db_connect() as conn:
+            if not sqlite_table_exists(conn, "analyst_adjudications"):
+                return 200, {"ok": True, "review": _soc_review_defaults(), "history": []}
+            sql = """
+                SELECT adjudication_id, dashboard_group_id, stable_group_id,
+                       case_id, analysis_id, outcome_override, confidence,
+                       rationale, evidence_gap, next_action, reviewer,
+                       event_status, detection_validity, activity_disposition,
+                       handling, duplicate_of,
+                       case_resolution_reason, created_at
+                FROM analyst_adjudications
+            """
+            if case_id:
+                sql += " WHERE case_id = ?"
+                arguments: list[object] = [case_id]
+            else:
+                stable_group_id = ""
+                if sqlite_table_exists(conn, "alert_group_alias"):
+                    row = conn.execute(
+                        "SELECT stable_group_id FROM alert_group_alias "
+                        "WHERE legacy_group_id = ?",
+                        (group_id,),
+                    ).fetchone()
+                    stable_group_id = str(row["stable_group_id"] or "") if row else ""
+                if (
+                    not stable_group_id
+                    and sqlite_table_exists(conn, "alert_group_summary")
+                    and "stable_group_id" in sqlite_table_columns(conn, "alerts")
+                ):
+                    row = conn.execute(
+                        """
+                        SELECT a.stable_group_id
+                        FROM alert_group_summary AS g
+                        JOIN alerts AS a ON a.alert_id = g.representative_alert_id
+                        WHERE g.group_id = ?
+                        """,
+                        (group_id,),
+                    ).fetchone()
+                    stable_group_id = str(row["stable_group_id"] or "") if row else ""
+                if stable_group_id:
+                    sql += " WHERE stable_group_id = ?"
+                    arguments = [stable_group_id]
+                else:
+                    sql += " WHERE dashboard_group_id = ?"
+                    arguments = [group_id]
+            sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+            arguments.append(limit)
+            history = [dict(row) for row in conn.execute(sql, arguments).fetchall()]
+            review = soc_alert_review_state_for_group(conn, group_id)
+            if case_id and sqlite_table_exists(conn, "incident_response_cases"):
+                case_row = conn.execute(
+                    "SELECT * FROM incident_response_cases WHERE case_id = ?",
+                    (case_id,),
+                ).fetchone()
+                if case_row:
+                    case = dict(case_row)
+                    analysis = soc_incident_current_analysis(conn, case)
+                    response = _soc_review_json(analysis.get("response_json"))
+                    review = soc_incident_review_state(
+                        conn,
+                        case,
+                        analysis,
+                        response,
+                    )
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        return soc_alert_api_error(f"Analyst review history unavailable: {exc}", 503)
+    return 200, {"ok": True, "review": review, "history": history}
+
+
 def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
     """Return one bounded page of durable Incident Response cases.
 
@@ -7199,6 +8159,19 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
             page = min(page, pages)
             offset = (page - 1) * per_page
             summary_ready = sqlite_table_exists(conn, "alert_group_summary")
+            case_columns = sqlite_table_columns(conn, "incident_response_cases")
+            resolution_reason_sql = (
+                "c.resolution_reason" if "resolution_reason" in case_columns
+                else "NULL AS resolution_reason"
+            )
+            resolved_at_sql = (
+                "c.resolved_at" if "resolved_at" in case_columns
+                else "NULL AS resolved_at"
+            )
+            resolved_by_sql = (
+                "c.resolved_by" if "resolved_by" in case_columns
+                else "NULL AS resolved_by"
+            )
             if summary_ready:
                 rows = conn.execute(
                     f"""
@@ -7207,6 +8180,7 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                            c.escalated_at, c.updated_at, c.escalated_by, c.reason,
                            c.latest_analysis_id, c.latest_model,
                            c.latest_generated_at, c.latest_error,
+                           {resolution_reason_sql}, {resolved_at_sql}, {resolved_by_sql},
                            COALESCE(g.rule_name, a.rule_name) AS rule_name,
                            COALESCE(g.severity, a.severity) AS severity,
                            COALESCE(g.severity_label, a.severity_label) AS severity_label,
@@ -7238,7 +8212,8 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                            c.representative_alert_id, c.status, c.agent_status,
                            c.escalated_at, c.updated_at, c.escalated_by, c.reason,
                            c.latest_analysis_id, c.latest_model,
-                           c.latest_generated_at, c.latest_error
+                           c.latest_generated_at, c.latest_error,
+                           {resolution_reason_sql}, {resolved_at_sql}, {resolved_by_sql}
                     FROM incident_response_cases c
                     {where_sql}
                     ORDER BY c.updated_at DESC, c.case_id DESC
@@ -7248,16 +8223,24 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                 ).fetchall()
 
             analyses: dict[str, dict[str, object]] = {}
+            run_columns: set[str] = set()
             analysis_ids = sorted({str(row["latest_analysis_id"] or "") for row in rows if row["latest_analysis_id"]})
             if analysis_ids and sqlite_table_exists(conn, "ai_analysis_runs"):
+                run_columns = sqlite_table_columns(conn, "ai_analysis_runs")
+                analysis_select = [
+                    column for column in (
+                        "analysis_id", "group_id", "agent_role", "generated_at",
+                        "created_at", "model", "detection_outcome", "bluf",
+                        "summary", "confidence", "evidence_hash", "response_json",
+                    ) if column in run_columns
+                ]
                 placeholders = ",".join("?" for _ in analysis_ids)
                 role_filter = ""
-                if "agent_role" in sqlite_table_columns(conn, "ai_analysis_runs"):
+                if "agent_role" in run_columns:
                     role_filter = " AND agent_role = 'incident-responder'"
                 for analysis in conn.execute(
                     f"""
-                    SELECT analysis_id, generated_at, model, detection_outcome,
-                           bluf, summary, confidence
+                    SELECT {", ".join(analysis_select)}
                     FROM ai_analysis_runs
                     WHERE analysis_id IN ({placeholders}){role_filter}
                     """,
@@ -7265,20 +8248,214 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                 ).fetchall():
                     analyses[str(analysis["analysis_id"])] = dict(analysis)
 
+            second_opinions: dict[str, dict[str, object]] = {}
+            if analysis_ids and sqlite_table_exists(conn, "ai_second_opinion_runs"):
+                placeholders = ",".join("?" for _ in analysis_ids)
+                for item in conn.execute(
+                    f"""
+                    SELECT analysis_id, status, primary_outcome, primary_confidence,
+                           reviewer_outcome, reviewer_confidence, agreement,
+                           material_disagreement, disputed_fields_json, generated_at
+                    FROM ai_second_opinion_runs
+                    WHERE analysis_id IN ({placeholders})
+                    """,
+                    analysis_ids,
+                ).fetchall():
+                    second_opinions[str(item["analysis_id"])] = dict(item)
+            adjudications: dict[tuple[str, str], dict[str, object]] = {}
+            if analysis_ids and sqlite_table_exists(conn, "analyst_adjudications"):
+                placeholders = ",".join("?" for _ in analysis_ids)
+                for item in conn.execute(
+                    f"""
+                    SELECT adjudication_id, dashboard_group_id, case_id, analysis_id,
+                           outcome_override, confidence, rationale, evidence_gap,
+                           next_action, reviewer, event_status, detection_validity,
+                           activity_disposition, handling, duplicate_of,
+                           case_resolution_reason, created_at
+                    FROM analyst_adjudications
+                    WHERE analysis_id IN ({placeholders})
+                    ORDER BY created_at DESC, rowid DESC
+                    """,
+                    analysis_ids,
+                ).fetchall():
+                    analysis_id = str(item["analysis_id"] or "")
+                    case_id = str(item["case_id"] or "")
+                    key = (case_id, analysis_id)
+                    if case_id and analysis_id and key not in adjudications:
+                        adjudications[key] = dict(item)
+
             incidents: list[dict[str, object]] = []
             for row in rows:
                 item = dict(row)
-                analysis = analyses.get(str(item.get("latest_analysis_id") or ""), {})
+                analysis_id = str(item.get("latest_analysis_id") or "")
+                analysis = analyses.get(analysis_id, {})
+                if (
+                    analysis
+                    and "group_id" in run_columns
+                    and str(analysis.get("group_id") or "") != str(item.get("group_id") or "")
+                ):
+                    analysis = {}
+                if (
+                    analysis
+                    and "agent_role" in run_columns
+                    and str(analysis.get("agent_role") or "") != "incident-responder"
+                ):
+                    analysis = {}
+                fallback_review: dict[str, object] | None = None
+                if not analysis and run_columns:
+                    analysis = soc_incident_current_analysis(conn, item)
+                    if analysis:
+                        fallback_response = _soc_review_json(analysis.get("response_json"))
+                        fallback_review = soc_incident_review_state(
+                            conn,
+                            item,
+                            analysis,
+                            fallback_response,
+                        )
+                analysis_id = str(analysis.get("analysis_id") or "")
+                response = _soc_review_json(analysis.get("response_json"))
+                report = response.get("incident_response_report")
+                report = report if isinstance(report, dict) else {}
+                evidence_gap_count = _soc_review_list_count(report.get("evidence_gaps"))
+                query_audit = response.get("_incident_query_audit")
+                query_audit = query_audit if isinstance(query_audit, dict) else {}
+                coverage_status = (
+                    "gaps" if evidence_gap_count or query_audit.get("partial")
+                    else ("complete" if query_audit.get("complete") else "unknown")
+                )
+                analysis_generated = str(
+                    analysis.get("generated_at") or ""
+                )
+                freshness_status = (
+                    "stale"
+                    if (
+                        analysis_generated
+                        and _soc_review_epoch(item.get("last_seen"))
+                        > _soc_review_epoch(analysis_generated)
+                    )
+                    else ("current" if analysis_generated else "not_analyzed")
+                )
+                reviewer = second_opinions.get(analysis_id, {})
+                if not reviewer:
+                    embedded = response.get("_second_opinion")
+                    embedded = embedded if isinstance(embedded, dict) else {}
+                    comparison = embedded.get("comparison")
+                    comparison = comparison if isinstance(comparison, dict) else {}
+                    reviewer_response = embedded.get("response")
+                    reviewer_response = reviewer_response if isinstance(reviewer_response, dict) else {}
+                    reviewer = {
+                        "status": embedded.get("status") or "not_requested",
+                        "reviewer_outcome": reviewer_response.get("detection_outcome") or "",
+                        "reviewer_confidence": reviewer_response.get("confidence") or "",
+                        "agreement": comparison.get("agreement") or "",
+                        "material_disagreement": bool(comparison.get("material_disagreement")),
+                        "disputed_fields_json": json.dumps(comparison.get("disputed_fields") or []),
+                    }
+                material_disagreement = str(
+                    reviewer.get("material_disagreement") or ""
+                ).strip().lower() in {"1", "true", "yes"}
+                adjudication = adjudications.get((
+                    str(item.get("case_id") or ""),
+                    analysis_id,
+                ))
+                final_review_status = _soc_review_final_status(
+                    reviewer,
+                    material_disagreement,
+                    adjudication,
+                )
+                primary_outcome = str(
+                    reviewer.get("primary_outcome")
+                    or analysis.get("detection_outcome")
+                    or ""
+                )
+                primary_confidence = str(
+                    reviewer.get("primary_confidence")
+                    or analysis.get("confidence")
+                    or ""
+                )
+                effective_outcome = str(
+                    adjudication.get("outcome_override")
+                    if adjudication
+                    else primary_outcome
+                )
+                effective_confidence = str(
+                    adjudication.get("confidence")
+                    if adjudication
+                    else primary_confidence
+                )
+                if fallback_review:
+                    adjudication = fallback_review.get("adjudication")
+                    final_review_status = str(
+                        fallback_review.get("final_review_status") or "unreviewed"
+                    )
+                    primary_outcome = str(fallback_review.get("primary_outcome") or "")
+                    primary_confidence = str(
+                        fallback_review.get("primary_confidence") or ""
+                    )
+                    effective_outcome = str(
+                        fallback_review.get("effective_outcome") or primary_outcome
+                    )
+                    effective_confidence = str(
+                        fallback_review.get("effective_confidence")
+                        or primary_confidence
+                    )
+                    material_disagreement = bool(
+                        fallback_review.get("material_disagreement")
+                    )
                 count = max(int(item.get("raw_alert_count") or 0), int(item.get("total_seen_count") or 0))
                 incidents.append({
                     **item,
                     "seen_count": count,
-                    "analysis_generated_at": analysis.get("generated_at") or item.get("latest_generated_at") or "",
-                    "analysis_model": analysis.get("model") or item.get("latest_model") or "",
+                    "analysis_id": analysis_id,
+                    "analysis_generated_at": analysis.get("generated_at") or "",
+                    "analysis_model": analysis.get("model") or "",
                     "detection_outcome": analysis.get("detection_outcome") or "",
+                    "primary_outcome": primary_outcome,
+                    "primary_confidence": primary_confidence,
+                    "primary_event_status": str(response.get("event_status") or ""),
+                    "primary_detection_validity": str(
+                        response.get("detection_validity") or ""
+                    ),
+                    "primary_activity_disposition": str(
+                        response.get("activity_disposition") or ""
+                    ),
+                    "primary_handling": str(response.get("handling") or ""),
+                    "primary_duplicate_of": response.get("duplicate_of"),
+                    "effective_outcome": effective_outcome,
+                    "effective_outcome_label": soc_alert_detection_outcome_label(
+                        effective_outcome
+                    ),
+                    "effective_confidence": effective_confidence,
                     "analysis_bluf": analysis.get("bluf") or "",
                     "analysis_summary": analysis.get("summary") or "",
                     "analysis_confidence": analysis.get("confidence") or "",
+                    "analysis_evidence_hash": analysis.get("evidence_hash") or "",
+                    "freshness_status": freshness_status,
+                    "coverage_status": coverage_status,
+                    "evidence_gap_count": evidence_gap_count,
+                    "reviewer_status": (
+                        fallback_review.get("reviewer_status")
+                        if fallback_review
+                        else reviewer.get("status")
+                    ) or "not_requested",
+                    "reviewer_outcome": (
+                        fallback_review.get("reviewer_outcome")
+                        if fallback_review
+                        else reviewer.get("reviewer_outcome")
+                    ) or "",
+                    "reviewer_confidence": (
+                        fallback_review.get("reviewer_confidence")
+                        if fallback_review
+                        else reviewer.get("reviewer_confidence")
+                    ) or "",
+                    "reviewer_agreement": (
+                        fallback_review.get("reviewer_agreement")
+                        if fallback_review
+                        else reviewer.get("agreement")
+                    ) or "",
+                    "material_disagreement": material_disagreement,
+                    "final_review_status": final_review_status,
+                    "adjudication": adjudication,
                 })
     except (FileNotFoundError, sqlite3.Error) as exc:
         return soc_alert_api_error(f"Incident Response data unavailable: {exc}", 503)
@@ -7293,6 +8470,168 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
         "agent_status_counts": agent_status_counts,
         "schema_ready": True,
     }
+
+
+def soc_incident_review_state(
+    conn: sqlite3.Connection,
+    case: dict[str, object],
+    analysis: dict[str, object],
+    response: dict[str, object],
+) -> dict[str, object]:
+    """Derive durable current-review state for one Incident Response detail."""
+    review = _soc_review_defaults()
+    dashboard_group_id = str(case.get("dashboard_group_id") or "")
+    analysis_id = str(analysis.get("analysis_id") or "")
+    report = response.get("incident_response_report")
+    report = report if isinstance(report, dict) else {}
+    analysis_generated = str(analysis.get("generated_at") or "")
+    evidence_updated = ""
+    if dashboard_group_id and sqlite_table_exists(conn, "alert_group_summary"):
+        try:
+            row = conn.execute(
+                "SELECT last_seen FROM alert_group_summary WHERE group_id = ?",
+                (dashboard_group_id,),
+            ).fetchone()
+            evidence_updated = str(row["last_seen"] or "") if row else ""
+        except sqlite3.Error:
+            evidence_updated = ""
+    query_audit = response.get("_incident_query_audit")
+    query_audit = query_audit if isinstance(query_audit, dict) else {}
+    gap_count = _soc_review_list_count(report.get("evidence_gaps"))
+    used_count = _soc_review_list_count(report.get("evidence_used"))
+    coverage = (
+        "gaps"
+        if gap_count or query_audit.get("partial")
+        else "complete"
+        if used_count or query_audit.get("complete")
+        else "unknown"
+    )
+    freshness = (
+        "stale"
+        if analysis_generated
+        and _soc_review_epoch(evidence_updated) > _soc_review_epoch(analysis_generated)
+        else "current"
+        if analysis_generated
+        else "not_analyzed"
+    )
+
+    reviewer: dict[str, object] = {}
+    if analysis_id and sqlite_table_exists(conn, "ai_second_opinion_runs"):
+        try:
+            row = conn.execute(
+                """
+                SELECT status, primary_outcome, primary_confidence,
+                       reviewer_outcome, reviewer_confidence, agreement,
+                       material_disagreement, disputed_fields_json, generated_at
+                FROM ai_second_opinion_runs
+                WHERE analysis_id = ?
+                """,
+                (analysis_id,),
+            ).fetchone()
+            reviewer = dict(row) if row else {}
+        except sqlite3.Error:
+            reviewer = {}
+    if not reviewer:
+        embedded = response.get("_second_opinion")
+        embedded = embedded if isinstance(embedded, dict) else {}
+        comparison = embedded.get("comparison")
+        comparison = comparison if isinstance(comparison, dict) else {}
+        reviewer_response = embedded.get("response")
+        reviewer_response = reviewer_response if isinstance(reviewer_response, dict) else {}
+        reviewer = {
+            "status": embedded.get("status") or "not_requested",
+            "primary_outcome": analysis.get("detection_outcome") or "",
+            "primary_confidence": analysis.get("confidence") or "",
+            "reviewer_outcome": reviewer_response.get("detection_outcome") or "",
+            "reviewer_confidence": reviewer_response.get("confidence") or "",
+            "agreement": comparison.get("agreement") or "",
+            "material_disagreement": bool(comparison.get("material_disagreement")),
+            "disputed_fields_json": json.dumps(comparison.get("disputed_fields") or []),
+        }
+    material = str(reviewer.get("material_disagreement") or "").strip().lower() in {
+        "1", "true", "yes",
+    }
+    try:
+        disputed_fields = json.loads(str(reviewer.get("disputed_fields_json") or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        disputed_fields = []
+    if not isinstance(disputed_fields, list):
+        disputed_fields = []
+    adjudication: dict[str, object] | None = None
+    if analysis_id and sqlite_table_exists(conn, "analyst_adjudications"):
+        try:
+            row = conn.execute(
+                """
+                SELECT adjudication_id, dashboard_group_id, case_id, analysis_id,
+                       outcome_override, confidence, rationale, evidence_gap,
+                       next_action, reviewer, event_status, detection_validity,
+                       activity_disposition, handling, duplicate_of,
+                       case_resolution_reason, created_at
+                FROM analyst_adjudications
+                WHERE analysis_id = ? AND case_id = ?
+                ORDER BY created_at DESC, rowid DESC LIMIT 1
+                """,
+                (analysis_id, str(case.get("case_id") or "")),
+            ).fetchone()
+            adjudication = dict(row) if row else None
+        except sqlite3.Error:
+            adjudication = None
+    final_status = _soc_review_final_status(reviewer, material, adjudication)
+    primary_outcome = str(
+        reviewer.get("primary_outcome") or analysis.get("detection_outcome") or ""
+    )
+    primary_confidence = str(
+        reviewer.get("primary_confidence") or analysis.get("confidence") or ""
+    )
+    effective_outcome = str(
+        adjudication.get("outcome_override")
+        if adjudication
+        else primary_outcome
+    )
+    effective_confidence = str(
+        adjudication.get("confidence")
+        if adjudication
+        else primary_confidence
+    )
+    review.update({
+        "analysis_id": analysis_id,
+        "analysis_generated_at": analysis_generated,
+        "analysis_confidence": str(analysis.get("confidence") or ""),
+        "analysis_evidence_hash": str(analysis.get("evidence_hash") or ""),
+        "primary_outcome": primary_outcome,
+        "primary_confidence": primary_confidence,
+        "primary_event_status": str(response.get("event_status") or ""),
+        "primary_detection_validity": str(
+            response.get("detection_validity") or ""
+        ),
+        "primary_activity_disposition": str(
+            response.get("activity_disposition") or ""
+        ),
+        "primary_handling": str(response.get("handling") or ""),
+        "primary_duplicate_of": response.get("duplicate_of"),
+        "effective_outcome": effective_outcome,
+        "effective_outcome_label": soc_alert_detection_outcome_label(
+            effective_outcome
+        ),
+        "effective_confidence": effective_confidence,
+        "freshness_status": freshness,
+        "evidence_updated_at": evidence_updated,
+        "coverage_status": coverage,
+        "evidence_used_count": used_count,
+        "evidence_gap_count": gap_count,
+        "reviewer_status": str(reviewer.get("status") or "not_requested"),
+        "reviewer_outcome": str(reviewer.get("reviewer_outcome") or ""),
+        "reviewer_confidence": str(reviewer.get("reviewer_confidence") or ""),
+        "reviewer_agreement": str(reviewer.get("agreement") or ""),
+        "material_disagreement": material,
+        "disputed_fields": disputed_fields[:20],
+        "final_review_status": final_status,
+        "adjudication": adjudication,
+        "case_resolution_reason": str(case.get("resolution_reason") or ""),
+        "case_resolved_at": str(case.get("resolved_at") or ""),
+        "case_resolved_by": str(case.get("resolved_by") or ""),
+    })
+    return review
 
 
 def _incident_html_text(value: object, fallback: str = "n/a") -> str:
@@ -7360,10 +8699,177 @@ def _incident_report_section(title: str, body: str) -> str:
     )
 
 
+def render_analyst_review_panel(
+    review: dict[str, object] | None,
+    *,
+    group_id: str,
+    case_id: str = "",
+) -> str:
+    """Render bounded review state and one explicit human-adjudication entry."""
+    review = review if isinstance(review, dict) else _soc_review_defaults()
+    final_status = str(
+        review.get("final_review_status")
+        or review.get("final_status")
+        or "unreviewed"
+    )
+    status_labels = {
+        "disputed_pending_human": "Disputed — human decision required",
+        "adjudicated": "Adjudicated",
+        "model_consensus": "Primary and reviewer agree",
+        "reviewer_advisory": "Reviewer advisory — no material disagreement",
+        "unreviewed": "Not independently reviewed",
+    }
+    primary_outcome = str(
+        review.get("primary_outcome")
+        or review.get("detection_outcome")
+        or ""
+    )
+    primary_confidence = str(
+        review.get("primary_confidence")
+        or review.get("analysis_confidence")
+        or ""
+    )
+    primary_event_status = str(review.get("primary_event_status") or "")
+    primary_detection_validity = str(
+        review.get("primary_detection_validity") or ""
+    )
+    primary_activity_disposition = str(
+        review.get("primary_activity_disposition") or ""
+    )
+    primary_handling = str(review.get("primary_handling") or "")
+    primary_duplicate_of = str(review.get("primary_duplicate_of") or "")
+    reviewer_outcome = str(review.get("reviewer_outcome") or "")
+    reviewer_confidence = str(review.get("reviewer_confidence") or "")
+    agreement = str(
+        review.get("reviewer_agreement")
+        or review.get("agreement")
+        or ""
+    )
+    freshness = str(review.get("freshness_status") or "unknown")
+    coverage = str(review.get("coverage_status") or "unknown")
+    analysis_id = str(review.get("analysis_id") or "")
+    adjudication = review.get("adjudication")
+    adjudication = adjudication if isinstance(adjudication, dict) else {}
+    disputed_fields = review.get("disputed_fields")
+    disputed_fields = disputed_fields if isinstance(disputed_fields, list) else []
+    disputed = final_status == "disputed_pending_human"
+    role_attr = ' role="alert"' if disputed else ""
+    disabled_attr = (
+        ' disabled title="Run an analysis before recording an analyst decision"'
+        if not analysis_id
+        else ""
+    )
+    comparison = (
+        '<div class="analyst-review-comparison">'
+        f'<div><b>Primary</b><span>{_incident_html_text(soc_alert_detection_outcome_label(primary_outcome))}'
+        f' · {_incident_html_text(primary_confidence or "confidence unknown")}</span></div>'
+        f'<div><b>Independent reviewer</b><span>{_incident_html_text(soc_alert_detection_outcome_label(reviewer_outcome))}'
+        f' · {_incident_html_text(reviewer_confidence or "confidence unknown")}</span></div>'
+        "</div>"
+        if reviewer_outcome or agreement
+        else '<p class="analyst-review-empty">No completed independent reviewer result is attached.</p>'
+    )
+    disputed_fields_html = (
+        '<p class="analyst-review-disputed-fields"><b>Disputed fields:</b> '
+        + ", ".join(_incident_html_text(item) for item in disputed_fields[:20])
+        + "</p>"
+        if disputed_fields
+        else ""
+    )
+    adjudication_html = ""
+    if adjudication:
+        evidence_gap = str(adjudication.get("evidence_gap") or "").strip()
+        next_action = str(adjudication.get("next_action") or "").strip()
+        resolution_reason = str(
+            adjudication.get("case_resolution_reason") or ""
+        ).strip()
+        factored_verdict = [
+            (label, str(adjudication.get(key) or "").strip())
+            for key, label in (
+                ("event_status", "Event"),
+                ("detection_validity", "Detection"),
+                ("activity_disposition", "Activity"),
+                ("handling", "Handling"),
+                ("duplicate_of", "Duplicate of"),
+            )
+            if str(adjudication.get(key) or "").strip()
+        ]
+        factored_html = (
+            '<div class="analyst-adjudication-factors"><b>Analyst-confirmed verdict factors:</b><ul>'
+            + "".join(
+                f"<li>{_incident_html_text(label)}: {_incident_html_text(value)}</li>"
+                for label, value in factored_verdict
+            )
+            + "</ul></div>"
+            if factored_verdict
+            else ""
+        )
+        adjudication_html = (
+            '<div class="analyst-adjudication-summary">'
+            f'<b>Final analyst decision:</b> {_incident_html_text(soc_alert_detection_outcome_label(adjudication.get("outcome_override")))}'
+            f' · {_incident_html_text(adjudication.get("confidence") or "confidence unknown")}'
+            f'<p>{_incident_html_text(adjudication.get("rationale"))}</p>'
+            + (
+                f'<p><b>Evidence gap:</b> {_incident_html_text(evidence_gap)}</p>'
+                if evidence_gap else ""
+            )
+            + (
+                f'<p><b>Next action:</b> {_incident_html_text(next_action)}</p>'
+                if next_action else ""
+            )
+            + (
+                f'<p><b>Case resolution:</b> {_incident_html_text(resolution_reason)}</p>'
+                if resolution_reason else ""
+            )
+            + factored_html
+            + f'<small>Reviewed by {_incident_html_text(adjudication.get("reviewer"))} at '
+            f'{_incident_html_text(adjudication.get("created_at"))}</small>'
+            "</div>"
+        )
+    case_resolution_html = ""
+    case_resolution_reason = str(
+        review.get("case_resolution_reason") or ""
+    ).strip()
+    if case_resolution_reason:
+        case_resolution_html = (
+            '<div class="analyst-case-resolution">'
+            f'<b>Resolved:</b> {_incident_html_text(case_resolution_reason)}'
+            f'<small> by {_incident_html_text(review.get("case_resolved_by"))} at '
+            f'{_incident_html_text(review.get("case_resolved_at"))}</small>'
+            "</div>"
+        )
+    return (
+        f'<section class="analyst-review-panel review-status-{html.escape(final_status, quote=True)}" '
+        f'data-review-group="{html.escape(group_id, quote=True)}" '
+        f'data-review-case="{html.escape(case_id, quote=True)}" '
+        f'data-review-analysis="{html.escape(analysis_id, quote=True)}" '
+        f'data-review-primary="{html.escape(primary_outcome, quote=True)}" '
+        f'data-review-event-status="{html.escape(primary_event_status, quote=True)}" '
+        f'data-review-detection-validity="{html.escape(primary_detection_validity, quote=True)}" '
+        f'data-review-activity-disposition="{html.escape(primary_activity_disposition, quote=True)}" '
+        f'data-review-handling="{html.escape(primary_handling, quote=True)}" '
+        f'data-review-duplicate-of="{html.escape(primary_duplicate_of, quote=True)}" '
+        f"{role_attr}>"
+        '<div class="analyst-review-heading">'
+        '<div><span class="analyst-review-eyebrow">Human validation</span>'
+        f'<h3>{html.escape(status_labels.get(final_status, final_status.replace("_", " ").title()))}</h3></div>'
+        '<div class="analyst-review-badges">'
+        f'<span class="review-badge review-freshness-{html.escape(freshness, quote=True)}">Freshness: {html.escape(freshness.replace("_", " "))}</span>'
+        f'<span class="review-badge review-coverage-{html.escape(coverage, quote=True)}">Coverage: {html.escape(coverage.replace("_", " "))}</span>'
+        "</div></div>"
+        f"{comparison}{disputed_fields_html}{adjudication_html}{case_resolution_html}"
+        f'<button class="analyst-adjudicate-button" type="button" data-open-adjudication{disabled_attr}>'
+        f'{"Resolve disagreement" if disputed else "Record analyst decision"}'
+        "</button>"
+        "</section>"
+    )
+
+
 def render_incident_response_report_html(
     case: dict[str, object],
     response: dict[str, object],
     analysis: dict[str, object],
+    review: dict[str, object] | None = None,
 ) -> tuple[str, int]:
     """Render a fact-grounded responder report and immutable query audit.
 
@@ -7376,10 +8882,17 @@ def render_incident_response_report_html(
     metadata = (
         '<div class="ir-analysis-meta">'
         f'<span><b>Case:</b> {_incident_html_text(case.get("case_id"))}</span>'
-        f'<span><b>Generated:</b> {_incident_html_text(analysis.get("generated_at") or case.get("latest_generated_at"))}</span>'
-        f'<span><b>Model:</b> {_incident_html_text(analysis.get("model") or case.get("latest_model"))}</span>'
+        f'<span><b>Generated:</b> {_incident_html_text(analysis.get("generated_at"))}</span>'
+        f'<span><b>Model:</b> {_incident_html_text(analysis.get("model"))}</span>'
         f'<span><b>Confidence:</b> {_incident_html_text(report.get("confidence") or analysis.get("confidence"))}</span>'
-        "</div>"
+        + (
+            f'<span><b>Resolution:</b> {_incident_html_text(case.get("resolution_reason"))}</span>'
+            f'<span><b>Resolved by:</b> {_incident_html_text(case.get("resolved_by"))}</span>'
+            f'<span><b>Resolved at:</b> {_incident_html_text(case.get("resolved_at"))}</span>'
+            if case.get("resolution_reason")
+            else ""
+        )
+        + "</div>"
     )
     if not report:
         state = str(case.get("agent_status") or "queued").replace("_", " ")
@@ -7422,6 +8935,7 @@ def render_incident_response_report_html(
             f"<p>{_incident_html_text(report.get('detection_outcome_reasoning'))}</p>",
         ),
         _incident_report_section("Scope", f"<p>{_incident_html_text(report.get('scope'))}</p>"),
+        _incident_report_section("Constraints", _incident_html_list(report.get("constraints"), "No explicit constraints were recorded.")),
         _incident_report_section("Affected Systems", _incident_html_list(report.get("affected_systems"))),
         _incident_report_section("Methodology", _incident_html_list(report.get("methodology"))),
         _incident_report_section("Factual Timeline", timeline_html),
@@ -7616,6 +9130,12 @@ def render_incident_response_report_html(
         + "</section>"
     )
     return (
+        render_analyst_review_panel(
+            review,
+            group_id=str(case.get("dashboard_group_id") or ""),
+            case_id=str(case.get("case_id") or ""),
+        )
+        +
         '<section class="ir-investigation-report">'
         "<h3>Incident Response Investigation</h3>"
         f"{metadata}{''.join(sections)}"
@@ -7663,28 +9183,17 @@ def soc_incident_detail_response(case_id: str) -> tuple[int, dict]:
             response: dict[str, object] = {}
             prior_analysis: dict[str, object] = {}
             prior_response: dict[str, object] = {}
+            review = _soc_review_defaults()
             if run_columns:
                 select_columns = [
                     column for column in (
                         "analysis_id", "group_id", "agent_role", "generated_at", "model",
-                        "detection_outcome", "bluf", "summary", "confidence", "response_json",
+                        "detection_outcome", "bluf", "summary", "confidence",
+                        "evidence_hash", "response_json",
                     ) if column in run_columns
                 ]
                 select_sql = ", ".join(select_columns)
-                latest_id = str(case.get("latest_analysis_id") or "").strip()
-                if latest_id and select_sql:
-                    row = conn.execute(
-                        f"SELECT {select_sql} FROM ai_analysis_runs WHERE analysis_id = ?", (latest_id,)
-                    ).fetchone()
-                    analysis = dict(row) if row else {}
-                if not analysis and "group_id" in run_columns and "agent_role" in run_columns:
-                    row = conn.execute(
-                        f"SELECT {select_sql} FROM ai_analysis_runs "
-                        "WHERE group_id = ? AND agent_role = 'incident-responder' "
-                        "ORDER BY generated_at DESC LIMIT 1",
-                        (case.get("group_id"),),
-                    ).fetchone()
-                    analysis = dict(row) if row else {}
+                analysis = soc_incident_current_analysis(conn, case)
                 if analysis.get("response_json"):
                     try:
                         parsed = json.loads(str(analysis["response_json"]))
@@ -7705,10 +9214,16 @@ def soc_incident_detail_response(case_id: str) -> tuple[int, dict]:
                             prior_response = parsed if isinstance(parsed, dict) else {}
                         except (TypeError, ValueError, json.JSONDecodeError):
                             prior_response = {}
+            review = soc_incident_review_state(conn, case, analysis, response)
     except (FileNotFoundError, sqlite3.Error) as exc:
         return soc_alert_api_error(f"Incident Response detail unavailable: {exc}", 503)
 
-    incident_html, query_count = render_incident_response_report_html(case, response, analysis)
+    incident_html, query_count = render_incident_response_report_html(
+        case,
+        response,
+        analysis,
+        review,
+    )
     prior_html = render_prior_soc_analysis_html(prior_response, prior_analysis)
     return 200, {
         "ok": True,
@@ -7716,6 +9231,7 @@ def soc_incident_detail_response(case_id: str) -> tuple[int, dict]:
         "agent_status": case.get("agent_status") or "queued",
         "analysis_available": bool(response.get("incident_response_report")),
         "query_count": query_count,
+        "review": review,
         "incident_html": incident_html,
         "prior_ai_html": prior_html,
     }
@@ -8130,8 +9646,15 @@ def soc_alert_detail_fragment_response(group_id: str) -> tuple[int, dict]:
         detail_html = target.read_text(encoding="utf-8")
     except OSError as exc:
         return soc_alert_api_error(str(exc), 503)
+    review = _soc_review_defaults()
+    try:
+        with soc_alert_db_connect() as conn:
+            review = soc_alert_review_state_for_group(conn, group_id)
+    except (FileNotFoundError, sqlite3.Error):
+        pass
     detail_html = soc_alert_append_live_pcap_detail(group_id, detail_html)
     detail_html = soc_alert_collapse_detail_sections(detail_html)
+    detail_html = render_analyst_review_panel(review, group_id=group_id) + detail_html
     layout_issues = soc_alert_validate_detail_layout_html(detail_html)
     if layout_issues and "detail-layout-error" not in detail_html:
         detail_html = soc_alert_layout_error_html(layout_issues) + detail_html
@@ -8142,6 +9665,7 @@ def soc_alert_detail_fragment_response(group_id: str) -> tuple[int, dict]:
         "layout_version": SOC_ALERT_DETAIL_LAYOUT_VERSION,
         "layout_valid": not layout_issues,
         "layout_issues": layout_issues,
+        "review": review,
         "detail_html": detail_html,
     }
 
@@ -8303,7 +9827,7 @@ def ack_soc_alert_store_id(alert_id: str, payload: dict) -> tuple[int, dict]:
         return soc_alert_api_error("Invalid SOC alert id")
     payload = {**payload, "id": alert_id}
     ok, data = update_soc_alert_status(payload)
-    status = HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST
+    status = HTTPStatus.OK if ok else int(data.get("status") or HTTPStatus.BAD_REQUEST)
     if ok:
         alert_status = load_soc_alert_statuses().get(alert_id, {})
         data = {
@@ -8404,6 +9928,28 @@ class PortalHandler(BaseHTTPRequestHandler):
         """Require an Administration session unless a dedicated service narrows the policy."""
         return self._admin_authenticated()
 
+    def _soc_review_write_authorized(self) -> bool:
+        """Reject cross-site/form writes while keeping the LAN analyst UI usable."""
+        content_type = str(self.headers.get("Content-Type") or "").lower()
+        if not content_type.startswith("application/json"):
+            return False
+        if self.headers.get("X-Onion-Sentinel-Request") != "dashboard":
+            return False
+        fetch_site = str(self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if fetch_site and fetch_site != "same-origin":
+            return False
+        origin = str(self.headers.get("Origin") or "").strip()
+        if origin:
+            parsed_origin = urlparse(origin)
+            request_host = str(self.headers.get("Host") or "").strip().lower()
+            if (
+                parsed_origin.scheme not in {"http", "https"}
+                or not parsed_origin.netloc
+                or parsed_origin.netloc.lower() != request_host
+            ):
+                return False
+        return True
+
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-incidents", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-incidents/") and parsed.path.endswith("/detail")) or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith(("/ack", "/escalate"))):
@@ -8427,7 +9973,14 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and parsed.path not in SOC_SETTINGS_PROMPT_API_PATHS and not (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))):
+        is_review_write = (
+            parsed.path.startswith("/api/soc-alerts/")
+            and parsed.path.endswith("/adjudicate")
+        ) or (
+            parsed.path.startswith("/api/soc-incidents/")
+            and parsed.path.endswith(("/adjudicate", "/status"))
+        )
+        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and parsed.path not in SOC_SETTINGS_PROMPT_API_PATHS and not (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) and not is_review_write:
             return self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain; charset=utf-8")
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -8436,7 +9989,7 @@ class PortalHandler(BaseHTTPRequestHandler):
         if length <= 0 or length > 50000:
             if parsed.path == "/api/admin/start-service":
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
-            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))):
+            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) or is_review_write:
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
             if parsed.path.startswith("/api/resource-library/"):
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
@@ -8444,6 +9997,52 @@ class PortalHandler(BaseHTTPRequestHandler):
                 return self._send(HTTPStatus.BAD_REQUEST, render_admin_dashboard("Invalid admin action request size.", True))
             return self._send(HTTPStatus.BAD_REQUEST, render_admin_login("Invalid request size.", True))
         raw = self.rfile.read(length).decode("utf-8", errors="replace")
+        if is_review_write:
+            if not self._soc_review_write_authorized():
+                return self._send(
+                    HTTPStatus.FORBIDDEN,
+                    json.dumps({
+                        "ok": False,
+                        "error": "Analyst review writes must come from the same-origin dashboard.",
+                    }).encode(),
+                    "application/json; charset=utf-8",
+                )
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                return self._send(
+                    HTTPStatus.BAD_REQUEST,
+                    json.dumps({"ok": False, "error": "Request body must be valid JSON."}).encode(),
+                    "application/json; charset=utf-8",
+                )
+            if not isinstance(payload, dict):
+                return self._send(
+                    HTTPStatus.BAD_REQUEST,
+                    json.dumps({"ok": False, "error": "Request body must be a JSON object."}).encode(),
+                    "application/json; charset=utf-8",
+                )
+            if parsed.path.startswith("/api/soc-alerts/"):
+                encoded_id = parsed.path[
+                    len("/api/soc-alerts/"):-len("/adjudicate")
+                ].strip("/")
+                status, data = soc_alert_adjudication_response(unquote(encoded_id), payload)
+            elif parsed.path.endswith("/adjudicate"):
+                encoded_id = parsed.path[
+                    len("/api/soc-incidents/"):-len("/adjudicate")
+                ].strip("/")
+                status, data = soc_incident_adjudication_response(unquote(encoded_id), payload)
+            else:
+                encoded_id = parsed.path[
+                    len("/api/soc-incidents/"):-len("/status")
+                ].strip("/")
+                status, data = soc_incident_status_response(unquote(encoded_id), payload)
+            if status < 400:
+                SOC_ALERT_RESPONSE_CACHE.clear()
+            return self._send(
+                status,
+                json.dumps(data, indent=2).encode(),
+                "application/json; charset=utf-8",
+            )
         if parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/ack"):
             try:
                 payload = json.loads(raw or "{}")
@@ -8492,7 +10091,12 @@ class PortalHandler(BaseHTTPRequestHandler):
             ok, data = update_soc_alert_status(payload)
             if ok:
                 SOC_ALERT_RESPONSE_CACHE.clear()
-            return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+            response_status = (
+                HTTPStatus.OK
+                if ok
+                else int(data.get("status") or HTTPStatus.BAD_REQUEST)
+            )
+            return self._send(response_status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path in SOC_SETTINGS_PROMPT_API_PATHS:
             try:
                 payload = json.loads(raw or "{}")
@@ -8648,9 +10252,42 @@ class PortalHandler(BaseHTTPRequestHandler):
         if path == "/api/soc-incidents":
             status, data = soc_incidents_query_response(query)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if path.startswith("/api/soc-incidents/") and path.endswith("/adjudications"):
+            case_id = unquote(
+                path[len("/api/soc-incidents/"):-len("/adjudications")].strip("/")
+            )
+            case_status, group_id = _soc_incident_case_group_id(case_id)
+            if case_status != HTTPStatus.OK:
+                status, data = soc_alert_api_error(
+                    "Incident case not found"
+                    if case_status == HTTPStatus.NOT_FOUND
+                    else "Invalid incident case id",
+                    case_status,
+                )
+            else:
+                try:
+                    limit = int((query.get("limit") or ["25"])[0])
+                except (TypeError, ValueError):
+                    limit = 25
+                status, data = soc_adjudication_history_response(
+                    group_id,
+                    case_id=case_id,
+                    limit=limit,
+                )
+            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path.startswith("/api/soc-incidents/") and path.endswith("/detail"):
             case_id = unquote(path[len("/api/soc-incidents/"):-len("/detail")].strip("/"))
             status, data = soc_incident_detail_response(case_id)
+            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if path.startswith("/api/soc-alerts/") and path.endswith("/adjudications"):
+            group_id = unquote(
+                path[len("/api/soc-alerts/"):-len("/adjudications")].strip("/")
+            )
+            try:
+                limit = int((query.get("limit") or ["25"])[0])
+            except (TypeError, ValueError):
+                limit = 25
+            status, data = soc_adjudication_history_response(group_id, limit=limit)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path.startswith("/api/soc-alerts/") and path.endswith("/detail"):
             group_id = unquote(path[len("/api/soc-alerts/"):-len("/detail")].strip("/"))

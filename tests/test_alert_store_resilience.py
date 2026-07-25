@@ -90,6 +90,54 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("parsedUrl.pathname === '/analyst-status'", self.code)
         self.assertIn("withSqliteWriteGate(async () =>", self.code)
 
+    def test_analyst_adjudication_is_append_only_and_guards_terminal_actions(self) -> None:
+        self.assertIn("CREATE TABLE IF NOT EXISTS analyst_adjudications", self.code)
+        self.assertIn("INSERT INTO analyst_adjudications", self.code)
+        self.assertNotIn("UPDATE analyst_adjudications", self.code)
+        for column in (
+            "event_status",
+            "detection_validity",
+            "activity_disposition",
+            "handling",
+            "duplicate_of",
+        ):
+            self.assertIn(
+                f"ensureColumn('analyst_adjudications', '{column}', 'TEXT')",
+                self.code,
+            )
+        self.assertIn("resolve_case must be a JSON boolean", self.code)
+        self.assertIn("function deriveAnalystLegacyOutcome(factors)", self.code)
+        self.assertIn("function analystVerdictContradictions(outcome, explicitFactors)", self.code)
+        self.assertIn(
+            "const verdictContradictions = analystVerdictContradictions(",
+            self.code,
+        )
+        self.assertIn(
+            "outcome_override conflicts with explicit verdict factors",
+            self.code,
+        )
+        self.assertIn("parsedUrl.pathname === '/adjudications'", self.code)
+        self.assertIn("parsedUrl.pathname === '/incidents/status'", self.code)
+        self.assertIn("disputed_pending_human", self.code)
+        self.assertIn(
+            "material model disagreement requires explicit analyst adjudication before suppression",
+            self.code,
+        )
+        self.assertIn(
+            "material model disagreement requires explicit analyst adjudication before resolution",
+            self.code,
+        )
+        self.assertIn("async function stableGroupHasPendingHumanDisagreement", self.code)
+        self.assertIn(
+            "automatic suppression blocked pending explicit analyst adjudication",
+            self.code,
+        )
+        self.assertIn(
+            "withSqliteWriteGate(() => withImmediateTransaction(\n"
+            "        () => recordAnalystAdjudication(payload)",
+            self.code,
+        )
+
     def test_pcap_mutations_use_the_sqlite_gate(self) -> None:
         self.assertIn("withSqliteWriteGate(() => createPcapRequest(payload))", self.code)
         self.assertIn("withSqliteWriteGate(() => claimPcapRequest(payload))", self.code)

@@ -37,11 +37,18 @@ from bounded_http import BoundedHttpError, read_bounded_json
 from bounded_process import BoundedProcessError, run_bounded_command, run_bounded_command_to_file
 from pcap_analysis_core import BoundedTopCounter, CoverageTracker, DeterministicReservoir, sanitize_evidence_text
 from pcap_tool_runtime import run_isolated_command, stream_isolated_lines
+from detection_validation import (
+    extract_rule_context,
+    load_detection_playbooks,
+    marker_specs as detection_marker_specs,
+    resolve_detection_playbook,
+)
 
 
 HOME = Path.home()
 DEFAULT_DB = HOME / "n8n-local" / "alert_store_data" / "alerts.sqlite3"
 DEFAULT_AI_SETTINGS = HOME / "n8n-local" / "config" / "ai_model_settings.json"
+DEFAULT_DETECTION_PLAYBOOKS = HOME / "n8n-local" / "config" / "detection_playbooks.json"
 DEFAULT_MAXMIND_DBS = {
     "asn": HOME / "n8n-local" / "config" / "maxmind" / "GeoLite2-ASN.mmdb",
     "city": HOME / "n8n-local" / "config" / "maxmind" / "GeoLite2-City.mmdb",
@@ -67,6 +74,7 @@ MAX_TOOL_STDERR_BYTES = max(16 * 1024, int(os.environ.get("PCAP_TOOL_MAX_STDERR_
 TSHARK_SAMPLE_LIMIT = max(20, int(os.environ.get("PCAP_TSHARK_SAMPLE_LIMIT", "200")))
 PARSER_TIMEOUT_SECONDS = max(60, int(os.environ.get("PCAP_PARSER_TIMEOUT_SECONDS", "900")))
 HEAVY_HITTER_CAPACITY = max(SUMMARY_LIMIT, int(os.environ.get("PCAP_HEAVY_HITTER_CAPACITY", "256")))
+ICMP_PAIR_STATE_LIMIT = max(128, int(os.environ.get("PCAP_ICMP_PAIR_STATE_LIMIT", "4096")))
 QUERY_INDEX_LIMIT = max(
     SUMMARY_LIMIT,
     min(HEAVY_HITTER_CAPACITY, int(os.environ.get("PCAP_QUERY_INDEX_LIMIT", "96"))),
@@ -88,6 +96,10 @@ MAX_REMOTE_ARTIFACT_BYTES = max(
 )
 REMOTE_FETCH_TIMEOUT_SECONDS = max(30, int(os.environ.get("PCAP_REMOTE_FETCH_TIMEOUT_SECONDS", "3600")))
 MAX_CONTROL_RESPONSE_BYTES = 64 * 1024
+MAX_SELECTION_WINDOW_SECONDS = max(
+    30,
+    min(86400, int(os.environ.get("PCAP_EVIDENCE_MAX_SELECTION_WINDOW_SECONDS", "86400"))),
+)
 # Keep repeated TShark field values distinct without corrupting legitimate
 # commas in DNS names, HTTP User-Agent strings, or other evidence text.
 TSHARK_OCCURRENCE_SEPARATOR = "\x1f"
@@ -99,6 +111,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifact-dir", type=Path, default=DEFAULT_ARTIFACT_DIR, help="Runtime-only copied PCAP artifact directory")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help="PCAP analysis JSON/Markdown output directory")
     parser.add_argument("--ai-settings", type=Path, default=DEFAULT_AI_SETTINGS, help="AI/GeoIP settings JSON")
+    parser.add_argument(
+        "--detection-playbooks",
+        type=Path,
+        default=DEFAULT_DETECTION_PLAYBOOKS,
+        help="Versioned exact-ID detection playbook registry",
+    )
     parser.add_argument("--wake-file", type=Path, default=DEFAULT_WAKE, help="Consumable launchd wake marker")
     parser.add_argument("--request-id", help="Process one PCAP broker request id")
     parser.add_argument("--pcap", type=Path, help="Parse a local PCAP directly, without reading pcap_requests")
@@ -478,6 +496,200 @@ def pending_requests(db_path: Path, request_id: str | None, limit: int, out_dir:
     return [request_from_row(item) for item in found]
 
 
+def signature_context_for_request(
+    db_path: Path,
+    request: dict[str, Any],
+    playbook_path: Path = DEFAULT_DETECTION_PLAYBOOKS,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Load the exact alert rule and its exact-ID playbook without DB writes.
+
+    The returned rule context includes a bounded ``playbook_policy`` object so
+    a missing, unreadable, or invalid registry can never be confused with a
+    valid registry that simply has no exact playbook for this rule.
+    """
+    alert_id = str(request.get("alert_id") or "").strip()
+    if not alert_id:
+        return {
+            "playbook_policy": {
+                "status": "not_evaluated",
+                "fail_closed": True,
+                "evidence_gap": "No selected alert id was supplied for exact detection-playbook resolution.",
+            },
+        }, None
+    if not db_path.exists():
+        return {
+            "playbook_policy": {
+                "status": "alert_database_missing",
+                "fail_closed": True,
+                "evidence_gap": "The alert database was unavailable for exact detection-playbook resolution.",
+            },
+        }, None
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        columns = table_columns(conn, "alerts")
+        if "alert_id" not in columns:
+            return {
+                "playbook_policy": {
+                    "status": "alert_schema_unsupported",
+                    "fail_closed": True,
+                    "evidence_gap": "The alert database lacks the alert_id column required for exact rule resolution.",
+                },
+            }, None
+        projection = ", ".join(
+            column if column in columns else f"NULL AS {column}"
+            for column in ("alert_json", "raw_event_json", "rule_id")
+        )
+        row = conn.execute(
+            f"SELECT {projection} FROM alerts WHERE alert_id = ?",
+            (alert_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return {
+            "playbook_policy": {
+                "status": "alert_not_found",
+                "fail_closed": True,
+                "evidence_gap": "The selected alert was not found for exact detection-playbook resolution.",
+            },
+        }, None
+    context = extract_rule_context(row["alert_json"], row["raw_event_json"], row["rule_id"])
+    try:
+        playbook_path.stat()
+    except FileNotFoundError:
+        context["playbook_policy"] = {
+            "status": "registry_missing",
+            "fail_closed": True,
+            "evidence_gap": "The detection-playbook registry is missing; playbook-specific conclusions are unavailable.",
+        }
+        return context, None
+    except OSError:
+        context["playbook_policy"] = {
+            "status": "registry_unreadable",
+            "fail_closed": True,
+            "evidence_gap": "The detection-playbook registry could not be read; playbook-specific conclusions are unavailable.",
+        }
+        return context, None
+    try:
+        registry = load_detection_playbooks(playbook_path)
+        playbook = resolve_detection_playbook(registry, context)
+    except OSError:
+        context["playbook_policy"] = {
+            "status": "registry_unreadable",
+            "fail_closed": True,
+            "evidence_gap": "The detection-playbook registry could not be read; playbook-specific conclusions are unavailable.",
+        }
+        return context, None
+    except (UnicodeError, ValueError):
+        context["playbook_policy"] = {
+            "status": "registry_invalid",
+            "fail_closed": True,
+            "evidence_gap": "The detection-playbook registry failed validation; playbook-specific conclusions are unavailable.",
+        }
+        return context, None
+    if registry.get("version") == 0:
+        context["playbook_policy"] = {
+            "status": "registry_missing",
+            "fail_closed": True,
+            "evidence_gap": "The detection-playbook registry is missing; playbook-specific conclusions are unavailable.",
+        }
+        return context, None
+    if not isinstance(playbook, dict):
+        context["playbook_policy"] = {
+            "status": "no_exact_playbook",
+            "fail_closed": True,
+            "registry_version": registry.get("version"),
+            "evidence_gap": "No exact detection playbook matched the selected rule identity.",
+        }
+        return context, None
+    context["playbook_policy"] = {
+        "status": "exact_playbook_matched",
+        "fail_closed": False,
+        "registry_version": registry.get("version"),
+        "evidence_gap": "",
+    }
+    return context, playbook
+
+
+def _timestamp_epoch(value: object) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(text.replace("  ", "T").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.timestamp()
+
+
+def icmp_evidence_scope(request: dict[str, Any]) -> dict[str, Any]:
+    """Build the bounded endpoint/time scope used for alert-associated ICMP."""
+    source_ip = sanitize_evidence_text(request.get("source_ip"), 64)
+    destination_ip = sanitize_evidence_text(request.get("destination_ip"), 64)
+    try:
+        source_ip = str(ipaddress.ip_address(source_ip)) if source_ip else ""
+    except ValueError:
+        source_ip = ""
+    try:
+        destination_ip = str(ipaddress.ip_address(destination_ip)) if destination_ip else ""
+    except ValueError:
+        destination_ip = ""
+
+    first_epoch = _timestamp_epoch(request.get("first_seen"))
+    last_epoch = _timestamp_epoch(request.get("last_seen"))
+    start_epoch: float | None = None
+    end_epoch: float | None = None
+    if first_epoch is not None and last_epoch is not None:
+        first_epoch, last_epoch = sorted((first_epoch, last_epoch))
+        try:
+            requested_window = int(request.get("max_window_seconds") or 120)
+        except (TypeError, ValueError):
+            requested_window = 120
+        window_seconds = max(30, min(MAX_SELECTION_WINDOW_SECONDS, requested_window))
+        duration = max(0, int(last_epoch - first_epoch))
+        if duration > window_seconds:
+            start_epoch, end_epoch = last_epoch - window_seconds, last_epoch
+        else:
+            padding = max(0, (window_seconds - duration) // 2)
+            start_epoch, end_epoch = first_epoch - padding, last_epoch + padding
+    return {
+        "selected_alert_id": sanitize_evidence_text(request.get("alert_id"), 256),
+        "source_ip": source_ip,
+        "destination_ip": destination_ip,
+        "window_start_epoch": start_epoch,
+        "window_end_epoch": end_epoch,
+        "window_basis": "bounded-pcap-request-window" if start_epoch is not None else "unavailable",
+    }
+
+
+def _icmp_scope_match(
+    source: str,
+    destination: str,
+    timestamp: float | None,
+    scope: dict[str, Any],
+) -> tuple[bool, str]:
+    selected_source = str(scope.get("source_ip") or "")
+    selected_destination = str(scope.get("destination_ip") or "")
+    if selected_source and selected_destination:
+        if {source, destination} != {selected_source, selected_destination}:
+            return False, "endpoint"
+    elif selected_source or selected_destination:
+        selected = selected_source or selected_destination
+        if selected not in {source, destination}:
+            return False, "endpoint"
+    start_epoch = scope.get("window_start_epoch")
+    end_epoch = scope.get("window_end_epoch")
+    if isinstance(start_epoch, (int, float)) and isinstance(end_epoch, (int, float)):
+        if timestamp is None:
+            return False, "missing_timestamp"
+        if timestamp < float(start_epoch) or timestamp > float(end_epoch):
+            return False, "time"
+    return True, ""
+
+
 def analysis_json_path(out_dir: Path, request_id: str) -> Path:
     return out_dir / f"{safe_filename(request_id)}-pcap-analysis.json"
 
@@ -785,6 +997,8 @@ def run_zeek(pcap_files: list[Path], work_dir: Path) -> dict[str, Any]:
 def run_tshark(
     pcap_files: list[Path],
     maxmind_db_paths: dict[str, Path] | Path | None = None,
+    markers: list[dict[str, Any]] | None = None,
+    selected_scope: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     tshark = tool_path("TSHARK_BIN", "tshark")
     if not tshark:
@@ -797,6 +1011,7 @@ def run_tshark(
         "tls_sni", "tls_handshake_version", "tls_supported_version", "tls_record_version",
         "http_host", "http_uri", "http_user_agent", "http2_user_agent",
         "icmp_type", "icmp_code", "icmpv6_type", "icmpv6_code",
+        "icmp_identifier", "icmp_sequence", "data_length", "data_payload",
     )
     tshark_fields = (
         "frame.number", "frame.time_epoch", "frame.len", "_ws.col.Protocol",
@@ -806,6 +1021,7 @@ def run_tshark(
         "tls.handshake.extensions_server_name", "tls.handshake.version", "tls.handshake.extensions.supported_version", "tls.record.version",
         "http.host", "http.request.uri", "http.user_agent", "http2.headers.user_agent",
         "icmp.type", "icmp.code", "icmpv6.type", "icmpv6.code",
+        "icmp.ident", "icmp.seq", "data.len", "data.data",
     )
     commands: list[dict[str, Any]] = []
     coverage = CoverageTracker()
@@ -821,6 +1037,27 @@ def run_tshark(
     tls_versions = BoundedTopCounter(128)
     icmp_anomalies = BoundedTopCounter(HEAVY_HITTER_CAPACITY)
     icmp_anomaly_samples = DeterministicReservoir(min(TSHARK_SAMPLE_LIMIT, 100))
+    icmp_type_codes = BoundedTopCounter(128)
+    icmp_identifiers = BoundedTopCounter(HEAVY_HITTER_CAPACITY)
+    icmp_sequences = BoundedTopCounter(HEAVY_HITTER_CAPACITY)
+    icmp_payload_lengths = BoundedTopCounter(HEAVY_HITTER_CAPACITY)
+    icmp_pair_latencies = BoundedTopCounter(HEAVY_HITTER_CAPACITY)
+    pending_icmp_requests: dict[tuple[str, str, str, str], float] = {}
+    marker_values: list[tuple[dict[str, Any], bytes]] = []
+    marker_offsets: dict[str, BoundedTopCounter] = {}
+    marker_packet_counts: Counter[str] = Counter()
+    for marker in markers or []:
+        if not isinstance(marker, dict):
+            continue
+        try:
+            decoded_marker = bytes.fromhex(str(marker.get("hex") or ""))
+        except ValueError:
+            continue
+        marker_id = str(marker.get("id") or "")[:100]
+        if not marker_id or not decoded_marker:
+            continue
+        marker_values.append((marker, decoded_marker))
+        marker_offsets[marker_id] = BoundedTopCounter(128)
     geoip_candidates = BoundedTopCounter(HEAVY_HITTER_CAPACITY)
     dns_packet_count = 0
     dns_query_count = 0
@@ -828,8 +1065,19 @@ def run_tshark(
     user_agent_count = 0
     tls_version_observation_count = 0
     icmp_packet_count = 0
+    capture_icmp_packet_count = 0
+    icmp_excluded_endpoint = 0
+    icmp_excluded_time = 0
+    icmp_excluded_missing_timestamp = 0
     icmp_abnormal_count = 0
     icmp_max_frame_bytes = 0
+    scope = selected_scope if isinstance(selected_scope, dict) else {}
+    endpoint_filter_applied = bool(scope.get("source_ip") or scope.get("destination_ip"))
+    endpoint_pair_complete = bool(scope.get("source_ip") and scope.get("destination_ip"))
+    time_filter_applied = isinstance(scope.get("window_start_epoch"), (int, float)) and isinstance(
+        scope.get("window_end_epoch"),
+        (int, float),
+    )
     files_processed = 0
     for pcap in pcap_files:
         file_coverage = CoverageTracker()
@@ -837,6 +1085,8 @@ def run_tshark(
         def on_line(line: str) -> None:
             nonlocal dns_packet_count, dns_query_count, dns_answer_count, user_agent_count
             nonlocal tls_version_observation_count, icmp_packet_count, icmp_abnormal_count, icmp_max_frame_bytes
+            nonlocal capture_icmp_packet_count, icmp_excluded_endpoint, icmp_excluded_time
+            nonlocal icmp_excluded_missing_timestamp
             try:
                 values = next(csv.reader([line], delimiter="\t", quotechar='"'))
             except (csv.Error, StopIteration):
@@ -898,27 +1148,108 @@ def run_tshark(
                         tls_versions.add((version_source, raw_version, version_name))
             icmp_family = "icmpv6" if row["icmpv6_type"] or row["icmpv6_code"] else "icmp" if row["icmp_type"] or row["icmp_code"] else ""
             if icmp_family:
-                icmp_packet_count += 1
                 try:
-                    frame_bytes = max(0, int(float(row["frame_length"] or 0)))
+                    packet_timestamp = float(row["timestamp_epoch"])
                 except (TypeError, ValueError):
-                    frame_bytes = 0
-                icmp_max_frame_bytes = max(icmp_max_frame_bytes, frame_bytes)
-                if frame_bytes >= ICMP_ABNORMAL_MIN_FRAME_BYTES:
-                    icmp_abnormal_count += 1
+                    packet_timestamp = None
+                capture_icmp_packet_count += 1
+                selected, exclusion = _icmp_scope_match(
+                    source,
+                    destination,
+                    packet_timestamp,
+                    scope,
+                )
+                if not selected:
+                    if exclusion == "endpoint":
+                        icmp_excluded_endpoint += 1
+                    elif exclusion == "time":
+                        icmp_excluded_time += 1
+                    elif exclusion == "missing_timestamp":
+                        icmp_excluded_missing_timestamp += 1
+                else:
+                    icmp_packet_count += 1
+                    try:
+                        frame_bytes = max(0, int(float(row["frame_length"] or 0)))
+                    except (TypeError, ValueError):
+                        frame_bytes = 0
+                    icmp_max_frame_bytes = max(icmp_max_frame_bytes, frame_bytes)
                     icmp_type = row["icmpv6_type"] if icmp_family == "icmpv6" else row["icmp_type"]
                     icmp_code = row["icmpv6_code"] if icmp_family == "icmpv6" else row["icmp_code"]
-                    icmp_anomalies.add((icmp_family, icmp_type, icmp_code, source, destination, frame_bytes))
-                    icmp_anomaly_samples.add({
-                        "frame_number": row["frame_number"],
-                        "timestamp_epoch": row["timestamp_epoch"],
-                        "family": icmp_family,
-                        "type": icmp_type,
-                        "code": icmp_code,
-                        "source_ip": source,
-                        "destination_ip": destination,
-                        "frame_bytes": frame_bytes,
-                    })
+                    identifier = row["icmp_identifier"]
+                    sequence = row["icmp_sequence"]
+                    icmp_type_codes.add((icmp_family, icmp_type, icmp_code))
+                    if identifier:
+                        icmp_identifiers.add((identifier,))
+                    if sequence:
+                        icmp_sequences.add((sequence,))
+                    payload_value = next(
+                        iter(tshark_occurrences(row["data_payload"])),
+                        str(row["data_payload"] or ""),
+                    )
+                    payload_hex = re.sub(r"[^0-9A-Fa-f]", "", payload_value)
+                    try:
+                        payload = bytes.fromhex(payload_hex) if payload_hex and len(payload_hex) % 2 == 0 else b""
+                    except ValueError:
+                        payload = b""
+                    try:
+                        data_length_value = next(
+                            iter(tshark_occurrences(row["data_length"])),
+                            str(row["data_length"] or ""),
+                        )
+                        payload_length = max(0, int(data_length_value or len(payload)))
+                    except (TypeError, ValueError):
+                        payload_length = len(payload)
+                    if payload_length:
+                        icmp_payload_lengths.add((payload_length,))
+                    for marker, decoded_marker in marker_values:
+                        marker_id = str(marker["id"])
+                        found = False
+                        start = 0
+                        for _ in range(16):
+                            position = payload.find(decoded_marker, start)
+                            if position < 0:
+                                break
+                            marker_offsets[marker_id].add((position,))
+                            found = True
+                            start = position + 1
+                        if found:
+                            marker_packet_counts[marker_id] += 1
+                    pair_key = (identifier, sequence, source, destination)
+                    reverse_key = (identifier, sequence, destination, source)
+                    if (
+                        icmp_family == "icmp"
+                        and icmp_type == "8"
+                        and identifier
+                        and sequence
+                        and packet_timestamp is not None
+                    ):
+                        if len(pending_icmp_requests) >= ICMP_PAIR_STATE_LIMIT:
+                            pending_icmp_requests.pop(next(iter(pending_icmp_requests)))
+                        pending_icmp_requests[pair_key] = packet_timestamp
+                    elif (
+                        icmp_family == "icmp"
+                        and icmp_type == "0"
+                        and reverse_key in pending_icmp_requests
+                        and packet_timestamp is not None
+                    ):
+                        latency_ms = max(
+                            0.0,
+                            (packet_timestamp - pending_icmp_requests.pop(reverse_key)) * 1000.0,
+                        )
+                        icmp_pair_latencies.add((round(latency_ms, 3),))
+                    if frame_bytes >= ICMP_ABNORMAL_MIN_FRAME_BYTES:
+                        icmp_abnormal_count += 1
+                        icmp_anomalies.add((icmp_family, icmp_type, icmp_code, source, destination, frame_bytes))
+                        icmp_anomaly_samples.add({
+                            "frame_number": row["frame_number"],
+                            "timestamp_epoch": row["timestamp_epoch"],
+                            "family": icmp_family,
+                            "type": icmp_type,
+                            "code": icmp_code,
+                            "source_ip": source,
+                            "destination_ip": destination,
+                            "frame_bytes": frame_bytes,
+                        })
             reservoir.add({
                 "frame_number": row["frame_number"],
                 "timestamp_epoch": row["timestamp_epoch"],
@@ -976,8 +1307,43 @@ def run_tshark(
         "observations": tls_version_observation_count,
         "versions": tls_versions.most_common(("source", "raw_version", "version"), SUMMARY_LIMIT),
     }
+    if endpoint_pair_complete and time_filter_applied:
+        association = "selected-alert-endpoints-and-request-window"
+    elif endpoint_filter_applied or time_filter_applied:
+        association = "partially-filtered-selected-alert-candidate"
+    else:
+        association = "capture-wide-not-attributed-to-selected-alert"
+    icmp_provenance = {
+        "association": association,
+        "association_is_proof": False,
+        "caution": (
+            "Endpoint/time filtering produces candidate evidence for the selected alert, not proof that every retained packet caused it."
+            if endpoint_filter_applied or time_filter_applied
+            else "No selected endpoint/time filters were available; ICMP findings describe the entire capture and must not be attributed to one alert."
+        ),
+        "selected_alert_id": sanitize_evidence_text(scope.get("selected_alert_id"), 256),
+        "endpoint_filter": {
+            "applied": endpoint_filter_applied,
+            "pair_complete": endpoint_pair_complete,
+            "direction": "bidirectional",
+            "source_ip": scope.get("source_ip") if endpoint_filter_applied else "",
+            "destination_ip": scope.get("destination_ip") if endpoint_filter_applied else "",
+        },
+        "time_filter": {
+            "applied": time_filter_applied,
+            "basis": str(scope.get("window_basis") or "unavailable")[:80],
+            "window_start_epoch": scope.get("window_start_epoch") if time_filter_applied else None,
+            "window_end_epoch": scope.get("window_end_epoch") if time_filter_applied else None,
+        },
+        "capture_icmp_packets_observed": capture_icmp_packet_count,
+        "retained_icmp_packets": icmp_packet_count,
+        "excluded_by_endpoint": icmp_excluded_endpoint,
+        "excluded_by_time": icmp_excluded_time,
+        "excluded_missing_timestamp": icmp_excluded_missing_timestamp,
+    }
     icmp_size_review = {
         "classification": "suspicious-size-review-signal-not-a-c2-verdict",
+        "provenance": icmp_provenance,
         "abnormal_frame_threshold_bytes": ICMP_ABNORMAL_MIN_FRAME_BYTES,
         "icmp_packets_observed": icmp_packet_count,
         "abnormal_packets_observed": icmp_abnormal_count,
@@ -987,6 +1353,53 @@ def run_tshark(
             SUMMARY_LIMIT,
         ),
         "representative_samples": icmp_anomaly_samples.records(),
+    }
+    marker_summaries = []
+    for marker, decoded_marker in marker_values:
+        marker_id = str(marker["id"])
+        expected_raw = marker.get("expected_offset")
+        try:
+            expected_offset = int(expected_raw) if expected_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            expected_offset = None
+        offsets = marker_offsets[marker_id].most_common(("offset",), 128)
+        marker_summaries.append({
+            "id": marker_id,
+            "source": marker.get("source"),
+            "sha256": hashlib.sha256(decoded_marker).hexdigest(),
+            "length": len(decoded_marker),
+            "printable": sanitize_evidence_text(
+                "".join(chr(value) if 32 <= value <= 126 else "." for value in decoded_marker),
+                80,
+            ),
+            "expected_offset": expected_offset,
+            "packets_with_marker": int(marker_packet_counts[marker_id]),
+            "observations": sum(int(item.get("count") or 0) for item in offsets),
+            "expected_offset_observations": sum(
+                int(item.get("count") or 0)
+                for item in offsets
+                if (
+                    expected_offset is not None
+                    and item.get("offset") is not None
+                    and int(item["offset"]) == expected_offset
+                )
+            ) if expected_offset is not None else None,
+            "offsets": offsets,
+        })
+    icmp_semantics = {
+        "raw_payloads_included": False,
+        "provenance": icmp_provenance,
+        "type_code_counts": icmp_type_codes.most_common(("family", "type", "code"), 128),
+        "identifiers": icmp_identifiers.most_common(("identifier",), SUMMARY_LIMIT),
+        "sequences": icmp_sequences.most_common(("sequence",), SUMMARY_LIMIT),
+        "payload_lengths": icmp_payload_lengths.most_common(("payload_bytes",), SUMMARY_LIMIT),
+        "request_reply_pairs": sum(
+            int(item.get("count") or 0)
+            for item in icmp_pair_latencies.most_common(("latency_ms",), HEAVY_HITTER_CAPACITY)
+        ),
+        "reply_latency_ms": icmp_pair_latencies.most_common(("latency_ms",), SUMMARY_LIMIT),
+        "unmatched_requests_retained": len(pending_icmp_requests),
+        "markers": marker_summaries,
     }
     geoip = maxmind_geoip_summary(
         geoip_candidates,
@@ -1022,6 +1435,7 @@ def run_tshark(
         "http_user_agents": http_user_agents,
         "tls_versions": tls_version_summary,
         "icmp_size_review": icmp_size_review,
+        "icmp_semantics": icmp_semantics,
         "geoip": geoip,
         "packet_samples": packet_samples,
         "_local_query_index": {
@@ -1038,6 +1452,7 @@ def run_tshark(
                 ("family", "type", "code", "source_ip", "destination_ip", "frame_bytes"),
                 QUERY_INDEX_LIMIT,
             ),
+            "icmp_semantics": icmp_semantics,
             "geoip": geoip.get("records", [])[:QUERY_INDEX_LIMIT],
         },
         "samples": [{
@@ -1206,6 +1621,21 @@ def report_analysis_status(base_url: str, request_id: str, status: str, error: s
 
 def process_one(request: dict[str, Any], args: argparse.Namespace, direct_pcap: Path | None = None) -> dict[str, Any]:
     request_id = safe_filename(request.get("request_id") or (direct_pcap.stem if direct_pcap else "pcap"))
+    rule_context, playbook = signature_context_for_request(
+        Path(getattr(args, "db", DEFAULT_DB)),
+        request,
+        Path(getattr(args, "detection_playbooks", DEFAULT_DETECTION_PLAYBOOKS)),
+    )
+    playbook_policy = (
+        rule_context.get("playbook_policy")
+        if isinstance(rule_context.get("playbook_policy"), dict)
+        else {
+            "status": "not_evaluated",
+            "fail_closed": True,
+            "evidence_gap": "Detection-playbook policy status was unavailable.",
+        }
+    )
+    markers = detection_marker_specs(rule_context, playbook)
     with tempfile.TemporaryDirectory(prefix="onion-sentinel-pcap-") as temp_name:
         work_dir = Path(temp_name)
         pcap_files, artifact_state = materialize_pcap_files(request, args, work_dir, direct_pcap)
@@ -1221,11 +1651,42 @@ def process_one(request: dict[str, Any], args: argparse.Namespace, direct_pcap: 
         ]
         zeek = run_zeek(pcap_files, work_dir) if pcap_files else {"available": False, "reason": artifact_state}
         settings_path = Path(getattr(args, "ai_settings", DEFAULT_AI_SETTINGS))
-        tshark = run_tshark(pcap_files, configured_maxmind_db_paths(settings_path)) if pcap_files else {"available": False, "reason": artifact_state}
+        tshark = run_tshark(
+            pcap_files,
+            configured_maxmind_db_paths(settings_path),
+            markers,
+            icmp_evidence_scope(request),
+        ) if pcap_files else {"available": False, "reason": artifact_state}
         analysis = {
             "analysis_type": "soc-pcap-analysis",
             "generated_at": project_now(),
             "request": request,
+            "detection_context": {
+                "policy_status": str(playbook_policy.get("status") or "not_evaluated")[:80],
+                "policy_fail_closed": bool(playbook_policy.get("fail_closed", True)),
+                "evidence_gaps": (
+                    [str(playbook_policy.get("evidence_gap") or "")[:500]]
+                    if str(playbook_policy.get("evidence_gap") or "")
+                    else []
+                ),
+                "playbook_registry_version": playbook_policy.get("registry_version"),
+                "rule": {
+                    "sid": rule_context.get("sid"),
+                    "revision": rule_context.get("revision"),
+                    "name": rule_context.get("name"),
+                    "ruleset": rule_context.get("ruleset"),
+                    "rule_sha256": (
+                        (rule_context.get("parsed_rule") or {}).get("rule_sha256")
+                        if isinstance(rule_context.get("parsed_rule"), dict)
+                        else ""
+                    ),
+                },
+                "playbook": {
+                    "id": playbook.get("id"),
+                    "version": playbook.get("version"),
+                    "status": playbook.get("status"),
+                } if isinstance(playbook, dict) else None,
+            },
             "artifact_state": artifact_state,
             "pcap_files": pcap_meta,
             "tool_paths": {
