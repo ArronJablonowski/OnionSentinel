@@ -187,6 +187,30 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                                 }]
                             },
                         },
+                        {
+                            "backend": "security_onion",
+                            "evidence": {
+                                "results": [{
+                                    "hits": [{
+                                        "id": "auth-hit",
+                                        "index": "logs-system.auth-default",
+                                        "source": {
+                                            "@timestamp": "2026-07-24T18:30:00Z",
+                                            "event": {
+                                                "dataset": "system.auth",
+                                                "outcome": "failure",
+                                            },
+                                            "source": {"ip": "192.0.2.55"},
+                                            "user": {"name": "invalid-user"},
+                                            "ssl": {
+                                                "server_name": "safe-tls.example",
+                                            },
+                                            "message": "password=TOPSECRET",
+                                        },
+                                    }]
+                                }]
+                            },
+                        },
                     ]
                 }]
             }
@@ -199,6 +223,10 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         self.assertIn("192.0.2.10", encoded)
         self.assertIn("safe.example", encoded)
         self.assertIn("safe-process", encoded)
+        self.assertIn("system.auth", encoded)
+        self.assertIn("192.0.2.55", encoded)
+        self.assertIn("invalid-user", encoded)
+        self.assertIn("safe-tls.example", encoded)
         self.assertNotIn("TOPSECRET", encoded)
         self.assertNotIn("QWxhZGRpb", encoded)
         self.assertNotIn("status_message", encoded)
@@ -241,6 +269,457 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                 round_number=1,
                 position=1,
             )
+
+    def test_normalizer_preserves_bounded_role_aware_event_tuple(self) -> None:
+        request = self.elastic_request("role-aware")
+        request["parameters"]["observables"]["ips"].append("198.51.100.20")
+        request["parameters"]["event_tuple"] = {
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "source_port": "49152",
+            "destination_port": 443,
+            "transport": "TCP",
+            "protocol": "TLS",
+            "community_id": "1:trusted-flow=",
+            "rule_id": "2016150",
+        }
+
+        normalized = self.runner.normalize_investigation_query_request(
+            request,
+            round_number=1,
+            position=1,
+        )
+
+        self.assertEqual(normalized["parameters"]["event_tuple"], {
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "source_port": 49152,
+            "destination_port": 443,
+            "transport": "tcp",
+            "protocol": "tls",
+            "community_id": "1:trusted-flow=",
+            "rule_id": "2016150",
+        })
+
+        request["parameters"]["event_tuple"]["destination_port"] = 70000
+        with self.assertRaisesRegex(
+            self.runner.InvestigationQueryError,
+            "port range",
+        ):
+            self.runner.normalize_investigation_query_request(
+                request,
+                round_number=1,
+                position=1,
+            )
+
+    def test_normalizer_projects_union_parameters_to_selected_backend(self) -> None:
+        request = self.elastic_request("project-union")
+        request["parameters"].update(
+            {
+                "operation": "dns",
+                "filters": {"query": "example.test"},
+                "indicator": "example.test",
+                "limit": 5,
+                "target_alias": "endpoint-a",
+                "query": "SELECT pid FROM processes LIMIT 1",
+            }
+        )
+
+        normalized = self.runner.normalize_investigation_query_request(
+            request,
+            round_number=1,
+            position=1,
+        )
+
+        self.assertEqual(
+            set(normalized["parameters"]),
+            {"pack", "window", "observables", "size", "aggregation"},
+        )
+        self.assertEqual(
+            normalized["normalization"]["dropped_cross_backend_parameters"],
+            [
+                "filters",
+                "indicator",
+                "limit",
+                "operation",
+                "query",
+                "target_alias",
+            ],
+        )
+
+    def test_normalizer_projects_union_parameters_to_derived_backend(self) -> None:
+        request = {
+            "query_id": "project-derived-union",
+            "backend": "pcap_zeek",
+            "purpose": "Confirm the capture-derived DNS records for the host.",
+            "parameters": {
+                "operation": "dns",
+                "filters": {"query": "example.test"},
+                "indicator": "example.test",
+                "limit": 5,
+                "pack": "dns_activity",
+                "window": {
+                    "start": "2026-07-24T18:00:00Z",
+                    "end": "2026-07-24T19:00:00Z",
+                },
+                "observables": {
+                    "ips": ["192.0.2.10"],
+                    "domains": ["example.test"],
+                    "hosts": [],
+                    "users": [],
+                },
+                "size": 25,
+                "aggregation": "events",
+                "target_alias": "endpoint-a",
+                "query": "SELECT pid FROM processes LIMIT 1",
+            },
+        }
+
+        normalized = self.runner.normalize_investigation_query_request(
+            request,
+            round_number=1,
+            position=1,
+        )
+
+        self.assertEqual(
+            normalized["parameters"],
+            {
+                "operation": "dns",
+                "filters": {"query": "example.test"},
+                "indicator": "example.test",
+                "limit": 5,
+            },
+        )
+        self.assertEqual(
+            normalized["normalization"]["dropped_cross_backend_parameters"],
+            [
+                "aggregation",
+                "observables",
+                "pack",
+                "query",
+                "size",
+                "target_alias",
+                "window",
+            ],
+        )
+
+    def test_historical_malformed_shapes_recover_safe_intent(self) -> None:
+        """Three common malformed requests normalize; one unsafe request rejects."""
+        elastic_union = self.elastic_request("elastic-union")
+        elastic_union["parameters"].update(
+            {
+                "operation": "connections",
+                "filters": {"source_ip": "192.0.2.10"},
+                "indicator": "192.0.2.10",
+                "limit": 10,
+                "target_alias": "endpoint-a",
+                "query": "SELECT pid FROM processes LIMIT 1",
+            }
+        )
+        pcap_union = {
+            "query_id": "pcap-union",
+            "backend": "pcap_zeek",
+            "purpose": "Inspect capture-derived connection evidence.",
+            "parameters": {
+                "operation": "connections",
+                "filters": {"source_ip": "192.0.2.10"},
+                "indicator": "192.0.2.10",
+                "limit": 10,
+                **self.elastic_request()["parameters"],
+            },
+        }
+        long_window = self.elastic_request("long-window")
+        long_window["parameters"]["window"] = {
+            "start": "2026-07-23T18:30:00Z",
+            "end": "2026-07-25T18:30:00Z",
+        }
+        no_observable = self.elastic_request("no-observable")
+        no_observable["parameters"]["observables"] = {
+            "ips": [],
+            "domains": [],
+            "hosts": [],
+            "users": [],
+        }
+        envelope = {
+            "start": "2026-07-23T18:30:00Z",
+            "end": "2026-07-25T18:30:00Z",
+        }
+
+        recovered = []
+        rejected = []
+        for position, request in enumerate(
+            [elastic_union, pcap_union, long_window, no_observable],
+            1,
+        ):
+            try:
+                recovered.append(
+                    self.runner.normalize_investigation_query_request(
+                        request,
+                        round_number=1,
+                        position=position,
+                        time_envelope=envelope,
+                    )
+                )
+            except self.runner.InvestigationQueryError as exc:
+                rejected.append(str(exc))
+
+        self.assertEqual(len(recovered), 3)
+        self.assertEqual(len(rejected), 1)
+        self.assertIn("at least one exact observable", rejected[0])
+
+    def test_normalizer_clamps_long_window_nearest_alert_and_audits_gap(self) -> None:
+        request = self.elastic_request("long-window")
+        request["parameters"]["window"] = {
+            "start": "2026-07-23T18:30:00Z",
+            "end": "2026-07-25T18:30:00Z",
+        }
+
+        normalized = self.runner.normalize_investigation_query_request(
+            request,
+            round_number=1,
+            position=1,
+            time_envelope={
+                "start": "2026-07-23T18:30:00Z",
+                "end": "2026-07-25T18:30:00Z",
+            },
+        )
+
+        self.assertEqual(
+            normalized["parameters"]["window"],
+            {
+                "start": "2026-07-24T06:30:00.000Z",
+                "end": "2026-07-25T06:30:00.000Z",
+            },
+        )
+        adjustment = normalized["normalization"]["window_adjustment"]
+        self.assertTrue(adjustment["adjusted"])
+        self.assertIn("clamped_to_24_hours_nearest_alert", adjustment["reasons"])
+
+    def test_security_preflight_isolates_one_invalid_observable(self) -> None:
+        context = {
+            "context_id": "context-test",
+            "case_id": "investigation-test",
+            "group_id": "group-test",
+            "actor_role": "incident_responder",
+            "anchor": {
+                "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                "id": "alert-1",
+            },
+            "time_envelope": {
+                "start": "2026-07-24T17:00:00.000Z",
+                "end": "2026-07-24T20:00:00.000Z",
+            },
+            "permitted_observables": {
+                "ips": ["192.0.2.10"],
+                "domains": [],
+                "hosts": [],
+                "users": [],
+            },
+            "discovered_observables": [],
+        }
+        valid = self.runner.normalize_investigation_query_request(
+            self.elastic_request("valid"),
+            round_number=1,
+            position=1,
+            time_envelope=context["time_envelope"],
+        )
+        invalid_raw = self.elastic_request("invalid")
+        invalid_raw["parameters"]["observables"]["ips"] = ["203.0.113.99"]
+        invalid = self.runner.normalize_investigation_query_request(
+            invalid_raw,
+            round_number=1,
+            position=2,
+            time_envelope=context["time_envelope"],
+        )
+        security = mock.Mock(
+            return_value={
+                "complete": True,
+                "partial": False,
+                "model_evidence": {
+                    "results": [{"query_id": "valid", "status": "ok"}]
+                },
+                "query_audit": [
+                    {
+                        "query_id": "valid",
+                        "dialect": "elastic",
+                        "status": "ok",
+                        "query_digest": "a" * 64,
+                    }
+                ],
+                "audit": {},
+            }
+        )
+
+        result = self.runner.execute_investigation_query_batch(
+            {"_local_investigation_query_context": context},
+            [valid, invalid],
+            round_number=1,
+            security_onion_executor=security,
+        )
+
+        security.assert_called_once()
+        proposal = security.call_args.args[0]
+        self.assertEqual(
+            [item["query_id"] for item in proposal["queries"]],
+            ["valid"],
+        )
+        rejected = next(
+            item for item in result["results"]
+            if item.get("query_id") == "invalid"
+        )
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertIn("isolated local authorization", rejected["error"])
+
+    def test_security_batch_forwards_only_authorized_event_tuple(self) -> None:
+        context = {
+            "context_id": "context-role-aware",
+            "case_id": "investigation-role-aware",
+            "group_id": "group-role-aware",
+            "actor_role": "incident_responder",
+            "anchor": {
+                "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                "id": "alert-1",
+            },
+            "time_envelope": {
+                "start": "2026-07-24T17:00:00.000Z",
+                "end": "2026-07-24T20:00:00.000Z",
+            },
+            "permitted_observables": {
+                "ips": ["192.0.2.10", "198.51.100.20"],
+                "domains": [],
+                "hosts": [],
+                "users": [],
+            },
+            "discovered_observables": [],
+            "permitted_event_tuples": [{
+                "event_tuple": {
+                    "source_ip": "192.0.2.10",
+                    "destination_ip": "198.51.100.20",
+                    "destination_port": 443,
+                    "transport": "tcp",
+                    "protocol": "tls",
+                },
+                "source": "trusted_context",
+                "evidence_ref": "context:event-tuple:flow-1",
+            }],
+        }
+        raw = self.elastic_request("role-aware")
+        raw["parameters"]["pack"] = "alert_context"
+        raw["parameters"]["observables"]["ips"].append("198.51.100.20")
+        raw["parameters"]["event_tuple"] = {
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "destination_port": 443,
+            "transport": "tcp",
+            "protocol": "tls",
+        }
+        request = self.runner.normalize_investigation_query_request(
+            raw,
+            round_number=1,
+            position=1,
+            time_envelope=context["time_envelope"],
+        )
+        security = mock.Mock(return_value={
+            "complete": False,
+            "partial": False,
+            "model_evidence": {"results": []},
+            "query_audit": [],
+            "audit": {},
+        })
+
+        self.runner.execute_investigation_query_batch(
+            {"_local_investigation_query_context": context},
+            [request],
+            round_number=1,
+            security_onion_executor=security,
+        )
+
+        security.assert_called_once()
+        self.assertEqual(
+            security.call_args.args[0]["queries"][0]["event_tuple"],
+            raw["parameters"]["event_tuple"],
+        )
+
+    def test_outcome_summary_counts_logical_queries_and_zero_success_gap(self) -> None:
+        summary = self.runner.investigation_query_outcome_summary(
+            [
+                {
+                    "requests": [],
+                    "results": [
+                        {
+                            "backend": "security_onion",
+                            "status": "ok",
+                            "query_ids": ["a", "b"],
+                        },
+                        {"backend": "contract", "status": "rejected"},
+                        {"backend": "elastic", "status": "error"},
+                        {"backend": "pcap_zeek", "status": "partial"},
+                    ],
+                }
+            ],
+            queries_admitted=5,
+        )
+        self.assertEqual(summary["successful_queries"], 2)
+        self.assertEqual(summary["rejected_queries"], 1)
+        self.assertEqual(summary["error_queries"], 1)
+        self.assertEqual(summary["partial_queries"], 1)
+        self.assertFalse(summary["zero_success"])
+
+        zero = self.runner.investigation_query_outcome_summary(
+            [{"requests": [], "results": [{"status": "rejected"}]}],
+            queries_admitted=1,
+        )
+        self.assertTrue(zero["zero_success"])
+        response = {"incident_response_report": {"evidence_gaps": []}}
+        self.runner._append_investigation_evidence_gaps(
+            response,
+            zero["evidence_gaps"],
+        )
+        self.assertIn(
+            "no follow-up query evidence was collected",
+            response["incident_response_report"]["evidence_gaps"][0],
+        )
+
+    def test_outcome_summary_counts_nested_partial_security_onion_batch(self) -> None:
+        summary = self.runner.investigation_query_outcome_summary(
+            [
+                {
+                    "requests": [],
+                    "results": [
+                        {
+                            "backend": "security_onion",
+                            "query_ids": ["successful-pivot", "failed-pivot"],
+                            "status": "partial",
+                            "evidence": {
+                                "controls_valid": True,
+                                "results": [
+                                    {
+                                        "query_id": "successful-pivot",
+                                        "status": "ok",
+                                        "semantic_valid": True,
+                                    },
+                                    {
+                                        "query_id": "failed-pivot",
+                                        "status": "error",
+                                        "semantic_valid": False,
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                },
+            ],
+            queries_admitted=2,
+        )
+
+        self.assertEqual(summary["successful_queries"], 1)
+        self.assertEqual(summary["error_queries"], 1)
+        self.assertEqual(summary["partial_queries"], 0)
+        self.assertFalse(summary["zero_success"])
+        self.assertIn(
+            "did not return complete successful evidence",
+            summary["evidence_gaps"][0],
+        )
 
     def test_mixed_batch_uses_injected_read_only_brokers(self) -> None:
         prompt_package = {
@@ -1006,14 +1485,25 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                     "elastic_index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
                     "elastic_id": "alert-1",
                     "source": {"ip": "192.0.2.10"},
-                    "destination": {"ip": "198.51.100.20"},
+                    "destination": {"ip": "198.51.100.20", "port": 443},
+                    "network": {
+                        "transport": "tcp",
+                        "protocol": "tls",
+                        "community_id": "1:trusted-flow=",
+                    },
+                    "rule": {"id": "2016150"},
                     "dns": {"question": {"name": "example.test"}},
                     "host": {"name": "workstation-1"},
                     "user": {"name": "analyst"},
                 }
             ),
             "source_ip": "192.0.2.10",
+            "source_port": 49152,
             "destination_ip": "198.51.100.20",
+            "destination_port": 443,
+            "transport_protocol": "tcp",
+            "network_protocol": "tls",
+            "rule_id": "2016150",
             "timestamp": "2026-07-24T18:30:00Z",
             "first_seen": "2026-07-24T18:29:00Z",
             "last_seen": "2026-07-24T18:31:00Z",
@@ -1034,10 +1524,182 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         self.assertIn("192.0.2.10", capability["permitted_observables"]["ips"])
         self.assertIn("example.test", capability["permitted_observables"]["domains"])
         self.assertEqual(
+            capability["request_schema"]["parameters_by_backend"]["elastic"],
+            [
+                "pack", "window", "observables", "event_tuple", "size",
+                "aggregation",
+            ],
+        )
+        self.assertEqual(
+            capability["permitted_event_tuples"],
+            [{
+                "source_ip": "192.0.2.10",
+                "destination_ip": "198.51.100.20",
+                "source_port": 49152,
+                "destination_port": 443,
+                "transport": "tcp",
+                "protocol": "tls",
+                "community_id": "1:trusted-flow=",
+                "rule_id": "2016150",
+            }],
+        )
+        self.assertEqual(
+            local["permitted_event_tuples"][0]["event_tuple"],
+            capability["permitted_event_tuples"][0],
+        )
+        self.assertIn(
+            "never merge",
+            capability["request_schema"]["rule"].lower(),
+        )
+        self.assertEqual(
             capability["budgets"]["max_rounds"],
             self.builder.INVESTIGATION_QUERY_MAX_ROUNDS,
         )
         self.assertNotIn("anchor", capability)
+
+    def test_builder_authorizes_sigma_original_event_system_auth_pivot(self) -> None:
+        row = {
+            "alert_id": ".ds-logs-detections.alerts-so-2026.07.24-000001:sigma-1",
+            "alert_json": json.dumps(
+                {
+                    "elastic_index": ".ds-logs-detections.alerts-so-2026.07.24-000001",
+                    "elastic_id": "sigma-1",
+                }
+            ),
+            "raw_event_json": json.dumps(
+                {
+                    "event": {"dataset": "sigma.alert"},
+                    "event_data": {
+                        "event": {
+                            "dataset": "system.auth",
+                            "outcome": "failure",
+                        },
+                        "source": {
+                            "address": "192.0.2.55",
+                            "ip": "192.0.2.55",
+                        },
+                        "host": {"id": "host-1", "name": "onion"},
+                        "agent": {"id": "agent-1", "name": "onion"},
+                        "user": {"name": "invalid-user"},
+                        "related": {
+                            "hosts": ["onion"],
+                            "ip": ["192.0.2.55"],
+                            "user": ["invalid-user"],
+                        },
+                    },
+                }
+            ),
+            "source_ip": None,
+            "destination_ip": None,
+            "timestamp": "2026-07-24T18:30:00Z",
+            "first_seen": "2026-07-24T18:29:00Z",
+            "last_seen": "2026-07-24T18:31:00Z",
+        }
+
+        capability, context = self.builder.investigation_query_context(
+            row,
+            [row],
+            "sigma-group",
+            "incident-responder",
+            False,
+        )
+
+        self.assertIn("192.0.2.55", context["permitted_observables"]["ips"])
+        self.assertIn("onion", context["permitted_observables"]["hosts"])
+        self.assertIn(
+            "invalid-user",
+            context["permitted_observables"]["users"],
+        )
+        self.assertIn(
+            "system_auth",
+            capability["backends"]["elastic"]["packs"],
+        )
+        self.assertIn(
+            "authentication",
+            capability["backends"]["elastic"]["pack_descriptions"][
+                "system_auth"
+            ].lower(),
+        )
+
+        request = self.elastic_request("auth-pivot")
+        request["parameters"].update(
+            {
+                "pack": "system_auth",
+                "window": {
+                    "start": "2026-07-24T18:00:00Z",
+                    "end": "2026-07-24T19:00:00Z",
+                },
+                "observables": {
+                    "ips": ["192.0.2.55"],
+                    "domains": [],
+                    "hosts": ["onion"],
+                    "users": ["invalid-user"],
+                },
+            }
+        )
+        normalized = self.runner.normalize_investigation_query_request(
+            request,
+            round_number=1,
+            position=1,
+            time_envelope=context["time_envelope"],
+        )
+        authorized = self.contract.authorize_investigation_query_request(
+            {
+                "query_contract": self.runner.INVESTIGATION_QUERY_CONTRACT,
+                "batch_id": "auth-pivot-batch",
+                "queries": [
+                    {
+                        "query_id": normalized["query_id"],
+                        "dialect": normalized["backend"],
+                        "pack": normalized["parameters"]["pack"],
+                        "purpose": normalized["purpose"],
+                        "window": normalized["parameters"]["window"],
+                        "observables": normalized["parameters"]["observables"],
+                        "size": normalized["parameters"]["size"],
+                        "aggregation": normalized["parameters"]["aggregation"],
+                    }
+                ],
+            },
+            context,
+        )
+
+        self.assertEqual(
+            authorized["queries"][0]["pack"],
+            "system_auth",
+        )
+
+    def test_builder_disables_security_pivots_without_exact_observable(self) -> None:
+        row = {
+            "alert_id": ".ds-logs-detections.alerts-so-2026.07.24-000001:sigma-empty",
+            "alert_json": json.dumps(
+                {
+                    "elastic_index": ".ds-logs-detections.alerts-so-2026.07.24-000001",
+                    "elastic_id": "sigma-empty",
+                }
+            ),
+            "raw_event_json": json.dumps(
+                {"event": {"dataset": "sigma.alert"}}
+            ),
+            "source_ip": None,
+            "destination_ip": None,
+            "timestamp": "2026-07-24T18:30:00Z",
+            "first_seen": "2026-07-24T18:29:00Z",
+            "last_seen": "2026-07-24T18:31:00Z",
+        }
+
+        capability, context = self.builder.investigation_query_context(
+            row,
+            [row],
+            "sigma-empty-group",
+            "incident-responder",
+            False,
+        )
+
+        self.assertTrue(context["anchor"])
+        self.assertFalse(any(context["permitted_observables"].values()))
+        self.assertFalse(capability["enabled"])
+        self.assertFalse(capability["backends"]["elastic"]["enabled"])
+        self.assertFalse(capability["backends"]["oql"]["enabled"])
 
     def test_builder_clamps_recurring_group_authorization_around_selected_alert(self) -> None:
         selected = {

@@ -45,6 +45,7 @@ MAX_PIVOT_HITS = 100
 MAX_PIVOT_BATCH_HITS = 400
 MAX_PIVOT_QUERY_OBSERVABLES = 8
 MAX_PIVOT_BATCH_OBSERVABLES = 24
+MAX_PIVOT_EVENT_TUPLES = 4
 MAX_PIVOT_WINDOW = dt.timedelta(hours=24)
 MAX_PIVOT_BATCH_WINDOW = dt.timedelta(hours=96)
 MAX_AUTHORIZATION_WINDOW = dt.timedelta(days=7)
@@ -59,9 +60,28 @@ PIVOT_PURPOSES = {
     "test_benign_hypothesis",
 }
 PIVOT_ACTOR_ROLES = {"soc_analyst", "incident_responder"}
+EVENT_TUPLE_FIELDS = {
+    "source_ip": "source.ip",
+    "destination_ip": "destination.ip",
+    "source_port": "source.port",
+    "destination_port": "destination.port",
+    "transport": "network.transport",
+    "protocol": "network.protocol",
+    "community_id": "network.community_id",
+    "rule_id": "rule.id",
+}
 ALERT_INDEX_SCOPE = [
     "logs-suricata.alerts-so",
     "logs-detections.alerts-so",
+]
+ZEEK_PROTOCOL_BASE_FIELDS = [
+    "@timestamp", "event.dataset", "event.kind", "event.category",
+    "event.type", "event.action", "event.outcome", "event.duration",
+    "source.ip", "source.port", "destination.ip", "destination.port",
+    "client.ip", "client.port", "server.ip", "server.port",
+    "network.transport", "network.protocol", "network.direction",
+    "network.community_id", "network.bytes", "network.packets",
+    "log.id.uid", "observer.name",
 ]
 PACKS = {
     "alert_context": {
@@ -119,7 +139,10 @@ PACKS = {
             "source.port", "destination.ip", "destination.port",
             "source.domain", "destination.domain", "client.ip",
             "client.domain", "server.ip", "server.domain", "url.domain",
-            "tls.server.name",
+            "tls.server.name", "dns.query.name", "dns.query.type",
+            "dns.query.class", "dns.response.code", "dns.response.code_name",
+            "dns.highest_registered_domain", "dns.parent_domain",
+            "dns.top_level_domain",
             "network.transport", "network.protocol", "network.community_id",
             "dns.id", "dns.question.name", "dns.question.type",
             "dns.question.class", "dns.response_code", "dns.resolved_ip",
@@ -127,6 +150,97 @@ PACKS = {
             "agent.id", "host.ip", "user.id", "user.name",
             "source.user.name", "destination.user.name", "client.user.name",
             "process.entity_id", "process.name", "process.executable",
+        ],
+    },
+    "system_auth": {
+        "indices": ["logs-system.auth-*"],
+        "datasets": ["system.auth"],
+        "fields": [
+            "@timestamp", "event.dataset", "event.kind", "event.category",
+            "event.type", "event.action", "event.outcome", "event.id",
+            "source.ip", "source.port", "source.address", "host.id",
+            "host.name", "host.hostname", "host.ip", "agent.id",
+            "agent.name", "user.id", "user.name", "related.ip",
+            "related.hosts", "related.user", "process.pid", "process.name",
+            "system.auth.ssh.event", "log.syslog.appname",
+        ],
+    },
+    "zeek_tls": {
+        "indices": ["logs-zeek-so"],
+        "datasets": ["zeek.ssl"],
+        "fields": [
+            *ZEEK_PROTOCOL_BASE_FIELDS,
+            "ssl.cipher", "ssl.curve", "ssl.established",
+            "ssl.server_name", "ssl.validation_status", "ssl.version",
+            "hash.ja3", "hash.ja3s", "hash.ja4",
+            "tls.server.hash.sha256",
+        ],
+    },
+    "zeek_http": {
+        "indices": ["logs-zeek-so"],
+        "datasets": ["zeek.http"],
+        "fields": [
+            *ZEEK_PROTOCOL_BASE_FIELDS,
+            "http.method", "http.status_code", "http.status_message",
+            "http.trans_depth", "http.uri", "http.useragent",
+            "http.version", "http.virtual_host",
+            "http.request.body.length", "http.response.body.length",
+            "file.resp_mime_types", "log.id.resp_fuids",
+        ],
+    },
+    "zeek_files": {
+        "indices": ["logs-zeek-so"],
+        "datasets": ["zeek.file"],
+        "fields": [
+            *ZEEK_PROTOCOL_BASE_FIELDS,
+            "log.id.fuid", "file.analyzer", "file.bytes.missing",
+            "file.bytes.overflow", "file.bytes.seen", "file.bytes.total",
+            "file.depth", "file.local_orig", "file.mime_type",
+            "file.source", "hash.md5", "hash.sha1", "hash.sha256",
+        ],
+    },
+    "zeek_ssh": {
+        "indices": ["logs-zeek-so"],
+        "datasets": ["zeek.ssh"],
+        "fields": [
+            *ZEEK_PROTOCOL_BASE_FIELDS,
+            "hash.hassh", "ssh.authentication.attempts",
+            "ssh.authentication.success", "ssh.cipher_algorithm",
+            "ssh.client", "ssh.compression_algorithm",
+            "ssh.hassh_algorithms", "ssh.hassh_server",
+            "ssh.hassh_server_algorithms", "ssh.hassh_version",
+            "ssh.host_key_algorithm", "ssh.kex_algorithm",
+            "ssh.mac_algorithm", "ssh.server", "ssh.version",
+        ],
+    },
+    "zeek_stun": {
+        "indices": ["logs-zeek-so"],
+        "datasets": ["zeek.stun", "zeek.stun_nat"],
+        "fields": [
+            *ZEEK_PROTOCOL_BASE_FIELDS,
+            "stun.attribute.types", "stun.attribute.values",
+            "stun.class", "stun.id", "stun.method",
+            "stun.lan.addresses", "stun.wan.addresses",
+            "stun.wan.ports",
+        ],
+    },
+    "zeek_quic": {
+        "indices": ["logs-zeek-so"],
+        "datasets": ["zeek.quic"],
+        "fields": [
+            *ZEEK_PROTOCOL_BASE_FIELDS,
+            "quic.client_initial_dcid", "quic.client_protocol",
+            "quic.client_scid", "quic.history", "quic.server_name",
+            "quic.server_scid", "quic.version",
+        ],
+    },
+    "zeek_anomalies": {
+        "indices": ["logs-zeek-so"],
+        "datasets": ["zeek.notice", "zeek.weird", "zeek.analyzer"],
+        "fields": [
+            *ZEEK_PROTOCOL_BASE_FIELDS,
+            "notice.action", "notice.note", "notice.suppress_for",
+            "weird.name", "weird.peer", "error.reason",
         ],
     },
     "osquery_history": {
@@ -323,16 +437,21 @@ OSQUERY_PACKS = {
 OBSERVABLE_FIELDS = {
     "ips": [
         "source.ip", "destination.ip", "client.ip", "server.ip", "host.ip",
-        "dns.resolved_ip",
+        "dns.resolved_ip", "related.ip",
     ],
     "domains": [
-        "dns.question.name", "url.domain", "tls.server.name", "source.domain",
-        "destination.domain", "client.domain", "server.domain",
+        "dns.question.name", "dns.query.name", "url.domain",
+        "tls.server.name", "ssl.server_name", "http.virtual_host",
+        "quic.server_name", "source.domain", "destination.domain",
+        "client.domain", "server.domain",
     ],
-    "hosts": ["host.id", "host.name", "host.hostname", "agent.id"],
+    "hosts": [
+        "host.id", "host.name", "host.hostname", "agent.id", "agent.name",
+        "related.hosts",
+    ],
     "users": [
         "user.id", "user.name", "source.user.name", "destination.user.name",
-        "client.user.name",
+        "client.user.name", "related.user",
     ],
 }
 SAFE_VALUE = re.compile(r"^[A-Za-z0-9_.:@-]{1,255}$")
@@ -343,6 +462,7 @@ SAFE_DOMAIN = re.compile(
     r"(?i)^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
 )
 SAFE_EVIDENCE_REF = re.compile(r"^[A-Za-z0-9_.:@/+=#-]{1,256}$")
+SAFE_COMMUNITY_ID = re.compile(r"^[A-Za-z0-9_:+/=-]{1,256}$")
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
 
 
@@ -559,6 +679,93 @@ def validated_pivot_observables(value: object, label: str) -> dict[str, list[str
     return clean
 
 
+def validated_event_tuple(value: object, label: str) -> dict:
+    if not isinstance(value, dict):
+        fail(f"{label} must be an object")
+    unknown = set(value) - set(EVENT_TUPLE_FIELDS)
+    if unknown:
+        fail(f"{label} contains unsupported fields: {', '.join(sorted(unknown))}")
+    if not value:
+        fail(f"{label} must not be empty")
+    clean = {}
+    for field in EVENT_TUPLE_FIELDS:
+        if field not in value:
+            continue
+        raw = value[field]
+        if field in {"source_ip", "destination_ip"}:
+            clean[field] = validated_pivot_observable("ips", raw)
+        elif field in {"source_port", "destination_port"}:
+            if isinstance(raw, bool):
+                fail(f"{label}.{field} is invalid")
+            try:
+                port = int(raw)
+            except (TypeError, ValueError):
+                fail(f"{label}.{field} is invalid")
+            if port < 0 or port > 65535:
+                fail(f"{label}.{field} is outside the port range")
+            clean[field] = port
+        elif field in {"transport", "protocol"}:
+            protocol = str(raw or "").strip().lower()
+            if not SAFE_VALUE.fullmatch(protocol):
+                fail(f"{label}.{field} is invalid")
+            clean[field] = protocol
+        elif field == "community_id":
+            community_id = str(raw or "").strip()
+            if not SAFE_COMMUNITY_ID.fullmatch(community_id):
+                fail(f"{label}.community_id is invalid")
+            clean[field] = community_id
+        else:
+            rule_id = str(raw or "").strip()
+            if not SAFE_VALUE.fullmatch(rule_id):
+                fail(f"{label}.rule_id is invalid")
+            clean[field] = rule_id
+    return clean
+
+
+def validated_event_tuple_manifest(value: object) -> list[dict]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > MAX_PIVOT_EVENT_TUPLES:
+        fail("investigation pivot event tuple manifest is out of bounds")
+    clean = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            fail(f"investigation pivot event tuple {index} must be an object")
+        require_exact_keys(
+            item,
+            allowed={"event_tuple", "source", "evidence_ref"},
+            required={"event_tuple", "source", "evidence_ref"},
+            label=f"investigation pivot event tuple {index}",
+        )
+        source = str(item["source"] or "")
+        evidence_ref = str(item["evidence_ref"] or "")
+        if source not in {"trusted_context", "prior_evidence"}:
+            fail("investigation pivot event tuple source is unsupported")
+        if not SAFE_EVIDENCE_REF.fullmatch(evidence_ref):
+            fail("investigation pivot event tuple evidence reference is invalid")
+        normalized = {
+            "event_tuple": validated_event_tuple(
+                item["event_tuple"],
+                f"investigation pivot event tuple {index}.event_tuple",
+            ),
+            "source": source,
+            "evidence_ref": evidence_ref,
+        }
+        if normalized in clean:
+            fail("investigation pivot event tuple authorization is duplicated")
+        clean.append(normalized)
+    return clean
+
+
+def pack_event_tuple_fields(pack_name: str) -> dict[str, str]:
+    projected = set(PACKS[pack_name]["fields"])
+    return {
+        key: path
+        for key, path in EVENT_TUPLE_FIELDS.items()
+        if path in projected
+    }
+
+
 def validated_pivot_request(data: dict) -> dict:
     """Independently validate a Mac-authorized iterative query batch."""
     require_exact_keys(
@@ -579,6 +786,7 @@ def validated_pivot_request(data: dict) -> dict:
         allowed={
             "context_id", "case_id", "group_id", "actor_role", "anchor",
             "time_envelope", "context_digest", "observables", "manifest_digest",
+            "event_tuples",
         },
         required={
             "context_id", "case_id", "group_id", "actor_role", "anchor",
@@ -652,12 +860,16 @@ def validated_pivot_request(data: dict) -> dict:
             fail("investigation pivot observable authorization is duplicated")
         authorized[key] = clean
         clean_entries.append(clean)
+    authorized_event_tuples = validated_event_tuple_manifest(
+        authorization.get("event_tuples")
+    )
     queries = data["queries"]
     if not isinstance(queries, list) or not queries or len(queries) > MAX_PIVOT_QUERIES:
         fail(f"investigation pivot request must contain 1-{MAX_PIVOT_QUERIES} queries")
     clean_queries = []
     query_ids = set()
     used_authorizations = set()
+    used_event_tuple_digests = set()
     hit_budget = 0
     window_budget = dt.timedelta()
     for index, item in enumerate(queries):
@@ -668,6 +880,7 @@ def validated_pivot_request(data: dict) -> dict:
             allowed={
                 "query_id", "dialect", "pack", "purpose", "window",
                 "observables", "observable_provenance", "size", "aggregation",
+                "event_tuple", "event_tuple_provenance",
             },
             required={
                 "query_id", "dialect", "pack", "purpose", "window",
@@ -720,13 +933,53 @@ def validated_pivot_request(data: dict) -> dict:
             if provenance[kind] != expected:
                 fail("investigation pivot observable provenance does not match its manifest")
             clean_provenance[kind] = [dict(entry) for entry in expected]
+        event_tuple = None
+        event_tuple_provenance = None
+        tuple_fields_present = {
+            field
+            for field in ("event_tuple", "event_tuple_provenance")
+            if field in item
+        }
+        if tuple_fields_present and tuple_fields_present != {
+            "event_tuple", "event_tuple_provenance"
+        }:
+            fail("investigation pivot event tuple and provenance must be supplied together")
+        if tuple_fields_present:
+            event_tuple = validated_event_tuple(
+                item["event_tuple"],
+                f"investigation pivot query {query_id} event_tuple",
+            )
+            unsupported = set(event_tuple) - set(pack_event_tuple_fields(pack))
+            if unsupported:
+                fail("investigation pivot event tuple is unsupported by its pack")
+            for field in ("source_ip", "destination_ip"):
+                if field in event_tuple and event_tuple[field] not in observables["ips"]:
+                    fail("investigation pivot role-aware IP is absent from observables")
+            event_tuple_provenance = item["event_tuple_provenance"]
+            if (
+                not isinstance(event_tuple_provenance, dict)
+                or event_tuple_provenance not in authorized_event_tuples
+                or not all(
+                    event_tuple_provenance["event_tuple"].get(field) == value
+                    for field, value in event_tuple.items()
+                )
+            ):
+                fail("investigation pivot event tuple provenance does not match its manifest")
+            if (
+                {"source_ip", "destination_ip"}.intersection(
+                    event_tuple_provenance["event_tuple"]
+                )
+                and not {"source_ip", "destination_ip"}.intersection(event_tuple)
+            ):
+                fail("investigation pivot event tuple dropped its trusted IP role")
+            used_event_tuple_digests.add(canonical_digest(event_tuple_provenance))
         size = item["size"]
         if isinstance(size, bool) or not isinstance(size, int):
             fail("investigation pivot query size must be an integer")
         if size < 1 or size > MAX_PIVOT_HITS:
             fail(f"investigation pivot query size must be between 1 and {MAX_PIVOT_HITS}")
         hit_budget += 0 if aggregation == "count" else size
-        clean_queries.append({
+        clean_query = {
             "query_id": query_id,
             "dialect": dialect,
             "pack": pack,
@@ -736,9 +989,19 @@ def validated_pivot_request(data: dict) -> dict:
             "observable_provenance": clean_provenance,
             "size": size,
             "aggregation": aggregation,
-        })
+        }
+        if event_tuple is not None:
+            clean_query["event_tuple"] = event_tuple
+            clean_query["event_tuple_provenance"] = dict(
+                event_tuple_provenance or {}
+            )
+        clean_queries.append(clean_query)
     if used_authorizations != set(authorized):
         fail("investigation pivot authorization contains an unused observable")
+    if used_event_tuple_digests != {
+        canonical_digest(item) for item in authorized_event_tuples
+    }:
+        fail("investigation pivot authorization contains an unused event tuple")
     if hit_budget > MAX_PIVOT_BATCH_HITS:
         fail("investigation pivot request exceeds its batch hit budget")
     if window_budget > MAX_PIVOT_BATCH_WINDOW:
@@ -763,6 +1026,8 @@ def validated_pivot_request(data: dict) -> dict:
         "context_digest": context_digest,
         "observables": clean_entries,
     }
+    if authorized_event_tuples:
+        clean_authorization["event_tuples"] = authorized_event_tuples
     clean_authorization["manifest_digest"] = canonical_digest(clean_authorization)
     if clean_authorization["manifest_digest"] != supplied_manifest_digest:
         fail("investigation pivot normalized authorization manifest digest is invalid")
@@ -797,6 +1062,17 @@ def observable_clause(
         for value in observables.get(kind, []):
             should.extend({"term": {field: value}} for field in fields)
     return {"bool": {"should": should, "minimum_should_match": 1}}
+
+
+def event_tuple_clause(event_tuple: dict) -> dict:
+    return {
+        "bool": {
+            "filter": [
+                {"term": {EVENT_TUPLE_FIELDS[field]: value}}
+                for field, value in event_tuple.items()
+            ]
+        }
+    }
 
 
 def dataset_clause(datasets: list[str]) -> dict:
@@ -1149,6 +1425,11 @@ def pivot_query_dsl(query: dict) -> dict:
             }}},
             dataset_clause(pack["datasets"]),
             observable_clause(query["observables"], query["pack"]),
+            *(
+                [event_tuple_clause(query["event_tuple"])]
+                if query.get("event_tuple")
+                else []
+            ),
         ]}},
     }
     if query["aggregation"] != "count":
@@ -1163,6 +1444,12 @@ def pivot_query_dsl(query: dict) -> dict:
 def quoted_filter_value(value: str) -> str:
     # Exact observable validation excludes quote and backslash characters.
     return f'"{value}"'
+
+
+def event_tuple_filter_value(field: str, value: object) -> str:
+    if field in {"source_port", "destination_port"}:
+        return str(value)
+    return quoted_filter_value(str(value))
 
 
 def pivot_kql_equivalent(query: dict) -> str:
@@ -1181,11 +1468,18 @@ def pivot_kql_equivalent(query: dict) -> str:
                 )
                 + ")"
             )
-    return (
+    rendered = (
         f'@timestamp >= {quoted_filter_value(query["window"]["start"])} and '
         f'@timestamp <= {quoted_filter_value(query["window"]["end"])} and '
         f"({datasets}) and (" + " or ".join(observable_filters) + ")"
     )
+    if query.get("event_tuple"):
+        rendered += " and (" + " and ".join(
+            f"{EVENT_TUPLE_FIELDS[field]} : "
+            f"{event_tuple_filter_value(field, value)}"
+            for field, value in query["event_tuple"].items()
+        ) + ")"
+    return rendered
 
 
 def pivot_oql_equivalent(query: dict) -> str:
@@ -1210,6 +1504,12 @@ def pivot_oql_equivalent(query: dict) -> str:
         f'{quoted_filter_value(query["window"]["end"])}] AND '
         f"({datasets}) AND (" + " OR ".join(observable_filters) + ")"
     )
+    if query.get("event_tuple"):
+        rendered += " AND (" + " AND ".join(
+            f"{EVENT_TUPLE_FIELDS[field]}:"
+            f"{event_tuple_filter_value(field, value)}"
+            for field, value in query["event_tuple"].items()
+        ) + ")"
     if query["aggregation"] == "timeline":
         rendered += " | sortby @timestamp^"
     return rendered
@@ -1259,6 +1559,27 @@ def returned_observable_matches(kind: str, expected: str, candidate: object) -> 
     return bool(SAFE_VALUE.fullmatch(text)) and text == expected
 
 
+def returned_event_tuple_matches(field: str, expected: object, candidate: object) -> bool:
+    text = str(candidate or "").strip()
+    if field in {"source_ip", "destination_ip"}:
+        try:
+            return str(ipaddress.ip_address(text)) == expected
+        except ValueError:
+            return False
+    if field in {"source_port", "destination_port"}:
+        if isinstance(candidate, bool):
+            return False
+        try:
+            return int(candidate) == expected
+        except (TypeError, ValueError):
+            return False
+    if field in {"transport", "protocol"}:
+        return bool(SAFE_VALUE.fullmatch(text.lower())) and text.lower() == expected
+    if field == "community_id":
+        return bool(SAFE_COMMUNITY_ID.fullmatch(text)) and text == expected
+    return bool(SAFE_VALUE.fullmatch(text)) and text == expected
+
+
 def valid_pivot_hit_source(source: object, query: dict) -> bool:
     if not isinstance(source, dict):
         return False
@@ -1288,12 +1609,24 @@ def valid_pivot_hit_source(source: object, query: dict) -> bool:
     datasets = [str(item) for item in source_path_values(source, "event.dataset")]
     if len(datasets) != 1 or datasets[0] not in pack["datasets"]:
         return False
-    return any(
+    observable_valid = any(
         returned_observable_matches(kind, expected, candidate)
         for kind, fields in pack_observable_fields(query["pack"]).items()
         for expected in query["observables"].get(kind, [])
         for field in fields
         for candidate in source_path_values(source, field)
+    )
+    if not observable_valid:
+        return False
+    return all(
+        any(
+            returned_event_tuple_matches(field, expected, candidate)
+            for candidate in source_path_values(
+                source,
+                EVENT_TUPLE_FIELDS[field],
+            )
+        )
+        for field, expected in (query.get("event_tuple") or {}).items()
     )
 
 
@@ -1327,6 +1660,14 @@ def execute_pivot_query(query: dict) -> dict:
         "window": query["window"],
         "observables": query["observables"],
         "observable_provenance": query["observable_provenance"],
+        **(
+            {
+                "event_tuple": query["event_tuple"],
+                "event_tuple_provenance": query["event_tuple_provenance"],
+            }
+            if query.get("event_tuple")
+            else {}
+        ),
         "size": query["size"],
         "aggregation": query["aggregation"],
         "request_item_digest": canonical_digest(query),

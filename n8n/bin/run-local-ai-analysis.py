@@ -38,6 +38,8 @@ from investigation_query_contract import (  # noqa: E402
     MAX_DISCOVERED_OBSERVABLES,
     SAFE_ATOM_RE as INVESTIGATION_SAFE_ATOM_RE,
     SAFE_DOMAIN_RE as INVESTIGATION_SAFE_DOMAIN_RE,
+    InvestigationQueryContractError,
+    authorize_investigation_query_request,
 )
 from live_osquery_client import (  # noqa: E402
     DEFAULT_CONFIG_FILE as DEFAULT_LIVE_OSQUERY_CONFIG_FILE,
@@ -129,6 +131,14 @@ INVESTIGATION_QUERY_PACKS = frozenset(
         "alert_context",
         "network_flow",
         "dns_activity",
+        "system_auth",
+        "zeek_tls",
+        "zeek_http",
+        "zeek_files",
+        "zeek_ssh",
+        "zeek_stun",
+        "zeek_quic",
+        "zeek_anomalies",
         "osquery_history",
         "cross_sensor_timeline",
     }
@@ -292,6 +302,48 @@ CONSEQUENTIAL_CLOSURE_OUTCOMES = {
     "false_positive_bad_intel_ioc",
     "duplicate",
     "informational_no_action",
+}
+INCIDENT_RESPONSE_REPORT_TEXT_FIELDS = (
+    "executive_bluf",
+    "detection_outcome_reasoning",
+    "scope",
+    "conclusion",
+)
+INCIDENT_RESPONSE_REPORT_LIST_FIELDS = (
+    "affected_systems",
+    "constraints",
+    "methodology",
+    "factual_timeline",
+    "security_onion_findings",
+    "osquery_findings",
+    "pcap_findings",
+    "host_findings",
+    "correlation_findings",
+    "containment_recommendations",
+    "eradication_recommendations",
+    "recovery_recommendations",
+    "follow_up_queries",
+    "evidence_gaps",
+)
+INCIDENT_RESPONSE_REPORT_REQUIRED_FIELDS = frozenset(
+    {
+        *INCIDENT_RESPONSE_REPORT_TEXT_FIELDS,
+        *INCIDENT_RESPONSE_REPORT_LIST_FIELDS,
+        "confidence",
+        "confidence_score",
+    }
+)
+DETECTION_OUTCOME_LABELS = {
+    "true_positive_malicious": "True Positive - Malicious",
+    "true_positive_suspicious": "True Positive - Suspicious",
+    "true_positive_authorized_benign": "True Positive - Authorized/Benign",
+    "false_positive_logic_rule": "False Positive - Logic/Rule",
+    "false_positive_data_parser": "False Positive - Data/Parser",
+    "false_positive_bad_intel_ioc": "False Positive - Bad Intelligence/IOC",
+    "false_negative": "False Negative - Missed Detection",
+    "duplicate": "Duplicate",
+    "informational_no_action": "Informational - No Action",
+    "inconclusive": "Inconclusive",
 }
 
 
@@ -1517,13 +1569,43 @@ _HOSTED_ELASTIC_SOURCE_PATHS = frozenset(
         "network.transport", "network.protocol", "network.direction",
         "network.community_id", "network.bytes", "network.packets",
         "dns.id", "dns.question.name", "dns.question.type",
-        "dns.question.class", "dns.response_code", "dns.resolved_ip",
-        "dns.answers.type", "tls.server.name", "url.domain",
+        "dns.question.class", "dns.query.name", "dns.query.type",
+        "dns.query.class", "dns.response_code", "dns.response.code",
+        "dns.response.code_name", "dns.resolved_ip", "dns.answers.type",
+        "dns.highest_registered_domain", "dns.parent_domain",
+        "dns.top_level_domain", "tls.server.name", "ssl.server_name",
+        "ssl.cipher", "ssl.curve", "ssl.established",
+        "ssl.validation_status", "ssl.version", "url.domain",
+        "http.method", "http.status_code", "http.trans_depth",
+        "http.virtual_host", "http.request.body.length",
+        "http.response.body.length", "file.resp_mime_types",
         "host.id", "host.name", "host.hostname", "host.ip", "agent.id",
-        "user.id", "user.name", "source.user.name",
+        "agent.name", "related.ip", "related.hosts", "related.user",
+        "source.address", "user.id", "user.name", "source.user.name",
         "destination.user.name", "client.user.name",
         "process.entity_id", "process.pid", "process.parent.pid",
-        "process.name", "file.extension", "file.hash.sha256",
+        "process.name", "system.auth.ssh.event", "log.syslog.appname",
+        "log.id.uid", "log.id.fuid", "log.id.resp_fuids",
+        "observer.name", "hash.ja3", "hash.ja3s", "hash.ja4",
+        "hash.hassh", "hash.md5", "hash.sha1", "hash.sha256",
+        "tls.server.hash.sha256", "file.extension", "file.hash.sha256",
+        "file.analyzer", "file.bytes.missing", "file.bytes.overflow",
+        "file.bytes.seen", "file.bytes.total", "file.depth",
+        "file.local_orig", "file.mime_type", "file.source",
+        "ssh.authentication.attempts", "ssh.authentication.success",
+        "ssh.cipher_algorithm", "ssh.client", "ssh.compression_algorithm",
+        "ssh.hassh_algorithms", "ssh.hassh_server",
+        "ssh.hassh_server_algorithms", "ssh.hassh_version",
+        "ssh.host_key_algorithm", "ssh.kex_algorithm",
+        "ssh.mac_algorithm", "ssh.server", "ssh.version",
+        "stun.attribute.types", "stun.attribute.values", "stun.class",
+        "stun.id", "stun.method", "stun.lan.addresses",
+        "stun.wan.addresses", "stun.wan.ports",
+        "quic.client_initial_dcid", "quic.client_protocol",
+        "quic.client_scid", "quic.history", "quic.server_name",
+        "quic.server_scid", "quic.version", "notice.action",
+        "notice.note", "notice.suppress_for", "weird.name", "weird.peer",
+        "error.reason",
     }
 )
 _HOSTED_PCAP_RECORD_FIELDS = frozenset(
@@ -1756,11 +1838,232 @@ def _positive_query_int(value: Any, default: int, maximum: int, label: str) -> i
     return number
 
 
+INVESTIGATION_PARAMETER_KEYS = {
+    "elastic": frozenset({
+        "pack", "window", "observables", "event_tuple", "size", "aggregation",
+    }),
+    "oql": frozenset({
+        "pack", "window", "observables", "event_tuple", "size", "aggregation",
+    }),
+    "osquery": frozenset({"target_alias", "query"}),
+    "pcap_zeek": frozenset({"operation", "filters", "indicator", "limit"}),
+}
+INVESTIGATION_PARAMETER_UNION = frozenset().union(
+    *INVESTIGATION_PARAMETER_KEYS.values()
+)
+
+
+def _query_utc(value: Any, label: str) -> dt.datetime:
+    text = _query_text(value, 64)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise InvestigationQueryError(f"{label} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise InvestigationQueryError(f"{label} must include a UTC offset")
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def _query_utc_text(value: dt.datetime) -> str:
+    return value.astimezone(dt.timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+
+
+def normalize_investigation_event_tuple(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or not value:
+        raise InvestigationQueryError(
+            "elastic/oql event_tuple must be a non-empty object"
+        )
+    allowed = {
+        "source_ip", "destination_ip", "source_port", "destination_port",
+        "transport", "protocol", "community_id", "rule_id",
+    }
+    unknown = set(value) - allowed
+    if unknown:
+        raise InvestigationQueryError(
+            "elastic/oql event_tuple contains unsupported fields: "
+            + ", ".join(sorted(unknown))
+        )
+    clean: dict[str, Any] = {}
+    for field in (
+        "source_ip", "destination_ip", "source_port", "destination_port",
+        "transport", "protocol", "community_id", "rule_id",
+    ):
+        if field not in value:
+            continue
+        raw = value[field]
+        if field in {"source_ip", "destination_ip"}:
+            import ipaddress
+
+            try:
+                clean[field] = str(ipaddress.ip_address(str(raw).strip()))
+            except ValueError as exc:
+                raise InvestigationQueryError(
+                    f"elastic/oql event_tuple {field} is invalid"
+                ) from exc
+        elif field in {"source_port", "destination_port"}:
+            if isinstance(raw, bool):
+                raise InvestigationQueryError(
+                    f"elastic/oql event_tuple {field} is invalid"
+                )
+            try:
+                port = int(raw)
+            except (TypeError, ValueError) as exc:
+                raise InvestigationQueryError(
+                    f"elastic/oql event_tuple {field} is invalid"
+                ) from exc
+            if port < 0 or port > 65535:
+                raise InvestigationQueryError(
+                    f"elastic/oql event_tuple {field} is outside the port range"
+                )
+            clean[field] = port
+        elif field in {"transport", "protocol"}:
+            text = _query_text(raw, 255).lower()
+            if not INVESTIGATION_SAFE_ATOM_RE.fullmatch(text):
+                raise InvestigationQueryError(
+                    f"elastic/oql event_tuple {field} is invalid"
+                )
+            clean[field] = text
+        elif field == "community_id":
+            text = _query_text(raw, 256)
+            if not re.fullmatch(r"[A-Za-z0-9_:+/=-]{1,256}", text):
+                raise InvestigationQueryError(
+                    "elastic/oql event_tuple community_id is invalid"
+                )
+            clean[field] = text
+        else:
+            text = _query_text(raw, 255)
+            if not INVESTIGATION_SAFE_ATOM_RE.fullmatch(text):
+                raise InvestigationQueryError(
+                    "elastic/oql event_tuple rule_id is invalid"
+                )
+            clean[field] = text
+    return clean
+
+
+def normalize_investigation_query_window(
+    value: Any,
+    *,
+    time_envelope: Any = None,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Narrow a model window to the broker's 24-hour read-only boundary.
+
+    The authorization context is trusted and centered on the selected alert.
+    When a model asks for the full 48-hour visible envelope, retain the 24 hours
+    nearest that center instead of rejecting the entire mixed batch. Any
+    narrowing is explicit audit metadata and therefore an evidence limitation,
+    never silent full-window coverage.
+    """
+    if not isinstance(value, dict) or set(value) != {"start", "end"}:
+        raise InvestigationQueryError(
+            "elastic/oql window must contain exact start and end timestamps"
+        )
+    requested_start = _query_utc(value.get("start"), "elastic/oql window start")
+    requested_end = _query_utc(value.get("end"), "elastic/oql window end")
+    if requested_end <= requested_start:
+        raise InvestigationQueryError("elastic/oql window must be positive")
+
+    envelope_start = requested_start
+    envelope_end = requested_end
+    if time_envelope is not None:
+        if (
+            not isinstance(time_envelope, dict)
+            or set(time_envelope) != {"start", "end"}
+        ):
+            raise InvestigationQueryError(
+                "trusted investigation time envelope is invalid"
+            )
+        envelope_start = _query_utc(
+            time_envelope.get("start"),
+            "trusted investigation time envelope start",
+        )
+        envelope_end = _query_utc(
+            time_envelope.get("end"),
+            "trusted investigation time envelope end",
+        )
+        if envelope_end <= envelope_start:
+            raise InvestigationQueryError(
+                "trusted investigation time envelope must be positive"
+            )
+
+    start = max(requested_start, envelope_start)
+    end = min(requested_end, envelope_end)
+    if end <= start:
+        raise InvestigationQueryError(
+            "elastic/oql window does not overlap its trusted time envelope"
+        )
+
+    maximum = dt.timedelta(hours=24)
+    reasons: list[str] = []
+    if start != requested_start or end != requested_end:
+        reasons.append("clipped_to_trusted_time_envelope")
+    if end - start > maximum:
+        center = envelope_start + (envelope_end - envelope_start) / 2
+        if center <= start:
+            end = start + maximum
+        elif center >= end:
+            start = end - maximum
+        else:
+            start = max(start, center - maximum / 2)
+            end = start + maximum
+            if end > min(requested_end, envelope_end):
+                end = min(requested_end, envelope_end)
+                start = end - maximum
+        reasons.append("clamped_to_24_hours_nearest_alert")
+
+    normalized = {
+        "start": _query_utc_text(start),
+        "end": _query_utc_text(end),
+    }
+    audit: dict[str, Any] = {
+        "adjusted": bool(reasons),
+        "reasons": reasons,
+    }
+    if reasons:
+        audit["requested_window"] = {
+            "start": _query_utc_text(requested_start),
+            "end": _query_utc_text(requested_end),
+        }
+        audit["executed_window"] = dict(normalized)
+    return normalized, audit
+
+
+def project_investigation_parameters(
+    backend: str,
+    parameters: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Project a union-shaped model object into one exact backend schema.
+
+    Known keys belonging to another advertised backend are harmlessly ignored.
+    Truly unknown keys—including raw Query DSL, paths, commands, scripts, and
+    parser arguments—still fail closed.
+    """
+    allowed = INVESTIGATION_PARAMETER_KEYS[backend]
+    unknown = set(parameters).difference(INVESTIGATION_PARAMETER_UNION)
+    if unknown:
+        raise InvestigationQueryError(
+            f"unsupported {backend} parameters: " + ", ".join(sorted(unknown))
+        )
+    dropped = sorted(set(parameters).difference(allowed))
+    return (
+        {
+            key: parameters[key]
+            for key in allowed
+            if key in parameters
+        },
+        dropped,
+    )
+
+
 def normalize_investigation_query_request(
     raw: Any,
     *,
     round_number: int,
     position: int,
+    time_envelope: Any = None,
 ) -> dict[str, Any]:
     """Normalize one request without accepting executable provider syntax."""
     if not isinstance(raw, dict):
@@ -1784,6 +2087,10 @@ def normalize_investigation_query_request(
     parameters = raw.get("parameters")
     if not isinstance(parameters, dict):
         raise InvestigationQueryError("investigation query parameters must be an object")
+    parameters, dropped_parameters = project_investigation_parameters(
+        backend,
+        parameters,
+    )
 
     normalized_parameters: dict[str, Any]
     if backend in {"elastic", "oql"}:
@@ -1791,12 +2098,6 @@ def normalize_investigation_query_request(
             raise InvestigationQueryError(
                 "elastic/oql purpose must be one of: "
                 + ", ".join(sorted(INVESTIGATION_SECURITY_ONION_PURPOSES))
-            )
-        allowed = {"pack", "window", "observables", "size", "aggregation"}
-        extra = set(parameters).difference(allowed)
-        if extra:
-            raise InvestigationQueryError(
-                f"unsupported {backend} parameters: " + ", ".join(sorted(extra))
             )
         pack = _query_text(parameters.get("pack"), 64).lower()
         if pack not in INVESTIGATION_QUERY_PACKS:
@@ -1806,16 +2107,10 @@ def normalize_investigation_query_request(
             raise InvestigationQueryError(
                 f"unsupported investigation aggregation: {aggregation or 'missing'}"
             )
-        window = parameters.get("window")
-        if (
-            not isinstance(window, dict)
-            or set(window) != {"start", "end"}
-            or not _query_text(window.get("start"), 64)
-            or not _query_text(window.get("end"), 64)
-        ):
-            raise InvestigationQueryError(
-                "elastic/oql window must contain exact start and end timestamps"
-            )
+        window, window_audit = normalize_investigation_query_window(
+            parameters.get("window"),
+            time_envelope=time_envelope,
+        )
         observables = parameters.get("observables")
         if not isinstance(observables, dict):
             raise InvestigationQueryError("elastic/oql observables must be an object")
@@ -1839,20 +2134,16 @@ def normalize_investigation_query_request(
             )
         normalized_parameters = {
             "pack": pack,
-            "window": {
-                "start": _query_text(window.get("start"), 64),
-                "end": _query_text(window.get("end"), 64),
-            },
+            "window": window,
             "observables": normalized_observables,
             "size": _positive_query_int(parameters.get("size"), 25, 100, "query size"),
             "aggregation": aggregation,
         }
-    elif backend == "osquery":
-        extra = set(parameters).difference({"target_alias", "query"})
-        if extra:
-            raise InvestigationQueryError(
-                "unsupported osquery parameters: " + ", ".join(sorted(extra))
+        if "event_tuple" in parameters:
+            normalized_parameters["event_tuple"] = normalize_investigation_event_tuple(
+                parameters["event_tuple"]
             )
+    elif backend == "osquery":
         target_alias = _query_text(parameters.get("target_alias"), 64)
         query = _query_text(parameters.get("query"), 4096)
         if not target_alias or not query:
@@ -1865,11 +2156,6 @@ def normalize_investigation_query_request(
             raise InvestigationQueryError(str(exc)) from exc
         normalized_parameters = {"target_alias": target_alias, "query": query}
     else:
-        extra = set(parameters).difference({"operation", "filters", "indicator", "limit"})
-        if extra:
-            raise InvestigationQueryError(
-                f"unsupported {backend} parameters: " + ", ".join(sorted(extra))
-            )
         operation = _query_text(parameters.get("operation"), 64).lower()
         if operation not in INVESTIGATION_DERIVED_OPERATIONS:
             raise InvestigationQueryError(
@@ -1910,12 +2196,20 @@ def normalize_investigation_query_request(
                 "derived-evidence query limit",
             ),
         }
-    return {
+    normalization: dict[str, Any] = {}
+    if dropped_parameters:
+        normalization["dropped_cross_backend_parameters"] = dropped_parameters
+    if backend in {"elastic", "oql"} and window_audit["adjusted"]:
+        normalization["window_adjustment"] = window_audit
+    normalized = {
         "query_id": query_id,
         "backend": backend,
         "purpose": purpose,
         "parameters": normalized_parameters,
     }
+    if normalization:
+        normalized["normalization"] = normalization
+    return normalized
 
 
 def pop_investigation_query_requests(response: dict[str, Any]) -> list[Any]:
@@ -2036,6 +2330,8 @@ TRUSTED_QUERY_AUDIT_FIELDS = frozenset(
         "window",
         "observables",
         "observable_provenance",
+        "event_tuple",
+        "event_tuple_provenance",
         "requested_size",
         "execution_backend",
         "semantics",
@@ -2266,7 +2562,18 @@ def execute_investigation_query_batch(
     ]
     admitted_security: list[dict[str, Any]] = []
     security_observables: set[tuple[str, str]] = set()
-    for request in security_requests:
+    can_preflight_security = all(
+        key in authorization_context
+        for key in (
+            "context_id",
+            "case_id",
+            "actor_role",
+            "anchor",
+            "time_envelope",
+            "permitted_observables",
+        )
+    )
+    for request_index, request in enumerate(security_requests, 1):
         request_observables = {
             (kind, value)
             for kind, values in request["parameters"]["observables"].items()
@@ -2277,6 +2584,38 @@ def execute_investigation_query_batch(
             reason = "at most four Security Onion Elastic/OQL queries are allowed per round"
         elif len(security_observables.union(request_observables)) > 24:
             reason = "Security Onion query batch exceeds 24 distinct observables"
+        elif can_preflight_security:
+            preflight_proposal = {
+                "query_contract": INVESTIGATION_QUERY_CONTRACT,
+                "batch_id": f"preflight-r{round_number}-q{request_index}",
+                "queries": [
+                    {
+                        "query_id": request["query_id"],
+                        "dialect": request["backend"],
+                        "pack": request["parameters"]["pack"],
+                        "purpose": request["purpose"],
+                        "window": request["parameters"]["window"],
+                        "observables": request["parameters"]["observables"],
+                        **(
+                            {"event_tuple": request["parameters"]["event_tuple"]}
+                            if request["parameters"].get("event_tuple")
+                            else {}
+                        ),
+                        "size": request["parameters"]["size"],
+                        "aggregation": request["parameters"]["aggregation"],
+                    }
+                ],
+            }
+            try:
+                authorize_investigation_query_request(
+                    preflight_proposal,
+                    authorization_context,
+                )
+            except InvestigationQueryContractError as exc:
+                reason = (
+                    "Security Onion query failed isolated local authorization: "
+                    f"{str(exc)[:700]}"
+                )
         if reason:
             results.append(
                 {
@@ -2285,6 +2624,7 @@ def execute_investigation_query_batch(
                     "status": "rejected",
                     "read_only": True,
                     "error": reason,
+                    "normalization": request.get("normalization") or {},
                 }
             )
             continue
@@ -2307,6 +2647,11 @@ def execute_investigation_query_batch(
                     "purpose": request["purpose"],
                     "window": request["parameters"]["window"],
                     "observables": request["parameters"]["observables"],
+                    **(
+                        {"event_tuple": request["parameters"]["event_tuple"]}
+                        if request["parameters"].get("event_tuple")
+                        else {}
+                    ),
                     "size": request["parameters"]["size"],
                     "aggregation": request["parameters"]["aggregation"],
                 }
@@ -2631,18 +2976,22 @@ def _validated_discovered_observables(
     seen: set[tuple[str, str]] = set()
     ip_keys = {
         "source.ip", "destination.ip", "client.ip", "server.ip",
-        "host.ip", "dns.resolved_ip", "src_ip", "dst_ip",
-        "source_ip", "destination_ip",
+        "host.ip", "dns.resolved_ip", "related.ip", "source.address",
+        "src_ip", "dst_ip", "source_ip", "destination_ip",
     }
     domain_keys = {
-        "dns.question.name", "domain", "query", "dns_query",
-        "query_name", "server_name", "sni", "tls.server.name",
+        "dns.question.name", "dns.query.name", "domain", "query",
+        "dns_query", "query_name", "server_name", "sni",
+        "tls.server.name", "ssl.server_name", "http.virtual_host",
+        "quic.server_name",
     }
     host_keys = {
         "host.name", "host.hostname", "host.id", "agent.id",
-        "hostname", "computer_name",
+        "agent.name", "related.hosts", "hostname", "computer_name",
     }
-    user_keys = {"user.name", "user.id", "username", "user_name"}
+    user_keys = {
+        "user.name", "user.id", "related.user", "username", "user_name",
+    }
 
     def visit(item: Any, evidence_base: str, path: tuple[str, ...] = ()) -> None:
         if len(discovered) >= limit:
@@ -2980,7 +3329,166 @@ def _investigation_round_audit(round_result: dict[str, Any]) -> dict[str, Any]:
         "results": summaries,
         "trusted_queries": trusted_queries[:MAX_INVESTIGATION_QUERIES_PER_ROUND],
         "broker_audit": round_result.get("audit") or [],
+        "request_normalizations": [
+            {
+                "query_id": _query_text(item.get("query_id"), 64),
+                "normalization": item.get("normalization"),
+            }
+            for item in (
+                round_result.get("requests")
+                if isinstance(round_result.get("requests"), list)
+                else []
+            )
+            if isinstance(item, dict)
+            and isinstance(item.get("normalization"), dict)
+            and item.get("normalization")
+        ][:MAX_INVESTIGATION_QUERIES_PER_ROUND],
     }
+
+
+def investigation_query_outcome_summary(
+    rounds: list[dict[str, Any]],
+    *,
+    queries_admitted: int,
+) -> dict[str, Any]:
+    """Count logical queries, including multi-query broker result envelopes."""
+    counts = {
+        "successful_queries": 0,
+        "partial_queries": 0,
+        "rejected_queries": 0,
+        "error_queries": 0,
+        "timeout_queries": 0,
+    }
+
+    def count_status(status: Any, logical_queries: int = 1) -> None:
+        normalized = str(status or "").strip().lower()
+        if normalized in {"ok", "complete", "completed", "success", "succeeded"}:
+            counts["successful_queries"] += logical_queries
+        elif normalized == "partial":
+            counts["partial_queries"] += logical_queries
+        elif normalized == "rejected":
+            counts["rejected_queries"] += logical_queries
+        elif normalized == "timeout":
+            counts["timeout_queries"] += logical_queries
+        else:
+            counts["error_queries"] += logical_queries
+
+    adjusted_windows = 0
+    for round_item in rounds:
+        if not isinstance(round_item, dict):
+            continue
+        for request in (
+            round_item.get("requests")
+            if isinstance(round_item.get("requests"), list)
+            else []
+        ):
+            normalization = (
+                request.get("normalization")
+                if isinstance(request, dict)
+                and isinstance(request.get("normalization"), dict)
+                else {}
+            )
+            if isinstance(normalization.get("window_adjustment"), dict):
+                adjusted_windows += 1
+        for result in (
+            round_item.get("results")
+            if isinstance(round_item.get("results"), list)
+            else []
+        ):
+            if not isinstance(result, dict):
+                counts["error_queries"] += 1
+                continue
+            query_ids = result.get("query_ids")
+            logical_query_ids = list(
+                dict.fromkeys(
+                    str(item).strip()
+                    for item in query_ids
+                    if str(item).strip()
+                )
+            ) if isinstance(query_ids, list) else []
+            evidence = (
+                result.get("evidence")
+                if isinstance(result.get("evidence"), dict)
+                else {}
+            )
+            nested_results = (
+                evidence.get("results")
+                if isinstance(evidence.get("results"), list)
+                else []
+            )
+            counted_ids: set[str] = set()
+            if logical_query_ids and nested_results:
+                controls_valid = evidence.get("controls_valid")
+                allowed_ids = set(logical_query_ids)
+                for nested in nested_results:
+                    if not isinstance(nested, dict):
+                        continue
+                    query_id = str(nested.get("query_id") or "").strip()
+                    if query_id not in allowed_ids or query_id in counted_ids:
+                        continue
+                    nested_status = nested.get("status")
+                    if (
+                        str(nested_status or "").strip().lower()
+                        in {"ok", "complete", "completed", "success", "succeeded"}
+                        and (
+                            controls_valid is False
+                            or nested.get("semantic_valid") is False
+                        )
+                    ):
+                        nested_status = "partial"
+                    count_status(nested_status)
+                    counted_ids.add(query_id)
+            remaining = (
+                len(logical_query_ids) - len(counted_ids)
+                if logical_query_ids
+                else 1
+            )
+            if remaining:
+                count_status(result.get("status"), remaining)
+
+    accounted = sum(counts.values())
+    unreported = max(0, int(queries_admitted) - accounted)
+    counts["unreported_queries"] = unreported
+    counts["queries_admitted"] = int(queries_admitted)
+    counts["queries_accounted"] = accounted
+    counts["adjusted_windows"] = adjusted_windows
+    counts["zero_success"] = bool(queries_admitted and not counts["successful_queries"])
+    evidence_gaps: list[str] = []
+    if counts["zero_success"]:
+        evidence_gaps.append(
+            "All requested iterative investigation pivots failed, timed out, "
+            "or were rejected; no follow-up query evidence was collected."
+        )
+    elif accounted - counts["successful_queries"] or unreported:
+        evidence_gaps.append(
+            "One or more requested iterative investigation pivots did not "
+            "return complete successful evidence."
+        )
+    if adjusted_windows:
+        evidence_gaps.append(
+            "One or more model-requested query windows were narrowed to the "
+            "broker's 24-hour limit; omitted time remains an evidence gap."
+        )
+    counts["evidence_gaps"] = evidence_gaps
+    return counts
+
+
+def _append_investigation_evidence_gaps(
+    response: dict[str, Any],
+    gaps: list[str],
+) -> None:
+    for container in (
+        response,
+        response.get("incident_response_report"),
+    ):
+        if not isinstance(container, dict):
+            continue
+        existing = container.get("evidence_gaps")
+        values = list(existing) if isinstance(existing, list) else []
+        for gap in gaps:
+            if gap not in values:
+                values.append(gap)
+        container["evidence_gaps"] = values[:100]
 
 
 def investigation_backend_available(
@@ -3129,12 +3637,19 @@ def apply_investigation_query_loop(
         normalized: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
+        local_context = prompt_package.get("_local_investigation_query_context")
+        trusted_time_envelope = (
+            local_context.get("time_envelope")
+            if isinstance(local_context, dict)
+            else None
+        )
         for position, raw in enumerate(admitted_raw, 1):
             try:
                 request = normalize_investigation_query_request(
                     raw,
                     round_number=round_number,
                     position=position,
+                    time_envelope=trusted_time_envelope,
                 )
                 if request["query_id"] in seen_ids:
                     request["query_id"] = f"round-{round_number}-query-{position}"
@@ -3298,6 +3813,10 @@ def apply_investigation_query_loop(
     repeated = pop_investigation_query_requests(response)
     ignored_requests += len(repeated)
     if rounds or ignored_requests:
+        outcomes = investigation_query_outcome_summary(
+            rounds,
+            queries_admitted=total_requests,
+        )
         response["_investigation_query_audit"] = {
             "query_contract": INVESTIGATION_QUERY_CONTRACT,
             "provider_neutral": True,
@@ -3312,8 +3831,15 @@ def apply_investigation_query_loop(
                 "max_prompt_evidence_bytes": MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES,
                 "max_prompt_evidence_rows": MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS,
             },
+            "outcomes": outcomes,
             "rounds": [_investigation_round_audit(item) for item in rounds],
         }
+        _append_investigation_evidence_gaps(
+            response,
+            outcomes["evidence_gaps"],
+        )
+        if isinstance(prompt_package.get("investigation_query_results"), dict):
+            prompt_package["investigation_query_results"]["outcomes"] = outcomes
     return response
 
 
@@ -3510,6 +4036,46 @@ def ollama_chat(prompt_package: dict[str, Any], args: argparse.Namespace, settin
     raise SystemExit("All enabled Ollama models failed; " + " | ".join(failures))
 
 
+def summarize_codex_cli_failure(stderr: str, returncode: int) -> str:
+    """Return a bounded operational error without echoing the evidence prompt.
+
+    Codex writes its session transcript, including the complete stdin prompt, to
+    stderr. Persisting that stream on a non-zero exit both leaks supplied
+    evidence into worker logs and places the useful terminal error after the
+    alert-store's 1,000-character error ceiling. Classify common failures first,
+    then retain only a short, explicitly error-prefixed terminal line.
+    """
+    lines = [line.strip() for line in str(stderr or "").splitlines() if line.strip()]
+    error_lines = [
+        line
+        for line in lines
+        if line.startswith(("ERROR:", "Error:", "error:"))
+    ]
+    lowered = "\n".join(error_lines).lower()
+    if "ran out of room in the model's context window" in lowered or "context window" in lowered:
+        return "model context window exhausted"
+    if "rate limit" in lowered or "usage limit" in lowered or "too many requests" in lowered:
+        return "provider rate or usage limit reached"
+    if (
+        "authentication" in lowered
+        or "unauthorized" in lowered
+        or "invalid api key" in lowered
+    ):
+        return "provider authentication failed"
+    if (
+        "model not found" in lowered
+        or "does not exist" in lowered
+        or "do not have access to model" in lowered
+    ):
+        return "configured model is unavailable or unauthorized"
+
+    for line in reversed(error_lines):
+        message = line.split(":", 1)[1].strip()
+        if message:
+            return f"provider error: {message[:500]}"
+    return f"Codex CLI exited with code {returncode}"
+
+
 def cloud_cli_chat(
     prompt_package: dict[str, Any],
     args: argparse.Namespace,
@@ -3607,7 +4173,7 @@ def cloud_cli_chat(
         except BoundedProcessError as exc:
             raise SystemExit(f"Codex CLI analysis failed: {exc}") from exc
         if proc.returncode != 0:
-            detail = proc.stderr.strip() or proc.stdout.strip() or f"exit code {proc.returncode}"
+            detail = summarize_codex_cli_failure(proc.stderr, proc.returncode)
             raise SystemExit(f"Codex CLI analysis failed: {detail}")
         if not final_message.is_file():
             raise SystemExit("Codex CLI completed without a final response artifact")
@@ -4404,11 +4970,10 @@ def _has_trusted_endpoint_evidence(prompt_package: dict[str, Any] | None) -> boo
 
     incident_evidence = prompt_package.get("incident_response_evidence")
     if isinstance(incident_evidence, dict):
-        security_onion = incident_evidence.get("security_onion_response")
-        if isinstance(security_onion, dict):
-            results = security_onion.get("osquery_results")
-            if isinstance(results, list) and any(completed_result(item) for item in results):
-                return True
+        # Fixed ``osquery_results`` are local snapshots of the Security Onion
+        # appliance. They cannot corroborate process, persistence, identity, or
+        # compromise claims about the alert endpoint. Only explicitly separate
+        # endpoint/host evidence collections may satisfy this guard.
         for key in ("endpoint_evidence", "host_evidence", "osquery_evidence"):
             evidence = incident_evidence.get(key)
             if endpoint_collection_has_evidence(evidence):
@@ -4740,6 +5305,18 @@ def calibrate_response_confidence(response: dict[str, Any]) -> dict[str, Any]:
             deterministic_reasons = ["deterministic_evidence_guard"]
         for reason in deterministic_reasons:
             cap(float(deterministic_cap), str(reason)[:200])
+    incident_completeness = (
+        response.get("_incident_evidence_completeness")
+        if isinstance(response.get("_incident_evidence_completeness"), dict)
+        else {}
+    )
+    incident_cap = incident_completeness.get("confidence_cap")
+    if isinstance(incident_cap, (int, float)):
+        incident_reasons = incident_completeness.get("limiters")
+        if not isinstance(incident_reasons, list) or not incident_reasons:
+            incident_reasons = ["incident_evidence_incomplete"]
+        for reason in incident_reasons:
+            cap(float(incident_cap), str(reason)[:200])
     if not evidence_used:
         cap(0.69, "no_cited_evidence")
     elif len(evidence_used) == 1:
@@ -4778,6 +5355,86 @@ def calibrate_response_confidence(response: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
+def _is_incident_responder_package(prompt_package: dict[str, Any] | None) -> bool:
+    if not isinstance(prompt_package, dict):
+        return False
+    role = str(prompt_package.get("agent_role") or "").strip().lower().replace("_", "-")
+    return role == "incident-responder"
+
+
+def validate_incident_response_report_shape(value: Any) -> dict[str, Any]:
+    """Describe missing or malformed responder fields without trusting prose.
+
+    The queue deliberately repairs minor model schema drift, so this validator
+    records deterministic defects instead of throwing away the entire analysis.
+    Confidence and automation guards can then fail closed while the dashboard
+    still receives an inspectable artifact.
+    """
+    report = value if isinstance(value, dict) else {}
+    missing_fields = sorted(INCIDENT_RESPONSE_REPORT_REQUIRED_FIELDS.difference(report))
+    invalid_fields: list[str] = []
+    if not isinstance(value, dict):
+        invalid_fields.append("incident_response_report")
+
+    for key in INCIDENT_RESPONSE_REPORT_TEXT_FIELDS:
+        if key in report and (
+            not isinstance(report.get(key), str)
+            or not str(report.get(key) or "").strip()
+        ):
+            invalid_fields.append(key)
+    for key in INCIDENT_RESPONSE_REPORT_LIST_FIELDS:
+        if key not in report:
+            continue
+        items = report.get(key)
+        if not isinstance(items, list):
+            invalid_fields.append(key)
+        elif key != "factual_timeline" and any(
+            not isinstance(item, str) or not item.strip()
+            for item in items
+        ):
+            invalid_fields.append(f"{key}[]")
+
+    timeline = report.get("factual_timeline")
+    invalid_timeline_entries = 0
+    if isinstance(timeline, list):
+        for item in timeline[:200]:
+            if not isinstance(item, dict):
+                invalid_timeline_entries += 1
+                continue
+            if any(
+                not isinstance(item.get(key), str)
+                or not str(item.get(key) or "").strip()
+                for key in ("timestamp", "event", "source_pack")
+            ):
+                invalid_timeline_entries += 1
+                continue
+            item_confidence = str(item.get("confidence") or "").strip().lower()
+            if item_confidence not in CONFIDENCE_VALUES:
+                invalid_timeline_entries += 1
+
+    report_confidence = str(report.get("confidence") or "").strip().lower()
+    if "confidence" in report and report_confidence not in CONFIDENCE_VALUES:
+        invalid_fields.append("confidence")
+    report_confidence_score = report.get("confidence_score")
+    if "confidence_score" in report and (
+        isinstance(report_confidence_score, bool)
+        or not isinstance(report_confidence_score, (int, float))
+        or not 0.0 <= report_confidence_score <= 1.0
+    ):
+        invalid_fields.append("confidence_score")
+
+    invalid_fields = sorted(set(invalid_fields))
+    return {
+        "required": True,
+        "model_report_present": isinstance(value, dict),
+        "valid": not missing_fields and not invalid_fields and invalid_timeline_entries == 0,
+        "missing_fields": missing_fields,
+        "invalid_fields": invalid_fields,
+        "timeline_entries_received": len(timeline) if isinstance(timeline, list) else 0,
+        "invalid_timeline_entries": invalid_timeline_entries,
+    }
+
+
 def normalize_incident_response_report(value: Any) -> dict[str, Any]:
     """Normalize the responder report while retaining explicit evidence limits.
 
@@ -4789,6 +5446,12 @@ def normalize_incident_response_report(value: Any) -> dict[str, Any]:
     confidence = bounded_text(report.get("confidence") or "low", 20).lower()
     if confidence not in CONFIDENCE_VALUES:
         confidence = "low"
+    try:
+        confidence_score = float(report.get("confidence_score"))
+    except (TypeError, ValueError, OverflowError):
+        confidence_score = CONFIDENCE_SCORE_BY_LABEL[confidence]
+    if not 0.0 <= confidence_score <= 1.0:
+        confidence_score = CONFIDENCE_SCORE_BY_LABEL[confidence]
 
     timeline: list[dict[str, str]] = []
     raw_timeline = report.get("factual_timeline")
@@ -4796,12 +5459,15 @@ def normalize_incident_response_report(value: Any) -> dict[str, Any]:
         for item in raw_timeline[:200]:
             if not isinstance(item, dict):
                 continue
+            item_confidence = bounded_text(item.get("confidence") or "low", 20).lower()
+            if item_confidence not in CONFIDENCE_VALUES:
+                item_confidence = "low"
             timeline.append({
                 "timestamp": bounded_text(item.get("timestamp"), 100),
                 "event": bounded_text(item.get("event"), 4000),
                 "source_pack": bounded_text(item.get("source_pack"), 200),
                 "query_digest": bounded_text(item.get("query_digest"), 128),
-                "confidence": bounded_text(item.get("confidence") or "low", 20).lower(),
+                "confidence": item_confidence,
             })
 
     methodology = report.get("methodology")
@@ -4834,7 +5500,366 @@ def normalize_incident_response_report(value: Any) -> dict[str, Any]:
         ),
         "conclusion": bounded_text(report.get("conclusion") or report.get("case_summary"), 8000),
         "confidence": confidence,
+        "confidence_score": round(confidence_score, 3),
     }
+
+
+def apply_incident_evidence_completeness_guard(
+    response: dict[str, Any],
+    prompt_package: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Cap Incident Responder confidence when query coverage is incomplete.
+
+    Query contracts intentionally permit bounded and partial evidence as an
+    explicit gap. This guard prevents a model from recovering ``high``
+    confidence merely by omitting that gap from free-form prose.
+    """
+    if not _is_incident_responder_package(prompt_package):
+        return response
+    assert isinstance(prompt_package, dict)
+    reasons: list[str] = []
+    maximum_score = 1.0
+
+    def cap(value: float, reason: str) -> None:
+        nonlocal maximum_score
+        maximum_score = min(maximum_score, value)
+        if reason not in reasons:
+            reasons.append(reason)
+
+    report_validation = response.get("_incident_response_report_validation")
+    if isinstance(report_validation, dict) and not report_validation.get("valid"):
+        critical_missing = set(report_validation.get("missing_fields") or []).intersection(
+            INCIDENT_RESPONSE_REPORT_TEXT_FIELDS
+        )
+        if (
+            not report_validation.get("model_report_present")
+            or critical_missing
+            or "incident_response_report"
+            in set(report_validation.get("invalid_fields") or [])
+        ):
+            cap(0.39, "required_incident_response_report_incomplete")
+        else:
+            cap(0.69, "incident_response_report_schema_defect")
+
+    evidence = prompt_package.get("incident_response_evidence")
+    if not isinstance(evidence, dict):
+        cap(0.39, "required_incident_evidence_missing")
+    else:
+        coverage_note = str(evidence.get("coverage_note") or "").strip().lower()
+        if any(marker in coverage_note for marker in ("bounded", "gap", "fallback")):
+            cap(0.79, "incident_evidence_temporal_coverage_limited")
+        security_onion = evidence.get("security_onion_response")
+        if not isinstance(security_onion, dict):
+            cap(0.39, "incident_evidence_response_missing")
+        else:
+            if security_onion.get("complete") is not True or security_onion.get("partial") is True:
+                cap(0.69, "incident_evidence_partial")
+            semantic = security_onion.get("semantic_validity")
+            if isinstance(semantic, dict):
+                if semantic.get("controls_valid") is not True:
+                    cap(0.39, "incident_evidence_controls_invalid")
+                elif semantic.get("semantic_valid") is not True:
+                    cap(0.69, "incident_evidence_semantically_incomplete")
+            results = (
+                security_onion.get("results")
+                if isinstance(security_onion.get("results"), list)
+                else []
+            )
+            for result in results:
+                if not isinstance(result, dict):
+                    cap(0.69, "incident_evidence_result_malformed")
+                    continue
+                if (
+                    str(result.get("status") or "").strip().lower() != "ok"
+                    or result.get("semantic_valid") is False
+                    or result.get("timed_out") is True
+                ):
+                    cap(0.69, "incident_evidence_query_failed_or_partial")
+                shards = result.get("shards")
+                if isinstance(shards, dict) and safe_nonnegative_int(shards.get("failed")):
+                    cap(0.69, "incident_evidence_failed_shards")
+                projection = result.get("prompt_projection")
+                if (
+                    result.get("truncated") is True
+                    or isinstance(projection, dict)
+                    and (
+                        projection.get("source_truncated") is True
+                        or safe_nonnegative_int(projection.get("source_returned_hits"))
+                        > safe_nonnegative_int(projection.get("retained_hits"))
+                    )
+                ):
+                    cap(0.79, "incident_evidence_query_truncated")
+
+    iterative = prompt_package.get("investigation_query_results")
+    if isinstance(iterative, dict):
+        outcomes = iterative.get("outcomes")
+        if isinstance(outcomes, dict):
+            if outcomes.get("zero_success") is True:
+                cap(0.69, "investigation_pivots_zero_success")
+            elif any(
+                safe_nonnegative_int(outcomes.get(key))
+                for key in (
+                    "partial_queries",
+                    "rejected_queries",
+                    "error_queries",
+                    "timeout_queries",
+                    "unreported_queries",
+                )
+            ):
+                cap(0.79, "investigation_pivots_incomplete")
+        projection = iterative.get("prompt_projection")
+        if isinstance(projection, dict) and projection.get("truncated") is True:
+            cap(0.79, "investigation_pivot_prompt_projection_truncated")
+        rounds = iterative.get("rounds") if isinstance(iterative.get("rounds"), list) else []
+        for round_item in rounds:
+            if not isinstance(round_item, dict):
+                continue
+            for result in (
+                round_item.get("results")
+                if isinstance(round_item.get("results"), list)
+                else []
+            ):
+                if not isinstance(result, dict):
+                    continue
+                status = str(result.get("status") or "").strip().lower()
+                if status in {"partial", "error", "timeout", "output_limit"}:
+                    cap(0.69, "investigation_pivot_failed_or_partial")
+                elif status in {"rejected", "invalid_response"}:
+                    cap(0.79, "investigation_pivot_rejected")
+                model_evidence = result.get("evidence")
+                if isinstance(model_evidence, dict):
+                    if model_evidence.get("controls_valid") is False:
+                        cap(0.39, "investigation_pivot_controls_invalid")
+                    if (
+                        model_evidence.get("partial") is True
+                        or model_evidence.get("complete") is False
+                        or bool(model_evidence.get("evidence_gaps"))
+                    ):
+                        cap(0.69, "investigation_pivot_evidence_partial")
+                    if (
+                        model_evidence.get("truncated") is True
+                        or model_evidence.get("model_projection_truncated") is True
+                        or model_evidence.get("prompt_projection")
+                        == "omitted_due_to_cumulative_byte_budget"
+                    ):
+                        cap(0.79, "investigation_pivot_evidence_truncated")
+                    evidence_results = (
+                        model_evidence.get("results")
+                        if isinstance(model_evidence.get("results"), list)
+                        else []
+                    )
+                    for evidence_result in evidence_results:
+                        if not isinstance(evidence_result, dict):
+                            cap(0.69, "investigation_pivot_result_malformed")
+                            continue
+                        if (
+                            str(evidence_result.get("status") or "").strip().lower()
+                            != "ok"
+                            or evidence_result.get("semantic_valid") is False
+                        ):
+                            cap(0.69, "investigation_pivot_failed_or_partial")
+                        if (
+                            evidence_result.get("truncated") is True
+                            or evidence_result.get("model_projection_truncated") is True
+                            or evidence_result.get("hits_prompt_truncated") is True
+                            or evidence_result.get("rows_prompt_truncated") is True
+                            or evidence_result.get("records_prompt_truncated") is True
+                        ):
+                            cap(0.79, "investigation_pivot_evidence_truncated")
+                trusted = (
+                    result.get("trusted_query_audit")
+                    if isinstance(result.get("trusted_query_audit"), list)
+                    else []
+                )
+                if any(
+                    isinstance(item, dict)
+                    and any(
+                        item.get(key) is True
+                        for key in (
+                            "truncated",
+                            "result_truncated",
+                            "index_scan_truncated",
+                            "audit_truncated",
+                        )
+                    )
+                    for item in trusted
+                ):
+                    cap(0.79, "investigation_pivot_result_truncated")
+
+    live_osquery = prompt_package.get("live_osquery_evidence")
+    if isinstance(live_osquery, dict):
+        if live_osquery.get("complete") is not True:
+            cap(0.69, "live_endpoint_osquery_incomplete")
+        live_results = (
+            live_osquery.get("results")
+            if isinstance(live_osquery.get("results"), list)
+            else []
+        )
+        for result in live_results:
+            if not isinstance(result, dict):
+                continue
+            if str(result.get("status") or "").strip().lower() not in {
+                "ok",
+                "complete",
+                "completed",
+                "success",
+                "succeeded",
+            }:
+                cap(0.69, "live_endpoint_osquery_query_failed")
+            if result.get("truncated") is True:
+                cap(0.79, "live_endpoint_osquery_result_truncated")
+
+    response["_incident_evidence_completeness"] = {
+        "version": 1,
+        "complete_for_high_confidence": maximum_score >= CONFIDENCE_HIGH_THRESHOLD,
+        "maximum_confidence_score": round(maximum_score, 3),
+        "confidence_cap": (
+            round(maximum_score, 3)
+            if maximum_score < 1.0
+            else None
+        ),
+        "limiters": reasons,
+    }
+    return response
+
+
+def _canonical_incident_disposition_sentence(response: dict[str, Any]) -> str:
+    outcome = normalized_detection_outcome(response.get("detection_outcome"))
+    label = DETECTION_OUTCOME_LABELS.get(outcome, "Inconclusive")
+    return (
+        f"{label}: the canonical runtime disposition records "
+        f"event_status={response.get('event_status') or 'unknown'}, "
+        f"detection_validity={response.get('detection_validity') or 'unknown'}, "
+        f"activity_disposition={response.get('activity_disposition') or 'unknown'}, "
+        f"and handling={response.get('handling') or 'investigate'}."
+    )
+
+
+def _human_review_incident_actions(response: dict[str, Any]) -> dict[str, list[str]]:
+    """Replace superseded action prose with canonical, non-automatic guidance."""
+    handling = str(response.get("handling") or "investigate").strip().lower()
+    if handling == "contain":
+        containment = (
+            "Do not execute containment steps from the superseded model report "
+            "automatically. Canonical handling=contain requires a human incident "
+            "responder to validate scope and approve proportionate containment."
+        )
+    elif handling == "escalate":
+        containment = (
+            "Do not initiate containment from the superseded model report "
+            "automatically. Canonical handling=escalate requires prompt human "
+            "review and an explicit containment decision."
+        )
+    else:
+        containment = (
+            "Do not initiate containment from the superseded model report. "
+            f"Canonical handling={handling} does not authorize automatic "
+            "containment; complete human review before changing host or network state."
+        )
+    return {
+        "containment_recommendations": [containment],
+        "eradication_recommendations": [
+            "Do not execute eradication steps from the superseded model report. "
+            "Preserve evidence and require a human responder to confirm compromise, "
+            "scope, and the approved remediation plan first."
+        ],
+        "recovery_recommendations": [
+            "Do not execute recovery steps from the superseded model report. "
+            "A human responder must confirm impact and approve recovery criteria "
+            "after any validated containment or eradication work."
+        ],
+    }
+
+
+def reconcile_incident_response_report(
+    response: dict[str, Any],
+    prompt_package: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Align the durable responder narrative with runtime-owned verdict fields."""
+    if not _is_incident_responder_package(prompt_package):
+        return response
+    report = response.get("incident_response_report")
+    if not isinstance(report, dict):
+        report = normalize_incident_response_report({})
+        response["incident_response_report"] = report
+    report["confidence"] = str(response.get("confidence") or "low")
+    report["confidence_score"] = response.get("confidence_score")
+
+    validation = (
+        dict(response.get("_incident_response_report_validation"))
+        if isinstance(response.get("_incident_response_report_validation"), dict)
+        else validate_incident_response_report_shape(report)
+    )
+    verdict_validation = (
+        response.get("_verdict_validation")
+        if isinstance(response.get("_verdict_validation"), dict)
+        else {}
+    )
+    guard = (
+        verdict_validation.get("deterministic_evidence_guard")
+        if isinstance(verdict_validation.get("deterministic_evidence_guard"), dict)
+        else {}
+    )
+    reconciliation_reason = ""
+    if guard.get("override_applied"):
+        reconciliation_reason = "deterministic evidence guard changed the model verdict"
+    elif verdict_validation.get("material_contradiction"):
+        reconciliation_reason = "runtime factored-verdict validation found a material contradiction"
+    elif not validation.get("valid"):
+        reconciliation_reason = "the model omitted or malformed required responder report fields"
+
+    if reconciliation_reason:
+        validation["model_narrative_before_reconciliation"] = {
+            key: bounded_text(report.get(key), 2000)
+            for key in (
+                "executive_bluf",
+                "detection_outcome_reasoning",
+                "conclusion",
+            )
+        }
+        validation["model_actions_before_reconciliation"] = {
+            key: bounded_text_list(report.get(key), limit=20, item_limit=1000)
+            for key in (
+                "containment_recommendations",
+                "eradication_recommendations",
+                "recovery_recommendations",
+            )
+        }
+        canonical = _canonical_incident_disposition_sentence(response)
+        report["executive_bluf"] = canonical
+        if guard.get("rule_intent_match") == "mismatch":
+            report["detection_outcome_reasoning"] = (
+                "Collector-owned detection validation recorded rule_intent_match=mismatch. "
+                "The runtime therefore set detection_validity=logic_error and did not allow "
+                "the detection name alone to support malicious attribution or containment."
+            )
+        else:
+            report["detection_outcome_reasoning"] = (
+                f"{canonical} The displayed disposition was reconciled because "
+                f"{reconciliation_reason}."
+            )
+        report.update(_human_review_incident_actions(response))
+        report["conclusion"] = (
+            f"{canonical} Human review is required before relying on superseded "
+            "model-authored narrative."
+        )
+        constraint = (
+            "The runtime replaced contradictory or incomplete responder narrative "
+            f"because {reconciliation_reason}."
+        )
+        constraints = bounded_text_list(report.get("constraints"))
+        if constraint not in constraints:
+            constraints.append(constraint)
+        report["constraints"] = constraints
+        validation["narrative_reconciled"] = True
+        validation["reconciliation_reason"] = reconciliation_reason
+    else:
+        validation["narrative_reconciled"] = False
+        validation["reconciliation_reason"] = ""
+    validation["canonical_confidence"] = report["confidence"]
+    validation["canonical_confidence_score"] = report["confidence_score"]
+    response["_incident_response_report_validation"] = validation
+    return response
 
 
 def incident_query_audit(prompt_package: dict[str, Any]) -> dict[str, Any]:
@@ -5170,10 +6195,45 @@ def validate_response(
     normalized["second_opinion_reason"] = str(normalized.get("second_opinion_reason") or "")[:1000]
     normalized["correlation_assessment"] = normalize_correlation_assessment(normalized.get("correlation_assessment"))
     normalized["memory_candidates"] = normalize_memory_candidates(normalized.get("memory_candidates"))
-    if "incident_response_report" in normalized:
+    incident_responder = _is_incident_responder_package(prompt_package)
+    if incident_responder:
+        raw_report = normalized.get("incident_response_report")
+        report_validation = validate_incident_response_report_shape(raw_report)
+        normalized["incident_response_report"] = normalize_incident_response_report(
+            raw_report
+        )
+        normalized["_incident_response_report_validation"] = report_validation
+        if not report_validation["valid"]:
+            repair = (
+                dict(normalized.get("_schema_repair"))
+                if isinstance(normalized.get("_schema_repair"), dict)
+                else {}
+            )
+            repaired_keys = {
+                str(item)
+                for item in repair.get("missing_keys", [])
+                if isinstance(repair.get("missing_keys"), list)
+            }
+            repaired_keys.update(
+                f"incident_response_report.{key}"
+                for key in report_validation["missing_fields"]
+            )
+            if not report_validation["model_report_present"]:
+                repaired_keys.add("incident_response_report")
+            repair["missing_keys"] = sorted(repaired_keys)
+            repair["repair_note"] = (
+                "Filled safe defaults and marked the Incident Responder output "
+                "for human review because its required report was incomplete."
+            )
+            normalized["_schema_repair"] = repair
+    elif "incident_response_report" in normalized:
         normalized["incident_response_report"] = normalize_incident_response_report(
             normalized.get("incident_response_report")
         )
+        # Preserve the legacy SOC analyst projection. Nested numeric
+        # confidence is an Incident Responder contract and must not silently
+        # expand unsolicited SOC output.
+        normalized["incident_response_report"].pop("confidence_score", None)
 
     if normalized["confidence"] not in CONFIDENCE_VALUES:
         normalized["_invalid_confidence"] = normalized["confidence"]
@@ -5203,7 +6263,15 @@ def validate_response(
         normalized,
         prompt_package,
     )
+    normalized = apply_incident_evidence_completeness_guard(
+        normalized,
+        prompt_package,
+    )
     normalized = calibrate_response_confidence(normalized)
+    normalized = reconcile_incident_response_report(
+        normalized,
+        prompt_package,
+    )
     normalized.setdefault("final_disposition_status", "primary_unreviewed")
     return normalized
 

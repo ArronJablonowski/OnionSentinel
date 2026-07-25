@@ -40,6 +40,11 @@ from detection_validation import (
     marker_specs,
     resolve_detection_playbook,
 )
+from investigation_query_contract import (
+    EVENT_TUPLE_FIELDS,
+    PACKS as INVESTIGATION_CONTRACT_PACKS,
+    SAFE_ATOM_RE as INVESTIGATION_EVENT_TUPLE_ATOM_RE,
+)
 
 
 HOME = Path.home()
@@ -71,9 +76,32 @@ INVESTIGATION_QUERY_PACKS = (
     "alert_context",
     "network_flow",
     "dns_activity",
+    "system_auth",
+    "zeek_tls",
+    "zeek_http",
+    "zeek_files",
+    "zeek_ssh",
+    "zeek_stun",
+    "zeek_quic",
+    "zeek_anomalies",
     "osquery_history",
     "cross_sensor_timeline",
 )
+INVESTIGATION_QUERY_PACK_DESCRIPTIONS = {
+    "alert_context": "Suricata and Sigma detection records.",
+    "network_flow": "Zeek connection, endpoint network, and alert flow metadata.",
+    "dns_activity": "Zeek DNS and endpoint network DNS metadata.",
+    "system_auth": "System authentication outcomes, exact users, hosts, and source IPs.",
+    "zeek_tls": "Zeek TLS/SSL metadata, SNI, validation, versions, ciphers, and JA fingerprints.",
+    "zeek_http": "Zeek HTTP methods, hosts, URIs, status, sizes, and user agents.",
+    "zeek_files": "Zeek file-transfer metadata, MIME types, sizes, analyzers, and hashes.",
+    "zeek_ssh": "Zeek SSH authentication, versions, algorithms, and HASSH metadata.",
+    "zeek_stun": "Zeek STUN and STUN NAT metadata.",
+    "zeek_quic": "Zeek QUIC protocol, version, connection IDs, and server-name metadata.",
+    "zeek_anomalies": "Zeek notice, weird, and analyzer anomaly metadata.",
+    "osquery_history": "Historical endpoint and osquery-manager events stored in Elastic.",
+    "cross_sensor_timeline": "Bounded alert, Zeek connection/DNS, and endpoint event timeline.",
+}
 INVESTIGATION_SECURITY_ONION_PURPOSES = (
     "validate_detection",
     "establish_timeline",
@@ -1387,6 +1415,7 @@ def investigation_query_context(
         "hosts": [],
         "users": [],
     }
+    permitted_event_tuples: list[dict] = []
 
     def add(kind: str, value: object) -> None:
         if isinstance(value, list):
@@ -1413,42 +1442,145 @@ def investigation_query_context(
         row_alert = parse_alert_json(
             str(sqlite_value(row_value, "alert_json") or "")
         )
+        raw_event = parse_json_object(
+            str(sqlite_value(row_value, "raw_event_json") or "")
+        )
+        original_event = raw_event.get("event_data")
+        observable_documents = [row_alert]
+        if isinstance(original_event, dict):
+            # Sigma detections retain the source event under event_data. It is
+            # trusted, anchor-bound local evidence and often carries the only
+            # exact host, user, and source IP available for a safe follow-up.
+            observable_documents.append(original_event)
         add("ips", sqlite_value(row_value, "source_ip"))
         add("ips", sqlite_value(row_value, "destination_ip"))
-        for path in (
-            "source.ip",
-            "destination.ip",
-            "client.ip",
-            "server.ip",
-            "host.ip",
-            "dns.resolved_ip",
-        ):
-            add("ips", _nested_alert_value(row_alert, path))
-        for path in (
-            "dns.question.name",
-            "url.domain",
-            "tls.server.name",
-        ):
-            add("domains", _nested_alert_value(row_alert, path))
-        for path in (
-            "source.domain",
-            "destination.domain",
-            "client.domain",
-            "server.domain",
-        ):
-            add("domains", _nested_alert_value(row_alert, path))
-        for path in ("host.hostname", "host.name"):
-            add("hosts", _nested_alert_value(row_alert, path))
-        for path in ("host.id", "agent.id"):
-            add("hosts", _nested_alert_value(row_alert, path))
-        for path in (
-            "user.name",
-            "source.user.name",
-            "destination.user.name",
-            "client.user.name",
-            "user.id",
-        ):
-            add("users", _nested_alert_value(row_alert, path))
+        for document in observable_documents:
+            for path in (
+                "source.ip",
+                "source.address",
+                "destination.ip",
+                "client.ip",
+                "server.ip",
+                "host.ip",
+                "dns.resolved_ip",
+                "related.ip",
+            ):
+                add("ips", _nested_alert_value(document, path))
+            for path in (
+                "dns.question.name",
+                "dns.query.name",
+                "url.domain",
+                "tls.server.name",
+                "ssl.server_name",
+                "http.virtual_host",
+                "quic.server_name",
+                "source.domain",
+                "destination.domain",
+                "client.domain",
+                "server.domain",
+            ):
+                add("domains", _nested_alert_value(document, path))
+            for path in (
+                "host.hostname",
+                "host.name",
+                "host.id",
+                "agent.id",
+                "agent.name",
+                "related.hosts",
+            ):
+                add("hosts", _nested_alert_value(document, path))
+            for path in (
+                "user.name",
+                "source.user.name",
+                "destination.user.name",
+                "client.user.name",
+                "user.id",
+                "related.user",
+            ):
+                add("users", _nested_alert_value(document, path))
+        tuple_value: dict[str, object] = {}
+        tuple_candidates = {
+            "source_ip": (
+                sqlite_value(row_value, "source_ip")
+                or _nested_alert_value(row_alert, "source.ip")
+            ),
+            "destination_ip": (
+                sqlite_value(row_value, "destination_ip")
+                or _nested_alert_value(row_alert, "destination.ip")
+            ),
+            "source_port": (
+                sqlite_value(row_value, "source_port")
+                or _nested_alert_value(row_alert, "source.port")
+            ),
+            "destination_port": (
+                sqlite_value(row_value, "destination_port")
+                or _nested_alert_value(row_alert, "destination.port")
+            ),
+            "transport": (
+                sqlite_value(row_value, "transport_protocol")
+                or _nested_alert_value(row_alert, "network.transport")
+            ),
+            "protocol": (
+                sqlite_value(row_value, "network_protocol")
+                or _nested_alert_value(row_alert, "network.protocol")
+            ),
+            "community_id": _nested_alert_value(
+                row_alert,
+                "network.community_id",
+            ),
+            "rule_id": (
+                sqlite_value(row_value, "rule_id")
+                or _nested_alert_value(row_alert, "rule.id")
+                or row_alert.get("signature_id")
+                or _nested_alert_value(
+                    row_alert,
+                    "suricata.eve.alert.signature_id",
+                )
+            ),
+        }
+        for field, raw_value in tuple_candidates.items():
+            if raw_value in (None, ""):
+                continue
+            if field in {"source_ip", "destination_ip"}:
+                try:
+                    tuple_value[field] = str(ipaddress.ip_address(str(raw_value)))
+                except ValueError:
+                    continue
+            elif field in {"source_port", "destination_port"}:
+                try:
+                    port = int(raw_value)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= port <= 65535:
+                    tuple_value[field] = port
+            elif field in {"transport", "protocol"}:
+                text = str(raw_value).strip().lower()
+                if INVESTIGATION_EVENT_TUPLE_ATOM_RE.fullmatch(text):
+                    tuple_value[field] = text
+            elif field == "community_id":
+                text = str(raw_value).strip()
+                if re.fullmatch(r"[A-Za-z0-9_:+/=-]{1,256}", text):
+                    tuple_value[field] = text
+            else:
+                text = str(raw_value).strip()
+                if INVESTIGATION_EVENT_TUPLE_ATOM_RE.fullmatch(text):
+                    tuple_value[field] = text
+        if tuple_value and not any(
+            item["event_tuple"] == tuple_value
+            for item in permitted_event_tuples
+        ) and len(permitted_event_tuples) < 32:
+            tuple_digest = hashlib.sha256(
+                json.dumps(
+                    tuple_value,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()[:20]
+            permitted_event_tuples.append({
+                "event_tuple": tuple_value,
+                "source": "trusted_context",
+                "evidence_ref": f"context:event-tuple:{tuple_digest}",
+            })
         for column in ("timestamp", "first_seen", "last_seen"):
             parsed = parse_project_datetime(sqlite_value(row_value, column))
             if parsed is not None:
@@ -1475,6 +1607,7 @@ def investigation_query_context(
     normalized_actor_role = str(actor_role or "").strip().lower().replace("-", "_")
     if normalized_actor_role not in {"soc_analyst", "incident_responder"}:
         normalized_actor_role = "soc_analyst"
+    security_query_enabled = bool(anchor) and any(permitted.values())
     local_context = {
         "context_id": "context-" + hashlib.sha256(
             f"{case_seed}:{normalized_actor_role}".encode("utf-8")
@@ -1486,14 +1619,37 @@ def investigation_query_context(
         "time_envelope": {"start": iso(start), "end": iso(end)},
         "permitted_observables": permitted,
         "discovered_observables": [],
+        "permitted_event_tuples": permitted_event_tuples,
     }
     capability = {
         "query_contract": INVESTIGATION_QUERY_CONTRACT,
-        "enabled": bool(anchor) or bool(pcap_available),
+        "enabled": security_query_enabled or bool(pcap_available),
+        "request_schema": {
+            "common_fields": ["query_id", "backend", "purpose", "parameters"],
+            "parameters_by_backend": {
+                "elastic": [
+                    "pack", "window", "observables", "event_tuple", "size",
+                    "aggregation",
+                ],
+                "oql": [
+                    "pack", "window", "observables", "event_tuple", "size",
+                    "aggregation",
+                ],
+                "pcap_zeek": [
+                    "operation", "filters", "indicator", "limit",
+                ],
+                "osquery": ["target_alias", "query"],
+            },
+            "rule": (
+                "Choose exactly one backend and include only that backend's "
+                "listed parameter fields. Never merge parameter shapes."
+            ),
+        },
         "backends": {
             "elastic": {
-                "enabled": bool(anchor),
+                "enabled": security_query_enabled,
                 "packs": list(INVESTIGATION_QUERY_PACKS),
+                "pack_descriptions": dict(INVESTIGATION_QUERY_PACK_DESCRIPTIONS),
                 "purposes": list(INVESTIGATION_SECURITY_ONION_PURPOSES),
                 "aggregations": ["events", "count", "timeline"],
                 "max_window_hours": 24,
@@ -1501,10 +1657,19 @@ def investigation_query_context(
                 "max_queries_per_round": 4,
                 "max_observables_per_query": 8,
                 "max_distinct_observables_per_batch": 24,
+                "event_tuple_fields_by_pack": {
+                    pack: [
+                        field
+                        for field, path in EVENT_TUPLE_FIELDS.items()
+                        if path in INVESTIGATION_CONTRACT_PACKS[pack]["fields"]
+                    ]
+                    for pack in INVESTIGATION_QUERY_PACKS
+                },
             },
             "oql": {
-                "enabled": bool(anchor),
+                "enabled": security_query_enabled,
                 "packs": list(INVESTIGATION_QUERY_PACKS),
+                "pack_descriptions": dict(INVESTIGATION_QUERY_PACK_DESCRIPTIONS),
                 "purposes": list(INVESTIGATION_SECURITY_ONION_PURPOSES),
                 "aggregations": ["events", "count", "timeline"],
                 "max_window_hours": 24,
@@ -1512,6 +1677,14 @@ def investigation_query_context(
                 "max_queries_per_round": 4,
                 "max_observables_per_query": 8,
                 "max_distinct_observables_per_batch": 24,
+                "event_tuple_fields_by_pack": {
+                    pack: [
+                        field
+                        for field, path in EVENT_TUPLE_FIELDS.items()
+                        if path in INVESTIGATION_CONTRACT_PACKS[pack]["fields"]
+                    ]
+                    for pack in INVESTIGATION_QUERY_PACKS
+                },
             },
             "pcap_zeek": {
                 "enabled": bool(pcap_available),
@@ -1536,10 +1709,14 @@ def investigation_query_context(
             "max_queries_per_round": INVESTIGATION_QUERY_MAX_PER_ROUND,
         },
         "permitted_observables": permitted,
+        "permitted_event_tuples": [
+            item["event_tuple"] for item in permitted_event_tuples
+        ],
         "time_envelope": local_context["time_envelope"],
         "restrictions": [
             "structured read-only broker requests only",
             "exact supplied or evidence-discovered observables only",
+            "optional event_tuple values must be copied from one advertised trusted tuple; supplied fields are ANDed and preserve source/destination roles",
             "no shell, arbitrary Query DSL, parser arguments, paths, scripts, or raw packet payloads",
             "every executed query and result carries broker-owned provenance",
         ],
@@ -1654,6 +1831,8 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             "raw_event_json",
             "rule_id",
             "timestamp",
+            "source_port",
+            "network_protocol",
             "transport_protocol",
             "destination_port",
         ),
@@ -1846,9 +2025,13 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
                     "backend": "elastic|oql|osquery|pcap_zeek",
                     "purpose": "for elastic/oql: validate_detection|establish_timeline|correlate_observable|measure_prevalence|identify_related_activity|test_benign_hypothesis; for osquery/pcap_zeek: a bounded falsifiable question",
                     "parameters": {
-                        "pack": "for elastic/oql: alert_context|network_flow|dns_activity|osquery_history|cross_sensor_timeline",
+                        "pack": (
+                            "for elastic/oql: "
+                            + "|".join(INVESTIGATION_QUERY_PACKS)
+                        ),
                         "window": {"start": "ISO 8601", "end": "ISO 8601"},
                         "observables": {"ips": [], "domains": [], "hosts": [], "users": []},
+                        "event_tuple": "for elastic/oql only: optional subset copied from one advertised permitted_event_tuple; allowed keys are source_ip, destination_ip, source_port, destination_port, transport, protocol, community_id, rule_id",
                         "size": "for elastic/oql: integer from 1 through 100",
                         "aggregation": "for elastic/oql: events|count|timeline",
                         "target_alias": "for osquery: one advertised exact endpoint alias",
@@ -1924,6 +2107,7 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             "evidence_gaps": ["specific missing evidence and its impact"],
             "conclusion": "fact-grounded conclusion",
             "confidence": "low|medium|high",
+            "confidence_score": "0.0 through 1.0 probability that the report's complete factored verdict is correct",
         }
     return package
 

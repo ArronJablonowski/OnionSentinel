@@ -15,10 +15,16 @@ Pi relay IP: 10.88.8.8
 ## Recovery Priority
 
 1. Restore network reachability.
-2. Restore Mac Studio n8n and alert-store.
-3. Restore Security Onion export wrapper.
+2. Restore or upgrade the Security Onion export wrapper.
+3. Restore or upgrade Mac Studio n8n and alert-store.
 4. Restore Pi relay.
 5. Run end-to-end tests.
+
+The section numbers below group host-specific instructions; they do not change
+that execution order. Deploy the Security Onion wrapper before Mac code because
+the newer wrapper accepts legacy requests, while newer Mac query packs or
+constraints may be rejected by an older wrapper. Roll back in the reverse
+order: Mac first, then Security Onion.
 
 ## 1. Network Checklist
 

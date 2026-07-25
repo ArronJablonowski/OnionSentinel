@@ -411,9 +411,120 @@ def _icmp_from_packet(packet: bytes, linktype: int = 1) -> dict[str, Any] | None
     }
 
 
+def _network_packet_envelope(packet: bytes, linktype: int = 1) -> dict[str, Any] | None:
+    """Return bounded IP transport metadata without exposing packet contents."""
+    if not packet or len(packet) > MAX_PACKET_BYTES:
+        return None
+    offset = 0
+    ethertype = 0
+    if linktype == 1:
+        if len(packet) < 14:
+            return None
+        ethertype = struct.unpack("!H", packet[12:14])[0]
+        offset = 14
+        while ethertype in {0x8100, 0x88A8, 0x9100}:
+            if len(packet) < offset + 4:
+                return None
+            ethertype = struct.unpack("!H", packet[offset + 2:offset + 4])[0]
+            offset += 4
+    elif packet[0] >> 4 == 4:
+        ethertype = 0x0800
+    elif packet[0] >> 4 == 6:
+        ethertype = 0x86DD
+    if ethertype == 0x0800:
+        if len(packet) < offset + 20 or packet[offset] >> 4 != 4:
+            return None
+        ihl = (packet[offset] & 0x0F) * 4
+        if ihl < 20 or len(packet) < offset + ihl:
+            return None
+        total_length = struct.unpack("!H", packet[offset + 2:offset + 4])[0]
+        if total_length < ihl:
+            return None
+        end = min(len(packet), offset + total_length)
+        return {
+            "family": "ipv4",
+            "protocol_number": int(packet[offset + 9]),
+            "transport_offset": offset + ihl,
+            "end": end,
+        }
+    if ethertype == 0x86DD:
+        if len(packet) < offset + 40 or packet[offset] >> 4 != 6:
+            return None
+        payload_length = struct.unpack("!H", packet[offset + 4:offset + 6])[0]
+        end = min(len(packet), offset + 40 + payload_length)
+        return {
+            "family": "ipv6",
+            "protocol_number": int(packet[offset + 6]),
+            "transport_offset": offset + 40,
+            "end": end,
+        }
+    return None
+
+
+def _udp_from_packet(
+    packet: bytes,
+    envelope: dict[str, Any],
+) -> dict[str, Any] | None:
+    if int(envelope.get("protocol_number", -1)) != 17:
+        return None
+    offset = int(envelope.get("transport_offset") or 0)
+    end = int(envelope.get("end") or 0)
+    if offset < 0 or end < offset + 8 or len(packet) < offset + 8:
+        return None
+    source_port, destination_port, udp_length = struct.unpack(
+        "!HHH", packet[offset:offset + 6]
+    )
+    if udp_length < 8 or offset + udp_length > end:
+        return None
+    return {
+        "source_port": source_port,
+        "destination_port": destination_port,
+        "payload_length": udp_length - 8,
+        "_payload": packet[offset + 8:offset + udp_length],
+    }
+
+
+def _stun_binding_semantics(payload: bytes) -> dict[str, Any] | None:
+    """Recognize a complete RFC 5389 STUN message without retaining identifiers."""
+    if len(payload) < 20:
+        return None
+    message_type, message_length, magic_cookie = struct.unpack("!HHI", payload[:8])
+    if message_type & 0xC000 or magic_cookie != 0x2112A442:
+        return None
+    if message_length % 4 or 20 + message_length > len(payload):
+        return None
+    method = (
+        (message_type & 0x000F)
+        | ((message_type & 0x00E0) >> 1)
+        | ((message_type & 0x3E00) >> 2)
+    )
+    message_class = ((message_type & 0x0010) >> 4) | ((message_type & 0x0100) >> 7)
+    if method != 0x001:
+        return None
+    kind = {
+        0: "binding_request",
+        1: "binding_indication",
+        2: "binding_success_response",
+        3: "binding_error_response",
+    }.get(message_class)
+    if kind is None:
+        return None
+    return {
+        "kind": kind,
+        "declared_body_bytes": message_length,
+    }
+
+
 def _bounded_counter(counter: collections.Counter[int]) -> list[dict[str, int]]:
     return [
         {"value": int(value), "count": int(count)}
+        for value, count in counter.most_common(MAX_COUNTER_VALUES)
+    ]
+
+
+def _bounded_text_counter(counter: collections.Counter[str]) -> list[dict[str, Any]]:
+    return [
+        {"value": str(value)[:80], "count": int(count)}
         for value, count in counter.most_common(MAX_COUNTER_VALUES)
     ]
 
@@ -483,44 +594,142 @@ def _content_constraint(
     spec: dict[str, Any],
 ) -> bool | None:
     """Evaluate the supported subset of Suricata payload-content semantics."""
-    modifiers = spec.get("modifiers") if isinstance(spec.get("modifiers"), dict) else {}
-    if any(key in modifiers for key in ("distance", "within", "rawbytes")):
+    positions = _content_match_positions(payload, marker, spec)
+    if positions is None:
         return None
-    offset = 0
-    if "offset" in modifiers:
-        offset = _nonnegative_modifier(modifiers.get("offset"))
-        if offset is None:
+    present = bool(positions)
+    return not present if bool(spec.get("negated")) else present
+
+
+def _content_match_positions(
+    payload: bytes,
+    marker: bytes,
+    spec: dict[str, Any],
+    *,
+    previous_match_end: int | None = None,
+) -> list[int] | None:
+    """Return bounded matches for one absolute or cursor-relative content clause."""
+    modifiers = spec.get("modifiers") if isinstance(spec.get("modifiers"), dict) else {}
+    if "rawbytes" in modifiers:
+        return None
+    relative = "distance" in modifiers or "within" in modifiers
+    if relative and any(key in modifiers for key in ("offset", "depth")):
+        return None
+    if relative:
+        if previous_match_end is None:
             return None
-    depth: int | None = None
-    if "depth" in modifiers:
-        depth = _nonnegative_modifier(modifiers.get("depth"))
-        if depth is None:
-            return None
-    if offset > len(payload):
-        present = False
+        distance = 0
+        if "distance" in modifiers:
+            distance = _nonnegative_modifier(modifiers.get("distance"))
+            if distance is None:
+                return None
+        start = previous_match_end + distance
+        end = len(payload)
+        if "within" in modifiers:
+            within = _nonnegative_modifier(modifiers.get("within"))
+            if within is None:
+                return None
+            end = min(len(payload), start + within)
     else:
-        end = len(payload) if depth is None else min(len(payload), offset + depth)
-        haystack = payload.lower() if "nocase" in modifiers else payload
-        needle = marker.lower() if "nocase" in modifiers else marker
-        if "startswith" in modifiers:
-            present = offset == 0 and haystack.startswith(needle)
-        elif "endswith" in modifiers:
-            position = len(haystack) - len(needle)
-            present = (
-                position >= offset
-                and position + len(needle) <= end
-                and haystack.endswith(needle)
+        start = 0
+        if "offset" in modifiers:
+            start = _nonnegative_modifier(modifiers.get("offset"))
+            if start is None:
+                return None
+        end = len(payload)
+        if "depth" in modifiers:
+            depth = _nonnegative_modifier(modifiers.get("depth"))
+            if depth is None:
+                return None
+            end = min(len(payload), start + depth)
+    if start < 0 or start > len(payload) or end < start:
+        return []
+    haystack = payload.lower() if "nocase" in modifiers else payload
+    needle = marker.lower() if "nocase" in modifiers else marker
+    if "startswith" in modifiers:
+        if start <= 0 and len(needle) <= end and haystack.startswith(needle):
+            return [0]
+        return []
+    if "endswith" in modifiers:
+        position = len(haystack) - len(needle)
+        if position >= start and position + len(needle) <= end and haystack.endswith(needle):
+            return [position]
+        return []
+    positions: list[int] = []
+    cursor = start
+    while len(positions) < MAX_MARKER_MATCHES_PER_PACKET:
+        position = haystack.find(needle, cursor, end)
+        if position < 0:
+            break
+        positions.append(position)
+        cursor = position + 1
+    return positions
+
+
+def _ordered_deployed_content_constraints(
+    payload: bytes,
+    marker_values: list[tuple[dict[str, Any], bytes]],
+) -> dict[str, bool | None]:
+    """Evaluate deployed content clauses in rule order with bounded cursor paths."""
+    results: dict[str, bool | None] = {}
+    cursors: set[int | None] = {None}
+    for spec, marker in marker_values:
+        if spec.get("source") != "deployed_rule":
+            continue
+        marker_id = str(spec["id"])
+        modifiers = spec.get("modifiers") if isinstance(spec.get("modifiers"), dict) else {}
+        relative = "distance" in modifiers or "within" in modifiers
+        if not cursors:
+            results[marker_id] = False
+            continue
+        if relative:
+            candidate_cursors = sorted(
+                cursors,
+                key=lambda value: -1 if value is None else value,
             )
         else:
-            present = haystack.find(needle, offset, end) >= 0
-    return not present if bool(spec.get("negated")) else present
+            candidate_cursors = [None]
+        supported = True
+        satisfied = False
+        next_cursors: set[int | None] = set()
+        for previous_end in candidate_cursors[:MAX_MARKER_MATCHES_PER_PACKET]:
+            positions = _content_match_positions(
+                payload,
+                marker,
+                spec,
+                previous_match_end=previous_end,
+            )
+            if positions is None:
+                supported = False
+                continue
+            if spec.get("negated"):
+                if not positions:
+                    satisfied = True
+                    if relative:
+                        next_cursors.add(previous_end)
+                    else:
+                        next_cursors.update(cursors)
+                continue
+            if positions:
+                satisfied = True
+                next_cursors.update(
+                    position + len(marker)
+                    for position in positions[:MAX_MARKER_MATCHES_PER_PACKET]
+                )
+        if not supported:
+            results[marker_id] = None
+            cursors = set()
+            continue
+        results[marker_id] = satisfied
+        cursors = next_cursors if satisfied else set()
+    return results
 
 
 def extract_group_packet_features(
     grouped_rows: Iterable[object],
     markers: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Decode stored packet copies and return raw-payload-free ICMP semantics."""
+    """Decode stored packet copies and return bounded, raw-payload-free semantics."""
     marker_values: list[tuple[dict[str, Any], bytes]] = []
     for item in markers or []:
         try:
@@ -544,7 +753,15 @@ def extract_group_packet_features(
     marker_constraint_violated: collections.Counter[str] = collections.Counter()
     marker_constraint_unsupported: set[str] = set()
     entropies: list[float] = []
-    packet_count = 0
+    parsed_packet_count = 0
+    content_packet_count = 0
+    icmp_packet_count = 0
+    udp_packet_count = 0
+    unsupported_protocol_packets = 0
+    protocol_counts: collections.Counter[str] = collections.Counter()
+    udp_payload_lengths: collections.Counter[int] = collections.Counter()
+    stun_kinds: collections.Counter[str] = collections.Counter()
+    stun_body_lengths: collections.Counter[int] = collections.Counter()
     candidate_count = 0
     parse_errors = 0
     truncated = False
@@ -573,22 +790,62 @@ def extract_group_packet_features(
             linktype = int(_nested(message, "packet_info.linktype") or 1)
         except (TypeError, ValueError):
             linktype = 1
-        parsed = _icmp_from_packet(packet, linktype)
-        if not parsed:
+        envelope = _network_packet_envelope(packet, linktype)
+        if not envelope:
             parse_errors += 1
             continue
-        packet_count += 1
-        payload = parsed.pop("_payload")
-        type_counts[parsed["type"]] += 1
-        code_counts[parsed["code"]] += 1
-        identifiers[parsed["identifier"]] += 1
-        sequences[parsed["sequence"]] += 1
-        payload_lengths[len(payload)] += 1
-        frame_lengths[parsed["frame_bytes"]] += 1
-        entropies.append(_entropy(payload))
+        protocol_number = int(envelope.get("protocol_number", -1))
+        protocol_name = {
+            1: "icmp",
+            6: "tcp",
+            17: "udp",
+            58: "icmpv6",
+        }.get(protocol_number, f"ip_protocol_{protocol_number}")
+        protocol_counts[protocol_name] += 1
+        if protocol_number in {1, 58}:
+            parsed = _icmp_from_packet(packet, linktype)
+            if not parsed:
+                parse_errors += 1
+                continue
+            parsed_packet_count += 1
+            icmp_packet_count += 1
+            payload = parsed.pop("_payload")
+            type_counts[parsed["type"]] += 1
+            code_counts[parsed["code"]] += 1
+            identifiers[parsed["identifier"]] += 1
+            sequences[parsed["sequence"]] += 1
+            payload_lengths[len(payload)] += 1
+            frame_lengths[parsed["frame_bytes"]] += 1
+            entropies.append(_entropy(payload))
+        elif protocol_number == 17:
+            parsed = _udp_from_packet(packet, envelope)
+            if not parsed:
+                parse_errors += 1
+                continue
+            parsed_packet_count += 1
+            udp_packet_count += 1
+            payload = parsed.pop("_payload")
+            udp_payload_lengths[len(payload)] += 1
+            stun = _stun_binding_semantics(payload)
+            if stun:
+                stun_kinds[str(stun["kind"])] += 1
+                stun_body_lengths[int(stun["declared_body_bytes"])] += 1
+        else:
+            # A valid, currently unsupported transport is not a parse error.
+            parsed_packet_count += 1
+            unsupported_protocol_packets += 1
+            continue
+        content_packet_count += 1
+        ordered_constraints = _ordered_deployed_content_constraints(
+            payload,
+            marker_values,
+        )
         for spec, marker in marker_values:
             marker_id = str(spec["id"])
-            constraint = _content_constraint(payload, marker, spec)
+            if spec.get("source") == "deployed_rule":
+                constraint = ordered_constraints.get(marker_id)
+            else:
+                constraint = _content_constraint(payload, marker, spec)
             if constraint is None:
                 marker_constraint_unsupported.add(marker_id)
             else:
@@ -636,7 +893,21 @@ def extract_group_packet_features(
         "source": "stored-security-onion-alert-packet-copies",
         "raw_payloads_included": False,
         "candidate_packets": candidate_count,
-        "icmp_packets_parsed": packet_count,
+        "packets_parsed": parsed_packet_count,
+        "content_packets_parsed": content_packet_count,
+        "packet_protocols": _bounded_text_counter(protocol_counts),
+        "unsupported_protocol_packets": unsupported_protocol_packets,
+        "icmp_packets_parsed": icmp_packet_count,
+        "udp_packets_parsed": udp_packet_count,
+        "udp_payload_lengths": _bounded_counter(udp_payload_lengths),
+        "stun": {
+            "packets_parsed": int(sum(stun_kinds.values())),
+            "message_types": _bounded_text_counter(stun_kinds),
+            "declared_body_lengths": _bounded_counter(stun_body_lengths),
+            "magic_cookie_valid_packets": int(sum(stun_kinds.values())),
+            "transaction_ids_included": False,
+            "raw_payloads_included": False,
+        },
         "parse_errors": parse_errors,
         "truncated": truncated,
         "icmp_types": _bounded_counter(type_counts),
@@ -867,6 +1138,56 @@ def _evaluate_numeric_predicate(
     }
 
 
+def _infer_stun_response_xbits_state(
+    rule_context: dict[str, Any],
+    packet_features: dict[str, Any],
+    state_operation: dict[str, Any],
+) -> bool:
+    """Infer only the deployed STUN-response xbit from exact validated alert packets."""
+    if (
+        str(rule_context.get("sid") or "") != "2016150"
+        or rule_context.get("revision") != 4
+        or str(rule_context.get("name") or "")
+        != "ET INFO Session Traversal Utilities for NAT (STUN Binding Response)"
+    ):
+        return False
+    parsed_rule = rule_context.get("parsed_rule")
+    if not isinstance(parsed_rule, dict) or parsed_rule.get("protocol") != "udp":
+        return False
+    conflicts = rule_context.get("identity_conflicts")
+    if isinstance(conflicts, dict) and any(
+        conflicts.get(key) for key in ("sid", "revision")
+    ):
+        return False
+    if (
+        str(state_operation.get("kind") or "").strip().casefold() != "xbits"
+        or str(state_operation.get("operation") or "").strip().casefold() != "isset"
+        or str(state_operation.get("name") or "").strip().casefold() != "et.stun"
+        or str(state_operation.get("track") or "").strip().casefold() != "track ip_dst"
+    ):
+        return False
+    candidate_packets = int(packet_features.get("candidate_packets") or 0)
+    content_packets = int(packet_features.get("content_packets_parsed") or 0)
+    stun = packet_features.get("stun")
+    if not isinstance(stun, dict):
+        return False
+    message_types = {
+        str(item.get("value") or ""): int(item.get("count") or 0)
+        for item in stun.get("message_types", [])
+        if isinstance(item, dict)
+    }
+    return bool(
+        candidate_packets > 0
+        and candidate_packets == content_packets
+        and int(stun.get("packets_parsed") or 0) == candidate_packets
+        and message_types.get("binding_success_response") == candidate_packets
+        and not int(packet_features.get("parse_errors") or 0)
+        and packet_features.get("truncated") is not True
+        and packet_features.get("source")
+        == "stored-security-onion-alert-packet-copies"
+    )
+
+
 def build_detection_validation(
     rule_context: dict[str, Any],
     packet_features: dict[str, Any],
@@ -890,17 +1211,51 @@ def build_detection_validation(
             operation = str(item.get("operation") or "").strip().lower()
             if operation not in {"isset", "isnotset"}:
                 continue
+            inferred_stun_state = _infer_stun_response_xbits_state(
+                rule_context,
+                packet_features,
+                item,
+            )
             predicate_results.append(
                 {
                     "id": f"deployed-state-{index}",
                     "field": f"{str(item.get('kind') or 'state')}.state",
                     "operator": operation,
                     "expected": "required state is intentionally not disclosed",
-                    "observed": None,
-                    "status": "unknown",
+                    "observed": (
+                        {
+                            "state": "inferred_satisfied",
+                            "engine_trace_observed": False,
+                        }
+                        if inferred_stun_state
+                        else None
+                    ),
+                    "status": "matched" if inferred_stun_state else "unknown",
                     "required": True,
                     "source": "deployed_rule",
-                    "reason": "stateful rule precondition requires a trusted Suricata rule-engine trace",
+                    "reason": (
+                        "STUN-specific inference from the exact stored Suricata SID 2016150 "
+                        "alert and a validated RFC 5389 Binding-success packet; the xbits "
+                        "engine state was not independently observed in a rule-engine trace"
+                        if inferred_stun_state
+                        else "stateful rule precondition requires a trusted Suricata rule-engine trace"
+                    ),
+                    "provenance": (
+                        {
+                            "kind": "inference",
+                            "basis": [
+                                "exact_suricata_alert",
+                                "validated_stun_binding_success_packet",
+                            ],
+                            "engine_trace_observed": False,
+                            "scope": "suricata_sid_2016150_only",
+                        }
+                        if inferred_stun_state
+                        else {
+                            "kind": "unobserved",
+                            "engine_trace_observed": False,
+                        }
+                    ),
                 }
             )
     if isinstance(playbook, dict):
@@ -954,25 +1309,36 @@ def build_detection_validation(
             evaluated = int(observation.get("packets_evaluated_for_constraint") or 0)
             satisfied = int(observation.get("packets_satisfying_constraint") or 0)
             violated = int(observation.get("packets_violating_constraint") or 0)
+            content_packets = int(
+                packet_features.get("content_packets_parsed")
+                or packet_features.get("icmp_packets_parsed")
+                or 0
+            )
             complete = (
                 int(packet_features.get("candidate_packets") or 0) > 0
                 and int(packet_features.get("candidate_packets") or 0)
-                == int(packet_features.get("icmp_packets_parsed") or 0)
+                == content_packets
                 and not int(packet_features.get("parse_errors") or 0)
                 and packet_features.get("truncated") is not True
             )
-            if not packet_features.get("icmp_packets_parsed") or not constraint_supported:
+            if not content_packets or not constraint_supported:
                 status = "unknown"
             elif violated:
                 status = "mismatched"
-            elif complete and evaluated == int(packet_features.get("icmp_packets_parsed") or 0) and satisfied == evaluated:
+            elif complete and evaluated == content_packets and satisfied == evaluated:
                 status = "matched"
             else:
                 status = "unknown"
             predicate_results.append(
                 {
                     "id": marker_id,
-                    "field": "icmp.payload_marker",
+                    "field": (
+                        "icmp.payload_marker"
+                        if parsed_rule.get("protocol") == "icmp"
+                        else "udp.payload_marker"
+                        if parsed_rule.get("protocol") == "udp"
+                        else "packet.payload_marker"
+                    ),
                     "operator": "not_contains" if item.get("negated") else "contains",
                     "expected": {
                         "sha256": observation.get("sha256") or item.get("sha256"),
@@ -1094,7 +1460,7 @@ def build_detection_validation(
         str(item.get("field")) for item in required if item.get("source") == "playbook"
     }
     missing_installed_constraints = sorted(playbook_required_fields.difference(installed_fields))
-    event_status = "observed" if packet_features.get("icmp_packets_parsed") else "unknown"
+    event_status = "observed" if packet_features.get("packets_parsed") else "unknown"
     return {
         "schema": VALIDATION_SCHEMA,
         "event_status": event_status,

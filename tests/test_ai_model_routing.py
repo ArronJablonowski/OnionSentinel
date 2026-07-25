@@ -53,6 +53,59 @@ class AiModelRoutingTests(unittest.TestCase):
         response.update(overrides)
         return response
 
+    def complete_incident_report(self, **overrides):
+        report = {
+            "executive_bluf": "Synthetic fact-grounded incident bottom line.",
+            "detection_outcome_reasoning": "Synthetic factored-verdict reasoning.",
+            "scope": "Synthetic bounded incident scope.",
+            "affected_systems": ["host-a supported by synthetic evidence"],
+            "constraints": [],
+            "methodology": ["Reviewed the supplied synthetic evidence."],
+            "factual_timeline": [
+                {
+                    "timestamp": "2026-07-24T12:00:00-06:00",
+                    "event": "Synthetic event observed.",
+                    "source_pack": "alert_context",
+                    "query_digest": "a" * 64,
+                    "confidence": "high",
+                },
+            ],
+            "security_onion_findings": ["Synthetic Security Onion finding."],
+            "osquery_findings": ["No endpoint OSQuery evidence supplied."],
+            "pcap_findings": ["Synthetic PCAP finding."],
+            "host_findings": ["No host telemetry supplied."],
+            "correlation_findings": ["No supported correlation."],
+            "containment_recommendations": ["Preserve evidence."],
+            "eradication_recommendations": ["Defer pending confirmation."],
+            "recovery_recommendations": ["Defer pending confirmation."],
+            "follow_up_queries": ["Collect the missing discriminator."],
+            "evidence_gaps": ["No endpoint telemetry supplied."],
+            "conclusion": "Synthetic fact-grounded conclusion.",
+            "confidence": "high",
+            "confidence_score": 0.9,
+        }
+        report.update(overrides)
+        return report
+
+    def complete_incident_prompt(self, **overrides):
+        prompt = {
+            "agent_role": "incident-responder",
+            "incident_response_evidence": {
+                "coverage_note": "Complete synthetic alert firing window.",
+                "security_onion_response": {
+                    "complete": True,
+                    "partial": False,
+                    "semantic_validity": {
+                        "controls_valid": True,
+                        "semantic_valid": True,
+                    },
+                    "results": [],
+                },
+            },
+        }
+        prompt.update(overrides)
+        return prompt
+
     def test_repo_template_assigns_approved_models_to_every_agent(self) -> None:
         settings_path = REPO_ROOT / "n8n" / "config" / "ai_model_settings.json"
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
@@ -413,6 +466,77 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertIn("--ephemeral", seen_command)
         self.assertNotIn("sh", seen_command)
         self.assertNotIn("this must never execute", " ".join(seen_command))
+
+    def test_codex_failure_summary_does_not_persist_prompt_transcript(self) -> None:
+        stderr = "\n".join(
+            [
+                "OpenAI Codex v0.145.0",
+                "user",
+                '{"prompt_package":{"sensitive_evidence":"must-not-leak"}}',
+                "ERROR: Codex ran out of room in the model's context window. Start a new thread.",
+            ]
+        )
+
+        summary = self.runner.summarize_codex_cli_failure(stderr, 1)
+
+        self.assertEqual(summary, "model context window exhausted")
+        self.assertNotIn("sensitive_evidence", summary)
+
+    def test_codex_failure_summary_uses_only_terminal_error_line(self) -> None:
+        stderr = "\n".join(
+            [
+                "OpenAI Codex v0.145.0",
+                '{"prompt_package":{"secret":"must-not-leak","note":"context window"}}',
+                "ERROR: provider transport closed unexpectedly",
+            ]
+        )
+
+        summary = self.runner.summarize_codex_cli_failure(stderr, 1)
+
+        self.assertEqual(summary, "provider error: provider transport closed unexpectedly")
+        self.assertNotIn("must-not-leak", summary)
+
+    def test_codex_nonzero_exit_raises_only_sanitized_terminal_cause(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "system_prompt_file": Path("/tmp/nonexistent-system-prompt.md"),
+                "timeout": 60,
+                "max_response_bytes": 1024 * 1024,
+            },
+        )()
+        completed = type(
+            "Completed",
+            (),
+            {
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "\n".join(
+                    [
+                        "OpenAI Codex v0.145.0",
+                        '{"prompt_package":{"secret":"must-not-leak"}}',
+                        "ERROR: Codex ran out of room in the model's context window.",
+                    ]
+                ),
+            },
+        )()
+
+        with (
+            mock.patch.object(self.runner, "resolve_codex_cli", return_value="/usr/local/bin/codex"),
+            mock.patch.object(self.runner, "run_bounded_command", return_value=completed),
+            self.assertRaisesRegex(
+                SystemExit,
+                "^Codex CLI analysis failed: model context window exhausted$",
+            ) as raised,
+        ):
+            self.runner.cloud_cli_chat(
+                {"response_schema": {"type": "object"}},
+                args,
+                self.runner.default_ai_settings(),
+            )
+
+        self.assertNotIn("must-not-leak", str(raised.exception))
 
     def test_exact_codex_route_overrides_global_model_and_effort(self) -> None:
         args = type(
@@ -1259,6 +1383,302 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(response["confidence_score"], 0.79)
         self.assertNotIn(
             "malicious_attribution_without_trusted_endpoint_evidence",
+            response["_confidence_calibration"]["limiters"],
+        )
+
+    def test_appliance_osquery_is_not_trusted_endpoint_evidence(self) -> None:
+        response = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.96,
+                detection_outcome="true_positive_malicious",
+                escalation_needed=True,
+            ),
+            {
+                "detection_validation": {
+                    "event_status": "observed",
+                    "rule_intent_match": "mismatch",
+                },
+                "incident_response_evidence": {
+                    "security_onion_response": {
+                        "osquery_results": [
+                            {
+                                "status": "ok",
+                                "target": "security-onion-appliance",
+                                "rows": [{"pid": "123", "name": "synthetic"}],
+                            },
+                        ],
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(response["detection_outcome"], "false_positive_logic_rule")
+        self.assertEqual(response["confidence"], "low")
+        self.assertEqual(response["confidence_score"], 0.39)
+        self.assertIn(
+            "malicious_attribution_without_trusted_endpoint_evidence",
+            response["_confidence_calibration"]["limiters"],
+        )
+
+    def test_incident_responder_requires_complete_nested_report_only_for_that_role(self) -> None:
+        incident_response = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.95,
+            ),
+            {"agent_role": "incident-responder"},
+        )
+        soc_response = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.95,
+            ),
+            {"agent_role": "soc-analyst"},
+        )
+        soc_with_unsolicited_report = self.runner.validate_response(
+            self.complete_response(
+                incident_response_report=self.complete_incident_report(),
+            ),
+            {"agent_role": "soc-analyst"},
+        )
+
+        validation = incident_response["_incident_response_report_validation"]
+        self.assertFalse(validation["valid"])
+        self.assertFalse(validation["model_report_present"])
+        self.assertIn("executive_bluf", validation["missing_fields"])
+        self.assertIn(
+            "incident_response_report.executive_bluf",
+            incident_response["_schema_repair"]["missing_keys"],
+        )
+        self.assertTrue(validation["narrative_reconciled"])
+        self.assertEqual(incident_response["confidence"], "low")
+        self.assertEqual(incident_response["confidence_score"], 0.39)
+        self.assertNotIn("incident_response_report", soc_response)
+        self.assertNotIn("_incident_response_report_validation", soc_response)
+        self.assertNotIn("_incident_evidence_completeness", soc_response)
+        self.assertEqual(soc_response["confidence"], "high")
+        self.assertEqual(soc_response["confidence_score"], 0.95)
+        self.assertNotIn(
+            "confidence_score",
+            soc_with_unsolicited_report["incident_response_report"],
+        )
+
+    def test_incident_report_confidence_tracks_calibrated_top_level_confidence(self) -> None:
+        response = self.runner.validate_response(
+            self.complete_response(
+                confidence="medium",
+                confidence_score=0.65,
+                incident_response_report=self.complete_incident_report(
+                    confidence="high",
+                ),
+            ),
+            self.complete_incident_prompt(),
+        )
+
+        self.assertTrue(response["_incident_response_report_validation"]["valid"])
+        self.assertFalse(
+            response["_incident_response_report_validation"]["narrative_reconciled"]
+        )
+        self.assertEqual(response["confidence"], "medium")
+        self.assertEqual(response["confidence_score"], 0.65)
+        self.assertEqual(response["incident_response_report"]["confidence"], "medium")
+        self.assertEqual(
+            response["incident_response_report"]["confidence_score"],
+            0.65,
+        )
+
+    def test_guarded_incident_verdict_reconciles_contradictory_report_narrative(self) -> None:
+        report = self.complete_incident_report(
+            executive_bluf="Confirmed malware; isolate every system immediately.",
+            detection_outcome_reasoning="The alert name proves malicious BPFdoor.",
+            conclusion="This incident is confirmed malicious.",
+            containment_recommendations=["Isolate every system immediately."],
+        )
+        prompt = self.complete_incident_prompt(
+            detection_validation={
+                "event_status": "observed",
+                "rule_intent_match": "mismatch",
+            },
+        )
+        response = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.96,
+                detection_outcome="true_positive_malicious",
+                escalation_needed=True,
+                incident_response_report=report,
+            ),
+            prompt,
+        )
+
+        reconciled = response["incident_response_report"]
+        validation = response["_incident_response_report_validation"]
+        self.assertEqual(response["detection_outcome"], "false_positive_logic_rule")
+        self.assertIn("False Positive - Logic/Rule", reconciled["executive_bluf"])
+        self.assertNotIn("Confirmed malware", reconciled["executive_bluf"])
+        self.assertIn(
+            "rule_intent_match=mismatch",
+            reconciled["detection_outcome_reasoning"],
+        )
+        self.assertTrue(validation["narrative_reconciled"])
+        self.assertEqual(
+            validation["model_narrative_before_reconciliation"]["conclusion"],
+            "This incident is confirmed malicious.",
+        )
+        self.assertEqual(
+            validation["model_actions_before_reconciliation"][
+                "containment_recommendations"
+            ],
+            ["Isolate every system immediately."],
+        )
+        self.assertNotIn(
+            "Isolate every system immediately.",
+            reconciled["containment_recommendations"],
+        )
+        self.assertIn(
+            "Do not initiate containment",
+            reconciled["containment_recommendations"][0],
+        )
+        self.assertEqual(reconciled["confidence"], response["confidence"])
+        self.assertEqual(
+            reconciled["confidence_score"],
+            response["confidence_score"],
+        )
+
+    def test_incomplete_incident_report_neutralizes_all_model_actions(self) -> None:
+        report = self.complete_incident_report(
+            containment_recommendations=["Isolate every system immediately."],
+            eradication_recommendations=["Delete every suspected file immediately."],
+            recovery_recommendations=["Reimage every host immediately."],
+        )
+        report.pop("osquery_findings")
+        response = self.runner.validate_response(
+            self.complete_response(
+                incident_response_report=report,
+            ),
+            self.complete_incident_prompt(),
+        )
+
+        reconciled = response["incident_response_report"]
+        validation = response["_incident_response_report_validation"]
+        self.assertTrue(validation["narrative_reconciled"])
+        self.assertIn("osquery_findings", validation["missing_fields"])
+        self.assertEqual(
+            validation["model_actions_before_reconciliation"],
+            {
+                "containment_recommendations": [
+                    "Isolate every system immediately."
+                ],
+                "eradication_recommendations": [
+                    "Delete every suspected file immediately."
+                ],
+                "recovery_recommendations": [
+                    "Reimage every host immediately."
+                ],
+            },
+        )
+        self.assertIn(
+            "Canonical handling=investigate",
+            reconciled["containment_recommendations"][0],
+        )
+        self.assertIn(
+            "Do not execute eradication",
+            reconciled["eradication_recommendations"][0],
+        )
+        self.assertIn(
+            "Do not execute recovery",
+            reconciled["recovery_recommendations"][0],
+        )
+        self.assertNotIn(
+            "Isolate every system immediately.",
+            reconciled["containment_recommendations"],
+        )
+
+    def test_truncated_incident_query_caps_high_confidence_at_medium(self) -> None:
+        prompt = self.complete_incident_prompt()
+        prompt["incident_response_evidence"]["security_onion_response"]["results"] = [
+            {
+                "status": "ok",
+                "semantic_valid": True,
+                "timed_out": False,
+                "truncated": True,
+                "shards": {"failed": 0},
+            },
+        ]
+        response = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.96,
+                detection_outcome="true_positive_suspicious",
+                incident_response_report=self.complete_incident_report(),
+            ),
+            prompt,
+        )
+
+        self.assertEqual(response["confidence"], "medium")
+        self.assertEqual(response["confidence_score"], 0.79)
+        self.assertIn(
+            "incident_evidence_query_truncated",
+            response["_confidence_calibration"]["limiters"],
+        )
+        self.assertEqual(
+            response["incident_response_report"]["confidence"],
+            "medium",
+        )
+        self.assertEqual(
+            response["incident_response_report"]["confidence_score"],
+            0.79,
+        )
+
+    def test_nested_investigation_pivot_projection_caps_high_confidence(self) -> None:
+        prompt = self.complete_incident_prompt(
+            investigation_query_results={
+                "prompt_projection": {
+                    "truncated": False,
+                },
+                "rounds": [
+                    {
+                        "round": 1,
+                        "results": [
+                            {
+                                "backend": "security_onion",
+                                "status": "ok",
+                                "evidence": {
+                                    "complete": True,
+                                    "partial": False,
+                                    "controls_valid": True,
+                                    "evidence_gaps": [],
+                                    "results": [
+                                        {
+                                            "status": "ok",
+                                            "semantic_valid": True,
+                                            "truncated": False,
+                                            "model_projection_truncated": True,
+                                        },
+                                    ],
+                                },
+                                "trusted_query_audit": [],
+                            },
+                        ],
+                    },
+                ],
+            },
+        )
+        response = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.96,
+                detection_outcome="true_positive_suspicious",
+                incident_response_report=self.complete_incident_report(),
+            ),
+            prompt,
+        )
+
+        self.assertEqual(response["confidence"], "medium")
+        self.assertEqual(response["confidence_score"], 0.79)
+        self.assertIn(
+            "investigation_pivot_evidence_truncated",
             response["_confidence_calibration"]["limiters"],
         )
 

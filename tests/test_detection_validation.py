@@ -59,6 +59,58 @@ def icmp_frame(
     return ethernet + ipv4 + icmp + payload
 
 
+def udp_frame(
+    payload: bytes,
+    *,
+    source_port: int = 61933,
+    destination_port: int = 3478,
+    vlan: bool = True,
+) -> bytes:
+    destination_mac = bytes.fromhex("969eaec0fe6b")
+    source_mac = bytes.fromhex("90ec77890954")
+    if vlan:
+        ethernet = (
+            destination_mac
+            + source_mac
+            + struct.pack("!HHH", 0x8100, 100, 0x0800)
+        )
+    else:
+        ethernet = destination_mac + source_mac + struct.pack("!H", 0x0800)
+    total_length = 20 + 8 + len(payload)
+    ipv4 = struct.pack(
+        "!BBHHHBBH4s4s",
+        0x45,
+        0,
+        total_length,
+        1,
+        0,
+        64,
+        17,
+        0,
+        socket.inet_aton("192.0.2.41"),
+        socket.inet_aton("192.0.2.42"),
+    )
+    udp = struct.pack(
+        "!HHHH",
+        source_port,
+        destination_port,
+        8 + len(payload),
+        0,
+    )
+    return ethernet + ipv4 + udp + payload
+
+
+def stun_message(message_type: int, *, body: bytes = b"") -> bytes:
+    if len(body) % 4:
+        raise ValueError("STUN fixture body must use 32-bit alignment")
+    transaction_id = bytes.fromhex("00112233445566778899aabb")
+    return (
+        struct.pack("!HHI", message_type, len(body), 0x2112A442)
+        + transaction_id
+        + body
+    )
+
+
 def alert_row(packet: bytes) -> dict[str, str]:
     raw_rule = (
         'alert icmp $HOME_NET any -> any any '
@@ -91,6 +143,58 @@ def alert_row(packet: bytes) -> dict[str, str]:
     }
     return {
         "rule_id": "2069174",
+        "raw_event_json": json.dumps(raw),
+        "alert_json": json.dumps(alert),
+    }
+
+
+def stun_alert_row(packet: bytes, *, response: bool = False) -> dict[str, str]:
+    if response:
+        sid = 2016150
+        name = "ET INFO Session Traversal Utilities for NAT (STUN Binding Response)"
+        raw_rule = (
+            'alert udp $EXTERNAL_NET 3478 -> $HOME_NET any '
+            f'(msg:"{name}"; xbits:isset,ET.STUN,track ip_dst; '
+            'content:"|01 01|"; depth:2; content:"|21 12 a4 42|"; '
+            f"distance:2; within:4; sid:{sid}; rev:4;)"
+        )
+    else:
+        sid = 2016149
+        name = "ET INFO Session Traversal Utilities for NAT (STUN Binding Request)"
+        raw_rule = (
+            'alert udp $HOME_NET any -> $EXTERNAL_NET 3478 '
+            f'(msg:"{name}"; xbits:set,ET.STUN,track ip_src; '
+            'content:"|00 01|"; depth:2; content:"|21 12 a4 42|"; '
+            f"distance:2; within:4; sid:{sid}; rev:4;)"
+        )
+    message = {
+        "timestamp": "2026-07-24  14:31:58.631-06:00",
+        "src_ip": "192.0.2.41",
+        "src_port": 61933,
+        "dest_ip": "192.0.2.42",
+        "dest_port": 3478,
+        "proto": "UDP",
+        "alert": {
+            "signature_id": sid,
+            "rev": 4,
+            "signature": name,
+            "rule": raw_rule,
+        },
+        "packet": base64.b64encode(packet).decode("ascii"),
+        "packet_info": {"linktype": 1},
+    }
+    raw = {
+        "message": json.dumps(message),
+        "rule": {"rule": raw_rule, "rev": 4, "ruleset": "Emerging Threats"},
+    }
+    alert = {
+        "rule_id": str(sid),
+        "rule_name": name,
+        "rule_ruleset": "Emerging Threats",
+        "security_onion": {"raw_event": raw},
+    }
+    return {
+        "rule_id": str(sid),
         "raw_event_json": json.dumps(raw),
         "alert_json": json.dumps(alert),
     }
@@ -256,6 +360,7 @@ class DetectionValidationTests(unittest.TestCase):
         )
         self.assertTrue(content["required"])
         self.assertEqual(content["status"], "mismatched")
+        self.assertEqual(content["field"], "icmp.payload_marker")
 
     def test_deployed_offset_is_search_start_not_exact_position(self) -> None:
         payload = bytearray(b"C" * 64)
@@ -365,6 +470,158 @@ class DetectionValidationTests(unittest.TestCase):
         self.assertEqual(features["candidate_packets"], 1)
         self.assertEqual(features["icmp_packets_parsed"], 0)
         self.assertEqual(features["parse_errors"], 1)
+
+    def test_vlan_udp_stun_binding_request_is_bounded_and_observed(self) -> None:
+        payload = stun_message(0x0001, body=b"\x00\x06\x00\x04safe")
+        row = stun_alert_row(udp_frame(payload))
+        context = validation.extract_rule_context(
+            json.loads(row["alert_json"]),
+            json.loads(row["raw_event_json"]),
+            row["rule_id"],
+        )
+
+        features = validation.extract_group_packet_features(
+            [row],
+            validation.marker_specs(context, None),
+        )
+        result = validation.build_detection_validation(context, features, None)
+
+        self.assertEqual(features["candidate_packets"], 1)
+        self.assertEqual(features["packets_parsed"], 1)
+        self.assertEqual(features["icmp_packets_parsed"], 0)
+        self.assertEqual(features["udp_packets_parsed"], 1)
+        self.assertEqual(features["parse_errors"], 0)
+        self.assertEqual(
+            features["packet_protocols"],
+            [{"value": "udp", "count": 1}],
+        )
+        self.assertEqual(features["stun"]["packets_parsed"], 1)
+        self.assertEqual(
+            features["stun"]["message_types"],
+            [{"value": "binding_request", "count": 1}],
+        )
+        self.assertEqual(features["stun"]["magic_cookie_valid_packets"], 1)
+        self.assertFalse(features["stun"]["transaction_ids_included"])
+        self.assertFalse(features["stun"]["raw_payloads_included"])
+        self.assertEqual(result["event_status"], "observed")
+        self.assertEqual(result["rule_intent_match"], "match")
+        deployed_contents = [
+            item
+            for item in result["predicate_results"]
+            if item["id"].startswith("deployed-content-")
+        ]
+        self.assertEqual(
+            [item["status"] for item in deployed_contents],
+            ["matched", "matched"],
+        )
+        self.assertEqual(
+            {item["field"] for item in deployed_contents},
+            {"udp.payload_marker"},
+        )
+        serialized = json.dumps(result)
+        self.assertNotIn(base64.b64encode(udp_frame(payload)).decode("ascii"), serialized)
+        self.assertNotIn("00112233445566778899aabb", serialized)
+        self.assertNotIn(payload.hex(), serialized)
+
+    def test_stun_request_and_success_response_are_counted_without_identifiers(self) -> None:
+        request = stun_alert_row(udp_frame(stun_message(0x0001)))
+        response = stun_alert_row(
+            udp_frame(
+                stun_message(0x0101, body=b"\x00\x20\x00\x08\x00\x01\x00\x00"),
+                source_port=3478,
+                destination_port=61933,
+            ),
+            response=True,
+        )
+
+        features = validation.extract_group_packet_features([request, response], [])
+
+        self.assertEqual(features["packets_parsed"], 2)
+        self.assertEqual(features["udp_packets_parsed"], 2)
+        self.assertEqual(features["parse_errors"], 0)
+        self.assertEqual(
+            features["stun"]["message_types"],
+            [
+                {"value": "binding_request", "count": 1},
+                {"value": "binding_success_response", "count": 1},
+            ],
+        )
+        self.assertEqual(features["stun"]["magic_cookie_valid_packets"], 2)
+        self.assertNotIn("transaction", json.dumps(features["stun"]["message_types"]))
+
+        response_context = validation.extract_rule_context(
+            json.loads(response["alert_json"]),
+            json.loads(response["raw_event_json"]),
+            response["rule_id"],
+        )
+        response_features = validation.extract_group_packet_features(
+            [response],
+            validation.marker_specs(response_context, None),
+        )
+        response_result = validation.build_detection_validation(
+            response_context,
+            response_features,
+            None,
+        )
+        self.assertEqual(response_result["rule_intent_match"], "match")
+        state = next(
+            item
+            for item in response_result["predicate_results"]
+            if item["id"] == "deployed-state-1"
+        )
+        self.assertEqual(state["status"], "matched")
+        self.assertEqual(state["provenance"]["kind"], "inference")
+        self.assertEqual(
+            state["provenance"]["scope"],
+            "suricata_sid_2016150_only",
+        )
+        self.assertFalse(state["provenance"]["engine_trace_observed"])
+        self.assertIn("not independently observed", state["reason"])
+
+    def test_stun_response_state_inference_does_not_generalize_to_other_xbits(self) -> None:
+        response = stun_alert_row(
+            udp_frame(
+                stun_message(0x0101, body=b"\x00\x20\x00\x08\x00\x01\x00\x00"),
+                source_port=3478,
+                destination_port=61933,
+            ),
+            response=True,
+        )
+        raw = json.loads(response["raw_event_json"])
+        raw["rule"]["rule"] = raw["rule"]["rule"].replace("ET.STUN", "ET.OTHER")
+        response["raw_event_json"] = json.dumps(raw)
+        context = validation.extract_rule_context(
+            json.loads(response["alert_json"]),
+            raw,
+            response["rule_id"],
+        )
+        features = validation.extract_group_packet_features(
+            [response],
+            validation.marker_specs(context, None),
+        )
+
+        result = validation.build_detection_validation(context, features, None)
+
+        self.assertEqual(result["rule_intent_match"], "unknown")
+        state = next(
+            item
+            for item in result["predicate_results"]
+            if item["id"] == "deployed-state-1"
+        )
+        self.assertEqual(state["status"], "unknown")
+        self.assertEqual(state["provenance"]["kind"], "unobserved")
+        self.assertFalse(state["provenance"]["engine_trace_observed"])
+
+    def test_valid_non_stun_udp_is_not_an_icmp_parse_error(self) -> None:
+        row = stun_alert_row(udp_frame(b"ordinary udp payload"))
+
+        features = validation.extract_group_packet_features([row], [])
+
+        self.assertEqual(features["packets_parsed"], 1)
+        self.assertEqual(features["icmp_packets_parsed"], 0)
+        self.assertEqual(features["udp_packets_parsed"], 1)
+        self.assertEqual(features["stun"]["packets_parsed"], 0)
+        self.assertEqual(features["parse_errors"], 0)
 
 
 if __name__ == "__main__":

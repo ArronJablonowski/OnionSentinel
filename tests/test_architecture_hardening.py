@@ -43,6 +43,11 @@ class ArchitectureHardeningTest(unittest.TestCase):
         self.assertNotIn("--model", plist)
         self.assertNotIn("devstral:latest", plist)
 
+    def test_codex_worker_has_a_context_safe_prompt_artifact_ceiling(self):
+        plist = (ROOT / "n8n/launchd/com.arron.soc.ai-analysis-cli.plist").read_text(encoding="utf-8")
+        self.assertIn("<string>--max-prompt-bytes</string>", plist)
+        self.assertIn("<string>1048576</string>", plist)
+
     def test_local_analysis_workers_are_event_driven_with_timer_fallbacks(self):
         ollama_plist = (ROOT / "n8n/launchd/com.arron.soc.ai-analysis.plist").read_text(encoding="utf-8")
         cli_plist = (ROOT / "n8n/launchd/com.arron.soc.ai-analysis-cli.plist").read_text(encoding="utf-8")

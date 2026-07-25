@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import sqlite3
@@ -76,6 +77,47 @@ class AiSchedulerPriorityTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.conn.close()
         self.tempdir.cleanup()
+
+    def test_deterministic_context_and_prompt_size_failures_are_not_retried(self) -> None:
+        for detail in (
+            "Codex CLI analysis failed: model context window exhausted",
+            "prompt package remains above 1048576 bytes after deterministic compaction",
+            "command stderr exceeded the 1048576-byte limit",
+            "Codex CLI analysis failed: provider authentication failed",
+            "Codex CLI analysis failed: configured model is unavailable or unauthorized",
+        ):
+            self.assertFalse(self.scheduler.ai_failure_is_retryable(detail))
+
+        for detail in (
+            "prompt builder failed rc=1",
+            "Codex CLI analysis failed: provider rate or usage limit reached",
+            "Codex CLI analysis failed: provider connection closed unexpectedly",
+        ):
+            self.assertTrue(self.scheduler.ai_failure_is_retryable(detail))
+
+    def test_failure_status_contract_marks_deterministic_failure_non_retryable(self) -> None:
+        response = io.BytesIO(b'{"ok":true}')
+        response.status = 200
+        with mock.patch.object(
+            self.scheduler.urllib.request,
+            "urlopen",
+            return_value=response,
+        ) as urlopen:
+            reported = self.scheduler.report_ai_job_status(
+                "http://127.0.0.1:8787",
+                "stable-group",
+                "failed",
+                "model context window exhausted",
+                "lease-token",
+                job_type="incident_response_analysis",
+                retryable=False,
+            )
+
+        self.assertTrue(reported)
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertIs(payload["retryable"], False)
+        self.assertEqual(payload["error"], "model context window exhausted")
 
     def insert_alert(
         self,
@@ -466,11 +508,12 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                 )
                 self.assertEqual(self.scheduler.cli_agent_roles(settings_path), set())
 
-    def test_analysis_child_uses_the_same_settings_file_as_lane_selection(self) -> None:
+    def test_analysis_child_uses_scheduler_settings_and_prompt_limit(self) -> None:
         settings_path = Path(self.tempdir.name) / "custom-ai-settings.json"
         args = SimpleNamespace(
             analysis_dir=Path(self.tempdir.name) / "analysis",
             timeout=600,
+            max_prompt_bytes=1024 * 1024,
             alert_store_url="http://127.0.0.1:8787",
             ai_settings_file=settings_path,
             model=None,
@@ -484,6 +527,10 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         self.assertEqual(
             command[command.index("--ai-settings-file") + 1],
             str(settings_path),
+        )
+        self.assertEqual(
+            command[command.index("--max-prompt-bytes") + 1],
+            str(1024 * 1024),
         )
 
     def test_indexed_contract_rejects_partial_schema(self) -> None:

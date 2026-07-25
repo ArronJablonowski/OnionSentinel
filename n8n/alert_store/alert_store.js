@@ -3531,9 +3531,18 @@ async function storeAlert(rawAlert) {
   return result;
 }
 
-async function transitionDurableJobStatus(jobType, dedupeKey, status, error = '', leaseToken = '') {
+async function transitionDurableJobStatus(
+  jobType,
+  dedupeKey,
+  status,
+  error = '',
+  leaseToken = '',
+  retryable = true,
+) {
   let resolvedKey = dedupeKey;
-  let transition = await durableJobs.transition(jobType, resolvedKey, status, error, leaseToken);
+  let transition = await durableJobs.transition(
+    jobType, resolvedKey, status, error, leaseToken, retryable,
+  );
   let updated = Boolean(transition?.updated);
   if (!updated && ['ai_analysis', 'incident_response_analysis'].includes(jobType)) {
     // Workers deployed before stable V2 group identities report the legacy
@@ -3545,7 +3554,9 @@ async function transitionDurableJobStatus(jobType, dedupeKey, status, error = ''
     );
     if (alias?.stable_group_id) {
       resolvedKey = String(alias.stable_group_id);
-      transition = await durableJobs.transition(jobType, resolvedKey, status, error, leaseToken);
+      transition = await durableJobs.transition(
+        jobType, resolvedKey, status, error, leaseToken, retryable,
+      );
       updated = Boolean(transition?.updated);
     }
   }
@@ -5650,9 +5661,10 @@ async function handleRequest(request, response) {
       const dedupeKey = safeString(payload?.dedupe_key, 256);
       const status = safeString(payload?.status, 32).toLowerCase();
       const leaseToken = safeString(payload?.lease_token, 128);
+      const retryable = payload?.retryable !== false;
       if (!jobType || !dedupeKey) throw new Error('job_type and dedupe_key are required');
       const transition = await withSqliteWriteGate(() => transitionDurableJobStatus(
-        jobType, dedupeKey, status, safeString(payload?.error, 1000), leaseToken,
+        jobType, dedupeKey, status, safeString(payload?.error, 1000), leaseToken, retryable,
       ));
       sendJson(response, transition.updated ? 200 : 404, {
         ok: transition.updated,

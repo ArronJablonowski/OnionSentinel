@@ -22,6 +22,20 @@ The baseline packs still run when live endpoint OSQuery is disabled or
 unavailable. A live-query failure is recorded as an evidence gap; it must not
 erase or fabricate baseline findings.
 
+After baseline collection, the provider-neutral investigation loop may request
+additional bounded Elastic/OQL pivots from these reviewed packs:
+`alert_context`, `network_flow`, `dns_activity`, `system_auth`, `zeek_tls`,
+`zeek_http`, `zeek_files`, `zeek_ssh`, `zeek_stun`, `zeek_quic`,
+`zeek_anomalies`, `osquery_history`, and `cross_sensor_timeline`. These are
+follow-up capabilities, not additional mandatory baseline searches.
+
+Each follow-up may optionally copy a subset of one trusted `event_tuple` to
+preserve source/destination IP roles, ports, transport, protocol, community ID,
+and rule ID. Tuple fields are ANDed with the exact observable and time filters.
+The Mac and Security Onion validators reject unsupported fields, values drawn
+from different events, swapped roles, missing provenance, and returned hits
+that do not satisfy the tuple.
+
 ## Fixed Elastic Packs
 
 `security-onion/bin/export-incident-evidence` constructs these five searches:

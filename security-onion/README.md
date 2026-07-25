@@ -79,13 +79,19 @@ or shell proxy.
 
 The SOC Analyst or Incident Responder model may propose only:
 
-- one of the five reviewed evidence packs listed above;
+- one of these reviewed pivot packs: `alert_context`, `network_flow`,
+  `dns_activity`, `system_auth`, `zeek_tls`, `zeek_http`, `zeek_files`,
+  `zeek_ssh`, `zeek_stun`, `zeek_quic`, `zeek_anomalies`,
+  `osquery_history`, or `cross_sensor_timeline`;
 - display dialect `elastic` or `oql`;
 - one of six reviewed purposes (`validate_detection`,
   `establish_timeline`, `correlate_observable`, `measure_prevalence`,
   `identify_related_activity`, or `test_benign_hypothesis`);
 - fixed aggregation behavior `events`, `count`, or `timeline`;
 - exact IP, domain, host, or user values;
+- optionally, a subset of one authenticated event tuple containing exact
+  source/destination roles, ports, transport, protocol, community ID, or rule
+  ID;
 - one UTC window of no more than 24 hours; and
 - a result size from 1 through 100.
 
@@ -95,9 +101,12 @@ proposal with a trusted authorization context containing the case/group,
 representative alert anchor, time envelope, base observables, and any new exact
 observable previously discovered in authenticated evidence. Every observable
 is tagged as `trusted_context` or `prior_evidence` with a bounded evidence
-reference. The Security Onion wrapper independently validates that manifest
-and rejects unused, missing, conflicting, wildcard, malformed, or
-out-of-envelope values.
+reference. Event tuples retain their trusted source and evidence reference and
+cannot be assembled as a cross-product from separate events. The Security
+Onion wrapper independently validates that manifest and rejects unused,
+missing, conflicting, role-swapped, wildcard, malformed, unsupported, or
+out-of-envelope values. It also rejects any returned hit that does not satisfy
+the authenticated tuple.
 
 A batch contains at most four queries, 24 distinct observables, 400 requested
 event bodies, and 96 cumulative query-hours. Every individual query is also

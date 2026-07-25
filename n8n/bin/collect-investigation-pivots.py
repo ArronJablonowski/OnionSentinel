@@ -153,6 +153,14 @@ def _model_evidence(response: dict[str, Any]) -> dict[str, Any]:
             "window": result["window"],
             "observables": result["observables"],
             "observable_provenance": result["observable_provenance"],
+            **(
+                {
+                    "event_tuple": result["event_tuple"],
+                    "event_tuple_provenance": result["event_tuple_provenance"],
+                }
+                if result.get("event_tuple")
+                else {}
+            ),
             "status": status,
             "semantic_valid": result["semantic_valid"],
             "total_hits": result["total_hits"],
@@ -192,6 +200,14 @@ def _query_audit(response: dict[str, Any]) -> list[dict[str, Any]]:
             "window": result["window"],
             "observables": result["observables"],
             "observable_provenance": result["observable_provenance"],
+            **(
+                {
+                    "event_tuple": result["event_tuple"],
+                    "event_tuple_provenance": result["event_tuple_provenance"],
+                }
+                if result.get("event_tuple")
+                else {}
+            ),
             "requested_size": result["size"],
             "execution_backend": result["execution_backend"],
             "execution_semantics": result["execution_semantics"],

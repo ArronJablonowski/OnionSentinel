@@ -193,20 +193,28 @@ investigation pivot loop. The prompt exposes only a capability descriptor; an
 underscore-prefixed local authorization context containing the immutable alert
 anchor, exact trusted observables, actor role, and bounded time envelope is
 removed before every model call. A model may request no more than three rounds,
-12 total pivots, or six pivots in one round. Every round runs through a local
+12 total pivots, or four pivots in one round. Every round runs through a local
 policy broker and returns bounded evidence plus collector-owned provenance to
 the same assigned model route.
 
-Elastic and OQL pivots choose one of the five reviewed evidence packs, a
-reviewed purpose, exact trusted or broker-discovered observables, an
-independently bounded UTC window no longer than 24 hours, a fixed aggregation,
-and a small result size. The model cannot provide an index, field, KQL/OQL
-expression, Query DSL object, script, wildcard, or mutation. The Mac binds the
-proposal to its hidden authorization context; Security Onion independently
-revalidates the signed-by-digest manifest and constructs the final query.
-Positive exact-anchor and contradictory negative controls run with every batch
-so a replayed, substituted, or filter-ignoring response fails semantic
-validation.
+Elastic and OQL pivots choose one of the reviewed pivot packs:
+`alert_context`, `network_flow`, `dns_activity`, `system_auth`, `zeek_tls`,
+`zeek_http`, `zeek_files`, `zeek_ssh`, `zeek_stun`, `zeek_quic`,
+`zeek_anomalies`, `osquery_history`, or `cross_sensor_timeline`. Each request
+also chooses a reviewed purpose, exact trusted or broker-discovered
+observables, an independently bounded UTC window no longer than 24 hours, a
+fixed aggregation, and a small result size. An optional `event_tuple` may bind
+an authenticated event's source and destination roles, ports, transport,
+protocol, community ID, and rule ID as ANDed exact constraints. It cannot mix
+values from different trusted rows.
+
+The model cannot provide an index, field, KQL/OQL expression, Query DSL object,
+script, wildcard, or mutation. The Mac binds the proposal to its hidden
+authorization context; Security Onion independently revalidates the
+signed-by-digest observable and event-tuple provenance and constructs the final
+query. Positive exact-anchor and contradictory negative controls run with every
+batch so a replayed, substituted, role-swapped, or filter-ignoring response
+fails semantic validation.
 
 For an OQL request, the wrapper renders real analyst-readable Hunt OQL but
 executes a locally compiled semantic equivalent through

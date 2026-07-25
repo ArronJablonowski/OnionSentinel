@@ -147,3 +147,30 @@ test('exhausted processing jobs become terminal instead of retrying forever', as
   assert.equal(failed.last_error, 'provider timeout');
   assert.equal(await env.queue.claim('public_enrichment', 60), null);
 });
+
+test('a deterministic non-retryable failure becomes terminal on its first attempt', async (context) => {
+  const env = await fixture();
+  context.after(env.close);
+  await env.queue.enqueue('incident_response_analysis', 'group-context', {}, {maxAttempts: 12});
+  const claimed = await env.queue.transition(
+    'incident_response_analysis', 'group-context', 'processing',
+  );
+  assert.equal(claimed.updated, true);
+
+  const transition = await env.queue.transition(
+    'incident_response_analysis',
+    'group-context',
+    'failed',
+    'model context window exhausted',
+    claimed.leaseToken,
+    false,
+  );
+
+  assert.equal(transition.updated, true);
+  const failed = await env.get(
+    "SELECT status, attempt_count, last_error FROM durable_jobs WHERE dedupe_key = 'group-context'",
+  );
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.attempt_count, 1);
+  assert.equal(failed.last_error, 'model context window exhausted');
+});

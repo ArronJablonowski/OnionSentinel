@@ -174,8 +174,9 @@ function createDurableJobQueue({run, get, all, now, transitionLeaseSeconds = 900
     return completed;
   }
 
-  async function fail(job, error, baseRetrySeconds = 30) {
-    const terminal = Number(job.attempt_count || 0) >= Number(job.max_attempts || 8);
+  async function fail(job, error, baseRetrySeconds = 30, retryable = true) {
+    const terminal = retryable === false
+      || Number(job.attempt_count || 0) >= Number(job.max_attempts || 8);
     const delay = Math.min(3600, Math.max(5, Number(baseRetrySeconds)) * (2 ** Math.max(0, Number(job.attempt_count || 1) - 1)));
     const retryAt = new Date(Date.now() + delay * 1000).toISOString();
     const result = await run(
@@ -193,7 +194,14 @@ function createDurableJobQueue({run, get, all, now, transitionLeaseSeconds = 900
     return rows;
   }
 
-  async function transition(jobType, dedupeKey, status, error = '', suppliedLeaseToken = '') {
+  async function transition(
+    jobType,
+    dedupeKey,
+    status,
+    error = '',
+    suppliedLeaseToken = '',
+    retryable = true,
+  ) {
     if (!['pending', 'processing', 'completed', 'failed'].includes(status)) {
       throw new Error('invalid durable job status');
     }
@@ -238,7 +246,15 @@ function createDurableJobQueue({run, get, all, now, transitionLeaseSeconds = 900
           [timestamp, timestamp, job.id, suppliedLeaseToken],
         );
       } else {
-        return {updated: await fail({...job, lease_token: suppliedLeaseToken}, error), leaseToken: null};
+        return {
+          updated: await fail(
+            {...job, lease_token: suppliedLeaseToken},
+            error,
+            30,
+            retryable,
+          ),
+          leaseToken: null,
+        };
       }
     } else if (status === 'completed') {
       result = await run(

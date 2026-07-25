@@ -277,6 +277,7 @@ def report_ai_job_status(
     error: str = "",
     lease_token: str = "",
     job_type: str = "ai_analysis",
+    retryable: bool = True,
 ) -> bool | str:
     """Transition durable AI intent through a bounded local HTTP contract.
 
@@ -291,6 +292,7 @@ def report_ai_job_status(
         "status": status,
         "error": error[:1000],
         "lease_token": lease_token,
+        "retryable": bool(retryable),
     }).encode("utf-8")
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/jobs/status",
@@ -317,6 +319,28 @@ def report_ai_job_status(
         raise RuntimeError(f"AI job status returned HTTP {exc.code}") from exc
     except (urllib.error.URLError, BoundedHttpError) as exc:
         raise RuntimeError(f"AI job status request failed: {exc}") from exc
+
+
+NON_RETRYABLE_AI_FAILURE_MARKERS = (
+    "model context window exhausted",
+    "prompt package remains above",
+    "prompt package exceeded",
+    "investigation follow-up prompt exceeds",
+    "no safe prompt budget remains",
+    "codex cli executable was not found",
+    "codex cli model name is invalid",
+    "codex cli reasoning effort is invalid",
+    "provider authentication failed",
+    "configured model is unavailable or unauthorized",
+    "command stderr exceeded the",
+    "command stdout exceeded the",
+)
+
+
+def ai_failure_is_retryable(error: object) -> bool:
+    """Return false for deterministic failures that rebuilding cannot repair."""
+    detail = str(error or "").strip().lower()
+    return not any(marker in detail for marker in NON_RETRYABLE_AI_FAILURE_MARKERS)
 
 
 def reconcile_completed_ai_jobs(base_url: str, group_ids: set[str]) -> int:
@@ -1207,6 +1231,13 @@ def analysis_command(prompt_path: Path, args: argparse.Namespace) -> list[str]:
         str(args.analysis_dir),
         "--timeout",
         str(args.timeout),
+        "--max-prompt-bytes",
+        str(
+            int(
+                getattr(args, "max_prompt_bytes", DEFAULT_MAX_PROMPT_BYTES)
+                or DEFAULT_MAX_PROMPT_BYTES
+            )
+        ),
         "--alert-store-url",
         args.alert_store_url,
         "--ai-settings-file",
@@ -1501,10 +1532,8 @@ def main() -> int:
                 )
                 if proc.stdout:
                     print(proc.stdout, end="")
-                if proc.stderr:
-                    print(proc.stderr, file=sys.stderr, end="")
                 if proc.returncode != 0:
-                    detail = proc.stderr or f"local AI analysis failed rc={proc.returncode}"
+                    detail = proc.stderr.strip() or f"local AI analysis failed rc={proc.returncode}"
                     if processing_recorded:
                         report_ai_job_status(
                             args.alert_store_url,
@@ -1513,9 +1542,12 @@ def main() -> int:
                             detail,
                             processing_lease_token,
                             job_type=durable_job_type,
+                            retryable=ai_failure_is_retryable(detail),
                         )
-                    print(detail.strip(), file=sys.stderr)
+                    print(detail, file=sys.stderr)
                     continue
+                if proc.stderr:
+                    print(proc.stderr, file=sys.stderr, end="")
                 if processing_recorded:
                     report_ai_job_status(
                         args.alert_store_url,
@@ -1535,6 +1567,7 @@ def main() -> int:
                             str(error),
                             processing_lease_token,
                             job_type=durable_job_type,
+                            retryable=ai_failure_is_retryable(error),
                         )
                     except RuntimeError as status_error:
                         print(f"AI failure callback also failed: {status_error}", file=sys.stderr)

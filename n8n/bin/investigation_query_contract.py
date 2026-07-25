@@ -33,6 +33,7 @@ MAX_WINDOW = dt.timedelta(hours=24)
 MAX_AUTHORIZATION_WINDOW = dt.timedelta(days=7)
 MAX_CONTEXT_OBSERVABLES_PER_KIND = 16
 MAX_DISCOVERED_OBSERVABLES = 32
+MAX_CONTEXT_EVENT_TUPLES = 32
 ALLOWED_DIALECTS = {"elastic", "oql"}
 ALLOWED_AGGREGATIONS = {"events", "count", "timeline"}
 ALLOWED_PURPOSES = {
@@ -49,21 +50,46 @@ OBSERVABLE_KINDS = ("ips", "domains", "hosts", "users")
 OBSERVABLE_FIELDS = {
     "ips": [
         "source.ip", "destination.ip", "client.ip", "server.ip", "host.ip",
-        "dns.resolved_ip",
+        "dns.resolved_ip", "related.ip",
     ],
     "domains": [
-        "dns.question.name", "url.domain", "tls.server.name", "source.domain",
-        "destination.domain", "client.domain", "server.domain",
+        "dns.question.name", "dns.query.name", "url.domain",
+        "tls.server.name", "ssl.server_name", "http.virtual_host",
+        "quic.server_name", "source.domain", "destination.domain",
+        "client.domain", "server.domain",
     ],
-    "hosts": ["host.id", "host.name", "host.hostname", "agent.id"],
+    "hosts": [
+        "host.id", "host.name", "host.hostname", "agent.id", "agent.name",
+        "related.hosts",
+    ],
     "users": [
         "user.id", "user.name", "source.user.name", "destination.user.name",
-        "client.user.name",
+        "client.user.name", "related.user",
     ],
+}
+EVENT_TUPLE_FIELDS = {
+    "source_ip": "source.ip",
+    "destination_ip": "destination.ip",
+    "source_port": "source.port",
+    "destination_port": "destination.port",
+    "transport": "network.transport",
+    "protocol": "network.protocol",
+    "community_id": "network.community_id",
+    # Security Onion maps a Suricata signature ID to ECS rule.id.
+    "rule_id": "rule.id",
 }
 ALERT_INDEX_SCOPE = [
     "logs-suricata.alerts-so",
     "logs-detections.alerts-so",
+]
+ZEEK_PROTOCOL_BASE_FIELDS = [
+    "@timestamp", "event.dataset", "event.kind", "event.category",
+    "event.type", "event.action", "event.outcome", "event.duration",
+    "source.ip", "source.port", "destination.ip", "destination.port",
+    "client.ip", "client.port", "server.ip", "server.port",
+    "network.transport", "network.protocol", "network.direction",
+    "network.community_id", "network.bytes", "network.packets",
+    "log.id.uid", "observer.name",
 ]
 PACKS = {
     "alert_context": {
@@ -118,7 +144,10 @@ PACKS = {
             "source.port", "destination.ip", "destination.port",
             "source.domain", "destination.domain", "client.ip",
             "client.domain", "server.ip", "server.domain", "url.domain",
-            "tls.server.name",
+            "tls.server.name", "dns.query.name", "dns.query.type",
+            "dns.query.class", "dns.response.code", "dns.response.code_name",
+            "dns.highest_registered_domain", "dns.parent_domain",
+            "dns.top_level_domain",
             "network.transport", "network.protocol", "network.community_id",
             "dns.id", "dns.question.name", "dns.question.type",
             "dns.question.class", "dns.response_code", "dns.resolved_ip",
@@ -126,6 +155,97 @@ PACKS = {
             "agent.id", "host.ip", "user.id", "user.name",
             "source.user.name", "destination.user.name", "client.user.name",
             "process.entity_id", "process.name", "process.executable",
+        ],
+    },
+    "system_auth": {
+        "indices": ["logs-system.auth-*"],
+        "datasets": ["system.auth"],
+        "fields": [
+            "@timestamp", "event.dataset", "event.kind", "event.category",
+            "event.type", "event.action", "event.outcome", "event.id",
+            "source.ip", "source.port", "source.address", "host.id",
+            "host.name", "host.hostname", "host.ip", "agent.id",
+            "agent.name", "user.id", "user.name", "related.ip",
+            "related.hosts", "related.user", "process.pid", "process.name",
+            "system.auth.ssh.event", "log.syslog.appname",
+        ],
+    },
+    "zeek_tls": {
+        "indices": ["logs-zeek-so"],
+        "datasets": ["zeek.ssl"],
+        "fields": [
+            *ZEEK_PROTOCOL_BASE_FIELDS,
+            "ssl.cipher", "ssl.curve", "ssl.established",
+            "ssl.server_name", "ssl.validation_status", "ssl.version",
+            "hash.ja3", "hash.ja3s", "hash.ja4",
+            "tls.server.hash.sha256",
+        ],
+    },
+    "zeek_http": {
+        "indices": ["logs-zeek-so"],
+        "datasets": ["zeek.http"],
+        "fields": [
+            *ZEEK_PROTOCOL_BASE_FIELDS,
+            "http.method", "http.status_code", "http.status_message",
+            "http.trans_depth", "http.uri", "http.useragent",
+            "http.version", "http.virtual_host",
+            "http.request.body.length", "http.response.body.length",
+            "file.resp_mime_types", "log.id.resp_fuids",
+        ],
+    },
+    "zeek_files": {
+        "indices": ["logs-zeek-so"],
+        "datasets": ["zeek.file"],
+        "fields": [
+            *ZEEK_PROTOCOL_BASE_FIELDS,
+            "log.id.fuid", "file.analyzer", "file.bytes.missing",
+            "file.bytes.overflow", "file.bytes.seen", "file.bytes.total",
+            "file.depth", "file.local_orig", "file.mime_type",
+            "file.source", "hash.md5", "hash.sha1", "hash.sha256",
+        ],
+    },
+    "zeek_ssh": {
+        "indices": ["logs-zeek-so"],
+        "datasets": ["zeek.ssh"],
+        "fields": [
+            *ZEEK_PROTOCOL_BASE_FIELDS,
+            "hash.hassh", "ssh.authentication.attempts",
+            "ssh.authentication.success", "ssh.cipher_algorithm",
+            "ssh.client", "ssh.compression_algorithm",
+            "ssh.hassh_algorithms", "ssh.hassh_server",
+            "ssh.hassh_server_algorithms", "ssh.hassh_version",
+            "ssh.host_key_algorithm", "ssh.kex_algorithm",
+            "ssh.mac_algorithm", "ssh.server", "ssh.version",
+        ],
+    },
+    "zeek_stun": {
+        "indices": ["logs-zeek-so"],
+        "datasets": ["zeek.stun", "zeek.stun_nat"],
+        "fields": [
+            *ZEEK_PROTOCOL_BASE_FIELDS,
+            "stun.attribute.types", "stun.attribute.values",
+            "stun.class", "stun.id", "stun.method",
+            "stun.lan.addresses", "stun.wan.addresses",
+            "stun.wan.ports",
+        ],
+    },
+    "zeek_quic": {
+        "indices": ["logs-zeek-so"],
+        "datasets": ["zeek.quic"],
+        "fields": [
+            *ZEEK_PROTOCOL_BASE_FIELDS,
+            "quic.client_initial_dcid", "quic.client_protocol",
+            "quic.client_scid", "quic.history", "quic.server_name",
+            "quic.server_scid", "quic.version",
+        ],
+    },
+    "zeek_anomalies": {
+        "indices": ["logs-zeek-so"],
+        "datasets": ["zeek.notice", "zeek.weird", "zeek.analyzer"],
+        "fields": [
+            *ZEEK_PROTOCOL_BASE_FIELDS,
+            "notice.action", "notice.note", "notice.suppress_for",
+            "weird.name", "weird.peer", "error.reason",
         ],
     },
     "osquery_history": {
@@ -195,6 +315,7 @@ SAFE_DOMAIN_RE = re.compile(
     r"(?i)^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
 )
 SAFE_EVIDENCE_REF_RE = re.compile(r"^[A-Za-z0-9_.:@/+=#-]{1,256}$")
+SAFE_COMMUNITY_ID_RE = re.compile(r"^[A-Za-z0-9_:+/=-]{1,256}$")
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 
 
@@ -330,6 +451,106 @@ def _normalize_observables(
     return normalized
 
 
+def _normalize_event_tuple(value: object, *, label: str) -> dict[str, Any]:
+    """Normalize one exact, role-preserving ECS event constraint tuple."""
+    data = _require_mapping(value, label)
+    unknown = set(data) - set(EVENT_TUPLE_FIELDS)
+    if unknown:
+        raise InvestigationQueryContractError(
+            f"{label} contains unsupported fields: {', '.join(sorted(unknown))}"
+        )
+    if not data:
+        raise InvestigationQueryContractError(f"{label} must not be empty")
+    clean: dict[str, Any] = {}
+    for field in EVENT_TUPLE_FIELDS:
+        if field not in data:
+            continue
+        raw = data[field]
+        if field in {"source_ip", "destination_ip"}:
+            clean[field] = _normalize_observable("ips", raw)
+        elif field in {"source_port", "destination_port"}:
+            if isinstance(raw, bool):
+                raise InvestigationQueryContractError(f"{label}.{field} is invalid")
+            try:
+                port = int(raw)
+            except (TypeError, ValueError) as exc:
+                raise InvestigationQueryContractError(
+                    f"{label}.{field} is invalid"
+                ) from exc
+            if port < 0 or port > 65535:
+                raise InvestigationQueryContractError(
+                    f"{label}.{field} is outside the port range"
+                )
+            clean[field] = port
+        elif field in {"transport", "protocol"}:
+            protocol = str(raw or "").strip().lower()
+            if not SAFE_ATOM_RE.fullmatch(protocol):
+                raise InvestigationQueryContractError(f"{label}.{field} is invalid")
+            clean[field] = protocol
+        elif field == "community_id":
+            community_id = str(raw or "").strip()
+            if not SAFE_COMMUNITY_ID_RE.fullmatch(community_id):
+                raise InvestigationQueryContractError(
+                    f"{label}.community_id is invalid"
+                )
+            clean[field] = community_id
+        else:
+            rule_id = str(raw or "").strip()
+            if not SAFE_ATOM_RE.fullmatch(rule_id):
+                raise InvestigationQueryContractError(f"{label}.rule_id is invalid")
+            clean[field] = rule_id
+    return clean
+
+
+def _normalize_context_event_tuples(
+    value: object,
+    *,
+    limit: int = MAX_CONTEXT_EVENT_TUPLES,
+    reject_duplicates: bool = False,
+) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > limit:
+        raise InvestigationQueryContractError(
+            "authorization permitted_event_tuples exceeds its limit"
+        )
+    clean: list[dict[str, Any]] = []
+    for index, raw in enumerate(value):
+        item = _require_mapping(raw, f"authorization event tuple {index}")
+        _require_exact_keys(
+            item,
+            allowed={"event_tuple", "source", "evidence_ref"},
+            required={"event_tuple", "source", "evidence_ref"},
+            label=f"authorization event tuple {index}",
+        )
+        source = str(item["source"] or "")
+        evidence_ref = str(item["evidence_ref"] or "")
+        if source not in {"trusted_context", "prior_evidence"}:
+            raise InvestigationQueryContractError(
+                "authorization event tuple source is unsupported"
+            )
+        if not SAFE_EVIDENCE_REF_RE.fullmatch(evidence_ref):
+            raise InvestigationQueryContractError(
+                "authorization event tuple evidence_ref is invalid"
+            )
+        normalized = {
+            "event_tuple": _normalize_event_tuple(
+                item["event_tuple"],
+                label=f"authorization event tuple {index}.event_tuple",
+            ),
+            "source": source,
+            "evidence_ref": evidence_ref,
+        }
+        if normalized in clean:
+            if reject_duplicates:
+                raise InvestigationQueryContractError(
+                    "authorization event tuple is duplicated"
+                )
+            continue
+        clean.append(normalized)
+    return clean
+
+
 def _index_matches_scope(index_name: str, index_scope: list[str]) -> bool:
     return any(
         fnmatch.fnmatchcase(index_name, pattern)
@@ -368,6 +589,7 @@ def _normalize_authorization_context(value: object) -> dict[str, Any]:
         allowed={
             "context_id", "case_id", "group_id", "actor_role", "anchor",
             "time_envelope", "permitted_observables", "discovered_observables",
+            "permitted_event_tuples",
         },
         required={
             "context_id", "case_id", "actor_role", "anchor", "time_envelope",
@@ -430,6 +652,9 @@ def _normalize_authorization_context(value: object) -> dict[str, Any]:
         "time_envelope": envelope,
         "permitted_observables": permitted,
         "discovered_observables": normalized_discoveries,
+        "permitted_event_tuples": _normalize_context_event_tuples(
+            context.get("permitted_event_tuples")
+        ),
     }
     normalized["_envelope_start"] = envelope_start
     normalized["_envelope_end"] = envelope_end
@@ -455,6 +680,66 @@ def _observable_authorizations(context: dict[str, Any]) -> dict[tuple[str, str],
             "evidence_ref": item["evidence_ref"],
         }
     return authorized
+
+
+def pack_event_tuple_fields(pack_name: str) -> dict[str, str]:
+    """Return tuple constraints that can also be authenticated in hit sources."""
+    projected = set(PACKS[pack_name]["fields"])
+    return {
+        key: path
+        for key, path in EVENT_TUPLE_FIELDS.items()
+        if path in projected
+    }
+
+
+def _event_tuple_authorization(
+    requested: dict[str, Any],
+    context: dict[str, Any],
+    *,
+    pack_name: str,
+    observables: dict[str, list[str]],
+    label: str,
+) -> dict[str, Any]:
+    unsupported = set(requested) - set(pack_event_tuple_fields(pack_name))
+    if unsupported:
+        raise InvestigationQueryContractError(
+            f"{label} uses fields unavailable in pack {pack_name}: "
+            + ", ".join(sorted(unsupported))
+        )
+    for field in ("source_ip", "destination_ip"):
+        if field in requested and requested[field] not in observables["ips"]:
+            raise InvestigationQueryContractError(
+                f"{label}.{field} must also be an authorized IP observable"
+            )
+    matches = [
+        entry
+        for entry in context["permitted_event_tuples"]
+        if all(
+            entry["event_tuple"].get(field) == value
+            for field, value in requested.items()
+        )
+    ]
+    if not matches:
+        raise InvestigationQueryContractError(
+            f"{label} does not match one trusted role-aware event tuple"
+        )
+    # A subset can match duplicate group rows. Select deterministically and
+    # carry the complete trusted tuple as provenance; caller values never
+    # become authority merely by being present in the proposal.
+    selected = min(
+        matches,
+        key=lambda item: canonical_digest(item),
+    )
+    if (
+        {"source_ip", "destination_ip"}.intersection(
+            selected["event_tuple"]
+        )
+        and not {"source_ip", "destination_ip"}.intersection(requested)
+    ):
+        raise InvestigationQueryContractError(
+            f"{label} must retain a trusted source or destination IP role"
+        )
+    return selected
 
 
 def authorize_investigation_query_request(
@@ -487,13 +772,14 @@ def authorize_investigation_query_request(
     total_hit_budget = 0
     total_window = dt.timedelta()
     used_authorizations: dict[tuple[str, str], dict[str, str]] = {}
+    used_event_tuple_authorizations: list[dict[str, Any]] = []
     for index, raw_query in enumerate(queries):
         query = _require_mapping(raw_query, f"investigation query {index}")
         _require_exact_keys(
             query,
             allowed={
                 "query_id", "dialect", "pack", "purpose", "window",
-                "observables", "size", "aggregation",
+                "observables", "event_tuple", "size", "aggregation",
             },
             required={
                 "query_id", "dialect", "pack", "purpose", "window",
@@ -549,6 +835,22 @@ def authorize_investigation_query_request(
                 provenance[kind].append(dict(authorization))
                 used_authorizations[key] = dict(authorization)
                 batch_value_keys.add(key)
+        event_tuple = None
+        event_tuple_provenance = None
+        if "event_tuple" in query:
+            event_tuple = _normalize_event_tuple(
+                query["event_tuple"],
+                label=f"investigation query {query_id} event_tuple",
+            )
+            event_tuple_provenance = _event_tuple_authorization(
+                event_tuple,
+                context,
+                pack_name=pack,
+                observables=observables,
+                label=f"investigation query {query_id} event_tuple",
+            )
+            if event_tuple_provenance not in used_event_tuple_authorizations:
+                used_event_tuple_authorizations.append(event_tuple_provenance)
         try:
             size = int(query["size"])
         except (TypeError, ValueError) as exc:
@@ -558,7 +860,7 @@ def authorize_investigation_query_request(
                 f"investigation size must be between 1 and {MAX_QUERY_HITS}"
             )
         total_hit_budget += 0 if aggregation == "count" else size
-        normalized_queries.append({
+        normalized_query = {
             "query_id": query_id,
             "dialect": dialect,
             "pack": pack,
@@ -568,7 +870,13 @@ def authorize_investigation_query_request(
             "observable_provenance": provenance,
             "size": size,
             "aggregation": aggregation,
-        })
+        }
+        if event_tuple is not None:
+            normalized_query["event_tuple"] = event_tuple
+            normalized_query["event_tuple_provenance"] = dict(
+                event_tuple_provenance or {}
+            )
+        normalized_queries.append(normalized_query)
     if len(batch_value_keys) > MAX_BATCH_OBSERVABLES:
         raise InvestigationQueryContractError(
             f"investigation batch exceeds {MAX_BATCH_OBSERVABLES} distinct observables"
@@ -599,6 +907,11 @@ def authorize_investigation_query_request(
             key=lambda item: (item["kind"], item["value"], item["evidence_ref"]),
         ),
     }
+    if used_event_tuple_authorizations:
+        authorization["event_tuples"] = sorted(
+            used_event_tuple_authorizations,
+            key=canonical_digest,
+        )
     authorization["manifest_digest"] = canonical_digest(authorization)
     return {
         "query_contract": INVESTIGATION_QUERY_CONTRACT,
@@ -666,6 +979,7 @@ def validate_authorized_investigation_query_request(payload: object) -> dict[str
         allowed={
             "context_id", "case_id", "group_id", "actor_role", "anchor",
             "time_envelope", "context_digest", "observables", "manifest_digest",
+            "event_tuples",
         },
         required={
             "context_id", "case_id", "group_id", "actor_role", "anchor",
@@ -723,6 +1037,11 @@ def validate_authorized_investigation_query_request(payload: object) -> dict[str
         authorized_values[key] = clean
         if clean not in clean_entries:
             clean_entries.append(clean)
+    authorized_event_tuples = _normalize_context_event_tuples(
+        authorization.get("event_tuples"),
+        limit=MAX_QUERIES,
+        reject_duplicates=True,
+    )
     queries = request["queries"]
     if not isinstance(queries, list) or not queries or len(queries) > MAX_QUERIES:
         raise InvestigationQueryContractError(
@@ -733,6 +1052,7 @@ def validate_authorized_investigation_query_request(payload: object) -> dict[str
     total_hits = 0
     total_window = dt.timedelta()
     used_values: set[tuple[str, str]] = set()
+    used_event_tuple_digests: set[str] = set()
     for index, raw_query in enumerate(queries):
         query = _require_mapping(raw_query, f"authorized query {index}")
         _require_exact_keys(
@@ -740,6 +1060,7 @@ def validate_authorized_investigation_query_request(payload: object) -> dict[str
             allowed={
                 "query_id", "dialect", "pack", "purpose", "window",
                 "observables", "observable_provenance", "size", "aggregation",
+                "event_tuple", "event_tuple_provenance",
             },
             required={
                 "query_id", "dialect", "pack", "purpose", "window",
@@ -803,6 +1124,58 @@ def validate_authorized_investigation_query_request(payload: object) -> dict[str
                     "authorized query observable provenance does not match its manifest"
                 )
             clean_provenance[kind] = [dict(item) for item in entries]
+        event_tuple = None
+        event_tuple_provenance = None
+        tuple_fields_present = {
+            field
+            for field in ("event_tuple", "event_tuple_provenance")
+            if field in query
+        }
+        if tuple_fields_present and tuple_fields_present != {
+            "event_tuple", "event_tuple_provenance"
+        }:
+            raise InvestigationQueryContractError(
+                "authorized query event tuple and provenance must be supplied together"
+            )
+        if tuple_fields_present:
+            event_tuple = _normalize_event_tuple(
+                query["event_tuple"],
+                label=f"authorized query {query_id} event_tuple",
+            )
+            unsupported = set(event_tuple) - set(pack_event_tuple_fields(pack))
+            if unsupported:
+                raise InvestigationQueryContractError(
+                    f"authorized query {query_id} event tuple is unsupported by its pack"
+                )
+            for field in ("source_ip", "destination_ip"):
+                if field in event_tuple and event_tuple[field] not in observables["ips"]:
+                    raise InvestigationQueryContractError(
+                        "authorized query role-aware IP is absent from observables"
+                    )
+            event_tuple_provenance = _require_mapping(
+                query["event_tuple_provenance"],
+                f"authorized query {query_id} event_tuple_provenance",
+            )
+            if (
+                event_tuple_provenance not in authorized_event_tuples
+                or not all(
+                    event_tuple_provenance["event_tuple"].get(field) == value
+                    for field, value in event_tuple.items()
+                )
+            ):
+                raise InvestigationQueryContractError(
+                    "authorized query event tuple provenance does not match its manifest"
+                )
+            if (
+                {"source_ip", "destination_ip"}.intersection(
+                    event_tuple_provenance["event_tuple"]
+                )
+                and not {"source_ip", "destination_ip"}.intersection(event_tuple)
+            ):
+                raise InvestigationQueryContractError(
+                    "authorized query event tuple dropped its trusted IP role"
+                )
+            used_event_tuple_digests.add(canonical_digest(event_tuple_provenance))
         try:
             size = int(query["size"])
         except (TypeError, ValueError) as exc:
@@ -810,7 +1183,7 @@ def validate_authorized_investigation_query_request(payload: object) -> dict[str
         if isinstance(query["size"], bool) or size < 1 or size > MAX_QUERY_HITS:
             raise InvestigationQueryContractError("authorized query size is out of bounds")
         total_hits += 0 if aggregation == "count" else size
-        clean_queries.append({
+        clean_query = {
             "query_id": query_id,
             "dialect": dialect,
             "pack": pack,
@@ -820,10 +1193,22 @@ def validate_authorized_investigation_query_request(payload: object) -> dict[str
             "observable_provenance": clean_provenance,
             "size": size,
             "aggregation": aggregation,
-        })
+        }
+        if event_tuple is not None:
+            clean_query["event_tuple"] = event_tuple
+            clean_query["event_tuple_provenance"] = dict(
+                event_tuple_provenance or {}
+            )
+        clean_queries.append(clean_query)
     if used_values != set(authorized_values):
         raise InvestigationQueryContractError(
             "authorization manifest contains unused or missing observable entries"
+        )
+    if used_event_tuple_digests != {
+        canonical_digest(item) for item in authorized_event_tuples
+    }:
+        raise InvestigationQueryContractError(
+            "authorization event tuple manifest contains unused or missing entries"
         )
     if total_hits > MAX_BATCH_HITS:
         raise InvestigationQueryContractError("authorized request exceeds its hit budget")
@@ -843,6 +1228,8 @@ def validate_authorized_investigation_query_request(payload: object) -> dict[str
         "context_digest": str(authorization["context_digest"]),
         "observables": clean_entries,
     }
+    if authorized_event_tuples:
+        clean_authorization["event_tuples"] = authorized_event_tuples
     clean_authorization["manifest_digest"] = canonical_digest(clean_authorization)
     if clean_authorization["manifest_digest"] != authorization["manifest_digest"]:
         raise InvestigationQueryContractError(
@@ -877,6 +1264,18 @@ def observable_clause(
     return {"bool": {"should": should, "minimum_should_match": 1}}
 
 
+def event_tuple_clause(event_tuple: dict[str, Any]) -> dict[str, Any]:
+    """Compile an exact tuple as an AND of fixed ECS term queries."""
+    return {
+        "bool": {
+            "filter": [
+                {"term": {EVENT_TUPLE_FIELDS[field]: value}}
+                for field, value in event_tuple.items()
+            ]
+        }
+    }
+
+
 def dataset_clause(datasets: list[str]) -> dict[str, Any]:
     return {
         "bool": {
@@ -909,6 +1308,11 @@ def build_query_dsl(query: dict[str, Any]) -> dict[str, Any]:
                     },
                     dataset_clause(pack["datasets"]),
                     observable_clause(query["observables"], query["pack"]),
+                    *(
+                        [event_tuple_clause(query["event_tuple"])]
+                        if query.get("event_tuple")
+                        else []
+                    ),
                 ]
             }
         },
@@ -927,6 +1331,12 @@ def _quote(value: str) -> str:
     return f'"{value}"'
 
 
+def _event_tuple_filter_value(field: str, value: Any) -> str:
+    if field in {"source_port", "destination_port"}:
+        return str(value)
+    return _quote(str(value))
+
+
 def kql_equivalent(query: dict[str, Any]) -> str:
     datasets = " or ".join(
         f"event.dataset : {_quote(value)}" for value in PACKS[query["pack"]]["datasets"]
@@ -937,11 +1347,18 @@ def kql_equivalent(query: dict[str, Any]) -> str:
             observables.append(
                 "(" + " or ".join(f"{field} : {_quote(value)}" for field in fields) + ")"
             )
-    return (
+    rendered = (
         f'@timestamp >= {_quote(query["window"]["start"])} and '
         f'@timestamp <= {_quote(query["window"]["end"])} and '
         f"({datasets}) and (" + " or ".join(observables) + ")"
     )
+    if query.get("event_tuple"):
+        rendered += " and (" + " and ".join(
+            f"{EVENT_TUPLE_FIELDS[field]} : "
+            f"{_event_tuple_filter_value(field, value)}"
+            for field, value in query["event_tuple"].items()
+        ) + ")"
+    return rendered
 
 
 def oql_equivalent(query: dict[str, Any]) -> str:
@@ -965,6 +1382,12 @@ def oql_equivalent(query: dict[str, Any]) -> str:
         f'{_quote(query["window"]["end"])}] AND '
         f"({datasets}) AND (" + " OR ".join(observables) + ")"
     )
+    if query.get("event_tuple"):
+        rendered += " AND (" + " AND ".join(
+            f"{EVENT_TUPLE_FIELDS[field]}:"
+            f"{_event_tuple_filter_value(field, value)}"
+            for field, value in query["event_tuple"].items()
+        ) + ")"
     if query["aggregation"] == "timeline":
         rendered += " | sortby @timestamp^"
     return rendered
@@ -1032,6 +1455,17 @@ def _observable_matches(kind: str, expected: str, candidate: object) -> bool:
         return False
 
 
+def _event_tuple_value_matches(field: str, expected: Any, candidate: object) -> bool:
+    try:
+        normalized = _normalize_event_tuple(
+            {field: candidate},
+            label="investigation hit event tuple",
+        )
+    except InvestigationQueryContractError:
+        return False
+    return normalized.get(field) == expected
+
+
 def _validate_hit_source(
     source: object,
     expected_query: dict[str, Any],
@@ -1080,6 +1514,15 @@ def _validate_hit_source(
         raise InvestigationQueryContractError(
             "investigation hit does not contain an authorized matching observable"
         )
+    for field, expected in (expected_query.get("event_tuple") or {}).items():
+        path = EVENT_TUPLE_FIELDS[field]
+        if not any(
+            _event_tuple_value_matches(field, expected, candidate)
+            for candidate in _path_values(source_map, path)
+        ):
+            raise InvestigationQueryContractError(
+                "investigation hit does not match its authorized event tuple"
+            )
 
 
 def _validate_pivot_result(
@@ -1092,6 +1535,11 @@ def _validate_pivot_result(
         "observable_provenance", "size", "aggregation",
     ):
         if value.get(field) != expected_query[field]:
+            raise InvestigationQueryContractError(
+                f"result {expected_query['query_id']} changed its authorized {field}"
+            )
+    for field in ("event_tuple", "event_tuple_provenance"):
+        if value.get(field) != expected_query.get(field):
             raise InvestigationQueryContractError(
                 f"result {expected_query['query_id']} changed its authorized {field}"
             )
@@ -1493,13 +1941,16 @@ __all__ = [
     "ALLOWED_AGGREGATIONS",
     "ALLOWED_DIALECTS",
     "ALLOWED_PURPOSES",
+    "EVENT_TUPLE_FIELDS",
     "INVESTIGATION_QUERY_CONTRACT",
     "InvestigationQueryContractError",
+    "SAFE_ATOM_RE",
     "authorize_investigation_query_request",
     "build_query_dsl",
     "canonical_digest",
     "kql_equivalent",
     "oql_equivalent",
+    "pack_event_tuple_fields",
     "validate_authorized_investigation_query_request",
     "validate_investigation_query_request",
     "validate_investigation_query_response",

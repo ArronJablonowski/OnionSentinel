@@ -26,6 +26,12 @@
     <string>8</string>
     <string>--timeout</string>
     <string>600</string>
+    <!-- Hosted Codex receives compact JSON, but the deterministic prompt
+         builder budgets its pretty-printed artifact. A 1 MiB artifact ceiling
+         compacts large IR evidence packs to roughly 350-500 KiB on the wire,
+         leaving context for reasoning and bounded follow-up queries. -->
+    <string>--max-prompt-bytes</string>
+    <string>1048576</string>
   </array>
 
   <key>WorkingDirectory</key>

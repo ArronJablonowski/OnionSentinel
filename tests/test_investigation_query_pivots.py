@@ -25,7 +25,9 @@ if str(BIN_DIR) not in sys.path:
 
 from investigation_query_contract import (  # noqa: E402
     ALERT_INDEX_SCOPE,
+    EVENT_TUPLE_FIELDS,
     INVESTIGATION_QUERY_CONTRACT,
+    OBSERVABLE_FIELDS,
     PACKS,
     InvestigationQueryContractError,
     authorize_investigation_query_request,
@@ -98,6 +100,48 @@ def proposal() -> dict:
             "aggregation": "timeline",
         }],
     }
+
+
+def role_aware_context() -> dict:
+    value = context()
+    value["permitted_observables"]["ips"] = [
+        "192.0.2.10",
+        "198.51.100.20",
+    ]
+    value["permitted_event_tuples"] = [{
+        "event_tuple": {
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "source_port": 49152,
+            "destination_port": 443,
+            "transport": "tcp",
+            "protocol": "tls",
+            "community_id": "1:trusted-flow=",
+            "rule_id": "2016150",
+        },
+        "source": "trusted_context",
+        "evidence_ref": "context:event-tuple:trusted-flow",
+    }]
+    return value
+
+
+def role_aware_proposal() -> dict:
+    value = proposal()
+    value["queries"][0].update({
+        "dialect": "elastic",
+        "pack": "alert_context",
+        "observables": {
+            "ips": ["192.0.2.10", "198.51.100.20"],
+            "domains": [],
+            "hosts": [],
+            "users": [],
+        },
+        "event_tuple": dict(
+            role_aware_context()["permitted_event_tuples"][0]["event_tuple"]
+        ),
+        "aggregation": "events",
+    })
+    return value
 
 
 def search_result_for(query: dict, *, hit: bool = True) -> dict:
@@ -343,6 +387,182 @@ class InvestigationQueryContractTests(unittest.TestCase):
             PACKS["dns_activity"]["fields"],
         )
 
+    def test_role_aware_event_tuple_is_provenance_bound_and_anded(self) -> None:
+        request = authorize_investigation_query_request(
+            role_aware_proposal(),
+            role_aware_context(),
+        )
+        query = request["queries"][0]
+        expected_tuple = role_aware_context()["permitted_event_tuples"][0][
+            "event_tuple"
+        ]
+        self.assertEqual(query["event_tuple"], expected_tuple)
+        self.assertEqual(
+            query["event_tuple_provenance"],
+            request["authorization"]["event_tuples"][0],
+        )
+
+        dsl = build_query_dsl(query)
+        tuple_filter = dsl["query"]["bool"]["filter"][3]["bool"]["filter"]
+        self.assertEqual(
+            tuple_filter,
+            [
+                {"term": {EVENT_TUPLE_FIELDS[field]: value}}
+                for field, value in expected_tuple.items()
+            ],
+        )
+        kql = kql_equivalent(query)
+        oql = oql_equivalent(query)
+        for text in (
+            'source.ip : "192.0.2.10"',
+            'destination.ip : "198.51.100.20"',
+            "source.port : 49152",
+            "destination.port : 443",
+            'network.transport : "tcp"',
+            'network.protocol : "tls"',
+            'network.community_id : "1:trusted-flow="',
+            'rule.id : "2016150"',
+        ):
+            self.assertIn(text, kql)
+            self.assertIn(text.replace(" : ", ":"), oql)
+
+    def test_event_tuple_cannot_swap_roles_or_cross_product_trusted_rows(self) -> None:
+        candidate = role_aware_proposal()
+        candidate["queries"][0]["event_tuple"].update({
+            "source_ip": "198.51.100.20",
+            "destination_ip": "192.0.2.10",
+        })
+        with self.assertRaisesRegex(
+            InvestigationQueryContractError,
+            "trusted role-aware event tuple",
+        ):
+            authorize_investigation_query_request(candidate, role_aware_context())
+
+        candidate_context = role_aware_context()
+        candidate_context["permitted_event_tuples"].append({
+            "event_tuple": {
+                "source_ip": "203.0.113.30",
+                "destination_ip": "192.0.2.10",
+                "destination_port": 53,
+                "transport": "udp",
+                "protocol": "dns",
+            },
+            "source": "trusted_context",
+            "evidence_ref": "context:event-tuple:second-flow",
+        })
+        candidate_context["permitted_observables"]["ips"].append("203.0.113.30")
+        candidate = role_aware_proposal()
+        candidate["queries"][0]["observables"]["ips"].append("203.0.113.30")
+        candidate["queries"][0]["event_tuple"] = {
+            "source_ip": "203.0.113.30",
+            "destination_ip": "198.51.100.20",
+        }
+        with self.assertRaisesRegex(
+            InvestigationQueryContractError,
+            "trusted role-aware event tuple",
+        ):
+            authorize_investigation_query_request(candidate, candidate_context)
+
+    def test_event_tuple_rejects_unauthorized_or_unprojected_constraints(self) -> None:
+        candidate = role_aware_proposal()
+        candidate["queries"][0]["event_tuple"]["destination_port"] = 8443
+        with self.assertRaisesRegex(
+            InvestigationQueryContractError,
+            "trusted role-aware event tuple",
+        ):
+            authorize_investigation_query_request(candidate, role_aware_context())
+
+        candidate = role_aware_proposal()
+        candidate["queries"][0]["event_tuple"]["community_id"] = (
+            '1:trusted-flow=" OR *'
+        )
+        with self.assertRaisesRegex(
+            InvestigationQueryContractError,
+            "community_id is invalid",
+        ):
+            authorize_investigation_query_request(candidate, role_aware_context())
+
+        candidate = role_aware_proposal()
+        candidate["queries"][0]["event_tuple"] = {
+            "destination_port": 443,
+            "transport": "tcp",
+        }
+        with self.assertRaisesRegex(
+            InvestigationQueryContractError,
+            "source or destination IP role",
+        ):
+            authorize_investigation_query_request(candidate, role_aware_context())
+
+        candidate = role_aware_proposal()
+        candidate["queries"][0]["pack"] = "system_auth"
+        candidate["queries"][0]["event_tuple"] = {"rule_id": "2016150"}
+        with self.assertRaisesRegex(
+            InvestigationQueryContractError,
+            "unavailable in pack",
+        ):
+            authorize_investigation_query_request(candidate, role_aware_context())
+
+    def test_system_auth_and_zeek_protocol_packs_compile_exact_fields(self) -> None:
+        auth_proposal = proposal()
+        auth_proposal["queries"][0].update(
+            {
+                "dialect": "elastic",
+                "pack": "system_auth",
+                "observables": {
+                    "ips": ["192.0.2.10"],
+                    "domains": [],
+                    "hosts": [],
+                    "users": [],
+                },
+                "aggregation": "events",
+            }
+        )
+        auth_query = authorize_investigation_query_request(
+            auth_proposal,
+            context(),
+        )["queries"][0]
+        auth_dsl = build_query_dsl(auth_query)
+        self.assertEqual(
+            auth_dsl["_source"],
+            PACKS["system_auth"]["fields"],
+        )
+        self.assertNotIn("message", auth_dsl["_source"])
+        self.assertIn(
+            {"term": {"event.dataset": "system.auth"}},
+            auth_dsl["query"]["bool"]["filter"][1]["bool"]["should"],
+        )
+
+        tls_context = context()
+        tls_proposal = proposal()
+        tls_proposal["queries"][0].update(
+            {
+                "pack": "zeek_tls",
+                "observables": {
+                    "ips": [],
+                    "domains": ["example.test"],
+                    "hosts": [],
+                    "users": [],
+                },
+                "aggregation": "events",
+            }
+        )
+        tls_query = authorize_investigation_query_request(
+            tls_proposal,
+            tls_context,
+        )["queries"][0]
+        tls_dsl = build_query_dsl(tls_query)
+        observable_terms = tls_dsl["query"]["bool"]["filter"][2]["bool"][
+            "should"
+        ]
+        self.assertIn(
+            {"term": {"ssl.server_name": "example.test"}},
+            observable_terms,
+        )
+        self.assertNotIn(
+            {"term": {"dns.query.name": "example.test"}},
+            observable_terms,
+        )
+
     def test_response_dsl_scope_and_projection_tampering_fail_closed(self) -> None:
         request = authorize_investigation_query_request(proposal(), context())
         response = valid_response(request)
@@ -357,6 +577,39 @@ class InvestigationQueryContractTests(unittest.TestCase):
         extra_source["results"][0]["hits"][0]["source"]["secret"] = "not projected"
         with self.assertRaisesRegex(InvestigationQueryContractError, "projection"):
             validate_investigation_query_response(extra_source, request)
+
+    def test_response_event_tuple_hit_mismatch_fails_closed(self) -> None:
+        request = authorize_investigation_query_request(
+            role_aware_proposal(),
+            role_aware_context(),
+        )
+        response = valid_response(request)
+        response["results"][0]["hits"][0] = {
+            "id": "hit-1",
+            "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+            "source": {
+                "@timestamp": "2026-07-24T11:30:00.000Z",
+                "event": {"dataset": "suricata.alert"},
+                "source": {"ip": "192.0.2.10", "port": 49152},
+                "destination": {"ip": "198.51.100.20", "port": 443},
+                "network": {
+                    "transport": "tcp",
+                    "protocol": "tls",
+                    "community_id": "1:trusted-flow=",
+                },
+                "rule": {"id": "2016150"},
+            },
+        }
+        self.assertIs(
+            validate_investigation_query_response(response, request),
+            response,
+        )
+        response["results"][0]["hits"][0]["source"]["destination"]["port"] = 8443
+        with self.assertRaisesRegex(
+            InvestigationQueryContractError,
+            "event tuple",
+        ):
+            validate_investigation_query_response(response, request)
 
     def test_response_rejects_forged_time_dataset_and_observable(self) -> None:
         request = authorize_investigation_query_request(proposal(), context())
@@ -444,6 +697,21 @@ class SecurityOnionInvestigationPivotTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.wrapper = load_source_module("investigation_pivot_wrapper_test", WRAPPER_PATH)
 
+    def test_wrapper_pack_and_observable_contract_matches_client(self) -> None:
+        self.assertEqual(self.wrapper.PACKS, PACKS)
+        self.assertEqual(self.wrapper.OBSERVABLE_FIELDS, OBSERVABLE_FIELDS)
+        self.assertEqual(self.wrapper.EVENT_TUPLE_FIELDS, EVENT_TUPLE_FIELDS)
+        self.assertEqual(
+            PACKS["system_auth"]["indices"],
+            ["logs-system.auth-*"],
+        )
+        self.assertEqual(
+            PACKS["zeek_tls"]["datasets"],
+            ["zeek.ssl"],
+        )
+        self.assertIn("dns.query.name", PACKS["dns_activity"]["fields"])
+        self.assertIn("ssl.server_name", OBSERVABLE_FIELDS["domains"])
+
     def test_wrapper_independently_validates_exact_authorized_request(self) -> None:
         request = authorize_investigation_query_request(proposal(), context())
         self.assertEqual(self.wrapper.validated_pivot_request(request), request)
@@ -453,6 +721,32 @@ class SecurityOnionInvestigationPivotTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit):
                 self.wrapper.validated_pivot_request(candidate)
+
+    def test_wrapper_event_tuple_parity_and_tampering_fail_closed(self) -> None:
+        request = authorize_investigation_query_request(
+            role_aware_proposal(),
+            role_aware_context(),
+        )
+        self.assertEqual(self.wrapper.validated_pivot_request(request), request)
+        query = request["queries"][0]
+        self.assertEqual(
+            self.wrapper.pivot_query_dsl(query),
+            build_query_dsl(query),
+        )
+        self.assertEqual(
+            self.wrapper.pivot_kql_equivalent(query),
+            kql_equivalent(query),
+        )
+        self.assertEqual(
+            self.wrapper.pivot_oql_equivalent(query),
+            oql_equivalent(query),
+        )
+
+        tampered = copy.deepcopy(request)
+        tampered["queries"][0]["event_tuple"]["destination_port"] = 8443
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self.wrapper.validated_pivot_request(tampered)
 
     def test_wrapper_executes_compiled_oql_equivalent_not_caller_query(self) -> None:
         request = authorize_investigation_query_request(proposal(), context())
@@ -557,6 +851,41 @@ class SecurityOnionInvestigationPivotTests(unittest.TestCase):
         unprojected = copy.deepcopy(source)
         unprojected["event"]["original"] = "sensitive raw event"
         self.assertFalse(self.wrapper.valid_pivot_hit_source(unprojected, query))
+
+    def test_wrapper_authenticates_every_role_aware_tuple_field_in_hits(self) -> None:
+        request = authorize_investigation_query_request(
+            role_aware_proposal(),
+            role_aware_context(),
+        )
+        query = request["queries"][0]
+        source = {
+            "@timestamp": "2026-07-24T11:30:00.000Z",
+            "event": {"dataset": "suricata.alert"},
+            "source": {"ip": "192.0.2.10", "port": 49152},
+            "destination": {"ip": "198.51.100.20", "port": 443},
+            "network": {
+                "transport": "tcp",
+                "protocol": "tls",
+                "community_id": "1:trusted-flow=",
+            },
+            "rule": {"id": "2016150"},
+        }
+        self.assertTrue(self.wrapper.valid_pivot_hit_source(source, query))
+
+        for path, replacement in (
+            (("source", "ip"), "198.51.100.20"),
+            (("destination", "port"), 8443),
+            (("network", "transport"), "udp"),
+            (("network", "protocol"), "dns"),
+            (("network", "community_id"), "1:other-flow="),
+            (("rule", "id"), "9999999"),
+        ):
+            candidate = copy.deepcopy(source)
+            candidate[path[0]][path[1]] = replacement
+            with self.subTest(path=path):
+                self.assertFalse(
+                    self.wrapper.valid_pivot_hit_source(candidate, query)
+                )
 
 
 class InvestigationPivotCollectorTests(unittest.TestCase):
