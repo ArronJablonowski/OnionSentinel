@@ -137,23 +137,36 @@ system prompt or cause a command, URL, path, filter, or parser option to run.
 Parsers run offline with a stripped environment and bounded process resources;
 macOS deployments also deny parser network access with `sandbox-exec`.
 
-The local model can request at most one follow-up evidence round. The runtime
-supports only fixed, read-only operations over a sanitized derived-evidence
-index and returns at most four queries with 20 rows each under a 32 KiB result
-budget. The allowlist includes coverage, connection, protocol, packet-sample,
-DNS, HTTP, TLS, file, notice, weird, ICMP-anomaly, User-Agent, TLS-version, and
-GeoIP summaries. It does not retain raw PCAPs for interactive model access and does not
-translate model text into shell, Zeek, or TShark syntax. Hosted second-opinion
-requests exclude packet samples, follow-up query results, local tool/path
-metadata, the private query index, and raw payload fields.
+The investigation runtime can request brokered follow-up evidence rounds. Each
+PCAP broker call supports only fixed, read-only operations over a sanitized
+derived-evidence index and returns at most four queries with 20 rows each under
+a 32 KiB result budget. It scans no more than 4096 derived records per request.
+The allowlist includes coverage, connections, protocols, payload-free packet
+facts, DNS records and answers, HTTP requests, TLS sessions, files, notices,
+weird records, ICMP facts, User-Agents, TLS versions, and GeoIP summaries.
 
-Incident Response uses a separate trusted evidence path. Before the assigned
-Incident Responder model runs, the worker gathers five fixed Elastic packs and
-seven fixed local OSquery packs through two dedicated forced-command SSH keys.
-For this baseline layer, the caller and model cannot provide an index, field,
-KQL expression, Query DSL object, OSquery SQL, target, filesystem path, parser
-option, or command. The exact datasets and seven SQL statements are pinned in
-`docs/incident-response-query-and-model-routing.md`.
+Requests may combine typed exact endpoint, port, protocol, and epoch filters
+with operation-specific facts such as DNS query/answer/rcode, TLS SNI/version,
+HTTP host/URI-prefix/User-Agent, or ICMP type/code and length ranges. A
+time-bounded request excludes aggregate rows that do not contain a timestamp.
+Results expose their sampling/truncation provenance and must not be treated as
+proof that no other packets exist.
+
+The broker does not retain raw PCAPs for interactive model access and never
+translates model text into shell, BPF/display-filter, regular-expression,
+Zeek-script, TShark-argument, path, or parser syntax. Output uses
+operation-specific field allowlists and cannot include raw payloads or parser
+metadata even if the local index is malformed. Hosted second-opinion requests
+exclude packet facts, follow-up query results, local tool/path metadata, the
+private query index, and raw payload fields.
+
+Incident Response uses a separate trusted baseline evidence path. Before the
+assigned Incident Responder model runs, the worker gathers five fixed Elastic
+packs and seven fixed local OSquery packs through two dedicated forced-command
+SSH keys. For this baseline layer, the caller and model cannot provide an
+index, field, KQL expression, Query DSL object, OSquery SQL, target, filesystem
+path, parser option, or command. The exact datasets and seven SQL statements
+are pinned in `docs/incident-response-query-and-model-routing.md`.
 
 Every returned pack includes an analyst-readable KQL equivalent and the exact
 Elasticsearch Query DSL executed by the Security Onion wrapper. The Incident
@@ -175,14 +188,49 @@ target, execution status, query digest, bounded result metadata, and explicit
 error state. The report shows those values under **OSquery Command Audit**.
 These fixed packs inspect Security Onion itself.
 
-The Incident Responder may request one optional live endpoint OSQuery round.
-This is a separate, disabled-by-default contract: exact operator aliases map to
-exact Fleet agent IDs only on Security Onion, and the Mac, relay, and Security
-Onion independently enforce the same SELECT-only table allowlist, query count,
-row, response-byte, and runtime ceilings. Wildcards, all-endpoint targets,
-mutations, comments, CTEs, compound queries, subqueries, and unknown tables are
-rejected. A failed or unavailable live query is an explicit evidence gap, not a
+Both the SOC Analyst and Incident Responder can then use the provider-neutral
+investigation pivot loop. The prompt exposes only a capability descriptor; an
+underscore-prefixed local authorization context containing the immutable alert
+anchor, exact trusted observables, actor role, and bounded time envelope is
+removed before every model call. A model may request no more than three rounds,
+12 total pivots, or six pivots in one round. Every round runs through a local
+policy broker and returns bounded evidence plus collector-owned provenance to
+the same assigned model route.
+
+Elastic and OQL pivots choose one of the five reviewed evidence packs, a
+reviewed purpose, exact trusted or broker-discovered observables, an
+independently bounded UTC window no longer than 24 hours, a fixed aggregation,
+and a small result size. The model cannot provide an index, field, KQL/OQL
+expression, Query DSL object, script, wildcard, or mutation. The Mac binds the
+proposal to its hidden authorization context; Security Onion independently
+revalidates the signed-by-digest manifest and constructs the final query.
+Positive exact-anchor and contradictory negative controls run with every batch
+so a replayed, substituted, or filter-ignoring response fails semantic
+validation.
+
+For an OQL request, the wrapper renders real analyst-readable Hunt OQL but
+executes a locally compiled semantic equivalent through
+`so-elasticsearch-query`. The audit labels this
+`compiled_oql_equivalent`; it must never imply that the Security Onion Pro API
+or a separate OQL endpoint executed. The exact Query DSL, index scope, endpoint,
+OQL/KQL equivalents, execution semantics, result counts, truncation, shard
+state, duration, and digests remain in the trusted audit.
+
+Endpoint OSQuery is another backend in the same loop. It remains
+disabled-by-default: exact operator aliases map to exact Fleet agent IDs only
+on Security Onion, and the Mac, relay, and Security Onion independently enforce
+the same SELECT-only table allowlist, query count, row, response-byte, and
+runtime ceilings. Wildcards, all-endpoint targets, mutations, comments, CTEs,
+compound queries, subqueries, and unknown tables are rejected. A failed or
+unavailable backend is an explicit evidence gap, not a negative finding or a
 license to infer missing facts.
+
+PCAP and Zeek pivots use the same loop but can inspect only the sanitized
+derived-evidence index described above. Results from one trusted round may
+authorize exact newly discovered observables for a later round, with an
+evidence reference preserved in the authorization manifest. The runtime rejects
+disabled backends, repeated or over-budget requests, and any request outside
+the advertised operation, target, observable, time, or result boundaries.
 
 All Ollama/local-model invocations share one host-wide inference lock. Codex
 CLI and GPT CLI use an independent provider lane and may run concurrently with

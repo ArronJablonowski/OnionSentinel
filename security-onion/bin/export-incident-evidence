@@ -13,9 +13,13 @@ from __future__ import annotations
 import datetime as dt
 import fnmatch
 import hashlib
+import ipaddress
 import json
 import glob
+import os
 import re
+import selectors
+import signal
 import subprocess
 import sys
 import time
@@ -24,6 +28,7 @@ from pathlib import Path
 
 MAX_REQUEST_BYTES = 16 * 1024
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+MAX_STDERR_BYTES = 256 * 1024
 MAX_HITS = 200
 MAX_WINDOWS = 4
 QUERY_TIMEOUT_SECONDS = 45
@@ -32,7 +37,28 @@ MAX_OSQUERY_OUTPUT_BYTES = 2 * 1024 * 1024
 MAX_OSQUERY_ROWS = 200
 SO_QUERY = Path("/usr/sbin/so-elasticsearch-query")
 QUERY_CONTRACT = "onion-sentinel-incident-evidence-v2"
+INVESTIGATION_QUERY_CONTRACT = "onion-sentinel-investigation-pivots-v1"
+INVESTIGATION_QUERY_OPERATION = "investigation_pivots"
 QUERY_PREFERENCE = "onion-sentinel-incident-evidence"
+MAX_PIVOT_QUERIES = 4
+MAX_PIVOT_HITS = 100
+MAX_PIVOT_BATCH_HITS = 400
+MAX_PIVOT_QUERY_OBSERVABLES = 8
+MAX_PIVOT_BATCH_OBSERVABLES = 24
+MAX_PIVOT_WINDOW = dt.timedelta(hours=24)
+MAX_PIVOT_BATCH_WINDOW = dt.timedelta(hours=96)
+MAX_AUTHORIZATION_WINDOW = dt.timedelta(days=7)
+PIVOT_DIALECTS = {"elastic", "oql"}
+PIVOT_AGGREGATIONS = {"events", "count", "timeline"}
+PIVOT_PURPOSES = {
+    "validate_detection",
+    "establish_timeline",
+    "correlate_observable",
+    "measure_prevalence",
+    "identify_related_activity",
+    "test_benign_hypothesis",
+}
+PIVOT_ACTOR_ROLES = {"soc_analyst", "incident_responder"}
 ALERT_INDEX_SCOPE = [
     "logs-suricata.alerts-so",
     "logs-detections.alerts-so",
@@ -40,50 +66,228 @@ ALERT_INDEX_SCOPE = [
 PACKS = {
     "alert_context": {
         "indices": ALERT_INDEX_SCOPE,
-        "datasets": ["suricata.alert"],
-        "fields": ["@timestamp", "event.*", "rule.*", "source.*", "destination.*", "network.*", "message"],
+        "datasets": ["suricata.alert", "sigma.alert"],
+        "fields": [
+            "@timestamp", "event.dataset", "event.kind", "event.category",
+            "event.type", "event.action", "event.outcome", "event.severity",
+            "event.id", "event.code", "rule.id", "rule.name",
+            "rule.category", "rule.ruleset", "source.ip", "source.port",
+            "source.domain", "source.mac", "destination.ip",
+            "destination.port", "destination.domain", "destination.mac",
+            "client.ip", "client.domain", "server.ip", "server.domain",
+            "host.id", "host.name", "host.hostname", "agent.id",
+            "user.id", "user.name", "source.user.name",
+            "destination.user.name", "client.user.name",
+            "network.transport", "network.protocol", "network.direction",
+            "network.community_id",
+        ],
     },
     "network_flow": {
         "indices": [
-            "logs-zeek.connection-*",
+            "logs-zeek-so",
             "logs-endpoint.events.network-*",
             *ALERT_INDEX_SCOPE,
         ],
-        "datasets": ["zeek.connection", "endpoint.events.network", "suricata.alert"],
-        "fields": ["@timestamp", "event.*", "source.*", "destination.*", "network.*", "host.*", "process.*", "message"],
+        "datasets": [
+            "zeek.conn", "endpoint.events.network", "suricata.alert",
+            "sigma.alert",
+        ],
+        "fields": [
+            "@timestamp", "event.dataset", "event.kind", "event.category",
+            "event.type", "event.action", "event.outcome", "event.duration",
+            "source.ip", "source.port", "source.domain", "source.bytes",
+            "source.packets", "destination.ip", "destination.port",
+            "destination.domain", "destination.bytes", "destination.packets",
+            "client.ip", "client.domain", "server.ip", "server.domain",
+            "network.transport", "network.protocol", "network.direction",
+            "network.community_id", "network.bytes", "network.packets",
+            "host.id", "host.name", "host.hostname", "agent.id", "host.ip",
+            "user.id", "user.name", "source.user.name",
+            "destination.user.name", "client.user.name", "process.entity_id",
+            "process.name", "process.executable",
+        ],
     },
     "dns_activity": {
         "indices": [
-            "logs-zeek.dns-*",
+            "logs-zeek-so",
             "logs-endpoint.events.network-*",
         ],
         "datasets": ["zeek.dns", "endpoint.events.network"],
-        "fields": ["@timestamp", "event.*", "dns.*", "url.*", "source.*", "destination.*", "host.*", "process.*", "message"],
+        "fields": [
+            "@timestamp", "event.dataset", "event.kind", "event.category",
+            "event.type", "event.action", "event.outcome", "source.ip",
+            "source.port", "destination.ip", "destination.port",
+            "source.domain", "destination.domain", "client.ip",
+            "client.domain", "server.ip", "server.domain", "url.domain",
+            "tls.server.name",
+            "network.transport", "network.protocol", "network.community_id",
+            "dns.id", "dns.question.name", "dns.question.type",
+            "dns.question.class", "dns.response_code", "dns.resolved_ip",
+            "dns.answers.type", "host.id", "host.name", "host.hostname",
+            "agent.id", "host.ip", "user.id", "user.name",
+            "source.user.name", "destination.user.name", "client.user.name",
+            "process.entity_id", "process.name", "process.executable",
+        ],
     },
     "osquery_history": {
         "indices": [
             "logs-endpoint.events.process-*",
             "logs-endpoint.events.file-*",
             "logs-endpoint.events.network-*",
-            "logs-osquery_manager.result-*",
-            "logs-osquery_manager.response-*",
+            "logs-osquery_manager.result-default",
+            "logs-osquery_manager.action.responses-default",
         ],
-        "datasets": ["endpoint.events.process", "endpoint.events.file", "endpoint.events.network", "osquery_manager.result", "osquery_manager.response"],
-        "fields": ["@timestamp", "event.*", "host.*", "user.*", "process.*", "file.*", "source.*", "destination.*", "message"],
+        "datasets": [
+            "endpoint.events.process", "endpoint.events.file",
+            "endpoint.events.network", "osquery_manager.result",
+            "osquery_manager.action.responses",
+        ],
+        "fields": [
+            "@timestamp", "event.dataset", "event.kind", "event.category",
+            "event.type", "event.action", "event.outcome", "event.id",
+            "host.id", "host.name", "host.ip", "user.id", "user.name",
+            "process.entity_id", "process.pid", "process.parent.pid",
+            "process.name", "process.executable", "file.name", "file.path",
+            "file.extension", "file.hash.sha256", "source.ip", "source.port",
+            "source.domain", "destination.ip", "destination.port",
+            "destination.domain", "client.ip", "client.domain", "server.ip",
+            "server.domain", "url.domain", "dns.question.name",
+            "dns.resolved_ip", "network.transport", "network.protocol",
+        ],
     },
     "cross_sensor_timeline": {
         "indices": [
             *ALERT_INDEX_SCOPE,
-            "logs-zeek.connection-*",
-            "logs-zeek.dns-*",
+            "logs-zeek-so",
             "logs-endpoint.events.network-*",
             "logs-endpoint.events.process-*",
             "logs-endpoint.events.file-*",
         ],
-        "datasets": ["suricata.alert", "zeek.connection", "zeek.dns", "endpoint.events.network", "endpoint.events.process", "endpoint.events.file"],
-        "fields": ["@timestamp", "event.*", "rule.*", "source.*", "destination.*", "network.*", "dns.*", "url.*", "host.*", "user.*", "process.*", "file.*", "message"],
+        "datasets": [
+            "suricata.alert", "sigma.alert", "zeek.conn", "zeek.dns",
+            "endpoint.events.network", "endpoint.events.process",
+            "endpoint.events.file",
+        ],
+        "fields": [
+            "@timestamp", "event.dataset", "event.kind", "event.category",
+            "event.type", "event.action", "event.outcome", "event.severity",
+            "event.id", "rule.id", "rule.name", "source.ip", "source.port",
+            "source.domain", "destination.ip", "destination.port",
+            "destination.domain", "client.ip", "client.domain", "server.ip",
+            "server.domain", "url.domain", "tls.server.name",
+            "network.transport", "network.protocol",
+            "network.direction", "network.community_id", "dns.id",
+            "dns.question.name", "dns.question.type", "dns.response_code",
+            "dns.resolved_ip", "host.id", "host.name", "host.hostname",
+            "host.ip", "agent.id", "user.id", "user.name",
+            "source.user.name", "destination.user.name", "client.user.name",
+            "process.entity_id", "process.pid",
+            "process.parent.pid", "process.name", "process.executable",
+            "file.name", "file.path", "file.hash.sha256",
+        ],
     },
 }
+
+
+class BoundedCommandError(RuntimeError):
+    """Raised after a child is terminated for timeout or output overflow."""
+
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
+
+
+def run_bounded_command(
+    command: list[str],
+    *,
+    timeout_seconds: float,
+    max_stdout_bytes: int,
+    max_stderr_bytes: int,
+) -> subprocess.CompletedProcess:
+    """Drain a no-shell child incrementally and enforce hard byte ceilings."""
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    assert process.stdout is not None and process.stderr is not None
+    selector = selectors.DefaultSelector()
+    streams = {
+        process.stdout: ("stdout", bytearray(), max_stdout_bytes),
+        process.stderr: ("stderr", bytearray(), max_stderr_bytes),
+    }
+    for stream in streams:
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise BoundedCommandError(
+                    "timeout",
+                    f"command timed out after {timeout_seconds:g} seconds",
+                )
+            events = selector.select(timeout=min(0.25, remaining))
+            if not events and process.poll() is not None:
+                events = [
+                    (key, selectors.EVENT_READ)
+                    for key in selector.get_map().values()
+                ]
+            for key, _mask in events:
+                stream = key.fileobj
+                label, target, limit = streams[stream]
+                try:
+                    chunk = os.read(stream.fileno(), 64 * 1024)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(stream)
+                    continue
+                if len(target) + len(chunk) > limit:
+                    raise BoundedCommandError(
+                        "output_limit",
+                        f"command {label} exceeded its {limit}-byte limit",
+                    )
+                target.extend(chunk)
+        return_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            process.kill()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        raise BoundedCommandError(
+            "timeout",
+            f"command timed out after {timeout_seconds:g} seconds",
+        ) from exc
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            process.kill()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        raise
+    finally:
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
+    return subprocess.CompletedProcess(
+        command,
+        return_code,
+        bytes(streams[process.stdout][1]),
+        bytes(streams[process.stderr][1]),
+    )
+
+
 OSQUERY_PACKS = {
     "system_inventory": (
         "SELECT hostname, uuid, cpu_brand, cpu_physical_cores, "
@@ -117,13 +321,29 @@ OSQUERY_PACKS = {
     ),
 }
 OBSERVABLE_FIELDS = {
-    "ips": ["source.ip", "destination.ip", "client.ip", "server.ip", "host.ip"],
-    "domains": ["dns.question.name", "url.domain", "server.domain", "destination.domain"],
-    "hosts": ["host.id", "host.name", "agent.id"],
-    "users": ["user.id", "user.name"],
+    "ips": [
+        "source.ip", "destination.ip", "client.ip", "server.ip", "host.ip",
+        "dns.resolved_ip",
+    ],
+    "domains": [
+        "dns.question.name", "url.domain", "tls.server.name", "source.domain",
+        "destination.domain", "client.domain", "server.domain",
+    ],
+    "hosts": ["host.id", "host.name", "host.hostname", "agent.id"],
+    "users": [
+        "user.id", "user.name", "source.user.name", "destination.user.name",
+        "client.user.name",
+    ],
 }
 SAFE_VALUE = re.compile(r"^[A-Za-z0-9_.:@-]{1,255}$")
 SAFE_ELASTIC_ID = re.compile(r"^[A-Za-z0-9_.:@+=-]{1,512}$")
+SAFE_ELASTIC_INDEX = re.compile(r"^[A-Za-z0-9._-]{1,255}$")
+SAFE_PIVOT_ID = re.compile(r"^[A-Za-z0-9_.:@+=-]{1,128}$")
+SAFE_DOMAIN = re.compile(
+    r"(?i)^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+)
+SAFE_EVIDENCE_REF = re.compile(r"^[A-Za-z0-9_.:@/+=#-]{1,256}$")
+SHA256 = re.compile(r"^[a-f0-9]{64}$")
 
 
 def fail(message: str, code: int = 2) -> None:
@@ -181,8 +401,7 @@ def validated_anchor(value: object) -> dict[str, str] | None:
     document_id = str(value.get("id") or "").strip()
     if (
         not index_name
-        or "*" in index_name
-        or "?" in index_name
+        or not SAFE_ELASTIC_INDEX.fullmatch(index_name)
         or not index_matches_scope(index_name, ALERT_INDEX_SCOPE)
     ):
         fail("anchor index is not an allowlisted Security Onion alert index")
@@ -256,20 +475,340 @@ def validated_request(
     return packs, osquery_packs, clean_windows, clean_observables, size, anchor
 
 
-def observable_clause(observables: dict[str, list[str]]) -> dict:
+def require_exact_keys(
+    value: dict,
+    *,
+    allowed: set[str],
+    required: set[str],
+    label: str,
+) -> None:
+    missing = required - set(value)
+    unknown = set(value) - allowed
+    if missing:
+        fail(f"{label} is missing required fields: {', '.join(sorted(missing))}")
+    if unknown:
+        fail(f"{label} contains unsupported fields: {', '.join(sorted(unknown))}")
+
+
+def validated_pivot_id(value: object, label: str) -> str:
+    text = str(value or "").strip()
+    if not SAFE_PIVOT_ID.fullmatch(text):
+        fail(f"{label} is invalid")
+    return text
+
+
+def validated_pivot_window(
+    value: object,
+    *,
+    label: str,
+    max_duration: dt.timedelta,
+) -> tuple[dict[str, str], dt.datetime, dt.datetime]:
+    if not isinstance(value, dict):
+        fail(f"{label} must be an object")
+    require_exact_keys(
+        value,
+        allowed={"start", "end"},
+        required={"start", "end"},
+        label=label,
+    )
+    try:
+        start, end = parse_time(value["start"]), parse_time(value["end"])
+    except (TypeError, ValueError) as exc:
+        fail(f"{label} is invalid: {exc}")
+    if start.utcoffset() != dt.timedelta(0) or end.utcoffset() != dt.timedelta(0):
+        fail(f"{label} must use UTC")
+    if end <= start or end - start > max_duration:
+        fail(f"{label} is outside its duration bound")
+    return {"start": iso_utc(start), "end": iso_utc(end)}, start, end
+
+
+def validated_pivot_observable(kind: str, value: object) -> str:
+    text = str(value or "").strip().rstrip(".")
+    if kind == "ips":
+        try:
+            return str(ipaddress.ip_address(text))
+        except ValueError:
+            fail("invalid exact IP pivot observable")
+    if kind == "domains":
+        if not SAFE_DOMAIN.fullmatch(text):
+            fail("invalid exact domain pivot observable")
+        return text.lower()
+    if kind in {"hosts", "users"} and SAFE_VALUE.fullmatch(text):
+        return text
+    fail(f"invalid exact {kind} pivot observable")
+    raise AssertionError("unreachable")
+
+
+def validated_pivot_observables(value: object, label: str) -> dict[str, list[str]]:
+    if not isinstance(value, dict) or set(value) != set(OBSERVABLE_FIELDS):
+        fail(f"{label} must contain exactly {', '.join(OBSERVABLE_FIELDS)}")
+    clean: dict[str, list[str]] = {}
+    for kind in OBSERVABLE_FIELDS:
+        items = value[kind]
+        if not isinstance(items, list) or len(items) > MAX_PIVOT_QUERY_OBSERVABLES:
+            fail(f"{label}.{kind} exceeds its value limit")
+        normalized = []
+        for item in items:
+            candidate = validated_pivot_observable(kind, item)
+            if candidate not in normalized:
+                normalized.append(candidate)
+        clean[kind] = normalized
+    count = sum(len(items) for items in clean.values())
+    if count < 1 or count > MAX_PIVOT_QUERY_OBSERVABLES:
+        fail(f"{label} must contain 1-{MAX_PIVOT_QUERY_OBSERVABLES} exact values")
+    return clean
+
+
+def validated_pivot_request(data: dict) -> dict:
+    """Independently validate a Mac-authorized iterative query batch."""
+    require_exact_keys(
+        data,
+        allowed={"query_contract", "operation", "batch_id", "authorization", "queries"},
+        required={"query_contract", "operation", "batch_id", "authorization", "queries"},
+        label="investigation pivot request",
+    )
+    if data["query_contract"] != INVESTIGATION_QUERY_CONTRACT:
+        fail("investigation pivot query contract is unsupported")
+    if data["operation"] != INVESTIGATION_QUERY_OPERATION:
+        fail("investigation pivot operation is unsupported")
+    authorization = data["authorization"]
+    if not isinstance(authorization, dict):
+        fail("investigation pivot authorization must be an object")
+    require_exact_keys(
+        authorization,
+        allowed={
+            "context_id", "case_id", "group_id", "actor_role", "anchor",
+            "time_envelope", "context_digest", "observables", "manifest_digest",
+        },
+        required={
+            "context_id", "case_id", "group_id", "actor_role", "anchor",
+            "time_envelope", "context_digest", "observables", "manifest_digest",
+        },
+        label="investigation pivot authorization",
+    )
+    supplied_manifest_digest = str(authorization["manifest_digest"] or "")
+    if (
+        not SHA256.fullmatch(supplied_manifest_digest)
+        or canonical_digest({
+            key: value
+            for key, value in authorization.items()
+            if key != "manifest_digest"
+        }) != supplied_manifest_digest
+    ):
+        fail("investigation pivot authorization manifest digest is invalid")
+    context_digest = str(authorization["context_digest"] or "")
+    if not SHA256.fullmatch(context_digest):
+        fail("investigation pivot context digest is invalid")
+    actor_role = str(authorization["actor_role"] or "")
+    if actor_role not in PIVOT_ACTOR_ROLES:
+        fail("investigation pivot actor role is unsupported")
+    envelope, envelope_start, envelope_end = validated_pivot_window(
+        authorization["time_envelope"],
+        label="investigation pivot authorization window",
+        max_duration=MAX_AUTHORIZATION_WINDOW,
+    )
+    if authorization["time_envelope"] != envelope:
+        fail("investigation pivot authorization window is not canonical UTC")
+    anchor = validated_anchor(authorization["anchor"])
+    if anchor is None:
+        fail("investigation pivot authorization anchor is required")
+    authorization_entries = authorization["observables"]
+    if (
+        not isinstance(authorization_entries, list)
+        or not authorization_entries
+        or len(authorization_entries) > MAX_PIVOT_BATCH_OBSERVABLES
+    ):
+        fail("investigation pivot authorization observable manifest is out of bounds")
+    authorized: dict[tuple[str, str], dict[str, str]] = {}
+    clean_entries: list[dict[str, str]] = []
+    for index, item in enumerate(authorization_entries):
+        if not isinstance(item, dict):
+            fail(f"investigation pivot authorization observable {index} must be an object")
+        require_exact_keys(
+            item,
+            allowed={"kind", "value", "source", "evidence_ref"},
+            required={"kind", "value", "source", "evidence_ref"},
+            label=f"investigation pivot authorization observable {index}",
+        )
+        kind = str(item["kind"] or "")
+        source = str(item["source"] or "")
+        evidence_ref = str(item["evidence_ref"] or "")
+        if kind not in OBSERVABLE_FIELDS:
+            fail("investigation pivot authorization observable kind is unsupported")
+        if source not in {"trusted_context", "prior_evidence"}:
+            fail("investigation pivot observable provenance source is unsupported")
+        if not SAFE_EVIDENCE_REF.fullmatch(evidence_ref):
+            fail("investigation pivot observable evidence reference is invalid")
+        clean = {
+            "kind": kind,
+            "value": validated_pivot_observable(kind, item["value"]),
+            "source": source,
+            "evidence_ref": evidence_ref,
+        }
+        key = (kind, clean["value"])
+        if key in authorized and authorized[key] != clean:
+            fail("investigation pivot observable authorization conflicts")
+        if key in authorized:
+            fail("investigation pivot observable authorization is duplicated")
+        authorized[key] = clean
+        clean_entries.append(clean)
+    queries = data["queries"]
+    if not isinstance(queries, list) or not queries or len(queries) > MAX_PIVOT_QUERIES:
+        fail(f"investigation pivot request must contain 1-{MAX_PIVOT_QUERIES} queries")
+    clean_queries = []
+    query_ids = set()
+    used_authorizations = set()
+    hit_budget = 0
+    window_budget = dt.timedelta()
+    for index, item in enumerate(queries):
+        if not isinstance(item, dict):
+            fail(f"investigation pivot query {index} must be an object")
+        require_exact_keys(
+            item,
+            allowed={
+                "query_id", "dialect", "pack", "purpose", "window",
+                "observables", "observable_provenance", "size", "aggregation",
+            },
+            required={
+                "query_id", "dialect", "pack", "purpose", "window",
+                "observables", "observable_provenance", "size", "aggregation",
+            },
+            label=f"investigation pivot query {index}",
+        )
+        query_id = validated_pivot_id(item["query_id"], f"pivot query {index} id")
+        if query_id in query_ids:
+            fail("investigation pivot query ids must be unique")
+        query_ids.add(query_id)
+        dialect = str(item["dialect"] or "")
+        pack = str(item["pack"] or "")
+        purpose = str(item["purpose"] or "")
+        aggregation = str(item["aggregation"] or "")
+        if dialect not in PIVOT_DIALECTS:
+            fail("investigation pivot dialect is unsupported")
+        if pack not in PACKS:
+            fail("investigation pivot pack is unsupported")
+        if purpose not in PIVOT_PURPOSES:
+            fail("investigation pivot purpose is unsupported")
+        if aggregation not in PIVOT_AGGREGATIONS:
+            fail("investigation pivot aggregation is unsupported")
+        window, start, end = validated_pivot_window(
+            item["window"],
+            label=f"investigation pivot query {query_id} window",
+            max_duration=MAX_PIVOT_WINDOW,
+        )
+        if item["window"] != window:
+            fail("investigation pivot query window is not canonical UTC")
+        if start < envelope_start or end > envelope_end:
+            fail("investigation pivot query escapes its authorization time envelope")
+        window_budget += end - start
+        observables = validated_pivot_observables(
+            item["observables"],
+            f"investigation pivot query {query_id} observables",
+        )
+        provenance = item["observable_provenance"]
+        if not isinstance(provenance, dict) or set(provenance) != set(OBSERVABLE_FIELDS):
+            fail("investigation pivot observable provenance is incomplete")
+        clean_provenance = {}
+        for kind in OBSERVABLE_FIELDS:
+            expected = []
+            for observable in observables[kind]:
+                key = (kind, observable)
+                if key not in authorized:
+                    fail("investigation pivot observable is absent from its authorization manifest")
+                expected.append(authorized[key])
+                used_authorizations.add(key)
+            if provenance[kind] != expected:
+                fail("investigation pivot observable provenance does not match its manifest")
+            clean_provenance[kind] = [dict(entry) for entry in expected]
+        size = item["size"]
+        if isinstance(size, bool) or not isinstance(size, int):
+            fail("investigation pivot query size must be an integer")
+        if size < 1 or size > MAX_PIVOT_HITS:
+            fail(f"investigation pivot query size must be between 1 and {MAX_PIVOT_HITS}")
+        hit_budget += 0 if aggregation == "count" else size
+        clean_queries.append({
+            "query_id": query_id,
+            "dialect": dialect,
+            "pack": pack,
+            "purpose": purpose,
+            "window": window,
+            "observables": observables,
+            "observable_provenance": clean_provenance,
+            "size": size,
+            "aggregation": aggregation,
+        })
+    if used_authorizations != set(authorized):
+        fail("investigation pivot authorization contains an unused observable")
+    if hit_budget > MAX_PIVOT_BATCH_HITS:
+        fail("investigation pivot request exceeds its batch hit budget")
+    if window_budget > MAX_PIVOT_BATCH_WINDOW:
+        fail("investigation pivot request exceeds its cumulative time budget")
+    clean_authorization = {
+        "context_id": validated_pivot_id(
+            authorization["context_id"], "investigation pivot context id"
+        ),
+        "case_id": validated_pivot_id(
+            authorization["case_id"], "investigation pivot case id"
+        ),
+        "group_id": (
+            validated_pivot_id(
+                authorization["group_id"], "investigation pivot group id"
+            )
+            if authorization["group_id"]
+            else ""
+        ),
+        "actor_role": actor_role,
+        "anchor": anchor,
+        "time_envelope": envelope,
+        "context_digest": context_digest,
+        "observables": clean_entries,
+    }
+    clean_authorization["manifest_digest"] = canonical_digest(clean_authorization)
+    if clean_authorization["manifest_digest"] != supplied_manifest_digest:
+        fail("investigation pivot normalized authorization manifest digest is invalid")
+    return {
+        "query_contract": INVESTIGATION_QUERY_CONTRACT,
+        "operation": INVESTIGATION_QUERY_OPERATION,
+        "batch_id": validated_pivot_id(data["batch_id"], "investigation pivot batch id"),
+        "authorization": clean_authorization,
+        "queries": clean_queries,
+    }
+
+
+def pack_observable_fields(pack_name: str) -> dict[str, list[str]]:
+    projected = set(PACKS[pack_name]["fields"])
+    return {
+        kind: [field for field in fields if field in projected]
+        for kind, fields in OBSERVABLE_FIELDS.items()
+    }
+
+
+def observable_clause(
+    observables: dict[str, list[str]],
+    pack_name: str | None = None,
+) -> dict:
     should = []
-    for kind, fields in OBSERVABLE_FIELDS.items():
+    fields_by_kind = (
+        pack_observable_fields(pack_name)
+        if pack_name is not None
+        else OBSERVABLE_FIELDS
+    )
+    for kind, fields in fields_by_kind.items():
         for value in observables.get(kind, []):
             should.extend({"term": {field: value}} for field in fields)
     return {"bool": {"should": should, "minimum_should_match": 1}}
 
 
 def dataset_clause(datasets: list[str]) -> dict:
-    should = []
-    for dataset in datasets:
-        should.append({"term": {"event.dataset": dataset}})
-        should.append({"prefix": {"event.dataset": dataset + "."}})
-    return {"bool": {"should": should, "minimum_should_match": 1}}
+    return {
+        "bool": {
+            "should": [
+                {"term": {"event.dataset": dataset}}
+                for dataset in datasets
+            ],
+            "minimum_should_match": 1,
+        }
+    }
 
 
 def kql_equivalent(window: dict, datasets: list[str], observables: dict[str, list[str]]) -> str:
@@ -377,31 +916,26 @@ def execute_search(body: dict, index_scope: list[str]) -> dict:
     encoded = json.dumps(body, separators=(",", ":"), sort_keys=True)
     started = time.monotonic()
     try:
-        proc = subprocess.run(
+        proc = run_bounded_command(
             [str(SO_QUERY), audit["query_endpoint"], "-d", encoded],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=QUERY_TIMEOUT_SECONDS,
-            check=False,
+            timeout_seconds=QUERY_TIMEOUT_SECONDS,
+            max_stdout_bytes=MAX_OUTPUT_BYTES,
+            max_stderr_bytes=MAX_STDERR_BYTES,
         )
-    except subprocess.TimeoutExpired:
+    except BoundedCommandError as exc:
+        status = "timeout" if exc.reason == "timeout" else "output_limit"
         return empty_search_result(
             body,
             index_scope,
-            "timeout",
-            QUERY_TIMEOUT_SECONDS * 1000,
-            error="Elasticsearch query exceeded the wrapper timeout",
+            status,
+            round((time.monotonic() - started) * 1000),
+            error=(
+                "Elasticsearch query exceeded the wrapper timeout"
+                if status == "timeout"
+                else "Elasticsearch response exceeded the wrapper output limit"
+            ),
         )
     duration_ms = round((time.monotonic() - started) * 1000)
-    if len(proc.stdout) > MAX_OUTPUT_BYTES:
-        return empty_search_result(
-            body,
-            index_scope,
-            "output_limit",
-            duration_ms,
-            error="Elasticsearch response exceeded the wrapper output limit",
-        )
     if proc.returncode != 0:
         error = proc.stderr.decode("utf-8", "replace")[:1000]
         return empty_search_result(body, index_scope, "error", duration_ms, error=error)
@@ -461,15 +995,23 @@ def execute_search(body: dict, index_scope: list[str]) -> dict:
             shards=shards,
             error="Elasticsearch reported a timed-out partial response",
         )
-    if shards["failed"]:
+    if (
+        shards["failed"]
+        or shards["successful"] != shards["total"]
+        or shards["skipped"] > shards["successful"]
+    ):
         return empty_search_result(
             body,
             index_scope,
-            "error",
+            "invalid_response" if not shards["failed"] else "error",
             duration_ms,
             took_ms=took_ms,
             shards=shards,
-            error=f"Elasticsearch returned {shards['failed']} failed shard(s)",
+            error=(
+                f"Elasticsearch returned {shards['failed']} failed shard(s)"
+                if shards["failed"]
+                else "Elasticsearch shard coverage is incomplete or inconsistent"
+            ),
         )
     if shards["total"] == 0 or shards["successful"] == 0:
         return empty_search_result(
@@ -593,6 +1135,215 @@ def execute_pack(pack_name: str, window: dict, observables: dict[str, list[str]]
     return {"pack": pack_name, **execute_search(body, pack["indices"])}
 
 
+def pivot_query_dsl(query: dict) -> dict:
+    pack = PACKS[query["pack"]]
+    body = {
+        "size": 0 if query["aggregation"] == "count" else query["size"],
+        "track_total_hits": True,
+        "timeout": "30s",
+        "_source": False if query["aggregation"] == "count" else pack["fields"],
+        "query": {"bool": {"filter": [
+            {"range": {"@timestamp": {
+                "gte": query["window"]["start"],
+                "lte": query["window"]["end"],
+            }}},
+            dataset_clause(pack["datasets"]),
+            observable_clause(query["observables"], query["pack"]),
+        ]}},
+    }
+    if query["aggregation"] != "count":
+        order = "asc" if query["aggregation"] == "timeline" else "desc"
+        body["sort"] = [
+            {"@timestamp": {"order": order, "unmapped_type": "date"}},
+            "_shard_doc",
+        ]
+    return body
+
+
+def quoted_filter_value(value: str) -> str:
+    # Exact observable validation excludes quote and backslash characters.
+    return f'"{value}"'
+
+
+def pivot_kql_equivalent(query: dict) -> str:
+    datasets = " or ".join(
+        f"event.dataset : {quoted_filter_value(value)}"
+        for value in PACKS[query["pack"]]["datasets"]
+    )
+    observable_filters = []
+    for kind, fields in pack_observable_fields(query["pack"]).items():
+        for value in query["observables"][kind]:
+            observable_filters.append(
+                "("
+                + " or ".join(
+                    f"{field} : {quoted_filter_value(value)}"
+                    for field in fields
+                )
+                + ")"
+            )
+    return (
+        f'@timestamp >= {quoted_filter_value(query["window"]["start"])} and '
+        f'@timestamp <= {quoted_filter_value(query["window"]["end"])} and '
+        f"({datasets}) and (" + " or ".join(observable_filters) + ")"
+    )
+
+
+def pivot_oql_equivalent(query: dict) -> str:
+    """Return real Hunt OQL while execution uses compiled equivalent DSL."""
+    datasets = " OR ".join(
+        f"event.dataset:{quoted_filter_value(value)}"
+        for value in PACKS[query["pack"]]["datasets"]
+    )
+    observable_filters = []
+    for kind, fields in pack_observable_fields(query["pack"]).items():
+        for value in query["observables"][kind]:
+            observable_filters.append(
+                "("
+                + " OR ".join(
+                    f"{field}:{quoted_filter_value(value)}"
+                    for field in fields
+                )
+                + ")"
+            )
+    rendered = (
+        f'@timestamp:[{quoted_filter_value(query["window"]["start"])} TO '
+        f'{quoted_filter_value(query["window"]["end"])}] AND '
+        f"({datasets}) AND (" + " OR ".join(observable_filters) + ")"
+    )
+    if query["aggregation"] == "timeline":
+        rendered += " | sortby @timestamp^"
+    return rendered
+
+
+def source_leaf_items(value: object, prefix: str = "") -> list[tuple[str, object]]:
+    """Flatten returned ECS leaves without accepting unprojected siblings."""
+    leaves: list[tuple[str, object]] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            leaves.extend(source_leaf_items(child, path))
+    elif isinstance(value, list):
+        for child in value:
+            leaves.extend(source_leaf_items(child, prefix))
+    else:
+        leaves.append((prefix, value))
+    return leaves
+
+
+def source_path_values(source: dict, path: str) -> list[object]:
+    current: list[object] = [source]
+    for part in path.split("."):
+        following: list[object] = []
+        for item in current:
+            if isinstance(item, dict) and part in item:
+                value = item[part]
+                following.extend(value if isinstance(value, list) else [value])
+            elif isinstance(item, list):
+                for child in item:
+                    if isinstance(child, dict) and part in child:
+                        value = child[part]
+                        following.extend(value if isinstance(value, list) else [value])
+        current = following
+    return [item for item in current if not isinstance(item, (dict, list))]
+
+
+def returned_observable_matches(kind: str, expected: str, candidate: object) -> bool:
+    text = str(candidate or "").strip().rstrip(".")
+    if kind == "ips":
+        try:
+            return str(ipaddress.ip_address(text)) == expected
+        except ValueError:
+            return False
+    if kind == "domains":
+        return bool(SAFE_DOMAIN.fullmatch(text)) and text.lower() == expected
+    return bool(SAFE_VALUE.fullmatch(text)) and text == expected
+
+
+def valid_pivot_hit_source(source: object, query: dict) -> bool:
+    if not isinstance(source, dict):
+        return False
+    pack = PACKS[query["pack"]]
+    if any(
+        path not in set(pack["fields"])
+        for path, _value in source_leaf_items(source)
+    ):
+        return False
+    timestamps = source_path_values(source, "@timestamp")
+    if len(timestamps) != 1:
+        return False
+    timestamp_text = str(timestamps[0] or "").strip()
+    if timestamp_text.endswith("Z"):
+        timestamp_text = timestamp_text[:-1] + "+00:00"
+    try:
+        timestamp = dt.datetime.fromisoformat(timestamp_text)
+    except ValueError:
+        return False
+    if timestamp.tzinfo is None or timestamp.utcoffset() != dt.timedelta(0):
+        return False
+    timestamp = timestamp.astimezone(dt.timezone.utc)
+    start = parse_time(query["window"]["start"])
+    end = parse_time(query["window"]["end"])
+    if timestamp < start or timestamp > end:
+        return False
+    datasets = [str(item) for item in source_path_values(source, "event.dataset")]
+    if len(datasets) != 1 or datasets[0] not in pack["datasets"]:
+        return False
+    return any(
+        returned_observable_matches(kind, expected, candidate)
+        for kind, fields in pack_observable_fields(query["pack"]).items()
+        for expected in query["observables"].get(kind, [])
+        for field in fields
+        for candidate in source_path_values(source, field)
+    )
+
+
+def execute_pivot_query(query: dict) -> dict:
+    pack = PACKS[query["pack"]]
+    body = pivot_query_dsl(query)
+    kql = pivot_kql_equivalent(query)
+    oql = pivot_oql_equivalent(query)
+    result = execute_search(body, pack["indices"])
+    if result.get("status") == "ok":
+        invalid_projection = any(
+            not isinstance(hit, dict)
+            or not valid_pivot_hit_source(hit.get("source"), query)
+            for hit in result.get("hits", [])
+        )
+        if invalid_projection or (
+            query["aggregation"] == "count" and result.get("hits")
+        ):
+            result = empty_search_result(
+                body,
+                pack["indices"],
+                "invalid_response",
+                int(result.get("duration_ms") or 0),
+                error="Elasticsearch returned data outside the reviewed pivot projection",
+            )
+    return {
+        "query_id": query["query_id"],
+        "dialect": query["dialect"],
+        "pack": query["pack"],
+        "purpose": query["purpose"],
+        "window": query["window"],
+        "observables": query["observables"],
+        "observable_provenance": query["observable_provenance"],
+        "size": query["size"],
+        "aggregation": query["aggregation"],
+        "request_item_digest": canonical_digest(query),
+        "execution_backend": "so-elasticsearch-query",
+        "execution_semantics": (
+            "compiled_oql_equivalent"
+            if query["dialect"] == "oql"
+            else "compiled_elastic_pack"
+        ),
+        "kql_equivalent": kql,
+        "kql_digest": hashlib.sha256(kql.encode("utf-8")).hexdigest(),
+        "oql_equivalent": oql,
+        "oql_digest": hashlib.sha256(oql.encode("utf-8")).hexdigest(),
+        **result,
+    }
+
+
 def execute_controls(anchor: dict[str, str] | None) -> dict:
     if anchor is None:
         missing = {
@@ -614,7 +1365,10 @@ def execute_controls(anchor: dict[str, str] | None) -> dict:
         "_source": ["@timestamp", "event.dataset"],
         "query": {"ids": {"values": [anchor["id"]]}},
     }
-    positive = execute_search(positive_body, ALERT_INDEX_SCOPE)
+    # The positive control is bound to the exact trusted backing index, not
+    # only the broader reviewed alert patterns. This prevents a duplicate ID
+    # in another data stream from satisfying or confusing the anchor proof.
+    positive = execute_search(positive_body, [anchor["index"]])
     exact_hits = [
         item for item in positive.get("hits", [])
         if item.get("id") == anchor["id"] and item.get("index") == anchor["index"]
@@ -683,6 +1437,31 @@ def semantic_validity(results: list[dict], osquery_results: list[dict], controls
         "controls_valid": controls_valid,
         "query_execution_valid": query_execution_valid,
         "coverage_valid": coverage_valid,
+        "semantic_valid": semantic_valid,
+        "reasons": reasons,
+    }
+
+
+def pivot_semantic_validity(results: list[dict], controls: dict) -> dict:
+    query_execution_valid = all(
+        result.get("status") == "ok" and result.get("semantic_valid") is True
+        for result in results
+    )
+    controls_valid = all(
+        (controls.get(name) or {}).get("passed") is True
+        for name in ("positive_anchor", "negative_filter")
+    )
+    semantic_valid = controls_valid and query_execution_valid
+    reasons = []
+    if not controls_valid:
+        reasons.append("representative alert controls did not both pass")
+    if not query_execution_valid:
+        reasons.append("one or more investigation pivots failed semantic validation")
+    return {
+        "transport_valid": True,
+        "controls_valid": controls_valid,
+        "query_execution_valid": query_execution_valid,
+        "coverage_valid": query_execution_valid,
         "semantic_valid": semantic_valid,
         "reasons": reasons,
     }
@@ -790,13 +1569,50 @@ def execute_osquery_pack(binary: Path, pack_name: str) -> dict:
     }
 
 
+def execute_pivot_batch(data: dict) -> int:
+    request = validated_pivot_request(data)
+    results = [
+        execute_pivot_query(query)
+        for query in request["queries"]
+    ]
+    controls = execute_controls(request["authorization"]["anchor"])
+    validity = pivot_semantic_validity(results, controls)
+    complete = validity["semantic_valid"]
+    response = {
+        "ok": True,
+        "complete": complete,
+        "partial": not complete,
+        "read_only": True,
+        "query_contract": INVESTIGATION_QUERY_CONTRACT,
+        "batch_id": request["batch_id"],
+        "request_digest": canonical_digest(request),
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(
+            timespec="seconds"
+        ).replace("+00:00", "Z"),
+        "results": results,
+        "controls": controls,
+        "semantic_validity": validity,
+    }
+    output = json.dumps(response, separators=(",", ":"), sort_keys=True).encode()
+    if len(output) > MAX_OUTPUT_BYTES:
+        fail("bounded investigation pivot response exceeded the output contract", 4)
+    sys.stdout.buffer.write(output + b"\n")
+    return 0
+
+
 def main() -> int:
     if not SO_QUERY.is_file():
         fail("Security Onion query CLI is unavailable", 3)
+    request_data = read_request()
+    if (
+        request_data.get("query_contract") == INVESTIGATION_QUERY_CONTRACT
+        or request_data.get("operation") == INVESTIGATION_QUERY_OPERATION
+    ):
+        return execute_pivot_batch(request_data)
     binary = osquery_binary()
     if binary is None:
         fail("managed Elastic Agent osqueryd is unavailable", 3)
-    packs, osquery_packs, windows, observables, size, anchor = validated_request(read_request())
+    packs, osquery_packs, windows, observables, size, anchor = validated_request(request_data)
     results = []
     for window_index, window in enumerate(windows):
         for pack_name in packs:

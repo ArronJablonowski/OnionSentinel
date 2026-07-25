@@ -39,12 +39,12 @@ class LiveOsqueryContractTests(unittest.TestCase):
             "SELECT pid, name FROM processes LIMIT 100;",
         )
 
-    def test_allows_bounded_join_between_allowlisted_tables(self):
-        query = normalize_query(
-            "SELECT p.pid, p.name, s.remote_address "
-            "FROM processes p JOIN process_open_sockets s ON p.pid = s.pid LIMIT 25;"
-        )
-        self.assertTrue(query.endswith("LIMIT 25;"))
+    def test_rejects_joins_even_between_allowlisted_tables(self):
+        with self.assertRaises(LiveOsqueryContractError):
+            normalize_query(
+                "SELECT p.pid, p.name, s.remote_address "
+                "FROM processes p JOIN process_open_sockets s ON p.pid = s.pid LIMIT 25;"
+            )
 
     def test_rejects_mutations_comments_unknown_tables_and_excessive_limits(self):
         rejected = (
@@ -60,6 +60,36 @@ class LiveOsqueryContractTests(unittest.TestCase):
             with self.subTest(query=query):
                 with self.assertRaises(LiveOsqueryContractError):
                     normalize_query(query)
+
+    def test_rejects_quoted_tables_functions_and_projection_aliases(self):
+        rejected = (
+            'SELECT * FROM processes JOIN "shell_history" ON 1=1 LIMIT 1;',
+            "SELECT * FROM processes JOIN `ssh_keys` ON 1=1 LIMIT 1;",
+            "SELECT * FROM processes JOIN [file] ON 1=1 LIMIT 1;",
+            "SELECT randomblob(1000000000) FROM processes LIMIT 1;",
+            "SELECT zeroblob(1000000000) FROM processes LIMIT 1;",
+            "SELECT printf('%1000000000s', name) FROM processes LIMIT 1;",
+            'SELECT "8.8.8.8" AS "source.ip" FROM processes LIMIT 1;',
+            "SELECT '8.8.8.8' AS source_ip FROM processes LIMIT 1;",
+            "SELECT name AS source_ip FROM processes LIMIT 1;",
+            "SELECT * FROM processes LIMIT 200, 1000000;",
+            "SELECT * FROM processes LIMIT 1 + 1000000;",
+            "SELECT * FROM processes LIMIT 10 OFFSET 1000000;",
+        )
+        for query in rejected:
+            with self.subTest(query=query):
+                with self.assertRaises(LiveOsqueryContractError):
+                    normalize_query(query)
+
+    def test_allows_single_table_native_columns_and_string_predicates(self):
+        self.assertEqual(
+            normalize_query(
+                "SELECT pid, name, path FROM processes "
+                "WHERE name = 'launchd' LIMIT 20"
+            ),
+            "SELECT pid, name, path FROM processes "
+            "WHERE name = 'launchd' LIMIT 20;",
+        )
 
     def test_rejects_wildcard_or_unconfigured_endpoint_targets(self):
         for alias in ("*", "all", "unknown-endpoint"):

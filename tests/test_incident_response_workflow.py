@@ -169,7 +169,10 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
                     "query_digest": "digest-unit",
                     "confidence": "high",
                 }],
-                "security_onion_findings": ["Bounded TEST-NET flow returned one hit."],
+                "security_onion_findings": [
+                    "Bounded TEST-NET flow returned one hit.",
+                    "pivot-oql-digest correlated one additional synthetic flow.",
+                ],
                 "detection_outcome_reasoning": "The event occurred but the synthetic fixture is inconclusive.",
                 "osquery_findings": ["The reviewed system inventory pack returned one synthetic row."],
                 "conclusion": "Synthetic test conclusion.",
@@ -236,6 +239,54 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
                     "rows_preview": [{"pid": "1", "name": "synthetic-init"}],
                 }],
             },
+            "_investigation_query_audit": {
+                "query_contract": "onion-sentinel-investigation-pivots-v1",
+                "provider_neutral": True,
+                "model_route": "codex-cli:gpt-5.6-sol:high",
+                "rounds_completed": 1,
+                "queries_admitted": 2,
+                "requests_ignored_or_over_budget": 0,
+                "rounds": [{
+                    "round": 1,
+                    "trusted_queries": [
+                        {
+                            "query_id": "oql-pivot-1",
+                            "dialect": "oql",
+                            "pack": "network_flow",
+                            "purpose": "correlate_observable",
+                            "status": "ok",
+                            "query_digest": "pivot-oql-digest",
+                            "window": {
+                                "start": "2026-07-22T17:55:00.000Z",
+                                "end": "2026-07-22T18:15:00.000Z",
+                            },
+                            "total_hits": 1,
+                            "returned_hits": 1,
+                            "execution_backend": "so-elasticsearch-query",
+                            "semantics": "compiled_oql_equivalent",
+                            "oql_equivalent": 'source.ip:"192.0.2.10" | sortby @timestamp^',
+                            "kql_equivalent": 'source.ip : "192.0.2.10"',
+                            "query_dsl": {
+                                "query": {"term": {"source.ip": "192.0.2.10"}},
+                                "size": 25,
+                            },
+                        },
+                        {
+                            "query_id": "zeek-pivot-1",
+                            "backend": "zeek",
+                            "purpose": "Confirm the DNS answer tied to the flow.",
+                            "operation": "dns",
+                            "filters": {"query": "example.test"},
+                            "limit": 10,
+                            "status": "ok",
+                            "query_digest": "pivot-zeek-digest",
+                            "candidate_records_scanned": 4,
+                            "records_returned": 1,
+                            "result_truncated": False,
+                        },
+                    ],
+                }],
+            },
         }
         prior_response = {
             "bluf": "Synthetic SOC assessment.",
@@ -266,7 +317,7 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         status, payload = self.portal.soc_incident_detail_response("ir-query-audit")
 
         self.assertEqual(status, 200)
-        self.assertEqual(payload["query_count"], 3)
+        self.assertEqual(payload["query_count"], 5)
         self.assertIn("KQL (analyst-readable equivalent)", payload["incident_html"])
         self.assertIn('source.ip: &quot;192.0.2.10&quot;', payload["incident_html"])
         self.assertIn("Elasticsearch Query DSL (exact executed request)", payload["incident_html"])
@@ -288,6 +339,15 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn("Confirm the endpoint process inventory.", payload["incident_html"])
         self.assertIn("SELECT pid, name, path FROM processes LIMIT 25;", payload["incident_html"])
         self.assertIn("synthetic-init", payload["incident_html"])
+        self.assertIn("Interactive Investigation Pivot Audit", payload["incident_html"])
+        self.assertIn("OQL (analyst-readable equivalent)", payload["incident_html"])
+        self.assertIn("compiled_oql_equivalent", payload["incident_html"])
+        self.assertIn("Structured PCAP/Zeek request (exact broker input)", payload["incident_html"])
+        self.assertIn("Confirm the DNS answer tied to the flow.", payload["incident_html"])
+        self.assertIn(
+            'data-query-finding="pivot-oql-digest correlated one additional synthetic flow."',
+            payload["incident_html"],
+        )
         self.assertIn("Synthetic SOC assessment.", payload["prior_ai_html"])
 
     def test_escalation_api_records_intent_through_alert_store(self) -> None:

@@ -39,6 +39,7 @@ install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay.py" /opt/so-ale
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/alert_outbox.py" /opt/so-alert-relay/app/alert_outbox.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/alert_delivery.py" /opt/so-alert-relay/app/alert_delivery.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/process_io.py" /opt/so-alert-relay/app/process_io.py
+install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/incident_evidence_broker.py" /opt/so-alert-relay/app/incident_evidence_broker.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/live_osquery_broker.py" /opt/so-alert-relay/app/live_osquery_broker.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract.py" /opt/so-alert-relay/app/live_osquery_contract.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay_health_wrapper.py" /opt/so-alert-relay/app/relay_health_wrapper.py
@@ -58,6 +59,13 @@ if [[ ! -f /etc/so-alert-relay/live-osquery.json ]]; then
     "$REPO_DIR/relay/config/live-osquery.example.json" \
     /etc/so-alert-relay/live-osquery.json
   echo "Created disabled /etc/so-alert-relay/live-osquery.json example." >&2
+fi
+
+if [[ ! -f /etc/so-alert-relay/incident-evidence.json ]]; then
+  install -o root -g soalert -m 0640 \
+    "$REPO_DIR/relay/config/incident-evidence.example.json" \
+    /etc/so-alert-relay/incident-evidence.json
+  echo "Created /etc/so-alert-relay/incident-evidence.json example." >&2
 fi
 
 install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-alert-relay.service" /etc/systemd/system/so-alert-relay.service

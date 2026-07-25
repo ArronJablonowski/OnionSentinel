@@ -570,7 +570,7 @@ class PcapAnalysisHardeningTest(unittest.TestCase):
         self.assertNotIn("/private/runtime", encoded)
         self.assertIn("aggregate", encoded)
 
-    def test_local_analysis_allows_exactly_one_follow_up_round(self) -> None:
+    def test_local_transport_leaves_legacy_follow_up_for_unified_orchestrator(self) -> None:
         package = {
             "pcap_evidence": {
                 "parsed_evidence": [{
@@ -580,29 +580,24 @@ class PcapAnalysisHardeningTest(unittest.TestCase):
             }
         }
         first = {"pcap_query_requests": [{"operation": "dns", "indicator": "wanted.example", "limit": 3}]}
-        final = {"summary": "final", "pcap_query_requests": [{"operation": "dns", "limit": 1}]}
         args = type("Args", (), {})()
 
         with (
             mock.patch.object(
                 runner,
                 "_ollama_request",
-                side_effect=[first, final],
+                return_value=first,
             ) as request,
             mock.patch.object(runner, "_unload_ollama_model"),
         ):
             response = runner.ollama_chat(package, args, {})
 
-        self.assertEqual(request.call_count, 2)
+        self.assertEqual(request.call_count, 1)
         first_package = request.call_args_list[0].args[0]
-        final_package = request.call_args_list[1].args[0]
         self.assertNotIn("_local_query_index", json.dumps(first_package))
-        self.assertEqual(
-            final_package["pcap_follow_up_results"]["results"][0]["records"][0]["query"],
-            "wanted.example",
-        )
-        self.assertNotIn("pcap_query_requests", response)
-        self.assertEqual(response["_pcap_query_audit"]["result_record_counts"], [1])
+        self.assertEqual(response["pcap_query_requests"], first["pcap_query_requests"])
+        self.assertNotIn("pcap_follow_up_results", response)
+        self.assertNotIn("_pcap_query_audit", response)
 
     def test_resource_limit_is_clamped_to_inherited_hard_limit(self) -> None:
         with (

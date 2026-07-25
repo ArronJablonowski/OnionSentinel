@@ -130,7 +130,7 @@ def evidence_artifact(*, status: str = "ok") -> dict:
     }
     positive = elastic_result(
         positive_dsl,
-        contract.ALERT_INDEX_SCOPE,
+        [anchor["index"]],
         hits=[{
             "id": anchor["id"],
             "index": anchor["index"],
@@ -236,7 +236,7 @@ class IncidentEvidenceContractTests(unittest.TestCase):
         result["hits"] = [
             {
                 "id": f"flow-{index}",
-                "index": ".ds-logs-zeek.connection-default-2026.07.22-000001",
+                "index": ".ds-logs-zeek-so-2026.07.22-000001",
                 "source": {
                     "@timestamp": f"2026-07-22T18:30:{index:02d}Z",
                     "source": {"ip": "192.0.2.10"},
@@ -475,9 +475,22 @@ class IncidentEvidenceContractTests(unittest.TestCase):
 
     def test_mac_installer_deploys_incident_evidence_runtime_dependencies(self) -> None:
         installer = (BIN_DIR / "install-macstudio-stack.zsh").read_text(encoding="utf-8")
+        example = json.loads(
+            (REPO_ROOT / "n8n" / "config" / "incident-evidence.example.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        collector = (BIN_DIR / "collect-incident-evidence.py").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("incident_evidence_contract.py", installer)
         self.assertIn("collect-incident-evidence.py", installer)
+        self.assertIn("incident-evidence.example.json", installer)
+        self.assertIn('if "timeout_seconds" not in config:', installer)
+        self.assertIn('config["timeout_seconds"] = 420', installer)
+        self.assertEqual(example["timeout_seconds"], 420)
+        self.assertIn('config.get("timeout_seconds", 420)', collector)
 
     def test_incident_responder_prompt_requires_framework_and_query_audits(self) -> None:
         prompt = (

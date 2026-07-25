@@ -883,12 +883,142 @@ ZEEK_SUMMARY_FIELDS = {
     "weird": ("name", "addl"),
 }
 
+# The private query index keeps a bounded, deterministic sample of
+# protocol-specific records so a follow-up pivot can combine endpoints,
+# timestamps, and protocol facts. Only these fields are projected; headers,
+# payloads, credentials, file paths, arbitrary Zeek fields, and scripts never
+# enter the index.
+ZEEK_QUERY_FIELDS = {
+    "conn": {
+        "ts": "timestamp_epoch",
+        "uid": "uid",
+        "id.orig_h": "source_ip",
+        "id.resp_h": "destination_ip",
+        "id.orig_p": "source_port",
+        "id.resp_p": "destination_port",
+        "proto": "transport",
+        "service": "service",
+        "duration": "duration",
+        "orig_bytes": "orig_bytes",
+        "resp_bytes": "resp_bytes",
+        "conn_state": "connection_state",
+        "history": "history",
+        "missed_bytes": "missed_bytes",
+    },
+    "dns": {
+        "ts": "timestamp_epoch",
+        "uid": "uid",
+        "id.orig_h": "source_ip",
+        "id.resp_h": "destination_ip",
+        "id.orig_p": "source_port",
+        "id.resp_p": "destination_port",
+        "proto": "transport",
+        "query": "query",
+        "qtype": "qtype",
+        "qtype_name": "qtype_name",
+        "rcode": "rcode",
+        "rcode_name": "rcode_name",
+        "answers": "dns_answers",
+        "rejected": "rejected",
+    },
+    "tls": {
+        "ts": "timestamp_epoch",
+        "uid": "uid",
+        "id.orig_h": "source_ip",
+        "id.resp_h": "destination_ip",
+        "id.orig_p": "source_port",
+        "id.resp_p": "destination_port",
+        "version": "version",
+        "cipher": "cipher",
+        "curve": "curve",
+        "server_name": "sni",
+        "resumed": "resumed",
+        "established": "established",
+        "next_protocol": "next_protocol",
+        "ja3": "ja3",
+        "ja3s": "ja3s",
+    },
+    "http": {
+        "ts": "timestamp_epoch",
+        "uid": "uid",
+        "id.orig_h": "source_ip",
+        "id.resp_h": "destination_ip",
+        "id.orig_p": "source_port",
+        "id.resp_p": "destination_port",
+        "method": "method",
+        "host": "host",
+        "uri": "uri",
+        "referrer": "referrer",
+        "version": "version",
+        "user_agent": "user_agent",
+        "request_body_len": "request_body_len",
+        "response_body_len": "response_body_len",
+        "status_code": "status_code",
+        "status_msg": "status_message",
+    },
+    "files": {
+        "ts": "timestamp_epoch",
+        "fuid": "fuid",
+        "conn_uids": "uid",
+        "tx_hosts": "source_ip",
+        "rx_hosts": "destination_ip",
+        "source": "source_name",
+        "mime_type": "mime_type",
+        "filename": "filename",
+        "seen_bytes": "seen_bytes",
+        "total_bytes": "total_bytes",
+        "missing_bytes": "missing_bytes",
+        "overflow_bytes": "overflow_bytes",
+        "md5": "md5",
+        "sha1": "sha1",
+        "sha256": "sha256",
+    },
+    "notice": {
+        "ts": "timestamp_epoch",
+        "uid": "uid",
+        "id.orig_h": "source_ip",
+        "id.resp_h": "destination_ip",
+        "id.orig_p": "source_port",
+        "id.resp_p": "destination_port",
+        "note": "note",
+        "msg": "message",
+        "sub": "sub",
+        "src": "source_ip",
+        "dst": "destination_ip",
+        "p": "destination_port",
+        "dropped": "dropped",
+    },
+    "weird": {
+        "ts": "timestamp_epoch",
+        "uid": "uid",
+        "id.orig_h": "source_ip",
+        "id.resp_h": "destination_ip",
+        "id.orig_p": "source_port",
+        "id.resp_p": "destination_port",
+        "name": "name",
+        "addl": "additional",
+        "notice": "notice",
+    },
+}
+
+
+def project_zeek_query_record(record: dict[str, Any], log_type: str) -> dict[str, Any]:
+    """Project one Zeek JSON row into payload-free, queryable facts."""
+    projected: dict[str, Any] = {"source": "zeek", "record_type": log_type}
+    for source_field, output_field in ZEEK_QUERY_FIELDS.get(log_type, {}).items():
+        value = record.get(source_field)
+        if value not in (None, "", [], {}):
+            projected[output_field] = value
+    return projected
+
 
 def aggregate_zeek_log(
     path: Path,
     fields: tuple[str, ...],
     counter: BoundedTopCounter,
     coverage: CoverageTracker,
+    query_sample: DeterministicReservoir | None = None,
+    log_type: str = "",
 ) -> None:
     """Read every Zeek record while keeping only bounded heavy-hitter state."""
     with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -909,6 +1039,8 @@ def aggregate_zeek_log(
                     continue
             coverage.observe(timestamp=parsed.get("ts"), length=packet_bytes, decoded=True)
             counter.add(parsed.get(field) for field in fields)
+            if query_sample is not None and log_type in ZEEK_QUERY_FIELDS:
+                query_sample.add(project_zeek_query_record(parsed, log_type))
 
 
 def run_zeek(pcap_files: list[Path], work_dir: Path) -> dict[str, Any]:
@@ -929,6 +1061,7 @@ def run_zeek(pcap_files: list[Path], work_dir: Path) -> dict[str, Any]:
     }
     counters = {key: BoundedTopCounter(HEAVY_HITTER_CAPACITY) for key in log_names}
     coverage = {key: CoverageTracker() for key in log_names}
+    query_samples = {key: DeterministicReservoir(QUERY_INDEX_LIMIT) for key in log_names}
     files_processed = 0
 
     for index, pcap in enumerate(pcap_files):
@@ -946,7 +1079,14 @@ def run_zeek(pcap_files: list[Path], work_dir: Path) -> dict[str, Any]:
             for log_key, candidates in log_names.items():
                 path = next((capture_dir / name for name in candidates if (capture_dir / name).exists()), None)
                 if path is not None:
-                    aggregate_zeek_log(path, ZEEK_SUMMARY_FIELDS[log_key], counters[log_key], coverage[log_key])
+                    aggregate_zeek_log(
+                        path,
+                        ZEEK_SUMMARY_FIELDS[log_key],
+                        counters[log_key],
+                        coverage[log_key],
+                        query_samples[log_key],
+                        log_key,
+                    )
             if result["ok"]:
                 files_processed += 1
         finally:
@@ -969,6 +1109,12 @@ def run_zeek(pcap_files: list[Path], work_dir: Path) -> dict[str, Any]:
         "sampling": {
             "strategy": "full-stream-bounded-heavy-hitters",
             "heavy_hitter_capacity_per_log": HEAVY_HITTER_CAPACITY,
+            "query_index_strategy": "deterministic-reservoir-per-log",
+            "query_index_limit_per_log": QUERY_INDEX_LIMIT,
+            "query_index_records": {
+                key: len(query_samples[key].records())
+                for key in log_names
+            },
             "records_truncated_before_aggregation": {key: False for key in log_names},
             "invalid_json_lines": {key: coverage[key].malformed_records for key in log_names},
         },
@@ -983,13 +1129,13 @@ def run_zeek(pcap_files: list[Path], work_dir: Path) -> dict[str, Any]:
         # queries. It is stripped before either the initial local prompt or any
         # hosted-model request is assembled.
         "_local_query_index": {
-            "connections": counters["conn"].most_common(ZEEK_SUMMARY_FIELDS["conn"], QUERY_INDEX_LIMIT),
-            "dns": counters["dns"].most_common(ZEEK_SUMMARY_FIELDS["dns"], QUERY_INDEX_LIMIT),
-            "tls": counters["tls"].most_common(ZEEK_SUMMARY_FIELDS["tls"], QUERY_INDEX_LIMIT),
-            "http": counters["http"].most_common(ZEEK_SUMMARY_FIELDS["http"], QUERY_INDEX_LIMIT),
-            "files": counters["files"].most_common(ZEEK_SUMMARY_FIELDS["files"], QUERY_INDEX_LIMIT),
-            "notices": counters["notice"].most_common(ZEEK_SUMMARY_FIELDS["notice"], QUERY_INDEX_LIMIT),
-            "weird": counters["weird"].most_common(ZEEK_SUMMARY_FIELDS["weird"], QUERY_INDEX_LIMIT),
+            "connections": query_samples["conn"].records(),
+            "dns": query_samples["dns"].records(),
+            "tls": query_samples["tls"].records(),
+            "http": query_samples["http"].records(),
+            "files": query_samples["files"].records(),
+            "notices": query_samples["notice"].records(),
+            "weird": query_samples["weird"].records(),
         },
     }
 
@@ -1027,6 +1173,10 @@ def run_tshark(
     coverage = CoverageTracker()
     per_file: list[dict[str, Any]] = []
     reservoir = DeterministicReservoir(TSHARK_SAMPLE_LIMIT)
+    dns_record_samples = DeterministicReservoir(QUERY_INDEX_LIMIT)
+    tls_record_samples = DeterministicReservoir(QUERY_INDEX_LIMIT)
+    http_record_samples = DeterministicReservoir(QUERY_INDEX_LIMIT)
+    icmp_fact_samples = DeterministicReservoir(QUERY_INDEX_LIMIT)
     protocols = BoundedTopCounter(128)
     conversations = BoundedTopCounter(HEAVY_HITTER_CAPACITY)
     dns_queries = BoundedTopCounter(HEAVY_HITTER_CAPACITY)
@@ -1112,6 +1262,8 @@ def run_tshark(
             if destination_public:
                 geoip_candidates.add((destination_public, "destination"))
             query_values = tshark_occurrences(row["dns_query"])
+            query_type_values = tshark_occurrences(row["dns_query_type"])
+            rcode_values = tshark_occurrences(row["dns_rcode"])
             answer_values = (
                 [("A", value) for value in tshark_occurrences(row["dns_answer_ipv4"])]
                 + [("AAAA", value) for value in tshark_occurrences(row["dns_answer_ipv6"])]
@@ -1122,9 +1274,9 @@ def run_tshark(
             for value in query_values:
                 dns_query_count += 1
                 dns_queries.add((value,))
-            for value in tshark_occurrences(row["dns_query_type"]):
+            for value in query_type_values:
                 dns_query_types.add((value,))
-            for value in tshark_occurrences(row["dns_rcode"]):
+            for value in rcode_values:
                 dns_rcodes.add((value,))
             for answer_type, value in answer_values:
                 dns_answer_count += 1
@@ -1132,10 +1284,16 @@ def run_tshark(
                 address = public_ip(value)
                 if address:
                     geoip_candidates.add((address, "dns_answer"))
+            user_agent_facts: list[dict[str, str]] = []
             for source_field, raw_user_agents in (("http/1", row["http_user_agent"]), ("http/2", row["http2_user_agent"])):
                 for raw_user_agent in tshark_occurrences(raw_user_agents):
                     user_agent_count += 1
                     user_agents.add((source_field, raw_user_agent))
+                    user_agent_facts.append({
+                        "http_version": source_field,
+                        "user_agent": raw_user_agent,
+                    })
+            tls_version_facts: list[dict[str, str]] = []
             for version_source, raw_versions in (
                 ("handshake", row["tls_handshake_version"]),
                 ("supported", row["tls_supported_version"]),
@@ -1146,12 +1304,32 @@ def run_tshark(
                     if raw_version:
                         tls_version_observation_count += 1
                         tls_versions.add((version_source, raw_version, version_name))
+                        tls_version_facts.append({
+                            "version_source": version_source,
+                            "raw_version": raw_version,
+                            "version": version_name,
+                        })
+            tls_sni_values = tshark_occurrences(row["tls_sni"])
+            http_host_values = tshark_occurrences(row["http_host"])
+            http_uri_values = tshark_occurrences(row["http_uri"])
             icmp_family = "icmpv6" if row["icmpv6_type"] or row["icmpv6_code"] else "icmp" if row["icmp_type"] or row["icmp_code"] else ""
+            icmp_fact: dict[str, Any] = {}
             if icmp_family:
                 try:
                     packet_timestamp = float(row["timestamp_epoch"])
                 except (TypeError, ValueError):
                     packet_timestamp = None
+                icmp_type = row["icmpv6_type"] if icmp_family == "icmpv6" else row["icmp_type"]
+                icmp_code = row["icmpv6_code"] if icmp_family == "icmpv6" else row["icmp_code"]
+                identifier = row["icmp_identifier"]
+                sequence = row["icmp_sequence"]
+                try:
+                    safe_payload_length = max(
+                        0,
+                        int(next(iter(tshark_occurrences(row["data_length"])), "0") or 0),
+                    )
+                except (TypeError, ValueError):
+                    safe_payload_length = 0
                 capture_icmp_packet_count += 1
                 selected, exclusion = _icmp_scope_match(
                     source,
@@ -1159,6 +1337,16 @@ def run_tshark(
                     packet_timestamp,
                     scope,
                 )
+                icmp_fact = {
+                    "icmp_family": icmp_family,
+                    "icmp_type": icmp_type,
+                    "icmp_code": icmp_code,
+                    "icmp_identifier": identifier,
+                    "icmp_sequence": sequence,
+                    "icmp_payload_length": safe_payload_length,
+                    "selected_scope_match": selected,
+                    "scope_exclusion_reason": exclusion,
+                }
                 if not selected:
                     if exclusion == "endpoint":
                         icmp_excluded_endpoint += 1
@@ -1173,10 +1361,6 @@ def run_tshark(
                     except (TypeError, ValueError):
                         frame_bytes = 0
                     icmp_max_frame_bytes = max(icmp_max_frame_bytes, frame_bytes)
-                    icmp_type = row["icmpv6_type"] if icmp_family == "icmpv6" else row["icmp_type"]
-                    icmp_code = row["icmpv6_code"] if icmp_family == "icmpv6" else row["icmp_code"]
-                    identifier = row["icmp_identifier"]
-                    sequence = row["icmp_sequence"]
                     icmp_type_codes.add((icmp_family, icmp_type, icmp_code))
                     if identifier:
                         icmp_identifiers.add((identifier,))
@@ -1199,6 +1383,7 @@ def run_tshark(
                         payload_length = max(0, int(data_length_value or len(payload)))
                     except (TypeError, ValueError):
                         payload_length = len(payload)
+                    icmp_fact["icmp_payload_length"] = payload_length
                     if payload_length:
                         icmp_payload_lengths.add((payload_length,))
                     for marker, decoded_marker in marker_values:
@@ -1250,7 +1435,9 @@ def run_tshark(
                             "destination_ip": destination,
                             "frame_bytes": frame_bytes,
                         })
-            reservoir.add({
+            packet_fact = {
+                "source": "tshark",
+                "record_type": "packet",
                 "frame_number": row["frame_number"],
                 "timestamp_epoch": row["timestamp_epoch"],
                 "frame_length": row["frame_length"],
@@ -1260,11 +1447,30 @@ def run_tshark(
                 "source_port": source_port,
                 "destination_port": destination_port,
                 "transport": transport,
-                "dns_query": row["dns_query"],
-                "tls_sni": row["tls_sni"],
-                "http_host": row["http_host"],
-                "http_uri": row["http_uri"],
-            })
+                "dns_query": query_values[0] if query_values else "",
+                "dns_queries": query_values,
+                "dns_qtypes": query_type_values,
+                "dns_rcodes": rcode_values,
+                "dns_answers": [
+                    {"answer_type": answer_type, "answer": value}
+                    for answer_type, value in answer_values
+                ],
+                "tls_sni": tls_sni_values[0] if tls_sni_values else "",
+                "tls_versions": tls_version_facts,
+                "http_host": http_host_values[0] if http_host_values else "",
+                "http_uri": http_uri_values[0] if http_uri_values else "",
+                "http_user_agents": user_agent_facts,
+                **icmp_fact,
+            }
+            reservoir.add(packet_fact)
+            if query_values or answer_values or query_type_values or rcode_values:
+                dns_record_samples.add({**packet_fact, "record_type": "dns"})
+            if tls_sni_values or tls_version_facts or row["protocol"].upper().startswith(("TLS", "SSL")):
+                tls_record_samples.add({**packet_fact, "record_type": "tls"})
+            if http_host_values or http_uri_values or user_agent_facts or row["protocol"].upper().startswith("HTTP"):
+                http_record_samples.add({**packet_fact, "record_type": "http"})
+            if icmp_fact:
+                icmp_fact_samples.add({**packet_fact, "record_type": "icmp"})
 
         command = [
             tshark, "-n", "-r", str(pcap), "-T", "fields",
@@ -1428,6 +1634,14 @@ def run_tshark(
             "sample_limit": TSHARK_SAMPLE_LIMIT,
             "packets_seen": reservoir.seen,
             "packets_sampled": len(packet_samples),
+            "query_index_strategy": "deterministic-protocol-reservoirs",
+            "query_index_limit_per_protocol": QUERY_INDEX_LIMIT,
+            "query_index_records": {
+                "dns": len(dns_record_samples.records()),
+                "tls": len(tls_record_samples.records()),
+                "http": len(http_record_samples.records()),
+                "icmp": len(icmp_fact_samples.records()),
+            },
         },
         "protocol_counts": top_protocols,
         "top_conversations": top_conversations,
@@ -1445,13 +1659,18 @@ def run_tshark(
             ),
             "protocols": protocols.most_common(("protocol",), QUERY_INDEX_LIMIT),
             "packet_samples": packet_samples,
+            "packet_facts": packet_samples,
             "dns": dns_queries.most_common(("query",), QUERY_INDEX_LIMIT),
+            "dns_records": dns_record_samples.records(),
+            "tls_records": tls_record_samples.records(),
+            "http_records": http_record_samples.records(),
             "user_agents": user_agents.most_common(("http_version", "user_agent"), QUERY_INDEX_LIMIT),
             "tls_versions": tls_versions.most_common(("source", "raw_version", "version"), QUERY_INDEX_LIMIT),
             "icmp_anomalies": icmp_anomalies.most_common(
                 ("family", "type", "code", "source_ip", "destination_ip", "frame_bytes"),
                 QUERY_INDEX_LIMIT,
             ),
+            "icmp_facts": icmp_fact_samples.records(),
             "icmp_semantics": icmp_semantics,
             "geoip": geoip.get("records", [])[:QUERY_INDEX_LIMIT],
         },

@@ -8,6 +8,9 @@
   "allowed_target_aliases": [
     "REPLACE_WITH_OPERATOR_ENDPOINT_ALIAS"
   ],
+  "allowed_agent_roles": [
+    "incident-responder"
+  ],
   "connect_timeout_seconds": 10,
   "timeout_seconds": 180,
   "artifact_dir": "~/n8n-local/soc-alerts/incident-evidence/live-osquery"

@@ -314,6 +314,31 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             ["critical", "high", "medium", "low", "informational"],
         )
 
+    def test_analysis_watchdog_allows_bounded_multi_turn_investigation(self) -> None:
+        args = SimpleNamespace(
+            analysis_dir=Path(self.tempdir.name),
+            timeout=240,
+            alert_store_url="http://127.0.0.1:8767",
+            ai_settings_file=Path(self.tempdir.name) / "ai_model_settings.json",
+            model="",
+        )
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with mock.patch.object(
+            self.scheduler,
+            "run_command",
+            return_value=completed,
+        ) as run_command:
+            result = self.scheduler.run_analysis(
+                Path(self.tempdir.name) / "prompt.json",
+                args,
+            )
+
+        self.assertIs(result, completed)
+        self.assertEqual(
+            run_command.call_args.kwargs["timeout_seconds"],
+            (args.timeout * 5) + 300,
+        )
+
     def test_pending_automatic_low_job_is_retired_without_inference_at_medium(self) -> None:
         result = self.run_indexed_worker_once(severity="low")
 

@@ -92,8 +92,8 @@ class SecurityOnionIncidentEvidenceExportTests(unittest.TestCase):
 
     def test_pack_uses_reviewed_indices_and_shard_doc_sort(self) -> None:
         with mock.patch.object(
-            self.wrapper.subprocess,
-            "run",
+            self.wrapper,
+            "run_bounded_command",
             return_value=completed_response(es_response()),
         ) as run:
             result = self.wrapper.execute_pack(
@@ -118,8 +118,8 @@ class SecurityOnionIncidentEvidenceExportTests(unittest.TestCase):
 
     def test_failed_shards_are_an_explicit_query_failure(self) -> None:
         with mock.patch.object(
-            self.wrapper.subprocess,
-            "run",
+            self.wrapper,
+            "run_bounded_command",
             return_value=completed_response(es_response(failed_shards=1)),
         ):
             result = self.wrapper.execute_pack(
@@ -143,8 +143,8 @@ class SecurityOnionIncidentEvidenceExportTests(unittest.TestCase):
             "status": 400,
         }
         with mock.patch.object(
-            self.wrapper.subprocess,
-            "run",
+            self.wrapper,
+            "run_bounded_command",
             return_value=completed_response(root_error),
         ):
             result = self.wrapper.execute_pack(
@@ -160,8 +160,8 @@ class SecurityOnionIncidentEvidenceExportTests(unittest.TestCase):
 
     def test_zero_shards_are_not_misread_as_a_valid_empty_result(self) -> None:
         with mock.patch.object(
-            self.wrapper.subprocess,
-            "run",
+            self.wrapper,
+            "run_bounded_command",
             return_value=completed_response(es_response(total_shards=0)),
         ):
             result = self.wrapper.execute_pack(
@@ -182,8 +182,8 @@ class SecurityOnionIncidentEvidenceExportTests(unittest.TestCase):
             "_source": {"@timestamp": "2026-07-22T18:30:00Z"},
         }
         with mock.patch.object(
-            self.wrapper.subprocess,
-            "run",
+            self.wrapper,
+            "run_bounded_command",
             return_value=completed_response(es_response(hits=[hit])),
         ):
             result = self.wrapper.execute_pack(
@@ -223,8 +223,8 @@ class SecurityOnionIncidentEvidenceExportTests(unittest.TestCase):
             },
         }
         with mock.patch.object(
-            self.wrapper.subprocess,
-            "run",
+            self.wrapper,
+            "run_bounded_command",
             side_effect=[
                 completed_response(es_response(hits=[positive_hit])),
                 completed_response(es_response()),

@@ -93,6 +93,53 @@ if [[ ! -f "$STACK_DIR/config/asset_inventory.json" ]]; then
   cp "$REPO_DIR/n8n/config/asset_inventory.example.json" "$STACK_DIR/config/asset_inventory.json"
   chmod 0600 "$STACK_DIR/config/asset_inventory.json"
 fi
+# Seed the incident-evidence transport with enough time for four sequential
+# bounded pivots plus both controls. During upgrades, add the key only when it
+# is absent; an operator's existing timeout (including a deliberately lower
+# value) is never overwritten.
+/usr/bin/python3 - "$HOME" "$REPO_DIR/n8n/config/incident-evidence.example.json" "$STACK_DIR/config/incident-evidence.json" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+home, source_name, destination_name = sys.argv[1:4]
+source = Path(source_name)
+destination = Path(destination_name)
+if not destination.exists():
+    destination.write_text(source.read_text().replace("__HOME__", home))
+    os.chmod(destination, 0o600)
+else:
+    try:
+        config = json.loads(destination.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        print(
+            f"WARNING: leaving invalid incident-evidence config unchanged: {exc}",
+            file=sys.stderr,
+        )
+        raise SystemExit(0)
+    if not isinstance(config, dict):
+        print(
+            "WARNING: leaving non-object incident-evidence config unchanged",
+            file=sys.stderr,
+        )
+        raise SystemExit(0)
+    if "timeout_seconds" not in config:
+        config["timeout_seconds"] = 420
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            delete=False,
+        ) as handle:
+            json.dump(config, handle, indent=2)
+            handle.write("\n")
+            temporary = Path(handle.name)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+PY
 for memory_file in \
   soc-analyst-memory.md \
   incident-responder-memory.md \
@@ -121,6 +168,8 @@ cp "$REPO_DIR/n8n/bin/detection_validation.py" "$STACK_DIR/bin/detection_validat
 cp "$REPO_DIR/n8n/bin/asset_inventory.py" "$STACK_DIR/bin/asset_inventory.py"
 cp "$REPO_DIR/n8n/bin/incident_evidence_contract.py" "$STACK_DIR/bin/incident_evidence_contract.py"
 cp "$REPO_DIR/n8n/bin/collect-incident-evidence.py" "$STACK_DIR/bin/collect-incident-evidence.py"
+cp "$REPO_DIR/n8n/bin/investigation_query_contract.py" "$STACK_DIR/bin/investigation_query_contract.py"
+cp "$REPO_DIR/n8n/bin/collect-investigation-pivots.py" "$STACK_DIR/bin/collect-investigation-pivots.py"
 cp "$REPO_DIR/n8n/bin/live_osquery_contract.py" "$STACK_DIR/bin/live_osquery_contract.py"
 cp "$REPO_DIR/n8n/bin/live_osquery_client.py" "$STACK_DIR/bin/live_osquery_client.py"
 cp "$REPO_DIR/n8n/bin/collect-live-osquery.py" "$STACK_DIR/bin/collect-live-osquery.py"

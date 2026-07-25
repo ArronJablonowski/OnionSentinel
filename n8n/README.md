@@ -389,15 +389,58 @@ macOS `sandbox-exec` when available. Packet-derived strings are sanitized for
 control characters and remain evidence only; neither scripts nor models may
 interpret them as instructions.
 
-The local SOC Analyst may make one bounded follow-up round against the derived
-evidence index. `bin/pcap_evidence_query.py` accepts only fixed operations
-(`coverage`, `connections`, `dns`, `tls`, `http`, `files`, `notices`, `weird`,
-`protocols`, `packet_samples`, `icmp_anomalies`, `user_agents`, `tls_versions`,
-or `geoip`), an optional exact indicator, and a limit.
-It rejects paths, regular expressions, display filters, parser arguments, and
-unknown fields. The query never invokes Zeek, TShark, a shell, or the network.
-Hosted-model payloads remove packet samples, follow-up results, local paths,
-tool metadata, and the private query index before invocation.
+The investigation runtime can pivot against the private derived-evidence index
+through `bin/pcap_evidence_query.py`. Each broker call accepts no more than four
+requests, returns no more than 20 records per request, scans at most 4096
+derived records per request, and has a 32 KiB total response budget. Supported
+operations are `coverage`, `connections`, `dns`, `tls`, `http`, `files`,
+`notices`, `weird`, `protocols`, `packet_facts`, `icmp_facts`, `user_agents`,
+`tls_versions`, and `geoip`. The legacy names `packet_samples` and
+`icmp_anomalies` remain equivalent payload-free views.
+
+A request has this form:
+
+```json
+{
+  "operation": "http",
+  "filters": {
+    "source_ip": "192.0.2.10",
+    "destination_port": 443,
+    "start_epoch": 1784916000,
+    "end_epoch": 1784916300,
+    "host": "service.example",
+    "uri_prefix": "/api/"
+  },
+  "limit": 10
+}
+```
+
+All comparisons are exact except the explicitly named `uri_prefix`. Common
+flow filters are source, destination, or either endpoint IP; source,
+destination, or either port; transport; protocol; and start/end epoch. DNS can
+filter query, answer, answer type, query type, and response code. TLS can
+filter SNI, version, cipher, and established state. HTTP can filter host, URI,
+URI prefix, method, status, and User-Agent. File, notice, weird, packet-fact,
+ICMP-fact, User-Agent, TLS-version, and GeoIP operations have similarly narrow
+typed fields. `indicator` remains available only as a legacy exact scalar
+match over an approved derived record.
+
+Time-bounded queries fail closed for timeless aggregate rows. The private Zeek
+index is a deterministic, bounded per-log record sample, while TShark keeps
+bounded DNS, TLS, HTTP, and ICMP fact samples in addition to capture-wide
+aggregates. Results identify the derived views scanned and whether either the
+index scan or returned result was truncated. Every normalized request has a
+SHA-256 query digest and a stable derived-evidence reference for report
+citation. These samples are investigative leads and never proof of complete
+capture coverage.
+
+Unknown fields, paths, regular expressions, display/BPF filters, scripts,
+parser arguments, shell text, and invalid types or ranges are rejected. The
+broker never invokes Zeek, TShark, a shell, or the network. Output is projected
+through operation-specific field allowlists; raw payloads and parser metadata
+cannot be returned even if a private index is malformed. Hosted-model payloads
+remove packet facts, follow-up results, local paths, tool metadata, and the
+private query index before invocation.
 
 Broker-managed raw archives are deleted from the Mac immediately after both
 Zeek and TShark commands succeed and the derived JSON/Markdown files are
@@ -752,9 +795,13 @@ Mac-to-relay forced-command key. Runtime configuration is rendered from
 `config/incident-evidence.example.json` to
 `$HOME/n8n-local/config/incident-evidence.json`; collected artifacts live under
 `$HOME/n8n-local/soc-alerts/incident-evidence` and are runtime data, not repo
-content. The collector also carries the representative alert's Elasticsearch
-backing index and document ID that the restricted alert exporter stored outside
-the event `_source`. It never accepts an index or ID from model output.
+content. New configurations use a 420-second outer transport timeout for four
+sequential pivot queries plus positive and negative controls. Upgrades add that
+default only when `timeout_seconds` is absent and preserve every existing
+operator-selected value. The collector also carries the representative alert's
+Elasticsearch backing index and document ID that the restricted alert exporter
+stored outside the event `_source`. It never accepts an index or ID from model
+output.
 
 The collector requests five immutable Elastic packs and seven immutable local
 OSquery packs. Security Onion creates every baseline command; model output is

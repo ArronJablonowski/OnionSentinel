@@ -157,6 +157,39 @@ function fixtureIncidentQueryRecord(position, pack, kql, totalHits, returnedHits
     + `</article>`;
 }
 
+function fixtureInteractivePivotRecords() {
+  const oql = '@timestamp:["2026-07-15T14:00:00.000Z" TO "2026-07-15T14:10:00.000Z"]'
+    + ' AND source.ip:"192.0.2.10" | sortby @timestamp^';
+  const dsl = JSON.stringify({
+    size: 25,
+    query: { bool: { filter: [{ term: { 'source.ip': '192.0.2.10' } }] } },
+  }, null, 2);
+  const structured = JSON.stringify({
+    operation: 'dns',
+    filters: { query: 'example.test' },
+    limit: 10,
+  }, null, 2);
+  return `<section class="ir-query-audit"><h3>Interactive Investigation Pivot Audit</h3>`
+    + `<article class="ir-query-record" data-query-purpose="Correlate an exact trusted observable."`
+    + ` data-query-finding="One related flow was returned.">`
+    + `<h4>Pivot 1 (round 1): OQL · network_flow</h4>`
+    + `<div class="ir-query-meta"><span><b>Status:</b> ok</span>`
+    + `<span><b>Hits:</b> 1 total / 1 returned</span></div>`
+    + `<h5>OQL (analyst-readable equivalent)</h5>`
+    + `<pre class="ir-query-code"><code>${escapeFixtureHtml(oql)}</code></pre>`
+    + `<h5>Elasticsearch Query DSL (exact executed request)</h5>`
+    + `<pre class="ir-query-code"><code>${escapeFixtureHtml(dsl)}</code></pre>`
+    + `</article>`
+    + `<article class="ir-query-record" data-query-purpose="Confirm the DNS answer."`
+    + ` data-query-finding="">`
+    + `<h4>Pivot 2 (round 1): ZEEK · dns</h4>`
+    + `<div class="ir-query-meta"><span><b>Status:</b> ok</span>`
+    + `<span><b>Records:</b> 4 scanned / 1 returned</span></div>`
+    + `<h5>Structured PCAP/Zeek request (exact broker input)</h5>`
+    + `<pre class="ir-query-code"><code>${escapeFixtureHtml(structured)}</code></pre>`
+    + `</article></section>`;
+}
+
 function fixtureIncidentHtml() {
   return `<section class="ir-investigation-report"><h3>Incident Response Investigation</h3>`
     + `<p>Synthetic query-audit browser fixture.</p></section>`
@@ -171,7 +204,8 @@ function fixtureIncidentHtml() {
       'The triggering synthetic detection was returned by the bounded query.',
     )
     + fixtureIncidentQueryRecord(2, 'network_flow', EXACT_NETWORK_FLOW_KQL, 7, 3)
-    + `</section>`;
+    + `</section>`
+    + fixtureInteractivePivotRecords();
 }
 
 function fixtureListPayload(state, requestUrl) {
@@ -504,9 +538,9 @@ test('incident query audits collapse by default and copy exact queries with acce
 
   const detail = page.locator(`.ir-detail-row[data-detail-for="${INCIDENT_CASE_ID}"]:not([hidden])`);
   const queries = detail.locator('details.ir-query-details');
-  await expect(queries).toHaveCount(2);
-  await expect(page.locator(`[data-mobile-case="${INCIDENT_CASE_ID}"] details.ir-query-details`)).toHaveCount(2);
-  for (let index = 0; index < 2; index += 1) {
+  await expect(queries).toHaveCount(4);
+  await expect(page.locator(`[data-mobile-case="${INCIDENT_CASE_ID}"] details.ir-query-details`)).toHaveCount(4);
+  for (let index = 0; index < 4; index += 1) {
     await expect(queries.nth(index)).not.toHaveAttribute('open', '');
   }
 
@@ -521,7 +555,7 @@ test('incident query audits collapse by default and copy exact queries with acce
   await expect(alertContext).toHaveAttribute('open', '');
 
   const queryCopyButtons = detail.locator('.ir-query-copy');
-  await expect(queryCopyButtons).toHaveCount(4);
+  await expect(queryCopyButtons).toHaveCount(7);
   const kqlCopy = alertContext.getByRole('button', {
     name: 'Copy KQL (analyst-readable equivalent) for Query 1: alert_context',
   });
@@ -544,6 +578,31 @@ test('incident query audits collapse by default and copy exact queries with acce
   await failedCopy.click();
   await expect(failedCopy).toHaveText('Try again');
   await expect(networkFlow.getByRole('status')).toHaveText('Copy failed — select and copy the query manually.');
+
+  await page.evaluate(() => { window.__incidentQueryCopyFailure = false; });
+  const oqlPivot = queries.nth(2);
+  await expect(oqlPivot.locator('summary')).toContainText('Pivot 1 (round 1): OQL · network_flow');
+  await expect(oqlPivot.locator('summary')).toContainText('One related flow was returned.');
+  await oqlPivot.locator('summary').click();
+  const oqlCopy = oqlPivot.getByRole('button', {
+    name: 'Copy OQL (analyst-readable equivalent) for Pivot 1 (round 1): OQL · network_flow',
+  });
+  await oqlCopy.click();
+  await expect(oqlCopy).toHaveText('Copied');
+
+  const zeekPivot = queries.nth(3);
+  await expect(zeekPivot.locator('summary')).toContainText('4 records scanned; 1 returned.');
+  await zeekPivot.locator('summary').click();
+  const structuredCopy = zeekPivot.getByRole('button', {
+    name: 'Copy Structured PCAP/Zeek request (exact broker input) for Pivot 2 (round 1): ZEEK · dns',
+  });
+  await structuredCopy.click();
+  await expect(structuredCopy).toHaveText('Copied');
+
+  const copied = await page.evaluate(() => window.__incidentQueryCopies);
+  expect(copied.some(value => value.includes('@timestamp:['))).toBeTruthy();
+  expect(copied.some(value => value.includes('"operation": "dns"'))).toBeTruthy();
+  await expect(detail.locator('.ir-query-copy')).toHaveCount(7);
 });
 
 test('successful escalation confirms for five seconds and removes desktop and mobile rows despite a stale list response', async ({ page }) => {

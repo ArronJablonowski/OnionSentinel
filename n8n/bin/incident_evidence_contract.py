@@ -28,25 +28,24 @@ ALERT_INDEX_SCOPE = [
 PACK_INDEX_SCOPES = {
     "alert_context": ALERT_INDEX_SCOPE,
     "network_flow": [
-        "logs-zeek.connection-*",
+        "logs-zeek-so",
         "logs-endpoint.events.network-*",
         *ALERT_INDEX_SCOPE,
     ],
     "dns_activity": [
-        "logs-zeek.dns-*",
+        "logs-zeek-so",
         "logs-endpoint.events.network-*",
     ],
     "osquery_history": [
         "logs-endpoint.events.process-*",
         "logs-endpoint.events.file-*",
         "logs-endpoint.events.network-*",
-        "logs-osquery_manager.result-*",
-        "logs-osquery_manager.response-*",
+        "logs-osquery_manager.result-default",
+        "logs-osquery_manager.action.responses-default",
     ],
     "cross_sensor_timeline": [
         *ALERT_INDEX_SCOPE,
-        "logs-zeek.connection-*",
-        "logs-zeek.dns-*",
+        "logs-zeek-so",
         "logs-endpoint.events.network-*",
         "logs-endpoint.events.process-*",
         "logs-endpoint.events.file-*",
@@ -94,6 +93,7 @@ OSQUERY_PACKS = {
 ALLOWED_STATUSES = {"ok", "timeout", "output_limit", "error", "invalid_response"}
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 SAFE_ELASTIC_ID_RE = re.compile(r"^[A-Za-z0-9_.:@+=-]{1,512}$")
+SAFE_ELASTIC_INDEX_RE = re.compile(r"^[A-Za-z0-9._-]{1,255}$")
 MAX_OSQUERY_ROWS = 200
 MAX_ELASTIC_HITS = 200
 
@@ -163,8 +163,7 @@ def _validate_anchor(value: object) -> dict[str, str] | None:
     index_name = _require_nonempty_text(anchor.get("index"), "representative alert anchor index")
     document_id = _require_nonempty_text(anchor.get("id"), "representative alert anchor id")
     if (
-        "*" in index_name
-        or "?" in index_name
+        not SAFE_ELASTIC_INDEX_RE.fullmatch(index_name)
         or not _index_matches_scope(index_name, ALERT_INDEX_SCOPE)
     ):
         raise IncidentEvidenceContractError(
@@ -377,7 +376,7 @@ def _validate_controls(
     positive_valid = _validate_search_result(
         positive,
         label="positive anchor control",
-        expected_scope=ALERT_INDEX_SCOPE,
+        expected_scope=[request_anchor["index"]],
         max_hits=1,
     )
     if positive.get("query_dsl") != _positive_control_dsl(request_anchor):

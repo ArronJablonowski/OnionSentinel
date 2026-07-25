@@ -324,7 +324,7 @@ test('desktop pinned alert keeps action controls stable and synchronizes horizon
       whiteSpace: buttons.map(button => getComputedStyle(button).whiteSpace),
     };
   });
-  expect(actionGeometry.labels).toEqual(['Analyze', 'Acknowledge', 'Suppress', 'PCAP', 'Escalate']);
+  expect(actionGeometry.labels).toEqual(['Analyze', 'Acknowledge', 'Suppress', 'PCAP', 'Review', 'Escalate']);
   expect(actionGeometry.whiteSpace.every(value => value === 'nowrap')).toBe(true);
   expect(actionGeometry.boxes.every(box => box.width >= 48 && box.height >= 32), JSON.stringify(actionGeometry)).toBe(true);
   for (let index = 1; index < actionGeometry.boxes.length; index += 1) {
@@ -540,7 +540,7 @@ test('Incident Response preserves endpoint columns and SOC-style expanded eviden
 
   await page.setViewportSize({ width: 1920, height: 1080 });
   await page.goto('./investigations.html', { waitUntil: 'domcontentloaded' });
-  const desktopRow = page.locator('.ir-case-row').first();
+  const desktopRow = page.locator('.ir-case-row:has(.ir-agent-analyzed)').first();
   await expect(desktopRow).toBeVisible();
   await expect(page.locator('.ir-table > thead > tr > th')).toHaveText([
     '', 'Status', 'Severity', 'Escalated', 'Alert', 'Source IP',
@@ -550,17 +550,19 @@ test('Incident Response preserves endpoint columns and SOC-style expanded eviden
   for (const index of [5, 6, 7]) {
     await expect(desktopRow.locator('td').nth(index)).not.toHaveText('n/a');
   }
+  const caseId = await desktopRow.getAttribute('data-case-id');
+  expect(caseId).toBeTruthy();
   await desktopRow.click();
   const desktopDetail = page.locator('.ir-detail-row:not([hidden]) .ir-detail-content');
   await expect(desktopDetail).toBeVisible();
-  await expect(desktopDetail.locator('.ir-canonical-detail')).toBeVisible();
+  await expect(desktopDetail.locator('.ir-investigation-report')).toBeVisible();
   await expect(desktopDetail).toHaveCSS('text-align', 'left');
-  await expect(desktopDetail.locator('.ir-canonical-detail')).toHaveCSS('text-align', 'left');
+  await expect(desktopDetail.locator('.ir-investigation-report')).toHaveCSS('text-align', 'left');
   await assertContainedLayout(page);
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.reload({ waitUntil: 'domcontentloaded' });
-  const mobileCard = page.locator('.ir-mobile-card').first();
+  const mobileCard = page.locator(`[data-mobile-case="${caseId}"]`);
   await expect(page.locator('.ir-table-wrap')).toBeHidden();
   await expect(mobileCard).toBeVisible();
   const mobileRoute = mobileCard.locator('.ir-muted');
@@ -569,7 +571,7 @@ test('Incident Response preserves endpoint columns and SOC-style expanded eviden
   await mobileCard.locator('.ir-mobile-toggle').click();
   const mobileDetail = mobileCard.locator('.ir-mobile-detail:not([hidden]) .ir-detail-content');
   await expect(mobileDetail).toBeVisible();
-  await expect(mobileDetail.locator('.ir-canonical-detail')).toBeVisible();
+  await expect(mobileDetail.locator('.ir-investigation-report')).toBeVisible();
   await expect(mobileDetail).toHaveCSS('text-align', 'left');
   await assertContainedLayout(page);
   expect(runtimeErrors).toEqual([]);

@@ -304,7 +304,7 @@ def main() -> int:
     proc = run_bounded_command(
         command,
         stdin_text=json.dumps(request, separators=(",", ":")),
-        timeout_seconds=float(config.get("timeout_seconds", 240)),
+        timeout_seconds=float(config.get("timeout_seconds", 420)),
         max_stdout_bytes=int(config.get("max_response_bytes", MAX_RESPONSE_BYTES)),
         max_stderr_bytes=int(config.get("max_stderr_bytes", 256 * 1024)),
     )

@@ -4,7 +4,7 @@
   "ssh_key": "/opt/so-alert-relay/keys/so-ai-relay-incident-query_ed25519",
   "known_hosts": "/opt/so-alert-relay/keys/security_onion_known_hosts",
   "connect_timeout_seconds": 20,
-  "timeout_seconds": 180,
+  "timeout_seconds": 400,
   "max_response_bytes": 8388608,
   "max_stderr_bytes": 262144
 }

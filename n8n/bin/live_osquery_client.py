@@ -42,6 +42,8 @@ MAX_CONFIG_BYTES = 64 * 1024
 MAX_STDERR_BYTES = 256 * 1024
 _SAFE_HOST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$")
 _SAFE_USER = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
+ALLOWED_AGENT_ROLES = frozenset({"soc-analyst", "incident-responder"})
+DEFAULT_ALLOWED_AGENT_ROLES = ("incident-responder",)
 
 
 class LiveOsqueryClientError(RuntimeError):
@@ -94,9 +96,22 @@ def load_live_osquery_config(path: Path = DEFAULT_CONFIG_FILE) -> dict[str, Any]
     source = _read_json(path.expanduser())
     enabled = bool(source.get("enabled"))
     aliases = normalize_target_aliases(source.get("allowed_target_aliases") or [])
+    raw_roles = source.get("allowed_agent_roles", list(DEFAULT_ALLOWED_AGENT_ROLES))
+    if not isinstance(raw_roles, list):
+        raise LiveOsqueryClientError("allowed_agent_roles must be an array")
+    allowed_agent_roles: list[str] = []
+    for raw_role in raw_roles:
+        role = str(raw_role or "").strip().lower()
+        if role not in ALLOWED_AGENT_ROLES:
+            raise LiveOsqueryClientError(
+                f"allowed_agent_roles contains unsupported role: {role or 'empty'}"
+            )
+        if role not in allowed_agent_roles:
+            allowed_agent_roles.append(role)
     config: dict[str, Any] = {
         "enabled": enabled,
         "allowed_target_aliases": aliases,
+        "allowed_agent_roles": allowed_agent_roles,
         "connect_timeout_seconds": _bounded_int(
             source.get("connect_timeout_seconds"),
             label="connect_timeout_seconds",

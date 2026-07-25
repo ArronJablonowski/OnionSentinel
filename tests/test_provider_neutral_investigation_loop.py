@@ -1,0 +1,1134 @@
+#!/usr/bin/env python3
+"""Focused contracts for the provider-neutral investigation pivot loop."""
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+BIN_DIR = REPO_ROOT / "n8n" / "bin"
+
+
+def load_module(name: str, path: Path):
+    if str(BIN_DIR) not in sys.path:
+        sys.path.insert(0, str(BIN_DIR))
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.runner = load_module(
+            "provider_neutral_investigation_runner",
+            BIN_DIR / "run-local-ai-analysis.py",
+        )
+        cls.builder = load_module(
+            "provider_neutral_investigation_builder",
+            BIN_DIR / "build-ai-investigation-prompt.py",
+        )
+        cls.contract = load_module(
+            "provider_neutral_investigation_contract",
+            BIN_DIR / "investigation_query_contract.py",
+        )
+
+    @staticmethod
+    def elastic_request(query_id: str = "pivot-1") -> dict:
+        return {
+            "query_id": query_id,
+            "backend": "elastic",
+            "purpose": "correlate_observable",
+            "parameters": {
+                "pack": "network_flow",
+                "window": {
+                    "start": "2026-07-24T18:00:00Z",
+                    "end": "2026-07-24T19:00:00Z",
+                },
+                "observables": {
+                    "ips": ["192.0.2.10"],
+                    "domains": [],
+                    "hosts": [],
+                    "users": [],
+                },
+                "size": 25,
+                "aggregation": "events",
+            },
+        }
+
+    def test_hosted_transport_keeps_safe_query_protocol_and_strips_raw_packet_fields(self) -> None:
+        package = {
+            "response_schema": {
+                "investigation_query_requests": [
+                    {
+                        "backend": "elastic|oql|osquery|pcap_zeek",
+                        "parameters": {},
+                    }
+                ]
+            },
+            "investigation_query_results": {
+                "rounds": [
+                    {
+                        "results": [
+                            {
+                                "backend": "pcap_zeek",
+                                "evidence": {
+                                    "connection_count": 2,
+                                    "packet_samples": [{"raw_payload": "secret"}],
+                                    "payload": "secret",
+                                    "event": {
+                                        "dataset": "zeek.conn",
+                                        "original": "raw event",
+                                    },
+                                    "process": {
+                                        "name": "safe-process",
+                                        "command_line": "secret --token value",
+                                        "args": ["secret"],
+                                    },
+                                    "url": {
+                                        "domain": "safe.example",
+                                        "query": "authorization=secret",
+                                    },
+                                    "uri": "/login?token=TOPSECRET",
+                                    "referrer": "https://safe.example/?session=ABC",
+                                    "user_agent": "secret-UA",
+                                    "file": {
+                                        "path": "/Users/alice/private/customer-list.csv"
+                                    },
+                                    "rows": [{
+                                        "path": "/Users/alice/.ssh/id_rsa",
+                                        "key": "PRIVATESECRET",
+                                    }],
+                                    "dns": {
+                                        "question": {"name": "safe.example"}
+                                    },
+                                    "message": "raw message",
+                                    "authorization": "Bearer secret",
+                                    "cookie": "session=secret",
+                                    "api_token": "secret",
+                                    "cmdline": "secret command",
+                                    "environment": "SECRET=value",
+                                    "content": "secret content",
+                                    "data": "secret data",
+                                },
+                            }
+                        ]
+                    }
+                ]
+            },
+            "_local_investigation_query_context": {
+                "anchor": {"index": "private", "id": "private"}
+            },
+        }
+
+        hosted = self.runner.model_safe_copy(package, hosted=True)
+        encoded = json.dumps(hosted)
+
+        self.assertIn("investigation_query_requests", encoded)
+        self.assertIn("investigation_query_results", encoded)
+        self.assertIn("connection_count", encoded)
+        self.assertNotIn("packet_samples", encoded)
+        self.assertNotIn("raw_payload", encoded)
+        self.assertNotIn('"payload"', encoded)
+        self.assertNotIn("raw event", encoded)
+        self.assertNotIn("secret --token", encoded)
+        self.assertNotIn("authorization=secret", encoded)
+        self.assertNotIn("raw message", encoded)
+        self.assertNotIn("Bearer secret", encoded)
+        self.assertNotIn("session=secret", encoded)
+        self.assertNotIn("secret command", encoded)
+        self.assertNotIn("SECRET=value", encoded)
+        self.assertNotIn("TOPSECRET", encoded)
+        self.assertNotIn("session=ABC", encoded)
+        self.assertNotIn("secret-UA", encoded)
+        self.assertNotIn("customer-list.csv", encoded)
+        self.assertNotIn("PRIVATESECRET", encoded)
+        self.assertIn("zeek.conn", encoded)
+        self.assertIn("safe-process", encoded)
+        self.assertIn("safe.example", encoded)
+        self.assertNotIn("_local_investigation_query_context", encoded)
+
+    def test_hosted_query_records_use_positive_projection_and_content_redaction(self) -> None:
+        package = {
+            "investigation_query_results": {
+                "rounds": [{
+                    "results": [
+                        {
+                            "backend": "pcap_zeek",
+                            "evidence": {
+                                "records": [{
+                                    "source_ip": "192.0.2.10",
+                                    "sni": "safe.example",
+                                    "status_message": "Authorization: Bearer TOPSECRET",
+                                    "additional": "password=TOPSECRET",
+                                    "notice": "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
+                                }]
+                            },
+                        },
+                        {
+                            "backend": "osquery",
+                            "evidence": {
+                                "rows": [{
+                                    "pid": "42",
+                                    "name": "safe-process",
+                                    "username": "alice",
+                                    "directory": "/Users/alice/private",
+                                    "cwd": r"C:\Users\alice\private",
+                                    "status": "token=TOPSECRET",
+                                }]
+                            },
+                        },
+                    ]
+                }]
+            }
+        }
+
+        encoded = json.dumps(
+            self.runner.model_safe_copy(package, hosted=True)
+        )
+
+        self.assertIn("192.0.2.10", encoded)
+        self.assertIn("safe.example", encoded)
+        self.assertIn("safe-process", encoded)
+        self.assertNotIn("TOPSECRET", encoded)
+        self.assertNotIn("QWxhZGRpb", encoded)
+        self.assertNotIn("status_message", encoded)
+        self.assertNotIn("additional", encoded)
+        self.assertNotIn("notice", encoded)
+        self.assertNotIn("username", encoded)
+        self.assertNotIn("directory", encoded)
+        self.assertNotIn('"cwd"', encoded)
+        self.assertNotIn("/Users/alice", encoded)
+        self.assertNotIn(r"C:\\Users\\alice", encoded)
+
+    def test_normalizer_rejects_arbitrary_query_syntax_and_raw_packet_operation(self) -> None:
+        with self.assertRaisesRegex(
+            self.runner.InvestigationQueryError,
+            "unsupported elastic parameters",
+        ):
+            self.runner.normalize_investigation_query_request(
+                {
+                    **self.elastic_request(),
+                    "parameters": {
+                        **self.elastic_request()["parameters"],
+                        "query_dsl": {"match_all": {}},
+                    },
+                },
+                round_number=1,
+                position=1,
+            )
+
+        with self.assertRaisesRegex(
+            self.runner.InvestigationQueryError,
+            "unsupported derived-evidence operation",
+        ):
+            self.runner.normalize_investigation_query_request(
+                {
+                    "query_id": "raw-packet",
+                    "backend": "pcap_zeek",
+                    "purpose": "Retrieve packet bytes.",
+                    "parameters": {"operation": "raw_packets", "limit": 1},
+                },
+                round_number=1,
+                position=1,
+            )
+
+    def test_mixed_batch_uses_injected_read_only_brokers(self) -> None:
+        prompt_package = {
+            "_local_investigation_query_context": {
+                "case_id": "investigation-test",
+                "anchor": {
+                    "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                    "id": "alert-1",
+                },
+            },
+            "pcap_evidence": {
+                "parsed_evidence": [
+                    {
+                        "request_id": "pcap-test",
+                        "group_id": "group-test",
+                        "generated_at": "2026-07-24T18:30:00Z",
+                        "pcap_files": [
+                            {
+                                "name": "synthetic.pcap",
+                                "size_bytes": 64,
+                                "sha256": "f" * 64,
+                            }
+                        ],
+                    }
+                ]
+            },
+            "alert": {"alert_id": "synthetic"},
+        }
+        requests = [
+            self.runner.normalize_investigation_query_request(
+                self.elastic_request(),
+                round_number=1,
+                position=1,
+            ),
+            self.runner.normalize_investigation_query_request(
+                {
+                    "query_id": "host-1",
+                    "backend": "osquery",
+                    "purpose": "Check the endpoint process inventory for the suspected binary.",
+                    "parameters": {
+                        "target_alias": "endpoint-a",
+                        "query": "SELECT name, path FROM processes LIMIT 20",
+                    },
+                },
+                round_number=1,
+                position=2,
+            ),
+            self.runner.normalize_investigation_query_request(
+                {
+                    "query_id": "zeek-1",
+                    "backend": "pcap_zeek",
+                    "purpose": "Confirm the exact DNS answer associated with the connection.",
+                    "parameters": {
+                        "operation": "dns",
+                        "filters": {"query": "example.test"},
+                        "limit": 5,
+                    },
+                },
+                round_number=1,
+                position=3,
+            ),
+        ]
+        security = mock.Mock(
+            return_value={
+                "complete": True,
+                "partial": False,
+                "model_evidence": {"results": [{"query_id": "pivot-1", "status": "ok"}]},
+                "query_audit": [
+                    {
+                        "query_id": "pivot-1",
+                        "dialect": "elastic",
+                        "status": "ok",
+                        "query_dsl": {"query": {"term": {"source.ip": "192.0.2.10"}}},
+                        "query_digest": "b" * 64,
+                        "returned_hits": 1,
+                    }
+                ],
+                "audit": {
+                    "query_contract": self.runner.INVESTIGATION_QUERY_CONTRACT,
+                    "authorized_request_digest": "c" * 64,
+                    "authorization_context_digest": "d" * 64,
+                    "security_onion_response_digest": "e" * 64,
+                },
+            }
+        )
+        osquery = mock.Mock(
+            return_value={
+                "complete": True,
+                "results": [
+                    {
+                        "status": "ok",
+                        "target_alias": "endpoint-a",
+                        "query_digest": "a" * 64,
+                        "rows": [],
+                    }
+                ],
+            }
+        )
+        derived_query = {
+            "operation": "dns",
+            "filters": {"query": "example.test"},
+            "indicator": "",
+            "limit": 5,
+        }
+        derived_query_digest = self.runner.hashlib.sha256(
+            json.dumps(
+                {
+                    "contract": self.runner.PCAP_QUERY_CONTRACT,
+                    "request": derived_query,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        empty_result_digest = self.runner.hashlib.sha256(b"[]").hexdigest()
+        derived = mock.Mock(
+            return_value={
+                "schema": self.runner.PCAP_QUERY_CONTRACT,
+                "executed": [derived_query],
+                "results": [
+                    {
+                        "query": derived_query,
+                        "query_digest": derived_query_digest,
+                        "result_digest": empty_result_digest,
+                        "evidence_ref": "legacy-ref",
+                        "records": [],
+                        "audit": {
+                            "candidate_records_scanned": 0,
+                            "unique_records_matched": 0,
+                            "records_returned": 0,
+                            "derived_views_considered": ["zeek.dns"],
+                        },
+                    }
+                ],
+            }
+        )
+
+        result = self.runner.execute_investigation_query_batch(
+            prompt_package,
+            requests,
+            round_number=1,
+            live_osquery_config={"enabled": True},
+            security_onion_executor=security,
+            osquery_executor=osquery,
+            derived_executor=derived,
+        )
+
+        self.assertEqual(result["schema"], self.runner.INVESTIGATION_QUERY_RESULT_SCHEMA)
+        self.assertEqual({item["backend"] for item in result["results"]}, {
+            "security_onion",
+            "osquery",
+            "pcap_zeek",
+        })
+        security.assert_called_once()
+        osquery.assert_called_once()
+        derived.assert_called_once()
+        self.assertEqual(
+            derived.call_args.args[1][0]["filters"],
+            {"query": "example.test"},
+        )
+        security_result = next(
+            item for item in result["results"] if item["backend"] == "security_onion"
+        )
+        self.assertEqual(
+            security_result["trusted_query_audit"][0]["query_digest"],
+            "b" * 64,
+        )
+        self.assertEqual(security_result["status"], "ok")
+        security_audit = next(
+            item for item in result["audit"] if item["backend"] == "security_onion"
+        )
+        self.assertEqual(security_audit["authorized_request_digest"], "c" * 64)
+        derived_result = next(
+            item for item in result["results"] if item["backend"] == "pcap_zeek"
+        )
+        self.assertTrue(
+            derived_result["evidence"]["evidence_ref"].startswith(
+                "derived-pcap-zeek:"
+            )
+        )
+        self.assertEqual(
+            derived_result["trusted_query_audit"][0]["evidence_ref"],
+            derived_result["evidence"]["evidence_ref"],
+        )
+
+    def test_derived_evidence_reference_is_bound_to_capture_identity(self) -> None:
+        def context(digest: str) -> dict:
+            return {
+                "parsed_evidence": [
+                    {
+                        "request_id": "same-request",
+                        "group_id": "same-group",
+                        "generated_at": "2026-07-24T18:30:00Z",
+                        "pcap_files": [
+                            {
+                                "name": "capture.pcap",
+                                "size_bytes": 42,
+                                "sha256": digest,
+                            }
+                        ],
+                    }
+                ]
+            }
+
+        first = self.runner._derived_evidence_source_digest(context("a" * 64))
+        second = self.runner._derived_evidence_source_digest(context("b" * 64))
+
+        self.assertNotEqual(first, second)
+
+    def test_loop_reuses_exact_route_and_enforces_round_budget(self) -> None:
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                    "id": "alert-1",
+                },
+                "discovered_observables": [],
+            },
+        }
+        primary = {"investigation_query_requests": [self.elastic_request("initial")]}
+        settings = {
+            "agent_models": {"soc-analyst": "codex-cli:gpt-5.6-sol:high"}
+        }
+        model_calls: list[tuple[str, dict]] = []
+
+        def model_executor(route, package, _args, _settings):
+            model_calls.append((route, package["investigation_follow_up"].copy()))
+            return {
+                "summary": f"round {len(model_calls)}",
+                "investigation_query_requests": [
+                    {
+                        **self.elastic_request(f"next-{len(model_calls)}"),
+                        "parameters": {
+                            **self.elastic_request()["parameters"],
+                            "size": 25 + len(model_calls),
+                        },
+                    }
+                ],
+            }
+
+        def query_executor(_package, requests, *, round_number, live_osquery_config):
+            return {
+                "schema": self.runner.INVESTIGATION_QUERY_RESULT_SCHEMA,
+                "round": round_number,
+                "requests": requests,
+                "results": [
+                    {
+                        "query_id": requests[0]["query_id"],
+                        "backend": "elastic",
+                        "status": "ok",
+                        "evidence": {"source.ip": "198.51.100.5"},
+                    }
+                ],
+                "audit": [],
+            }
+
+        response = self.runner.apply_investigation_query_loop(
+            prompt_package,
+            primary,
+            object(),
+            settings,
+            "soc-analyst",
+            model_executor=model_executor,
+            query_executor=query_executor,
+        )
+
+        self.assertEqual(len(model_calls), self.runner.MAX_INVESTIGATION_QUERY_ROUNDS)
+        self.assertTrue(
+            all(call[0] == "codex-cli:gpt-5.6-sol:high" for call in model_calls)
+        )
+        self.assertEqual(
+            response["_investigation_query_audit"]["rounds_completed"],
+            self.runner.MAX_INVESTIGATION_QUERY_ROUNDS,
+        )
+        self.assertEqual(
+            response["_investigation_query_audit"]["requests_ignored_or_over_budget"],
+            1,
+        )
+        self.assertNotIn("investigation_query_requests", response)
+        self.assertEqual(
+            len(prompt_package["investigation_query_results"]["rounds"]),
+            self.runner.MAX_INVESTIGATION_QUERY_ROUNDS,
+        )
+
+    def test_loop_rejects_disabled_or_unadvertised_backend_before_execution(self) -> None:
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": False}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                    "id": "alert-1",
+                }
+            },
+        }
+        settings = {"agent_models": {"soc-analyst": "codex-cli:gpt-5.5:medium"}}
+        query_executor = mock.Mock()
+
+        response = self.runner.apply_investigation_query_loop(
+            prompt_package,
+            {"investigation_query_requests": [self.elastic_request()]},
+            object(),
+            settings,
+            "soc-analyst",
+            model_executor=mock.Mock(return_value={"summary": "No query executed."}),
+            query_executor=query_executor,
+        )
+
+        query_executor.assert_not_called()
+        rejected = prompt_package["investigation_query_results"]["rounds"][0]["results"][0]
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertIn("disabled", rejected["error"])
+        self.assertEqual(
+            response["_investigation_query_audit"]["rounds"][0]["results"][0]["status"],
+            "rejected",
+        )
+
+    def test_loop_rejects_semantically_duplicate_query_across_rounds(self) -> None:
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                    "id": "alert-1",
+                }
+            },
+        }
+        settings = {"agent_models": {"soc-analyst": "codex-cli:gpt-5.5:medium"}}
+        query_executor = mock.Mock(
+            return_value={
+                "schema": self.runner.INVESTIGATION_QUERY_RESULT_SCHEMA,
+                "round": 1,
+                "requests": [self.elastic_request()],
+                "results": [],
+                "audit": [],
+            }
+        )
+        second = {
+            **self.elastic_request("renamed"),
+            "purpose": "measure_prevalence",
+        }
+
+        response = self.runner.apply_investigation_query_loop(
+            prompt_package,
+            {"investigation_query_requests": [self.elastic_request()]},
+            object(),
+            settings,
+            "soc-analyst",
+            model_executor=mock.Mock(
+                side_effect=[
+                    {"investigation_query_requests": [second]},
+                    {"summary": "final"},
+                ]
+            ),
+            query_executor=query_executor,
+        )
+
+        query_executor.assert_called_once()
+        duplicate = prompt_package["investigation_query_results"]["rounds"][1]["results"][0]
+        self.assertEqual(duplicate["status"], "rejected")
+        self.assertIn("already executed", duplicate["error"])
+        self.assertGreaterEqual(
+            response["_investigation_query_audit"]["requests_ignored_or_over_budget"],
+            1,
+        )
+
+    def test_semantic_dedup_canonicalizes_order_timezones_and_osquery_limit(self) -> None:
+        first = self.runner.normalize_investigation_query_request(
+            self.elastic_request("first"),
+            round_number=1,
+            position=1,
+        )
+        equivalent = self.elastic_request("second")
+        equivalent["parameters"]["window"] = {
+            "start": "2026-07-24T12:00:00-06:00",
+            "end": "2026-07-24T13:00:00-06:00",
+        }
+        equivalent["parameters"]["observables"]["ips"] = ["192.0.2.10", "192.0.2.10"]
+        second = self.runner.normalize_investigation_query_request(
+            equivalent,
+            round_number=1,
+            position=2,
+        )
+        self.assertEqual(
+            self.runner.investigation_request_semantic_digest(first),
+            self.runner.investigation_request_semantic_digest(second),
+        )
+
+        implicit = self.runner.normalize_investigation_query_request(
+            {
+                "backend": "osquery",
+                "purpose": "Inspect one bounded endpoint fact.",
+                "parameters": {
+                    "target_alias": "endpoint-a",
+                    "query": "SELECT pid FROM processes",
+                },
+            },
+            round_number=1,
+            position=1,
+        )
+        explicit = self.runner.normalize_investigation_query_request(
+            {
+                "backend": "osquery",
+                "purpose": "Same fact.",
+                "parameters": {
+                    "target_alias": "endpoint-a",
+                    "query": "select pid from processes limit 100;",
+                },
+            },
+            round_number=1,
+            position=2,
+        )
+        self.assertEqual(
+            self.runner.investigation_request_semantic_digest(implicit),
+            self.runner.investigation_request_semantic_digest(explicit),
+        )
+
+    def test_cumulative_prompt_projection_enforces_row_and_byte_caps(self) -> None:
+        rows = [
+            {"source": {"ip": "192.0.2.1"}, "padding": "x" * 4096}
+            for _ in range(800)
+        ]
+        rounds = [{
+            "round": 1,
+            "requests": [],
+            "audit": [],
+            "results": [{
+                "query_id": "large",
+                "backend": "security_onion",
+                "status": "ok",
+                "evidence": {"results": [{"hits": rows}]},
+                "trusted_query_audit": [],
+            }],
+        }]
+        projected = self.runner._investigation_prompt_payload(rounds)
+        encoded = json.dumps(
+            projected,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        self.assertLessEqual(
+            len(encoded),
+            self.runner.MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES,
+        )
+        self.assertLessEqual(
+            projected["prompt_projection"]["rows_included"],
+            self.runner.MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS,
+        )
+        self.assertTrue(projected["prompt_projection"]["truncated"])
+
+    def test_discovered_observables_match_contract_and_never_exceed_shared_cap(self) -> None:
+        query_digest = "a" * 64
+        hits = [
+            {
+                "id": f"hit-{index}",
+                "index": "logs-suricata.alerts",
+                "source": {"source": {"ip": f"198.51.100.{index}"}},
+            }
+            for index in range(1, 41)
+        ]
+        hits.extend([
+            {"id": "bad-domain", "index": "logs-suricata.alerts",
+             "source": {"dns": {"question": {"name": "bad_domain"}}}},
+            {"id": "bad-host", "index": "logs-suricata.alerts",
+             "source": {"host": {"name": "bad+host"}}},
+            {"id": "bad-user", "index": "logs-suricata.alerts",
+             "source": {"user": {"name": "bad+user"}}},
+        ])
+        evidence = [{
+            "backend": "security_onion",
+            "status": "ok",
+            "security_onion_response_digest": "b" * 64,
+            "trusted_query_audit": [{
+                "query_id": "q1",
+                "query_digest": query_digest,
+                "status": "ok",
+            }],
+            "evidence": {
+                "controls_valid": True,
+                "results": [{
+                    "query_id": "q1",
+                    "query_digest": query_digest,
+                    "status": "ok",
+                    "hits": hits,
+                }],
+            },
+        }]
+
+        discovered = self.runner._validated_discovered_observables(
+            evidence,
+        )
+
+        self.assertEqual(
+            len(discovered),
+            self.contract.MAX_DISCOVERED_OBSERVABLES,
+        )
+        self.assertNotIn("bad_domain", {item["value"] for item in discovered})
+        self.assertNotIn("bad+host", {item["value"] for item in discovered})
+        self.assertNotIn("bad+user", {item["value"] for item in discovered})
+
+    def test_discovery_refs_bind_exact_hits_and_zero_hit_filters_never_promote(self) -> None:
+        query_digest = "c" * 64
+        security = {
+            "backend": "security_onion",
+            "status": "ok",
+            "security_onion_response_digest": "d" * 64,
+            "trusted_query_audit": [{
+                "query_id": "exact-q",
+                "query_digest": query_digest,
+                "status": "ok",
+            }],
+            "evidence": {
+                "controls_valid": True,
+                "results": [{
+                    "query_id": "exact-q",
+                    "query_digest": query_digest,
+                    "status": "ok",
+                    "hits": [
+                        {"id": "hit-one", "index": "index-one",
+                         "source": {"source": {"ip": "192.0.2.1"}}},
+                        {"id": "hit-two", "index": "index-two",
+                         "source": {"source": {"ip": "192.0.2.2"}}},
+                    ],
+                }],
+            },
+        }
+        discovered = self.runner._validated_discovered_observables([security])
+        refs = {item["value"]: item["evidence_ref"] for item in discovered}
+        self.assertNotEqual(refs["192.0.2.1"], refs["192.0.2.2"])
+        self.assertIn("hit-one", refs["192.0.2.1"])
+        self.assertIn("index-one", refs["192.0.2.1"])
+        self.assertIn("source.ip", refs["192.0.2.1"])
+
+        forged_filter = {
+            "backend": "pcap_zeek",
+            "status": "ok",
+            "query_id": "derived-q",
+            "evidence": {
+                "query": {
+                    "operation": "tls",
+                    "filters": {"sni": "attacker-chosen.example"},
+                },
+                "query_digest": "e" * 64,
+                "result_digest": "f" * 64,
+                "evidence_ref": "derived-pcap-zeek:bound",
+                "records": [],
+            },
+            "trusted_query_audit": [{
+                "query_id": "derived-q",
+                "query_digest": "e" * 64,
+                "result_digest": "f" * 64,
+                "evidence_ref": "derived-pcap-zeek:bound",
+                "status": "ok",
+            }],
+        }
+        self.assertEqual(
+            self.runner._validated_discovered_observables([forged_filter]),
+            [],
+        )
+
+    def test_enabled_osquery_capability_enables_top_level_loop(self) -> None:
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": False,
+                "backends": {"osquery": {"enabled": False}},
+            }
+        }
+        with tempfile.TemporaryDirectory() as temp_name:
+            config_path = Path(temp_name) / "live-osquery.json"
+            config_path.write_text("{}", encoding="utf-8")
+            with (
+                mock.patch.object(
+                    self.runner,
+                    "DEFAULT_LIVE_OSQUERY_CONFIG_FILE",
+                    config_path,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "load_live_osquery_config",
+                    return_value={
+                        "enabled": True,
+                        "allowed_target_aliases": ["endpoint-a"],
+                        "allowed_agent_roles": ["soc-analyst"],
+                    },
+                ),
+            ):
+                config = self.runner.prepare_live_osquery_context(
+                    prompt_package,
+                    "soc-analyst",
+                )
+
+        self.assertTrue(config["enabled"])
+        self.assertTrue(prompt_package["investigation_query_capability"]["enabled"])
+        self.assertTrue(
+            prompt_package["investigation_query_capability"]["backends"]["osquery"]["enabled"]
+        )
+
+    def test_osquery_defaults_to_incident_responder_and_soc_requires_opt_in(self) -> None:
+        def prepare(role: str, configured: dict) -> tuple[dict, dict]:
+            package = {
+                "investigation_query_capability": {
+                    "enabled": False,
+                    "backends": {"osquery": {"enabled": False}},
+                }
+            }
+            with tempfile.TemporaryDirectory() as temp_name:
+                config_path = Path(temp_name) / "live-osquery.json"
+                config_path.write_text("{}", encoding="utf-8")
+                with (
+                    mock.patch.object(
+                        self.runner,
+                        "DEFAULT_LIVE_OSQUERY_CONFIG_FILE",
+                        config_path,
+                    ),
+                    mock.patch.object(
+                        self.runner,
+                        "load_live_osquery_config",
+                        return_value=configured,
+                    ),
+                ):
+                    scoped = self.runner.prepare_live_osquery_context(package, role)
+            return package, scoped
+
+        base = {
+            "enabled": True,
+            "allowed_target_aliases": ["endpoint-a"],
+            "allowed_agent_roles": ["incident-responder"],
+        }
+        soc_package, soc_config = prepare("soc-analyst", base)
+        self.assertFalse(soc_config["enabled"])
+        self.assertFalse(
+            soc_package["investigation_query_capability"]["backends"]["osquery"]["enabled"]
+        )
+        ir_package, ir_config = prepare("incident-responder", base)
+        self.assertTrue(ir_config["enabled"])
+        self.assertTrue(
+            ir_package["investigation_query_capability"]["backends"]["osquery"]["enabled"]
+        )
+
+    def test_osquery_aliases_cannot_authorize_new_elastic_observables(self) -> None:
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"osquery": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "discovered_observables": [],
+            },
+        }
+        request = {
+            "query_id": "host-pivot",
+            "backend": "osquery",
+            "purpose": "Inspect a bounded endpoint process fact.",
+            "parameters": {
+                "target_alias": "endpoint-a",
+                "query": "SELECT pid FROM processes LIMIT 1",
+            },
+        }
+        query_executor = mock.Mock(
+            return_value={
+                "schema": self.runner.INVESTIGATION_QUERY_RESULT_SCHEMA,
+                "round": 1,
+                "requests": [request],
+                "results": [
+                    {
+                        "query_id": "host-pivot",
+                        "backend": "osquery",
+                        "status": "ok",
+                        "evidence": {"rows": [{"source.ip": "8.8.8.8"}]},
+                    }
+                ],
+                "audit": [],
+            }
+        )
+
+        self.runner.apply_investigation_query_loop(
+            prompt_package,
+            {"investigation_query_requests": [request]},
+            object(),
+            {"agent_models": {"soc-analyst": "codex-cli:gpt-5.5:medium"}},
+            "soc-analyst",
+            live_osquery_config={"enabled": True},
+            model_executor=mock.Mock(return_value={"summary": "final"}),
+            query_executor=query_executor,
+        )
+
+        self.assertEqual(
+            prompt_package["_local_investigation_query_context"]["discovered_observables"],
+            [],
+        )
+
+    def test_unavailable_security_onion_broker_becomes_evidence_gap(self) -> None:
+        request = self.runner.normalize_investigation_query_request(
+            self.elastic_request(),
+            round_number=1,
+            position=1,
+        )
+
+        result = self.runner.execute_investigation_query_batch(
+            {
+                "_local_investigation_query_context": {
+                    "case_id": "investigation-test",
+                }
+            },
+            [request],
+            round_number=1,
+            security_onion_executor=mock.Mock(
+                side_effect=self.runner.InvestigationQueryError("broker unavailable")
+            ),
+        )
+
+        self.assertEqual(result["results"][0]["status"], "error")
+        self.assertIn("broker unavailable", result["results"][0]["error"])
+
+    def test_partial_security_onion_batch_is_never_labeled_ok(self) -> None:
+        request = self.runner.normalize_investigation_query_request(
+            self.elastic_request(),
+            round_number=1,
+            position=1,
+        )
+
+        result = self.runner.execute_investigation_query_batch(
+            {"_local_investigation_query_context": {"case_id": "investigation-test"}},
+            [request],
+            round_number=1,
+            security_onion_executor=mock.Mock(
+                return_value={
+                    "complete": False,
+                    "partial": True,
+                    "model_evidence": {
+                        "results": [{"query_id": "pivot-1", "status": "timeout"}]
+                    },
+                    "query_audit": [
+                        {
+                            "query_id": "pivot-1",
+                            "dialect": "elastic",
+                            "status": "timeout",
+                            "query_digest": "a" * 64,
+                        }
+                    ],
+                    "audit": {},
+                }
+            ),
+        )
+
+        self.assertEqual(result["results"][0]["status"], "partial")
+
+    def test_builder_creates_hidden_anchor_and_bounded_visible_capability(self) -> None:
+        row = {
+            "alert_id": ".ds-logs-suricata.alerts-so-2026.07.24-000001:alert-1",
+            "alert_json": json.dumps(
+                {
+                    "elastic_index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                    "elastic_id": "alert-1",
+                    "source": {"ip": "192.0.2.10"},
+                    "destination": {"ip": "198.51.100.20"},
+                    "dns": {"question": {"name": "example.test"}},
+                    "host": {"name": "workstation-1"},
+                    "user": {"name": "analyst"},
+                }
+            ),
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "timestamp": "2026-07-24T18:30:00Z",
+            "first_seen": "2026-07-24T18:29:00Z",
+            "last_seen": "2026-07-24T18:31:00Z",
+        }
+
+        capability, local = self.builder.investigation_query_context(
+            row,
+            [row],
+            "group-1",
+            "incident-responder",
+            True,
+        )
+
+        self.assertTrue(capability["enabled"])
+        self.assertEqual(local["anchor"]["id"], "alert-1")
+        self.assertEqual(local["actor_role"], "incident_responder")
+        self.assertTrue(local["context_id"].startswith("context-"))
+        self.assertIn("192.0.2.10", capability["permitted_observables"]["ips"])
+        self.assertIn("example.test", capability["permitted_observables"]["domains"])
+        self.assertEqual(
+            capability["budgets"]["max_rounds"],
+            self.builder.INVESTIGATION_QUERY_MAX_ROUNDS,
+        )
+        self.assertNotIn("anchor", capability)
+
+    def test_builder_clamps_recurring_group_authorization_around_selected_alert(self) -> None:
+        selected = {
+            "alert_id": ".ds-logs-suricata.alerts-so-2026.07.24-000001:alert-2",
+            "alert_json": json.dumps({
+                "elastic_index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                "elastic_id": "alert-2",
+            }),
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "timestamp": "2026-07-24T18:30:00Z",
+            "first_seen": "2026-07-01T00:00:00Z",
+            "last_seen": "2026-07-24T18:30:00Z",
+        }
+        old_group_row = {
+            **selected,
+            "alert_id": "old-copy",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "first_seen": "2026-01-01T00:00:00Z",
+            "last_seen": "2026-01-01T00:00:00Z",
+        }
+
+        _capability, local = self.builder.investigation_query_context(
+            selected,
+            [selected, old_group_row],
+            "long-running-group",
+            "soc-analyst",
+            False,
+        )
+
+        self.assertEqual(
+            local["time_envelope"],
+            {
+                "start": "2026-07-23T18:30:00.000Z",
+                "end": "2026-07-25T18:30:00.000Z",
+            },
+        )
+
+    def test_builder_context_authorizes_a_real_broker_request(self) -> None:
+        row = {
+            "alert_id": ".ds-logs-suricata.alerts-so-2026.07.24-000001:alert-3",
+            "alert_json": json.dumps({
+                "elastic_index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                "elastic_id": "alert-3",
+            }),
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "timestamp": "2026-07-24T18:30:00Z",
+            "first_seen": "2026-07-24T18:29:00Z",
+            "last_seen": "2026-07-24T18:31:00Z",
+        }
+        _capability, context = self.builder.investigation_query_context(
+            row,
+            [row],
+            "group-3",
+            "soc-analyst",
+            False,
+        )
+        normalized = self.runner.normalize_investigation_query_request(
+            self.elastic_request("real-contract"),
+            round_number=1,
+            position=1,
+        )
+        proposal = {
+            "query_contract": self.runner.INVESTIGATION_QUERY_CONTRACT,
+            "batch_id": "real-contract-batch",
+            "queries": [
+                {
+                    "query_id": normalized["query_id"],
+                    "dialect": normalized["backend"],
+                    "pack": normalized["parameters"]["pack"],
+                    "purpose": normalized["purpose"],
+                    "window": normalized["parameters"]["window"],
+                    "observables": normalized["parameters"]["observables"],
+                    "size": normalized["parameters"]["size"],
+                    "aggregation": normalized["parameters"]["aggregation"],
+                }
+            ],
+        }
+
+        authorized = self.contract.authorize_investigation_query_request(
+            proposal,
+            context,
+        )
+
+        self.assertEqual(authorized["authorization"]["actor_role"], "soc_analyst")
+        self.assertEqual(
+            authorized["queries"][0]["observable_provenance"]["ips"][0]["source"],
+            "trusted_context",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

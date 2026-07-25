@@ -488,8 +488,10 @@ command, forwarding request, PTY, path, or query text.
 The broker validates a bounded JSON request and relays it over a second
 dedicated key to Security Onion. Runtime settings belong in
 `/etc/so-alert-relay/incident-evidence.json`, rendered from the sanitized
-example. The broker caps request, response, stderr, connection, and total
-runtime sizes on both hops. Security Onion independently rebuilds every query
+example. The relay's 400-second inner timeout accommodates a bounded
+four-query pivot batch plus two semantic controls; the Mac caller uses a
+slightly longer 420-second outer timeout. The broker caps request, response,
+stderr, connection, and total runtime sizes on both hops. Security Onion independently rebuilds every query
 from fixed allowlisted packs, so neither the dashboard nor either model can
 turn incident reasoning into an arbitrary Elasticsearch or shell operation.
 

@@ -59,6 +59,15 @@ _FORBIDDEN_QUERY_SHAPES = re.compile(
     r"\b(?:except|intersect|union|with)\b|\(\s*select\b|\b(?:from|join)\s*\(",
     re.IGNORECASE,
 )
+_SQL_STRING_LITERAL = re.compile(r"'(?:''|[^'])*'")
+_FUNCTION_CALL = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\s*\(")
+_SELECT_PROJECTION = re.compile(
+    r"^\s*select\s+(?P<body>.*?)\s+from\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_SAFE_PROJECTION_ITEM = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_]*\.)?(?:\*|[A-Za-z_][A-Za-z0-9_]*)$"
+)
 _TABLE_REFERENCE = re.compile(
     r"\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_]*)",
     re.IGNORECASE,
@@ -67,7 +76,7 @@ _FROM_CLAUSE = re.compile(
     r"\bfrom\b(?P<body>.*?)(?=\bwhere\b|\bgroup\s+by\b|\border\s+by\b|\blimit\b|$)",
     re.IGNORECASE | re.DOTALL,
 )
-_LIMIT = re.compile(r"\blimit\s+(\d+)\b", re.IGNORECASE)
+_TERMINAL_LIMIT = re.compile(r"\s+limit\s+([0-9]+)\s*$", re.IGNORECASE)
 _ALIAS = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _RESULT_STATUSES = frozenset(
     {"ok", "timeout", "error", "invalid_response", "cancelled"}
@@ -126,33 +135,71 @@ def normalize_query(value: Any) -> str:
         raise LiveOsqueryContractError("only one SQL statement is allowed")
     if not re.match(r"^\s*select\b", query, flags=re.IGNORECASE):
         raise LiveOsqueryContractError("only SELECT queries are allowed")
-    if _FORBIDDEN_SQL.search(query):
+    structural = _SQL_STRING_LITERAL.sub("__string_literal__", query)
+    if "'" in structural:
+        raise LiveOsqueryContractError("query contains an unterminated SQL string")
+    if any(character in structural for character in ('"', "`", "[", "]")):
+        raise LiveOsqueryContractError(
+            "quoted or bracketed SQL identifiers are forbidden"
+        )
+    if _FORBIDDEN_SQL.search(structural):
         raise LiveOsqueryContractError("query contains a forbidden SQL operation")
-    if _FORBIDDEN_QUERY_SHAPES.search(query):
+    if _FORBIDDEN_QUERY_SHAPES.search(structural):
         raise LiveOsqueryContractError(
             "compound queries, CTEs, subqueries, and derived tables are forbidden"
         )
-    from_clause = _FROM_CLAUSE.search(query)
-    if from_clause and "," in from_clause.group("body"):
+    if re.search(r"\bjoin\b", structural, flags=re.IGNORECASE):
+        raise LiveOsqueryContractError("JOIN queries are forbidden")
+    if _FUNCTION_CALL.search(structural):
+        raise LiveOsqueryContractError("SQL function calls are forbidden")
+    projection = _SELECT_PROJECTION.search(structural)
+    if projection is None:
+        raise LiveOsqueryContractError("query must have a bounded column projection")
+    projection_items = [
+        item.strip() for item in projection.group("body").split(",")
+    ]
+    if (
+        not projection_items
+        or len(projection_items) > 64
+        or any(not _SAFE_PROJECTION_ITEM.fullmatch(item) for item in projection_items)
+    ):
         raise LiveOsqueryContractError(
-            "comma joins are forbidden; use an explicit JOIN between allowed tables"
+            "SELECT projection must contain only native column identifiers or *"
         )
+    from_clause = _FROM_CLAUSE.search(structural)
+    if from_clause and "," in from_clause.group("body"):
+        raise LiveOsqueryContractError("comma joins are forbidden")
 
-    tables = {match.group(1).lower() for match in _TABLE_REFERENCE.finditer(query)}
-    if not tables:
-        raise LiveOsqueryContractError("query must reference an allowed OSQuery table")
+    table_references = [
+        match.group(1).lower()
+        for match in _TABLE_REFERENCE.finditer(structural)
+    ]
+    if len(table_references) != 1:
+        raise LiveOsqueryContractError(
+            "query must reference exactly one allowed OSQuery table"
+        )
+    tables = set(table_references)
     unknown = sorted(tables.difference(ALLOWED_TABLES))
     if unknown:
         raise LiveOsqueryContractError(
             "query references a table outside the allowlist: " + ", ".join(unknown)
         )
 
-    limits = [int(match.group(1)) for match in _LIMIT.finditer(query)]
-    if len(limits) > 1:
-        raise LiveOsqueryContractError("query may contain only one LIMIT clause")
-    if limits and (limits[0] < 1 or limits[0] > MAX_ROWS):
+    terminal_limit = _TERMINAL_LIMIT.search(structural)
+    if re.search(r"\boffset\b", structural, flags=re.IGNORECASE):
+        raise LiveOsqueryContractError("query OFFSET clauses are forbidden")
+    limit_tokens = list(re.finditer(r"\blimit\b", structural, flags=re.IGNORECASE))
+    if limit_tokens and (
+        terminal_limit is None
+        or len(limit_tokens) != 1
+    ):
+        raise LiveOsqueryContractError(
+            "query must use only one terminal LIMIT with a decimal row count"
+        )
+    limit_value = int(terminal_limit.group(1)) if terminal_limit else None
+    if limit_value is not None and (limit_value < 1 or limit_value > MAX_ROWS):
         raise LiveOsqueryContractError(f"query LIMIT must be between 1 and {MAX_ROWS}")
-    if not limits:
+    if limit_value is None:
         query = f"{query} LIMIT {DEFAULT_ROWS}"
     return f"{query};"
 

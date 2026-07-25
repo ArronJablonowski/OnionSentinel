@@ -29,10 +29,10 @@ erase or fabricate baseline findings.
 | Pack | Reviewed index scope | Allowed datasets |
 | --- | --- | --- |
 | `alert_context` | `logs-suricata.alerts-so`, `logs-detections.alerts-so` | `suricata.alert` |
-| `network_flow` | Zeek connection, endpoint network, and the two alert data streams | `zeek.connection`, `endpoint.events.network`, `suricata.alert` |
+| `network_flow` | Zeek connection, endpoint network, and the two alert data streams | `zeek.conn`, `endpoint.events.network`, `suricata.alert`, `sigma.alert` |
 | `dns_activity` | Zeek DNS and endpoint network data streams | `zeek.dns`, `endpoint.events.network` |
-| `osquery_history` | Endpoint process/file/network and Osquery Manager result/response data streams | `endpoint.events.process`, `endpoint.events.file`, `endpoint.events.network`, `osquery_manager.result`, `osquery_manager.response` |
-| `cross_sensor_timeline` | The reviewed alert, Zeek connection/DNS, and endpoint network/process/file data streams | `suricata.alert`, `zeek.connection`, `zeek.dns`, endpoint network/process/file events |
+| `osquery_history` | Endpoint process/file/network and Osquery Manager result/action-response data streams | `endpoint.events.process`, `endpoint.events.file`, `endpoint.events.network`, `osquery_manager.result`, `osquery_manager.action.responses` |
+| `cross_sensor_timeline` | The reviewed alert, Zeek connection/DNS, and endpoint network/process/file data streams | `suricata.alert`, `sigma.alert`, `zeek.conn`, `zeek.dns`, endpoint network/process/file events |
 
 Each search is limited to approved fields, exact validated observables, no more
 than four windows of 24 hours each, no more than 16 observables in each

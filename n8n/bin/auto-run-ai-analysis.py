@@ -1219,9 +1219,15 @@ def analysis_command(prompt_path: Path, args: argparse.Namespace) -> list[str]:
 
 def run_analysis(prompt_path: Path, args: argparse.Namespace, *, progress_callback=None):
     cmd = analysis_command(prompt_path, args)
+    # One durable analysis may now include the initial inference, as many as
+    # three bounded evidence-pivot follow-ups, and an independent review.  The
+    # child enforces the per-call timeout and query budgets; this outer watchdog
+    # must not terminate a healthy multi-turn investigation after only one
+    # model-call allowance.
+    worker_timeout = (args.timeout * 5) + 300
     return run_command(
         cmd,
-        timeout_seconds=args.timeout + 120,
+        timeout_seconds=worker_timeout,
         max_stdout_bytes=DEFAULT_MAX_CHILD_STDOUT_BYTES,
         max_stderr_bytes=DEFAULT_MAX_CHILD_STDERR_BYTES,
         progress_callback=progress_callback,

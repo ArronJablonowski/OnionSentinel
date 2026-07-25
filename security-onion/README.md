@@ -8,7 +8,7 @@ This directory contains the Security Onion-side pieces for Onion Sentinel.
 | --- | --- | --- |
 | `bin/export-recent-alerts` | `/usr/local/sbin/export-recent-alerts` | Restricted wrapper that exports recent alerts as JSON. |
 | `bin/export-pcap-window` | `/usr/local/sbin/export-pcap-window` | Restricted wrapper that streams one bounded, filtered rotation directly to the relay SSD without Security Onion staging. |
-| `bin/export-incident-evidence` | `/usr/local/sbin/export-incident-evidence` | Restricted read-only incident evidence wrapper with fixed Elasticsearch query packs. |
+| `bin/export-incident-evidence` | `/usr/local/sbin/export-incident-evidence` | Restricted baseline evidence and policy-brokered Elastic/OQL pivot wrapper. |
 | `bin/run-live-osquery` | `/usr/local/sbin/run-live-osquery` | Disabled-by-default live endpoint OSQuery wrapper with exact alias mapping and bounded Osquery Manager calls. |
 | `sudoers/90-so-ai-relay-export` | `/etc/sudoers.d/90-so-ai-relay-export` | Allows only the wrapper to run passwordless for `so-ai-relay`. |
 | `ssh/authorized_keys.example` | `/home/so-ai-relay/.ssh/authorized_keys` | Forced-command SSH template restricted to the relay source IP. |
@@ -69,6 +69,83 @@ result. Every OSquery result records the reviewed pack, exact SQL, local target,
 status, query digest, bounded result metadata, and any explicit error. Query
 DSL and OSquery SQL are the authoritative command audits; KQL is explanatory
 and is not independently executed.
+
+## Iterative Elastic and OQL Investigation Pivots
+
+The same incident-evidence forced command also accepts
+`onion-sentinel-investigation-pivots-v1` batches. This opens an iterative
+investigation path without turning the SSH key into a general Elastic, Hunt,
+or shell proxy.
+
+The SOC Analyst or Incident Responder model may propose only:
+
+- one of the five reviewed evidence packs listed above;
+- display dialect `elastic` or `oql`;
+- one of six reviewed purposes (`validate_detection`,
+  `establish_timeline`, `correlate_observable`, `measure_prevalence`,
+  `identify_related_activity`, or `test_benign_hypothesis`);
+- fixed aggregation behavior `events`, `count`, or `timeline`;
+- exact IP, domain, host, or user values;
+- one UTC window of no more than 24 hours; and
+- a result size from 1 through 100.
+
+The model cannot submit Query DSL, KQL, OQL, index names, fields, search
+endpoints, scripts, paths, or shell text. The Mac collector combines the
+proposal with a trusted authorization context containing the case/group,
+representative alert anchor, time envelope, base observables, and any new exact
+observable previously discovered in authenticated evidence. Every observable
+is tagged as `trusted_context` or `prior_evidence` with a bounded evidence
+reference. The Security Onion wrapper independently validates that manifest
+and rejects unused, missing, conflicting, wildcard, malformed, or
+out-of-envelope values.
+
+A batch contains at most four queries, 24 distinct observables, 400 requested
+event bodies, and 96 cumulative query-hours. Every individual query is also
+bounded to eight observables and 100 results. The authorization envelope cannot
+span more than seven days. The representative-alert positive and contradictory
+negative controls run for every batch; a failed control, shard, timeout,
+projection check, or out-of-scope hit makes the batch partial and creates an
+explicit evidence gap.
+
+The wrapper generates all three audit forms locally:
+
+- the exact Query DSL executed by `so-elasticsearch-query`;
+- an analyst-readable KQL equivalent; and
+- actual Security Onion Hunt OQL using Lucene predicates and the allowlisted
+  `| sortby @timestamp^` pipeline for chronological timelines.
+
+An `oql` request is labeled `compiled_oql_equivalent`: its semantic equivalent
+is executed through the reviewed Elasticsearch path. It is not represented as
+execution through the Security Onion SOC Hunt API. Query,
+execution-manifest, request-item, KQL, OQL, authorization-context, manifest,
+request, and response digests preserve provenance across the round trip.
+
+The Mac transport timeout defaults to 420 seconds so four sequential bounded
+queries and both controls can finish without weakening the Security Onion
+wrapper's per-query timeout. The Mac installer seeds this value for new
+deployments and adds it only when an existing JSON configuration has no
+`timeout_seconds` key; it never overwrites an operator-selected value.
+
+On the Mac Studio, `n8n/bin/investigation_query_contract.py` independently
+rebuilds the expected DSL, OQL, KQL, endpoint, index scope, projections, and
+digests before evidence can return to a model.
+`n8n/bin/collect-investigation-pivots.py` exposes the shared SOC Analyst and
+Incident Responder API:
+
+```python
+collect_investigation_pivots(
+    proposal,
+    authorization_context,
+    config_path=incident_evidence_config,
+    out_dir=artifact_directory,
+    persist=True,
+)
+```
+
+The returned artifact contains compact `model_evidence`, a presentation-ready
+`query_audit` without duplicated hit bodies, and the full authenticated
+response under `audit.security_onion_response`. Persisted artifacts are mode
+`0600` runtime data and must not be committed.
 
 Live endpoint OSQuery is a separate Incident Responder capability based on
 `security-onion/ssh/authorized_keys.live-osquery.example`. It remains disabled
