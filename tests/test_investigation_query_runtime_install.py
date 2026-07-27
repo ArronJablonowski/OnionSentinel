@@ -262,6 +262,7 @@ class InvestigationQueryRuntimeInstallTests(unittest.TestCase):
                 module.run_command = fake_run
                 args = SimpleNamespace(
                     prompt_dir=runtime,
+                    ai_settings_file=runtime / "ai_model_settings.json",
                     related_limit=8,
                     correlation_limit=8,
                     correlation_min_score=15,

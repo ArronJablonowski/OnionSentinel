@@ -33,6 +33,7 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tmp.name) / "alerts.sqlite3"
         self.portal = load_portal()
+        self.portal.HOME = Path(self.tmp.name)
         self.portal.SOC_ALERT_STORE_DB = self.db_path
         self.portal.SOC_ALERT_STORE_API_URL = ""
         self.portal.SOC_ALERT_STATUS_FILE = Path(self.tmp.name) / ".soc_alert_status.json"
