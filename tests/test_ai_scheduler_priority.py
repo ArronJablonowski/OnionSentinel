@@ -83,6 +83,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         for detail in (
             "Codex CLI analysis failed: model context window exhausted",
             "prompt package remains above 1048576 bytes after deterministic compaction",
+            "InvestigationQueryError: investigation query prompt projection exceeds its cumulative byte budget",
             "command stderr exceeded the 1048576-byte limit",
             "Codex CLI analysis failed: provider authentication failed",
             "Codex CLI analysis failed: configured model is unavailable or unauthorized",
@@ -1473,7 +1474,9 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             "ira-" + ("a" * 40),
         )
 
-    def test_cli_lane_clamps_builder_and_runner_prompt_package_budget(self) -> None:
+    def test_cli_lane_reserves_follow_up_headroom_between_builder_and_runner(
+        self,
+    ) -> None:
         settings_path = Path(self.tempdir.name) / "custom-ai-settings.json"
         settings_path.write_text(
             json.dumps(
@@ -1493,6 +1496,11 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             encoding="utf-8",
         )
         args = SimpleNamespace(
+            prompt_dir=Path(self.tempdir.name) / "prompts",
+            related_limit=8,
+            correlation_limit=8,
+            correlation_min_score=15,
+            include_tests=False,
             analysis_dir=Path(self.tempdir.name) / "analysis",
             timeout=600,
             max_prompt_bytes=1024 * 1024,
@@ -1501,6 +1509,9 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             provider_lane="cli",
             model=None,
         )
+        args.prompt_dir.mkdir()
+        prompt_path = args.prompt_dir / "prompt.json"
+        prompt_path.write_text("{}", encoding="utf-8")
 
         self.assertEqual(
             self.scheduler.effective_prompt_package_limit(
@@ -1509,6 +1520,62 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             ),
             self.scheduler.CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES,
         )
+        self.assertEqual(
+            self.scheduler.effective_initial_prompt_package_limit(
+                args,
+                agent_role="soc-analyst",
+            ),
+            self.scheduler.CODEX_CLI_INITIAL_PROMPT_PACKAGE_BYTES,
+        )
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=str(prompt_path) + "\n",
+            stderr="",
+        )
+        with mock.patch.object(
+            self.scheduler,
+            "run_command",
+            return_value=completed,
+        ) as run:
+            self.assertEqual(
+                self.scheduler.build_prompt(
+                    "synthetic-alert",
+                    args,
+                    {"agent_role": "soc-analyst"},
+                ),
+                prompt_path,
+            )
+        builder_command = run.call_args.args[0]
+        self.assertEqual(
+            builder_command[
+                builder_command.index("--max-package-bytes") + 1
+            ],
+            str(self.scheduler.CODEX_CLI_INITIAL_PROMPT_PACKAGE_BYTES),
+        )
+        prompt_path.write_bytes(
+            b"x"
+            * (
+                self.scheduler.CODEX_CLI_INITIAL_PROMPT_PACKAGE_BYTES
+                + 1
+            )
+        )
+        with (
+            mock.patch.object(
+                self.scheduler,
+                "run_command",
+                return_value=completed,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "prompt package exceeded the "
+                f"{self.scheduler.CODEX_CLI_INITIAL_PROMPT_PACKAGE_BYTES}-byte",
+            ),
+        ):
+            self.scheduler.build_prompt(
+                "synthetic-alert",
+                args,
+                {"agent_role": "soc-analyst"},
+            )
         command = self.scheduler.analysis_command(
             Path(self.tempdir.name) / "prompt.json",
             args,
@@ -1560,6 +1627,13 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                 agent_role="soc-analyst",
             ),
             self.scheduler.CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES,
+        )
+        self.assertEqual(
+            self.scheduler.effective_initial_prompt_package_limit(
+                args,
+                agent_role="soc-analyst",
+            ),
+            self.scheduler.CODEX_CLI_INITIAL_PROMPT_PACKAGE_BYTES,
         )
 
     def test_prompt_builder_and_runner_share_custom_role_prompt_directory(self) -> None:

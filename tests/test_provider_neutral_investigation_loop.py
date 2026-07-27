@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 import sys
@@ -2404,6 +2405,79 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         )
         self.assertNotIn(f"query:{second_query}", refs)
 
+    def test_rich_query_references_require_strict_bounded_result_counts(
+        self,
+    ) -> None:
+        missing = object()
+        invalid_counts = (
+            missing,
+            True,
+            "1",
+            1.0,
+            1.75,
+            -1,
+            float("nan"),
+            float("inf"),
+            object(),
+            [],
+            2**63,
+        )
+        for index, returned in enumerate(invalid_counts, 1):
+            with self.subTest(returned=repr(returned)):
+                query_digest = f"{index:064x}"
+                result_digest = f"{index + 100:064x}"
+                result = {
+                    "query_id": f"strict-count-{index}",
+                    "query_digest": query_digest,
+                    "result_digest": result_digest,
+                    "status": "ok",
+                }
+                if returned is not missing:
+                    result["returned_hits"] = returned
+                contract = self.runner.evidence_reference_contract({
+                    "investigation_query_results": {
+                        "results": [result],
+                    },
+                })
+                reference = (
+                    f"query:{query_digest}:{result_digest}"
+                )
+                catalog = {
+                    item["ref"]: item
+                    for item in contract["references"]
+                }
+                self.assertIn(reference, catalog)
+                self.assertFalse(catalog[reference]["corroborating"])
+                self.assertIsNone(catalog[reference]["returned"])
+                self.assertEqual(
+                    catalog[reference]["status"],
+                    "invalid_result_count",
+                )
+
+        maximum = self.runner.MAX_INVESTIGATION_RESULT_COUNT
+        query_digest = "e" * 64
+        result_digest = "f" * 64
+        contract = self.runner.evidence_reference_contract({
+            "investigation_query_results": {
+                "results": [{
+                    "query_id": "strict-count-maximum",
+                    "query_digest": query_digest,
+                    "result_digest": result_digest,
+                    "status": "ok",
+                    "returned_hits": maximum,
+                }],
+            },
+        })
+        maximum_reference = (
+            f"query:{query_digest}:{result_digest}"
+        )
+        maximum_item = {
+            item["ref"]: item
+            for item in contract["references"]
+        }[maximum_reference]
+        self.assertTrue(maximum_item["corroborating"])
+        self.assertEqual(maximum_item["returned"], maximum)
+
     def test_reviewer_preflight_precedes_reviewer_execution(self) -> None:
         events: list[tuple] = []
         harness = RecordingHarness(events)
@@ -2770,6 +2844,1626 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             self.runner.MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS,
         )
         self.assertTrue(projected["prompt_projection"]["truncated"])
+
+    def test_cumulative_prompt_projection_compacts_query_audit_without_losing_evidence_provenance(
+        self,
+    ) -> None:
+        trusted_query_audit = []
+        for index in range(4):
+            query_digest = f"{index + 1:064x}"
+            result_digest = f"{index + 101:064x}"
+            trusted_query_audit.append({
+                "query_id": f"pivot-{index + 1}",
+                "backend": "security_onion",
+                "dialect": "elastic",
+                "pack": "network_flow",
+                "purpose": "Confirm the exact result-bound network pivot.",
+                "status": "ok",
+                "semantic_valid": True,
+                "returned_hits": index + 1,
+                "query_digest": query_digest,
+                "result_digest": result_digest,
+                "evidence_ref": f"query:{query_digest}:{result_digest}",
+                "query_dsl": {
+                    "query": {
+                        "bool": {
+                            "filter": [
+                                {
+                                    "term": {
+                                        "event.dataset": (
+                                            "logs-zeek.conn-" + ("x" * 12_000)
+                                        )
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                },
+                "kql_equivalent": "source.ip:192.0.2.1 " + ("k" * 12_000),
+                "oql_equivalent": "source.ip == 192.0.2.1 " + ("o" * 12_000),
+            })
+        evidence = {
+            "controls_valid": True,
+            "complete": True,
+            "partial": False,
+            "results": [
+                {
+                    "query_id": f"pivot-{index + 1}",
+                    "status": "ok",
+                    "semantic_valid": True,
+                    "query_digest": item["query_digest"],
+                    "returned_hits": index + 1,
+                    "hits": [{"source": {"source": {"ip": "192.0.2.1"}}}],
+                }
+                for index, item in enumerate(trusted_query_audit)
+            ],
+        }
+        rounds = [{
+            "round": 1,
+            "requests": [],
+            "audit": [],
+            "results": [{
+                "backend": "security_onion",
+                "query_ids": [
+                    item["query_id"] for item in trusted_query_audit
+                ],
+                "status": "ok",
+                "read_only": True,
+                "security_onion_response_digest": "f" * 64,
+                "evidence": evidence,
+                "trusted_query_audit": trusted_query_audit,
+            }],
+        }]
+        original = copy.deepcopy(rounds)
+
+        projected = self.runner._investigation_prompt_payload(
+            rounds,
+            maximum_bytes=12 * 1024,
+        )
+        repeated = self.runner._investigation_prompt_payload(
+            rounds,
+            maximum_bytes=12 * 1024,
+        )
+        encoded = json.dumps(
+            projected,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        self.assertEqual(projected, repeated)
+        self.assertEqual(rounds, original)
+        self.assertLessEqual(len(encoded), 12 * 1024)
+        self.assertEqual(
+            projected["prompt_projection"]["encoded_bytes"],
+            len(encoded),
+        )
+        self.assertEqual(
+            projected["prompt_projection"][
+                "trusted_query_audits_compacted"
+            ],
+            4,
+        )
+        self.assertEqual(
+            projected["prompt_projection"]["evidence_bodies_omitted"],
+            0,
+        )
+        result = projected["rounds"][0]["results"][0]
+        self.assertEqual(result["evidence"], evidence)
+        for source, compact in zip(
+            trusted_query_audit,
+            result["trusted_query_audit"],
+            strict=True,
+        ):
+            self.assertEqual(
+                compact["prompt_projection"],
+                "compacted_due_to_cumulative_byte_budget",
+            )
+            self.assertEqual(compact["query_id"], source["query_id"])
+            self.assertEqual(
+                compact["query_digest"],
+                source["query_digest"],
+            )
+            self.assertEqual(
+                compact["result_digest"],
+                source["result_digest"],
+            )
+            self.assertEqual(
+                compact["evidence_ref"],
+                source["evidence_ref"],
+            )
+            source_bytes = json.dumps(
+                source,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            self.assertEqual(compact["audit_bytes"], len(source_bytes))
+            self.assertEqual(
+                compact["audit_sha256"],
+                hashlib.sha256(source_bytes).hexdigest(),
+            )
+            self.assertNotIn("query_dsl", compact)
+            self.assertNotIn("kql_equivalent", compact)
+            self.assertNotIn("oql_equivalent", compact)
+
+    def test_rank_nineteen_shape_preserves_evidence_under_eleven_kib_budget(
+        self,
+    ) -> None:
+        def sized_audit(
+            target_bytes: int,
+            *,
+            query_id: str,
+            query_digest: str,
+            result_digest: str,
+        ) -> dict:
+            audit = {
+                "query_id": query_id,
+                "backend": "security_onion",
+                "dialect": "elastic",
+                "pack": "network_flow",
+                "purpose": "Validate the bounded network-flow pivot.",
+                "status": "ok",
+                "semantic_valid": True,
+                "returned_hits": 1,
+                "query_digest": query_digest,
+                "result_digest": result_digest,
+                "evidence_ref": (
+                    f"query:{query_digest}:{result_digest}"
+                ),
+                "query_dsl": {"padding": ""},
+            }
+            empty_size = len(json.dumps(
+                audit,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"))
+            self.assertGreater(target_bytes, empty_size)
+            audit["query_dsl"]["padding"] = "x" * (
+                target_bytes - empty_size
+            )
+            self.assertEqual(
+                len(json.dumps(
+                    audit,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")),
+                target_bytes,
+            )
+            return audit
+
+        rounds = []
+        evidence_by_round = []
+        audit_sizes = (4612, 10497)
+        for round_number, audit_size in enumerate(audit_sizes, 1):
+            query_digest = f"{round_number:064x}"
+            result_digest = f"{round_number + 20:064x}"
+            evidence = {
+                "controls_valid": True,
+                "complete": True,
+                "partial": False,
+                "results": [{
+                    "query_id": f"pivot-{round_number}",
+                    "status": "ok",
+                    "semantic_valid": True,
+                    "query_digest": query_digest,
+                    "result_digest": result_digest,
+                    "returned_hits": 1,
+                    "hits": [{
+                        "source": {
+                            "source": {"ip": "192.0.2.10"},
+                            "destination": {"ip": "198.51.100.20"},
+                        },
+                    }],
+                }],
+            }
+            evidence_by_round.append(evidence)
+            rounds.append({
+                "round": round_number,
+                "requests": [],
+                "audit": [],
+                "results": [{
+                    "backend": "security_onion",
+                    "query_ids": [f"pivot-{round_number}"],
+                    "status": "ok",
+                    "read_only": True,
+                    "evidence": evidence,
+                    "trusted_query_audit": [sized_audit(
+                        audit_size,
+                        query_id=f"pivot-{round_number}",
+                        query_digest=query_digest,
+                        result_digest=result_digest,
+                    )],
+                }],
+            })
+
+        projected = self.runner._investigation_prompt_payload(
+            rounds,
+            maximum_bytes=11091,
+        )
+        encoded = json.dumps(
+            projected,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        self.assertLessEqual(len(encoded), 11091)
+        self.assertFalse(
+            projected["prompt_projection"].get(
+                "columnar_provenance_fallback",
+                False,
+            )
+        )
+        self.assertGreaterEqual(
+            projected["prompt_projection"][
+                "trusted_query_audits_compacted"
+            ],
+            1,
+        )
+        self.assertEqual(
+            projected["prompt_projection"]["evidence_bodies_omitted"],
+            0,
+        )
+        self.assertEqual(
+            [
+                item["results"][0]["evidence"]
+                for item in projected["rounds"]
+            ],
+            evidence_by_round,
+        )
+
+    def test_complete_follow_up_admission_includes_refreshed_contract_under_runtime_ceiling(
+        self,
+    ) -> None:
+        maximum = self.runner.CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES
+        query_digest = "a" * 64
+        result_digest = "b" * 64
+        prompt_package = {
+            "package_type": "soc-ai-investigation-prompt",
+            "agent_role": "soc-analyst",
+            "padding": "p" * (maximum - 14_000),
+            "evidence_reference_contract": {
+                "schema": "stale-contract-must-be-replaced",
+                "references": [],
+            },
+        }
+        rounds = [{
+            "round": 1,
+            "requests": [],
+            "audit": [],
+            "results": [{
+                "query_id": "pivot-1",
+                "backend": "elastic",
+                "status": "ok",
+                "read_only": True,
+                "evidence": {
+                    "query_id": "pivot-1",
+                    "pack": "network_flow",
+                    "status": "ok",
+                    "query_digest": query_digest,
+                    "result_digest": result_digest,
+                    "returned_hits": 1,
+                    "hits": [{"source": {"padding": "e" * 20_000}}],
+                },
+                "trusted_query_audit": [{
+                    "query_id": "pivot-1",
+                    "backend": "elastic",
+                    "pack": "network_flow",
+                    "aggregation": "events",
+                    "purpose": "Confirm exact prompt admission evidence.",
+                    "status": "ok",
+                    "query_digest": query_digest,
+                    "result_digest": result_digest,
+                    "evidence_ref": (
+                        f"query:{query_digest}:{result_digest}"
+                    ),
+                    "returned_hits": 1,
+                    "query_dsl": {"padding": "q" * 20_000},
+                }],
+            }],
+        }]
+
+        admitted_size = self.runner._admit_investigation_query_prompt(
+            prompt_package,
+            rounds,
+            maximum_prompt_bytes=maximum,
+            hosted=True,
+        )
+        actual_size = len(json.dumps(
+            self.runner.model_safe_copy(prompt_package, hosted=True),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"))
+
+        self.assertEqual(admitted_size, actual_size)
+        self.assertLessEqual(actual_size, maximum)
+        contract = prompt_package["evidence_reference_contract"]
+        self.assertEqual(
+            contract["schema"],
+            "onion-sentinel-evidence-reference-contract-v1",
+        )
+        self.assertIn(
+            f"query:{query_digest}:{result_digest}",
+            {item["ref"] for item in contract["references"]},
+        )
+
+    def test_follow_up_admission_finds_exact_nonmonotonic_floor_boundary(
+        self,
+    ) -> None:
+        maximum = self.runner.CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES
+        exact_projection_budget = 843
+
+        def synthetic_projection(_rounds, *, maximum_bytes):
+            if maximum_bytes < exact_projection_budget:
+                raise self.runner.InvestigationQueryError(
+                    "synthetic provenance floor"
+                )
+            projection = {
+                "schema": self.runner.INVESTIGATION_QUERY_RESULT_SCHEMA,
+                "rounds": [{
+                    "schema": "synthetic-admission-state",
+                    "padding": (
+                        ""
+                        if maximum_bytes == exact_projection_budget
+                        else "z" * 4096
+                    ),
+                }],
+                "prompt_projection": {
+                    "max_bytes": maximum_bytes,
+                    "truncated": True,
+                    "encoded_bytes": 0,
+                },
+            }
+            for _ in range(8):
+                encoded = len(json.dumps(
+                    projection,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8"))
+                if projection["prompt_projection"]["encoded_bytes"] == encoded:
+                    break
+                projection["prompt_projection"]["encoded_bytes"] = encoded
+            return projection
+
+        exact_projection = synthetic_projection(
+            [],
+            maximum_bytes=exact_projection_budget,
+        )
+        empty_candidate = {
+            "padding": "",
+            "investigation_query_results": exact_projection,
+        }
+        self.runner.attach_evidence_reference_contract(empty_candidate)
+        empty_size = len(json.dumps(
+            self.runner.model_safe_copy(empty_candidate, hosted=True),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"))
+        self.assertLess(empty_size, maximum)
+        prompt_package = {
+            "padding": "p" * (maximum - empty_size),
+        }
+
+        with mock.patch.object(
+            self.runner,
+            "_investigation_prompt_payload",
+            side_effect=synthetic_projection,
+        ):
+            admitted_size = self.runner._admit_investigation_query_prompt(
+                prompt_package,
+                [],
+                maximum_prompt_bytes=maximum,
+                hosted=True,
+            )
+
+        self.assertEqual(admitted_size, maximum)
+        self.assertEqual(
+            prompt_package["investigation_query_results"][
+                "prompt_projection"
+            ]["max_bytes"],
+            exact_projection_budget,
+        )
+
+    def test_cumulative_prompt_projection_has_four_kib_provenance_fallback_for_twelve_queries(
+        self,
+    ) -> None:
+        rounds = []
+        expected = []
+        for round_number in range(1, 4):
+            results = []
+            for position in range(4):
+                index = ((round_number - 1) * 4) + position + 1
+                query_digest = f"{index:064x}"
+                result_digest = f"{index + 100:064x}"
+                evidence_ref = (
+                    f"query:{query_digest}:{result_digest}"
+                )
+                expected.append({
+                    "round": round_number,
+                    "query_id": f"pivot-{index}",
+                    "query_digest": query_digest,
+                    "result_digest": result_digest,
+                    "evidence_ref": evidence_ref,
+                })
+                results.append({
+                    "query_id": f"pivot-{index}",
+                    "backend": "elastic",
+                    "status": "ok",
+                    "read_only": True,
+                    "evidence": {
+                        "query_digest": query_digest,
+                        "result_digest": result_digest,
+                        "evidence_ref": evidence_ref,
+                        "results": [{
+                            "query_id": f"pivot-{index}",
+                            "status": "ok",
+                            "query_digest": query_digest,
+                            "result_digest": result_digest,
+                            "evidence_ref": evidence_ref,
+                            "returned_hits": index,
+                            "hits": [{
+                                "source": {
+                                    "padding": "e" * 2_000,
+                                },
+                            }],
+                        }],
+                    },
+                    "trusted_query_audit": [{
+                        "query_id": f"pivot-{index}",
+                        "backend": "elastic",
+                        "pack": "network_flow",
+                        "aggregation": "events",
+                        "purpose": "Confirm bounded network-flow evidence.",
+                        "status": "ok",
+                        "query_digest": query_digest,
+                        "result_digest": result_digest,
+                        "evidence_ref": evidence_ref,
+                        "query_dsl": {"padding": "q" * 5_000},
+                    }],
+                })
+            rounds.append({
+                "round": round_number,
+                "requests": [],
+                "audit": [],
+                "results": results,
+            })
+
+        projected = self.runner._investigation_prompt_payload(
+            rounds,
+            maximum_bytes=4096,
+        )
+        encoded = json.dumps(
+            projected,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        self.assertLessEqual(len(encoded), 4096)
+        self.assertEqual(
+            projected["prompt_projection"]["encoded_bytes"],
+            len(encoded),
+        )
+        self.assertTrue(
+            projected["prompt_projection"][
+                "columnar_provenance_fallback"
+            ]
+        )
+        columnar = projected["rounds"][0]
+        self.assertEqual(columnar["omitted_rows"], 0)
+        self.assertEqual(len(columnar["rows"]), 12)
+        self.assertEqual(
+            columnar["source_sha256"],
+            hashlib.sha256(
+                json.dumps(
+                    rounds,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        )
+        columns = columnar["columns"]
+        for source, row in zip(expected, columnar["rows"], strict=True):
+            values = dict(zip(columns, row, strict=True))
+            self.assertEqual(values["round"], source["round"])
+            self.assertEqual(values["query_id"], source["query_id"])
+            self.assertEqual(
+                values["query_digest"],
+                source["query_digest"],
+            )
+            self.assertEqual(
+                values["result_digest"],
+                source["result_digest"],
+            )
+            self.assertEqual(values["evidence_ref_or_empty"], "")
+
+        references = {
+            item["ref"]
+            for item in self.runner.evidence_reference_contract({
+                "investigation_query_results": projected,
+            })["references"]
+        }
+        for source in expected:
+            self.assertIn(source["evidence_ref"], references)
+
+    def test_hosted_copy_preserves_exact_columnar_provenance_structure(
+        self,
+    ) -> None:
+        query_digest = "a" * 64
+        result_digest = "b" * 64
+        evidence_ref = "collector-evidence:pivot-hosted"
+        projected = self.runner._columnar_investigation_prompt_payload(
+            [{
+                "round": 1,
+                "results": [{
+                    "query_ids": ["pivot-hosted"],
+                    "backend": "security_onion",
+                    "status": "ok",
+                    "read_only": True,
+                    "evidence": {
+                        "results": [{
+                            "query_id": "pivot-hosted",
+                            "status": "ok",
+                            "returned_hits": 2,
+                            "query_digest": query_digest,
+                            "result_digest": result_digest,
+                        }],
+                    },
+                    "trusted_query_audit": [{
+                        "query_id": "pivot-hosted",
+                        "backend": "elastic",
+                        "pack": "network_flow",
+                        "purpose": "Confirm the selected source flow.",
+                        "observables": {"ips": ["192.0.2.10"]},
+                        "window": {
+                            "start": "2026-07-24T12:00:00Z",
+                            "end": "2026-07-24T12:05:00Z",
+                        },
+                        "match_semantics": "source.ip exact",
+                        "status": "ok",
+                        "query_digest": query_digest,
+                        "result_digest": result_digest,
+                        "evidence_ref": evidence_ref,
+                        "returned_hits": 2,
+                    }],
+                }],
+            }],
+            maximum_bytes=4096,
+        )
+        self.assertIsNotNone(projected)
+
+        hosted = self.runner.model_safe_copy(
+            {"investigation_query_results": projected},
+            hosted=True,
+        )["investigation_query_results"]
+        original_columnar = projected["rounds"][0]
+        hosted_columnar = hosted["rounds"][0]
+        self.assertEqual(
+            len(hosted_columnar["rows"]),
+            len(original_columnar["rows"]),
+        )
+        self.assertTrue(all(
+            isinstance(row, list)
+            and len(row)
+            == len(self.runner.INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS)
+            for row in hosted_columnar["rows"]
+        ))
+        self.assertEqual(
+            hosted_columnar["semantics_values"],
+            original_columnar["semantics_values"],
+        )
+        self.assertEqual(
+            hosted_columnar["result_summary_values"],
+            original_columnar["result_summary_values"],
+        )
+        columns = hosted_columnar["columns"]
+        hosted_row = dict(
+            zip(columns, hosted_columnar["rows"][0], strict=True)
+        )
+        self.assertEqual(
+            hosted_row["evidence_ref_or_empty"],
+            evidence_ref,
+        )
+        hosted_references = {
+            item["ref"]
+            for item in self.runner.evidence_reference_contract({
+                "investigation_query_results": hosted,
+            })["references"]
+        }
+        self.assertIn(evidence_ref, hosted_references)
+
+        boolean_omission = copy.deepcopy(projected)
+        boolean_omission["rounds"][0]["omitted_rows"] = False
+        self.assertFalse(
+            self.runner._exact_hosted_columnar_envelope(
+                boolean_omission,
+                require_encoded_accounting=False,
+            )
+        )
+        stripped = self.runner.model_safe_copy(
+            {"investigation_query_results": boolean_omission},
+            hosted=True,
+        )["investigation_query_results"]
+        self.assertEqual(stripped["rounds"][0]["rows"], [])
+
+    def test_hosted_columnar_redaction_refreshes_accounting_and_contract(
+        self,
+    ) -> None:
+        query_digest = "c" * 64
+        result_digest = "d" * 64
+        canonical_ref = f"query:{query_digest}:{result_digest}"
+        sensitive_marker = "marker-for-hosted-redaction"
+        stale_evidence_ref = (
+            f"collector:password={sensitive_marker}"
+        )
+        projected = self.runner._columnar_investigation_prompt_payload(
+            [{
+                "round": 1,
+                "results": [{
+                    "query_id": "hosted-sensitive",
+                    "backend": "elastic",
+                    "status": "ok",
+                    "read_only": True,
+                    "trusted_query_audit": [{
+                        "query_id": "hosted-sensitive",
+                        "backend": "elastic",
+                        "pack": "network_flow",
+                        "purpose": (
+                            "Confirm flow using "
+                            f"password={sensitive_marker}"
+                        ),
+                        "status": "ok",
+                        "query_digest": query_digest,
+                        "result_digest": result_digest,
+                        "evidence_ref": stale_evidence_ref,
+                        "returned_hits": 1,
+                    }],
+                }],
+            }],
+            maximum_bytes=4096,
+        )
+        self.assertIsNotNone(projected)
+        prompt_package = {
+            "investigation_query_results": projected,
+        }
+        self.runner.attach_evidence_reference_contract(prompt_package)
+
+        transported = self.runner.model_safe_copy(
+            prompt_package,
+            hosted=True,
+        )
+        serialized = json.dumps(
+            transported,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.assertNotIn(sensitive_marker, serialized)
+        hosted_results = transported["investigation_query_results"]
+        hosted_encoded = len(json.dumps(
+            hosted_results,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"))
+        self.assertEqual(
+            hosted_results["prompt_projection"]["encoded_bytes"],
+            hosted_encoded,
+        )
+        self.assertLessEqual(
+            hosted_encoded,
+            hosted_results["prompt_projection"]["max_bytes"],
+        )
+        self.assertEqual(
+            transported["evidence_reference_contract"],
+            self.runner.evidence_reference_contract(transported),
+        )
+        references = {
+            item["ref"]
+            for item in transported[
+                "evidence_reference_contract"
+            ]["references"]
+        }
+        self.assertIn(canonical_ref, references)
+        self.assertNotIn(stale_evidence_ref, references)
+        self.assertNotIn("[redacted-sensitive-value]", references)
+
+        synchronized = copy.deepcopy(prompt_package)
+        self.runner.synchronize_hosted_investigation_contract(
+            synchronized
+        )
+        self.assertEqual(
+            synchronized["investigation_query_results"],
+            hosted_results,
+        )
+        self.assertEqual(
+            synchronized["evidence_reference_contract"],
+            transported["evidence_reference_contract"],
+        )
+
+        tight_projection = (
+            self.runner._columnar_investigation_prompt_payload(
+                [{
+                    "round": 1,
+                    "results": [{
+                        "query_id": "tight-redaction-budget",
+                        "backend": "elastic",
+                        "status": "ok",
+                        "read_only": True,
+                        "trusted_query_audit": [{
+                            "query_id": "tight-redaction-budget",
+                            "backend": "elastic",
+                            "pack": "network_flow",
+                            "purpose": "Confirm the tight-budget result.",
+                            "status": "ok",
+                            "query_digest": "a" * 64,
+                            "result_digest": "b" * 64,
+                            "returned_hits": 1,
+                            "evidence_summary": {"x": "token=x"},
+                        }],
+                    }],
+                }],
+                maximum_bytes=4096,
+            )
+        )
+        self.assertIsNotNone(tight_projection)
+        for _ in range(16):
+            tight_size = len(json.dumps(
+                tight_projection,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"))
+            projection_metadata = tight_projection[
+                "prompt_projection"
+            ]
+            if (
+                projection_metadata["max_bytes"] == tight_size
+                and projection_metadata["encoded_bytes"] == tight_size
+            ):
+                break
+            projection_metadata["max_bytes"] = tight_size
+            projection_metadata["encoded_bytes"] = tight_size
+        self.assertTrue(
+            self.runner._exact_hosted_columnar_envelope(
+                tight_projection,
+                require_encoded_accounting=True,
+            )
+        )
+        tight_hosted = self.runner.model_safe_copy(
+            {"investigation_query_results": tight_projection},
+            hosted=True,
+        )["investigation_query_results"]
+        tight_hosted_size = len(json.dumps(
+            tight_hosted,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"))
+        self.assertEqual(
+            tight_hosted["prompt_projection"]["encoded_bytes"],
+            tight_hosted_size,
+        )
+        self.assertLessEqual(
+            tight_hosted_size,
+            tight_hosted["prompt_projection"]["max_bytes"],
+        )
+        self.assertTrue(
+            self.runner._exact_hosted_columnar_envelope(
+                tight_hosted,
+                require_encoded_accounting=True,
+            )
+        )
+
+    def test_hosted_copy_strips_nested_columnar_row_spoofs(self) -> None:
+        phone_number = "+1-202-555-0199"
+        employee_alias = "employee-alias-private"
+        nested_spoof = {
+            "schema": (
+                self.runner.INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA
+            ),
+            "prompt_projection": (
+                "columnar_provenance_due_to_cumulative_byte_budget"
+            ),
+            "columns": list(
+                self.runner.INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS
+            ),
+            "rows": [{
+                "phone_number": phone_number,
+                "employee_alias": employee_alias,
+            }],
+        }
+        prompt_package = {
+            "investigation_query_results": {
+                "schema": self.runner.INVESTIGATION_QUERY_RESULT_SCHEMA,
+                "rounds": [{
+                    "round": 1,
+                    "results": [{
+                        "query_id": "nested-spoof",
+                        "evidence_summary": {
+                            "nested": nested_spoof,
+                        },
+                    }],
+                }],
+            },
+        }
+
+        hosted = self.runner.model_safe_copy(
+            prompt_package,
+            hosted=True,
+        )
+        serialized = json.dumps(
+            hosted,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.assertNotIn(phone_number, serialized)
+        self.assertNotIn(employee_alias, serialized)
+        nested_rows = (
+            hosted["investigation_query_results"]["rounds"][0]
+            ["results"][0]["evidence_summary"]["nested"]["rows"]
+        )
+        self.assertEqual(nested_rows, [{}])
+
+    def test_columnar_provenance_preserves_zero_result_corroboration_semantics(
+        self,
+    ) -> None:
+        rounds = [{
+            "round": 1,
+            "requests": [],
+            "audit": [],
+            "results": [],
+        }]
+        expected = []
+        for index, returned_hits in enumerate((0, 7), 1):
+            query_digest = f"{index:064x}"
+            result_digest = f"{index + 40:064x}"
+            evidence_ref = f"query:{query_digest}:{result_digest}"
+            expected.append((evidence_ref, returned_hits))
+            rounds[0]["results"].append({
+                "query_id": f"pivot-{index}",
+                "backend": "elastic",
+                "status": "ok",
+                "read_only": True,
+                "trusted_query_audit": [{
+                    "query_id": f"pivot-{index}",
+                    "backend": "elastic",
+                    "pack": "network_flow",
+                    "aggregation": "events",
+                    "purpose": "Confirm zero and positive result handling.",
+                    "status": "ok",
+                    "query_digest": query_digest,
+                    "result_digest": result_digest,
+                    "evidence_ref": evidence_ref,
+                    "returned_hits": returned_hits,
+                }],
+            })
+
+        projected = self.runner._columnar_investigation_prompt_payload(
+            rounds,
+            maximum_bytes=4096,
+        )
+
+        self.assertIsNotNone(projected)
+        columnar = projected["rounds"][0]
+        columns = columnar["columns"]
+        self.assertEqual(
+            [
+                dict(zip(columns, row, strict=True))["returned"]
+                for row in columnar["rows"]
+            ],
+            [0, 7],
+        )
+        references = {
+            item["ref"]: item
+            for item in self.runner.evidence_reference_contract({
+                "investigation_query_results": projected,
+            })["references"]
+        }
+        zero_ref = expected[0][0]
+        positive_ref = expected[1][0]
+        self.assertEqual(references[zero_ref]["returned"], 0)
+        self.assertFalse(references[zero_ref]["corroborating"])
+        self.assertEqual(references[positive_ref]["returned"], 7)
+        self.assertTrue(references[positive_ref]["corroborating"])
+
+    def test_columnar_decoder_rejects_nested_lookalikes_and_invalid_envelopes(
+        self,
+    ) -> None:
+        query_digest = "a" * 64
+        result_digest = "b" * 64
+        evidence_ref = f"query:{query_digest}:{result_digest}"
+        projected = self.runner._columnar_investigation_prompt_payload(
+            [{
+                "round": 1,
+                "results": [{
+                    "query_id": "pivot-1",
+                    "backend": "elastic",
+                    "status": "ok",
+                    "read_only": True,
+                    "trusted_query_audit": [{
+                        "query_id": "pivot-1",
+                        "backend": "elastic",
+                        "pack": "network_flow",
+                        "aggregation": "events",
+                        "purpose": "Confirm nested projection isolation.",
+                        "status": "ok",
+                        "query_digest": query_digest,
+                        "result_digest": result_digest,
+                        "evidence_ref": evidence_ref,
+                        "returned_hits": 1,
+                    }],
+                }],
+            }],
+            maximum_bytes=4096,
+        )
+        self.assertIsNotNone(projected)
+
+        nested_contract = self.runner.evidence_reference_contract({
+            "asset_context": {
+                "untrusted_nested_projection": projected["rounds"][0],
+            },
+        })
+        self.assertNotIn(
+            evidence_ref,
+            {item["ref"] for item in nested_contract["references"]},
+        )
+
+        invalid = copy.deepcopy(projected)
+        invalid["rounds"][0]["columns"] = list(
+            reversed(invalid["rounds"][0]["columns"])
+        )
+        invalid_contract = self.runner.evidence_reference_contract({
+            "investigation_query_results": invalid,
+        })
+        self.assertNotIn(
+            evidence_ref,
+            {item["ref"] for item in invalid_contract["references"]},
+        )
+
+        wrong_position = copy.deepcopy(projected)
+        wrong_position["rounds"].insert(0, {"round": 0})
+        wrong_position["prompt_projection"]["encoded_bytes"] = len(
+            json.dumps(
+                wrong_position,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        wrong_position_contract = self.runner.evidence_reference_contract({
+            "investigation_query_results": wrong_position,
+        })
+        self.assertNotIn(
+            evidence_ref,
+            {item["ref"] for item in wrong_position_contract["references"]},
+        )
+
+    def test_columnar_provenance_preserves_mixed_child_terminal_statuses(
+        self,
+    ) -> None:
+        statuses = ("ok", "timeout", "error", "rejected")
+        trusted = []
+        nested = []
+        expected_refs = {}
+        for index, status in enumerate(statuses, 1):
+            query_digest = f"{index:064x}"
+            result_digest = f"{index + 60:064x}"
+            evidence_ref = f"query:{query_digest}:{result_digest}"
+            expected_refs[evidence_ref] = status
+            trusted.append({
+                "query_id": f"pivot-{index}",
+                "backend": "elastic",
+                "pack": "network_flow",
+                "aggregation": "events",
+                "purpose": "Confirm exact grouped-query coverage.",
+                "status": "ok",
+                "query_digest": query_digest,
+                "result_digest": result_digest,
+                "evidence_ref": evidence_ref,
+                "returned_hits": 1,
+            })
+            nested.append({
+                "query_id": f"pivot-{index}",
+                "status": status,
+                "query_digest": query_digest,
+                "result_digest": result_digest,
+                "returned_hits": 1,
+                "semantic_valid": status == "ok",
+            })
+        projected = self.runner._columnar_investigation_prompt_payload(
+            [{
+                "round": 1,
+                "results": [{
+                    "query_ids": [
+                        f"pivot-{index}"
+                        for index in range(1, len(statuses) + 1)
+                    ],
+                    "backend": "security_onion",
+                    "status": "partial",
+                    "read_only": True,
+                    "evidence": {
+                        "controls_valid": True,
+                        "results": nested,
+                    },
+                    "trusted_query_audit": trusted,
+                }],
+            }],
+            maximum_bytes=8192,
+        )
+        self.assertIsNotNone(projected)
+        columnar = projected["rounds"][0]
+        status_values = columnar["status_values"]
+        columns = columnar["columns"]
+        observed_statuses = [
+            status_values[
+                dict(zip(columns, row, strict=True))["status_index"]
+            ]
+            for row in columnar["rows"]
+        ]
+        self.assertEqual(observed_statuses, list(statuses))
+
+        references = {
+            item["ref"]: item
+            for item in self.runner.evidence_reference_contract({
+                "investigation_query_results": projected,
+            })["references"]
+        }
+        for evidence_ref, status in expected_refs.items():
+            self.assertEqual(references[evidence_ref]["status"], status)
+            self.assertEqual(
+                references[evidence_ref]["corroborating"],
+                status == "ok",
+            )
+
+    def test_grouped_columnar_provenance_requires_exact_query_id_coverage(
+        self,
+    ) -> None:
+        def child(query_id: str, index: int) -> dict:
+            return {
+                "query_id": query_id,
+                "backend": "elastic",
+                "pack": "network_flow",
+                "aggregation": "events",
+                "purpose": "Confirm exact grouped-query coverage.",
+                "status": "ok",
+                "query_digest": f"{index:064x}",
+                "result_digest": f"{index + 50:064x}",
+                "returned_hits": 1,
+            }
+
+        baseline = {
+            "query_ids": ["q1", "q2"],
+            "backend": "security_onion",
+            "status": "ok",
+            "read_only": True,
+            "evidence": {
+                "results": [
+                    child("q1", 1),
+                    child("q2", 2),
+                ],
+            },
+            "trusted_query_audit": [
+                child("q1", 1),
+                child("q2", 2),
+            ],
+        }
+        cases = {
+            "trusted-missing": lambda item: item[
+                "trusted_query_audit"
+            ].pop(),
+            "trusted-extra": lambda item: item[
+                "trusted_query_audit"
+            ].append(child("q3", 3)),
+            "trusted-duplicate": lambda item: item[
+                "trusted_query_audit"
+            ].append(child("q1", 1)),
+            "nested-missing": lambda item: item["evidence"][
+                "results"
+            ].pop(),
+            "nested-extra": lambda item: item["evidence"][
+                "results"
+            ].append(child("q3", 3)),
+            "nested-duplicate": lambda item: item["evidence"][
+                "results"
+            ].append(child("q1", 1)),
+            "declared-duplicate": lambda item: item[
+                "query_ids"
+            ].append("q1"),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label=label):
+                grouped = copy.deepcopy(baseline)
+                mutate(grouped)
+                self.assertIsNone(
+                    self.runner._columnar_investigation_prompt_payload(
+                        [{"round": 1, "results": [grouped]}],
+                        maximum_bytes=4096,
+                    )
+                )
+
+    def test_columnar_provenance_rejects_malformed_children_and_scalar_mismatch(
+        self,
+    ) -> None:
+        def valid_result() -> dict:
+            return {
+                "query_id": "q1",
+                "backend": "elastic",
+                "status": "ok",
+                "read_only": True,
+                "evidence": {
+                    "results": [{
+                        "query_id": "q1",
+                        "status": "ok",
+                        "query_digest": "a" * 64,
+                        "result_digest": "b" * 64,
+                        "returned_hits": 1,
+                    }],
+                },
+                "trusted_query_audit": [{
+                    "query_id": "q1",
+                    "backend": "elastic",
+                    "pack": "network_flow",
+                    "purpose": "Confirm the exact scalar query identity.",
+                    "status": "ok",
+                    "query_digest": "a" * 64,
+                    "result_digest": "b" * 64,
+                    "returned_hits": 1,
+                }],
+            }
+
+        valid_round = {
+            "round": 1,
+            "results": [valid_result()],
+        }
+        malformed_rounds = [
+            [copy.deepcopy(valid_round), None],
+            [{
+                "round": 1,
+                "results": [valid_result(), None],
+            }],
+        ]
+        trusted_child = valid_result()
+        trusted_child["trusted_query_audit"].append(None)
+        malformed_rounds.append([{
+            "round": 1,
+            "results": [trusted_child],
+        }])
+        nested_child = valid_result()
+        nested_child["evidence"]["results"].append(None)
+        malformed_rounds.append([{
+            "round": 1,
+            "results": [nested_child],
+        }])
+        scalar_mismatch = valid_result()
+        scalar_mismatch["trusted_query_audit"][0][
+            "query_id"
+        ] = "q2"
+        malformed_rounds.append([{
+            "round": 1,
+            "results": [scalar_mismatch],
+        }])
+
+        for index, rounds in enumerate(malformed_rounds, 1):
+            with self.subTest(case=index):
+                self.assertIsNone(
+                    self.runner._columnar_investigation_prompt_payload(
+                        rounds,
+                        maximum_bytes=4096,
+                    )
+                )
+
+    def test_columnar_semantics_distinguish_same_pack_query_intent(
+        self,
+    ) -> None:
+        audits = []
+        nested = []
+        expected = []
+        expected_refs = []
+        for index, (
+            purpose,
+            observable,
+            start,
+            match_semantics,
+        ) in enumerate((
+            (
+                "Confirm source activity.",
+                "192.0.2.10",
+                "2026-07-24T12:00:00Z",
+                "source.ip exact",
+            ),
+            (
+                "Confirm destination activity.",
+                "198.51.100.20",
+                "2026-07-24T13:00:00Z",
+                "destination.ip exact",
+            ),
+        ), 1):
+            query_digest = f"{index:064x}"
+            result_digest = f"{index + 90:064x}"
+            expected_refs.append(
+                f"query:{query_digest}:{result_digest}"
+            )
+            window = {
+                "start": start,
+                "end": start.replace(":00:00Z", ":05:00Z"),
+            }
+            observables = {"ips": [observable]}
+            filters = {"field": match_semantics.split()[0]}
+            query = {"term": {filters["field"]: observable}}
+            expected.append({
+                "purpose": purpose,
+                "observables": observables,
+                "window": window,
+                "match_semantics": match_semantics,
+                "query": query,
+                "filters": filters,
+            })
+            audits.append({
+                "query_id": f"pivot-{index}",
+                "backend": "elastic",
+                "pack": "network_flow",
+                "aggregation": "events",
+                "purpose": purpose,
+                "observables": observables,
+                "window": window,
+                "match_semantics": match_semantics,
+                "query": query,
+                "filters": filters,
+                "status": "ok",
+                "query_digest": query_digest,
+                "result_digest": result_digest,
+                "returned_hits": 1,
+            })
+            nested.append({
+                "query_id": f"pivot-{index}",
+                "status": "ok",
+                "query_digest": query_digest,
+                "result_digest": result_digest,
+                "returned_hits": 1,
+            })
+
+        projected = self.runner._columnar_investigation_prompt_payload(
+            [{
+                "round": 1,
+                "results": [{
+                    "query_ids": ["pivot-1", "pivot-2"],
+                    "backend": "security_onion",
+                    "status": "ok",
+                    "read_only": True,
+                    "evidence": {"results": nested},
+                    "trusted_query_audit": audits,
+                }],
+            }],
+            maximum_bytes=8192,
+        )
+        self.assertIsNotNone(projected)
+        columnar = projected["rounds"][0]
+        columns = columnar["columns"]
+        semantic_documents = [
+            json.loads(columnar["semantics_values"][
+                dict(zip(columns, row, strict=True))["semantics_index"]
+            ])
+            for row in columnar["rows"]
+        ]
+        self.assertEqual(semantic_documents, [
+            {
+                "aggregation": "events",
+                "backend": "elastic",
+                "filters": item["filters"],
+                "match_semantics": item["match_semantics"],
+                "observables": item["observables"],
+                "pack": "network_flow",
+                "purpose": item["purpose"],
+                "query": item["query"],
+                "window": item["window"],
+            }
+            for item in expected
+        ])
+        self.assertNotEqual(
+            columnar["rows"][0][columns.index("semantics_index")],
+            columnar["rows"][1][columns.index("semantics_index")],
+        )
+        references = {
+            item["ref"]
+            for item in self.runner.evidence_reference_contract({
+                "investigation_query_results": projected,
+            })["references"]
+        }
+        self.assertTrue(set(expected_refs).issubset(references))
+
+    def test_columnar_pack_name_alone_is_not_query_semantics(self) -> None:
+        self.assertIsNone(
+            self.runner._columnar_investigation_prompt_payload(
+                [{
+                    "round": 1,
+                    "results": [{
+                        "query_id": "pack-only",
+                        "backend": "elastic",
+                        "status": "ok",
+                        "read_only": True,
+                        "trusted_query_audit": [{
+                            "query_id": "pack-only",
+                            "backend": "elastic",
+                            "pack": "network_flow",
+                            "aggregation": "events",
+                            "status": "ok",
+                            "query_digest": "a" * 64,
+                            "result_digest": "b" * 64,
+                            "returned_hits": 1,
+                        }],
+                    }],
+                }],
+                maximum_bytes=4096,
+            )
+        )
+
+    def test_all_canonical_query_success_statuses_are_corroborating(
+        self,
+    ) -> None:
+        statuses = ("ok", "success", "completed", "complete", "succeeded")
+        rounds = [{"round": 1, "results": []}]
+        expected_refs = []
+        for index, status in enumerate(statuses, 1):
+            query_digest = f"{index + 20:064x}"
+            result_digest = f"{index + 120:064x}"
+            expected_refs.append(
+                f"query:{query_digest}:{result_digest}"
+            )
+            rounds[0]["results"].append({
+                "query_id": f"success-{index}",
+                "backend": "elastic",
+                "status": status,
+                "read_only": True,
+                "trusted_query_audit": [{
+                    "query_id": f"success-{index}",
+                    "backend": "elastic",
+                    "pack": "network_flow",
+                    "aggregation": "events",
+                    "purpose": "Confirm the canonical success result.",
+                    "status": status,
+                    "query_digest": query_digest,
+                    "result_digest": result_digest,
+                    "returned_hits": 1,
+                }],
+            })
+
+        projected = self.runner._columnar_investigation_prompt_payload(
+            rounds,
+            maximum_bytes=8192,
+        )
+        self.assertIsNotNone(projected)
+        compact_refs = {
+            item["ref"]: item
+            for item in self.runner.evidence_reference_contract({
+                "investigation_query_results": projected,
+            })["references"]
+        }
+        regular_refs = {
+            item["ref"]: item
+            for item in self.runner.evidence_reference_contract({
+                "investigation_query_results": {
+                    "schema": (
+                        self.runner.INVESTIGATION_QUERY_RESULT_SCHEMA
+                    ),
+                    "rounds": rounds,
+                },
+            })["references"]
+        }
+        for evidence_ref in expected_refs:
+            self.assertTrue(compact_refs[evidence_ref]["corroborating"])
+            self.assertTrue(regular_refs[evidence_ref]["corroborating"])
+
+    def test_columnar_invalid_counts_are_never_corroborating(self) -> None:
+        invalid_counts = (
+            False,
+            -1,
+            None,
+            "1",
+            1.0,
+            1.75,
+            float("nan"),
+            float("inf"),
+            [],
+            2**63,
+        )
+        for value in (*invalid_counts, object()):
+            with self.subTest(canonical_count=value):
+                self.assertIsNone(
+                    self.runner._canonical_investigation_count(value)
+                )
+        maximum = self.runner.MAX_INVESTIGATION_RESULT_COUNT
+        for value in (0, 1, maximum):
+            with self.subTest(canonical_count=value):
+                self.assertEqual(
+                    self.runner._canonical_investigation_count(value),
+                    value,
+                )
+        self.assertIsNone(
+            self.runner._columnar_investigation_prompt_payload(
+                [{
+                    "round": 1,
+                    "results": [{
+                        "query_id": "object-count",
+                        "backend": "elastic",
+                        "status": "ok",
+                        "read_only": True,
+                        "trusted_query_audit": [{
+                            "query_id": "object-count",
+                            "backend": "elastic",
+                            "pack": "network_flow",
+                            "purpose": (
+                                "Reject an unserializable result count."
+                            ),
+                            "status": "ok",
+                            "query_digest": "a" * 64,
+                            "result_digest": "b" * 64,
+                            "returned_hits": object(),
+                        }],
+                    }],
+                }],
+                maximum_bytes=4096,
+            )
+        )
+        rounds = [{"round": 1, "results": []}]
+        expected_refs = []
+        for index, count in enumerate(invalid_counts, 1):
+            query_digest = f"{index + 10:064x}"
+            result_digest = f"{index + 80:064x}"
+            evidence_ref = f"query:{query_digest}:{result_digest}"
+            expected_refs.append(evidence_ref)
+            audit = {
+                "query_id": f"pivot-{index}",
+                "backend": "elastic",
+                "pack": "network_flow",
+                "aggregation": "events",
+                "purpose": "Confirm strict result-count handling.",
+                "status": "ok",
+                "query_digest": query_digest,
+                "result_digest": result_digest,
+                "evidence_ref": evidence_ref,
+                "evidence_summary": {
+                    "collection": "returned count unavailable",
+                },
+            }
+            if count is not None:
+                audit["returned_hits"] = count
+            rounds[0]["results"].append({
+                "query_id": f"pivot-{index}",
+                "backend": "elastic",
+                "status": "ok",
+                "read_only": True,
+                "trusted_query_audit": [audit],
+            })
+        projected = self.runner._columnar_investigation_prompt_payload(
+            rounds,
+            maximum_bytes=4096,
+        )
+        self.assertIsNotNone(projected)
+        references = {
+            item["ref"]: item
+            for item in self.runner.evidence_reference_contract({
+                "investigation_query_results": projected,
+            })["references"]
+        }
+        for evidence_ref in expected_refs:
+            self.assertIsNone(references[evidence_ref]["returned"])
+            self.assertFalse(references[evidence_ref]["corroborating"])
+            self.assertEqual(
+                references[evidence_ref]["status"],
+                "invalid_result_count",
+            )
+
+        maximum_query_digest = "e" * 64
+        maximum_result_digest = "f" * 64
+        maximum_ref = (
+            f"query:{maximum_query_digest}:{maximum_result_digest}"
+        )
+        maximum_projection = (
+            self.runner._columnar_investigation_prompt_payload(
+                [{
+                    "round": 1,
+                    "results": [{
+                        "query_id": "maximum-count",
+                        "backend": "elastic",
+                        "status": "ok",
+                        "read_only": True,
+                        "trusted_query_audit": [{
+                            "query_id": "maximum-count",
+                            "backend": "elastic",
+                            "pack": "network_flow",
+                            "purpose": (
+                                "Confirm the maximum canonical result count."
+                            ),
+                            "status": "ok",
+                            "query_digest": maximum_query_digest,
+                            "result_digest": maximum_result_digest,
+                            "returned_hits": maximum,
+                        }],
+                    }],
+                }],
+                maximum_bytes=4096,
+            )
+        )
+        self.assertIsNotNone(maximum_projection)
+        maximum_reference = {
+            item["ref"]: item
+            for item in self.runner.evidence_reference_contract({
+                "investigation_query_results": maximum_projection,
+            })["references"]
+        }[maximum_ref]
+        self.assertEqual(maximum_reference["returned"], maximum)
+        self.assertTrue(maximum_reference["corroborating"])
+
+        overflow_projection = copy.deepcopy(maximum_projection)
+        overflow_columns = overflow_projection["rounds"][0]["columns"]
+        overflow_projection["rounds"][0]["rows"][0][
+            overflow_columns.index("returned")
+        ] = maximum + 1
+        for _ in range(8):
+            overflow_size = len(json.dumps(
+                overflow_projection,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"))
+            if (
+                overflow_projection["prompt_projection"]["encoded_bytes"]
+                == overflow_size
+            ):
+                break
+            overflow_projection["prompt_projection"]["encoded_bytes"] = (
+                overflow_size
+            )
+        overflow_reference = {
+            item["ref"]: item
+            for item in self.runner.evidence_reference_contract({
+                "investigation_query_results": overflow_projection,
+            })["references"]
+        }[maximum_ref]
+        self.assertIsNone(overflow_reference["returned"])
+        self.assertFalse(overflow_reference["corroborating"])
+        self.assertEqual(
+            overflow_reference["status"],
+            "invalid_result_count",
+        )
+
+    def test_columnar_fallback_refuses_zero_or_incomplete_provenance(self) -> None:
+        self.assertIsNone(
+            self.runner._columnar_investigation_prompt_payload(
+                [],
+                maximum_bytes=4096,
+            )
+        )
+        self.assertIsNone(
+            self.runner._columnar_investigation_prompt_payload(
+                [{
+                    "round": 1,
+                    "results": [{
+                        "query_id": "pivot-without-provenance",
+                        "backend": "elastic",
+                        "status": "ok",
+                        "read_only": True,
+                    }],
+                }],
+                maximum_bytes=4096,
+            )
+        )
+
+    def test_cumulative_prompt_projection_fails_closed_below_provenance_floor(
+        self,
+    ) -> None:
+        rounds = [{
+            "round": 1,
+            "requests": [],
+            "audit": [],
+            "results": [{
+                "query_id": "pivot-1",
+                "backend": "elastic",
+                "status": "ok",
+                "read_only": True,
+            }],
+        }]
+
+        with self.assertRaisesRegex(
+            self.runner.InvestigationQueryError,
+            "exceeds its cumulative byte budget",
+        ):
+            self.runner._investigation_prompt_payload(
+                rounds,
+                maximum_bytes=128,
+            )
 
     def test_discovered_observables_match_contract_and_never_exceed_shared_cap(self) -> None:
         query_digest = "a" * 64

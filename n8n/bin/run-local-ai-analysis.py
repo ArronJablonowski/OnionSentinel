@@ -15,6 +15,7 @@ import fcntl
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -176,6 +177,29 @@ HERMES_MAX_AUTH_BYTES = 2 * 1024 * 1024
 HERMES_MAX_USAGE_BYTES = 64 * 1024
 HERMES_AGENT_REASONING_EFFORT = "medium"
 INVESTIGATION_QUERY_RESULT_SCHEMA = "onion-sentinel-investigation-query-results-v1"
+INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA = (
+    "onion-sentinel-investigation-columnar-provenance-v1"
+)
+INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS = (
+    "round",
+    "query_id",
+    "backend_index",
+    "status_index",
+    "read_only",
+    "query_digest",
+    "result_digest",
+    "evidence_ref_or_empty",
+    "returned",
+    "semantics_index",
+    "result_summary_index",
+)
+INVESTIGATION_COLUMNAR_EMPTY_REF_INSTRUCTION = (
+    "canonical query reference derived from query_digest and result_digest"
+)
+INVESTIGATION_QUERY_SUCCESS_STATUSES = frozenset(
+    {"ok", "success", "completed", "complete", "succeeded"}
+)
+MAX_INVESTIGATION_RESULT_COUNT = (2**63) - 1
 MAX_INVESTIGATION_QUERY_ROUNDS = 3
 MAX_INVESTIGATION_QUERIES_TOTAL = 12
 MAX_INVESTIGATION_QUERIES_PER_ROUND = 4
@@ -2651,17 +2675,299 @@ def _project_hosted_result_rows(key: str, value: list[Any]) -> list[Any]:
     return projected
 
 
+def _exact_hosted_columnar_envelope(
+    value: Any,
+    *,
+    require_encoded_accounting: bool,
+) -> bool:
+    """Recognize only the runtime-owned top-level columnar envelope."""
+    if not isinstance(value, dict) or set(value) != {
+        "schema",
+        "rounds",
+        "prompt_projection",
+    }:
+        return False
+    projection = value.get("prompt_projection")
+    rounds = value.get("rounds")
+    if (
+        value.get("schema") != INVESTIGATION_QUERY_RESULT_SCHEMA
+        or not isinstance(projection, dict)
+        or set(projection)
+        != {
+            "max_bytes",
+            "truncated",
+            "columnar_provenance_fallback",
+            "encoded_bytes",
+        }
+        or projection.get("truncated") is not True
+        or projection.get("columnar_provenance_fallback") is not True
+        or not isinstance(rounds, list)
+        or len(rounds) != 1
+        or not isinstance(rounds[0], dict)
+    ):
+        return False
+    maximum_bytes = projection.get("max_bytes")
+    encoded_bytes = projection.get("encoded_bytes")
+    if (
+        isinstance(maximum_bytes, bool)
+        or not isinstance(maximum_bytes, int)
+        or maximum_bytes <= 0
+        or isinstance(encoded_bytes, bool)
+        or not isinstance(encoded_bytes, int)
+        or encoded_bytes <= 0
+    ):
+        return False
+    round_item = rounds[0]
+    if (
+        set(round_item)
+        != {
+            "schema",
+            "prompt_projection",
+            "source_bytes",
+            "source_sha256",
+            "source_provenance_rows",
+            "columns",
+            "backend_values",
+            "status_values",
+            "semantics_values",
+            "result_summary_values",
+            "empty_evidence_ref",
+            "rows",
+            "omitted_rows",
+        }
+        or round_item.get("schema")
+        != INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA
+        or round_item.get("prompt_projection")
+        != "columnar_provenance_due_to_cumulative_byte_budget"
+        or round_item.get("columns")
+        != list(INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS)
+        or round_item.get("empty_evidence_ref")
+        != INVESTIGATION_COLUMNAR_EMPTY_REF_INSTRUCTION
+        or isinstance(round_item.get("source_bytes"), bool)
+        or not isinstance(round_item.get("source_bytes"), int)
+        or round_item.get("source_bytes") < 0
+        or not isinstance(round_item.get("source_sha256"), str)
+        or not re.fullmatch(
+            r"[a-f0-9]{64}",
+            round_item.get("source_sha256") or "",
+        )
+        or isinstance(round_item.get("source_provenance_rows"), bool)
+        or not isinstance(round_item.get("source_provenance_rows"), int)
+        or round_item.get("source_provenance_rows") <= 0
+        or isinstance(round_item.get("omitted_rows"), bool)
+        or not isinstance(round_item.get("omitted_rows"), int)
+        or round_item.get("omitted_rows") != 0
+    ):
+        return False
+    rows_value = round_item.get("rows")
+    if (
+        not isinstance(rows_value, list)
+        or not rows_value
+        or len(rows_value) != round_item["source_provenance_rows"]
+        or len(rows_value) > MAX_INVESTIGATION_QUERIES_TOTAL
+        or any(
+            not isinstance(row, list)
+            or len(row)
+            != len(INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS)
+            for row in rows_value
+        )
+    ):
+        return False
+    tables: dict[str, list[str]] = {}
+    for table_name, maximum_item_bytes in {
+        "backend_values": 40,
+        "status_values": 40,
+        "semantics_values": 1024,
+        "result_summary_values": 256,
+    }.items():
+        table = round_item.get(table_name)
+        if (
+            not isinstance(table, list)
+            or not table
+            or len(table) > MAX_INVESTIGATION_QUERIES_TOTAL
+            or any(
+                not isinstance(item, str)
+                or not item
+                or len(item.encode("utf-8")) > maximum_item_bytes
+                for item in table
+            )
+        ):
+            return False
+        tables[table_name] = table
+    for row in rows_value:
+        item = dict(
+            zip(
+                INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS,
+                row,
+                strict=True,
+            )
+        )
+        round_number = item.get("round")
+        query_id = item.get("query_id")
+        read_only = item.get("read_only")
+        query_digest = item.get("query_digest")
+        result_digest = item.get("result_digest")
+        evidence_ref = item.get("evidence_ref_or_empty")
+        returned = item.get("returned")
+        indexes = {
+            "backend_values": item.get("backend_index"),
+            "status_values": item.get("status_index"),
+            "semantics_values": item.get("semantics_index"),
+            "result_summary_values": item.get("result_summary_index"),
+        }
+        if (
+            isinstance(round_number, bool)
+            or not isinstance(round_number, int)
+            or not 1 <= round_number <= MAX_INVESTIGATION_QUERY_ROUNDS
+            or not isinstance(query_id, str)
+            or not re.fullmatch(
+                r"[A-Za-z0-9_.:@+=-]{1,128}",
+                query_id,
+            )
+            or not isinstance(read_only, bool)
+            or not isinstance(query_digest, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", query_digest)
+            or not isinstance(result_digest, str)
+            or (
+                result_digest
+                and not re.fullmatch(r"[a-f0-9]{64}", result_digest)
+            )
+            or not isinstance(evidence_ref, str)
+            or len(evidence_ref.encode("utf-8")) > 512
+            or (
+                returned is not None
+                and _canonical_investigation_count(returned) is None
+            )
+            or any(
+                isinstance(index, bool)
+                or not isinstance(index, int)
+                or not 0 <= index < len(tables[table_name])
+                for table_name, index in indexes.items()
+            )
+        ):
+            return False
+    if require_encoded_accounting:
+        try:
+            actual_bytes = len(_investigation_prompt_json_bytes(value))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if encoded_bytes != actual_bytes or actual_bytes > maximum_bytes:
+            return False
+    return True
+
+
+def _refinalize_hosted_columnar_envelope(value: Any) -> Any:
+    """Refresh self-accounting after hosted string redaction."""
+    if not _exact_hosted_columnar_envelope(
+        value,
+        require_encoded_accounting=False,
+    ):
+        return value
+    projection = value["prompt_projection"]
+    projection["encoded_bytes"] = 0
+    for _ in range(8):
+        actual_bytes = len(_investigation_prompt_json_bytes(value))
+        if projection["encoded_bytes"] == actual_bytes:
+            break
+        projection["encoded_bytes"] = actual_bytes
+    return value
+
+
 def _sanitize_hosted_investigation_evidence(
     value: Any,
     path: tuple[str, ...] = (),
+    *,
+    preserve_columnar_rows: bool = False,
 ) -> Any:
     """Keep safe facts/query provenance while removing hosted-sensitive values."""
     if isinstance(value, dict):
         output: dict[str, Any] = {}
+        exact_columnar_provenance = (
+            preserve_columnar_rows
+            and path == ("investigation_query_results", "rounds")
+            and value.get("schema")
+            == INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA
+            and value.get("prompt_projection")
+            == "columnar_provenance_due_to_cumulative_byte_budget"
+            and value.get("columns")
+            == list(INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS)
+        )
         for raw_key, item in value.items():
             key = str(raw_key)
             normalized = key.lower().replace("-", "_")
-            if normalized in {"hits", "records", "rows"} and isinstance(item, list):
+            if (
+                exact_columnar_provenance
+                and normalized
+                in {
+                    "backend_values",
+                    "status_values",
+                    "semantics_values",
+                    "result_summary_values",
+                }
+                and isinstance(item, list)
+            ):
+                sanitized_table = []
+                for child in item[:MAX_INVESTIGATION_QUERIES_TOTAL]:
+                    sanitized_child = (
+                        _sanitize_hosted_investigation_evidence(
+                            child,
+                            (*path, normalized),
+                            preserve_columnar_rows=True,
+                        )
+                    )
+                    # Hosted redaction must not invalidate the envelope's
+                    # already-admitted max_bytes. A compact marker is shorter
+                    # than every sensitive token/path pattern we recognize.
+                    sanitized_table.append(
+                        "[r]"
+                        if sanitized_child != child
+                        else sanitized_child
+                    )
+                output[key] = sanitized_table
+                continue
+            if (
+                exact_columnar_provenance
+                and normalized == "rows"
+                and isinstance(item, list)
+            ):
+                evidence_ref_index = (
+                    INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS.index(
+                        "evidence_ref_or_empty"
+                    )
+                )
+                sanitized_rows: list[list[Any]] = []
+                for raw_row in item[:MAX_INVESTIGATION_QUERIES_TOTAL]:
+                    if not isinstance(raw_row, list):
+                        continue
+                    sanitized_row = [
+                        _sanitize_hosted_investigation_evidence(
+                            child,
+                            (*path, normalized),
+                            preserve_columnar_rows=True,
+                        )
+                        for child in raw_row
+                    ]
+                    if (
+                        len(sanitized_row)
+                        == len(INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS)
+                        and sanitized_row[evidence_ref_index]
+                        != raw_row[evidence_ref_index]
+                    ):
+                        # A redaction placeholder is not collector-owned
+                        # evidence. Empty means derive the exact canonical,
+                        # result-bound query reference from the adjacent digests.
+                        sanitized_row[evidence_ref_index] = ""
+                    sanitized_rows.append(sanitized_row)
+                output[key] = sanitized_rows
+                continue
+            if (
+                normalized in {"hits", "records", "rows"}
+                and isinstance(item, list)
+                and not (
+                    exact_columnar_provenance
+                    and normalized == "rows"
+                )
+            ):
                 item = _project_hosted_result_rows(normalized, item)
             parent = path[-1].lower().replace("-", "_") if path else ""
             token_like = bool(_HOSTED_RESULT_TOKEN_KEY.search(normalized))
@@ -2682,11 +2988,16 @@ def _sanitize_hosted_investigation_evidence(
             output[key] = _sanitize_hosted_investigation_evidence(
                 item,
                 (*path, normalized),
+                preserve_columnar_rows=preserve_columnar_rows,
             )
         return output
     if isinstance(value, list):
         return [
-            _sanitize_hosted_investigation_evidence(item, path)
+            _sanitize_hosted_investigation_evidence(
+                item,
+                path,
+                preserve_columnar_rows=preserve_columnar_rows,
+            )
             for item in value[:2000]
         ]
     if isinstance(value, str):
@@ -2711,6 +3022,7 @@ def model_safe_copy(
     *,
     hosted: bool = False,
     reviewer_safe: bool = False,
+    _path: tuple[str, ...] = (),
 ) -> Any:
     """Copy model evidence while enforcing transport-specific disclosure rules.
 
@@ -2723,6 +3035,7 @@ def model_safe_copy(
         output = {}
         for raw_key, item in value.items():
             key = str(raw_key)
+            item_path = (*_path, key)
             if key.startswith("_local_") or key in MODEL_INTERNAL_KEYS:
                 continue
             if hosted and (key in HOSTED_FORBIDDEN_KEYS or key.startswith("_pcap_query_")):
@@ -2731,15 +3044,40 @@ def model_safe_copy(
                 "investigation_query_results",
                 "live_osquery_evidence",
             }:
-                item = _sanitize_hosted_investigation_evidence(item)
+                preserve_columnar_rows = (
+                    item_path == ("investigation_query_results",)
+                    and _exact_hosted_columnar_envelope(
+                        item,
+                        require_encoded_accounting=True,
+                    )
+                )
+                item = _sanitize_hosted_investigation_evidence(
+                    item,
+                    item_path,
+                    preserve_columnar_rows=preserve_columnar_rows,
+                )
             output[key] = model_safe_copy(
                 item,
                 hosted=hosted,
                 reviewer_safe=reviewer_safe,
+                _path=item_path,
             )
         if (hosted or reviewer_safe) and "asset_context" in output:
             output["asset_context"] = _redact_unshared_asset_owners(
                 output["asset_context"]
+            )
+        if (
+            hosted
+            and not _path
+            and "investigation_query_results" in output
+        ):
+            output["investigation_query_results"] = (
+                _refinalize_hosted_columnar_envelope(
+                    output["investigation_query_results"]
+                )
+            )
+            output["evidence_reference_contract"] = (
+                evidence_reference_contract(output)
             )
         return output
     if isinstance(value, list):
@@ -2748,10 +3086,27 @@ def model_safe_copy(
                 item,
                 hosted=hosted,
                 reviewer_safe=reviewer_safe,
+                _path=(*_path, "[]"),
             )
             for item in value
         ]
     return value
+
+
+def synchronize_hosted_investigation_contract(
+    prompt_package: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind runtime validation to the exact post-redaction query structure."""
+    transported = model_safe_copy(prompt_package, hosted=True)
+    if "investigation_query_results" in transported:
+        prompt_package["investigation_query_results"] = transported[
+            "investigation_query_results"
+        ]
+    if "evidence_reference_contract" in transported:
+        prompt_package["evidence_reference_contract"] = transported[
+            "evidence_reference_contract"
+        ]
+    return prompt_package
 
 
 EVIDENCE_REFERENCE_MAX = 400
@@ -2896,18 +3251,18 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
         returned: Any = None,
         source_class: Any = "",
         evidence_digest: Any = "",
+        require_valid_count: bool = False,
     ) -> None:
         ref = _bounded_reference(reference)
         if not ref or len(entries) >= EVIDENCE_REFERENCE_MAX:
             return
-        try:
-            returned_count = (
-                None
-                if returned in (None, "")
-                else max(0, int(returned))
-            )
-        except (TypeError, ValueError):
-            returned_count = None
+        returned_count = _canonical_investigation_count(returned)
+        count_invalid = returned_count is None and (
+            require_valid_count or returned not in (None, "")
+        )
+        if count_invalid:
+            corroborating = False
+            status = "invalid_result_count"
         if returned_count == 0:
             corroborating = False
         current = entries.get(ref)
@@ -2962,6 +3317,15 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
 
     def visit(value: Any, path: tuple[str, ...] = ()) -> None:
         if isinstance(value, dict):
+            if (
+                value.get("prompt_projection")
+                == "columnar_provenance_due_to_cumulative_byte_budget"
+                or value.get("schema")
+                == INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA
+            ):
+                # Only the exact top-level investigation_query_results
+                # envelope is decoded below. Nested lookalikes are inert.
+                return
             status = value.get("status")
             returned = next(
                 (
@@ -2990,10 +3354,14 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
                     query_ref,
                     source=".".join(path[-3:]) or "query",
                     source_class=path[0] if path else "query",
-                    corroborating=str(status or "").lower() in {"ok", "success", "completed"},
+                    corroborating=(
+                        str(status or "").lower()
+                        in INVESTIGATION_QUERY_SUCCESS_STATUSES
+                    ),
                     status=status,
                     returned=returned,
                     evidence_digest=query_evidence_digest,
+                    require_valid_count=True,
                 )
                 pack = value.get("pack")
                 if pack:
@@ -3007,10 +3375,14 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
                         pack_ref,
                         source=".".join(path[-3:]) or "query",
                         source_class=path[0] if path else "query",
-                        corroborating=str(status or "").lower() in {"ok", "success", "completed"},
+                        corroborating=(
+                            str(status or "").lower()
+                            in INVESTIGATION_QUERY_SUCCESS_STATUSES
+                        ),
                         status=status,
                         returned=returned,
                         evidence_digest=query_evidence_digest,
+                        require_valid_count=True,
                     )
             evidence_ref = value.get("evidence_ref")
             if evidence_ref:
@@ -3027,12 +3399,14 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
                     normalized_evidence_ref,
                     source=".".join(path[-3:]) or "evidence",
                     source_class=path[0] if path else "evidence",
-                    corroborating=str(status or "ok").lower() in {
-                        "ok", "success", "completed", "partial",
-                    },
+                    corroborating=(
+                        str(status or "ok").lower()
+                        in INVESTIGATION_QUERY_SUCCESS_STATUSES
+                    ),
                     status=status,
                     returned=returned,
                     evidence_digest=evidence_ref_digest,
+                    require_valid_count=True,
                 )
             query_id = value.get("query_id")
             if query_id and digest:
@@ -3046,10 +3420,14 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
                     query_id_ref,
                     source=".".join(path[-3:]) or "query",
                     source_class=path[0] if path else "query",
-                    corroborating=str(status or "").lower() in {"ok", "success", "completed"},
+                    corroborating=(
+                        str(status or "").lower()
+                        in INVESTIGATION_QUERY_SUCCESS_STATUSES
+                    ),
                     status=status,
                     returned=returned,
                     evidence_digest=query_evidence_digest,
+                    require_valid_count=True,
                 )
             request_id = value.get("request_id")
             if request_id:
@@ -3061,6 +3439,7 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
                     in {"ok", "success", "completed", "fulfilled"},
                     status=status,
                     returned=returned,
+                    require_valid_count=True,
                 )
             for key, child in value.items():
                 visit(child, (*path, str(key)))
@@ -3068,6 +3447,259 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
             for child in value[:1000]:
                 visit(child, path)
 
+    def visit_columnar_investigation_results(value: Any) -> bool:
+        """Decode only the exact runtime-produced top-level compact envelope."""
+        if not isinstance(value, dict):
+            return False
+        projection = value.get("prompt_projection")
+        rounds = value.get("rounds")
+        claimed = bool(
+            isinstance(projection, dict)
+            and projection.get("columnar_provenance_fallback") is True
+        )
+        if not claimed:
+            return False
+        if (
+            set(value) != {"schema", "rounds", "prompt_projection"}
+            or value.get("schema") != INVESTIGATION_QUERY_RESULT_SCHEMA
+            or not isinstance(rounds, list)
+            or len(rounds) != 1
+            or not isinstance(rounds[0], dict)
+            or set(projection)
+            != {
+                "max_bytes",
+                "truncated",
+                "columnar_provenance_fallback",
+                "encoded_bytes",
+            }
+            or projection.get("truncated") is not True
+        ):
+            return True
+        round_item = rounds[0]
+        if (
+            set(round_item)
+            != {
+                "schema",
+                "prompt_projection",
+                "source_bytes",
+                "source_sha256",
+                "source_provenance_rows",
+                "columns",
+                "backend_values",
+                "status_values",
+                "semantics_values",
+                "result_summary_values",
+                "empty_evidence_ref",
+                "rows",
+                "omitted_rows",
+            }
+            or round_item.get("schema")
+            != INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA
+            or round_item.get("prompt_projection")
+            != "columnar_provenance_due_to_cumulative_byte_budget"
+            or round_item.get("columns")
+            != list(INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS)
+            or round_item.get("empty_evidence_ref")
+            != INVESTIGATION_COLUMNAR_EMPTY_REF_INSTRUCTION
+        ):
+            return True
+
+        def canonical_integer(raw: Any, *, minimum: int = 0) -> int | None:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return None
+            return raw if raw >= minimum else None
+
+        maximum_bytes = canonical_integer(
+            projection.get("max_bytes"),
+            minimum=1,
+        )
+        encoded_bytes = canonical_integer(
+            projection.get("encoded_bytes"),
+            minimum=1,
+        )
+        source_bytes = canonical_integer(round_item.get("source_bytes"))
+        source_rows = canonical_integer(
+            round_item.get("source_provenance_rows"),
+            minimum=1,
+        )
+        omitted_rows = canonical_integer(round_item.get("omitted_rows"))
+        try:
+            encoded_value = len(_investigation_prompt_json_bytes(value))
+        except (TypeError, ValueError, OverflowError):
+            return True
+        rows_value = round_item.get("rows")
+        if (
+            maximum_bytes is None
+            or encoded_bytes is None
+            or encoded_bytes != encoded_value
+            or encoded_value > maximum_bytes
+            or source_bytes is None
+            or source_rows is None
+            or omitted_rows != 0
+            or not isinstance(round_item.get("source_sha256"), str)
+            or not re.fullmatch(
+                r"[a-f0-9]{64}",
+                round_item.get("source_sha256") or "",
+            )
+            or not isinstance(rows_value, list)
+            or not rows_value
+            or len(rows_value) != source_rows
+            or len(rows_value) > MAX_INVESTIGATION_QUERIES_TOTAL
+        ):
+            return True
+
+        table_limits = {
+            "backend_values": 40,
+            "status_values": 40,
+            "semantics_values": 1024,
+            "result_summary_values": 256,
+        }
+        tables: dict[str, list[str]] = {}
+        for table_name, item_maximum_bytes in table_limits.items():
+            table = round_item.get(table_name)
+            if (
+                not isinstance(table, list)
+                or not table
+                or len(table) > MAX_INVESTIGATION_QUERIES_TOTAL
+                or any(
+                    not isinstance(item, str)
+                    or not item
+                    or len(item.encode("utf-8"))
+                    > item_maximum_bytes
+                    for item in table
+                )
+            ):
+                return True
+            tables[table_name] = table
+
+        def table_value(name: str, index: Any) -> str | None:
+            if isinstance(index, bool) or not isinstance(index, int):
+                return None
+            table = tables[name]
+            return table[index] if 0 <= index < len(table) else None
+
+        decoded: list[dict[str, Any]] = []
+        for row in rows_value:
+            if (
+                not isinstance(row, list)
+                or len(row) != len(INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS)
+            ):
+                return True
+            item = dict(
+                zip(
+                    INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS,
+                    row,
+                    strict=True,
+                )
+            )
+            round_number = canonical_integer(item.get("round"), minimum=1)
+            query_id = item.get("query_id")
+            backend = table_value(
+                "backend_values",
+                item.get("backend_index"),
+            )
+            status = table_value(
+                "status_values",
+                item.get("status_index"),
+            )
+            semantics = table_value(
+                "semantics_values",
+                item.get("semantics_index"),
+            )
+            result_summary = table_value(
+                "result_summary_values",
+                item.get("result_summary_index"),
+            )
+            query_digest = item.get("query_digest")
+            result_digest = item.get("result_digest")
+            evidence_ref = item.get("evidence_ref_or_empty")
+            returned_raw = item.get("returned")
+            returned = _canonical_investigation_count(returned_raw)
+            count_valid = returned is not None
+            if (
+                round_number is None
+                or round_number > MAX_INVESTIGATION_QUERY_ROUNDS
+                or not isinstance(query_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9_.:@+=-]{1,128}", query_id)
+                or not backend
+                or not status
+                or not semantics
+                or not result_summary
+                or not isinstance(query_digest, str)
+                or not re.fullmatch(r"[a-f0-9]{64}", query_digest)
+                or not isinstance(result_digest, str)
+                or (
+                    result_digest
+                    and not re.fullmatch(r"[a-f0-9]{64}", result_digest)
+                )
+                or not isinstance(evidence_ref, str)
+                or len(evidence_ref.encode("utf-8")) > 512
+                or not isinstance(item.get("read_only"), bool)
+            ):
+                return True
+            canonical_ref, evidence_digest = (
+                result_bound_query_reference(
+                    query_digest,
+                    result_digest,
+                )
+            )
+            if not evidence_ref:
+                evidence_ref = canonical_ref
+            elif evidence_ref.startswith("query:"):
+                evidence_ref = canonical_ref
+            if not evidence_ref:
+                return True
+            safe_status = status
+            if item["read_only"] is not True:
+                safe_status = "read_only_violation"
+            elif not count_valid:
+                safe_status = "invalid_result_count"
+            decoded.append({
+                "query_id": query_id,
+                "status": safe_status,
+                "returned": returned,
+                "query_digest": query_digest,
+                "result_digest": result_digest,
+                "evidence_ref": evidence_ref,
+                "evidence_digest": evidence_digest,
+            })
+
+        for item in decoded:
+            corroborating = (
+                str(item["status"]).lower()
+                in INVESTIGATION_QUERY_SUCCESS_STATUSES
+            )
+            common = {
+                "source": (
+                    "investigation_query_results.rounds."
+                    "columnar_provenance"
+                ),
+                "source_class": "investigation_query_results",
+                "corroborating": corroborating,
+                "status": item["status"],
+                "returned": item["returned"],
+                "evidence_digest": item["evidence_digest"],
+                "require_valid_count": True,
+            }
+            query_ref, _ = result_bound_query_reference(
+                item["query_digest"],
+                item["result_digest"],
+            )
+            add(query_ref, **common)
+            add(item["evidence_ref"], **common)
+            query_id_ref, _ = result_bound_query_reference(
+                item["query_digest"],
+                item["result_digest"],
+                namespace="query-id",
+                label=item["query_id"],
+            )
+            add(query_id_ref, **common)
+        return True
+
+    iterative_results = prompt_package.get("investigation_query_results")
+    columnar_claimed = visit_columnar_investigation_results(
+        iterative_results
+    )
     for section in (
         "grouped_alert_context",
         "public_enrichment",
@@ -3075,10 +3707,14 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
         "detection_validation",
         "asset_context",
         "incident_response_evidence",
-        "investigation_query_results",
         "live_osquery_evidence",
     ):
         visit(prompt_package.get(section), (section,))
+    if not columnar_claimed:
+        visit(
+            iterative_results,
+            ("investigation_query_results",),
+        )
     return {
         "schema": "onion-sentinel-evidence-reference-contract-v1",
         "instruction": (
@@ -4706,49 +5342,683 @@ def _prompt_project_investigation_rows(
     return value
 
 
+def _investigation_prompt_json_bytes(value: Any) -> bytes:
+    """Return the canonical bytes used for prompt admission and omission hashes."""
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+
+
+def _compact_prompt_trusted_query_audit(
+    value: Any,
+) -> dict[str, Any]:
+    """Project one query audit while retaining result-bound provenance.
+
+    Broker query audits can legitimately contain several renderings of the same
+    read-only query (Query DSL, KQL, and OQL) plus verbose authorization
+    metadata. The durable round keeps that full audit. When the cumulative
+    model prompt is tight, retain the fields needed to identify and cite the
+    execution and bind the omitted representation with a canonical digest.
+    """
+    encoded = _investigation_prompt_json_bytes(value)
+    summary: dict[str, Any] = {
+        "prompt_projection": "compacted_due_to_cumulative_byte_budget",
+        "audit_bytes": len(encoded),
+        "audit_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+    if not isinstance(value, dict):
+        summary["audit_type"] = type(value).__name__
+        return summary
+
+    text_limits = {
+        "query_id": 128,
+        "dialect": 40,
+        "backend": 40,
+        "pack": 100,
+        "purpose": 500,
+        "aggregation": 40,
+        "execution_backend": 100,
+        "query_endpoint": 256,
+        "endpoint": 256,
+        "query_digest": 128,
+        "result_digest": 128,
+        "execution_digest": 128,
+        "request_digest": 128,
+        "item_digest": 128,
+        "kql_digest": 128,
+        "oql_digest": 128,
+        "target_alias": 160,
+        "operation": 80,
+        "indicator": 253,
+        "status": 40,
+        "error": 500,
+        "evidence_ref": 512,
+    }
+    for key, limit in text_limits.items():
+        if key in value:
+            summary[key] = _query_text(value.get(key), limit)
+
+    for key in (
+        "semantic_valid",
+        "total_hits",
+        "returned_hits",
+        "total_rows",
+        "returned_rows",
+        "candidate_records_scanned",
+        "unique_records_matched",
+        "records_returned",
+        "truncated",
+        "result_truncated",
+        "index_scan_truncated",
+        "duration_ms",
+        "timed_out",
+        "took_ms",
+    ):
+        item = value.get(key)
+        if isinstance(item, (bool, int, float)) and not (
+            isinstance(item, float)
+            and (math.isnan(item) or math.isinf(item))
+        ):
+            summary[key] = item
+
+    window = value.get("window")
+    if isinstance(window, dict):
+        summary["window"] = {
+            key: _query_text(window.get(key), 100)
+            for key in ("start", "end")
+            if window.get(key) not in (None, "")
+        }
+    return summary
+
+
+def _bounded_investigation_prompt_fact(
+    value: Any,
+    *,
+    maximum_bytes: int = 256,
+) -> str:
+    """Return one complete bounded fact; never truncate into new semantics."""
+    if value in (None, "", {}, []):
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+        encoded = text.encode("utf-8")
+    else:
+        encoded = _investigation_prompt_json_bytes(value)
+        text = encoded.decode("utf-8")
+    return text if len(encoded) <= maximum_bytes else ""
+
+
+def _canonical_investigation_count(value: Any) -> int | None:
+    """Return an exact non-negative integer count without coercion."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return (
+        value
+        if 0 <= value <= MAX_INVESTIGATION_RESULT_COUNT
+        else None
+    )
+
+
+def _investigation_provenance_count(
+    containers: tuple[dict[str, Any], ...],
+    keys: tuple[str, ...],
+) -> int | None:
+    for key in keys:
+        for container in containers:
+            if key not in container:
+                continue
+            # The most specific collector child wins even when it reports an
+            # invalid count. Falling back to an outer positive aggregate could
+            # otherwise turn a malformed child result into corroboration.
+            return _canonical_investigation_count(container.get(key))
+    return None
+
+
+def _investigation_query_semantics(
+    containers: tuple[dict[str, Any], ...],
+) -> str:
+    """Build a bounded human-readable description of what the query tested."""
+    def first_text(key: str, limit: int) -> str:
+        for container in containers:
+            text = _query_text(container.get(key), limit)
+            if text:
+                return text
+        return ""
+
+    def first_bounded_value(
+        key: str,
+        maximum_bytes: int,
+    ) -> tuple[bool, Any]:
+        for container in containers:
+            value = container.get(key)
+            if value in (None, "", {}, []):
+                continue
+            if isinstance(value, str):
+                value = value.strip()
+                encoded = value.encode("utf-8")
+            else:
+                encoded = _investigation_prompt_json_bytes(value)
+            if len(encoded) <= maximum_bytes:
+                return True, value
+            return True, None
+        return False, None
+
+    summary: dict[str, Any] = {}
+    backend = first_text("dialect", 40) or first_text("backend", 40)
+    if backend:
+        summary["backend"] = backend
+    for key, limit in (
+        ("pack", 100),
+        ("aggregation", 40),
+        ("operation", 80),
+        ("target_alias", 160),
+        ("indicator", 253),
+    ):
+        text = first_text(key, limit)
+        if text:
+            summary[key] = text
+
+    for key, maximum_bytes in (
+        ("semantics", 256),
+        ("purpose", 180),
+        ("observables", 256),
+        ("window", 192),
+        ("match_semantics", 192),
+        ("query", 256),
+        ("filters", 192),
+    ):
+        present, fact = first_bounded_value(key, maximum_bytes)
+        if present and fact is None:
+            return ""
+        if present:
+            summary[key] = fact
+
+    # Transport metadata and broad scope alone do not describe what was tested.
+    # Require a concrete intent or target predicate; a pack, aggregation,
+    # operation label, or time window cannot independently support a finding.
+    if not any(
+        key in summary
+        for key in (
+            "purpose",
+            "observables",
+            "match_semantics",
+            "semantics",
+            "query",
+            "filters",
+            "indicator",
+        )
+    ):
+        return ""
+    return _bounded_investigation_prompt_fact(
+        summary,
+        maximum_bytes=1024,
+    )
+
+
+def _investigation_result_summary(
+    containers: tuple[dict[str, Any], ...],
+    *,
+    status: str,
+    returned: int | None,
+) -> str:
+    """Retain bounded collector facts needed to interpret one result digest."""
+    for container in containers:
+        summary = _bounded_investigation_prompt_fact(
+            container.get("evidence_summary"),
+        )
+        if summary:
+            return summary
+    facts: dict[str, Any] = {"status": status}
+    if returned is not None:
+        facts["returned"] = returned
+    total = _investigation_provenance_count(
+        containers,
+        ("total_hits", "total_rows"),
+    )
+    if total is not None:
+        facts["total"] = total
+    for key in (
+        "semantic_valid",
+        "truncated",
+        "result_truncated",
+        "index_scan_truncated",
+        "timed_out",
+    ):
+        for container in containers:
+            value = container.get(key)
+            if isinstance(value, bool):
+                facts[key] = value
+                break
+    for container in containers:
+        error = _bounded_investigation_prompt_fact(
+            container.get("error"),
+            maximum_bytes=120,
+        )
+        if error:
+            facts["error"] = error
+            break
+    # A status label by itself is not a finding or result fact.
+    if len(facts) == 1:
+        return ""
+    return _bounded_investigation_prompt_fact(facts)
+
+
+def _investigation_prompt_provenance_rows(
+    rounds: list[dict[str, Any]],
+) -> list[dict[str, Any]] | None:
+    """Extract one compact, ordered provenance record per logical query."""
+    output: list[dict[str, Any]] = []
+    for round_item in rounds:
+        if not isinstance(round_item, dict):
+            return None
+        round_number = round_item.get("round")
+        raw_results = round_item.get("results", [])
+        if not isinstance(raw_results, list):
+            return None
+        results = raw_results
+        for result in results:
+            if not isinstance(result, dict):
+                return None
+            evidence = (
+                result.get("evidence")
+                if isinstance(result.get("evidence"), dict)
+                else {}
+            )
+            raw_nested = evidence.get("results", [])
+            if not isinstance(raw_nested, list) or any(
+                not isinstance(item, dict) for item in raw_nested
+            ):
+                return None
+            nested_sources = list(raw_nested)
+
+            raw_trusted = result.get("trusted_query_audit", [])
+            if not isinstance(raw_trusted, list) or any(
+                not isinstance(item, dict) for item in raw_trusted
+            ):
+                return None
+            trusted_sources = list(raw_trusted)
+
+            def exact_query_id(raw_query_id: Any) -> str:
+                if not isinstance(raw_query_id, str):
+                    return ""
+                query_id = _query_text(raw_query_id, 128)
+                if (
+                    query_id != raw_query_id
+                    or not re.fullmatch(
+                        r"[A-Za-z0-9_.:@+=-]{1,128}",
+                        query_id,
+                    )
+                ):
+                    return ""
+                return query_id
+
+            has_scalar_id = "query_id" in result
+            has_group_ids = "query_ids" in result
+            if has_scalar_id == has_group_ids:
+                return None
+            if has_group_ids:
+                declared_raw = result.get("query_ids")
+                if not isinstance(declared_raw, list):
+                    return None
+                declared_ids = [
+                    exact_query_id(raw_query_id)
+                    for raw_query_id in declared_raw
+                ]
+            else:
+                declared_ids = [
+                    exact_query_id(result.get("query_id"))
+                ]
+            if (
+                not declared_ids
+                or not all(declared_ids)
+                or len(set(declared_ids)) != len(declared_ids)
+            ):
+                return None
+
+            def exact_declared_coverage(
+                candidates: list[dict[str, Any]],
+            ) -> bool:
+                candidate_ids = [
+                    exact_query_id(item.get("query_id"))
+                    for item in candidates
+                ]
+                return (
+                    len(candidate_ids) == len(declared_ids)
+                    and all(candidate_ids)
+                    and len(set(candidate_ids)) == len(candidate_ids)
+                    and set(candidate_ids) == set(declared_ids)
+                )
+
+            # Every collector representation that is present must bind
+            # exactly one provenance row to every declared logical query.
+            # A partial, extra, or duplicate batch must not mint a projection
+            # from whichever child happened to survive.
+            if (
+                trusted_sources
+                and not exact_declared_coverage(trusted_sources)
+            ) or (
+                nested_sources
+                and not exact_declared_coverage(nested_sources)
+            ):
+                return None
+            if (
+                len(declared_ids) > 1
+                and not trusted_sources
+                and not nested_sources
+            ):
+                return None
+
+            sources = trusted_sources
+            if not sources:
+                sources = nested_sources
+            if not sources:
+                sources = [result]
+            nested_by_id = {
+                exact_query_id(item.get("query_id")): item
+                for item in nested_sources
+            }
+            for source in sources:
+                query_id = _query_text(
+                    source.get("query_id") or result.get("query_id"),
+                    128,
+                )
+                nested_result = nested_by_id.get(query_id, {})
+                containers = (
+                    nested_result,
+                    source,
+                    evidence,
+                    result,
+                )
+                # Per-query terminal state is more precise than an aggregate
+                # outer "partial" status for a mixed batch.
+                query_status = _query_text(
+                    nested_result.get("status")
+                    or source.get("status")
+                    or result.get("status"),
+                    40,
+                )
+                if (
+                    evidence.get("controls_valid") is False
+                    or nested_result.get("semantic_valid") is False
+                    or source.get("semantic_valid") is False
+                ) and (
+                    query_status.lower()
+                    in INVESTIGATION_QUERY_SUCCESS_STATUSES
+                ):
+                    query_status = "partial"
+
+                def provenance_value(key: str) -> Any:
+                    for container in containers:
+                        if container.get(key) not in (None, ""):
+                            return container.get(key)
+                    return ""
+
+                returned = _investigation_provenance_count(
+                    containers,
+                    (
+                        "returned_hits",
+                        "returned_rows",
+                        "records_returned",
+                        "total_hits",
+                        "total_rows",
+                    ),
+                )
+                output.append({
+                    "round": round_number,
+                    "query_id": query_id,
+                    "backend": _query_text(
+                        source.get("backend")
+                        or source.get("dialect")
+                        or result.get("backend"),
+                        40,
+                    ),
+                    "status": query_status,
+                    "read_only": result.get("read_only") is True,
+                    "query_digest": _query_text(
+                        provenance_value("query_digest"),
+                        128,
+                    ),
+                    "result_digest": _query_text(
+                        provenance_value("result_digest"),
+                        128,
+                    ),
+                    "evidence_ref": _query_text(
+                        provenance_value("evidence_ref"),
+                        512,
+                    ),
+                    "returned": returned,
+                    "semantics": _investigation_query_semantics(containers),
+                    "result_summary": _investigation_result_summary(
+                        containers,
+                        status=query_status,
+                        returned=returned,
+                    ),
+                })
+    return output
+
+
+def _columnar_investigation_prompt_payload(
+    rounds: list[dict[str, Any]],
+    *,
+    maximum_bytes: int,
+) -> dict[str, Any] | None:
+    """Return the smallest useful provenance-only projection that fits.
+
+    Empty evidence-ref cells represent the exact canonical result-bound query
+    reference derived from the adjacent digests. Non-canonical references stay
+    verbatim. If unusually large identities cannot all fit, the complete
+    source digest and omitted-row count make that loss explicit.
+    """
+    try:
+        source_bytes = _investigation_prompt_json_bytes(rounds)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    provenance = _investigation_prompt_provenance_rows(rounds)
+    if (
+        not provenance
+        or len(provenance) > MAX_INVESTIGATION_QUERIES_TOTAL
+        or any(
+            not item["query_id"]
+            or not item["backend"]
+            or not item["status"]
+            or not re.fullmatch(r"[a-f0-9]{64}", item["query_digest"])
+            or not item["semantics"]
+            or not item["result_summary"]
+            for item in provenance
+        )
+    ):
+        return None
+    backends = list(dict.fromkeys(item["backend"] for item in provenance))
+    statuses = list(dict.fromkeys(item["status"] for item in provenance))
+    semantics = list(
+        dict.fromkeys(item["semantics"] for item in provenance)
+    )
+    result_summaries = list(
+        dict.fromkeys(item["result_summary"] for item in provenance)
+    )
+    rows: list[list[Any]] = []
+    for item in provenance:
+        canonical_ref, _ = result_bound_query_reference(
+            item["query_digest"],
+            item["result_digest"],
+        )
+        evidence_ref = item["evidence_ref"]
+        if canonical_ref and evidence_ref == canonical_ref:
+            evidence_ref = ""
+        rows.append([
+            item["round"],
+            item["query_id"],
+            backends.index(item["backend"]),
+            statuses.index(item["status"]),
+            item["read_only"],
+            item["query_digest"],
+            item["result_digest"],
+            evidence_ref,
+            item["returned"],
+            semantics.index(item["semantics"]),
+            result_summaries.index(item["result_summary"]),
+        ])
+
+    def candidate() -> dict[str, Any]:
+        value = {
+            "schema": INVESTIGATION_QUERY_RESULT_SCHEMA,
+            "rounds": [{
+                "schema": INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA,
+                "prompt_projection": (
+                    "columnar_provenance_due_to_cumulative_byte_budget"
+                ),
+                "source_bytes": len(source_bytes),
+                "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+                "source_provenance_rows": len(provenance),
+                "columns": list(
+                    INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS
+                ),
+                "backend_values": backends,
+                "status_values": statuses,
+                "semantics_values": semantics,
+                "result_summary_values": result_summaries,
+                "empty_evidence_ref": (
+                    INVESTIGATION_COLUMNAR_EMPTY_REF_INSTRUCTION
+                ),
+                "rows": rows,
+                "omitted_rows": 0,
+            }],
+            "prompt_projection": {
+                "max_bytes": maximum_bytes,
+                "truncated": True,
+                "columnar_provenance_fallback": True,
+                "encoded_bytes": 0,
+            },
+        }
+        for _ in range(8):
+            actual_size = len(_investigation_prompt_json_bytes(value))
+            if value["prompt_projection"]["encoded_bytes"] == actual_size:
+                break
+            value["prompt_projection"]["encoded_bytes"] = actual_size
+        return value
+
+    value = candidate()
+    encoded_size = len(_investigation_prompt_json_bytes(value))
+    if (
+        value["prompt_projection"]["encoded_bytes"] == encoded_size
+        and encoded_size <= maximum_bytes
+    ):
+        return value
+    return None
+
+
 def _investigation_prompt_payload(
     rounds: list[dict[str, Any]],
     *,
     maximum_bytes: int = MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES,
 ) -> dict[str, Any]:
     """Project all query rounds below cumulative row and serialized-byte caps."""
-    state: dict[str, int | bool] = {"rows": 0, "truncated": False}
+    if (
+        isinstance(maximum_bytes, bool)
+        or not isinstance(maximum_bytes, int)
+        or maximum_bytes <= 0
+    ):
+        raise InvestigationQueryError(
+            "investigation query prompt byte budget must be a positive integer"
+        )
+    state: dict[str, int | bool] = {
+        "rows": 0,
+        "truncated": False,
+        "trusted_query_audits_compacted": 0,
+        "evidence_bodies_omitted": 0,
+        "round_metadata_omitted": 0,
+    }
     projected = [
         _prompt_project_investigation_rows(item, state)
         for item in rounds
     ]
 
     def encoded_size(value: Any) -> int:
-        return len(
-            json.dumps(
-                value,
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
-            ).encode("utf-8")
-        )
+        return len(_investigation_prompt_json_bytes(value))
 
-    def envelope() -> dict[str, Any]:
+    def envelope(encoded_bytes: int | None = None) -> dict[str, Any]:
+        projection = {
+            "max_bytes": maximum_bytes,
+            "max_rows": MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS,
+            "rows_included": int(state["rows"]),
+            "truncated": bool(state["truncated"]),
+            "trusted_query_audits_compacted": int(
+                state["trusted_query_audits_compacted"]
+            ),
+            "evidence_bodies_omitted": int(
+                state["evidence_bodies_omitted"]
+            ),
+            "round_metadata_omitted": int(
+                state["round_metadata_omitted"]
+            ),
+        }
+        if encoded_bytes is not None:
+            projection["encoded_bytes"] = encoded_bytes
         return {
             "schema": INVESTIGATION_QUERY_RESULT_SCHEMA,
             "rounds": projected,
-            "prompt_projection": {
-                "max_bytes": maximum_bytes,
-                "max_rows": MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS,
-                "rows_included": int(state["rows"]),
-                "truncated": bool(state["truncated"]),
-            },
+            "prompt_projection": projection,
         }
 
-    # Preserve status and trusted query provenance while first replacing only
-    # the largest evidence bodies. All digests are over the pre-projection body.
-    for _iteration in range(
-        MAX_INVESTIGATION_QUERY_ROUNDS
-        * MAX_INVESTIGATION_QUERIES_PER_ROUND
-        + 1
-    ):
-        if encoded_size(envelope()) <= maximum_bytes:
+    # Reserve the maximum possible digit width for encoded_bytes during every
+    # admission decision. Otherwise adding that final accounting field can
+    # itself push an exactly-full payload over the hard limit.
+    encoded_size_reservation = (10 ** len(str(maximum_bytes))) - 1
+
+    def within_budget() -> bool:
+        return (
+            encoded_size(envelope(encoded_size_reservation))
+            <= maximum_bytes
+        )
+
+    # The executed query is durably retained outside this model-only
+    # projection. Compact its redundant rendered forms before discarding
+    # evidence. Core status, result-bound digests, evidence_ref, and a hash of
+    # the exact omitted audit remain available to the model.
+    while not within_budget():
+        audit_candidates: list[
+            tuple[int, dict[str, Any], int, dict[str, Any]]
+        ] = []
+        for round_item in projected:
+            if not isinstance(round_item, dict):
+                continue
+            for result in round_item.get("results") or []:
+                if not isinstance(result, dict):
+                    continue
+                trusted = result.get("trusted_query_audit")
+                if not isinstance(trusted, list):
+                    continue
+                for index, audit in enumerate(trusted):
+                    if (
+                        isinstance(audit, dict)
+                        and audit.get("prompt_projection")
+                        == "compacted_due_to_cumulative_byte_budget"
+                    ):
+                        continue
+                    compact = _compact_prompt_trusted_query_audit(audit)
+                    savings = encoded_size(audit) - encoded_size(compact)
+                    if savings > 0:
+                        audit_candidates.append(
+                            (savings, result, index, compact)
+                        )
+        if not audit_candidates:
             break
+        _, result, index, compact = max(
+            audit_candidates,
+            key=lambda item: item[0],
+        )
+        result["trusted_query_audit"][index] = compact
+        state["trusted_query_audits_compacted"] = (
+            int(state["trusted_query_audits_compacted"]) + 1
+        )
+        state["truncated"] = True
+
+    # If compact provenance is not sufficient, replace the largest evidence
+    # bodies. All hashes bind the exact pre-byte-projection body.
+    while not within_budget():
         candidates: list[tuple[int, dict[str, Any]]] = []
         for round_item in projected:
             if not isinstance(round_item, dict):
@@ -4768,17 +6038,11 @@ def _investigation_prompt_payload(
             break
         _, result = max(candidates, key=lambda item: item[0])
         evidence = result.pop("evidence")
+        evidence_bytes = _investigation_prompt_json_bytes(evidence)
         summary = {
             "prompt_projection": "omitted_due_to_cumulative_byte_budget",
-            "evidence_bytes": encoded_size(evidence),
-            "evidence_sha256": hashlib.sha256(
-                json.dumps(
-                    evidence,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    default=str,
-                ).encode("utf-8")
-            ).hexdigest(),
+            "evidence_bytes": len(evidence_bytes),
+            "evidence_sha256": hashlib.sha256(evidence_bytes).hexdigest(),
         }
         if isinstance(evidence, dict):
             for key in ("query_digest", "result_digest", "evidence_ref"):
@@ -4786,39 +6050,252 @@ def _investigation_prompt_payload(
                     summary[key] = evidence[key]
         result["evidence"] = summary
         state["truncated"] = True
+        state["evidence_bodies_omitted"] = (
+            int(state["evidence_bodies_omitted"]) + 1
+        )
 
     # A pathological broker response can still bloat request/audit metadata.
     # Replace those sections by hashes rather than exceeding the model prompt.
-    if encoded_size(envelope()) > maximum_bytes:
+    if not within_budget():
         for round_item in projected:
             if not isinstance(round_item, dict):
                 continue
             for key in ("requests", "audit"):
                 original = round_item.get(key)
                 if original:
+                    original_bytes = _investigation_prompt_json_bytes(original)
                     round_item[key] = {
                         "prompt_projection": "omitted_due_to_cumulative_byte_budget",
-                        "sha256": hashlib.sha256(
-                            json.dumps(
-                                original,
-                                sort_keys=True,
-                                separators=(",", ":"),
-                                default=str,
-                            ).encode("utf-8")
-                        ).hexdigest(),
+                        "bytes": len(original_bytes),
+                        "sha256": hashlib.sha256(original_bytes).hexdigest(),
                     }
                     state["truncated"] = True
+                    state["round_metadata_omitted"] = (
+                        int(state["round_metadata_omitted"]) + 1
+                    )
+                    if within_budget():
+                        break
+            if within_budget():
+                break
 
-    payload = envelope()
-    payload["prompt_projection"]["encoded_bytes"] = encoded_size(payload)
-    # Updating encoded_bytes can change its own digit width; converge and then
-    # fail closed if an unforeseen shape still exceeds the hard limit.
-    payload["prompt_projection"]["encoded_bytes"] = encoded_size(payload)
-    if encoded_size(payload) > maximum_bytes:
+    payload = envelope(0)
+    # Updating encoded_bytes can change its own digit width. Converge to the
+    # exact serialized size; the reservation above guarantees this cannot turn
+    # an admitted payload into an over-budget one.
+    for _ in range(8):
+        actual_size = encoded_size(payload)
+        if payload["prompt_projection"]["encoded_bytes"] == actual_size:
+            break
+        payload["prompt_projection"]["encoded_bytes"] = actual_size
+    if not (
+        payload["prompt_projection"]["encoded_bytes"] == encoded_size(payload)
+        and encoded_size(payload) <= maximum_bytes
+    ):
+        provenance_fallback = _columnar_investigation_prompt_payload(
+            rounds,
+            maximum_bytes=maximum_bytes,
+        )
+        if provenance_fallback is not None:
+            return provenance_fallback
+    if (
+        payload["prompt_projection"]["encoded_bytes"] != encoded_size(payload)
+        or encoded_size(payload) > maximum_bytes
+    ):
         raise InvestigationQueryError(
             "investigation query prompt projection exceeds its cumulative byte budget"
         )
     return payload
+
+
+def _admit_investigation_query_prompt(
+    prompt_package: dict[str, Any],
+    rounds: list[dict[str, Any]],
+    *,
+    maximum_prompt_bytes: int,
+    hosted: bool,
+) -> int:
+    """Install the richest complete query projection that exactly fits.
+
+    Admission measures the complete model-safe package after refreshing the
+    citation contract. No fixed headroom estimate is used: every candidate is
+    serialized exactly, and only the final admitted candidate mutates the
+    caller's package.
+    """
+    if (
+        isinstance(maximum_prompt_bytes, bool)
+        or not isinstance(maximum_prompt_bytes, int)
+        or maximum_prompt_bytes <= 0
+    ):
+        raise InvestigationQueryError(
+            "investigation follow-up prompt byte budget is invalid"
+        )
+    base = dict(prompt_package)
+    base.pop("investigation_query_results", None)
+    base.pop("evidence_reference_contract", None)
+
+    projection_cache: dict[int, dict[str, Any] | None] = {}
+
+    def projection_at(evidence_bytes: int) -> dict[str, Any] | None:
+        if evidence_bytes not in projection_cache:
+            try:
+                projection_cache[evidence_bytes] = (
+                    _investigation_prompt_payload(
+                        rounds,
+                        maximum_bytes=evidence_bytes,
+                    )
+                )
+            except InvestigationQueryError:
+                projection_cache[evidence_bytes] = None
+        return projection_cache[evidence_bytes]
+
+    def projection_signature(projection: dict[str, Any]) -> str:
+        """Identify one structural projection state independent of its budget."""
+        signature_value = dict(projection)
+        metadata = (
+            dict(projection.get("prompt_projection"))
+            if isinstance(projection.get("prompt_projection"), dict)
+            else {}
+        )
+        metadata.pop("max_bytes", None)
+        metadata.pop("encoded_bytes", None)
+        signature_value["prompt_projection"] = metadata
+        return hashlib.sha256(
+            _investigation_prompt_json_bytes(signature_value)
+        ).hexdigest()
+
+    def complete_candidate(
+        evidence_bytes: int,
+    ) -> tuple[dict[str, Any], int] | None:
+        projection = projection_at(evidence_bytes)
+        if projection is None:
+            return None
+        candidate = dict(base)
+        candidate["investigation_query_results"] = projection
+        attach_evidence_reference_contract(candidate)
+        encoded_size = len(
+            _investigation_prompt_json_bytes(
+                model_safe_copy(candidate, hosted=hosted)
+            )
+        )
+        return candidate, encoded_size
+
+    low = 1
+    high = min(
+        MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES,
+        maximum_prompt_bytes,
+    )
+
+    # Projection existence has a lower floor: below the smallest complete
+    # columnar representation there is no safe payload, while every larger
+    # budget admits at least that representation. Find that floor separately
+    # from full-package feasibility. Treating "no projection yet" as an
+    # over-budget package is what caused the former one-pass binary search to
+    # skip narrow feasible intervals at the floor.
+    first_projection_budget: int | None = None
+    search_low = low
+    search_high = high
+    while search_low <= search_high:
+        midpoint = search_low + ((search_high - search_low) // 2)
+        if projection_at(midpoint) is None:
+            search_low = midpoint + 1
+        else:
+            first_projection_budget = midpoint
+            search_high = midpoint - 1
+    if first_projection_budget is None:
+        raise InvestigationQueryError(
+            "no safe prompt budget remains for complete investigation "
+            "query evidence and its refreshed citation contract"
+        )
+
+    # As the evidence budget increases, the deterministic projector advances
+    # through a finite sequence of richer structural states: columnar,
+    # progressively less compact audits/evidence, then the full projection.
+    # Enumerate the exact start of every state and measure the complete package
+    # there. Full-package feasibility is deliberately *not* assumed monotonic:
+    # a richer state may cross the ceiling even though the preceding state's
+    # first admissible byte budget fits exactly.
+    admitted: tuple[dict[str, Any], int] | None = None
+    seen_signatures: set[str] = set()
+    state_start = first_projection_budget
+    while state_start <= high:
+        projection = projection_at(state_start)
+        if projection is None:
+            raise InvestigationQueryError(
+                "investigation prompt projection admission did not converge"
+            )
+        signature = projection_signature(projection)
+        if signature in seen_signatures:
+            raise InvestigationQueryError(
+                "investigation prompt projection states are not monotonic"
+            )
+        seen_signatures.add(signature)
+
+        candidate = complete_candidate(state_start)
+        if candidate is not None and candidate[1] <= maximum_prompt_bytes:
+            admitted = candidate
+        if state_start == high:
+            break
+
+        high_projection = projection_at(high)
+        if high_projection is None:
+            raise InvestigationQueryError(
+                "investigation prompt projection admission did not converge"
+            )
+        if projection_signature(high_projection) == signature:
+            break
+
+        # Within one structural state only the accounting integers vary.
+        # Locate the first byte budget whose structural signature differs.
+        transition_low = state_start + 1
+        transition_high = high
+        while transition_low < transition_high:
+            midpoint = transition_low + (
+                (transition_high - transition_low) // 2
+            )
+            midpoint_projection = projection_at(midpoint)
+            if midpoint_projection is None:
+                transition_low = midpoint + 1
+            elif projection_signature(midpoint_projection) == signature:
+                transition_low = midpoint + 1
+            else:
+                transition_high = midpoint
+        next_projection = projection_at(transition_low)
+        if (
+            next_projection is None
+            or projection_signature(next_projection) == signature
+        ):
+            raise InvestigationQueryError(
+                "investigation prompt projection transition did not converge"
+            )
+        state_start = transition_low
+
+    if admitted is None:
+        raise InvestigationQueryError(
+            "no safe prompt budget remains for complete investigation "
+            "query evidence and its refreshed citation contract"
+        )
+
+    candidate, encoded_size = admitted
+    prompt_package.pop("investigation_query_results", None)
+    prompt_package.pop("evidence_reference_contract", None)
+    prompt_package["investigation_query_results"] = candidate[
+        "investigation_query_results"
+    ]
+    prompt_package["evidence_reference_contract"] = candidate[
+        "evidence_reference_contract"
+    ]
+    if hosted:
+        synchronize_hosted_investigation_contract(prompt_package)
+    final_size = len(
+        _investigation_prompt_json_bytes(
+            model_safe_copy(prompt_package, hosted=hosted)
+        )
+    )
+    if final_size != encoded_size or final_size > maximum_prompt_bytes:
+        raise InvestigationQueryError(
+            "investigation follow-up prompt exceeds max_prompt_bytes"
+        )
+    return final_size
 
 
 def _investigation_round_audit(round_result: dict[str, Any]) -> dict[str, Any]:
@@ -4866,10 +6343,6 @@ def _investigation_round_audit(round_result: dict[str, Any]) -> dict[str, Any]:
         ][:MAX_INVESTIGATION_QUERIES_PER_ROUND],
     }
 
-
-INVESTIGATION_QUERY_SUCCESS_STATUSES = frozenset(
-    {"ok", "complete", "completed", "success", "succeeded"}
-)
 INVESTIGATION_QUERY_NONEXECUTION_STATUSES = frozenset(
     {"rejected", "denied", "blocked", "unauthorized", "forbidden"}
 )
@@ -5006,7 +6479,7 @@ def investigation_query_outcome_summary(
 
     def count_status(status: Any, logical_queries: int = 1) -> None:
         normalized = str(status or "").strip().lower()
-        if normalized in {"ok", "complete", "completed", "success", "succeeded"}:
+        if normalized in INVESTIGATION_QUERY_SUCCESS_STATUSES:
             counts["successful_queries"] += logical_queries
         elif normalized == "partial":
             counts["partial_queries"] += logical_queries
@@ -5073,7 +6546,7 @@ def investigation_query_outcome_summary(
                     nested_status = nested.get("status")
                     if (
                         str(nested_status or "").strip().lower()
-                        in {"ok", "complete", "completed", "success", "succeeded"}
+                        in INVESTIGATION_QUERY_SUCCESS_STATUSES
                         and (
                             controls_valid is False
                             or nested.get("semantic_valid") is False
@@ -5326,6 +6799,14 @@ def apply_investigation_query_loop(
             or DEFAULT_MAX_PROMPT_BYTES
         )
         hosted_route = model_route_is_hosted(route, settings)
+        if canonical_model_route(
+            route,
+            enabled_agent_model_routes(settings),
+        ).startswith("codex-cli:"):
+            maximum_prompt_bytes = min(
+                maximum_prompt_bytes,
+                CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES,
+            )
         serialized_prompt_bytes = len(
             json.dumps(
                 model_safe_copy(prompt_package, hosted=hosted_route),
@@ -5635,52 +7116,26 @@ def apply_investigation_query_loop(
             getattr(args, "max_prompt_bytes", DEFAULT_MAX_PROMPT_BYTES)
             or DEFAULT_MAX_PROMPT_BYTES
         )
-        baseline = dict(prompt_package)
-        baseline.pop("investigation_query_results", None)
         hosted_route = model_route_is_hosted(route, settings)
-        baseline_bytes = len(
-            json.dumps(
-                model_safe_copy(baseline, hosted=hosted_route),
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
-            ).encode("utf-8")
-        )
-        evidence_budget = min(
-            MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES,
-            maximum_prompt_bytes - baseline_bytes - 1024,
-        )
-        if evidence_budget < 4096:
-            raise InvestigationQueryError(
-                "no safe prompt budget remains for investigation query evidence"
+        if canonical_model_route(
+            route,
+            enabled_agent_model_routes(settings),
+        ).startswith("codex-cli:"):
+            maximum_prompt_bytes = min(
+                maximum_prompt_bytes,
+                CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES,
             )
-        prompt_package["investigation_query_results"] = (
-            _investigation_prompt_payload(
-                rounds,
-                maximum_bytes=evidence_budget,
-            )
+        _admit_investigation_query_prompt(
+            prompt_package,
+            rounds,
+            maximum_prompt_bytes=maximum_prompt_bytes,
+            hosted=hosted_route,
         )
-        # Refresh the exact citation allowlist after each trusted broker round.
-        # Otherwise the model can see a query result but cannot cite its
-        # collector-owned digest during final deterministic validation.
-        attach_evidence_reference_contract(prompt_package)
         observe_harness(
             lambda: harness_runtime.catalogue_prompt_evidence(prompt_package)
             if harness_runtime is not None
             else None
         )
-        serialized_prompt_bytes = len(
-            json.dumps(
-                model_safe_copy(prompt_package, hosted=hosted_route),
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
-            ).encode("utf-8")
-        )
-        if serialized_prompt_bytes > maximum_prompt_bytes:
-            raise InvestigationQueryError(
-                "investigation follow-up prompt exceeds max_prompt_bytes"
-            )
         model_call_id = f"primary-followup-{round_number}"
         observe_harness(
             lambda: harness_runtime.preflight_model_call(
@@ -6324,6 +7779,22 @@ def prepare_codex_cli_transport(
         system_prompt_file=system_prompt_file,
         independent_review=independent_review,
     )
+    configured_package_limit = int(
+        getattr(args, "max_prompt_bytes", CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES)
+        or CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES
+    )
+    runtime_package_limit = min(
+        configured_package_limit,
+        CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES,
+    )
+    package_bytes = len(
+        _investigation_prompt_json_bytes(payload["prompt_package"])
+    )
+    if package_bytes > runtime_package_limit:
+        raise SystemExit(
+            "Codex CLI runtime prompt package exceeded the "
+            f"{runtime_package_limit}-byte admission limit"
+        )
     serialized = json.dumps(
         payload,
         sort_keys=True,
@@ -7194,6 +8665,8 @@ def analyze_model_route(
         raise SystemExit(
             f"Configured analysis model route is not enabled: {route or 'none'}"
         )
+    if model_route_is_hosted(route, settings):
+        synchronize_hosted_investigation_contract(prompt_package)
     if route in {"gpt-cli", "codex-cli"}:
         response = cloud_cli_chat(
             prompt_package,

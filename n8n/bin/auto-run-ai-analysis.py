@@ -55,6 +55,7 @@ SEVERITY_PRIORITY = ("critical", "high", "medium", "low", "informational")
 ELIGIBLE_FILTER_STATUSES = ("accepted", "escalated", "unknown", "suppressed")
 TEST_PREFIXES = ("phase%", "config-%", "internal-test-%", "sqlite-%", "policy-%", "codex-%")
 DEFAULT_MAX_PROMPT_BYTES = max(256 * 1024, int(os.environ.get("SOC_AI_MAX_PROMPT_PACKAGE_BYTES", 4 * 1024 * 1024)))
+CODEX_CLI_INITIAL_PROMPT_PACKAGE_BYTES = 320 * 1024
 CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES = 384 * 1024
 DEFAULT_MAX_CHILD_STDOUT_BYTES = max(1024 * 1024, int(os.environ.get("SOC_AI_SCHEDULER_MAX_STDOUT_BYTES", 16 * 1024 * 1024)))
 DEFAULT_MAX_CHILD_STDERR_BYTES = max(256 * 1024, int(os.environ.get("SOC_AI_SCHEDULER_MAX_STDERR_BYTES", 2 * 1024 * 1024)))
@@ -381,16 +382,12 @@ def cli_agent_roles(settings_path: Path) -> set[str]:
     return cli_roles
 
 
-def effective_prompt_package_limit(
+def _role_uses_codex_cli(
     args: argparse.Namespace,
     *,
     agent_role: str = "",
-) -> int:
-    """Clamp hosted Codex work to the checked-in context-safe package budget."""
-    configured = int(
-        getattr(args, "max_prompt_bytes", DEFAULT_MAX_PROMPT_BYTES)
-        or DEFAULT_MAX_PROMPT_BYTES
-    )
+) -> bool:
+    """Return whether either configured route for this role uses Codex CLI."""
     role = str(agent_role or "").strip()
     settings_path = Path(
         getattr(args, "ai_settings_file", DEFAULT_AI_SETTINGS)
@@ -413,12 +410,40 @@ def effective_prompt_package_limit(
                     )
     except (OSError, ValueError, TypeError):
         routes = []
-    if any(
+    return any(
         route in {"gpt-cli", "codex-cli"}
         or route.startswith("codex-cli:")
         for route in routes
-    ):
+    )
+
+
+def effective_prompt_package_limit(
+    args: argparse.Namespace,
+    *,
+    agent_role: str = "",
+) -> int:
+    """Clamp the mutable Codex runner prompt to its transport-safe ceiling."""
+    configured = int(
+        getattr(args, "max_prompt_bytes", DEFAULT_MAX_PROMPT_BYTES)
+        or DEFAULT_MAX_PROMPT_BYTES
+    )
+    if _role_uses_codex_cli(args, agent_role=agent_role):
         return min(configured, CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES)
+    return configured
+
+
+def effective_initial_prompt_package_limit(
+    args: argparse.Namespace,
+    *,
+    agent_role: str = "",
+) -> int:
+    """Leave deterministic headroom for audited follow-up query evidence."""
+    configured = int(
+        getattr(args, "max_prompt_bytes", DEFAULT_MAX_PROMPT_BYTES)
+        or DEFAULT_MAX_PROMPT_BYTES
+    )
+    if _role_uses_codex_cli(args, agent_role=agent_role):
+        return min(configured, CODEX_CLI_INITIAL_PROMPT_PACKAGE_BYTES)
     return configured
 
 
@@ -667,6 +692,7 @@ NON_RETRYABLE_AI_FAILURE_MARKERS = (
     "prompt package exceeded",
     "codex cli complete transport exceeds",
     "investigation follow-up prompt exceeds",
+    "investigation query prompt projection exceeds",
     "no safe prompt budget remains",
     "codex cli executable was not found",
     "codex cli model name is invalid",
@@ -1818,7 +1844,7 @@ def build_prompt(
     related_limit = bounded_int(job_payload.get("related_limit"), args.related_limit, 1, 500)
     pcap_analysis_limit = bounded_int(job_payload.get("pcap_analysis_limit"), 8, 1, 25)
     agent_role = str(job_payload.get("agent_role") or "soc-analyst")
-    prompt_limit = effective_prompt_package_limit(
+    prompt_limit = effective_initial_prompt_package_limit(
         args,
         agent_role=agent_role,
     )

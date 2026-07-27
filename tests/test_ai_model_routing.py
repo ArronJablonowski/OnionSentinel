@@ -2,6 +2,7 @@
 """Contract tests for provider rosters and exact per-agent model routing."""
 from __future__ import annotations
 
+import copy
 import importlib.util
 import io
 import json
@@ -500,7 +501,7 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertNotIn("sh", seen_command)
         self.assertNotIn("this must never execute", " ".join(seen_command))
 
-    def test_codex_rejects_oversized_complete_transport_before_spawn(self) -> None:
+    def test_codex_rejects_oversized_runtime_package_before_spawn(self) -> None:
         args = type(
             "Args",
             (),
@@ -527,8 +528,8 @@ class AiModelRoutingTests(unittest.TestCase):
             mock.patch.object(self.runner, "run_bounded_command") as run,
             self.assertRaisesRegex(
                 SystemExit,
-                "Codex CLI complete transport exceeds the "
-                f"{self.runner.CODEX_CLI_MAX_STDIN_BYTES}-byte",
+                "Codex CLI runtime prompt package exceeded the "
+                f"{self.runner.CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES}-byte",
             ),
         ):
             self.runner.cloud_cli_chat(
@@ -538,6 +539,97 @@ class AiModelRoutingTests(unittest.TestCase):
             )
 
         run.assert_not_called()
+
+    def test_codex_runtime_package_and_stdin_boundaries_are_exact(self) -> None:
+        args = type("Args", (), {})()
+
+        def exact_padding(container: dict, key: str, target: int) -> str:
+            baseline = json.loads(json.dumps(container))
+            baseline[key] = ""
+            overhead = len(json.dumps(
+                baseline,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"))
+            self.assertGreaterEqual(target, overhead)
+            return "x" * (target - overhead)
+
+        package = {"padding": ""}
+        package["padding"] = exact_padding(
+            package,
+            "padding",
+            self.runner.CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES,
+        )
+        package_payload = {
+            "task": "bounded task",
+            "system_prompt": "bounded system",
+            "prompt_package": package,
+        }
+        with mock.patch.object(
+            self.runner,
+            "cli_analysis_payload",
+            return_value=package_payload,
+        ):
+            _payload, serialized = (
+                self.runner.prepare_codex_cli_transport({}, args)
+            )
+        self.assertLessEqual(
+            len(serialized.encode("utf-8")),
+            self.runner.CODEX_CLI_MAX_STDIN_BYTES,
+        )
+
+        oversized_package = copy.deepcopy(package_payload)
+        oversized_package["prompt_package"]["padding"] += "x"
+        with (
+            mock.patch.object(
+                self.runner,
+                "cli_analysis_payload",
+                return_value=oversized_package,
+            ),
+            self.assertRaisesRegex(
+                SystemExit,
+                "runtime prompt package exceeded",
+            ),
+        ):
+            self.runner.prepare_codex_cli_transport({}, args)
+
+        stdin_payload = {
+            "task": "",
+            "system_prompt": "",
+            "prompt_package": {"response_schema": {}},
+        }
+        stdin_payload["task"] = exact_padding(
+            stdin_payload,
+            "task",
+            self.runner.CODEX_CLI_MAX_STDIN_BYTES,
+        )
+        with mock.patch.object(
+            self.runner,
+            "cli_analysis_payload",
+            return_value=stdin_payload,
+        ):
+            _payload, serialized = (
+                self.runner.prepare_codex_cli_transport({}, args)
+            )
+        self.assertEqual(
+            len(serialized.encode("utf-8")),
+            self.runner.CODEX_CLI_MAX_STDIN_BYTES,
+        )
+
+        oversized_stdin = copy.deepcopy(stdin_payload)
+        oversized_stdin["task"] += "x"
+        with (
+            mock.patch.object(
+                self.runner,
+                "cli_analysis_payload",
+                return_value=oversized_stdin,
+            ),
+            self.assertRaisesRegex(
+                SystemExit,
+                "complete transport exceeds",
+            ),
+        ):
+            self.runner.prepare_codex_cli_transport({}, args)
 
     def test_codex_uses_canonical_incident_prompt_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -663,7 +755,7 @@ class AiModelRoutingTests(unittest.TestCase):
             mock.patch.object(self.runner, "run_bounded_command") as run,
             self.assertRaisesRegex(
                 SystemExit,
-                "Codex CLI complete transport exceeds",
+                "Codex CLI runtime prompt package exceeded",
             ),
         ):
             self.runner.cloud_cli_chat(
@@ -717,7 +809,7 @@ class AiModelRoutingTests(unittest.TestCase):
                     ) as run,
                     self.assertRaisesRegex(
                         SystemExit,
-                        "Codex CLI complete transport exceeds",
+                        "Codex CLI runtime prompt package exceeded",
                     ),
                 ):
                     self.runner.cloud_cli_chat(
