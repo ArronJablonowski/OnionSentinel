@@ -48,6 +48,20 @@ class ArchitectureHardeningTest(unittest.TestCase):
         self.assertIn("<string>--max-prompt-bytes</string>", plist)
         self.assertIn("<string>1048576</string>", plist)
 
+    def test_installer_runs_locked_alert_store_install_from_package_directory(self):
+        installer = (
+            ROOT / "n8n/bin/install-macstudio-stack.zsh"
+        ).read_text(encoding="utf-8")
+        self.assertIn('cd "$STACK_DIR/alert_store"', installer)
+        self.assertIn(
+            '/opt/homebrew/bin/npm ci --omit=dev',
+            installer,
+        )
+        self.assertNotIn(
+            '/opt/homebrew/bin/npm --prefix "$STACK_DIR/alert_store"',
+            installer,
+        )
+
     def test_local_analysis_workers_are_event_driven_with_timer_fallbacks(self):
         ollama_plist = (ROOT / "n8n/launchd/com.arron.soc.ai-analysis.plist").read_text(encoding="utf-8")
         cli_plist = (ROOT / "n8n/launchd/com.arron.soc.ai-analysis-cli.plist").read_text(encoding="utf-8")

@@ -433,7 +433,10 @@ if (major < 20 || (major === 20 && minor < 17)) {
   process.exit(1);
 }
 '
-PATH="/opt/homebrew/bin:$PATH" /opt/homebrew/bin/npm --prefix "$STACK_DIR/alert_store" ci --omit=dev
+(
+  cd "$STACK_DIR/alert_store"
+  PATH="/opt/homebrew/bin:$PATH" /opt/homebrew/bin/npm ci --omit=dev
+)
 
 /usr/local/bin/docker compose -f "$STACK_DIR/docker-compose.yml" --project-directory "$STACK_DIR" up -d
 # Reload LaunchAgents so Docker/n8n are monitored after future reboots.
