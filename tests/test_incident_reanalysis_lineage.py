@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import os
 import socket
@@ -23,6 +24,16 @@ ALERT_STORE_DIR = REPO_ROOT / "n8n" / "alert_store"
 ALERT_STORE = ALERT_STORE_DIR / "alert_store.js"
 SCORING_RULES = ALERT_STORE_DIR / "config" / "scoring_rules.json"
 DEPLOYED_RELEASE = "d" * 40
+COHORT_MODULE_PATH = (
+    REPO_ROOT / "operations" / "run-incident-harness-cohort.py"
+)
+COHORT_SPEC = importlib.util.spec_from_file_location(
+    "run_incident_harness_cohort_for_lineage_test",
+    COHORT_MODULE_PATH,
+)
+assert COHORT_SPEC and COHORT_SPEC.loader
+cohort = importlib.util.module_from_spec(COHORT_SPEC)
+COHORT_SPEC.loader.exec_module(cohort)
 
 
 def available_port() -> int:
@@ -1189,6 +1200,13 @@ class IncidentReanalysisLineageTests(unittest.TestCase):
             generated_at="2026-07-25T18:00:01Z",
         )
         payload["response"]["observed_at"] = "2026-07-25T18:00:00Z"
+        payload["response"]["summary"] = "Observed café traffic — reviewed."
+        payload["response"]["confidence_score"] = 0.0000001
+        payload["response"]["serialization_probe"] = {
+            "observed_at": "2026-07-25T18:00:00Z",
+            "\ue000": "private-use",
+            "😀": "astral",
+        }
 
         raw_body = json.dumps(
             payload,
@@ -1221,14 +1239,9 @@ class IncidentReanalysisLineageTests(unittest.TestCase):
                 (payload["analysis_id"],),
             ).fetchone()[0]
         stored_response = json.loads(stored_response_json)
-        canonical_stored_response = json.dumps(
-            stored_response,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        expected_stored_digest = hashlib.sha256(
-            canonical_stored_response
-        ).hexdigest()
+        expected_stored_digest = cohort.alert_store_response_sha256(
+            stored_response_json
+        )
         self.assertEqual(
             accepted["stored_response_sha256"],
             expected_stored_digest,

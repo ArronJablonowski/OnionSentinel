@@ -28,8 +28,10 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import sqlite3
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -46,6 +48,7 @@ MAX_COHORT_SIZE = 100
 MAX_HTTP_BODY_BYTES = 1_000_000
 MAX_SOURCE_ROWS_BYTES = 2_000_000
 MAX_MANIFEST_BYTES = 10_000_000
+MAX_STORED_RESPONSE_BYTES = 8_000_000
 MAX_STABLE_GROUP_KEY_BYTES = 2048
 TERMINAL_MONITOR_STATES = {"completed", "failed", "skipped"}
 ACTIVE_JOB_STATES = {"pending", "processing"}
@@ -62,6 +65,25 @@ SHA256_RE = re.compile(r"[a-f0-9]{64}")
 RELEASE_ID_RE = re.compile(r"[a-f0-9]{40}")
 SAFE_ROUTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{2,255}")
 TRACE_EVALUATOR_PATH = Path(__file__).with_name("evaluate-harness-traces.py")
+ALERT_STORE_CANONICAL_SHA256_JS = r"""
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const canonicalize = (item) => {
+  if (Array.isArray(item)) return item.map((entry) => canonicalize(entry));
+  if (item && typeof item === "object") {
+    return Object.fromEntries(
+      Object.keys(item).sort().map((key) => [key, canonicalize(item[key])]),
+    );
+  }
+  return item;
+};
+const value = JSON.parse(fs.readFileSync(0, "utf8"));
+process.stdout.write(
+  crypto.createHash("sha256")
+    .update(JSON.stringify(canonicalize(value)))
+    .digest("hex"),
+);
+"""
 MODEL_CALL_CONTRACT_SCHEMA = "onion-sentinel-model-call-contract-v1"
 MAX_RUNTIME_MODEL_CALLS = 6
 DISPATCH_ID_SCHEMA = "onion-sentinel-cohort-member-dispatch-v1"
@@ -108,6 +130,53 @@ def canonical_bytes(value: Any) -> bytes:
 
 def sha256_value(value: Any) -> str:
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
+def alert_store_response_sha256(raw_response: str) -> str:
+    """Reproduce alert-store's JavaScript canonical response digest exactly.
+
+    Python's JSON serializer cannot be used for this receipt comparison:
+    ECMAScript differs in number formatting and orders object keys by UTF-16
+    code units. Execute a fixed, input-only Node program so the observer proves
+    the same byte representation that alert-store hashed at commit time.
+    """
+
+    encoded = raw_response.encode("utf-8")
+    if not encoded or len(encoded) > MAX_STORED_RESPONSE_BYTES:
+        raise CohortError("stored analysis response exceeds its safe bound")
+    node = shutil.which("node")
+    if not node:
+        for candidate in (
+            Path("/opt/homebrew/bin/node"),
+            Path("/usr/local/bin/node"),
+            Path("/usr/bin/node"),
+        ):
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                node = str(candidate)
+                break
+    if not node:
+        raise CohortError(
+            "Node.js is required to verify alert-store response receipts"
+        )
+    try:
+        completed = subprocess.run(
+            [node, "-e", ALERT_STORE_CANONICAL_SHA256_JS],
+            input=encoded,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CohortError(
+            "could not canonicalize the stored analysis response"
+        ) from exc
+    digest = completed.stdout.decode("ascii", errors="ignore").strip()
+    if completed.returncode != 0 or not SHA256_RE.fullmatch(digest):
+        raise CohortError(
+            "alert-store response canonicalization failed closed"
+        )
+    return digest
 
 
 def _digest_bound(document: Mapping[str, Any], field: str) -> dict[str, Any]:
@@ -2750,15 +2819,9 @@ def _analysis_metadata(
         ) from exc
     if not isinstance(response, dict):
         raise CohortError(f"analysis {analysis_id} response is not an object")
-    item["response_canonical_sha256"] = hashlib.sha256(
-        json.dumps(
-            response,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()
+    item["response_canonical_sha256"] = alert_store_response_sha256(
+        raw_response
+    )
     item["result"] = {
         key: response.get(key)
         for key in (

@@ -2288,6 +2288,13 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             "detection_validity": "matched_intent",
             "activity_disposition": "suspicious",
             "handling": "investigate",
+            "summary": "Observed café traffic — reviewed.",
+            "confidence_score": 0.0000001,
+            "serialization_probe": {
+                "observed_at": "2026-07-25T18:00:00Z",
+                "\ue000": "private-use",
+                "😀": "astral",
+            },
             "_analysis_model": "gpt-5.6-sol",
             "_analysis_model_path": "codex_cli",
             "_analysis_model_route": "codex-cli:gpt-5.6-sol:high",
@@ -2372,6 +2379,10 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         self.assertEqual(
             result["analysis"]["result"]["_analysis_harness"],
             "onion-sentinel",
+        )
+        self.assertEqual(
+            result["analysis"]["response_canonical_sha256"],
+            cohort.alert_store_response_sha256(json.dumps(response)),
         )
         manifest = cohort.load_private_manifest(self.manifest_path)
         analysis = manifest["members"][0]["monitor"]["analysis"]
