@@ -855,6 +855,99 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
             )
             self.assertTrue(report["runs"][0]["integrity"]["valid"])
 
+    def test_projects_hash_bound_terminal_execution_controls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "harness.sqlite3"
+            policy = harness.HarnessPolicy.from_dict(
+                {
+                    "schema": harness.POLICY_SCHEMA,
+                    "version": "terminal-execution-controls",
+                    "enabled": True,
+                    "mode": "shadow",
+                    "budgets": dict(harness.DEFAULT_BUDGETS),
+                    "role_capabilities": {
+                        role: sorted(capabilities)
+                        for role, capabilities
+                        in harness.DEFAULT_ROLE_CAPABILITIES.items()
+                    },
+                    "approval_required": [],
+                    "memory": {
+                        "require_independent_agreement": True,
+                        "shared_requires_human_approval": True,
+                    },
+                }
+            )
+            route = "codex-cli:gpt-5.6-sol:high"
+            envelope = harness.JobEnvelope.from_prompt(
+                run_id="terminal-control-run",
+                prompt_package={
+                    "group_id": "1" * 20,
+                    "alert": {"alert_id": "alert-terminal-control"},
+                    "evidence_reference_contract": {"references": []},
+                },
+                role=harness.AgentRole.SOC_ANALYST.value,
+                assigned_route=route,
+                configuration={
+                    "reviewer_route": "codex-cli:gpt-5.6-sol:xhigh",
+                    "evaluation_memory_frozen": True,
+                },
+            )
+            run = harness.HarnessRun(
+                harness.HarnessStore(database),
+                envelope,
+                policy,
+            )
+            run.preflight_model_call(
+                call_id="primary",
+                input_value={"case": "terminal-control"},
+                requested_route=route,
+                purpose="primary analysis",
+            )
+            run.model_call(
+                call_id="primary",
+                purpose="primary analysis",
+                requested_route=route,
+                response={
+                    "_analysis_model": "gpt-5.6-sol",
+                    "_analysis_model_path": "frontier-codex-cli",
+                    "_analysis_provider": "codex-cli",
+                    "_analysis_model_route": route,
+                },
+                input_value={"case": "terminal-control"},
+                duration_seconds=0.1,
+            )
+            run.complete(
+                {
+                    "analysis_id": run.run_id,
+                    "submitted_response_sha256": "a" * 64,
+                    "stored_response_sha256": "b" * 64,
+                    "evaluation_memory_frozen": True,
+                },
+                check_budget=False,
+            )
+
+            report = evaluator.evaluate_database(database, run.run_id)
+            result = report["runs"][0]
+            self.assertEqual(result["assigned_route"], route)
+            self.assertEqual(
+                result["assigned_reviewer_route"],
+                "codex-cli:gpt-5.6-sol:xhigh",
+            )
+            self.assertEqual(
+                result["terminal_execution_summary"],
+                {
+                    "analysis_id": run.run_id,
+                    "submitted_response_sha256": "a" * 64,
+                    "stored_response_sha256": "b" * 64,
+                    "evaluation_memory_frozen": True,
+                },
+            )
+            self.assertEqual(
+                result["models"]["successful_primary_call_count"],
+                1,
+            )
+            self.assertTrue(result["integrity"]["valid"])
+
     def test_installer_preserves_policy_and_installs_harness_assets(self):
         source = INSTALLER_PATH.read_text(encoding="utf-8")
         policy = '$STACK_DIR/config/investigation_harness_policy.json'

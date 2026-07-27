@@ -1322,15 +1322,17 @@ def flush_analysis_index_queue(
     memory_committed_dir: Path = DEFAULT_MEMORY_WRITEBACK_COMMITTED_DIR,
     memory_receipt_dir: Path = DEFAULT_MEMORY_WRITEBACK_RECEIPT_DIR,
     limit: int = 100,
+    memory_writeback_enabled: bool = True,
 ) -> tuple[int, int, int]:
     # A previous process may have crashed after the authoritative commit. These
     # tasks are safe to replay because memory reinforcement is analysis-id
     # idempotent.
-    resume_committed_memory_writebacks(
-        committed_dir=memory_committed_dir,
-        receipt_dir=memory_receipt_dir,
-        limit=limit,
-    )
+    if memory_writeback_enabled:
+        resume_committed_memory_writebacks(
+            committed_dir=memory_committed_dir,
+            receipt_dir=memory_receipt_dir,
+            limit=limit,
+        )
     if not queue_dir.exists():
         return 0, 0, 0
     completed = 0
@@ -1350,7 +1352,7 @@ def flush_analysis_index_queue(
             )
             path.unlink(missing_ok=True)
             completed += 1
-            if committed_task is not None:
+            if committed_task is not None and memory_writeback_enabled:
                 # Memory is supplemental. A recoverable lane or receipt failure
                 # keeps the committed task for the next startup but does not
                 # reclassify the already-committed analysis index as failed.
@@ -10004,9 +10006,17 @@ def write_outputs(
 
 def main() -> int:
     args = parse_args()
+    # Evaluation isolation must be known before any crash-recovery journal is
+    # replayed. Publishing a completed analysis remains safe while frozen, but
+    # its committed memory task must stay durable and untouched until a normal
+    # non-evaluation worker resumes it.
+    evaluation_memory_frozen = boolean_setting(
+        os.environ.get(EVALUATION_FREEZE_MEMORY_ENV)
+    )
     if args.flush_index_only:
         completed, failed, quarantined = flush_analysis_index_queue(
-            args.alert_store_url
+            args.alert_store_url,
+            memory_writeback_enabled=not evaluation_memory_frozen,
         )
         print(json.dumps({
             "ok": failed == 0,
@@ -10037,7 +10047,8 @@ def main() -> int:
         # another inference. A failed local API call never requires rerunning
         # the LLM because the completed result remains in this durable spool.
         _, pending_index_failures, _ = flush_analysis_index_queue(
-            args.alert_store_url
+            args.alert_store_url,
+            memory_writeback_enabled=not evaluation_memory_frozen,
         )
         if pending_index_failures:
             raise RuntimeError(
@@ -10060,9 +10071,6 @@ def main() -> int:
             validate_incident_evidence_artifact(prompt_package.get("incident_response_evidence"))
 
         settings = effective_ai_settings(args)
-        evaluation_memory_frozen = boolean_setting(
-            os.environ.get(EVALUATION_FREEZE_MEMORY_ENV)
-        )
         live_osquery_config = prepare_live_osquery_context(prompt_package, agent_role)
         attach_evidence_reference_contract(prompt_package)
         enabled_routes = enabled_agent_model_routes(settings)
@@ -10391,6 +10399,13 @@ def main() -> int:
                 allowed=reviewer_memory_allowed,
                 eligibility_reason=reviewer_memory_reason,
             )
+        # Collector-owned evaluation attestation. Model output cannot opt into
+        # or forge this control because the worker overwrites it after all
+        # inference and binds the final value to both the stored response hash
+        # and terminal harness event.
+        response["_analysis_evaluation_memory_frozen"] = (
+            evaluation_memory_frozen
+        )
         role_memory_file = Path(
             str(prompt_package.get("agent_memory_file") or "")
         ).expanduser()
@@ -10616,6 +10631,9 @@ def main() -> int:
                         ),
                         "final_disposition_status": response.get(
                             "final_disposition_status"
+                        ),
+                        "evaluation_memory_frozen": (
+                            evaluation_memory_frozen
                         ),
                         "memory_writeback_receipt_sha256": (
                             canonical_payload_digest(memory_receipt)

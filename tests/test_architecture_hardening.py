@@ -95,6 +95,28 @@ class ArchitectureHardeningTest(unittest.TestCase):
         self.assertIn("<key>StartInterval</key>", plist)
         self.assertIn("com.arron.soc.dashboard-refresh.plist", installer)
 
+    def test_harness_trace_retention_is_installed_and_hourly_bounded(self):
+        installer = (
+            ROOT / "n8n/bin/install-macstudio-stack.zsh"
+        ).read_text(encoding="utf-8")
+        plist = (
+            ROOT
+            / "n8n/launchd/com.arron.onion-sentinel.harness-maintenance.plist"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'cp "$REPO_DIR/n8n/bin/maintain-investigation-harness.py"',
+            installer,
+        )
+        self.assertIn(
+            "com.arron.onion-sentinel.harness-maintenance.plist",
+            installer,
+        )
+        self.assertIn("<key>StartInterval</key>", plist)
+        self.assertIn("<integer>3600</integer>", plist)
+        self.assertIn("<string>--apply</string>", plist)
+        self.assertIn("<string>--max-terminal-runs</string>", plist)
+        self.assertIn("<string>--max-live-bytes</string>", plist)
+
     def test_repair_install_preserves_live_scoring_policy(self):
         installer = (ROOT / "n8n/bin/install-macstudio-stack.zsh").read_text(encoding="utf-8")
         destination = '$STACK_DIR/alert_store/config/scoring_rules.json'

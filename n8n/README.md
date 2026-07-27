@@ -24,6 +24,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `bin/` | Local AI prompt, analysis, scheduler, rollup, and stack management scripts. |
 | `bin/maintain-alert-store-sqlite.zsh` | Hourly SQLite `quick_check`, verified backup, and recovery-candidate maintenance. |
 | `bin/backup-onion-sentinel-runtime.py` | Daily atomic SQLite, PostgreSQL, and secret-bearing runtime recovery bundle. |
+| `bin/maintain-investigation-harness.py` | Owner-only harness trace integrity, bounded retention, WAL checkpoint, and disk-accounting pass. |
 | `bin/report-production-soak.py` | Read-only 48-hour SLO coverage and acceptance reporter. |
 | `bin/run-recovery-restore-drill.py` | Full SQLite and network-isolated disposable PostgreSQL restore qualification. |
 | `bin/ensure-onion-sentinel-web.py` | One-minute service-identity guard that safely recovers the dedicated dashboard port, bootstraps the exact allowlisted LaunchAgent if launchd lost the job, and refuses unknown listeners. |
@@ -140,6 +141,16 @@ python3 operations/evaluate-harness-traces.py \
   --db "$HOME/n8n-local/alert_store_data/investigation-harness.sqlite3" \
   --fail-on-invalid-chain
 ```
+
+Daily recovery bundles include the harness SQLite database when it exists and
+perform an independent logical restore check before publication. The hourly
+maintenance LaunchAgent retains terminal traces for at most 30 days and 10,000
+runs, applies a 2 GiB live-page budget, deletes at most 1,000 terminal runs per
+pass, and never deletes an active trace. Retention is blocked unless a recent
+hash-verified runtime bundle contains a restorable harness snapshot. Its
+owner-only accounting report is
+`logs/investigation-harness-maintenance.json`; run the helper without
+`--apply` for a non-mutating preview.
 
 Verify the complete five-agent memory contract after installation or prompt
 maintenance:

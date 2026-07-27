@@ -78,7 +78,9 @@ python3 operations/run-incident-harness-cohort.py freeze-from-rows \
   --manifest /path/to/private/cohort.json \
   --cohort-id newest-20-harness-evaluation \
   --reason "Evaluate the Incident Responder harness against a frozen cohort." \
-  --expected-count 20
+  --expected-count 20 \
+  --expected-assigned-route codex-cli:gpt-5.5:high \
+  --expected-reviewer-route codex-cli:gpt-5.6-sol:xhigh
 ```
 
 The import preserves source order and validates every dashboard group, stable
@@ -119,9 +121,21 @@ python3 operations/run-incident-harness-cohort.py monitor \
 python3 operations/run-incident-harness-cohort.py export \
   --db ~/n8n-local/alert_store_data/alerts.sqlite3 \
   --manifest /path/to/private/cohort.json \
+  --harness-db ~/n8n-local/alert_store_data/investigation-harness.sqlite3 \
   --output /path/to/private/cohort-results.json
 ```
 
 The export includes identities, execution routing, result classifications,
-query-pack status/count/digests, and response hashes. It excludes raw alerts,
-prompts, model responses, query text/results, job payloads, and credentials.
+query-pack status/count/digests, response hashes, and one bounded proof for
+each exact harness trace. Export fails unless every member completed freshly
+after its one accepted dispatch. The proof binds the selected route, agent
+role, reanalysis task kind, shadow policy mode, terminal hash chain and ledger
+manifest, collector-owned memory-freeze attestation, and absence of
+non-read-only tool calls. It excludes raw alerts, prompts, model responses,
+query text/results, job payloads, and credentials.
+
+Accuracy grading is fail closed: provide both the SOC Analyst and Incident
+Responder exports made from the same source-row file. The offline evaluator
+refuses to score either role unless all 40 results pass their machine gates,
+the two exports have the same source SHA-256 and ordered identities, and every
+independent adjudication is bound to the exact fresh analysis ID.

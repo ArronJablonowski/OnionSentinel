@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -39,8 +40,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 
-SCHEMA = "onion-sentinel-incident-harness-cohort-v1"
-EXPORT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v1"
+SCHEMA = "onion-sentinel-incident-harness-cohort-v2"
+EXPORT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v2"
 MAX_COHORT_SIZE = 100
 MAX_HTTP_BODY_BYTES = 1_000_000
 MAX_SOURCE_ROWS_BYTES = 2_000_000
@@ -55,6 +56,9 @@ DASHBOARD_GROUP_ID_RE = re.compile(r"[a-f0-9]{12}")
 STABLE_GROUP_ID_RE = re.compile(r"[a-f0-9]{20}")
 CASE_ID_RE = re.compile(r"ir-[a-z0-9-]{1,80}")
 RUN_ID_RE = re.compile(r"irr-[a-z0-9-]{1,80}")
+SHA256_RE = re.compile(r"[a-f0-9]{64}")
+SAFE_ROUTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{2,255}")
+TRACE_EVALUATOR_PATH = Path(__file__).with_name("evaluate-harness-traces.py")
 
 
 class CohortError(RuntimeError):
@@ -185,6 +189,25 @@ def load_private_manifest(path: Path) -> dict[str, Any]:
     members = document.get("members")
     if not isinstance(members, list) or not members:
         raise CohortError("cohort manifest has no members")
+    contract = document.get("execution_contract")
+    if not isinstance(contract, dict) or contract != execution_contract(
+        expected_assigned_route=str(
+            (contract or {}).get("expected_assigned_route") or ""
+        ),
+        expected_reviewer_route=str(
+            (contract or {}).get("expected_reviewer_route") or ""
+        ),
+    ):
+        raise CohortError("cohort execution contract is missing or malformed")
+    frozen_plan_sha256 = str(document.get("frozen_plan_sha256") or "")
+    if (
+        not SHA256_RE.fullmatch(frozen_plan_sha256)
+        or not _constant_time_equal(
+            frozen_plan_sha256,
+            _frozen_plan_digest(document),
+        )
+    ):
+        raise CohortError("frozen plan digest does not match the manifest")
     return document
 
 
@@ -242,6 +265,113 @@ def validate_agent_role(value: str) -> str:
             "agent role must be incident-responder or soc-analyst"
         )
     return role
+
+
+def validate_model_route(value: str, label: str, *, allow_empty: bool = False) -> str:
+    route = str(value or "").strip()
+    if not route and allow_empty:
+        return ""
+    if not SAFE_ROUTE_RE.fullmatch(route):
+        raise CohortError(f"{label} is missing or malformed")
+    return route
+
+
+def execution_contract(
+    *,
+    expected_assigned_route: str,
+    expected_reviewer_route: str = "",
+) -> dict[str, Any]:
+    """Return the immutable controls required for a gradeable harness run."""
+
+    return {
+        "harness_required": True,
+        "harness_mode": "shadow",
+        "memory_frozen": True,
+        "expected_assigned_route": validate_model_route(
+            expected_assigned_route,
+            "expected assigned route",
+        ),
+        "expected_reviewer_route": validate_model_route(
+            expected_reviewer_route,
+            "expected reviewer route",
+            allow_empty=True,
+        ),
+    }
+
+
+def ordered_identity_projection(
+    members: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "rank": int(member["rank"]),
+            "dashboard_group_id": str(member["dashboard_group_id"]),
+            "stable_group_id": str(member["stable_group_id"]),
+            "representative_alert_id": str(
+                member["representative_alert_id"]
+            ),
+        }
+        for member in members
+    ]
+
+
+def _frozen_plan_digest(manifest: Mapping[str, Any]) -> str:
+    selection = manifest.get("selection")
+    members = (
+        manifest.get("members")
+        if isinstance(manifest.get("members"), list)
+        else []
+    )
+    identities = ordered_identity_projection(members)
+    if len(identities) != len(members):
+        raise CohortError("frozen plan member projection is incomplete")
+    return sha256_value(
+        {
+            "schema": manifest.get("schema"),
+            "cohort_id": manifest.get("cohort_id"),
+            "agent_role": manifest.get("agent_role"),
+            "count": manifest.get("count"),
+            "created_at": manifest.get("created_at"),
+            "selection": selection if isinstance(selection, dict) else {},
+            "execution_contract": manifest.get("execution_contract"),
+            "members": [
+                {
+                    **identity,
+                    "pre_state_sha256": sha256_value(
+                        member.get("pre_state")
+                        if isinstance(member.get("pre_state"), dict)
+                        else {}
+                    ),
+                    "dispatch_kind": str(
+                        (member.get("dispatch") or {}).get("kind") or ""
+                    ),
+                }
+                for identity, member in zip(
+                    identities,
+                    members,
+                )
+            ],
+        }
+    )
+
+
+def _parse_timestamp(value: Any, label: str) -> dt.datetime:
+    text = str(value or "").strip()
+    if not text:
+        raise CohortError(f"{label} is missing")
+    text = re.sub(
+        r"^(\d{4}-\d{2}-\d{2})\s+",
+        r"\1T",
+        text,
+        count=1,
+    )
+    try:
+        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise CohortError(f"{label} is not an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise CohortError(f"{label} must include a timezone")
+    return parsed.astimezone(dt.timezone.utc)
 
 
 def connect_read_only(database_path: Path) -> sqlite3.Connection:
@@ -713,6 +843,8 @@ def freeze_cohort(
     cohort_id: str,
     reason: str,
     count: int,
+    expected_assigned_route: str = "codex-cli:gpt-5.6-sol:high",
+    expected_reviewer_route: str = "",
     dry_run: bool = False,
 ) -> dict[str, Any]:
     cohort_id, reason = validate_cohort_identity(cohort_id, reason)
@@ -791,6 +923,7 @@ def freeze_cohort(
                 f"requested {count} distinct stable groups but only "
                 f"{len(selected)} were available"
             )
+        identities = ordered_identity_projection(selected)
         manifest: dict[str, Any] = {
             "schema": SCHEMA,
             "cohort_id": cohort_id,
@@ -798,6 +931,17 @@ def freeze_cohort(
             "agent_role": "incident-responder",
             "count": count,
             "created_at": utc_now(),
+            "selection": {
+                "mode": "database_newest",
+                "source_sha256": sha256_value(identities),
+                "source_count": len(identities),
+                "order_preserved": True,
+                "ordered_identity_sha256": sha256_value(identities),
+            },
+            "execution_contract": execution_contract(
+                expected_assigned_route=expected_assigned_route,
+                expected_reviewer_route=expected_reviewer_route,
+            ),
             "database": {
                 "path": str(database_path.expanduser().resolve()),
                 "schema_sha256": schema_fingerprint(connection),
@@ -810,6 +954,7 @@ def freeze_cohort(
             "state": "frozen",
             "members": selected,
         }
+        manifest["frozen_plan_sha256"] = _frozen_plan_digest(manifest)
     finally:
         connection.close()
     if dry_run:
@@ -916,6 +1061,8 @@ def freeze_cohort_from_rows(
     reason: str,
     expected_count: int,
     agent_role: str = "incident-responder",
+    expected_assigned_route: str = "codex-cli:gpt-5.6-sol:high",
+    expected_reviewer_route: str = "",
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Import exact preselected identities; never recompute cohort membership."""
@@ -1020,6 +1167,7 @@ def freeze_cohort_from_rows(
                     "monitor": {"state": "not_started"},
                 }
             )
+        identities = ordered_identity_projection(members)
         manifest: dict[str, Any] = {
             "schema": SCHEMA,
             "cohort_id": cohort_id,
@@ -1032,7 +1180,12 @@ def freeze_cohort_from_rows(
                 "source_sha256": source_sha256,
                 "source_count": len(rows),
                 "order_preserved": True,
+                "ordered_identity_sha256": sha256_value(identities),
             },
+            "execution_contract": execution_contract(
+                expected_assigned_route=expected_assigned_route,
+                expected_reviewer_route=expected_reviewer_route,
+            ),
             "database": {
                 "path": str(database_path.expanduser().resolve()),
                 "schema_sha256": schema_fingerprint(connection),
@@ -1045,6 +1198,7 @@ def freeze_cohort_from_rows(
             "state": "frozen",
             "members": members,
         }
+        manifest["frozen_plan_sha256"] = _frozen_plan_digest(manifest)
     finally:
         connection.close()
     if dry_run:
@@ -1691,6 +1845,15 @@ def _analysis_metadata(
         ) from exc
     if not isinstance(response, dict):
         raise CohortError(f"analysis {analysis_id} response is not an object")
+    item["response_canonical_sha256"] = hashlib.sha256(
+        json.dumps(
+            response,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
     item["result"] = {
         key: response.get(key)
         for key in (
@@ -1706,6 +1869,7 @@ def _analysis_metadata(
             "_analysis_harness",
             "_analysis_model_route",
             "_analysis_input_mode",
+            "_analysis_evaluation_memory_frozen",
         )
         if key in response
         and isinstance(response.get(key), (str, int, float, bool, type(None)))
@@ -2021,17 +2185,363 @@ def monitor_cohort(
         time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
 
 
+def _load_trace_evaluator() -> Any:
+    spec = importlib.util.spec_from_file_location(
+        "onion_sentinel_cohort_trace_evaluator",
+        TRACE_EVALUATOR_PATH,
+    )
+    if spec is None or spec.loader is None:
+        raise CohortError("could not load the harness trace evaluator")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _prior_analysis_ids(member: Mapping[str, Any]) -> set[str]:
+    pre_state = (
+        member.get("pre_state")
+        if isinstance(member.get("pre_state"), dict)
+        else {}
+    )
+    identities = {
+        str(item)
+        for item in pre_state.get("soc_analysis_ids", [])
+        if str(item)
+    } if isinstance(pre_state.get("soc_analysis_ids"), list) else set()
+    for source in (
+        pre_state.get("latest_analysis"),
+        pre_state.get("incident_case"),
+    ):
+        if isinstance(source, dict):
+            identity = str(
+                source.get("analysis_id")
+                or source.get("latest_analysis_id")
+                or ""
+            )
+            if identity:
+                identities.add(identity)
+    return identities
+
+
+def _expected_task_kind(role: str, dispatch_kind: str) -> str:
+    if role == "soc-analyst" and dispatch_kind == "analyze":
+        # The explicit dashboard /analyze endpoint marks the queued job as a
+        # manual reanalysis. The harness must preserve that lineage instead of
+        # presenting this controlled rerun as first-pass alert intake.
+        return "reanalysis"
+    if role == "incident-responder" and dispatch_kind == "reanalyze":
+        return "reanalysis"
+    if role == "incident-responder" and dispatch_kind == "escalate":
+        return "incident-response"
+    raise CohortError(
+        f"dispatch {dispatch_kind!r} is invalid for agent role {role!r}"
+    )
+
+
+def _harness_execution_proof(
+    *,
+    harness_database_path: Path,
+    manifest: Mapping[str, Any],
+    member: Mapping[str, Any],
+    monitor: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Fail closed unless one fresh result has one valid successful trace."""
+
+    role = str(manifest.get("agent_role") or "")
+    contract = manifest.get("execution_contract")
+    if not isinstance(contract, dict):
+        raise CohortError("manifest has no execution contract")
+    dispatch = (
+        member.get("dispatch")
+        if isinstance(member.get("dispatch"), dict)
+        else {}
+    )
+    analysis = (
+        monitor.get("analysis")
+        if isinstance(monitor.get("analysis"), dict)
+        else {}
+    )
+    analysis_result = (
+        analysis.get("result")
+        if isinstance(analysis.get("result"), dict)
+        else {}
+    )
+    analysis_id = str(monitor.get("analysis_id") or "")
+    failures: list[str] = []
+    if str(monitor.get("state") or "") != "completed":
+        failures.append("result-not-completed")
+    if not analysis_id or str(analysis.get("analysis_id") or "") != analysis_id:
+        failures.append("analysis-id-binding-failed")
+    if analysis_id in _prior_analysis_ids(member):
+        failures.append("analysis-id-is-not-fresh")
+    if str(analysis.get("agent_role") or "") != role:
+        failures.append("analysis-role-mismatch")
+    if dispatch.get("state") != "accepted" or int(
+        dispatch.get("attempt_count") or 0
+    ) != 1:
+        failures.append("dispatch-not-exactly-once")
+    try:
+        dispatch_started = _parse_timestamp(
+            dispatch.get("started_at"),
+            "dispatch started_at",
+        )
+        analysis_generated = _parse_timestamp(
+            analysis.get("generated_at"),
+            "analysis generated_at",
+        )
+        if analysis_generated < dispatch_started:
+            failures.append("analysis-predates-dispatch")
+    except CohortError:
+        failures.append("freshness-timestamp-invalid")
+        dispatch_started = None
+        analysis_generated = None
+
+    expected_route = str(contract.get("expected_assigned_route") or "")
+    expected_reviewer_route = str(
+        contract.get("expected_reviewer_route") or ""
+    )
+    if analysis_result.get("_analysis_evaluation_memory_frozen") is not True:
+        failures.append("analysis-memory-freeze-not-attested")
+    if str(analysis_result.get("_analysis_model_route") or "") != expected_route:
+        failures.append("analysis-route-mismatch")
+
+    trace_evaluator = _load_trace_evaluator()
+    try:
+        trace_report = trace_evaluator.evaluate_database(
+            harness_database_path,
+            analysis_id,
+        )
+    except Exception as exc:
+        raise CohortError(
+            f"harness trace evaluation failed for {analysis_id}: "
+            f"{type(exc).__name__}"
+        ) from exc
+    trace_runs = trace_report.get("runs")
+    if not isinstance(trace_runs, list) or len(trace_runs) != 1:
+        raise CohortError(
+            f"harness trace for {analysis_id} is not exactly one run"
+        )
+    trace = trace_runs[0]
+    integrity = (
+        trace.get("integrity")
+        if isinstance(trace.get("integrity"), dict)
+        else {}
+    )
+    routes = (
+        (trace.get("models") or {}).get("route_consistency")
+        if isinstance(trace.get("models"), dict)
+        else {}
+    )
+    routes = routes if isinstance(routes, dict) else {}
+    tools = trace.get("tools") if isinstance(trace.get("tools"), dict) else {}
+    models = (
+        trace.get("models")
+        if isinstance(trace.get("models"), dict)
+        else {}
+    )
+    terminal = (
+        trace.get("terminal_execution_summary")
+        if isinstance(trace.get("terminal_execution_summary"), dict)
+        else {}
+    )
+    if str(trace.get("run_id") or "") != analysis_id:
+        failures.append("harness-run-analysis-binding-failed")
+    if str(trace.get("status") or "") != "succeeded":
+        failures.append("harness-run-not-succeeded")
+    if str(trace.get("stage") or "") != "complete":
+        failures.append("harness-run-not-complete")
+    if str(trace.get("role") or "") != role:
+        failures.append("harness-role-mismatch")
+    dispatch_kind = str(dispatch.get("kind") or "")
+    if str(trace.get("task_kind") or "") != _expected_task_kind(
+        role,
+        dispatch_kind,
+    ):
+        failures.append("harness-task-kind-mismatch")
+    if str(trace.get("correlation_id") or "") != str(
+        member.get("stable_group_id") or ""
+    ):
+        failures.append("harness-stable-group-binding-failed")
+    if str(trace.get("alert_id") or "") != str(
+        member.get("representative_alert_id") or ""
+    ):
+        failures.append("harness-alert-binding-failed")
+    if str(trace.get("policy_mode") or "") != str(
+        contract.get("harness_mode") or ""
+    ):
+        failures.append("harness-mode-mismatch")
+    if str(trace.get("assigned_route") or "") != expected_route:
+        failures.append("harness-assigned-route-mismatch")
+    if (
+        str(trace.get("assigned_reviewer_route") or "")
+        != expected_reviewer_route
+    ):
+        failures.append("harness-reviewer-route-mismatch")
+    if not integrity.get("valid"):
+        failures.append("harness-chain-invalid")
+    if not integrity.get("ledger_manifest_bound"):
+        failures.append("harness-terminal-ledger-unbound")
+    if int(models.get("successful_primary_call_count") or 0) < 1:
+        failures.append("harness-primary-model-call-missing")
+    if int(models.get("successful_call_count") or 0) != int(
+        (trace.get("counts") or {}).get("model_calls") or 0
+    ):
+        failures.append("harness-model-call-incomplete")
+    for field in (
+        "authorization_failure_count",
+        "authorization_denied_event_count",
+        "authorization_malformed_event_count",
+        "authorization_orphan_event_count",
+        "authorization_unverified_call_count",
+        "observation_denied_event_count",
+        "observation_malformed_event_count",
+        "observation_orphan_event_count",
+        "identity_mismatch_count",
+        "identity_unverified_call_count",
+    ):
+        if int(routes.get(field) or 0):
+            failures.append(f"harness-route-{field}")
+    if routes.get("contract_available") is not True:
+        failures.append("harness-route-contract-unavailable")
+    if int(tools.get("read_only_violation_count") or 0):
+        failures.append("harness-non-read-only-tool-call")
+    if trace_report.get("data_quality", {}).get("malformed_json_counts"):
+        failures.append("harness-trace-malformed-json")
+    if terminal.get("evaluation_memory_frozen") is not True:
+        failures.append("harness-memory-freeze-not-attested")
+    if str(terminal.get("analysis_id") or "") != analysis_id:
+        failures.append("harness-terminal-analysis-binding-failed")
+    canonical_response_sha256 = str(
+        analysis.get("response_canonical_sha256") or ""
+    )
+    submitted_response_sha256 = str(
+        terminal.get("submitted_response_sha256") or ""
+    )
+    stored_response_sha256 = str(
+        terminal.get("stored_response_sha256") or ""
+    )
+    # The alert store deliberately normalizes timestamp strings before
+    # persistence. Consequently the pre-normalization submitted response may
+    # have a different canonical digest. Its digest is still hash-chain bound
+    # in the terminal event; only the commit receipt's stored digest can be
+    # compared to the canonical response read back from ai_analysis_runs.
+    if not SHA256_RE.fullmatch(submitted_response_sha256):
+        failures.append("harness-terminal-submitted-response-digest-invalid")
+    if (
+        not SHA256_RE.fullmatch(stored_response_sha256)
+        or stored_response_sha256 != canonical_response_sha256
+    ):
+        failures.append("harness-terminal-stored-response-digest-mismatch")
+    try:
+        harness_started = _parse_timestamp(
+            trace.get("started_at"),
+            "harness started_at",
+        )
+        harness_completed = _parse_timestamp(
+            trace.get("completed_at"),
+            "harness completed_at",
+        )
+        if dispatch_started and harness_started < dispatch_started:
+            failures.append("harness-run-predates-dispatch")
+        if analysis_generated and harness_completed < analysis_generated:
+            failures.append("harness-completed-before-analysis")
+    except CohortError:
+        failures.append("harness-timestamp-invalid")
+
+    if failures:
+        raise CohortError(
+            f"execution gate failed for {analysis_id}: "
+            + ", ".join(sorted(set(failures)))
+        )
+    proof = {
+        "status": "passed",
+        "fresh_analysis": True,
+        "dispatch_accepted_once": True,
+        "analysis_id": analysis_id,
+        "analysis_generated_at": str(analysis.get("generated_at") or ""),
+        "harness": {
+            "run_id": analysis_id,
+            "trace_id": str(trace.get("trace_id") or ""),
+            "stable_group_id": str(trace.get("correlation_id") or ""),
+            "representative_alert_id": str(trace.get("alert_id") or ""),
+            "status": "succeeded",
+            "stage": "complete",
+            "role": role,
+            "task_kind": str(trace.get("task_kind") or ""),
+            "policy_mode": str(trace.get("policy_mode") or ""),
+            "assigned_route": str(trace.get("assigned_route") or ""),
+            "assigned_reviewer_route": str(
+                trace.get("assigned_reviewer_route") or ""
+            ),
+            "started_at": str(trace.get("started_at") or ""),
+            "completed_at": str(trace.get("completed_at") or ""),
+            "chain_valid": True,
+            "chain_head_sha256": str(integrity.get("head_sha256") or ""),
+            "ledger_manifest_bound": True,
+            "ledger_manifest_schema": str(
+                integrity.get("ledger_manifest_schema") or ""
+            ),
+            "model_call_count": int(
+                (trace.get("counts") or {}).get("model_calls") or 0
+            ),
+            "successful_model_call_count": int(
+                models.get("successful_call_count") or 0
+            ),
+            "successful_primary_model_call_count": int(
+                models.get("successful_primary_call_count") or 0
+            ),
+            "route_authorization_failure_count": 0,
+            "route_identity_mismatch_count": 0,
+            "tool_call_count": int(
+                (trace.get("counts") or {}).get("tool_calls") or 0
+            ),
+            "read_only_violation_count": 0,
+            "memory_frozen": True,
+            "submitted_response_sha256": submitted_response_sha256,
+            "response_canonical_sha256": canonical_response_sha256,
+        },
+    }
+    proof["proof_sha256"] = sha256_value(proof)
+    return proof
+
+
 def export_cohort(
     database_path: Path,
     manifest_path: Path,
     output_path: Path,
+    *,
+    harness_database_path: Path | None = None,
 ) -> dict[str, Any]:
     manifest, terminal = monitor_cohort_once(database_path, manifest_path)
     if not terminal:
         raise CohortError("cohort is not terminal; refusing a partial export")
+    noncompleted = [
+        int(member.get("rank") or 0)
+        for member in manifest["members"]
+        if str((member.get("monitor") or {}).get("state") or "")
+        != "completed"
+    ]
+    if noncompleted:
+        raise CohortError(
+            "cohort contains non-completed results; refusing a gradeable "
+            f"export (ranks={noncompleted})"
+        )
     members = []
     for member in manifest["members"]:
         monitor = member.get("monitor") or {}
+        proof = (
+            _harness_execution_proof(
+                harness_database_path=harness_database_path,
+                manifest=manifest,
+                member=member,
+                monitor=monitor,
+            )
+            if harness_database_path is not None
+            else {
+                "status": "not_attested",
+                "reason": "harness database was not supplied",
+            }
+        )
         members.append(
             {
                 "rank": member["rank"],
@@ -2042,8 +2552,22 @@ def export_cohort(
                 "pre_state": member["pre_state"],
                 "dispatch": member["dispatch"],
                 "result": monitor,
+                "execution_proof": proof,
             }
         )
+    selection = (
+        dict(manifest.get("selection"))
+        if isinstance(manifest.get("selection"), dict)
+        else {}
+    )
+    gate_passed = (
+        harness_database_path is not None
+        and len(members) == int(manifest["count"])
+        and all(
+            (member.get("execution_proof") or {}).get("status") == "passed"
+            for member in members
+        )
+    )
     export = {
         "schema": EXPORT_SCHEMA,
         "cohort_id": manifest["cohort_id"],
@@ -2053,6 +2577,23 @@ def export_cohort(
         "frozen_at": manifest["created_at"],
         "exported_at": utc_now(),
         "source_manifest_sha256": manifest["manifest_sha256"],
+        "frozen_plan_sha256": manifest["frozen_plan_sha256"],
+        "selection": selection,
+        "execution_contract": manifest["execution_contract"],
+        "execution_gate": {
+            "status": "passed" if gate_passed else "not_attested",
+            "expected_count": int(manifest["count"]),
+            "passed_count": sum(
+                (member.get("execution_proof") or {}).get("status") == "passed"
+                for member in members
+            ),
+            "ordered_identity_sha256": sha256_value(
+                ordered_identity_projection(members)
+            ),
+            "contract_sha256": sha256_value(
+                manifest["execution_contract"]
+            ),
+        },
         "security_onion_access": "none",
         "content_policy": {
             "contains_raw_alerts": False,
@@ -2100,6 +2641,8 @@ def build_parser() -> argparse.ArgumentParser:
     freeze.add_argument("--cohort-id", required=True)
     freeze.add_argument("--reason", required=True)
     freeze.add_argument("--count", required=True, type=int)
+    freeze.add_argument("--expected-assigned-route", required=True)
+    freeze.add_argument("--expected-reviewer-route", default="")
     freeze.add_argument(
         "--dry-run",
         action="store_true",
@@ -2116,6 +2659,8 @@ def build_parser() -> argparse.ArgumentParser:
     imported.add_argument("--cohort-id", required=True)
     imported.add_argument("--reason", required=True)
     imported.add_argument("--expected-count", required=True, type=int)
+    imported.add_argument("--expected-assigned-route", required=True)
+    imported.add_argument("--expected-reviewer-route", default="")
     imported.add_argument(
         "--agent-role",
         choices=sorted(AGENT_ROLES),
@@ -2158,6 +2703,12 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--db", required=True, type=Path)
     export.add_argument("--manifest", required=True, type=Path)
     export.add_argument("--output", required=True, type=Path)
+    export.add_argument(
+        "--harness-db",
+        required=True,
+        type=Path,
+        help="read-only harness ledger used to attest every exact analysis",
+    )
     return parser
 
 
@@ -2171,6 +2722,8 @@ def main(argv: list[str] | None = None) -> int:
                 cohort_id=args.cohort_id,
                 reason=args.reason,
                 count=args.count,
+                expected_assigned_route=args.expected_assigned_route,
+                expected_reviewer_route=args.expected_reviewer_route,
                 dry_run=args.dry_run,
             )
             _print_summary(result)
@@ -2184,6 +2737,8 @@ def main(argv: list[str] | None = None) -> int:
                 reason=args.reason,
                 expected_count=args.expected_count,
                 agent_role=args.agent_role,
+                expected_assigned_route=args.expected_assigned_route,
+                expected_reviewer_route=args.expected_reviewer_route,
                 dry_run=args.dry_run,
             )
             _print_summary(result)
@@ -2208,7 +2763,12 @@ def main(argv: list[str] | None = None) -> int:
             _print_summary(result)
             return 0 if terminal else 3
         if args.command == "export":
-            result = export_cohort(args.db, args.manifest, args.output)
+            result = export_cohort(
+                args.db,
+                args.manifest,
+                args.output,
+                harness_database_path=args.harness_db,
+            )
             _print_summary(result)
             return 0
     except (CohortError, sqlite3.Error) as exc:

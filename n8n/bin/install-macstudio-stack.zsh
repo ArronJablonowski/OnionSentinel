@@ -267,6 +267,7 @@ cp "$REPO_DIR/n8n/bin/send-telegram-notification.py" "$STACK_DIR/bin/send-telegr
 cp "$REPO_DIR/n8n/bin/evaluate-operational-slos.py" "$STACK_DIR/bin/evaluate-operational-slos.py"
 cp "$REPO_DIR/n8n/bin/disk_capacity.py" "$STACK_DIR/bin/disk_capacity.py"
 cp "$REPO_DIR/n8n/bin/backup-onion-sentinel-runtime.py" "$STACK_DIR/bin/backup-onion-sentinel-runtime.py"
+cp "$REPO_DIR/n8n/bin/maintain-investigation-harness.py" "$STACK_DIR/bin/maintain-investigation-harness.py"
 cp "$REPO_DIR/n8n/bin/report-production-soak.py" "$STACK_DIR/bin/report-production-soak.py"
 cp "$REPO_DIR/n8n/bin/run-recovery-restore-drill.py" "$STACK_DIR/bin/run-recovery-restore-drill.py"
 cp "$REPO_DIR/n8n/bin/run-alert-store-host.zsh" "$STACK_DIR/bin/run-alert-store-host.zsh"
@@ -394,6 +395,7 @@ for plist in \
   com.arron.soc.daily-rollup.plist \
   com.arron.onion-sentinel.web.plist \
   com.arron.onion-sentinel.web-guard.plist \
+  com.arron.onion-sentinel.harness-maintenance.plist \
   com.arron.onion-sentinel.runtime-backup.plist
 do
   /usr/bin/python3 - "$HOME" "$REPO_DIR/n8n/launchd/$plist" "$LAUNCHD_DIR/$plist" <<'PY'
@@ -425,6 +427,7 @@ launchctl unload "$LAUNCHD_DIR/com.arron.soc.dashboard-refresh.plist" >/dev/null
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.web-guard.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.web.plist" >/dev/null 2>&1 || true
+launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.harness-maintenance.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.runtime-backup.plist" >/dev/null 2>&1 || true
 launchctl load "$LAUNCHD_DIR/com.arron.n8n.ensure-stack.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.n8n.monitor-stack.plist"
@@ -438,6 +441,7 @@ launchctl load "$LAUNCHD_DIR/com.arron.soc.dashboard-refresh.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.web.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.web-guard.plist"
+launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.harness-maintenance.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.runtime-backup.plist"
 
 cat <<MSG

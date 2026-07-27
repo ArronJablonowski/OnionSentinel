@@ -2,7 +2,9 @@ import datetime as dt
 from contextlib import closing
 import importlib.util
 import io
+import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 from unittest import mock
@@ -81,6 +83,91 @@ class OperationalSloTests(unittest.TestCase):
         )
         self.assertIn("Mac runtime disk is 75.0% used", failures)
         self.assertEqual(snapshot["signals"]["disk_hard_limit_percent"], 80)
+
+    def test_harness_maintenance_disk_accounting_is_exposed(self):
+        now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
+        metrics = {
+            "metrics": {
+                "process": {"ingest_errors": 0},
+                "oldest_pending_job_seconds": 0,
+                "oldest_pending_jobs": [],
+                "oldest_pending_pcap_seconds": 0,
+            }
+        }
+        health = {
+            "summary": {
+                "latest": {"timestamp_utc": "2026-07-14T17:55:00Z"}
+            },
+            "pcap": {"warning_count": 0},
+        }
+        maintenance = {
+            "generated_at": "2026-07-14T17:50:00Z",
+            "status": "ok",
+            "follow_up_required": False,
+            "policy": {"max_live_bytes": 2 * 1024**3},
+            "checkpoint": {"busy": 0},
+            "after": {
+                "quick_check": "ok",
+                "foreign_key_check_rows": 0,
+                "live_page_bytes": 12_345,
+                "allocated_disk_bytes": 16_384,
+                "reclaimable_page_bytes": 4_039,
+                "run_counts": {"terminal": 20, "active": 1},
+            },
+        }
+        failures, snapshot = self.slo.evaluate(
+            metrics,
+            health,
+            now=now,
+            disk_used_percent=55,
+            sqlite_backup_age=60,
+            postgres_backup_age=60,
+            previous_ingest_errors=0,
+            harness_database_present=True,
+            harness_maintenance=maintenance,
+        )
+        self.assertEqual(failures, [])
+        signal = snapshot["signals"]["investigation_harness"]
+        self.assertEqual(signal["live_page_bytes"], 12_345)
+        self.assertEqual(signal["terminal_runs"], 20)
+        self.assertEqual(signal["maintenance_status"], "ok")
+
+    def test_missing_harness_maintenance_report_fails_slo(self):
+        now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
+        metrics = {
+            "metrics": {
+                "process": {"ingest_errors": 0},
+                "oldest_pending_job_seconds": 0,
+                "oldest_pending_jobs": [],
+                "oldest_pending_pcap_seconds": 0,
+            }
+        }
+        health = {
+            "summary": {
+                "latest": {"timestamp_utc": "2026-07-14T17:55:00Z"}
+            },
+            "pcap": {"warning_count": 0},
+        }
+        failures, _ = self.slo.evaluate(
+            metrics,
+            health,
+            now=now,
+            disk_used_percent=55,
+            sqlite_backup_age=60,
+            postgres_backup_age=60,
+            previous_ingest_errors=0,
+            harness_database_present=True,
+            harness_maintenance=None,
+        )
+        self.assertIn(
+            "investigation harness maintenance report is missing or older "
+            "than 2 hours",
+            failures,
+        )
+        self.assertIn(
+            "investigation harness maintenance is not healthy (missing)",
+            failures,
+        )
 
     def test_known_pipeline_backlog_is_admitted_before_disk_ceiling(self):
         now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
@@ -350,7 +437,6 @@ class OperationalSloTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "source.sqlite3"
             destination = Path(tmp) / "backup.sqlite3"
-            import sqlite3
             with closing(sqlite3.connect(source)) as conn:
                 with conn:
                     conn.execute("CREATE TABLE alerts (id TEXT)")
@@ -358,6 +444,148 @@ class OperationalSloTests(unittest.TestCase):
             self.assertEqual(self.backup.backup_sqlite(source, destination), 2)
             with closing(sqlite3.connect(destination)) as conn:
                 self.assertEqual(conn.execute("PRAGMA quick_check").fetchone()[0], "ok")
+
+    def test_harness_sqlite_backup_runs_logical_restore_drill(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "harness.sqlite3"
+            destination = Path(tmp) / "harness.backup.sqlite3"
+            with closing(sqlite3.connect(source)) as conn:
+                with conn:
+                    conn.execute("PRAGMA foreign_keys = ON")
+                    conn.execute(
+                        "CREATE TABLE harness_runs (run_id TEXT PRIMARY KEY)"
+                    )
+                    conn.execute(
+                        """
+                        CREATE TABLE harness_events (
+                            run_id TEXT REFERENCES harness_runs(run_id)
+                                ON DELETE CASCADE,
+                            sequence INTEGER
+                        )
+                        """
+                    )
+                    conn.execute("INSERT INTO harness_runs VALUES ('run-1')")
+                    conn.execute("INSERT INTO harness_events VALUES ('run-1', 1)")
+            result = self.backup.backup_sqlite_database(
+                source,
+                destination,
+                required_tables=("harness_runs", "harness_events"),
+                count_table="harness_runs",
+            )
+            self.assertEqual(result["rows"], 1)
+            self.assertEqual(result["quick_check"], "ok")
+            self.assertEqual(result["restore_drill"]["quick_check"], "ok")
+            self.assertEqual(result["foreign_key_check_rows"], 0)
+
+    def test_create_bundle_includes_optional_harness_snapshot_and_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stack = root / "stack"
+            backup_root = root / "backups"
+            data = stack / "alert_store_data"
+            data.mkdir(parents=True)
+            with closing(sqlite3.connect(data / "alerts.sqlite3")) as conn:
+                with conn:
+                    conn.execute("CREATE TABLE alerts (id TEXT)")
+                    conn.execute("CREATE TABLE alert_group_summary (id TEXT)")
+                    conn.execute("INSERT INTO alerts VALUES ('alert-1')")
+            harness_tables = (
+                "harness_metadata",
+                "harness_runs",
+                "harness_events",
+                "harness_evidence",
+                "harness_hypotheses",
+                "harness_decisions",
+                "harness_model_calls",
+                "harness_tool_calls",
+                "harness_budget_reservations",
+            )
+            with closing(
+                sqlite3.connect(data / "investigation-harness.sqlite3")
+            ) as conn:
+                with conn:
+                    for table in harness_tables:
+                        if table == "harness_runs":
+                            conn.execute(
+                                "CREATE TABLE harness_runs (run_id TEXT)"
+                            )
+                        elif table == "harness_metadata":
+                            conn.execute(
+                                """
+                                CREATE TABLE harness_metadata (
+                                    key TEXT,
+                                    value TEXT
+                                )
+                                """
+                            )
+                        else:
+                            conn.execute(f"CREATE TABLE {table} (id TEXT)")
+                    conn.execute("INSERT INTO harness_runs VALUES ('run-1')")
+            backup_root.mkdir()
+            with mock.patch.object(
+                self.backup,
+                "require_runtime_capacity",
+            ), mock.patch.object(
+                self.backup,
+                "postgres_dump",
+                side_effect=lambda _docker, destination: destination.write_bytes(
+                    b"fake-postgres-dump"
+                ),
+            ):
+                bundle = self.backup.create_bundle(
+                    stack,
+                    backup_root,
+                    "/fake/docker",
+                )
+            manifest = json.loads((bundle / "manifest.json").read_text())
+            self.assertTrue(
+                (bundle / "investigation-harness.sqlite3").is_file()
+            )
+            self.assertEqual(manifest["harness_runs"], 1)
+            self.assertTrue(
+                manifest["sqlite"]["investigation_harness"]["present"]
+            )
+            self.assertEqual(
+                manifest["sqlite"]["investigation_harness"]["restore_drill"][
+                    "rows"
+                ],
+                1,
+            )
+
+    def test_create_bundle_remains_compatible_when_harness_is_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stack = root / "stack"
+            backup_root = root / "backups"
+            data = stack / "alert_store_data"
+            data.mkdir(parents=True)
+            with closing(sqlite3.connect(data / "alerts.sqlite3")) as conn:
+                with conn:
+                    conn.execute("CREATE TABLE alerts (id TEXT)")
+                    conn.execute("CREATE TABLE alert_group_summary (id TEXT)")
+            backup_root.mkdir()
+            with mock.patch.object(
+                self.backup,
+                "require_runtime_capacity",
+            ), mock.patch.object(
+                self.backup,
+                "postgres_dump",
+                side_effect=lambda _docker, destination: destination.write_bytes(
+                    b"fake-postgres-dump"
+                ),
+            ):
+                bundle = self.backup.create_bundle(
+                    stack,
+                    backup_root,
+                    "/fake/docker",
+                )
+            manifest = json.loads((bundle / "manifest.json").read_text())
+            self.assertFalse(
+                manifest["sqlite"]["investigation_harness"]["present"]
+            )
+            self.assertFalse(
+                (bundle / "investigation-harness.sqlite3").exists()
+            )
 
     def test_runtime_archive_only_contains_declared_recovery_paths(self):
         with tempfile.TemporaryDirectory() as tmp:

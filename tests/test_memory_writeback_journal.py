@@ -254,6 +254,72 @@ class MemoryWritebackJournalTests(unittest.TestCase):
                 0o600,
             )
 
+    def test_evaluation_freeze_publishes_index_but_defers_memory_replay(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            analysis_id = "frozen-evaluation-memory"
+            response = {"summary": "bounded synthetic result"}
+            pending_task, role_memory, _shared_memory = self.stage_task(
+                root,
+                analysis_id=analysis_id,
+                response_digest=self.runner.canonical_payload_digest(response),
+            )
+            queue_dir = root / "index-queue"
+            quarantine_dir = root / "index-quarantine"
+            committed_dir = root / "journal" / "committed"
+            receipt_dir = root / "journal" / "receipts"
+            self.runner.queue_analysis_index(
+                {"analysis_id": analysis_id, "response": response},
+                queue_dir,
+            )
+
+            with mock.patch.object(
+                self.runner,
+                "post_analysis_index",
+                return_value={"ok": True},
+            ):
+                frozen = self.runner.flush_analysis_index_queue(
+                    "http://127.0.0.1:8787",
+                    queue_dir=queue_dir,
+                    quarantine_dir=quarantine_dir,
+                    memory_pending_dir=pending_task.parent,
+                    memory_committed_dir=committed_dir,
+                    memory_receipt_dir=receipt_dir,
+                    memory_writeback_enabled=False,
+                )
+
+            self.assertEqual(frozen, (1, 0, 0))
+            self.assertFalse(pending_task.exists())
+            self.assertEqual(
+                [path.name for path in committed_dir.glob("*.json")],
+                [f"{analysis_id}.json"],
+            )
+            self.assertFalse(receipt_dir.exists())
+            self.assertNotIn(
+                self.memory.MANAGED_START,
+                role_memory.read_text(encoding="utf-8"),
+            )
+
+            resumed = self.runner.flush_analysis_index_queue(
+                "http://127.0.0.1:8787",
+                queue_dir=queue_dir,
+                quarantine_dir=quarantine_dir,
+                memory_pending_dir=pending_task.parent,
+                memory_committed_dir=committed_dir,
+                memory_receipt_dir=receipt_dir,
+                memory_writeback_enabled=True,
+            )
+
+            self.assertEqual(resumed, (0, 0, 0))
+            self.assertEqual(list(committed_dir.glob("*.json")), [])
+            self.assertTrue((receipt_dir / f"{analysis_id}.json").is_file())
+            self.assertIn(
+                self.memory.MANAGED_START,
+                role_memory.read_text(encoding="utf-8"),
+            )
+
     def test_partial_role_shared_failure_recovers_without_reinforcement(
         self,
     ) -> None:

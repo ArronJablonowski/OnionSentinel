@@ -13,10 +13,22 @@ from pathlib import Path, PurePosixPath
 import secrets
 import shutil
 import sqlite3
+import stat
 import subprocess
 import tarfile
 import tempfile
 import time
+
+
+ALLOWED_BUNDLE_FILES = frozenset(
+    {
+        "alerts.sqlite3",
+        "investigation-harness.sqlite3",
+        "n8n-postgres.dump",
+        "runtime-secrets.tar.gz",
+    }
+)
+CURRENT_HARNESS_SCHEMA_VERSION = 4
 
 
 def sha256_file(path: Path) -> str:
@@ -35,14 +47,63 @@ def newest_bundle(root: Path) -> Path:
 
 
 def verify_bundle(bundle: Path) -> dict[str, object]:
-    manifest = json.loads((bundle / "manifest.json").read_text())
+    bundle_metadata = bundle.lstat()
+    if (
+        bundle.is_symlink()
+        or not stat.S_ISDIR(bundle_metadata.st_mode)
+        or stat.S_IMODE(bundle_metadata.st_mode) & 0o077
+        or bundle_metadata.st_uid != os.getuid()
+    ):
+        raise RuntimeError("recovery bundle directory must be owner-only")
+    manifest_path = bundle / "manifest.json"
+    manifest_metadata = manifest_path.lstat()
+    if (
+        manifest_path.is_symlink()
+        or not stat.S_ISREG(manifest_metadata.st_mode)
+        or stat.S_IMODE(manifest_metadata.st_mode) & 0o077
+        or manifest_metadata.st_uid != os.getuid()
+    ):
+        raise RuntimeError("recovery bundle manifest must be owner-only")
+    manifest = json.loads(manifest_path.read_text())
     for name, metadata in dict(manifest.get("files") or {}).items():
+        pure_name = PurePosixPath(str(name))
+        if (
+            pure_name.is_absolute()
+            or len(pure_name.parts) != 1
+            or str(name) not in ALLOWED_BUNDLE_FILES
+        ):
+            raise RuntimeError("recovery bundle manifest contains an unsafe file")
         path = bundle / name
-        if not path.is_file() or sha256_file(path) != metadata.get("sha256"):
+        try:
+            path_metadata = path.lstat()
+        except FileNotFoundError:
+            raise RuntimeError(f"bundle hash validation failed for {name}") from None
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(path_metadata.st_mode)
+            or stat.S_IMODE(path_metadata.st_mode) & 0o077
+            or path_metadata.st_uid != os.getuid()
+            or sha256_file(path) != metadata.get("sha256")
+        ):
             raise RuntimeError(f"bundle hash validation failed for {name}")
     required = {"alerts.sqlite3", "n8n-postgres.dump", "runtime-secrets.tar.gz"}
     if not required.issubset(set(dict(manifest.get("files") or {}))):
         raise RuntimeError("recovery bundle is missing required files")
+    harness = dict(
+        dict(manifest.get("sqlite") or {}).get("investigation_harness") or {}
+    )
+    harness_file = bundle / "investigation-harness.sqlite3"
+    harness_listed = (
+        "investigation-harness.sqlite3"
+        in set(dict(manifest.get("files") or {}))
+    )
+    if (
+        bool(harness.get("present")) != harness_file.is_file()
+        or bool(harness.get("present")) != harness_listed
+    ):
+        raise RuntimeError(
+            "recovery bundle harness manifest does not match its files"
+        )
     return manifest
 
 
@@ -71,6 +132,69 @@ def validate_sqlite(source: Path, temp_dir: Path) -> dict[str, object]:
     if quick_check != "ok":
         raise RuntimeError(f"restored SQLite quick_check failed: {quick_check}")
     return {"quick_check": quick_check, "alert_rows": alerts, "group_rows": groups}
+
+
+def validate_harness_sqlite(source: Path, temp_dir: Path) -> dict[str, object]:
+    """Restore and validate the optional investigation trace database."""
+    restored = temp_dir / "investigation-harness-restored.sqlite3"
+    shutil.copy2(source, restored)
+    with closing(sqlite3.connect(f"file:{restored}?mode=ro", uri=True)) as conn:
+        conn.execute("PRAGMA query_only = ON")
+        quick_check = str(conn.execute("PRAGMA quick_check").fetchone()[0])
+        foreign_key_errors = len(conn.execute("PRAGMA foreign_key_check").fetchall())
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                """
+            ).fetchall()
+        }
+        required = {
+            "harness_metadata",
+            "harness_runs",
+            "harness_events",
+            "harness_evidence",
+            "harness_hypotheses",
+            "harness_decisions",
+            "harness_model_calls",
+            "harness_tool_calls",
+            "harness_budget_reservations",
+        }
+        missing = sorted(required.difference(tables))
+        if missing:
+            raise RuntimeError(
+                "restored harness SQLite is missing table(s): "
+                + ", ".join(missing)
+            )
+        runs = int(conn.execute("SELECT COUNT(*) FROM harness_runs").fetchone()[0])
+        schema_row = conn.execute(
+            """
+            SELECT value FROM harness_metadata
+            WHERE key = 'schema_version'
+            """
+        ).fetchone()
+    if quick_check != "ok":
+        raise RuntimeError(
+            f"restored harness SQLite quick_check failed: {quick_check}"
+        )
+    if foreign_key_errors:
+        raise RuntimeError(
+            "restored harness SQLite foreign_key_check failed: "
+            f"{foreign_key_errors} row(s)"
+        )
+    if schema_row is None or not str(schema_row[0]).isdigit():
+        raise RuntimeError("restored harness SQLite schema version is invalid")
+    schema_version = int(schema_row[0])
+    if schema_version < 1 or schema_version > CURRENT_HARNESS_SCHEMA_VERSION:
+        raise RuntimeError("restored harness SQLite schema version is unsupported")
+    return {
+        "quick_check": quick_check,
+        "foreign_key_check_rows": foreign_key_errors,
+        "run_rows": runs,
+        "schema_version": schema_version,
+    }
 
 
 def docker_output(docker: str, args: list[str], **kwargs) -> str:
@@ -130,9 +254,28 @@ def main() -> int:
     try:
         manifest = verify_bundle(bundle)
         with tempfile.TemporaryDirectory(prefix="onion-sentinel-restore-") as temp:
-            report["sqlite"] = validate_sqlite(bundle / "alerts.sqlite3", Path(temp))
+            temp_dir = Path(temp)
+            report["sqlite"] = validate_sqlite(
+                bundle / "alerts.sqlite3",
+                temp_dir,
+            )
+            harness_path = bundle / "investigation-harness.sqlite3"
+            report["investigation_harness"] = (
+                validate_harness_sqlite(harness_path, temp_dir)
+                if harness_path.is_file()
+                else {"present": False}
+            )
         if int(report["sqlite"]["alert_rows"]) != int(manifest.get("alert_rows") or -1):
             raise RuntimeError("restored SQLite row count does not match bundle manifest")
+        if (bundle / "investigation-harness.sqlite3").is_file():
+            if int(report["investigation_harness"]["run_rows"]) != int(
+                manifest.get("harness_runs", -1)
+            ):
+                raise RuntimeError(
+                    "restored harness SQLite run count does not match "
+                    "bundle manifest"
+                )
+            report["investigation_harness"]["present"] = True
         report["runtime_archive"] = validate_runtime_archive(bundle / "runtime-secrets.tar.gz")
         report["postgres"] = restore_postgres(args.docker, bundle / "n8n-postgres.dump")
         report["manifest_alert_rows"] = int(manifest.get("alert_rows") or 0)

@@ -550,6 +550,47 @@ def reviewer_result(
     }
 
 
+def terminal_execution_summary(
+    events: Iterable[Mapping[str, Any]],
+    run_status: object,
+    malformed: collections.Counter[str],
+) -> dict[str, Any]:
+    """Project collector-owned completion controls without exporting content."""
+
+    normalized_status = normalize_status(run_status)
+    terminal_event = next(
+        (
+            event
+            for event in reversed(list(events))
+            if str(event.get("event_type") or "")
+            == f"run.{normalized_status}"
+        ),
+        None,
+    )
+    if terminal_event is None:
+        return {}
+    payload = safe_json(
+        terminal_event.get("payload_json"),
+        {},
+        malformed,
+        "event.terminal.payload_json",
+    )
+    summary = payload.get("summary")
+    if not isinstance(summary, dict):
+        return {}
+    output: dict[str, Any] = {}
+    for field in (
+        "analysis_id",
+        "submitted_response_sha256",
+        "stored_response_sha256",
+        "evaluation_memory_frozen",
+    ):
+        value = summary.get(field)
+        if isinstance(value, (str, int, float, bool, type(None))):
+            output[field] = value
+    return output
+
+
 def budget_operation_id(
     event: Mapping[str, Any],
     payload: Mapping[str, Any],
@@ -1101,14 +1142,25 @@ def evaluate_run(
     return {
         "run_id": run_id,
         "trace_id": str(run.get("trace_id") or ""),
+        "correlation_id": str(run.get("correlation_id") or ""),
         "case_id": str(run.get("case_id") or ""),
+        "alert_id": str(run.get("alert_id") or ""),
         "role": str(run.get("role") or ""),
         "task_kind": str(run.get("task_kind") or ""),
         "status": str(run.get("status") or ""),
         "stage": str(run.get("stage") or ""),
+        "assigned_route": str(run.get("assigned_route") or ""),
+        "assigned_reviewer_route": str(
+            run.get("assigned_reviewer_route") or ""
+        ),
         "policy_mode": str(run.get("policy_mode") or ""),
         "started_at": str(run.get("started_at") or ""),
         "completed_at": str(run.get("completed_at") or ""),
+        "terminal_execution_summary": terminal_execution_summary(
+            events,
+            run.get("status"),
+            malformed,
+        ),
         "integrity": verify_chain(
             run_id,
             events,
@@ -1142,6 +1194,15 @@ def evaluate_run(
                 }
             ),
             "independent_review_calls": reviewer["model_call_count"],
+            "successful_call_count": sum(
+                normalize_status(row.get("status")) in SUCCESS_STATUSES
+                for row in model_calls
+            ),
+            "successful_primary_call_count": sum(
+                normalize_status(row.get("status")) in SUCCESS_STATUSES
+                and int(row.get("independent_review") or 0) == 0
+                for row in model_calls
+            ),
             "duration_ms": sum(
                 nonnegative_int(row.get("duration_ms")) for row in model_calls
             ),

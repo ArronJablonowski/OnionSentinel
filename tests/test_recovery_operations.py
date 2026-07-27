@@ -1,6 +1,8 @@
 import datetime as dt
 from contextlib import closing
 import importlib.util
+import json
+import os
 from pathlib import Path
 import sqlite3
 import tarfile
@@ -67,6 +69,91 @@ class RecoveryOperationTests(unittest.TestCase):
             result = self.restore.validate_sqlite(source, restore_dir)
             self.assertEqual(result["quick_check"], "ok")
             self.assertEqual(result["alert_rows"], 1)
+
+    def test_optional_harness_restore_validates_integrity_and_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "investigation-harness.sqlite3"
+            required_tables = (
+                "harness_metadata",
+                "harness_runs",
+                "harness_events",
+                "harness_evidence",
+                "harness_hypotheses",
+                "harness_decisions",
+                "harness_model_calls",
+                "harness_tool_calls",
+                "harness_budget_reservations",
+            )
+            with closing(sqlite3.connect(source)) as conn:
+                with conn:
+                    for table in required_tables:
+                        if table == "harness_metadata":
+                            conn.execute(
+                                """
+                                CREATE TABLE harness_metadata (
+                                    key TEXT PRIMARY KEY,
+                                    value TEXT
+                                )
+                                """
+                            )
+                        elif table == "harness_runs":
+                            conn.execute(
+                                "CREATE TABLE harness_runs (run_id TEXT)"
+                            )
+                        else:
+                            conn.execute(f"CREATE TABLE {table} (id TEXT)")
+                    conn.execute(
+                        "INSERT INTO harness_metadata VALUES ('schema_version', '4')"
+                    )
+                    conn.execute("INSERT INTO harness_runs VALUES ('run-1')")
+            restore_dir = root / "restore"
+            restore_dir.mkdir()
+            result = self.restore.validate_harness_sqlite(
+                source,
+                restore_dir,
+            )
+            self.assertEqual(result["quick_check"], "ok")
+            self.assertEqual(result["foreign_key_check_rows"], 0)
+            self.assertEqual(result["run_rows"], 1)
+            self.assertEqual(result["schema_version"], 4)
+
+    def test_bundle_harness_manifest_must_match_optional_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            os.chmod(bundle, 0o700)
+            for name in (
+                "alerts.sqlite3",
+                "n8n-postgres.dump",
+                "runtime-secrets.tar.gz",
+            ):
+                (bundle / name).write_bytes(b"fixture")
+                os.chmod(bundle / name, 0o600)
+            files = {
+                name: {"sha256": self.restore.sha256_file(bundle / name)}
+                for name in (
+                    "alerts.sqlite3",
+                    "n8n-postgres.dump",
+                    "runtime-secrets.tar.gz",
+                )
+            }
+            manifest_path = bundle / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "files": files,
+                        "sqlite": {
+                            "investigation_harness": {"present": True}
+                        },
+                    }
+                )
+            )
+            os.chmod(manifest_path, 0o600)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "harness manifest",
+            ):
+                self.restore.verify_bundle(bundle)
 
     def test_runtime_archive_requires_n8n_encryption_config(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -82,6 +82,14 @@ def append_bounded_history(path: Path, snapshot: dict[str, object], keep: int = 
     os.chmod(path, 0o600)
 
 
+def read_json_object(path: Path) -> dict[str, object] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def evaluate(
     metrics_payload: dict[str, object],
     health_payload: dict[str, object],
@@ -91,6 +99,8 @@ def evaluate(
     sqlite_backup_age: int | None,
     postgres_backup_age: int | None,
     previous_ingest_errors: int | None,
+    harness_database_present: bool = False,
+    harness_maintenance: dict[str, object] | None = None,
 ) -> tuple[list[str], dict[str, object]]:
     metrics = dict(metrics_payload.get("metrics") or {})
     process = dict(metrics.get("process") or {})
@@ -190,6 +200,66 @@ def evaluate(
     if postgres_backup_age is None or postgres_backup_age > 26 * 60 * 60:
         failures.append("verified PostgreSQL recovery bundle is missing or older than 26 hours")
 
+    harness_signal: dict[str, object] = {
+        "database_present": harness_database_present,
+    }
+    if harness_database_present:
+        maintenance = dict(harness_maintenance or {})
+        maintenance_age = age_seconds(maintenance.get("generated_at"), now)
+        maintenance_status = str(maintenance.get("status") or "missing")
+        after = dict(maintenance.get("after") or {})
+        run_counts = dict(after.get("run_counts") or {})
+        policy = dict(maintenance.get("policy") or {})
+        checkpoint = dict(maintenance.get("checkpoint") or {})
+        if maintenance_age is None or maintenance_age > 2 * 60 * 60:
+            failures.append(
+                "investigation harness maintenance report is missing or "
+                "older than 2 hours"
+            )
+        if maintenance_status in {"missing", "blocked", "absent"}:
+            failures.append(
+                "investigation harness maintenance is not healthy "
+                f"({maintenance_status})"
+            )
+        if (
+            after
+            and (
+                str(after.get("quick_check") or "") != "ok"
+                or int(after.get("foreign_key_check_rows") or 0) != 0
+            )
+        ):
+            failures.append(
+                "investigation harness SQLite integrity verification failed"
+            )
+        if maintenance_status == "follow-up-required":
+            advisories.append(
+                "investigation harness retention requires another bounded pass"
+            )
+        if int(checkpoint.get("busy") or 0) > 0:
+            advisories.append(
+                "investigation harness WAL checkpoint was busy"
+            )
+        harness_signal.update(
+            {
+                "maintenance_status": maintenance_status,
+                "maintenance_age_seconds": maintenance_age,
+                "terminal_runs": int(run_counts.get("terminal") or 0),
+                "active_runs": int(run_counts.get("active") or 0),
+                "live_page_bytes": int(after.get("live_page_bytes") or 0),
+                "allocated_disk_bytes": int(
+                    after.get("allocated_disk_bytes") or 0
+                ),
+                "reclaimable_page_bytes": int(
+                    after.get("reclaimable_page_bytes") or 0
+                ),
+                "max_live_bytes": int(policy.get("max_live_bytes") or 0),
+                "follow_up_required": bool(
+                    maintenance.get("follow_up_required")
+                ),
+                "checkpoint_busy": int(checkpoint.get("busy") or 0),
+            }
+        )
+
     snapshot = {
         "generated_at": now.astimezone().replace(microsecond=0).isoformat().replace("T", "  "),
         "ok": not failures,
@@ -237,6 +307,7 @@ def evaluate(
             "pipeline_disk_growth_1h": dict(pipeline_disk.get("net_growth") or {}).get("1h", {}),
             "sqlite_backup_age_seconds": sqlite_backup_age,
             "postgres_backup_age_seconds": postgres_backup_age,
+            "investigation_harness": harness_signal,
         },
     }
     return failures, snapshot
@@ -308,6 +379,14 @@ def main() -> int:
         sqlite_backup_age=newest_file_age(args.stack_dir / "alert_store_backups", "*.backup", now),
         postgres_backup_age=newest_file_age(args.stack_dir / "recovery_backups", "*/n8n-postgres.dump", now),
         previous_ingest_errors=int(previous["ingest_errors"]) if "ingest_errors" in previous else None,
+        harness_database_present=(
+            args.stack_dir
+            / "alert_store_data/investigation-harness.sqlite3"
+        ).is_file(),
+        harness_maintenance=read_json_object(
+            args.stack_dir
+            / "logs/investigation-harness-maintenance.json"
+        ),
     )
     # A deliberate capture-protection hold is not a stack failure, but it also
     # must not count toward the 48-hour end-to-end production qualification.

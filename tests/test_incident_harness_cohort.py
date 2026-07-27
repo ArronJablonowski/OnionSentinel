@@ -12,6 +12,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +24,14 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC and SPEC.loader
 cohort = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(cohort)
+EVALUATOR_PATH = ROOT / "operations" / "evaluate-investigation-cohort.py"
+EVALUATOR_SPEC = importlib.util.spec_from_file_location(
+    "evaluate_investigation_cohort_for_export_test",
+    EVALUATOR_PATH,
+)
+assert EVALUATOR_SPEC and EVALUATOR_SPEC.loader
+cohort_evaluator = importlib.util.module_from_spec(EVALUATOR_SPEC)
+EVALUATOR_SPEC.loader.exec_module(cohort_evaluator)
 
 
 class IncidentHarnessCohortTests(unittest.TestCase):
@@ -655,6 +664,7 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             "_analysis_model_route": "codex-cli:gpt-5.6-sol:high",
             "_analysis_provider": "codex-cli",
             "_analysis_harness": "onion-sentinel",
+            "_analysis_evaluation_memory_frozen": True,
         }
         connection = self._connect()
         connection.execute(
@@ -697,15 +707,83 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             result["analysis"]["result"]["_analysis_harness"],
             "onion-sentinel",
         )
-        exported = cohort.export_cohort(
-            self.db_path,
-            self.manifest_path,
-            self.output_path,
+        manifest = cohort.load_private_manifest(self.manifest_path)
+        manifest["members"][0]["dispatch"]["started_at"] = (
+            "2026-07-25T12:10:00Z"
         )
+        cohort.write_private_json(
+            self.manifest_path,
+            manifest,
+            digest_field="manifest_sha256",
+        )
+        analysis = manifest["members"][0]["monitor"]["analysis"]
+        proof = {
+            "status": "passed",
+            "fresh_analysis": True,
+            "dispatch_accepted_once": True,
+            "analysis_id": "analysis-soc-new",
+            "analysis_generated_at": "2026-07-25T12:11:00Z",
+            "harness": {
+                "run_id": "analysis-soc-new",
+                "trace_id": "trace-soc-export",
+                "stable_group_id": self.stable_one,
+                "representative_alert_id": "alert-a-newest",
+                "status": "succeeded",
+                "stage": "complete",
+                "role": "soc-analyst",
+                "task_kind": "reanalysis",
+                "policy_mode": "shadow",
+                "assigned_route": "codex-cli:gpt-5.6-sol:high",
+                "assigned_reviewer_route": "",
+                "started_at": "2026-07-25T12:10:30Z",
+                "completed_at": "2026-07-25T12:12:00Z",
+                "chain_valid": True,
+                "chain_head_sha256": "a" * 64,
+                "ledger_manifest_bound": True,
+                "ledger_manifest_schema": (
+                    "onion-sentinel-harness-ledger-manifest-v2"
+                ),
+                "model_call_count": 1,
+                "successful_model_call_count": 1,
+                "successful_primary_model_call_count": 1,
+                "route_authorization_failure_count": 0,
+                "route_identity_mismatch_count": 0,
+                "tool_call_count": 0,
+                "read_only_violation_count": 0,
+                "memory_frozen": True,
+                "submitted_response_sha256": "b" * 64,
+                "response_canonical_sha256": analysis[
+                    "response_canonical_sha256"
+                ],
+            },
+        }
+        proof["proof_sha256"] = cohort.sha256_value(proof)
+        with mock.patch.object(
+            cohort,
+            "_harness_execution_proof",
+            return_value=proof,
+        ):
+            exported = cohort.export_cohort(
+                self.db_path,
+                self.manifest_path,
+                self.output_path,
+                harness_database_path=self.root / "harness.sqlite3",
+            )
         self.assertEqual(exported["agent_role"], "soc-analyst")
         self.assertEqual(
             exported["members"][0]["result"]["analysis"]["model"],
             "gpt-5.6-sol",
+        )
+        loaded, _source_file_sha256 = (
+            cohort_evaluator.load_result_export(
+                self.output_path,
+                role="soc-analyst",
+                expected_count=1,
+            )
+        )
+        self.assertEqual(
+            loaded["ordered_identities"][0]["stable_group_id"],
+            self.stable_one,
         )
 
     def test_ambiguous_dispatch_is_recorded_and_never_retried(self) -> None:
@@ -882,6 +960,133 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         )
         source = MODULE_PATH.read_text(encoding="utf-8")
         self.assertNotIn('"/api/soc-incidents/reanalyze-all"', source)
+
+    def test_execution_proof_accepts_timestamp_normalization_and_distinct_submission_digest(
+        self,
+    ) -> None:
+        analysis_id = "analysis-normalized-timestamp"
+        response_digest = "a" * 64
+        submitted_digest = "b" * 64
+        member = {
+            "rank": 1,
+            "dashboard_group_id": self.dashboard_a,
+            "stable_group_id": self.stable_one,
+            "representative_alert_id": "alert-a-newest",
+            "pre_state": {"soc_analysis_ids": []},
+            "dispatch": {
+                "kind": "analyze",
+                "state": "accepted",
+                "attempt_count": 1,
+                "started_at": "2026-07-25  23:00:00.000-06:00",
+            },
+        }
+        manifest = {
+            "agent_role": "soc-analyst",
+            "execution_contract": cohort.execution_contract(
+                expected_assigned_route=(
+                    "codex-cli:gpt-5.6-sol:high"
+                ),
+                expected_reviewer_route=(
+                    "codex-cli:gpt-5.6-sol:xhigh"
+                ),
+            ),
+        }
+        monitor = {
+            "state": "completed",
+            "analysis_id": analysis_id,
+            "analysis": {
+                "analysis_id": analysis_id,
+                "agent_role": "soc-analyst",
+                "generated_at": "2026-07-25  23:02:35.980-06:00",
+                "response_canonical_sha256": response_digest,
+                "result": {
+                    "_analysis_model_route": (
+                        "codex-cli:gpt-5.6-sol:high"
+                    ),
+                    "_analysis_evaluation_memory_frozen": True,
+                },
+            },
+        }
+        zero_routes = {
+            "contract_available": True,
+            "authorization_failure_count": 0,
+            "authorization_denied_event_count": 0,
+            "authorization_malformed_event_count": 0,
+            "authorization_orphan_event_count": 0,
+            "authorization_unverified_call_count": 0,
+            "observation_denied_event_count": 0,
+            "observation_malformed_event_count": 0,
+            "observation_orphan_event_count": 0,
+            "identity_mismatch_count": 0,
+            "identity_unverified_call_count": 0,
+        }
+        trace_report = {
+            "runs": [
+                {
+                    "run_id": analysis_id,
+                    "trace_id": "trace-normalized",
+                    "correlation_id": self.stable_one,
+                    "alert_id": "alert-a-newest",
+                    "role": "soc-analyst",
+                    "task_kind": "reanalysis",
+                    "status": "succeeded",
+                    "stage": "complete",
+                    "assigned_route": "codex-cli:gpt-5.6-sol:high",
+                    "assigned_reviewer_route": (
+                        "codex-cli:gpt-5.6-sol:xhigh"
+                    ),
+                    "policy_mode": "shadow",
+                    "started_at": "2026-07-25  23:00:01.000-06:00",
+                    "completed_at": "2026-07-25  23:03:00.000-06:00",
+                    "terminal_execution_summary": {
+                        "analysis_id": analysis_id,
+                        "submitted_response_sha256": submitted_digest,
+                        "stored_response_sha256": response_digest,
+                        "evaluation_memory_frozen": True,
+                    },
+                    "integrity": {
+                        "valid": True,
+                        "head_sha256": "c" * 64,
+                        "ledger_manifest_bound": True,
+                        "ledger_manifest_schema": (
+                            "onion-sentinel-harness-ledger-manifest-v2"
+                        ),
+                    },
+                    "counts": {"model_calls": 1, "tool_calls": 0},
+                    "models": {
+                        "successful_call_count": 1,
+                        "successful_primary_call_count": 1,
+                        "route_consistency": zero_routes,
+                    },
+                    "tools": {"read_only_violation_count": 0},
+                }
+            ],
+            "data_quality": {"malformed_json_counts": {}},
+        }
+        fake_evaluator = type(
+            "FakeTraceEvaluator",
+            (),
+            {"evaluate_database": staticmethod(lambda _path, _run: trace_report)},
+        )
+
+        with mock.patch.object(
+            cohort,
+            "_load_trace_evaluator",
+            return_value=fake_evaluator,
+        ):
+            proof = cohort._harness_execution_proof(
+                harness_database_path=self.root / "synthetic-harness.sqlite3",
+                manifest=manifest,
+                member=member,
+                monitor=monitor,
+            )
+
+        self.assertEqual(proof["status"], "passed")
+        self.assertEqual(
+            proof["harness"]["submitted_response_sha256"],
+            submitted_digest,
+        )
+        self.assertNotEqual(submitted_digest, response_digest)
 
 
 if __name__ == "__main__":

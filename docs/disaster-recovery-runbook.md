@@ -703,13 +703,17 @@ ssh <mac_user>@<mac_studio_ip> 'python3 "$HOME/n8n-local/bin/backup-onion-sentin
 ssh <mac_user>@<mac_studio_ip> 'latest=$(find "$HOME/n8n-local/recovery_backups" -mindepth 1 -maxdepth 1 -type d ! -name ".*" | sort | tail -1); python3 -m json.tool "$latest/manifest.json"'
 ```
 
-Each atomic bundle contains a quick-checked SQLite database, a PostgreSQL
-custom-format dump validated by `pg_restore --list`, a SHA-256 manifest, and
-the runtime `.env`, n8n encryption config, prompts/settings, and agent memories
-needed for recovery. The bundle is mode `0700` with files mode `0600`, retained
-for seven days, and must never enter Git. Because it contains secrets and live
-operator state, any off-host copy must use an operator-controlled encrypted
-backup target.
+Each atomic bundle contains the quick-checked alert-store SQLite database and,
+when it exists, the owner-only investigation-harness SQLite database. Both
+snapshots are restored through SQLite's backup API, rechecked, and compared to
+their manifest row counts before the bundle is published. The bundle also
+contains a PostgreSQL custom-format dump validated by `pg_restore --list`, a
+SHA-256 manifest, and the runtime `.env`, n8n encryption config,
+prompts/settings, and agent memories needed for recovery. A missing harness
+database remains a valid pre-harness recovery state. The bundle is mode `0700`
+with files mode `0600`, retained for seven days, and must never enter Git.
+Because it contains secrets and live operator state, any off-host copy must
+use an operator-controlled encrypted backup target.
 
 Qualify a bundle with a full isolated restore rather than relying only on dump
 creation checks:
@@ -720,9 +724,27 @@ ssh <mac_user>@<mac_studio_ip> 'python3 "$HOME/n8n-local/bin/run-recovery-restor
 
 This uses a disposable PostgreSQL container with networking disabled and a
 temporary data filesystem. It validates the restored n8n schema and workflow
-records, verifies the SQLite copy and manifest row count, checks all bundle
-hashes, and confirms the archive contains the n8n encryption configuration.
-The production containers, databases, keys, and workflows are not modified.
+records; verifies the alert-store and optional investigation-harness SQLite
+copies, foreign keys, schema version, and manifest row counts; checks all
+bundle hashes; and confirms the archive contains the n8n encryption
+configuration. The production containers, databases, keys, and workflows are
+not modified.
+
+Harness trace retention is a separate hourly job. It preserves active runs,
+deletes no more than 1,000 terminal traces per pass, and refuses every
+destructive pass unless a hash-verified harness snapshot exists in a recovery
+bundle no older than 26 hours:
+
+```bash
+ssh <mac_user>@<mac_studio_ip> \
+  'python3 "$HOME/n8n-local/bin/maintain-investigation-harness.py"'
+ssh <mac_user>@<mac_studio_ip> \
+  'python3 -m json.tool "$HOME/n8n-local/logs/investigation-harness-maintenance.json"'
+```
+
+The first command is a dry run. The installed LaunchAgent supplies `--apply`.
+Exit `1` means another bounded pass is required; exit `2` means the database,
+lock, permissions, integrity check, or backup precondition blocked retention.
 
 Alert-store SQLite should run with these durability defaults in the Mac Studio
 runtime `.env` and repo compose template:

@@ -1108,11 +1108,15 @@ def _connect(path: Path) -> Iterable[sqlite3.Connection]:
     if path.exists() and not path.is_file():
         raise HarnessIntegrityError("harness database must be a regular file")
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    new_database = not path.exists()
     connection = sqlite3.connect(path, timeout=30.0)
     try:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 30000")
+        if new_database:
+            # This must be selected before any tables or WAL state exist.
+            connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA synchronous = FULL")
         _secure_sqlite_files(path)

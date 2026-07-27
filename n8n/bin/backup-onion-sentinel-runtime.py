@@ -31,18 +31,108 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def backup_sqlite(source: Path, destination: Path) -> int:
+def _sqlite_tables(connection: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            """
+        ).fetchall()
+    }
+
+
+def _validate_sqlite_connection(
+    connection: sqlite3.Connection,
+    *,
+    required_tables: tuple[str, ...],
+    count_table: str,
+) -> tuple[str, int]:
+    result = str(connection.execute("PRAGMA quick_check").fetchone()[0])
+    if result != "ok":
+        raise RuntimeError(f"SQLite backup failed quick_check: {result}")
+    missing = sorted(set(required_tables).difference(_sqlite_tables(connection)))
+    if missing:
+        raise RuntimeError(
+            "SQLite backup is missing required table(s): " + ", ".join(missing)
+        )
+    rows = int(
+        connection.execute(f'SELECT COUNT(*) FROM "{count_table}"').fetchone()[0]
+    )
+    return result, rows
+
+
+def backup_sqlite_database(
+    source: Path,
+    destination: Path,
+    *,
+    required_tables: tuple[str, ...],
+    count_table: str,
+) -> dict[str, object]:
+    """Create and logically restore one consistent SQLite snapshot.
+
+    SQLite's online backup API includes committed WAL content. Restoring that
+    snapshot into an independent in-memory database catches artifacts which
+    are readable as files but cannot be restored through SQLite itself.
+    """
+    if source.is_symlink() or not source.is_file():
+        raise RuntimeError(f"SQLite source is not a regular file: {source}")
     # sqlite3.Connection's context manager commits or rolls back but does not
     # close the handle. Explicit closing keeps repeated backup jobs bounded.
     with closing(sqlite3.connect(source)) as src, closing(sqlite3.connect(destination)) as dst:
         with src, dst:
             src.backup(dst)
     with closing(sqlite3.connect(destination)) as check:
-        result = check.execute("PRAGMA quick_check").fetchone()[0]
-        rows = check.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
-    if result != "ok":
-        raise RuntimeError(f"SQLite backup failed quick_check: {result}")
-    return int(rows)
+        quick_check, rows = _validate_sqlite_connection(
+            check,
+            required_tables=required_tables,
+            count_table=count_table,
+        )
+        foreign_key_errors = len(check.execute("PRAGMA foreign_key_check").fetchall())
+        if foreign_key_errors:
+            raise RuntimeError(
+                f"SQLite backup failed foreign_key_check: {foreign_key_errors} row(s)"
+            )
+        with closing(sqlite3.connect(":memory:")) as restored:
+            check.backup(restored)
+            restore_check, restored_rows = _validate_sqlite_connection(
+                restored,
+                required_tables=required_tables,
+                count_table=count_table,
+            )
+            restore_foreign_key_errors = len(
+                restored.execute("PRAGMA foreign_key_check").fetchall()
+            )
+    if restore_foreign_key_errors:
+        raise RuntimeError(
+            "SQLite logical restore failed foreign_key_check: "
+            f"{restore_foreign_key_errors} row(s)"
+        )
+    if restored_rows != rows:
+        raise RuntimeError("SQLite logical restore row count does not match snapshot")
+    return {
+        "rows": rows,
+        "quick_check": quick_check,
+        "foreign_key_check_rows": foreign_key_errors,
+        "restore_drill": {
+            "quick_check": restore_check,
+            "foreign_key_check_rows": restore_foreign_key_errors,
+            "rows": restored_rows,
+        },
+    }
+
+
+def backup_sqlite(source: Path, destination: Path) -> int:
+    """Backward-compatible alert-store backup helper."""
+    result = backup_sqlite_database(
+        source,
+        destination,
+        required_tables=("alerts",),
+        count_table="alerts",
+    )
+    return int(result["rows"])
 
 
 def postgres_dump(docker: str, destination: Path) -> None:
@@ -78,7 +168,23 @@ def archive_runtime_secrets(stack_dir: Path, destination: Path) -> list[str]:
 
 def create_bundle(stack_dir: Path, backup_root: Path, docker: str) -> Path:
     sqlite_source = stack_dir / "alert_store_data/alerts.sqlite3"
-    estimated_bytes = max(2 * 1024**3, sqlite_source.stat().st_size * 2 if sqlite_source.exists() else 0)
+    harness_source = (
+        stack_dir / "alert_store_data/investigation-harness.sqlite3"
+    )
+    if harness_source.is_symlink():
+        raise RuntimeError("harness SQLite source must not be a symlink")
+    sqlite_source_bytes = (
+        sqlite_source.stat().st_size if sqlite_source.is_file() else 0
+    )
+    harness_source_bytes = (
+        harness_source.stat().st_size
+        if harness_source.exists() and not harness_source.is_symlink()
+        else 0
+    )
+    estimated_bytes = max(
+        2 * 1024**3,
+        (sqlite_source_bytes + harness_source_bytes) * 2,
+    )
     require_runtime_capacity(
         backup_root,
         estimated_bytes,
@@ -89,7 +195,31 @@ def create_bundle(stack_dir: Path, backup_root: Path, docker: str) -> Path:
     final = backup_root / stamp
     staging.mkdir(mode=0o700, parents=True)
     try:
-        alert_rows = backup_sqlite(stack_dir / "alert_store_data/alerts.sqlite3", staging / "alerts.sqlite3")
+        alert_sqlite = backup_sqlite_database(
+            sqlite_source,
+            staging / "alerts.sqlite3",
+            required_tables=("alerts", "alert_group_summary"),
+            count_table="alerts",
+        )
+        harness_sqlite: dict[str, object] = {"present": False}
+        if harness_source.exists():
+            harness_result = backup_sqlite_database(
+                harness_source,
+                staging / "investigation-harness.sqlite3",
+                required_tables=(
+                    "harness_metadata",
+                    "harness_runs",
+                    "harness_events",
+                    "harness_evidence",
+                    "harness_hypotheses",
+                    "harness_decisions",
+                    "harness_model_calls",
+                    "harness_tool_calls",
+                    "harness_budget_reservations",
+                ),
+                count_table="harness_runs",
+            )
+            harness_sqlite = {"present": True, **harness_result}
         postgres_dump(docker, staging / "n8n-postgres.dump")
         included = archive_runtime_secrets(stack_dir, staging / "runtime-secrets.tar.gz")
         files = {}
@@ -99,7 +229,16 @@ def create_bundle(stack_dir: Path, backup_root: Path, docker: str) -> Path:
                 files[path.name] = {"bytes": path.stat().st_size, "sha256": sha256_file(path)}
         manifest = {
             "created_at": dt.datetime.now().astimezone().replace(microsecond=0).isoformat().replace("T", "  "),
-            "alert_rows": alert_rows,
+            "alert_rows": int(alert_sqlite["rows"]),
+            "harness_runs": (
+                int(harness_sqlite["rows"])
+                if harness_sqlite["present"]
+                else 0
+            ),
+            "sqlite": {
+                "alerts": {"present": True, **alert_sqlite},
+                "investigation_harness": harness_sqlite,
+            },
             "runtime_paths": included,
             "files": files,
         }

@@ -971,12 +971,72 @@ model use, tool failures and policy rejections, coverage and truncation,
 evidence-source diversity, independent-review disagreement, distinct budget
 breaches, and memory-promotion outcomes.
 
+## Trace Durability and Retention
+
+Shadow mode writes an owner-only SQLite trace ledger at
+`~/n8n-local/alert_store_data/investigation-harness.sqlite3`. The daily runtime
+recovery bundle takes a transactionally consistent SQLite snapshot, runs
+`quick_check` and `foreign_key_check`, then restores the snapshot through
+SQLite's backup API and repeats the checks before publishing the atomic
+bundle. The isolated recovery drill restores the optional trace snapshot,
+validates its schema version and row count against the manifest, and remains
+backward-compatible with bundles made before a harness database existed.
+
+The hourly `com.arron.onion-sentinel.harness-maintenance` LaunchAgent applies
+three independent bounds to terminal traces: 30 days, 10,000 terminal runs,
+and 2 GiB of live SQLite pages. Each pass deletes at most 1,000 terminal runs;
+running or review-waiting traces are never eligible. Byte pressure preserves
+the newest 1,000 terminal traces. A destructive pass is blocked unless a
+recovery bundle no older than 26 hours contains a hash-matching,
+quick-checked harness snapshot with the manifest's run count. Every exact
+deletion candidate must already be terminal in that snapshot and its event
+hash chain must verify; a run completed after the snapshot waits for the next
+backup. This ordering ensures retention cannot erase the only recoverable
+copy.
+
+New trace databases use SQLite incremental auto-vacuum. Maintenance performs a
+bounded incremental-vacuum pass, optimizes statistics, and truncates a WAL only
+when SQLite reports that all frames were checkpointed. Existing databases are
+not rewritten during deployment; they reuse freed pages and report physical,
+live-page, and reclaimable-page bytes so an operator can schedule a separate
+offline full vacuum if ever needed.
+
+Inspect or dry-run the maintenance decision without deleting a trace:
+
+```bash
+python3 ~/n8n-local/bin/maintain-investigation-harness.py
+python3 -m json.tool \
+  ~/n8n-local/logs/investigation-harness-maintenance.json
+```
+
+An operator-initiated destructive pass uses the same backup prerequisite as
+the scheduled job:
+
+```bash
+python3 ~/n8n-local/bin/maintain-investigation-harness.py --apply
+```
+
+Exit `0` means the database is absent or within bounds, exit `1` requests
+another bounded pass, and exit `2` means integrity, permissions, locking, or
+backup verification blocked maintenance. The JSON report contains counts and
+disk accounting, never raw event payloads or evidence. The operational SLO
+monitor requires this report to be no more than two hours old whenever the
+harness database exists, fails on a blocked or invalid integrity state, and
+surfaces bounded follow-up/checkpoint pressure as a degraded advisory.
+
 For controlled cohort evaluation only, set
 `ONION_SENTINEL_EVALUATION_FREEZE_MEMORY=1` on the manually invoked analysis
 worker. The runner still reads the fixed pre-evaluation role/shared memory but
 marks every primary and reviewer candidate ineligible for persistence. The
-loaded harness configuration records that freeze in the run digest. Do not set
-this variable on normal scheduled workers.
+loaded harness configuration records that freeze in the run digest. It also
+defers replay of any crash-recovered committed memory journal entry until a
+normal, non-evaluation worker resumes, so recovery work cannot contaminate the
+cohort between cases. Hash the role/shared memory files and record the exact
+pending/committed memory-task sets before and after the cohort as independent
+invariants. Owner-only post-commit receipt additions are expected; validate
+their analysis IDs and frozen-memory attestations instead of requiring the
+entire journal directory to remain byte-identical. Do not set this variable on
+normal scheduled workers.
 
 ## Operator Configuration and Safety
 

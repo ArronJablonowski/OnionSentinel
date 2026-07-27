@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.arron.onion-sentinel.harness-maintenance</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__HOME__/n8n-local/bin/maintain-investigation-harness.py</string>
+    <string>--apply</string>
+    <string>--retention-days</string>
+    <string>30</string>
+    <string>--max-terminal-runs</string>
+    <string>10000</string>
+    <string>--min-terminal-runs</string>
+    <string>1000</string>
+    <string>--max-delete-runs</string>
+    <string>1000</string>
+    <string>--max-live-bytes</string>
+    <string>2147483648</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StartInterval</key>
+  <integer>3600</integer>
+
+  <key>LowPriorityIO</key>
+  <true/>
+
+  <key>Nice</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/n8n-local/logs/harness-maintenance.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__HOME__/n8n-local/logs/harness-maintenance.err.log</string>
+</dict>
+</plist>
