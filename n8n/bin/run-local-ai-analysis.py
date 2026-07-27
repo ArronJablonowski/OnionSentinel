@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import copy
 import datetime as dt
 import fcntl
 import hashlib
@@ -2447,6 +2448,8 @@ MODEL_INTERNAL_KEYS = {
     "shared_memory_file",
     "sha256",
 }
+HOSTED_TRANSPORT_FIXED_POINT_MAX_PASSES = 8
+_MODEL_LIST_PATH_SENTINEL = object()
 HOSTED_FORBIDDEN_KEYS = {
     "packet_samples",
     "field_sample_tsv",
@@ -2673,6 +2676,59 @@ def _project_hosted_result_rows(key: str, value: list[Any]) -> list[Any]:
             if str(field).lower() in allowed
         })
     return projected
+
+
+def _prune_empty_hosted_projection(value: Any) -> Any:
+    """Remove empty shells left after positive projection and redaction.
+
+    Empty containers do not carry evidence. Removing them in the same
+    transport pass also makes repeated hosted projection idempotent.
+    """
+    def empty_container(item: Any) -> bool:
+        return isinstance(item, (dict, list)) and not item
+
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for raw_key, child in value.items():
+            projected = _prune_empty_hosted_projection(child)
+            normalized = str(raw_key).lower().replace("-", "_")
+            if (
+                isinstance(projected, list)
+                and not projected
+                and normalized in {"hits", "records", "rows"}
+            ):
+                # Preserve an explicit zero-result collection; remove only
+                # empty row/container shells inside it.
+                output[str(raw_key)] = []
+            elif not empty_container(projected):
+                output[str(raw_key)] = projected
+        return output
+    if isinstance(value, list):
+        output_list = []
+        for child in value:
+            projected = _prune_empty_hosted_projection(child)
+            if not empty_container(projected):
+                output_list.append(projected)
+        return output_list
+    return value
+
+
+def _reviewed_hosted_sha256_evidence_path(
+    path: tuple[object, ...],
+) -> bool:
+    """Allow SHA-256 only at positively projected Elastic source paths."""
+    if not path or path[0] != "investigation_query_results":
+        return False
+    anchor = ("hits", _MODEL_LIST_PATH_SENTINEL, "source")
+    reviewed_suffixes = {
+        ("hash",),
+        ("file", "hash"),
+        ("tls", "server", "hash"),
+    }
+    for position in range(max(0, len(path) - len(anchor) + 1)):
+        if path[position:position + len(anchor)] == anchor:
+            return path[position + len(anchor):] in reviewed_suffixes
+    return False
 
 
 def _exact_hosted_columnar_envelope(
@@ -2973,6 +3029,14 @@ def _sanitize_hosted_investigation_evidence(
             token_like = bool(_HOSTED_RESULT_TOKEN_KEY.search(normalized))
             if normalized.endswith("_digest"):
                 token_like = False
+            if (
+                normalized == "sha256"
+                and (
+                    not isinstance(item, str)
+                    or not re.fullmatch(r"[a-fA-F0-9]{64}", item)
+                )
+            ):
+                continue
             path_sensitive = (
                 (parent == "event" and normalized == "original")
                 or (parent == "process" and normalized in {"args", "command_line"})
@@ -2985,11 +3049,23 @@ def _sanitize_hosted_investigation_evidence(
                 or normalized in _HOSTED_RESULT_SENSITIVE_KEYS
             ):
                 continue
-            output[key] = _sanitize_hosted_investigation_evidence(
+            sanitized_item = _sanitize_hosted_investigation_evidence(
                 item,
                 (*path, normalized),
                 preserve_columnar_rows=preserve_columnar_rows,
             )
+            if (
+                normalized in {"hits", "records", "rows"}
+                and isinstance(item, list)
+                and not (
+                    exact_columnar_provenance
+                    and normalized == "rows"
+                )
+            ):
+                sanitized_item = _prune_empty_hosted_projection(
+                    sanitized_item
+                )
+            output[key] = sanitized_item
         return output
     if isinstance(value, list):
         return [
@@ -3022,7 +3098,7 @@ def model_safe_copy(
     *,
     hosted: bool = False,
     reviewer_safe: bool = False,
-    _path: tuple[str, ...] = (),
+    _path: tuple[object, ...] = (),
 ) -> Any:
     """Copy model evidence while enforcing transport-specific disclosure rules.
 
@@ -3036,14 +3112,35 @@ def model_safe_copy(
         for raw_key, item in value.items():
             key = str(raw_key)
             item_path = (*_path, key)
-            if key.startswith("_local_") or key in MODEL_INTERNAL_KEYS:
+            hosted_projected_evidence = hosted and key in {
+                "investigation_query_results",
+                "live_osquery_evidence",
+            }
+            preserve_columnar_rows = False
+            reviewed_hosted_sha256 = (
+                key == "sha256"
+                and hosted
+                and _reviewed_hosted_sha256_evidence_path(_path)
+            )
+            if (
+                key.startswith("_local_")
+                or (
+                    key in MODEL_INTERNAL_KEYS
+                    and not reviewed_hosted_sha256
+                )
+            ):
+                continue
+            if (
+                reviewed_hosted_sha256
+                and (
+                    not isinstance(item, str)
+                    or not re.fullmatch(r"[a-fA-F0-9]{64}", item)
+                )
+            ):
                 continue
             if hosted and (key in HOSTED_FORBIDDEN_KEYS or key.startswith("_pcap_query_")):
                 continue
-            if hosted and key in {
-                "investigation_query_results",
-                "live_osquery_evidence",
-            }:
+            if hosted_projected_evidence:
                 preserve_columnar_rows = (
                     item_path == ("investigation_query_results",)
                     and _exact_hosted_columnar_envelope(
@@ -3086,7 +3183,7 @@ def model_safe_copy(
                 item,
                 hosted=hosted,
                 reviewer_safe=reviewer_safe,
-                _path=(*_path, "[]"),
+                _path=(*_path, _MODEL_LIST_PATH_SENTINEL),
             )
             for item in value
         ]
@@ -3096,17 +3193,54 @@ def model_safe_copy(
 def synchronize_hosted_investigation_contract(
     prompt_package: dict[str, Any],
 ) -> dict[str, Any]:
-    """Bind runtime validation to the exact post-redaction query structure."""
-    transported = model_safe_copy(prompt_package, hosted=True)
-    if "investigation_query_results" in transported:
-        prompt_package["investigation_query_results"] = transported[
-            "investigation_query_results"
-        ]
-    if "evidence_reference_contract" in transported:
-        prompt_package["evidence_reference_contract"] = transported[
-            "evidence_reference_contract"
-        ]
-    return prompt_package
+    """Bind validation to a verified fixed point of hosted redaction.
+
+    Work on an isolated top-level copy and mutate the caller only after a
+    bounded convergence check. This keeps prompt admission transactional if a
+    future transport rule is accidentally non-idempotent.
+    """
+    working = copy.deepcopy(prompt_package)
+    seen_transport_digests: set[str] = set()
+    for _ in range(HOSTED_TRANSPORT_FIXED_POINT_MAX_PASSES):
+        transported = model_safe_copy(working, hosted=True)
+        transported_bytes = _investigation_prompt_json_bytes(transported)
+        transported_digest = hashlib.sha256(transported_bytes).hexdigest()
+        if transported_digest in seen_transport_digests:
+            raise InvestigationQueryError(
+                "hosted investigation transport did not reach a fixed point "
+                "(projection cycle)"
+            )
+        seen_transport_digests.add(transported_digest)
+        candidate = copy.deepcopy(working)
+        if "investigation_query_results" in transported:
+            candidate["investigation_query_results"] = transported[
+                "investigation_query_results"
+            ]
+        else:
+            candidate.pop("investigation_query_results", None)
+        if "evidence_reference_contract" in transported:
+            candidate["evidence_reference_contract"] = transported[
+                "evidence_reference_contract"
+            ]
+        else:
+            candidate.pop("evidence_reference_contract", None)
+        verified = model_safe_copy(candidate, hosted=True)
+        if _investigation_prompt_json_bytes(verified) == transported_bytes:
+            prompt_package.pop("investigation_query_results", None)
+            prompt_package.pop("evidence_reference_contract", None)
+            if "investigation_query_results" in candidate:
+                prompt_package["investigation_query_results"] = candidate[
+                    "investigation_query_results"
+                ]
+            if "evidence_reference_contract" in candidate:
+                prompt_package["evidence_reference_contract"] = candidate[
+                    "evidence_reference_contract"
+                ]
+            return prompt_package
+        working = candidate
+    raise InvestigationQueryError(
+        "hosted investigation transport did not reach a fixed point"
+    )
 
 
 EVIDENCE_REFERENCE_MAX = 400
@@ -6172,6 +6306,8 @@ def _admit_investigation_query_prompt(
         candidate = dict(base)
         candidate["investigation_query_results"] = projection
         attach_evidence_reference_contract(candidate)
+        if hosted:
+            synchronize_hosted_investigation_contract(candidate)
         encoded_size = len(
             _investigation_prompt_json_bytes(
                 model_safe_copy(candidate, hosted=hosted)
@@ -6276,25 +6412,39 @@ def _admit_investigation_query_prompt(
         )
 
     candidate, encoded_size = admitted
-    prompt_package.pop("investigation_query_results", None)
-    prompt_package.pop("evidence_reference_contract", None)
-    prompt_package["investigation_query_results"] = candidate[
+    prepared = copy.deepcopy(prompt_package)
+    prepared.pop("investigation_query_results", None)
+    prepared.pop("evidence_reference_contract", None)
+    prepared["investigation_query_results"] = candidate[
         "investigation_query_results"
     ]
-    prompt_package["evidence_reference_contract"] = candidate[
+    prepared["evidence_reference_contract"] = candidate[
         "evidence_reference_contract"
     ]
     if hosted:
-        synchronize_hosted_investigation_contract(prompt_package)
+        synchronize_hosted_investigation_contract(prepared)
     final_size = len(
         _investigation_prompt_json_bytes(
-            model_safe_copy(prompt_package, hosted=hosted)
+            model_safe_copy(prepared, hosted=hosted)
         )
     )
-    if final_size != encoded_size or final_size > maximum_prompt_bytes:
+    if final_size > maximum_prompt_bytes:
         raise InvestigationQueryError(
             "investigation follow-up prompt exceeds max_prompt_bytes"
         )
+    if final_size != encoded_size:
+        raise InvestigationQueryError(
+            "investigation follow-up prompt changed after admission "
+            f"(measured={encoded_size}, finalized={final_size})"
+        )
+    prompt_package.pop("investigation_query_results", None)
+    prompt_package.pop("evidence_reference_contract", None)
+    prompt_package["investigation_query_results"] = prepared[
+        "investigation_query_results"
+    ]
+    prompt_package["evidence_reference_contract"] = prepared[
+        "evidence_reference_contract"
+    ]
     return final_size
 
 

@@ -385,6 +385,220 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         self.assertNotIn("/Users/alice", encoded)
         self.assertNotIn(r"C:\\Users\\alice", encoded)
 
+    def test_hosted_elastic_hash_projection_is_idempotent(self) -> None:
+        certificate_digest = "d" * 64
+        file_digest = "e" * 64
+        general_digest = "f" * 64
+        private_memory_digest = "1" * 64
+        package = {
+            "sha256": "top-level-local-artifact-digest",
+            "agent_memory": {
+                "records": [{
+                    "kind": "operator-private-hash",
+                    "sha256": private_memory_digest,
+                }],
+            },
+            "analyst_state": {
+                "arbitrary": {
+                    "hash": {
+                        "sha256": private_memory_digest,
+                    },
+                },
+            },
+            "investigation_query_results": {
+                "rounds": [{
+                    "results": [{
+                        "backend": "security_onion",
+                        "evidence": {
+                            "unreviewed": {
+                                "hash": {
+                                    "sha256": private_memory_digest,
+                                },
+                            },
+                            "spoofed_list_path": {
+                                "hits": {
+                                    "[]": {
+                                        "source": {
+                                            "hash": {
+                                                "sha256": (
+                                                    private_memory_digest
+                                                ),
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                            "records": [],
+                            "rows": [],
+                            "results": [{
+                                "hits": [{
+                                    "id": "tls-hit",
+                                    "index": "logs-zeek-so",
+                                    "source": {
+                                        "hash": {
+                                            "sha256": general_digest,
+                                        },
+                                        "file": {
+                                            "hash": {
+                                                "sha256": file_digest,
+                                            },
+                                            "path": "/private/evidence.bin",
+                                        },
+                                        "tls": {
+                                            "server": {
+                                                "hash": {
+                                                    "sha256": certificate_digest,
+                                                },
+                                            },
+                                        },
+                                        "message": "password=TOPSECRET",
+                                    },
+                                }, {
+                                    "id": "invalid-hash",
+                                    "source": {
+                                        "hash": {
+                                            "sha256": "not-a-canonical-hash",
+                                        },
+                                    },
+                                }],
+                            }],
+                        },
+                    }],
+                }],
+            },
+        }
+
+        first = self.runner.model_safe_copy(package, hosted=True)
+        second = self.runner.model_safe_copy(first, hosted=True)
+
+        self.assertEqual(first, second)
+        self.assertNotIn("sha256", first)
+        encoded = json.dumps(first, sort_keys=True)
+        self.assertIn(certificate_digest, encoded)
+        self.assertIn(file_digest, encoded)
+        self.assertIn(general_digest, encoded)
+        self.assertNotIn("TOPSECRET", encoded)
+        self.assertNotIn("/private/evidence.bin", encoded)
+        self.assertNotIn("not-a-canonical-hash", encoded)
+        self.assertNotIn(private_memory_digest, encoded)
+        self.assertNotIn(
+            "sha256",
+            first["agent_memory"]["records"][0],
+        )
+        self.assertNotIn(
+            "sha256",
+            first["analyst_state"]["arbitrary"]["hash"],
+        )
+        source = (
+            first["investigation_query_results"]["rounds"][0]["results"][0]
+            ["evidence"]["results"][0]["hits"][0]["source"]
+        )
+        evidence = (
+            first["investigation_query_results"]["rounds"][0]["results"][0]
+            ["evidence"]
+        )
+        self.assertEqual(evidence["records"], [])
+        self.assertEqual(evidence["rows"], [])
+        self.assertNotIn(
+            "sha256",
+            evidence["unreviewed"]["hash"],
+        )
+        self.assertNotIn(
+            "sha256",
+            evidence["spoofed_list_path"]["hits"]["[]"]["source"]["hash"],
+        )
+        self.assertEqual(source["hash"]["sha256"], general_digest)
+        self.assertEqual(source["file"]["hash"]["sha256"], file_digest)
+        self.assertEqual(
+            source["tls"]["server"]["hash"]["sha256"],
+            certificate_digest,
+        )
+
+    def test_hosted_synchronization_is_transactional_and_reaches_fixed_point(
+        self,
+    ) -> None:
+        prompt_package = {
+            "investigation_query_results": {
+                "rounds": [{
+                    "results": [{
+                        "backend": "security_onion",
+                        "evidence": {
+                            "results": [{
+                                "hits": [{
+                                    "source": {
+                                        "tls": {
+                                            "server": {
+                                                "hash": {"sha256": "e" * 64},
+                                            },
+                                        },
+                                    },
+                                }],
+                            }],
+                        },
+                    }],
+                }],
+            },
+            "evidence_reference_contract": {
+                "schema": "stale-contract",
+                "references": [],
+            },
+        }
+
+        self.runner.synchronize_hosted_investigation_contract(prompt_package)
+        synchronized = copy.deepcopy(prompt_package)
+        transported = self.runner.model_safe_copy(
+            prompt_package,
+            hosted=True,
+        )
+        self.assertEqual(
+            prompt_package["investigation_query_results"],
+            transported["investigation_query_results"],
+        )
+        self.assertEqual(
+            prompt_package["evidence_reference_contract"],
+            transported["evidence_reference_contract"],
+        )
+        self.runner.synchronize_hosted_investigation_contract(prompt_package)
+        self.assertEqual(prompt_package, synchronized)
+
+        original = copy.deepcopy(prompt_package)
+
+        def nonconvergent_transport(value, *, hosted=False, **_kwargs):
+            output = copy.deepcopy(value)
+            current = (
+                value.get("investigation_query_results", {}).get(
+                    "transport_generation",
+                    0,
+                )
+                if isinstance(
+                    value.get("investigation_query_results"),
+                    dict,
+                )
+                else 0
+            )
+            output["investigation_query_results"] = {
+                "transport_generation": 0 if current == 1 else 1,
+            }
+            output["evidence_reference_contract"] = {
+                "schema": "synthetic-nonconvergent",
+                "references": [],
+            }
+            return output
+
+        with mock.patch.object(
+            self.runner,
+            "model_safe_copy",
+            side_effect=nonconvergent_transport,
+        ):
+            with self.assertRaisesRegex(
+                self.runner.InvestigationQueryError,
+                "did not reach a fixed point",
+            ):
+                self.runner.synchronize_hosted_investigation_contract(
+                    prompt_package
+                )
+        self.assertEqual(prompt_package, original)
+
     def test_normalizer_rejects_arbitrary_query_syntax_and_raw_packet_operation(self) -> None:
         with self.assertRaisesRegex(
             self.runner.InvestigationQueryError,
@@ -3185,6 +3399,275 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             {item["ref"] for item in contract["references"]},
         )
 
+    def test_follow_up_admission_commits_exact_hosted_tls_hash_fixed_point(
+        self,
+    ) -> None:
+        certificate_digest = "c" * 64
+        second_certificate_digest = "9" * 64
+        query_digest = "a" * 64
+        result_digest = "b" * 64
+        prompt_package = {
+            "package_type": "soc-ai-investigation-prompt",
+            "agent_role": "soc-analyst",
+        }
+        rounds = [{
+            "round": 1,
+            "requests": [],
+            "audit": [],
+            "results": [{
+                "query_id": "tls-certificate-pivot",
+                "backend": "elastic",
+                "status": "ok",
+                "read_only": True,
+                "evidence": {
+                    "query_id": "tls-certificate-pivot",
+                    "pack": "zeek_tls",
+                    "status": "ok",
+                    "query_digest": query_digest,
+                    "result_digest": result_digest,
+                    "returned_hits": 1,
+                    "hits": [{
+                        "source": {
+                            "tls": {
+                                "server": {
+                                    "hash": {
+                                        "sha256": certificate_digest,
+                                    },
+                                },
+                            },
+                        },
+                    }],
+                },
+                "trusted_query_audit": [{
+                    "query_id": "tls-certificate-pivot",
+                    "backend": "elastic",
+                    "pack": "zeek_tls",
+                    "aggregation": "events",
+                    "purpose": "Confirm the observed TLS certificate hash.",
+                    "status": "ok",
+                    "query_digest": query_digest,
+                    "result_digest": result_digest,
+                    "returned_hits": 1,
+                }],
+            }],
+        }]
+        second_round = copy.deepcopy(rounds[0])
+        second_round["round"] = 2
+        second_result = second_round["results"][0]
+        second_result["query_id"] = "tls-certificate-pivot-2"
+        second_result["evidence"]["query_id"] = "tls-certificate-pivot-2"
+        second_result["evidence"]["query_digest"] = "3" * 64
+        second_result["evidence"]["result_digest"] = "4" * 64
+        second_result["evidence"]["returned_hits"] = 45
+        second_result["evidence"]["hits"] = [
+            {
+                "source": {
+                    "tls": {
+                        "server": {
+                            "hash": {
+                                "sha256": second_certificate_digest,
+                            },
+                        },
+                    },
+                },
+            }
+            for _ in range(45)
+        ]
+        second_audit = second_result["trusted_query_audit"][0]
+        second_audit["query_id"] = "tls-certificate-pivot-2"
+        second_audit["query_digest"] = "3" * 64
+        second_audit["result_digest"] = "4" * 64
+        second_audit["returned_hits"] = 45
+        rounds.append(second_round)
+
+        first_admitted_size = self.runner._admit_investigation_query_prompt(
+            prompt_package,
+            rounds[:1],
+            maximum_prompt_bytes=(
+                self.runner.CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES
+            ),
+            hosted=True,
+        )
+        self.assertLessEqual(
+            first_admitted_size,
+            self.runner.CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES,
+        )
+        admitted_size = self.runner._admit_investigation_query_prompt(
+            prompt_package,
+            rounds,
+            maximum_prompt_bytes=(
+                self.runner.CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES
+            ),
+            hosted=True,
+        )
+        transported = self.runner.model_safe_copy(
+            prompt_package,
+            hosted=True,
+        )
+        actual_size = len(json.dumps(
+            transported,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"))
+
+        self.assertEqual(admitted_size, actual_size)
+        self.assertLessEqual(
+            actual_size,
+            self.runner.CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES,
+        )
+        self.assertEqual(
+            transported,
+            self.runner.model_safe_copy(transported, hosted=True),
+        )
+        self.assertIn(
+            certificate_digest,
+            json.dumps(transported, sort_keys=True),
+        )
+        self.assertIn(
+            second_certificate_digest,
+            json.dumps(transported, sort_keys=True),
+        )
+
+    def test_follow_up_admission_measures_staged_fixed_point_at_exact_ceiling(
+        self,
+    ) -> None:
+        maximum = 4096
+
+        def synthetic_projection(_rounds, *, maximum_bytes):
+            return {
+                "schema": "synthetic-query-results",
+                "rounds": [{"schema": "synthetic-round"}],
+                "transport_generation": 0,
+                "transport_padding": "",
+                "prompt_projection": {
+                    "max_bytes": maximum_bytes,
+                    "encoded_bytes": 1,
+                    "truncated": False,
+                },
+            }
+
+        def staged_transport(value, *, hosted=False, **_kwargs):
+            output = copy.deepcopy(value)
+            if not hosted:
+                return output
+            results = output.get("investigation_query_results")
+            if isinstance(results, dict):
+                current = results.get("transport_generation", 0)
+                if isinstance(current, bool) or not isinstance(current, int):
+                    current = 0
+                generation = min(2, max(0, current) + 1)
+                results["transport_generation"] = generation
+                results["transport_padding"] = "s" * (generation * 17)
+                output["evidence_reference_contract"] = {
+                    "schema": "synthetic-staged-contract",
+                    "generation": generation,
+                    "references": [],
+                }
+            return output
+
+        rounds: list[dict] = []
+        with (
+            mock.patch.object(
+                self.runner,
+                "_investigation_prompt_payload",
+                side_effect=synthetic_projection,
+            ),
+            mock.patch.object(
+                self.runner,
+                "model_safe_copy",
+                side_effect=staged_transport,
+            ),
+        ):
+            calibration = {"padding": ""}
+            calibration_size = (
+                self.runner._admit_investigation_query_prompt(
+                    calibration,
+                    rounds,
+                    maximum_prompt_bytes=maximum,
+                    hosted=True,
+                )
+            )
+            self.assertLess(calibration_size, maximum)
+
+            prompt_package = {
+                "padding": "p" * (maximum - calibration_size),
+            }
+            admitted_size = self.runner._admit_investigation_query_prompt(
+                prompt_package,
+                rounds,
+                maximum_prompt_bytes=maximum,
+                hosted=True,
+            )
+            transported = self.runner.model_safe_copy(
+                prompt_package,
+                hosted=True,
+            )
+
+        self.assertEqual(admitted_size, maximum)
+        self.assertEqual(
+            len(self.runner._investigation_prompt_json_bytes(transported)),
+            maximum,
+        )
+        self.assertEqual(
+            prompt_package["investigation_query_results"][
+                "transport_generation"
+            ],
+            2,
+        )
+        self.assertEqual(
+            transported["investigation_query_results"][
+                "transport_generation"
+            ],
+            2,
+        )
+
+    def test_follow_up_admission_does_not_mutate_on_transport_failure(
+        self,
+    ) -> None:
+        prompt_package = {
+            "package_type": "soc-ai-investigation-prompt",
+            "sentinel": {"unchanged": True},
+        }
+        original = copy.deepcopy(prompt_package)
+        rounds = [{
+            "round": 1,
+            "requests": [],
+            "audit": [],
+            "results": [{
+                "query_id": "pivot",
+                "backend": "elastic",
+                "status": "ok",
+                "read_only": True,
+                "evidence": {
+                    "query_digest": "a" * 64,
+                    "result_digest": "b" * 64,
+                    "returned_hits": 0,
+                },
+                "trusted_query_audit": [],
+            }],
+        }]
+
+        with mock.patch.object(
+            self.runner,
+            "synchronize_hosted_investigation_contract",
+            side_effect=self.runner.InvestigationQueryError(
+                "synthetic transport failure"
+            ),
+        ):
+            with self.assertRaisesRegex(
+                self.runner.InvestigationQueryError,
+                "synthetic transport failure",
+            ):
+                self.runner._admit_investigation_query_prompt(
+                    prompt_package,
+                    rounds,
+                    maximum_prompt_bytes=(
+                        self.runner.CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES
+                    ),
+                    hosted=True,
+                )
+        self.assertEqual(prompt_package, original)
+
     def test_follow_up_admission_finds_exact_nonmonotonic_floor_boundary(
         self,
     ) -> None:
@@ -3696,7 +4179,9 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             hosted["investigation_query_results"]["rounds"][0]
             ["results"][0]["evidence_summary"]["nested"]["rows"]
         )
-        self.assertEqual(nested_rows, [{}])
+        # A projected row with no reviewed fields carries no evidence and is
+        # removed in the same pass, keeping hosted transport idempotent.
+        self.assertEqual(nested_rows, [])
 
     def test_columnar_provenance_preserves_zero_result_corroboration_semantics(
         self,
