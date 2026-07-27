@@ -13,6 +13,26 @@ INSTALLER = ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
 PRIOR_MODEL_SETTINGS_SHA256 = (
     "fd9f93123b22c0664d147fdcd012d1c016329566ffaea97cb4bfa7c5d7daaf2b"
 )
+PRIOR_REVIEWER_PROMPT_SHA256 = {
+    "cyber_threat_intel_second_opinion_prompt.md": (
+        "2c0a5093fc6c79d6bb7f40a278a265e2edba91d69e7fa763508f16eaf5f69e44"
+    ),
+    "incident_responder_second_opinion_prompt.md": (
+        "71400cd9a6826be6b23a2cfa3cdacbada21ff6ef16d0093dac49c13dcf63d646"
+    ),
+    "siem_engineer_second_opinion_prompt.md": (
+        "d2d60b55dd3050d99f42cc62653376c9ed6b1a5e3ad47bd3ea9b2a2f884d0dac"
+    ),
+    "soc_analyst_second_opinion_prompt.md": (
+        "db79fa2ac912b7227e4889626d853eca28a950966b93acd822582b0468dcc5ff"
+    ),
+    "threat_hunter_second_opinion_prompt.md": (
+        "15af4c64dfa8fcd5388286250212c24224aeb06716efb7da1e29bd6dd6469017"
+    ),
+}
+OLDER_INCIDENT_RESPONDER_PROMPT_SHA256 = (
+    "c13d5fcd90644db6fcd745fdc5c6ce978ccdd62a3f3e115dfce0aec634f77421"
+)
 
 
 def load_module():
@@ -188,6 +208,53 @@ class RuntimePolicyUpgradeTests(unittest.TestCase):
         self.assertIn(seed, installer)
         self.assertIn(migration, installer)
         self.assertLess(installer.index(seed), installer.index(migration))
+
+    def test_installer_exactly_migrates_every_shipped_reviewer_prompt(self) -> None:
+        installer = INSTALLER.read_text(encoding="utf-8")
+        seed_loop = installer.index("for reviewer_prompt in")
+
+        for prompt_name, prior_digest in PRIOR_REVIEWER_PROMPT_SHA256.items():
+            with self.subTest(prompt=prompt_name):
+                source = ROOT / "n8n" / "config" / prompt_name
+                self.assertNotEqual(
+                    hashlib.sha256(source.read_bytes()).hexdigest(),
+                    prior_digest,
+                    "the accepted predecessor must not equal the new source",
+                )
+                migration = (
+                    f'--source "$REPO_DIR/n8n/config/{prompt_name}" \\\n'
+                    f'  --destination "$STACK_DIR/config/{prompt_name}"'
+                )
+                migration_index = installer.index(migration)
+                self.assertLess(seed_loop, migration_index)
+                self.assertIn(
+                    f'--accepted-prior-sha256 "{prior_digest}"',
+                    installer[migration_index:],
+                )
+
+    def test_installer_retains_older_incident_responder_upgrade_path(self) -> None:
+        installer = INSTALLER.read_text(encoding="utf-8")
+        incident_migration = installer.index(
+            '--source "$REPO_DIR/n8n/config/'
+            'incident_responder_second_opinion_prompt.md"'
+        )
+        following_migration = installer.index(
+            '--source "$REPO_DIR/n8n/config/'
+            'siem_engineer_second_opinion_prompt.md"',
+            incident_migration,
+        )
+        incident_block = installer[incident_migration:following_migration]
+
+        self.assertIn(
+            f'--accepted-prior-sha256 "{OLDER_INCIDENT_RESPONDER_PROMPT_SHA256}"',
+            incident_block,
+        )
+        self.assertIn(
+            '--accepted-prior-sha256 "'
+            f'{PRIOR_REVIEWER_PROMPT_SHA256["incident_responder_second_opinion_prompt.md"]}'
+            '"',
+            incident_block,
+        )
 
 
 if __name__ == "__main__":

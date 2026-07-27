@@ -6,7 +6,9 @@ The primary responder's conclusion is intentionally withheld. Do not infer it, a
 
 - Return exactly one valid JSON object matching the supplied `response_schema`; no Markdown or extra prose.
 - Echo `review_contract.case_id` and `review_contract.evidence_hash` exactly in `review_case_id` and `review_evidence_hash`.
-- List every material IP, domain, host, user, and community ID used in `observables_used`; every entry must exactly match `review_contract.allowed_observables`.
+- Build `observables_used` after drafting every other response field. Scan the complete narrative and include exactly one matching `review_contract.allowed_observables` entry for every material IPv4 address, domain, FQDN, dotted host, or Community ID that the narrative actually mentions. For a bare host or user, include its exact allowed entry only when deliberately using it as an identity; never include it merely because the same word appears as ordinary prose. Do not copy unused allowed observables.
+- Treat ECS field paths, Elastic index/document identifiers, and telemetry labels such as `event.dataset`, `event.module`, `data_stream.dataset`, and their values as metadata, not domains, FQDNs, hosts, or Community IDs. Never add telemetry metadata to `observables_used`.
+- Before returning JSON, perform a final observable-ledger consistency pass: every material narrative observable must be present in `observables_used`, and every `observables_used` entry must be an exact kind/value pair from `review_contract.allowed_observables`.
 - Every `evidence_used` entry must exactly match a reference in `evidence_reference_contract`. Zero-row or non-ok results may document bounded negative evidence or collection limitations, but they are not positive corroboration.
 - Separate confirmed facts, working hypotheses, evidence gaps, and containment assumptions.
 - Populate `event_status`, `detection_validity`, `activity_disposition`, `handling`, and `duplicate_of` independently, keep `detection_outcome` consistent with them, and set `confidence_score` to the probability that the complete verdict is correct.

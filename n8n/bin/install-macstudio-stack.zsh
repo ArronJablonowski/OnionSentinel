@@ -141,7 +141,8 @@ if [[ ! -f "$STACK_DIR/config/incident_responder_system_prompt.md" ]]; then
   cp "$REPO_DIR/n8n/config/incident_responder_system_prompt.md" "$STACK_DIR/config/incident_responder_system_prompt.md"
 fi
 # Reviewer prompts are operator-editable runtime policy, just like the primary
-# prompts. Seed missing files during recovery but never overwrite live edits.
+# prompts. Seed missing files during recovery. Existing files are considered
+# for the byte-exact, reviewed baseline upgrades below.
 for reviewer_prompt in \
   soc_analyst_second_opinion_prompt.md \
   incident_responder_second_opinion_prompt.md \
@@ -153,13 +154,31 @@ do
     cp "$REPO_DIR/n8n/config/$reviewer_prompt" "$STACK_DIR/config/$reviewer_prompt"
   fi
 done
-# Upgrade the Incident Responder reviewer only when the live file still
-# matches the exact previously shipped baseline. Preserve any operator-edited
-# prompt and report that decision instead of silently overwriting it.
+# Upgrade each reviewer only when its live file still matches an exact
+# previously shipped baseline. Any operator edit changes the digest, so the
+# helper preserves that file and reports the decision instead of silently
+# overwriting it. The Incident Responder has two reviewed predecessor releases.
+/usr/bin/python3 "$REPO_DIR/n8n/bin/upgrade-runtime-policy.py" \
+  --source "$REPO_DIR/n8n/config/cyber_threat_intel_second_opinion_prompt.md" \
+  --destination "$STACK_DIR/config/cyber_threat_intel_second_opinion_prompt.md" \
+  --accepted-prior-sha256 "2c0a5093fc6c79d6bb7f40a278a265e2edba91d69e7fa763508f16eaf5f69e44"
 /usr/bin/python3 "$REPO_DIR/n8n/bin/upgrade-runtime-policy.py" \
   --source "$REPO_DIR/n8n/config/incident_responder_second_opinion_prompt.md" \
   --destination "$STACK_DIR/config/incident_responder_second_opinion_prompt.md" \
-  --accepted-prior-sha256 "c13d5fcd90644db6fcd745fdc5c6ce978ccdd62a3f3e115dfce0aec634f77421"
+  --accepted-prior-sha256 "c13d5fcd90644db6fcd745fdc5c6ce978ccdd62a3f3e115dfce0aec634f77421" \
+  --accepted-prior-sha256 "71400cd9a6826be6b23a2cfa3cdacbada21ff6ef16d0093dac49c13dcf63d646"
+/usr/bin/python3 "$REPO_DIR/n8n/bin/upgrade-runtime-policy.py" \
+  --source "$REPO_DIR/n8n/config/siem_engineer_second_opinion_prompt.md" \
+  --destination "$STACK_DIR/config/siem_engineer_second_opinion_prompt.md" \
+  --accepted-prior-sha256 "d2d60b55dd3050d99f42cc62653376c9ed6b1a5e3ad47bd3ea9b2a2f884d0dac"
+/usr/bin/python3 "$REPO_DIR/n8n/bin/upgrade-runtime-policy.py" \
+  --source "$REPO_DIR/n8n/config/soc_analyst_second_opinion_prompt.md" \
+  --destination "$STACK_DIR/config/soc_analyst_second_opinion_prompt.md" \
+  --accepted-prior-sha256 "db79fa2ac912b7227e4889626d853eca28a950966b93acd822582b0468dcc5ff"
+/usr/bin/python3 "$REPO_DIR/n8n/bin/upgrade-runtime-policy.py" \
+  --source "$REPO_DIR/n8n/config/threat_hunter_second_opinion_prompt.md" \
+  --destination "$STACK_DIR/config/threat_hunter_second_opinion_prompt.md" \
+  --accepted-prior-sha256 "15af4c64dfa8fcd5388286250212c24224aeb06716efb7da1e29bd6dd6469017"
 if [[ ! -f "$STACK_DIR/config/ai_model_settings.json" ]]; then
   cp "$REPO_DIR/n8n/config/ai_model_settings.json" "$STACK_DIR/config/ai_model_settings.json"
   chmod 0600 "$STACK_DIR/config/ai_model_settings.json"

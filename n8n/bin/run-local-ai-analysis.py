@@ -2793,6 +2793,14 @@ REVIEW_KNOWN_FIELD_PATHS = frozenset(
         "user.name",
     }
 )
+REVIEW_TAXONOMY_FIELD_PATHS = frozenset(
+    {
+        "data_stream_dataset",
+        "data_stream_type",
+        "event_dataset",
+        "event_module",
+    }
+)
 
 
 def _bounded_reference(value: Any) -> str:
@@ -3244,6 +3252,65 @@ def reviewer_observable_catalog(prompt_package: dict[str, Any]) -> list[dict[str
         {"kind": kind, "value": value}
         for kind, value in sorted(found)
     ]
+
+
+def reviewer_non_domain_taxonomy_catalog(
+    prompt_package: dict[str, Any],
+) -> list[str]:
+    """Return exact dotted dataset/module labels that are not DNS names.
+
+    Dataset and module values such as ``suricata.alert`` share the lexical
+    shape of an FQDN.  They are safe to exempt from the narrative domain check
+    only when a collector-owned, semantically typed field in the current
+    evidence package supplies that exact value.  Arbitrary dotted prose and
+    values under unrelated keys never enter this catalog.
+    """
+    found: set[str] = set()
+
+    def field_segment(value: Any) -> str:
+        return re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            str(value or "").strip().lower(),
+        ).strip("_")
+
+    def add(value: Any) -> None:
+        text = _bounded_reference(value).lower()
+        if text and REVIEW_DOMAIN_RE.fullmatch(text):
+            found.add(text)
+
+    def visit(value: Any, path: tuple[str, ...] = ()) -> None:
+        if isinstance(value, dict):
+            for raw_key, child in value.items():
+                segment = field_segment(raw_key)
+                child_path = path + ((segment,) if segment else ())
+                semantic_path = "_".join(child_path[-2:])
+                if (
+                    isinstance(child, (str, int))
+                    and (
+                        segment in REVIEW_TAXONOMY_FIELD_PATHS
+                        or semantic_path in REVIEW_TAXONOMY_FIELD_PATHS
+                    )
+                ):
+                    add(child)
+                else:
+                    visit(child, child_path)
+        elif isinstance(value, list):
+            for child in value[:1000]:
+                visit(child, path)
+
+    for section in (
+        "alert",
+        "grouped_alert_context",
+        "correlated_alert_context",
+        "pcap_evidence",
+        "detection_validation",
+        "incident_response_evidence",
+        "investigation_query_results",
+        "live_osquery_evidence",
+    ):
+        visit(prompt_package.get(section), ())
+    return sorted(found)
 
 
 class InvestigationQueryError(ValueError):
@@ -7005,15 +7072,8 @@ def analyze_model_route(
         model = route.removeprefix("ollama:").strip()
         if not model:
             raise SystemExit("Configured Ollama route has an empty model name")
-        review_package = prompt_package
-        if independent_review:
-            review_package = model_safe_copy(prompt_package, reviewer_safe=True)
-            review_package["second_opinion_review"] = {
-                "mode": "independent",
-                "instruction": "Analyze the supplied evidence independently; the primary conclusion is withheld.",
-            }
         response = _ollama_chat_for_model(
-            review_package,
+            prompt_package,
             args,
             settings,
             model,
@@ -7149,11 +7209,20 @@ def reviewer_case_id(prompt_package: dict[str, Any]) -> str:
 
 def reviewer_evidence_hash(review_package: dict[str, Any]) -> str:
     """Bind the reviewer response to its exact blind, model-visible package."""
-    payload = {
-        key: value
-        for key, value in review_package.items()
-        if key not in {"review_contract", "review_contract_repair"}
-    }
+    payload: dict[str, Any] = {}
+    for key, value in review_package.items():
+        if key == "review_contract_repair":
+            continue
+        if key == "review_contract":
+            if isinstance(value, dict):
+                bound_contract = dict(value)
+                # Avoid a circular digest while binding every other
+                # collector-owned contract field, including the observable
+                # and telemetry-taxonomy catalogs.
+                bound_contract.pop("evidence_hash", None)
+                payload[key] = bound_contract
+            continue
+        payload[key] = value
     return hashlib.sha256(
         json.dumps(
             model_safe_copy(payload, reviewer_safe=True),
@@ -7164,15 +7233,23 @@ def reviewer_evidence_hash(review_package: dict[str, Any]) -> str:
     ).hexdigest()
 
 
-def independent_reviewer_package(prompt_package: dict[str, Any]) -> dict[str, Any]:
-    """Build a blind evidence view without prior model conclusions.
+def independent_reviewer_package(
+    prompt_package: dict[str, Any],
+    *,
+    hosted: bool = False,
+) -> dict[str, Any]:
+    """Build the exact route-safe blind evidence view sent to the reviewer.
 
     The reviewer receives the same collector-owned alert, enrichment, PCAP, and
     incident evidence as the primary. Previous AI conclusions, model-authored
     memory, and the embedded primary system prompt are deliberately removed so
     agreement represents an independent conclusion rather than anchoring.
     """
-    review_package = model_safe_copy(prompt_package, reviewer_safe=True)
+    review_package = model_safe_copy(
+        prompt_package,
+        hosted=hosted,
+        reviewer_safe=True,
+    )
     review_package.pop("prior_analyses", None)
 
     instructions = review_package.get("instructions")
@@ -7231,8 +7308,12 @@ def independent_reviewer_package(prompt_package: dict[str, Any]) -> dict[str, An
         )
 
     attach_evidence_reference_contract(review_package)
-    case_id = reviewer_case_id(prompt_package)
-    observables = reviewer_observable_catalog(prompt_package)
+    case_id = reviewer_case_id(review_package)
+    # Generate reviewer contracts only after applying the exact transport
+    # boundary. Otherwise a forbidden hosted field could be removed while one
+    # of its values was accidentally reintroduced through allowed_observables.
+    observables = reviewer_observable_catalog(review_package)
+    non_domain_taxonomy = reviewer_non_domain_taxonomy_catalog(review_package)
     response_schema = (
         dict(review_package.get("response_schema"))
         if isinstance(review_package.get("response_schema"), dict)
@@ -7251,25 +7332,9 @@ def independent_reviewer_package(prompt_package: dict[str, Any]) -> dict[str, An
         }
     )
     review_package["response_schema"] = response_schema
-    evidence_hash = reviewer_evidence_hash(review_package)
-    review_package["review_contract"] = {
-        "schema": "onion-sentinel-independent-review-v1",
-        "case_id": case_id,
-        "evidence_hash": evidence_hash,
-        "allowed_observables": observables,
-        "requirements": [
-            "Echo case_id and evidence_hash exactly in review_case_id and review_evidence_hash.",
-            "List every material IP, domain, host, user, and community_id used in observables_used.",
-            "Use only exact allowed_observables and exact evidence_reference_contract refs.",
-            (
-                "Treat Elastic index/document identifiers as record identifiers, "
-                "not Community IDs; never add them to observables_used as community_id."
-            ),
-            "Do not repeat boilerplate or introduce facts from another case.",
-        ],
-    }
     review_package["second_opinion_review"] = {
         "mode": "blind_independent",
+        "evidence_boundary": "hosted-redacted" if hosted else "local",
         "primary_conclusion_withheld": True,
         "excluded_context": [
             "current primary response",
@@ -7278,6 +7343,37 @@ def independent_reviewer_package(prompt_package: dict[str, Any]) -> dict[str, An
             "unconfirmed model-observed memory",
         ],
     }
+    review_package["review_contract"] = {
+        "schema": "onion-sentinel-independent-review-v1",
+        "case_id": case_id,
+        "allowed_observables": observables,
+        "allowed_non_domain_taxonomy_tokens": non_domain_taxonomy,
+        "requirements": [
+            "Echo case_id and evidence_hash exactly in review_case_id and review_evidence_hash.",
+            (
+                "List every material IPv4 address, domain, FQDN, dotted host, "
+                "and community_id used in observables_used."
+            ),
+            (
+                "List a bare host or user only when deliberately using that "
+                "exact allowed value as an identity, never because the same "
+                "word appears as ordinary prose."
+            ),
+            "Use only exact allowed_observables and exact evidence_reference_contract refs.",
+            (
+                "Treat Elastic index/document identifiers as record identifiers, "
+                "not Community IDs; never add them to observables_used as community_id."
+            ),
+            (
+                "Treat exact allowed_non_domain_taxonomy_tokens as dataset or "
+                "module labels, not domain observables."
+            ),
+            "Do not repeat boilerplate or introduce facts from another case.",
+        ],
+    }
+    review_package["review_contract"]["evidence_hash"] = (
+        reviewer_evidence_hash(review_package)
+    )
     return review_package
 
 
@@ -7332,6 +7428,12 @@ def validate_reviewer_response(
     if not isinstance(contract, dict):
         raise ReviewerValidationError("review contract is unavailable")
     errors: list[str] = []
+    if str(contract.get("evidence_hash") or "") != reviewer_evidence_hash(
+        review_package
+    ):
+        errors.append(
+            "review contract evidence hash did not match the current review package"
+        )
     if str(response.get("review_case_id") or "") != str(contract.get("case_id") or ""):
         errors.append("review_case_id did not echo the current case")
     if str(response.get("review_evidence_hash") or "") != str(contract.get("evidence_hash") or ""):
@@ -7362,7 +7464,12 @@ def validate_reviewer_response(
         )
     foreign_observables: list[str] = []
     for item in observables:
-        if not isinstance(item, dict) or set(item) != {"kind", "value"}:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"kind", "value"}
+            or not isinstance(item.get("kind"), str)
+            or not isinstance(item.get("value"), str)
+        ):
             foreign_observables.append("malformed observable")
             continue
         key = (str(item.get("kind") or ""), str(item.get("value") or ""))
@@ -7373,11 +7480,20 @@ def validate_reviewer_response(
             "reviewer used foreign observables: " + ",".join(foreign_observables[:10])
         )
 
-    used_observables = {
+    supplied_observable_sequence = [
         (str(item.get("kind") or ""), str(item.get("value") or ""))
         for item in observables
         if isinstance(item, dict)
-    }
+        and set(item) == {"kind", "value"}
+        and isinstance(item.get("kind"), str)
+        and isinstance(item.get("value"), str)
+        and (
+            str(item.get("kind") or ""),
+            str(item.get("value") or ""),
+        )
+        in allowed
+    ]
+    used_observables = set(supplied_observable_sequence)
     allowed_ips = {value for kind, value in allowed if kind == "ip"}
     narrative_response = {
         key: value
@@ -7390,7 +7506,8 @@ def validate_reviewer_response(
         }
     }
     response_text = "\n".join(_response_strings(narrative_response))
-    foreign_ips = sorted(set(REVIEW_IPV4_RE.findall(response_text)).difference(allowed_ips))
+    narrative_ips = set(REVIEW_IPV4_RE.findall(response_text))
+    foreign_ips = sorted(narrative_ips.difference(allowed_ips))
     if foreign_ips:
         errors.append("reviewer introduced foreign IP address(es): " + ",".join(foreign_ips[:10]))
 
@@ -7399,10 +7516,31 @@ def validate_reviewer_response(
         for kind, value in allowed
         if kind == "domain" or (kind == "host" and "." in value)
     }
+    contracted_non_domain_taxonomy = {
+        str(value).strip().lower()
+        for value in (
+            contract.get("allowed_non_domain_taxonomy_tokens")
+            if isinstance(
+                contract.get("allowed_non_domain_taxonomy_tokens"),
+                list,
+            )
+            else []
+        )
+        if str(value).strip()
+    }
+    allowed_non_domain_taxonomy = set(
+        reviewer_non_domain_taxonomy_catalog(review_package)
+    )
+    if contracted_non_domain_taxonomy != allowed_non_domain_taxonomy:
+        errors.append(
+            "review contract non-domain taxonomy catalog did not match "
+            "collector-owned evidence"
+        )
     narrative_domains = {
         candidate.lower()
         for candidate in REVIEW_DOMAIN_RE.findall(response_text)
         if candidate.lower() not in REVIEW_KNOWN_FIELD_PATHS
+        and candidate.lower() not in allowed_non_domain_taxonomy
         and candidate.rsplit(".", 1)[-1].lower() not in REVIEW_NON_DOMAIN_SUFFIXES
     }
     foreign_domains = sorted(narrative_domains.difference(allowed_domains))
@@ -7425,22 +7563,49 @@ def validate_reviewer_response(
             + ",".join(foreign_community_ids[:10])
         )
 
-    narrative_lower = response_text.lower()
-    omitted_observables: list[str] = []
-    for kind, value in sorted(allowed):
-        # Arbitrary bare host/user tokens cannot be distinguished reliably from
-        # ordinary prose. IPs, domains/FQDNs, and Community IDs have bounded
-        # syntax, so require those material narrative values to be enumerated.
-        if kind not in {"ip", "domain", "community_id"} and not (
-            kind == "host" and "." in value
-        ):
-            continue
-        if value and value.lower() in narrative_lower and (kind, value) not in used_observables:
-            omitted_observables.append(f"{kind}:{value}"[:300])
-    if omitted_observables:
-        errors.append(
-            "material narrative observables were omitted from observables_used: "
-            + ",".join(omitted_observables[:10])
+    narrative_material_observables: set[tuple[str, str]] = {
+        ("ip", value)
+        for value in narrative_ips.intersection(allowed_ips)
+    }
+    for value in narrative_domains.intersection(allowed_domains):
+        narrative_material_observables.update(
+            (kind, allowed_value)
+            for kind, allowed_value in allowed
+            if kind in {"domain", "host"}
+            and allowed_value.lower() == value
+            and (kind == "domain" or "." in allowed_value)
+        )
+    narrative_material_observables.update(
+        ("community_id", value)
+        for value in narrative_community_ids.intersection(
+            allowed_community_ids
+        )
+    )
+    bounded_model_supplied_observables = {
+        (kind, value)
+        for kind, value in used_observables
+        if kind in {"ip", "domain", "community_id"}
+        or (kind == "host" and "." in value)
+    }
+    discarded_unused_observables = sorted(
+        bounded_model_supplied_observables.difference(
+            narrative_material_observables
+        )
+    )
+    explicit_bare_model_observables = sorted(
+        used_observables.difference(
+            bounded_model_supplied_observables
+        )
+    )
+    used_observables.difference_update(discarded_unused_observables)
+    derived_observables = sorted(
+        narrative_material_observables.difference(used_observables)
+    )
+    used_observables.update(derived_observables)
+    if len(used_observables) > REVIEW_OBSERVABLE_MAX:
+        raise ReviewerValidationError(
+            "canonical observables_used exceeds the maximum of "
+            f"{REVIEW_OBSERVABLE_MAX} entries"
         )
 
     evidence_contract = review_package.get("evidence_reference_contract")
@@ -7498,12 +7663,58 @@ def validate_reviewer_response(
     if errors:
         raise ReviewerValidationError("; ".join(errors)[:2000])
     validated = dict(response)
+    normalized_observables = [
+        {"kind": kind, "value": value}
+        for kind, value in sorted(used_observables)
+    ]
+    validated["observables_used"] = normalized_observables
     validated["_review_contract_validation"] = {
         "schema": "onion-sentinel-independent-review-validation-v1",
         "valid": True,
         "case_id": contract.get("case_id"),
         "evidence_hash": contract.get("evidence_hash"),
-        "observable_count": len(observables),
+        "observable_count": len(normalized_observables),
+        "observable_normalization": {
+            "schema": "onion-sentinel-reviewer-observable-normalization-v1",
+            "model_supplied_count": len(observables),
+            "canonical_model_supplied_count": len(
+                set(supplied_observable_sequence)
+            ),
+            "retained_model_supplied_count": len(
+                set(supplied_observable_sequence).difference(
+                    discarded_unused_observables
+                )
+            ),
+            "duplicate_count": (
+                len(supplied_observable_sequence)
+                - len(set(supplied_observable_sequence))
+            ),
+            "discarded_unused_bounded_count": len(
+                discarded_unused_observables
+            ),
+            "discarded_unused_bounded_observables": [
+                {"kind": kind, "value": value}
+                for kind, value in discarded_unused_observables
+            ],
+            "explicit_bare_model_observable_count": len(
+                explicit_bare_model_observables
+            ),
+            "explicit_bare_model_observables": [
+                {"kind": kind, "value": value}
+                for kind, value in explicit_bare_model_observables
+            ],
+            "derived_count": len(derived_observables),
+            "derived_observables": [
+                {"kind": kind, "value": value}
+                for kind, value in derived_observables
+            ],
+            "normalization_applied": (
+                normalized_observables != observables
+            ),
+            "allowed_non_domain_taxonomy_count": len(
+                allowed_non_domain_taxonomy
+            ),
+        },
         "evidence_reference_count": len(cited_evidence),
         "corroborating_evidence_count": len(corroborating_evidence),
     }
@@ -8032,7 +8243,10 @@ def apply_configured_second_opinion(
         trigger,
     )
     started_monotonic = time.monotonic()
-    review_package = independent_reviewer_package(prompt_package)
+    review_package = independent_reviewer_package(
+        prompt_package,
+        hosted=model_route_is_hosted(route, settings),
+    )
 
     def observe_harness(call: Callable[[], Any]) -> Any:
         if harness_runtime is None:
@@ -8330,7 +8544,10 @@ def precommit_controlled_evaluation_reviewer_gate(
     ):
         reject("reviewer attempt history exceeds or violates the one-repair contract")
 
-    review_package = independent_reviewer_package(prompt_package)
+    review_package = independent_reviewer_package(
+        prompt_package,
+        hosted=model_route_is_hosted(reviewer_route, settings),
+    )
     try:
         validated = validate_reviewer_response(
             reviewer_response,
