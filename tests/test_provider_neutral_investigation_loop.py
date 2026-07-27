@@ -1399,6 +1399,9 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                         "read_only": True,
                         "security_onion_response_digest": "e" * 64,
                         "evidence": {
+                            "complete": False,
+                            "partial": True,
+                            "read_only": True,
                             "controls_valid": True,
                             "results": [
                                 {
@@ -1427,7 +1430,13 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                                 "query_digest": query_digest_ok,
                                 "result_digest": result_digest_ok,
                                 "returned_hits": 1,
-                                "shards": {"failed": 0},
+                                "shards": {
+                                    "total": 3,
+                                    "successful": 3,
+                                    "skipped": 1,
+                                    "failed": 0,
+                                    "failures": [],
+                                },
                             },
                             {
                                 "query_id": "failed-pivot",
@@ -1436,7 +1445,13 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                                 "timed_out": False,
                                 "query_digest": query_digest_failed,
                                 "result_digest": result_digest_failed,
-                                "shards": {"failed": 0},
+                                "shards": {
+                                    "total": 0,
+                                    "successful": 0,
+                                    "skipped": 0,
+                                    "failed": 0,
+                                    "failures": [],
+                                },
                             },
                         ],
                     }
@@ -1508,6 +1523,67 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             bindings["failed-pivot"]["result_digest"],
             expected_result_digest,
         )
+        with tempfile.TemporaryDirectory() as temporary_root:
+            policy = self.harness.HarnessPolicy.from_dict(
+                {
+                    "schema": self.harness.POLICY_SCHEMA,
+                    "version": "test",
+                    "enabled": True,
+                    "mode": "shadow",
+                    "budgets": dict(self.harness.DEFAULT_BUDGETS),
+                    "role_capabilities": {
+                        role_name: sorted(capabilities)
+                        for role_name, capabilities
+                        in self.harness.DEFAULT_ROLE_CAPABILITIES.items()
+                    },
+                    "approval_required": [],
+                    "memory": {
+                        "require_independent_agreement": True,
+                        "shared_requires_human_approval": True,
+                    },
+                }
+            )
+            envelope = self.harness.JobEnvelope.from_prompt(
+                run_id="partial-batch-cross-layer",
+                prompt_package={
+                    "alert": {"alert_id": "alert-partial-cross-layer"},
+                    "group_id": "group-partial-cross-layer",
+                },
+                role="soc-analyst",
+                assigned_route=route,
+                configuration={
+                    "reviewer_route": "codex-cli:gpt-5.6-sol:xhigh",
+                },
+            )
+            durable = self.harness.HarnessRun(
+                self.harness.HarnessStore(
+                    Path(temporary_root) / "harness.sqlite3"
+                ),
+                envelope,
+                policy,
+            )
+            durable.query_round(executed_round["value"])
+            durable_bindings = {
+                item["call_id"]: item
+                for item in durable.store.export_trace(
+                    durable.run_id
+                )["tool_calls"]
+            }
+        for binding in bindings.values():
+            durable_binding = durable_bindings[binding["call_id"]]
+            self.assertEqual(durable_binding["status"], binding["status"])
+            self.assertEqual(
+                durable_binding["request_digest"],
+                binding["request_digest"],
+            )
+            self.assertEqual(
+                durable_binding["result_digest"],
+                binding["result_digest"],
+            )
+            self.assertEqual(
+                bool(durable_binding["read_only"]),
+                binding["read_only"],
+            )
 
     def test_normal_shadow_and_no_harness_do_not_force_query_retry(self) -> None:
         route = "codex-cli:gpt-5.5:high"

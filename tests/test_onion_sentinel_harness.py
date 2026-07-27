@@ -1639,13 +1639,25 @@ class OnionSentinelHarnessTests(unittest.TestCase):
         result_digest_ok = "b" * 64
         query_digest_failed = "c" * 64
         result_digest_failed = "d" * 64
+        query_digest_ok_two = "1" * 64
+        result_digest_ok_two = "2" * 64
+        query_digest_failed_two = "3" * 64
+        result_digest_failed_two = "4" * 64
         batch_result = {
             "backend": "security_onion",
-            "query_ids": ["successful-pivot", "failed-pivot"],
+            "query_ids": [
+                "successful-pivot",
+                "failed-pivot",
+                "successful-pivot-two",
+                "failed-pivot-two",
+            ],
             "status": "partial",
             "read_only": True,
             "security_onion_response_digest": "e" * 64,
             "evidence": {
+                "complete": False,
+                "partial": True,
+                "read_only": True,
                 "controls_valid": True,
                 "results": [
                     {
@@ -1663,6 +1675,21 @@ class OnionSentinelHarnessTests(unittest.TestCase):
                         "query_digest": query_digest_failed,
                         "result_digest": result_digest_failed,
                     },
+                    {
+                        "query_id": "successful-pivot-two",
+                        "status": "ok",
+                        "semantic_valid": True,
+                        "query_digest": query_digest_ok_two,
+                        "result_digest": result_digest_ok_two,
+                        "returned_hits": 0,
+                    },
+                    {
+                        "query_id": "failed-pivot-two",
+                        "status": "invalid_response",
+                        "semantic_valid": False,
+                        "query_digest": query_digest_failed_two,
+                        "result_digest": result_digest_failed_two,
+                    },
                 ],
             },
             "trusted_query_audit": [
@@ -1674,7 +1701,13 @@ class OnionSentinelHarnessTests(unittest.TestCase):
                     "query_digest": query_digest_ok,
                     "result_digest": result_digest_ok,
                     "returned_hits": 2,
-                    "shards": {"failed": 0},
+                    "shards": {
+                        "total": 4,
+                        "successful": 4,
+                        "skipped": 2,
+                        "failed": 0,
+                        "failures": [],
+                    },
                 },
                 {
                     "query_id": "failed-pivot",
@@ -1683,7 +1716,44 @@ class OnionSentinelHarnessTests(unittest.TestCase):
                     "timed_out": False,
                     "query_digest": query_digest_failed,
                     "result_digest": result_digest_failed,
-                    "shards": {"failed": 0},
+                    "shards": {
+                        "total": 0,
+                        "successful": 0,
+                        "skipped": 0,
+                        "failed": 0,
+                        "failures": [],
+                    },
+                },
+                {
+                    "query_id": "successful-pivot-two",
+                    "status": "ok",
+                    "semantic_valid": True,
+                    "timed_out": False,
+                    "query_digest": query_digest_ok_two,
+                    "result_digest": result_digest_ok_two,
+                    "returned_hits": 0,
+                    "shards": {
+                        "total": 2,
+                        "successful": 2,
+                        "skipped": 0,
+                        "failed": 0,
+                        "failures": [],
+                    },
+                },
+                {
+                    "query_id": "failed-pivot-two",
+                    "status": "invalid_response",
+                    "semantic_valid": False,
+                    "timed_out": False,
+                    "query_digest": query_digest_failed_two,
+                    "result_digest": result_digest_failed_two,
+                    "shards": {
+                        "total": 0,
+                        "successful": 0,
+                        "skipped": 0,
+                        "failed": 0,
+                        "failures": [],
+                    },
                 },
             ],
         }
@@ -1701,6 +1771,16 @@ class OnionSentinelHarnessTests(unittest.TestCase):
                         "backend": "elastic",
                         "purpose": "Test a second discriminator.",
                     },
+                    {
+                        "query_id": "successful-pivot-two",
+                        "backend": "elastic",
+                        "purpose": "Measure exact prevalence.",
+                    },
+                    {
+                        "query_id": "failed-pivot-two",
+                        "backend": "elastic",
+                        "purpose": "Test an unsupported field response.",
+                    },
                 ],
                 "results": [batch_result],
             }
@@ -1712,16 +1792,26 @@ class OnionSentinelHarnessTests(unittest.TestCase):
         }
         successful = calls["round-1-successful-pivot"]
         failed = calls["round-1-failed-pivot"]
+        successful_two = calls["round-1-successful-pivot-two"]
+        failed_two = calls["round-1-failed-pivot-two"]
         self.assertEqual(successful["status"], "ok")
         self.assertEqual(successful["coverage"], "bounded-result")
         self.assertEqual(successful["truncated"], 0)
         self.assertEqual(failed["status"], "invalid_response")
         self.assertEqual(failed["coverage"], "evidence-gap")
+        self.assertEqual(successful_two["status"], "ok")
+        self.assertEqual(successful_two["coverage"], "exact-zero")
+        self.assertEqual(failed_two["status"], "invalid_response")
         self.assertEqual(
             successful["result_digest"],
             HARNESS.digest_json(batch_result),
         )
         self.assertEqual(failed["result_digest"], successful["result_digest"])
+        self.assertEqual(
+            successful_two["result_digest"],
+            successful["result_digest"],
+        )
+        self.assertEqual(failed_two["result_digest"], successful["result_digest"])
 
         mismatched = json.loads(json.dumps(batch_result))
         mismatched["trusted_query_audit"][0]["result_digest"] = "f" * 64
@@ -1731,6 +1821,144 @@ class OnionSentinelHarnessTests(unittest.TestCase):
         )
         self.assertEqual(status, "partial")
         self.assertIs(observation, mismatched)
+
+        malformed_cases = []
+
+        def malformed(label, mutate):
+            candidate = json.loads(json.dumps(batch_result))
+            mutate(candidate)
+            malformed_cases.append((label, candidate))
+
+        malformed(
+            "model evidence is not read-only",
+            lambda item: item["evidence"].__setitem__("read_only", False),
+        )
+        malformed(
+            "partial flag is inconsistent",
+            lambda item: item["evidence"].__setitem__("partial", False),
+        )
+        malformed(
+            "complete flag is inconsistent",
+            lambda item: item["evidence"].__setitem__("complete", True),
+        )
+        malformed(
+            "controls are invalid",
+            lambda item: item["evidence"].__setitem__(
+                "controls_valid",
+                False,
+            ),
+        )
+        malformed(
+            "response digest is malformed",
+            lambda item: item.__setitem__(
+                "security_onion_response_digest",
+                "not-a-digest",
+            ),
+        )
+        malformed(
+            "outer query ids are duplicated",
+            lambda item: item["query_ids"].append("successful-pivot"),
+        )
+        malformed(
+            "nested query coverage is incomplete",
+            lambda item: item["evidence"]["results"].pop(),
+        )
+        malformed(
+            "audit query coverage is incomplete",
+            lambda item: item["trusted_query_audit"].pop(),
+        )
+        malformed(
+            "nested status is outside the closed broker contract",
+            lambda item: (
+                item["evidence"]["results"][0].__setitem__(
+                    "status",
+                    "unknown",
+                ),
+                item["evidence"]["results"][0].__setitem__(
+                    "semantic_valid",
+                    False,
+                ),
+                item["trusted_query_audit"][0].__setitem__(
+                    "status",
+                    "unknown",
+                ),
+                item["trusted_query_audit"][0].__setitem__(
+                    "semantic_valid",
+                    False,
+                ),
+            ),
+        )
+        malformed(
+            "semantic validity contradicts success",
+            lambda item: item["evidence"]["results"][0].__setitem__(
+                "semantic_valid",
+                False,
+            ),
+        )
+        malformed(
+            "successful query timed out",
+            lambda item: item["trusted_query_audit"][0].__setitem__(
+                "timed_out",
+                True,
+            ),
+        )
+        malformed(
+            "successful shard coverage is incomplete",
+            lambda item: item["trusted_query_audit"][0]["shards"].__setitem__(
+                "successful",
+                3,
+            ),
+        )
+        malformed(
+            "successful shard count is zero",
+            lambda item: (
+                item["trusted_query_audit"][0]["shards"].__setitem__(
+                    "total",
+                    0,
+                ),
+                item["trusted_query_audit"][0]["shards"].__setitem__(
+                    "successful",
+                    0,
+                ),
+                item["trusted_query_audit"][0]["shards"].__setitem__(
+                    "skipped",
+                    0,
+                ),
+            ),
+        )
+        malformed(
+            "successful query has failed shards",
+            lambda item: (
+                item["trusted_query_audit"][0]["shards"].__setitem__(
+                    "failed",
+                    1,
+                ),
+                item["trusted_query_audit"][0]["shards"].__setitem__(
+                    "failures",
+                    [{"reason": "synthetic"}],
+                ),
+            ),
+        )
+        for label, candidate in malformed_cases:
+            with self.subTest(label=label):
+                status, _observation = HARNESS.resolve_query_binding(
+                    candidate,
+                    "successful-pivot",
+                )
+                self.assertEqual(status, "partial")
+
+        ordinary = {
+            "query_id": "ordinary",
+            "backend": "elastic",
+            "status": "ok",
+            "read_only": True,
+        }
+        status, observation = HARNESS.resolve_query_binding(
+            ordinary,
+            "ordinary",
+        )
+        self.assertEqual(status, "ok")
+        self.assertIs(observation, ordinary)
 
     def test_changed_evidence_manifest_can_be_recatalogued_idempotently(
         self,
