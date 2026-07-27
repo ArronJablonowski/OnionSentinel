@@ -102,6 +102,71 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 "analyze" if role == "soc-analyst" else "escalate"
             )
             response_canonical_sha256 = f"{rank + 2:x}" * 64
+            tool_call_bindings = [
+                {
+                    "call_id": f"round-1-pivot-{rank}",
+                    "round_number": 1,
+                    "query_id": f"pivot-{rank}",
+                    "backend": "elastic",
+                    "status": "ok",
+                    "request_digest": f"{rank + 8:x}" * 64,
+                    "result_digest": "c" * 64,
+                    "read_only": True,
+                }
+            ]
+            query_audit = {
+                "_investigation_query_audit": {
+                    "read_only": True,
+                    "complete": True,
+                    "all_tool_call_bindings_read_only": True,
+                    "evaluation_requirement_satisfied": True,
+                    "partial": False,
+                    "query_contract": (
+                        "onion-sentinel-investigation-pivots-v2"
+                    ),
+                    "provider_neutral": True,
+                    "rounds_completed": 1,
+                    "queries_admitted": 1,
+                    "successful_read_only_queries": 1,
+                    "tool_call_bindings": tool_call_bindings,
+                    "queries": [
+                        {
+                            "query_id": f"pivot-{rank}",
+                            "backend": "elastic",
+                            "status": "ok",
+                            "query_digest": "b" * 64,
+                            "result_digest": "c" * 64,
+                            "returned_hits": 1,
+                        }
+                    ],
+                    "round_results": [
+                        {
+                            "query_id": f"pivot-{rank}",
+                            "backend": "elastic",
+                            "status": "ok",
+                            "query_digest": "b" * 64,
+                        }
+                    ],
+                }
+            }
+            if role == "incident-responder":
+                query_audit["_incident_query_audit"] = {
+                    "trusted_source": True,
+                    "read_only": (
+                        second_read_only if rank == 2 else True
+                    ),
+                    "complete": True,
+                    "partial": False,
+                    "queries": [
+                        {
+                            "pack": "alert_context",
+                            "status": "completed",
+                            "query_digest": "a" * 64,
+                            "returned_hits": 3,
+                            "partial": False,
+                        }
+                    ],
+                }
             execution_proof = {
                 "status": "passed",
                 "fresh_analysis": True,
@@ -138,7 +203,20 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "route_authorization_failure_count": 0,
                     "route_identity_mismatch_count": 0,
                     "tool_call_count": 1,
+                    "successful_tool_call_count": 1,
+                    "read_only_tool_call_count": 1,
                     "read_only_violation_count": 0,
+                    "successful_read_only_tool_call_bindings": (
+                        tool_call_bindings
+                    ),
+                    "successful_read_only_tool_call_bindings_sha256": (
+                        evaluator.sha256_value(tool_call_bindings)
+                    ),
+                    "query_audit": (
+                        evaluator._query_audit_execution_binding(
+                            {"query_audit": query_audit}
+                        )
+                    ),
                     "memory_frozen": True,
                     "submitted_response_sha256": f"{rank + 6:x}" * 64,
                     "response_canonical_sha256": (
@@ -195,27 +273,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                                 "_analysis_model_route": expected_route,
                                 "_analysis_evaluation_memory_frozen": True,
                             },
-                            "query_audit": {
-                                "_incident_query_audit": {
-                                    "trusted_source": True,
-                                    "read_only": (
-                                        second_read_only
-                                        if rank == 2
-                                        else True
-                                    ),
-                                    "complete": True,
-                                    "partial": False,
-                                    "queries": [
-                                        {
-                                            "pack": "alert_context",
-                                            "status": "completed",
-                                            "query_digest": "a" * 64,
-                                            "returned_hits": 3,
-                                            "partial": False,
-                                        }
-                                    ],
-                                }
-                            },
+                            "query_audit": query_audit,
                         },
                         "second_opinion": {
                             "status": "completed",
@@ -444,28 +502,71 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             incident["aggregate"]["shadow_acceptance_gate"]["passed"]
         )
 
-    def test_explicit_non_read_only_audit_is_an_automatic_hard_failure(self) -> None:
+    def test_explicit_non_read_only_audit_blocks_grading(self) -> None:
         self._write_fixture_documents(ir_second_read_only=False)
-        adjudication = json.loads(
-            self.adjudication_path.read_text(encoding="utf-8")
-        )
-        adjudication["cases"][1]["role_assessments"][
-            "incident-responder"
-        ]["hard_failures"] = []
-        self._write_private(self.adjudication_path, adjudication)
+        with self.assertRaisesRegex(
+            evaluator.CohortEvaluationError,
+            "read-only/freeze gate failed",
+        ):
+            evaluator.evaluate_cohorts(
+                result_paths={
+                    "incident-responder": self.ir_path,
+                    "soc-analyst": self.soc_path,
+                },
+                adjudication_path=self.adjudication_path,
+                expected_count=2,
+            )
 
-        report = evaluator.evaluate_cohorts(
-            result_paths={
-                "incident-responder": self.ir_path,
-                "soc-analyst": self.soc_path,
-            },
-            adjudication_path=self.adjudication_path,
-            expected_count=2,
-        )
+    def test_zero_tool_call_ledger_blocks_grading(self) -> None:
+        self._write_fixture_documents()
+        document = json.loads(self.soc_path.read_text(encoding="utf-8"))
+        proof = document["members"][0]["execution_proof"]
+        harness = proof["harness"]
+        harness["tool_call_count"] = 0
+        harness["successful_tool_call_count"] = 0
+        harness["read_only_tool_call_count"] = 0
+        proof.pop("proof_sha256")
+        proof["proof_sha256"] = evaluator.sha256_value(proof)
+        document.pop("export_sha256")
+        document["export_sha256"] = evaluator.sha256_value(document)
+        self._write_private(self.soc_path, document)
 
-        second = report["roles"]["incident-responder"]["cases"][1]
-        self.assertEqual(second["hard_failures"], ["unauthorized_query"])
-        self.assertEqual(second["effective_score"], 0.0)
+        with self.assertRaisesRegex(
+            evaluator.CohortEvaluationError,
+            "read-only/freeze gate failed",
+        ):
+            evaluator.evaluate_cohorts(
+                result_paths={
+                    "incident-responder": self.ir_path,
+                    "soc-analyst": self.soc_path,
+                },
+                adjudication_path=self.adjudication_path,
+                expected_count=2,
+            )
+
+    def test_query_audit_digest_mismatch_blocks_grading(self) -> None:
+        self._write_fixture_documents()
+        document = json.loads(self.ir_path.read_text(encoding="utf-8"))
+        query = document["members"][0]["result"]["analysis"][
+            "query_audit"
+        ]["_incident_query_audit"]["queries"][0]
+        query["returned_hits"] = 99
+        document.pop("export_sha256")
+        document["export_sha256"] = evaluator.sha256_value(document)
+        self._write_private(self.ir_path, document)
+
+        with self.assertRaisesRegex(
+            evaluator.CohortEvaluationError,
+            "query-audit binding does not match",
+        ):
+            evaluator.evaluate_cohorts(
+                result_paths={
+                    "incident-responder": self.ir_path,
+                    "soc-analyst": self.soc_path,
+                },
+                adjudication_path=self.adjudication_path,
+                expected_count=2,
+            )
 
     def _single_role_adjudication(self, role: str) -> Path:
         document = json.loads(

@@ -67,6 +67,7 @@ from onion_sentinel_harness import (  # noqa: E402
     DEFAULT_DB_PATH as DEFAULT_INVESTIGATION_HARNESS_DB,
     DEFAULT_POLICY_PATH as DEFAULT_INVESTIGATION_HARNESS_POLICY,
     HarnessRun as OnionSentinelHarnessRun,
+    digest_json as harness_digest_json,
     external_agent_harness_provider,
     load_policy as load_investigation_harness_policy,
     should_start_onion_sentinel_harness,
@@ -4689,6 +4690,7 @@ def _investigation_round_audit(round_result: dict[str, Any]) -> dict[str, Any]:
         "request_count": len(round_result.get("requests") or []),
         "results": summaries,
         "trusted_queries": trusted_queries[:MAX_INVESTIGATION_QUERIES_PER_ROUND],
+        "tool_call_bindings": _investigation_tool_call_bindings(round_result),
         "broker_audit": round_result.get("audit") or [],
         "request_normalizations": [
             {
@@ -4704,6 +4706,129 @@ def _investigation_round_audit(round_result: dict[str, Any]) -> dict[str, Any]:
             and isinstance(item.get("normalization"), dict)
             and item.get("normalization")
         ][:MAX_INVESTIGATION_QUERIES_PER_ROUND],
+    }
+
+
+INVESTIGATION_QUERY_SUCCESS_STATUSES = frozenset(
+    {"ok", "complete", "completed", "success", "succeeded"}
+)
+INVESTIGATION_QUERY_NONEXECUTION_STATUSES = frozenset(
+    {"rejected", "denied", "blocked", "unauthorized", "forbidden"}
+)
+
+
+def _investigation_tool_call_bindings(
+    round_result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Bind the response audit to the exact collector-owned harness tool rows.
+
+    This deliberately mirrors ``HarnessRun.query_round``. It emits only compact
+    identities and digests, never query text or returned evidence.
+    """
+    try:
+        round_number = int(round_result.get("round") or 0)
+    except (TypeError, ValueError, OverflowError):
+        round_number = 0
+    requests = (
+        round_result.get("requests")
+        if isinstance(round_result.get("requests"), list)
+        else []
+    )
+    results = (
+        round_result.get("results")
+        if isinstance(round_result.get("results"), list)
+        else []
+    )
+    request_by_id = {
+        str(item.get("query_id")): item
+        for item in requests
+        if isinstance(item, dict) and item.get("query_id")
+    }
+    result_by_id: dict[str, dict[str, Any]] = {}
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        item_ids = (
+            [str(value) for value in item.get("query_ids", [])]
+            if isinstance(item.get("query_ids"), list)
+            else [str(item.get("query_id"))]
+            if item.get("query_id")
+            else []
+        )
+        for item_id in item_ids:
+            result_by_id[item_id] = item
+    # Rejected proposals that never entered the normalized request array still
+    # produce harness tool rows. Reconstruct the same bounded request stub so
+    # the response-side digest intersects the durable ledger exactly.
+    for query_id, result in result_by_id.items():
+        if query_id not in request_by_id:
+            request_by_id[query_id] = {
+                "query_id": query_id,
+                "backend": result.get("backend"),
+                "purpose": result.get("purpose")
+                or "proposal rejected before execution",
+                "rejected_before_execution": True,
+            }
+
+    bindings: list[dict[str, Any]] = []
+    for query_id, request in request_by_id.items():
+        result = result_by_id.get(query_id, {})
+        backend = str(request.get("backend") or result.get("backend") or "")
+        status = str(result.get("status") or "missing")
+        bindings.append(
+            {
+                "call_id": f"round-{round_number}-{query_id}"[:128],
+                "round": round_number,
+                "round_number": round_number,
+                "query_id": query_id[:128],
+                "backend": backend[:80],
+                "status": status[:40],
+                "normalized_status": status.strip().lower()[:40],
+                "request_digest": harness_digest_json(request),
+                "result_digest": harness_digest_json(result),
+                "read_only": result.get("read_only") is True,
+            }
+        )
+    return bindings[: MAX_INVESTIGATION_QUERIES_PER_ROUND * 2]
+
+
+def investigation_query_binding_summary(
+    bindings: list[dict[str, Any]],
+    *,
+    queries_admitted: int,
+) -> dict[str, Any]:
+    """Summarize collector-bound read-only execution without model assertions."""
+    executed = [
+        item
+        for item in bindings
+        if str(item.get("normalized_status") or "")
+        not in INVESTIGATION_QUERY_NONEXECUTION_STATUSES
+    ]
+    successful_read_only = [
+        item
+        for item in bindings
+        if item.get("read_only") is True
+        and str(item.get("normalized_status") or "")
+        in INVESTIGATION_QUERY_SUCCESS_STATUSES
+    ]
+    all_bindings_read_only = bool(bindings) and all(
+        item.get("read_only") is True for item in bindings
+    )
+    executed_read_only = bool(executed) and all(
+        item.get("read_only") is True for item in executed
+    )
+    complete = bool(bindings) and all_bindings_read_only and all(
+        str(item.get("normalized_status") or "")
+        in INVESTIGATION_QUERY_SUCCESS_STATUSES
+        for item in bindings
+    ) and len(bindings) >= max(1, int(queries_admitted))
+    return {
+        "read_only": executed_read_only,
+        "all_tool_call_bindings_read_only": all_bindings_read_only,
+        "successful_read_only_queries": len(successful_read_only),
+        "complete": complete,
+        "evaluation_requirement_satisfied": bool(successful_read_only)
+        and all_bindings_read_only,
     }
 
 
@@ -4987,6 +5112,13 @@ def apply_investigation_query_loop(
     total_requests = 0
     ignored_requests = 0
     seen_semantic_requests: set[str] = set()
+    evaluation_query_guarantee = bool(
+        harness_runtime is not None
+        and boolean_setting(os.environ.get(EVALUATION_FREEZE_MEMORY_ENV))
+    )
+    query_planning_retry_attempted = False
+    effective_max_rounds = MAX_INVESTIGATION_QUERY_ROUNDS
+    effective_max_queries = MAX_INVESTIGATION_QUERIES_TOTAL
 
     def observe_harness(call: Callable[[], Any]) -> Any:
         if harness_runtime is None:
@@ -4994,7 +5126,10 @@ def apply_investigation_query_loop(
         try:
             return call()
         except Exception as exc:
-            if harness_runtime.policy.mode == "enforce":
+            if (
+                harness_runtime.policy.mode == "enforce"
+                or evaluation_query_guarantee
+            ):
                 raise
             print(
                 "warning: Onion Sentinel harness shadow query observation "
@@ -5003,8 +5138,145 @@ def apply_investigation_query_loop(
             )
             return None
 
-    for round_number in range(1, MAX_INVESTIGATION_QUERY_ROUNDS + 1):
-        raw_requests = pop_investigation_query_requests(response)
+    initial_requests = pop_investigation_query_requests(response)
+    if evaluation_query_guarantee and not initial_requests:
+        query_planning_retry_attempted = True
+        # Consume one of the ordinary model-call slots for planning while
+        # retaining room for both bounded reviewer attempts under the
+        # checked-in six-call harness budget.
+        effective_max_rounds = max(1, MAX_INVESTIGATION_QUERY_ROUNDS - 1)
+        effective_max_queries = min(
+            MAX_INVESTIGATION_QUERIES_TOTAL,
+            effective_max_rounds * MAX_INVESTIGATION_QUERIES_PER_ROUND,
+        )
+        prompt_package["investigation_query_planning_retry"] = {
+            "evaluation_only": True,
+            "attempt": 1,
+            "maximum_attempts": 1,
+            "remaining_query_rounds": effective_max_rounds,
+            "remaining_queries": effective_max_queries,
+            "maximum_queries_this_round": MAX_INVESTIGATION_QUERIES_PER_ROUND,
+            "instruction": (
+                "The initial primary response did not request a dynamic investigation pivot. "
+                "Return at least one narrow, material, read-only investigation_query_requests "
+                "entry using only the advertised schema, backends, observables, time envelope, "
+                "and budgets. Do not invent direct tool access or widen authorization."
+            ),
+        }
+        maximum_prompt_bytes = int(
+            getattr(args, "max_prompt_bytes", DEFAULT_MAX_PROMPT_BYTES)
+            or DEFAULT_MAX_PROMPT_BYTES
+        )
+        hosted_route = model_route_is_hosted(route, settings)
+        serialized_prompt_bytes = len(
+            json.dumps(
+                model_safe_copy(prompt_package, hosted=hosted_route),
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        )
+        if serialized_prompt_bytes > maximum_prompt_bytes:
+            raise InvestigationQueryError(
+                "evaluation query-planning retry prompt exceeds max_prompt_bytes"
+            )
+        observe_harness(
+            lambda: harness_runtime.phase(
+                "investigation_query_planning",
+                route,
+                "evaluation retry 1 of 1 after initial response omitted pivots",
+            )
+            if harness_runtime is not None
+            else None
+        )
+        planning_call_id = "primary-query-planning-retry-1"
+        planning_purpose = "evaluation query-planning retry 1 of 1"
+        observe_harness(
+            lambda: harness_runtime.preflight_model_call(
+                call_id=planning_call_id,
+                input_value=prompt_package,
+                requested_route=route,
+                purpose=planning_purpose,
+            )
+            if harness_runtime is not None
+            else None
+        )
+        model_started = time.monotonic()
+        try:
+            planned_response = model_executor(
+                route,
+                prompt_package,
+                args,
+                settings,
+            )
+        except (Exception, SystemExit) as exc:
+            observe_harness(
+                lambda: harness_runtime.model_call(
+                    call_id=planning_call_id,
+                    purpose=planning_purpose,
+                    requested_route=route,
+                    response={},
+                    input_value=prompt_package,
+                    duration_seconds=time.monotonic() - model_started,
+                    status=f"failed:{type(exc).__name__}",
+                )
+                if harness_runtime is not None
+                else None
+            )
+            raise
+        if not isinstance(planned_response, dict):
+            observe_harness(
+                lambda: harness_runtime.model_call(
+                    call_id=planning_call_id,
+                    purpose=planning_purpose,
+                    requested_route=route,
+                    response={},
+                    input_value=prompt_package,
+                    duration_seconds=time.monotonic() - model_started,
+                    status="failed:InvalidResponse",
+                )
+                if harness_runtime is not None
+                else None
+            )
+            raise InvestigationQueryError(
+                "evaluation query-planning retry returned a non-object response"
+            )
+        observe_harness(
+            lambda: harness_runtime.model_call(
+                call_id=planning_call_id,
+                purpose=planning_purpose,
+                requested_route=route,
+                response=planned_response,
+                input_value=prompt_package,
+                duration_seconds=time.monotonic() - model_started,
+            )
+            if harness_runtime is not None
+            else None
+        )
+        # This instruction is scoped to the single planning retry. Keeping it
+        # in later evidence-synthesis prompts could incorrectly steer a final
+        # response back into query-only mode.
+        prompt_package.pop("investigation_query_planning_retry", None)
+        observed_route = str(
+            planned_response.get("_analysis_model_route") or ""
+        ).strip()
+        if observed_route != route:
+            raise InvestigationQueryError(
+                "evaluation query-planning retry did not preserve the assigned model route"
+            )
+        response = planned_response
+        initial_requests = pop_investigation_query_requests(response)
+        if not initial_requests:
+            raise InvestigationQueryError(
+                "evaluation query-planning retry produced no investigation_query_requests"
+            )
+
+    for round_number in range(1, effective_max_rounds + 1):
+        raw_requests = (
+            initial_requests
+            if round_number == 1
+            else pop_investigation_query_requests(response)
+        )
         if not raw_requests:
             break
         observe_harness(
@@ -5016,7 +5288,7 @@ def apply_investigation_query_loop(
             if harness_runtime is not None
             else None
         )
-        remaining = MAX_INVESTIGATION_QUERIES_TOTAL - total_requests
+        remaining = effective_max_queries - total_requests
         allowed_count = min(MAX_INVESTIGATION_QUERIES_PER_ROUND, remaining)
         admitted_raw = raw_requests[:allowed_count]
         ignored_requests += max(0, len(raw_requests) - len(admitted_raw))
@@ -5189,8 +5461,8 @@ def apply_investigation_query_loop(
                     known.add((item["kind"], item["value"]))
             local_context["discovered_observables"] = existing
 
-        remaining_rounds = MAX_INVESTIGATION_QUERY_ROUNDS - round_number
-        remaining_queries = MAX_INVESTIGATION_QUERIES_TOTAL - total_requests
+        remaining_rounds = effective_max_rounds - round_number
+        remaining_queries = effective_max_queries - total_requests
         prompt_package["investigation_follow_up"] = {
             "round": round_number,
             "remaining_rounds": remaining_rounds,
@@ -5294,6 +5566,12 @@ def apply_investigation_query_loop(
             if harness_runtime is not None
             else None
         )
+        if evaluation_query_guarantee and str(
+            response.get("_analysis_model_route") or ""
+        ).strip() != route:
+            raise InvestigationQueryError(
+                "evaluation investigation follow-up did not preserve the assigned model route"
+            )
         observe_harness(
             lambda: harness_runtime.phase(
                 "evidence_synthesis",
@@ -5314,6 +5592,16 @@ def apply_investigation_query_loop(
             rounds,
             queries_admitted=total_requests,
         )
+        round_audits = [_investigation_round_audit(item) for item in rounds]
+        tool_call_bindings = [
+            binding
+            for round_audit in round_audits
+            for binding in round_audit["tool_call_bindings"]
+        ]
+        binding_summary = investigation_query_binding_summary(
+            tool_call_bindings,
+            queries_admitted=total_requests,
+        )
         response["_investigation_query_audit"] = {
             "query_contract": INVESTIGATION_QUERY_CONTRACT,
             "provider_neutral": True,
@@ -5321,15 +5609,43 @@ def apply_investigation_query_loop(
             "rounds_completed": len(rounds),
             "queries_admitted": total_requests,
             "requests_ignored_or_over_budget": ignored_requests,
+            "planning_retry_attempted": query_planning_retry_attempted,
+            "planning_retry_produced_requests": bool(
+                query_planning_retry_attempted and initial_requests
+            ),
+            "query_planning_retry": {
+                "attempted": query_planning_retry_attempted,
+                "attempts": 1 if query_planning_retry_attempted else 0,
+                "maximum_attempts": 1,
+                "evaluation_only": query_planning_retry_attempted,
+            },
             "limits": {
-                "max_rounds": MAX_INVESTIGATION_QUERY_ROUNDS,
-                "max_queries_total": MAX_INVESTIGATION_QUERIES_TOTAL,
+                "max_rounds": effective_max_rounds,
+                "max_queries_total": effective_max_queries,
                 "max_queries_per_round": MAX_INVESTIGATION_QUERIES_PER_ROUND,
+                "configured_max_rounds": MAX_INVESTIGATION_QUERY_ROUNDS,
+                "configured_max_queries_total": MAX_INVESTIGATION_QUERIES_TOTAL,
                 "max_prompt_evidence_bytes": MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES,
                 "max_prompt_evidence_rows": MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS,
             },
+            "read_only": binding_summary["read_only"],
+            "all_tool_call_bindings_read_only": binding_summary[
+                "all_tool_call_bindings_read_only"
+            ],
+            "successful_read_only_queries": binding_summary[
+                "successful_read_only_queries"
+            ],
+            "complete": binding_summary["complete"],
+            "evaluation_requirement_satisfied": binding_summary[
+                "evaluation_requirement_satisfied"
+            ],
+            "evaluation_query_guarantee": {
+                "required": evaluation_query_guarantee,
+                **binding_summary,
+            },
             "outcomes": outcomes,
-            "rounds": [_investigation_round_audit(item) for item in rounds],
+            "tool_call_bindings": tool_call_bindings,
+            "rounds": round_audits,
         }
         _append_investigation_evidence_gaps(
             response,
@@ -5337,6 +5653,14 @@ def apply_investigation_query_loop(
         )
         if isinstance(prompt_package.get("investigation_query_results"), dict):
             prompt_package["investigation_query_results"]["outcomes"] = outcomes
+        if (
+            evaluation_query_guarantee
+            and not binding_summary["evaluation_requirement_satisfied"]
+        ):
+            raise InvestigationQueryError(
+                "controlled harness evaluation requires at least one successful "
+                "read-only dynamic pivot and an all-read-only bound tool ledger"
+            )
     return response
 
 
@@ -7780,6 +8104,10 @@ def analyze_with_config(
     if not route:
         raise SystemExit(f"Agent {agent_role} has no enabled analysis model assignment")
     notify_analysis_phase(phase_callback, "primary_analysis", route)
+    evaluation_harness_run = bool(
+        harness_runtime is not None
+        and boolean_setting(os.environ.get(EVALUATION_FREEZE_MEMORY_ENV))
+    )
 
     def observe_harness(call: Callable[[], Any]) -> Any:
         if harness_runtime is None:
@@ -7787,7 +8115,7 @@ def analyze_with_config(
         try:
             return call()
         except Exception as exc:
-            if harness_runtime.policy.mode == "enforce":
+            if harness_runtime.policy.mode == "enforce" or evaluation_harness_run:
                 raise
             print(
                 "warning: Onion Sentinel harness shadow model observation "
@@ -7836,6 +8164,13 @@ def analyze_with_config(
         if harness_runtime is not None
         else None
     )
+    if evaluation_harness_run and str(
+        primary.get("_analysis_model_route") or ""
+    ).strip() != route:
+        raise InvestigationQueryError(
+            "controlled harness evaluation initial response did not preserve "
+            "the assigned model route"
+        )
     return apply_investigation_query_loop(
         prompt_package,
         primary,
@@ -10123,13 +10458,21 @@ def main() -> int:
                     policy=configured_harness_policy,
                 )
             except Exception as exc:
-                if configured_harness_policy.mode == "enforce":
+                if (
+                    configured_harness_policy.mode == "enforce"
+                    or evaluation_memory_frozen
+                ):
                     raise
                 print(
                     "warning: Onion Sentinel harness shadow initialization "
                     f"failed: {type(exc).__name__}: {exc}",
                     file=sys.stderr,
                 )
+        elif evaluation_memory_frozen:
+            raise RuntimeError(
+                "controlled harness evaluation cannot bypass the Onion "
+                f"Sentinel harness: {harness_activation_reason}"
+            )
         elif configured_harness_policy.enabled:
             print(
                 "Onion Sentinel investigation harness bypassed: "
@@ -10143,7 +10486,10 @@ def main() -> int:
             try:
                 return call()
             except Exception as exc:
-                if harness_runtime.policy.mode == "enforce":
+                if (
+                    harness_runtime.policy.mode == "enforce"
+                    or evaluation_memory_frozen
+                ):
                     raise
                 print(
                     "warning: Onion Sentinel harness shadow observation "

@@ -158,6 +158,59 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             },
         }
 
+    @staticmethod
+    def successful_security_onion_round(
+        requests: list[dict],
+        *,
+        round_number: int,
+    ) -> dict:
+        query_digest = "a" * 64
+        result_digest = "b" * 64
+        query_ids = [item["query_id"] for item in requests]
+        return {
+            "schema": "onion-sentinel-investigation-query-results-v1",
+            "round": round_number,
+            "requests": copy.deepcopy(requests),
+            "results": [
+                {
+                    "backend": "security_onion",
+                    "query_ids": query_ids,
+                    "status": "ok",
+                    "read_only": True,
+                    "evidence": {
+                        "controls_valid": True,
+                        "results": [
+                            {
+                                "query_id": query_id,
+                                "status": "ok",
+                                "returned_hits": 1,
+                            }
+                            for query_id in query_ids
+                        ],
+                    },
+                    "trusted_query_audit": [
+                        {
+                            "query_id": query_id,
+                            "status": "ok",
+                            "query_digest": query_digest,
+                            "result_digest": result_digest,
+                            "evidence_ref": f"query:{query_digest}",
+                            "returned_hits": 1,
+                        }
+                        for query_id in query_ids
+                    ],
+                }
+            ],
+            "audit": [
+                {
+                    "backend": "security_onion",
+                    "complete": True,
+                    "partial": False,
+                    "read_only": True,
+                }
+            ],
+        }
+
     def test_hosted_transport_keeps_safe_query_protocol_and_strips_raw_packet_fields(self) -> None:
         package = {
             "response_schema": {
@@ -1058,6 +1111,548 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         )
         execution_position = events.index(("initial_model_executor",))
         self.assertLess(preflight_position, execution_position)
+
+    def test_evaluation_retry_collects_successful_read_only_pivot_and_binds_audit(
+        self,
+    ) -> None:
+        events: list[tuple] = []
+        harness = RecordingHarness(events, mode="shadow")
+        route = "codex-cli:gpt-5.6-sol:high"
+        prompt_package = {
+            "case_id": "case-evaluation-retry",
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                    "id": "alert-evaluation-retry",
+                },
+            },
+        }
+        settings = {"agent_models": {"soc-analyst": route}}
+        executed_round: dict[str, dict] = {}
+
+        def model_executor(
+            observed_route,
+            package,
+            _args,
+            _settings,
+        ):
+            self.assertEqual(observed_route, route)
+            if "investigation_follow_up" not in package:
+                events.append(("model_executor", "query-planning", observed_route))
+                retry = package["investigation_query_planning_retry"]
+                self.assertEqual(retry["attempt"], 1)
+                self.assertEqual(retry["maximum_attempts"], 1)
+                return {
+                    "investigation_query_requests": [self.elastic_request()],
+                    "_analysis_model_route": route,
+                }
+            events.append(("model_executor", "evidence-synthesis", observed_route))
+            return {
+                "summary": "Final response after a dynamic pivot.",
+                "_analysis_model_route": route,
+            }
+
+        def query_executor(
+            _package,
+            requests,
+            *,
+            round_number,
+            live_osquery_config,
+        ):
+            self.assertIsNone(live_osquery_config)
+            result = self.successful_security_onion_round(
+                requests,
+                round_number=round_number,
+            )
+            executed_round["value"] = result
+            return result
+
+        with mock.patch.dict(
+            self.runner.os.environ,
+            {self.runner.EVALUATION_FREEZE_MEMORY_ENV: "1"},
+        ):
+            response = self.runner.apply_investigation_query_loop(
+                prompt_package,
+                {
+                    "summary": "Initial response omitted a pivot.",
+                    "_analysis_model_route": route,
+                },
+                self.runner.argparse.Namespace(
+                    max_prompt_bytes=self.runner.DEFAULT_MAX_PROMPT_BYTES,
+                ),
+                settings,
+                "soc-analyst",
+                harness_runtime=harness,
+                model_executor=model_executor,
+                query_executor=query_executor,
+            )
+
+        audit = response["_investigation_query_audit"]
+        self.assertTrue(audit["planning_retry_attempted"])
+        self.assertTrue(audit["planning_retry_produced_requests"])
+        self.assertTrue(audit["query_planning_retry"]["attempted"])
+        self.assertTrue(audit["read_only"])
+        self.assertTrue(audit["all_tool_call_bindings_read_only"])
+        self.assertTrue(audit["complete"])
+        self.assertEqual(audit["successful_read_only_queries"], 1)
+        self.assertTrue(audit["evaluation_requirement_satisfied"])
+        self.assertTrue(
+            audit["evaluation_query_guarantee"][
+                "evaluation_requirement_satisfied"
+            ]
+        )
+        self.assertEqual(len(audit["tool_call_bindings"]), 1)
+        binding = audit["tool_call_bindings"][0]
+        exact_round = executed_round["value"]
+        self.assertEqual(
+            binding["request_digest"],
+            self.harness.digest_json(exact_round["requests"][0]),
+        )
+        self.assertEqual(
+            binding["result_digest"],
+            self.harness.digest_json(exact_round["results"][0]),
+        )
+        self.assertEqual(binding["call_id"], "round-1-pivot-1")
+        self.assertEqual(binding["backend"], "elastic")
+        self.assertEqual(binding["status"], "ok")
+        self.assertIs(binding["read_only"], True)
+        planning_preflight = next(
+            index
+            for index, event in enumerate(events)
+            if event[:2]
+            == ("preflight_model_call", "primary-query-planning-retry-1")
+        )
+        planning_execution = events.index(
+            ("model_executor", "query-planning", route)
+        )
+        self.assertLess(planning_preflight, planning_execution)
+        self.assertIn(
+            ("model_call", "primary-query-planning-retry-1", False),
+            events,
+        )
+        self.assertIn(("model_call", "primary-followup-1", False), events)
+
+    def test_evaluation_retry_without_query_fails_before_pivot_or_persistence(
+        self,
+    ) -> None:
+        events: list[tuple] = []
+        harness = RecordingHarness(events, mode="shadow")
+        route = "codex-cli:gpt-5.5:high"
+        model_executor = mock.Mock(
+            return_value={
+                "summary": "Still no query request.",
+                "_analysis_model_route": route,
+            }
+        )
+        query_executor = mock.Mock()
+
+        with (
+            mock.patch.dict(
+                self.runner.os.environ,
+                {self.runner.EVALUATION_FREEZE_MEMORY_ENV: "1"},
+            ),
+            self.assertRaisesRegex(
+                self.runner.InvestigationQueryError,
+                "produced no investigation_query_requests",
+            ),
+        ):
+            self.runner.apply_investigation_query_loop(
+                {},
+                {
+                    "summary": "Initial response omitted a pivot.",
+                    "_analysis_model_route": route,
+                },
+                self.runner.argparse.Namespace(
+                    max_prompt_bytes=self.runner.DEFAULT_MAX_PROMPT_BYTES,
+                ),
+                {"agent_models": {"soc-analyst": route}},
+                "soc-analyst",
+                harness_runtime=harness,
+                model_executor=model_executor,
+                query_executor=query_executor,
+            )
+
+        model_executor.assert_called_once()
+        query_executor.assert_not_called()
+        self.assertIn(
+            ("model_call", "primary-query-planning-retry-1", False),
+            events,
+        )
+
+    def test_evaluation_fails_when_dynamic_pivot_is_not_successful_read_only(
+        self,
+    ) -> None:
+        events: list[tuple] = []
+        harness = RecordingHarness(events, mode="shadow")
+        route = "codex-cli:gpt-5.5:high"
+
+        def failed_query_round(
+            _package,
+            requests,
+            *,
+            round_number,
+            live_osquery_config,
+        ):
+            self.assertIsNone(live_osquery_config)
+            return {
+                "schema": self.runner.INVESTIGATION_QUERY_RESULT_SCHEMA,
+                "round": round_number,
+                "requests": copy.deepcopy(requests),
+                "results": [
+                    {
+                        "query_id": requests[0]["query_id"],
+                        "backend": "elastic",
+                        "status": "error",
+                        "read_only": True,
+                        "error": "synthetic broker failure",
+                    }
+                ],
+                "audit": [],
+            }
+
+        with (
+            mock.patch.dict(
+                self.runner.os.environ,
+                {self.runner.EVALUATION_FREEZE_MEMORY_ENV: "1"},
+            ),
+            self.assertRaisesRegex(
+                self.runner.InvestigationQueryError,
+                "at least one successful read-only dynamic pivot",
+            ),
+        ):
+            self.runner.apply_investigation_query_loop(
+                {
+                    "investigation_query_capability": {
+                        "enabled": True,
+                        "backends": {"elastic": {"enabled": True}},
+                    },
+                    "_local_investigation_query_context": {
+                        "anchor": {
+                            "index": (
+                                ".ds-logs-suricata.alerts-so-"
+                                "2026.07.24-000001"
+                            ),
+                            "id": "alert-failed-evaluation-pivot",
+                        },
+                    },
+                },
+                {
+                    "investigation_query_requests": [
+                        self.elastic_request()
+                    ],
+                    "_analysis_model_route": route,
+                },
+                object(),
+                {"agent_models": {"soc-analyst": route}},
+                "soc-analyst",
+                harness_runtime=harness,
+                model_executor=mock.Mock(
+                    return_value={
+                        "summary": "No evidence was collected.",
+                        "_analysis_model_route": route,
+                    }
+                ),
+                query_executor=failed_query_round,
+            )
+
+        self.assertIn(("query_round", 1), events)
+
+    def test_normal_shadow_and_no_harness_do_not_force_query_retry(self) -> None:
+        route = "codex-cli:gpt-5.5:high"
+        settings = {"agent_models": {"soc-analyst": route}}
+        baseline = {
+            "summary": "A normal shadow run may conclude without a pivot.",
+            "_analysis_model_route": route,
+        }
+        model_executor = mock.Mock()
+        shadow = RecordingHarness([], mode="shadow")
+
+        without_freeze = self.runner.apply_investigation_query_loop(
+            {},
+            copy.deepcopy(baseline),
+            object(),
+            settings,
+            "soc-analyst",
+            harness_runtime=shadow,
+            model_executor=model_executor,
+        )
+        with mock.patch.dict(
+            self.runner.os.environ,
+            {self.runner.EVALUATION_FREEZE_MEMORY_ENV: "1"},
+        ):
+            without_harness = self.runner.apply_investigation_query_loop(
+                {},
+                copy.deepcopy(baseline),
+                object(),
+                settings,
+                "soc-analyst",
+                model_executor=model_executor,
+            )
+
+        self.assertEqual(without_freeze, baseline)
+        self.assertEqual(without_harness, baseline)
+        model_executor.assert_not_called()
+
+    def test_evaluation_query_planning_retry_enforces_prompt_and_route_bounds(
+        self,
+    ) -> None:
+        route = "codex-cli:gpt-5.5:high"
+        settings = {"agent_models": {"soc-analyst": route}}
+        model_executor = mock.Mock()
+        with (
+            mock.patch.dict(
+                self.runner.os.environ,
+                {self.runner.EVALUATION_FREEZE_MEMORY_ENV: "1"},
+            ),
+            self.assertRaisesRegex(
+                self.runner.InvestigationQueryError,
+                "prompt exceeds max_prompt_bytes",
+            ),
+        ):
+            self.runner.apply_investigation_query_loop(
+                {"case_id": "case-prompt-bound"},
+                {"summary": "no request", "_analysis_model_route": route},
+                self.runner.argparse.Namespace(max_prompt_bytes=64),
+                settings,
+                "soc-analyst",
+                harness_runtime=RecordingHarness([], mode="shadow"),
+                model_executor=model_executor,
+            )
+        model_executor.assert_not_called()
+
+        route_events: list[tuple] = []
+        with (
+            mock.patch.dict(
+                self.runner.os.environ,
+                {self.runner.EVALUATION_FREEZE_MEMORY_ENV: "1"},
+            ),
+            self.assertRaisesRegex(
+                self.runner.InvestigationQueryError,
+                "preserve the assigned model route",
+            ),
+        ):
+            self.runner.apply_investigation_query_loop(
+                {},
+                {"summary": "no request", "_analysis_model_route": route},
+                self.runner.argparse.Namespace(
+                    max_prompt_bytes=self.runner.DEFAULT_MAX_PROMPT_BYTES,
+                ),
+                settings,
+                "soc-analyst",
+                harness_runtime=RecordingHarness(
+                    route_events,
+                    mode="shadow",
+                ),
+                model_executor=mock.Mock(
+                    return_value={
+                        "investigation_query_requests": [
+                            self.elastic_request()
+                        ],
+                        "_analysis_model_route": (
+                            "codex-cli:gpt-5.6-terra:high"
+                        ),
+                    }
+                ),
+                query_executor=mock.Mock(),
+            )
+        self.assertIn(
+            ("model_call", "primary-query-planning-retry-1", False),
+            route_events,
+        )
+
+    def test_evaluation_shadow_trace_failures_are_fail_closed(self) -> None:
+        route = "codex-cli:gpt-5.5:high"
+        settings = {"agent_models": {"soc-analyst": route}}
+        initial_model_executor = mock.Mock()
+        initial_harness = RecordingHarness([], mode="shadow")
+        initial_harness.preflight_model_call = mock.Mock(
+            side_effect=RuntimeError("synthetic initial trace failure")
+        )
+        with (
+            mock.patch.dict(
+                self.runner.os.environ,
+                {self.runner.EVALUATION_FREEZE_MEMORY_ENV: "1"},
+            ),
+            mock.patch.object(
+                self.runner,
+                "analyze_model_route",
+                initial_model_executor,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "synthetic initial trace failure",
+            ),
+        ):
+            self.runner.analyze_with_config(
+                {"case_id": "case-initial-trace-failure"},
+                object(),
+                settings=settings,
+                harness_runtime=initial_harness,
+            )
+        initial_model_executor.assert_not_called()
+
+        query_executor = mock.Mock()
+        query_harness = RecordingHarness(
+            [],
+            mode="shadow",
+            fail_authorization=True,
+        )
+        with (
+            mock.patch.dict(
+                self.runner.os.environ,
+                {self.runner.EVALUATION_FREEZE_MEMORY_ENV: "1"},
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "synthetic shadow observation failure",
+            ),
+        ):
+            self.runner.apply_investigation_query_loop(
+                {
+                    "investigation_query_capability": {
+                        "enabled": True,
+                        "backends": {"elastic": {"enabled": True}},
+                    },
+                    "_local_investigation_query_context": {
+                        "anchor": {
+                            "index": (
+                                ".ds-logs-suricata.alerts-so-"
+                                "2026.07.24-000001"
+                            ),
+                            "id": "alert-query-trace-failure",
+                        },
+                    },
+                },
+                {
+                    "investigation_query_requests": [
+                        self.elastic_request()
+                    ],
+                    "_analysis_model_route": route,
+                },
+                object(),
+                settings,
+                "soc-analyst",
+                harness_runtime=query_harness,
+                model_executor=mock.Mock(),
+                query_executor=query_executor,
+            )
+        query_executor.assert_not_called()
+
+    def test_evaluation_audit_bindings_match_durable_harness_tool_rows(
+        self,
+    ) -> None:
+        route = "codex-cli:gpt-5.5:high"
+        prompt_package = {
+            "case_id": "case-durable-query-binding",
+            "alert": {
+                "alert_id": (
+                    ".ds-logs-suricata.alerts-so-2026.07.24-000001:"
+                    "alert-durable-query-binding"
+                ),
+            },
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                    "id": "alert-durable-query-binding",
+                },
+            },
+        }
+        self.runner.attach_evidence_reference_contract(prompt_package)
+        policy_value = json.loads(
+            (
+                REPO_ROOT
+                / "n8n"
+                / "config"
+                / "investigation_harness_policy.json"
+            ).read_text(encoding="utf-8")
+        )
+        policy_value["enabled"] = True
+        policy_value["mode"] = "enforce"
+        policy = self.harness.HarnessPolicy.from_dict(policy_value)
+        model_call_count = 0
+
+        def model_executor(
+            observed_route,
+            _package,
+            _args,
+            _settings,
+        ):
+            nonlocal model_call_count
+            model_call_count += 1
+            self.assertEqual(observed_route, route)
+            if model_call_count == 1:
+                return {
+                    "investigation_query_requests": [self.elastic_request()],
+                    "_analysis_model_route": route,
+                }
+            return {
+                "summary": "Durably bound final response.",
+                "_analysis_model_route": route,
+            }
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            runtime = self.harness.start_harness_run(
+                run_id="run-durable-query-binding",
+                prompt_package=prompt_package,
+                role="soc-analyst",
+                assigned_route=route,
+                configuration={
+                    "evaluation_memory_frozen": True,
+                    "test": True,
+                },
+                policy=policy,
+                db_path=Path(temp_name) / "harness.sqlite3",
+            )
+            self.assertIsNotNone(runtime)
+            with mock.patch.dict(
+                self.runner.os.environ,
+                {self.runner.EVALUATION_FREEZE_MEMORY_ENV: "1"},
+            ):
+                response = self.runner.apply_investigation_query_loop(
+                    prompt_package,
+                    {
+                        "summary": "Initial response omitted a pivot.",
+                        "_analysis_model_route": route,
+                    },
+                    self.runner.argparse.Namespace(
+                        max_prompt_bytes=self.runner.DEFAULT_MAX_PROMPT_BYTES,
+                    ),
+                    {"agent_models": {"soc-analyst": route}},
+                    "soc-analyst",
+                    harness_runtime=runtime,
+                    model_executor=model_executor,
+                    query_executor=lambda _package, requests, **kwargs: (
+                        self.successful_security_onion_round(
+                            requests,
+                            round_number=kwargs["round_number"],
+                        )
+                    ),
+                )
+            trace = runtime.store.export_trace(runtime.run_id)
+
+        binding = response["_investigation_query_audit"][
+            "tool_call_bindings"
+        ][0]
+        tool_row = trace["tool_calls"][0]
+        for key in (
+            "call_id",
+            "round_number",
+            "backend",
+            "status",
+            "request_digest",
+            "result_digest",
+        ):
+            self.assertEqual(binding[key], tool_row[key])
+        self.assertIs(binding["read_only"], True)
+        self.assertEqual(bool(tool_row["read_only"]), binding["read_only"])
 
     def test_query_authorization_and_batch_preflight_precede_executor(
         self,

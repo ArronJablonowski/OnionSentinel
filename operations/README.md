@@ -131,11 +131,19 @@ each exact harness trace. Export fails unless every member completed freshly
 after its one accepted dispatch. The proof binds the selected route, agent
 role, reanalysis task kind, shadow policy mode, terminal hash chain and ledger
 manifest, collector-owned memory-freeze attestation, and absence of
-non-read-only tool calls. It excludes raw alerts, prompts, model responses,
-query text/results, job payloads, and credentials.
+non-read-only tool calls. Every SOC Analyst and Incident Responder result must
+also have at least one successful, explicitly read-only tool call in that
+terminal-bound ledger; a zero-query or rejected-only trace is not gradeable.
+Where the stored response includes collector-owned query-audit metadata, its
+bounded digest and counts are bound into the execution proof. Incident
+Responder results additionally require at least one explicitly read-only
+Security Onion query in that collector audit. The export excludes raw alerts,
+prompts, model responses, query text/results, job payloads, and credentials.
 
 Accuracy grading is fail closed: provide both the SOC Analyst and Incident
 Responder exports made from the same source-row file. The offline evaluator
 refuses to score either role unless all 40 results pass their machine gates,
 the two exports have the same source SHA-256 and ordered identities, and every
-independent adjudication is bound to the exact fresh analysis ID.
+independent adjudication is bound to the exact fresh analysis ID. The final
+dual-role gate may claim read-only query ledgers only after all 40 results meet
+the positive successful-tool requirement above.

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import contextlib
 import hashlib
 import importlib.util
@@ -536,10 +538,32 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
             self.assertEqual(report["models"]["call_count"], 2)
             self.assertEqual(report["models"]["independent_review_call_count"], 1)
             self.assertEqual(report["tools"]["call_count"], 3)
+            self.assertEqual(report["tools"]["successful_call_count"], 2)
+            self.assertEqual(report["tools"]["read_only_call_count"], 2)
             self.assertEqual(report["tools"]["rejected_count"], 1)
             self.assertEqual(report["tools"]["coverage_gap_count"], 1)
             self.assertEqual(report["tools"]["truncated_count"], 1)
             self.assertEqual(report["tools"]["read_only_violation_count"], 1)
+            self.assertEqual(
+                report["runs"][0]["tools"]["successful_call_count"],
+                2,
+            )
+            self.assertEqual(
+                report["runs"][0]["tools"]["read_only_call_count"],
+                2,
+            )
+            bindings = report["runs"][0]["tools"][
+                "successful_read_only_call_bindings"
+            ]
+            self.assertEqual(len(bindings), 1)
+            self.assertEqual(bindings[0]["call_id"], "elastic-ok")
+            self.assertIs(bindings[0]["read_only"], True)
+            self.assertEqual(
+                report["runs"][0]["tools"][
+                    "successful_read_only_call_bindings_sha256"
+                ],
+                evaluator.digest_json(bindings),
+            )
             self.assertEqual(
                 report["evidence"]["average_distinct_source_classes_per_run"],
                 2.0,

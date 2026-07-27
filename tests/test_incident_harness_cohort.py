@@ -654,6 +654,18 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         )
         self.assertEqual(queued["members"][0]["dispatch"]["state"], "accepted")
 
+        soc_tool_call_bindings = [
+            {
+                "call_id": "round-1-soc-pivot",
+                "round_number": 1,
+                "query_id": "soc-pivot",
+                "backend": "elastic",
+                "status": "ok",
+                "request_digest": "d" * 64,
+                "result_digest": "e" * 64,
+                "read_only": True,
+            }
+        ]
         response = {
             "event_status": "observed",
             "detection_validity": "matched_intent",
@@ -665,6 +677,43 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             "_analysis_provider": "codex-cli",
             "_analysis_harness": "onion-sentinel",
             "_analysis_evaluation_memory_frozen": True,
+            "_investigation_query_audit": {
+                "read_only": True,
+                "complete": True,
+                "all_tool_call_bindings_read_only": True,
+                "evaluation_requirement_satisfied": True,
+                "query_contract": (
+                    "onion-sentinel-investigation-pivots-v2"
+                ),
+                "provider_neutral": True,
+                "rounds_completed": 1,
+                "queries_admitted": 1,
+                "successful_read_only_queries": 1,
+                "tool_call_bindings": soc_tool_call_bindings,
+                "rounds": [
+                    {
+                        "round": 1,
+                        "trusted_queries": [
+                            {
+                                "query_id": "soc-pivot",
+                                "backend": "elastic",
+                                "status": "ok",
+                                "query_digest": "f" * 64,
+                                "result_digest": "e" * 64,
+                                "returned_hits": 1,
+                            }
+                        ],
+                        "results": [
+                            {
+                                "query_id": "soc-pivot",
+                                "backend": "elastic",
+                                "status": "ok",
+                                "query_digest": "f" * 64,
+                            }
+                        ],
+                    }
+                ],
+            },
         }
         connection = self._connect()
         connection.execute(
@@ -717,6 +766,9 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             digest_field="manifest_sha256",
         )
         analysis = manifest["members"][0]["monitor"]["analysis"]
+        exported_tool_bindings = analysis["query_audit"][
+            "_investigation_query_audit"
+        ]["tool_call_bindings"]
         proof = {
             "status": "passed",
             "fresh_analysis": True,
@@ -748,8 +800,19 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 "successful_primary_model_call_count": 1,
                 "route_authorization_failure_count": 0,
                 "route_identity_mismatch_count": 0,
-                "tool_call_count": 0,
+                "tool_call_count": 1,
+                "successful_tool_call_count": 1,
+                "read_only_tool_call_count": 1,
                 "read_only_violation_count": 0,
+                "successful_read_only_tool_call_bindings": (
+                    exported_tool_bindings
+                ),
+                "successful_read_only_tool_call_bindings_sha256": (
+                    cohort.sha256_value(exported_tool_bindings)
+                ),
+                "query_audit": cohort._query_audit_execution_binding(
+                    analysis
+                ),
                 "memory_frozen": True,
                 "submitted_response_sha256": "b" * 64,
                 "response_canonical_sha256": analysis[
@@ -991,6 +1054,18 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 ),
             ),
         }
+        tool_call_bindings = [
+            {
+                "call_id": "round-1-soc-proof-pivot",
+                "round_number": 1,
+                "query_id": "soc-proof-pivot",
+                "backend": "elastic",
+                "status": "ok",
+                "request_digest": "d" * 64,
+                "result_digest": "e" * 64,
+                "read_only": True,
+            }
+        ]
         monitor = {
             "state": "completed",
             "analysis_id": analysis_id,
@@ -1004,6 +1079,40 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                         "codex-cli:gpt-5.6-sol:high"
                     ),
                     "_analysis_evaluation_memory_frozen": True,
+                },
+                "query_audit": {
+                    "_investigation_query_audit": {
+                        "read_only": True,
+                        "complete": True,
+                        "all_tool_call_bindings_read_only": True,
+                        "evaluation_requirement_satisfied": True,
+                        "query_contract": (
+                            "onion-sentinel-investigation-pivots-v2"
+                        ),
+                        "provider_neutral": True,
+                        "rounds_completed": 1,
+                        "queries_admitted": 1,
+                        "successful_read_only_queries": 1,
+                        "queries": [
+                            {
+                                "query_id": "soc-proof-pivot",
+                                "backend": "elastic",
+                                "status": "ok",
+                                "query_digest": "f" * 64,
+                                "result_digest": "e" * 64,
+                                "returned_hits": 1,
+                            }
+                        ],
+                        "round_results": [
+                            {
+                                "query_id": "soc-proof-pivot",
+                                "backend": "elastic",
+                                "status": "ok",
+                                "query_digest": "f" * 64,
+                            }
+                        ],
+                        "tool_call_bindings": tool_call_bindings,
+                    }
                 },
             },
         }
@@ -1052,13 +1161,23 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                             "onion-sentinel-harness-ledger-manifest-v2"
                         ),
                     },
-                    "counts": {"model_calls": 1, "tool_calls": 0},
+                    "counts": {"model_calls": 1, "tool_calls": 1},
                     "models": {
                         "successful_call_count": 1,
                         "successful_primary_call_count": 1,
                         "route_consistency": zero_routes,
                     },
-                    "tools": {"read_only_violation_count": 0},
+                    "tools": {
+                        "successful_call_count": 1,
+                        "read_only_call_count": 1,
+                        "read_only_violation_count": 0,
+                        "successful_read_only_call_bindings": (
+                            tool_call_bindings
+                        ),
+                        "successful_read_only_call_bindings_sha256": (
+                            cohort.sha256_value(tool_call_bindings)
+                        ),
+                    },
                 }
             ],
             "data_quality": {"malformed_json_counts": {}},
@@ -1087,6 +1206,32 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             submitted_digest,
         )
         self.assertNotEqual(submitted_digest, response_digest)
+        self.assertEqual(proof["harness"]["tool_call_count"], 1)
+        self.assertEqual(
+            proof["harness"]["successful_tool_call_count"],
+            1,
+        )
+
+        trace_report["runs"][0]["counts"]["tool_calls"] = 0
+        trace_report["runs"][0]["tools"]["successful_call_count"] = 0
+        trace_report["runs"][0]["tools"]["read_only_call_count"] = 0
+        with mock.patch.object(
+            cohort,
+            "_load_trace_evaluator",
+            return_value=fake_evaluator,
+        ):
+            with self.assertRaisesRegex(
+                cohort.CohortError,
+                "harness-tool-call-ledger-missing",
+            ):
+                cohort._harness_execution_proof(
+                    harness_database_path=(
+                        self.root / "synthetic-harness.sqlite3"
+                    ),
+                    manifest=manifest,
+                    member=member,
+                    monitor=monitor,
+                )
 
 
 if __name__ == "__main__":

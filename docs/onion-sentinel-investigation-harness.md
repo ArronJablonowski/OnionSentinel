@@ -971,6 +971,14 @@ model use, tool failures and policy rejections, coverage and truncation,
 evidence-source diversity, independent-review disagreement, distinct budget
 breaches, and memory-promotion outcomes.
 
+Controlled accuracy grading fails closed unless every selected SOC Analyst and
+Incident Responder trace contains at least one successful tool call and every
+logged call is explicitly read-only. A zero-call or rejected-only ledger is a
+coverage gap, not proof of read-only investigation. Bounded collector query
+audits are digest-bound to the stored response when present; Incident
+Responder grading also requires a positive read-only Security Onion query
+audit.
+
 ## Trace Durability and Retention
 
 Shadow mode writes an owner-only SQLite trace ledger at
@@ -1037,6 +1045,23 @@ invariants. Owner-only post-commit receipt additions are expected; validate
 their analysis IDs and frozen-memory attestations instead of requiring the
 entire journal directory to remain byte-identical. Do not set this variable on
 normal scheduled workers.
+
+When that evaluation freeze is active and the custom harness starts, the
+provider-neutral query loop also becomes fail-closed. If the initial primary
+response omits `investigation_query_requests`, the runner makes exactly one
+query-planning retry on the immutable primary route. The retry has its own
+harness preflight/model-call trace, stays inside the existing prompt and
+six-model-call budgets (the retry reserves one of the three ordinary pivot
+follow-up slots), and its planning-only instruction is removed before evidence
+synthesis. The run is rejected before artifact persistence unless at
+least one request-bound broker result has a successful status and explicit
+`read_only: true`; every compact response-side tool binding must also be
+read-only. Those bindings contain only call/query identity, backend, status,
+and exact request/result digests matching the harness tool ledger—never query
+text or returned evidence. Harness initialization, bypass, or trace failures
+that shadow mode normally observes without interruption are fatal during this
+controlled evaluation. Ordinary production shadow runs outside the evaluation
+freeze retain their prior behavior and may conclude without a dynamic pivot.
 
 ## Operator Configuration and Safety
 

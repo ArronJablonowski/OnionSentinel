@@ -46,7 +46,9 @@ OPTIONAL_TABLES = frozenset(
 TERMINAL_STATUSES = frozenset(
     {"succeeded", "failed", "cancelled"}
 )
-SUCCESS_STATUSES = frozenset({"ok", "completed", "success", "succeeded"})
+SUCCESS_STATUSES = frozenset(
+    {"ok", "complete", "completed", "success", "succeeded"}
+)
 REJECTION_STATUSES = frozenset(
     {"rejected", "denied", "blocked", "unauthorized", "forbidden"}
 )
@@ -1048,6 +1050,48 @@ def evaluate_run(
         for row in tool_calls
         if int(row.get("read_only") or 0) != 1
     ]
+    successful_tools = [
+        str(row.get("call_id") or "")
+        for row in tool_calls
+        if normalize_status(row.get("status")) in SUCCESS_STATUSES
+    ]
+    read_only_tools = [
+        str(row.get("call_id") or "")
+        for row in tool_calls
+        if int(row.get("read_only") or 0) == 1
+    ]
+    successful_read_only_call_bindings = []
+    for row in tool_calls:
+        if (
+            normalize_status(row.get("status")) not in SUCCESS_STATUSES
+            or int(row.get("read_only") or 0) != 1
+        ):
+            continue
+        round_number = nonnegative_int(row.get("round_number"))
+        call_id = str(row.get("call_id") or "")
+        call_prefix = f"round-{round_number}-"
+        successful_read_only_call_bindings.append(
+            {
+                "call_id": call_id,
+                "round_number": round_number,
+                "query_id": (
+                    call_id[len(call_prefix) :]
+                    if call_id.startswith(call_prefix)
+                    else ""
+                ),
+                "backend": str(row.get("backend") or ""),
+                "status": normalize_status(row.get("status")),
+                "request_digest": str(row.get("request_digest") or ""),
+                "result_digest": str(row.get("result_digest") or ""),
+                "read_only": True,
+            }
+        )
+    successful_read_only_call_bindings.sort(
+        key=lambda item: (
+            int(item["round_number"]),
+            str(item["call_id"]),
+        )
+    )
 
     budget_violation_sources: dict[tuple[str, str], set[str]] = {}
     memory_promotions: list[dict[str, Any]] = []
@@ -1124,6 +1168,8 @@ def evaluate_run(
         coverage_reasons.append("no-model-call-ledger")
     if not tool_calls:
         coverage_reasons.append("no-tool-call-ledger")
+    elif not successful_tools:
+        coverage_reasons.append("no-successful-tool-call-ledger")
     if coverage_gaps:
         coverage_reasons.append("tool-evidence-gap")
     if truncated_tools:
@@ -1228,6 +1274,14 @@ def evaluate_run(
                 :MAX_REPORTED_IDS
             ],
             "read_only_violation_count": len(read_only_violations),
+            "successful_call_count": len(successful_tools),
+            "read_only_call_count": len(read_only_tools),
+            "successful_read_only_call_bindings": (
+                successful_read_only_call_bindings
+            ),
+            "successful_read_only_call_bindings_sha256": digest_json(
+                successful_read_only_call_bindings
+            ),
         },
         "evidence": {
             "source_classes": source_classes,
@@ -1282,7 +1336,8 @@ def summarize(
 
     total_events = total_evidence = total_hypotheses = total_decisions = 0
     total_model_calls = total_model_ms = independent_review_calls = 0
-    total_tool_calls = rejected_tools = failed_tools = 0
+    total_tool_calls = successful_tools = read_only_tools = 0
+    rejected_tools = failed_tools = 0
     coverage_gap_tools = truncated_tools = read_only_violations = 0
     corroborating_evidence = 0
     reviewer_runs = comparable_reviews = reviewer_disagreements = 0
@@ -1313,6 +1368,8 @@ def summarize(
         total_decisions += result["counts"]["decisions"]
         total_model_calls += result["counts"]["model_calls"]
         total_tool_calls += result["counts"]["tool_calls"]
+        successful_tools += result["tools"]["successful_call_count"]
+        read_only_tools += result["tools"]["read_only_call_count"]
         total_model_ms += result["models"]["duration_ms"]
         independent_review_calls += result["models"][
             "independent_review_calls"
@@ -1502,6 +1559,8 @@ def summarize(
         },
         "tools": {
             "call_count": total_tool_calls,
+            "successful_call_count": successful_tools,
+            "read_only_call_count": read_only_tools,
             "calls_per_run": ratio(total_tool_calls, run_count),
             "rejected_count": rejected_tools,
             "rejection_rate": ratio(rejected_tools, total_tool_calls),

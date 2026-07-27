@@ -653,6 +653,173 @@ def _query_audit_summary(analysis: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _query_audit_execution_binding(
+    analysis: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Recompute the export's collector-owned query-provenance binding."""
+
+    query_audit = (
+        analysis.get("query_audit")
+        if isinstance(analysis.get("query_audit"), dict)
+        else {}
+    )
+    section_count = 0
+    queried_section_count = 0
+    query_count = 0
+    read_only_queried_section_count = 0
+    for section in query_audit.values():
+        if not isinstance(section, dict):
+            continue
+        section_count += 1
+        queries = (
+            section.get("queries")
+            if isinstance(section.get("queries"), list)
+            else []
+        )
+        query_count += len(queries)
+        if queries:
+            queried_section_count += 1
+            if section.get("read_only") is True:
+                read_only_queried_section_count += 1
+    security_onion = query_audit.get("_incident_query_audit")
+    security_onion = (
+        security_onion if isinstance(security_onion, dict) else {}
+    )
+    security_onion_queries = (
+        security_onion.get("queries")
+        if isinstance(security_onion.get("queries"), list)
+        else []
+    )
+    dynamic = query_audit.get("_investigation_query_audit")
+    dynamic = dynamic if isinstance(dynamic, dict) else {}
+    dynamic_queries = (
+        dynamic.get("queries")
+        if isinstance(dynamic.get("queries"), list)
+        else []
+    )
+    successful_statuses = {
+        "ok",
+        "complete",
+        "completed",
+        "success",
+        "succeeded",
+    }
+    raw_dynamic_tool_bindings = (
+        dynamic.get("tool_call_bindings")
+        if isinstance(dynamic.get("tool_call_bindings"), list)
+        else []
+    )
+    invalid_dynamic_tool_bindings = 0
+    duplicate_dynamic_tool_bindings = 0
+    seen_call_ids: set[str] = set()
+    dynamic_tool_bindings: list[dict[str, Any]] = []
+    for binding in raw_dynamic_tool_bindings:
+        if not isinstance(binding, dict):
+            invalid_dynamic_tool_bindings += 1
+            continue
+        status = str(binding.get("status") or "").strip().lower()
+        status = status.replace("_", "-")
+        try:
+            round_number = int(binding.get("round_number"))
+        except (TypeError, ValueError, OverflowError):
+            round_number = -1
+        call_id = str(binding.get("call_id") or "")
+        query_id = str(binding.get("query_id") or "")
+        backend = str(binding.get("backend") or "")
+        request_digest = str(binding.get("request_digest") or "")
+        result_digest = str(binding.get("result_digest") or "")
+        binding_is_valid = (
+            round_number >= 1
+            and bool(query_id)
+            and bool(backend)
+            and bool(status)
+            and call_id == f"round-{round_number}-{query_id}"[:128]
+            and SHA256_RE.fullmatch(request_digest) is not None
+            and SHA256_RE.fullmatch(result_digest) is not None
+            and isinstance(binding.get("read_only"), bool)
+        )
+        if not binding_is_valid:
+            invalid_dynamic_tool_bindings += 1
+            continue
+        if call_id in seen_call_ids:
+            duplicate_dynamic_tool_bindings += 1
+            continue
+        seen_call_ids.add(call_id)
+        if (
+            status not in successful_statuses
+            or binding.get("read_only") is not True
+        ):
+            continue
+        dynamic_tool_bindings.append(
+            {
+                "call_id": call_id,
+                "round_number": round_number,
+                "query_id": query_id,
+                "backend": backend,
+                "status": status,
+                "request_digest": request_digest,
+                "result_digest": result_digest,
+                "read_only": True,
+            }
+        )
+    dynamic_tool_bindings.sort(
+        key=lambda item: (
+            int(item["round_number"]),
+            str(item["call_id"]),
+        )
+    )
+    try:
+        successful_read_only_queries = int(
+            dynamic.get("successful_read_only_queries")
+        )
+    except (TypeError, ValueError, OverflowError):
+        successful_read_only_queries = -1
+    return {
+        "query_audit_sha256": sha256_value(query_audit),
+        "section_count": section_count,
+        "queried_section_count": queried_section_count,
+        "query_count": query_count,
+        "read_only_queried_section_count": (
+            read_only_queried_section_count
+        ),
+        "read_only_verified": (
+            queried_section_count > 0
+            and read_only_queried_section_count == queried_section_count
+        ),
+        "security_onion_query_count": len(security_onion_queries),
+        "security_onion_read_only": (
+            security_onion.get("read_only") is True
+        ),
+        "dynamic_query_count": len(dynamic_queries),
+        "dynamic_tool_call_binding_count": len(
+            raw_dynamic_tool_bindings
+        ),
+        "dynamic_invalid_tool_call_binding_count": (
+            invalid_dynamic_tool_bindings
+        ),
+        "dynamic_duplicate_tool_call_binding_count": (
+            duplicate_dynamic_tool_bindings
+        ),
+        "dynamic_read_only": dynamic.get("read_only") is True,
+        "dynamic_complete": dynamic.get("complete") is True,
+        "dynamic_all_tool_call_bindings_read_only": (
+            dynamic.get("all_tool_call_bindings_read_only") is True
+        ),
+        "dynamic_evaluation_requirement_satisfied": (
+            dynamic.get("evaluation_requirement_satisfied") is True
+        ),
+        "dynamic_successful_read_only_queries": (
+            successful_read_only_queries
+        ),
+        "dynamic_successful_read_only_tool_bindings": (
+            dynamic_tool_bindings
+        ),
+        "dynamic_successful_read_only_tool_bindings_sha256": (
+            sha256_value(dynamic_tool_bindings)
+        ),
+    }
+
+
 def _parse_timestamp(value: Any, label: str) -> dt.datetime:
     text = str(value or "").strip()
     text = re.sub(
@@ -859,6 +1026,23 @@ def _validate_execution_proof(
             raise CohortEvaluationError(
                 f"{label} harness {field} does not match"
             )
+    query_audit_binding = _query_audit_execution_binding(analysis)
+    if harness.get("query_audit") != query_audit_binding:
+        raise CohortEvaluationError(
+            f"{label} collector query-audit binding does not match"
+        )
+    dynamic_bindings = query_audit_binding[
+        "dynamic_successful_read_only_tool_bindings"
+    ]
+    trace_bindings = harness.get(
+        "successful_read_only_tool_call_bindings"
+    )
+    trace_binding_digest = str(
+        harness.get(
+            "successful_read_only_tool_call_bindings_sha256"
+        )
+        or ""
+    )
     if (
         harness.get("chain_valid") is not True
         or harness.get("ledger_manifest_bound") is not True
@@ -868,7 +1052,71 @@ def _validate_execution_proof(
         != int(harness.get("successful_model_call_count") or 0)
         or int(harness.get("route_authorization_failure_count") or 0)
         or int(harness.get("route_identity_mismatch_count") or 0)
+        or int(harness.get("tool_call_count") or 0) < 1
+        or int(harness.get("successful_tool_call_count") or 0) < 1
+        or int(harness.get("read_only_tool_call_count") or 0)
+        != int(harness.get("tool_call_count") or 0)
         or int(harness.get("read_only_violation_count") or 0)
+        or not isinstance(trace_bindings, list)
+        or trace_bindings != dynamic_bindings
+        or len(dynamic_bindings)
+        != int(harness.get("successful_tool_call_count") or 0)
+        or trace_binding_digest != sha256_value(dynamic_bindings)
+        or (
+            int(query_audit_binding["queried_section_count"]) > 0
+            and query_audit_binding["read_only_verified"] is not True
+        )
+        or query_audit_binding["dynamic_read_only"] is not True
+        or query_audit_binding[
+            "dynamic_all_tool_call_bindings_read_only"
+        ]
+        is not True
+        or query_audit_binding[
+            "dynamic_evaluation_requirement_satisfied"
+        ]
+        is not True
+        or int(
+            query_audit_binding[
+                "dynamic_successful_read_only_queries"
+            ]
+        )
+        < 1
+        or int(query_audit_binding["dynamic_query_count"]) < 1
+        or int(
+            query_audit_binding[
+                "dynamic_tool_call_binding_count"
+            ]
+        )
+        < 1
+        or int(
+            query_audit_binding[
+                "dynamic_invalid_tool_call_binding_count"
+            ]
+        )
+        != 0
+        or int(
+            query_audit_binding[
+                "dynamic_duplicate_tool_call_binding_count"
+            ]
+        )
+        != 0
+        or int(
+            query_audit_binding[
+                "dynamic_successful_read_only_queries"
+            ]
+        )
+        != len(dynamic_bindings)
+        or (
+            role == "incident-responder"
+            and (
+                int(
+                    query_audit_binding["security_onion_query_count"]
+                )
+                < 1
+                or query_audit_binding["security_onion_read_only"]
+                is not True
+            )
+        )
         or not SHA256_RE.fullmatch(
             str(harness.get("submitted_response_sha256") or "")
         )
@@ -1526,6 +1774,8 @@ def evaluate_cohorts(
                 "terminal_chains_valid": True,
                 "routes_verified": True,
                 "read_only_ledgers": True,
+                "positive_successful_tool_ledgers": True,
+                "collector_query_audits_bound": True,
                 "memory_frozen": True,
                 "bypass_or_partial_results": 0,
             },
