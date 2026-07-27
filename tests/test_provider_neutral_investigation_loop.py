@@ -1361,6 +1361,154 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
 
         self.assertIn(("query_round", 1), events)
 
+    def test_evaluation_counts_digest_bound_success_inside_partial_broker_batch(
+        self,
+    ) -> None:
+        events: list[tuple] = []
+        harness = RecordingHarness(events, mode="shadow")
+        route = "codex-cli:gpt-5.5:high"
+        successful = self.elastic_request("successful-pivot")
+        failed = self.elastic_request("failed-pivot")
+        failed["parameters"]["size"] = 26
+        query_digest_ok = "a" * 64
+        result_digest_ok = "b" * 64
+        query_digest_failed = "c" * 64
+        result_digest_failed = "d" * 64
+        executed_round: dict[str, dict] = {}
+
+        def mixed_query_round(
+            _package,
+            requests,
+            *,
+            round_number,
+            live_osquery_config,
+        ):
+            self.assertIsNone(live_osquery_config)
+            result = {
+                "schema": self.runner.INVESTIGATION_QUERY_RESULT_SCHEMA,
+                "round": round_number,
+                "requests": copy.deepcopy(requests),
+                "results": [
+                    {
+                        "backend": "security_onion",
+                        "query_ids": [
+                            "successful-pivot",
+                            "failed-pivot",
+                        ],
+                        "status": "partial",
+                        "read_only": True,
+                        "security_onion_response_digest": "e" * 64,
+                        "evidence": {
+                            "controls_valid": True,
+                            "results": [
+                                {
+                                    "query_id": "successful-pivot",
+                                    "status": "ok",
+                                    "semantic_valid": True,
+                                    "query_digest": query_digest_ok,
+                                    "result_digest": result_digest_ok,
+                                    "returned_hits": 1,
+                                },
+                                {
+                                    "query_id": "failed-pivot",
+                                    "status": "invalid_response",
+                                    "semantic_valid": False,
+                                    "query_digest": query_digest_failed,
+                                    "result_digest": result_digest_failed,
+                                },
+                            ],
+                        },
+                        "trusted_query_audit": [
+                            {
+                                "query_id": "successful-pivot",
+                                "status": "ok",
+                                "semantic_valid": True,
+                                "timed_out": False,
+                                "query_digest": query_digest_ok,
+                                "result_digest": result_digest_ok,
+                                "returned_hits": 1,
+                                "shards": {"failed": 0},
+                            },
+                            {
+                                "query_id": "failed-pivot",
+                                "status": "invalid_response",
+                                "semantic_valid": False,
+                                "timed_out": False,
+                                "query_digest": query_digest_failed,
+                                "result_digest": result_digest_failed,
+                                "shards": {"failed": 0},
+                            },
+                        ],
+                    }
+                ],
+                "audit": [],
+            }
+            executed_round["value"] = result
+            return result
+
+        with mock.patch.dict(
+            self.runner.os.environ,
+            {self.runner.EVALUATION_FREEZE_MEMORY_ENV: "1"},
+        ):
+            response = self.runner.apply_investigation_query_loop(
+                {
+                    "investigation_query_capability": {
+                        "enabled": True,
+                        "backends": {"elastic": {"enabled": True}},
+                    },
+                    "_local_investigation_query_context": {
+                        "anchor": {
+                            "index": (
+                                ".ds-logs-suricata.alerts-so-"
+                                "2026.07.24-000001"
+                            ),
+                            "id": "alert-mixed-evaluation-pivot",
+                        },
+                    },
+                },
+                {
+                    "investigation_query_requests": [successful, failed],
+                    "_analysis_model_route": route,
+                },
+                object(),
+                {"agent_models": {"soc-analyst": route}},
+                "soc-analyst",
+                harness_runtime=harness,
+                model_executor=mock.Mock(
+                    return_value={
+                        "summary": "One trusted pivot succeeded.",
+                        "_analysis_model_route": route,
+                    }
+                ),
+                query_executor=mixed_query_round,
+            )
+
+        audit = response["_investigation_query_audit"]
+        self.assertEqual(audit["successful_read_only_queries"], 1)
+        self.assertTrue(audit["evaluation_requirement_satisfied"])
+        self.assertTrue(audit["all_tool_call_bindings_read_only"])
+        self.assertFalse(audit["complete"])
+        bindings = {
+            item["query_id"]: item
+            for item in audit["tool_call_bindings"]
+        }
+        self.assertEqual(bindings["successful-pivot"]["status"], "ok")
+        self.assertEqual(
+            bindings["failed-pivot"]["status"],
+            "invalid_response",
+        )
+        expected_result_digest = self.harness.digest_json(
+            executed_round["value"]["results"][0]
+        )
+        self.assertEqual(
+            bindings["successful-pivot"]["result_digest"],
+            expected_result_digest,
+        )
+        self.assertEqual(
+            bindings["failed-pivot"]["result_digest"],
+            expected_result_digest,
+        )
+
     def test_normal_shadow_and_no_harness_do_not_force_query_retry(self) -> None:
         route = "codex-cli:gpt-5.5:high"
         settings = {"agent_models": {"soc-analyst": route}}

@@ -1631,6 +1631,107 @@ class OnionSentinelHarnessTests(unittest.TestCase):
         self.assertEqual(query_event["payload"]["rejected_proposal_count"], 1)
         self.assertTrue(trace["integrity"]["valid"])
 
+    def test_query_round_resolves_digest_bound_nested_status_in_partial_batch(
+        self,
+    ) -> None:
+        run = self.make_run("query-partial-batch-semantics")
+        query_digest_ok = "a" * 64
+        result_digest_ok = "b" * 64
+        query_digest_failed = "c" * 64
+        result_digest_failed = "d" * 64
+        batch_result = {
+            "backend": "security_onion",
+            "query_ids": ["successful-pivot", "failed-pivot"],
+            "status": "partial",
+            "read_only": True,
+            "security_onion_response_digest": "e" * 64,
+            "evidence": {
+                "controls_valid": True,
+                "results": [
+                    {
+                        "query_id": "successful-pivot",
+                        "status": "ok",
+                        "semantic_valid": True,
+                        "query_digest": query_digest_ok,
+                        "result_digest": result_digest_ok,
+                        "returned_hits": 2,
+                    },
+                    {
+                        "query_id": "failed-pivot",
+                        "status": "invalid_response",
+                        "semantic_valid": False,
+                        "query_digest": query_digest_failed,
+                        "result_digest": result_digest_failed,
+                    },
+                ],
+            },
+            "trusted_query_audit": [
+                {
+                    "query_id": "successful-pivot",
+                    "status": "ok",
+                    "semantic_valid": True,
+                    "timed_out": False,
+                    "query_digest": query_digest_ok,
+                    "result_digest": result_digest_ok,
+                    "returned_hits": 2,
+                    "shards": {"failed": 0},
+                },
+                {
+                    "query_id": "failed-pivot",
+                    "status": "invalid_response",
+                    "semantic_valid": False,
+                    "timed_out": False,
+                    "query_digest": query_digest_failed,
+                    "result_digest": result_digest_failed,
+                    "shards": {"failed": 0},
+                },
+            ],
+        }
+        run.query_round(
+            {
+                "round": 1,
+                "requests": [
+                    {
+                        "query_id": "successful-pivot",
+                        "backend": "elastic",
+                        "purpose": "Validate the exact network event.",
+                    },
+                    {
+                        "query_id": "failed-pivot",
+                        "backend": "elastic",
+                        "purpose": "Test a second discriminator.",
+                    },
+                ],
+                "results": [batch_result],
+            }
+        )
+
+        calls = {
+            item["call_id"]: item
+            for item in run.store.export_trace(run.run_id)["tool_calls"]
+        }
+        successful = calls["round-1-successful-pivot"]
+        failed = calls["round-1-failed-pivot"]
+        self.assertEqual(successful["status"], "ok")
+        self.assertEqual(successful["coverage"], "bounded-result")
+        self.assertEqual(successful["truncated"], 0)
+        self.assertEqual(failed["status"], "invalid_response")
+        self.assertEqual(failed["coverage"], "evidence-gap")
+        self.assertEqual(
+            successful["result_digest"],
+            HARNESS.digest_json(batch_result),
+        )
+        self.assertEqual(failed["result_digest"], successful["result_digest"])
+
+        mismatched = json.loads(json.dumps(batch_result))
+        mismatched["trusted_query_audit"][0]["result_digest"] = "f" * 64
+        status, observation = HARNESS.resolve_query_binding(
+            mismatched,
+            "successful-pivot",
+        )
+        self.assertEqual(status, "partial")
+        self.assertIs(observation, mismatched)
+
     def test_changed_evidence_manifest_can_be_recatalogued_idempotently(
         self,
     ) -> None:

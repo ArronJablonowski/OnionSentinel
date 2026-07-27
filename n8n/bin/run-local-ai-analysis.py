@@ -70,6 +70,7 @@ from onion_sentinel_harness import (  # noqa: E402
     digest_json as harness_digest_json,
     external_agent_harness_provider,
     load_policy as load_investigation_harness_policy,
+    resolve_query_binding,
     should_start_onion_sentinel_harness,
     start_harness_run,
 )
@@ -4853,7 +4854,7 @@ def _investigation_tool_call_bindings(
     for query_id, request in request_by_id.items():
         result = result_by_id.get(query_id, {})
         backend = str(request.get("backend") or result.get("backend") or "")
-        status = str(result.get("status") or "missing")
+        status, _result_observation = resolve_query_binding(result, query_id)
         bindings.append(
             {
                 "call_id": f"round-{round_number}-{query_id}"[:128],

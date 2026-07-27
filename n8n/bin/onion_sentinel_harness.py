@@ -16,6 +16,7 @@ import dataclasses
 import datetime as dt
 import enum
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -456,6 +457,129 @@ def observed_truncation(value: Any, *, depth: int = 0) -> bool:
             for child in list(value)[:MAX_EVENT_ITEMS]
         )
     return False
+
+
+QUERY_SUCCESS_STATUSES = frozenset(
+    {"ok", "complete", "completed", "success", "succeeded"}
+)
+
+
+def resolve_query_binding(
+    result: Mapping[str, Any],
+    query_id: str,
+) -> tuple[str, Any]:
+    """Resolve one durable tool status from a provenance-bound batch result.
+
+    The Security Onion broker returns one envelope for a batch. A mixed batch
+    is correctly marked ``partial`` even when some nested queries succeeded.
+    Copying that coarse status to every tool row loses the successful pivots
+    and can incorrectly fail a controlled evaluation. Only unwrap an
+    individual status when the trusted response digest, semantic controls,
+    per-query audit, and both query/result digests agree exactly.
+
+    The caller must continue hashing the full outer result for durable result
+    provenance. The returned observation is only for per-query status,
+    coverage, and truncation semantics.
+    """
+    outer_status = str(result.get("status") or "missing").strip().lower()[:40]
+    if (
+        outer_status != "partial"
+        or str(result.get("backend") or "") != "security_onion"
+        or result.get("read_only") is not True
+    ):
+        return outer_status, result
+
+    response_digest = str(
+        result.get("security_onion_response_digest") or ""
+    ).strip()
+    evidence = (
+        result.get("evidence")
+        if isinstance(result.get("evidence"), Mapping)
+        else None
+    )
+    query_ids = (
+        [str(value) for value in result.get("query_ids", [])]
+        if isinstance(result.get("query_ids"), list)
+        else []
+    )
+    if (
+        not DIGEST_RE.fullmatch(response_digest)
+        or not isinstance(evidence, Mapping)
+        or evidence.get("controls_valid") is not True
+        or query_ids.count(query_id) != 1
+    ):
+        return outer_status, result
+
+    nested_results = (
+        evidence.get("results")
+        if isinstance(evidence.get("results"), list)
+        else []
+    )
+    audits = (
+        result.get("trusted_query_audit")
+        if isinstance(result.get("trusted_query_audit"), list)
+        else []
+    )
+    matching_results = [
+        item
+        for item in nested_results
+        if isinstance(item, Mapping)
+        and str(item.get("query_id") or "") == query_id
+    ]
+    matching_audits = [
+        item
+        for item in audits
+        if isinstance(item, Mapping)
+        and str(item.get("query_id") or "") == query_id
+    ]
+    if len(matching_results) != 1 or len(matching_audits) != 1:
+        return outer_status, result
+    nested = matching_results[0]
+    audit = matching_audits[0]
+
+    nested_status = str(nested.get("status") or "").strip().lower()[:40]
+    audit_status = str(audit.get("status") or "").strip().lower()[:40]
+    nested_query_digest = str(
+        nested.get("query_digest") or ""
+    ).strip()
+    audit_query_digest = str(
+        audit.get("query_digest") or ""
+    ).strip()
+    nested_result_digest = str(
+        nested.get("result_digest") or ""
+    ).strip()
+    audit_result_digest = str(
+        audit.get("result_digest") or ""
+    ).strip()
+    if (
+        not nested_status
+        or nested_status != audit_status
+        or not DIGEST_RE.fullmatch(nested_query_digest)
+        or not DIGEST_RE.fullmatch(audit_query_digest)
+        or not hmac.compare_digest(nested_query_digest, audit_query_digest)
+        or not DIGEST_RE.fullmatch(nested_result_digest)
+        or not DIGEST_RE.fullmatch(audit_result_digest)
+        or not hmac.compare_digest(nested_result_digest, audit_result_digest)
+    ):
+        return outer_status, result
+
+    observation = {"result": nested, "audit": audit}
+    if nested_status in QUERY_SUCCESS_STATUSES:
+        shards = (
+            audit.get("shards")
+            if isinstance(audit.get("shards"), Mapping)
+            else None
+        )
+        if (
+            nested.get("semantic_valid") is not True
+            or audit.get("semantic_valid") is not True
+            or nested.get("timed_out") is True
+            or audit.get("timed_out") is not False
+            or not isinstance(shards, Mapping)
+            or _nonnegative_int(shards.get("failed")) != 0
+        ):
+            return outer_status, observation
+    return nested_status, observation
 
 
 def _redacted_string(value: object, maximum: int = MAX_EVENT_STRING) -> str:
@@ -3426,8 +3550,11 @@ class HarnessRun:
                 if isinstance(result.get("evidence"), dict)
                 else {}
             )
-            result_status = str(result.get("status") or "missing")
-            returned_count = observed_returned_count(result)
+            result_status, result_observation = resolve_query_binding(
+                result,
+                query_id,
+            )
+            returned_count = observed_returned_count(result_observation)
             coverage = str(
                 evidence.get("coverage")
                 or evidence.get("coverage_semantics")
@@ -3456,7 +3583,7 @@ class HarnessRun:
                 status=result_status,
                 read_only=result.get("read_only") is True,
                 coverage=coverage,
-                truncated=observed_truncation(result),
+                truncated=observed_truncation(result_observation),
             )
         with _connect(self.store.path) as connection:
             usage = connection.execute(
