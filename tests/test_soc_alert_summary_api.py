@@ -1108,6 +1108,56 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(request_payload["pcap_analysis_limit"], 8)
         self.assertEqual(post_mock.call_args.kwargs["timeout"], 10.0)
 
+    def test_manual_analyze_forwards_exact_frozen_dispatch_identity(self) -> None:
+        group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        identity = {
+            "representative_alert_id": "frozen-alert:with:opaque-id",
+            "stable_group_id": "abcdef1234567890abcd",
+            "stable_group_key": "v2|critical|newest detection|192.0.2.10|198.51.100.10",
+            "cohort_id": "newest-20-soc.2026_07_26",
+            "dispatch_id": "a" * 64,
+            "release_id": "d" * 40,
+        }
+        with mock.patch.object(
+            self.portal,
+            "alert_store_post_json",
+            return_value={"ok": True, "status": "queued", **identity},
+        ) as post_mock:
+            status, payload = self.portal.soc_alert_queue_analysis_response(
+                group_id,
+                identity,
+            )
+
+        self.assertEqual(status, 202)
+        self.assertTrue(payload["ok"])
+        path, request_payload = post_mock.call_args.args
+        self.assertEqual(path, "/ai/request")
+        for field, expected in identity.items():
+            self.assertEqual(request_payload[field], expected)
+
+    def test_manual_analyze_preserves_alert_store_identity_conflict(self) -> None:
+        group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        with mock.patch.object(
+            self.portal,
+            "alert_store_post_json",
+            side_effect=self.portal.AlertStoreRequestError(
+                "frozen representative no longer belongs to the group",
+                409,
+            ),
+        ):
+            status, payload = self.portal.soc_alert_queue_analysis_response(
+                group_id,
+                {"representative_alert_id": "stale-alert"},
+            )
+
+        self.assertEqual(status, 409)
+        self.assertFalse(payload["ok"])
+        self.assertIn("no longer belongs", payload["error"])
+
     def test_top_endpoint_metrics_use_visible_alert_volume(self) -> None:
         self.insert_summary(
             "medium|Noisy visible detection|192.0.2.99|198.51.100.99|accepted",

@@ -252,6 +252,7 @@ function createDurableJobQueue({run, get, all, now, transitionLeaseSeconds = 900
     error = '',
     suppliedLeaseToken = '',
     retryable = true,
+    options = {},
   ) {
     if (!['pending', 'processing', 'completed', 'failed'].includes(status)) {
       throw new Error('invalid durable job status');
@@ -272,14 +273,30 @@ function createDurableJobQueue({run, get, all, now, transitionLeaseSeconds = 900
         );
       } else {
         leaseToken = randomUUID();
+        const expectedJobId = Number(options.expectedJobId || 0);
+        const expectedPayloadJson = typeof options.expectedPayloadJson === 'string'
+          ? options.expectedPayloadJson
+          : '';
+        const exactClaim = Number.isSafeInteger(expectedJobId) && expectedJobId > 0
+          && Boolean(expectedPayloadJson);
         result = await run(
           `UPDATE durable_jobs SET status = 'processing', attempt_count = attempt_count + 1,
              lease_expires_at = ?, lease_token = ?, processing_started_at = ?, rerun_requested = 0,
              last_error = NULL, updated_at = ?
            WHERE job_type = ? AND dedupe_key = ? AND status = 'pending'
              AND datetime(replace(next_attempt_at, '  ', 'T')) <= datetime(replace(?, '  ', 'T'))
-             AND attempt_count < max_attempts`,
-          [leaseExpiry, leaseToken, timestamp, timestamp, jobType, dedupeKey, timestamp],
+             AND attempt_count < max_attempts
+             ${exactClaim ? 'AND id = ? AND payload_json = ?' : ''}`,
+          [
+            leaseExpiry,
+            leaseToken,
+            timestamp,
+            timestamp,
+            jobType,
+            dedupeKey,
+            timestamp,
+            ...(exactClaim ? [expectedJobId, expectedPayloadJson] : []),
+          ],
         );
       }
     } else if (status === 'failed') {

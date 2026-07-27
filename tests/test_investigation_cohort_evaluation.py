@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import stat
@@ -30,7 +32,11 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         )
         self.root = Path(self.temporary.name)
         os.chmod(self.root, 0o700)
-        self.stable_ids = ("1" * 20, "2" * 20)
+        self.stable_ids = tuple(
+            f"{rank:020x}"
+            for rank in range(1, evaluator.EXPECTED_ROLE_COUNT + 1)
+        )
+        self.release_id = "a" * 40
         self.ir_path = self.root / "ir-export.json"
         self.soc_path = self.root / "soc-export.json"
         self.adjudication_path = self.root / "adjudication.json"
@@ -78,6 +84,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         second_outcome: str = "true_positive_suspicious",
         second_read_only: bool = True,
         source_rows_sha256: str = "e" * 64,
+        first_detection_rule: str | None = None,
     ) -> dict:
         members = []
         expected_route = "codex-cli:gpt-test:high"
@@ -86,10 +93,12 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             "harness_required": True,
             "harness_mode": "shadow",
             "memory_frozen": True,
+            "expected_release_id": self.release_id,
             "expected_assigned_route": expected_route,
             "expected_reviewer_route": reviewer_route,
         }
         for rank, stable_id in enumerate(self.stable_ids, start=1):
+            stable_group_key = f"v2|fixture|{rank}"
             labels = self._labels(
                 outcome=(
                     second_outcome
@@ -101,7 +110,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             dispatch_kind = (
                 "analyze" if role == "soc-analyst" else "escalate"
             )
-            response_canonical_sha256 = f"{rank + 2:x}" * 64
+            response_canonical_sha256 = f"{rank + 2:064x}"
             tool_call_bindings = [
                 {
                     "call_id": f"round-1-pivot-{rank}",
@@ -109,7 +118,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "query_id": f"pivot-{rank}",
                     "backend": "elastic",
                     "status": "ok",
-                    "request_digest": f"{rank + 8:x}" * 64,
+                    "request_digest": f"{rank + 8:064x}",
                     "result_digest": "c" * 64,
                     "read_only": True,
                 }
@@ -189,6 +198,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 "dispatch_accepted_once": True,
                 "analysis_id": analysis_id,
                 "analysis_generated_at": "2026-07-25T00:02:00Z",
+                "release_id": self.release_id,
                 "harness": {
                     "run_id": analysis_id,
                     "trace_id": f"trace-{role}-{rank}",
@@ -208,7 +218,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "started_at": "2026-07-25T00:01:30Z",
                     "completed_at": "2026-07-25T00:03:00Z",
                     "chain_valid": True,
-                    "chain_head_sha256": f"{rank + 4:x}" * 64,
+                    "chain_head_sha256": f"{rank + 4:064x}",
                     "ledger_manifest_bound": True,
                     "ledger_manifest_schema": (
                         "onion-sentinel-harness-ledger-manifest-v2"
@@ -274,7 +284,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                         )
                     ),
                     "memory_frozen": True,
-                    "submitted_response_sha256": f"{rank + 6:x}" * 64,
+                    "submitted_response_sha256": f"{rank + 6:064x}",
                     "response_canonical_sha256": (
                         response_canonical_sha256
                     ),
@@ -286,11 +296,17 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             members.append(
                 {
                     "rank": rank,
-                    "dashboard_group_id": f"{rank:x}" * 12,
+                    "dashboard_group_id": f"{rank:012x}",
                     "stable_group_id": stable_id,
+                    "stable_group_key": stable_group_key,
                     "representative_alert_id": f"alert-{rank}",
                     "detection": {
-                        "rule_name": f"PRIVATE RULE {rank}",
+                        "stable_group_key": stable_group_key,
+                        "rule_name": (
+                            first_detection_rule
+                            if rank == 1 and first_detection_rule
+                            else f"PRIVATE RULE {rank}"
+                        ),
                         "source_ip": f"10.0.0.{rank}",
                     },
                     "pre_state": {},
@@ -310,7 +326,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                             "model": "gpt-test",
                             "confidence": "medium",
                             "detection_outcome": labels["detection_outcome"],
-                            "response_sha256": str(rank) * 64,
+                            "response_sha256": f"{rank:064x}",
                             "response_canonical_sha256": (
                                 response_canonical_sha256
                             ),
@@ -344,6 +360,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 "rank": member["rank"],
                 "dashboard_group_id": member["dashboard_group_id"],
                 "stable_group_id": member["stable_group_id"],
+                "stable_group_key": member["stable_group_key"],
                 "representative_alert_id": member[
                     "representative_alert_id"
                 ],
@@ -353,7 +370,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         selection = {
             "mode": "imported_rows",
             "source_sha256": source_rows_sha256,
-            "source_count": 2,
+            "source_count": evaluator.EXPECTED_ROLE_COUNT,
             "order_preserved": True,
             "ordered_identity_sha256": evaluator.sha256_value(
                 ordered_identities
@@ -363,7 +380,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             "schema": evaluator.MANIFEST_SCHEMA,
             "cohort_id": cohort_id,
             "agent_role": role,
-            "count": 2,
+            "count": evaluator.EXPECTED_ROLE_COUNT,
             "created_at": "2026-07-25T00:00:00Z",
             "selection": selection,
             "execution_contract": contract,
@@ -371,27 +388,79 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 {
                     **identity,
                     "pre_state_sha256": evaluator.sha256_value({}),
+                    "detection_sha256": evaluator.sha256_value(
+                        members[index]["detection"]
+                    ),
                     "dispatch_kind": members[index]["dispatch"]["kind"],
                 }
                 for index, identity in enumerate(ordered_identities)
             ],
         }
+        frozen_plan_sha256 = evaluator.sha256_value(frozen_plan)
+        for member in members:
+            dispatch = member["dispatch"]
+            dispatch_id = evaluator._expected_dispatch_id(
+                cohort_id=cohort_id,
+                frozen_plan_sha256=frozen_plan_sha256,
+                member=member,
+                dispatch_kind=dispatch["kind"],
+            )
+            job_id = int(member["rank"])
+            payload_sha256 = f"{job_id + 100:064x}"
+            shared = {
+                "stable_group_id": member["stable_group_id"],
+                "stable_group_key": member["stable_group_key"],
+                "representative_alert_id": member[
+                    "representative_alert_id"
+                ],
+                "cohort_id": cohort_id,
+                "dispatch_id": dispatch_id,
+                "release_id": self.release_id,
+            }
+            dispatch.update(
+                {
+                    "dispatch_id": dispatch_id,
+                    "accepted": dict(shared),
+                    "readback": {
+                        **shared,
+                        "job_id": job_id,
+                        "job_payload_sha256": payload_sha256,
+                    },
+                }
+            )
+            member["result"]["job"] = {
+                **shared,
+                "id": job_id,
+                "job_type": (
+                    "ai_analysis"
+                    if dispatch["kind"] == "analyze"
+                    else "incident_response_analysis"
+                ),
+                "dedupe_key": member["stable_group_id"],
+                "status": "completed",
+                "attempt_count": 1,
+                "requested_at": "2026-07-25T00:01:10Z",
+                "completed_at": "2026-07-25T00:02:30Z",
+                "last_completed_at": "2026-07-25T00:02:30Z",
+                "updated_at": "2026-07-25T00:02:31Z",
+                "payload_sha256": payload_sha256,
+            }
         document = {
             "schema": evaluator.RESULT_SCHEMA,
             "agent_role": role,
             "cohort_id": cohort_id,
             "reason": "Unit-test cohort",
-            "count": 2,
+            "count": evaluator.EXPECTED_ROLE_COUNT,
             "frozen_at": "2026-07-25T00:00:00Z",
             "exported_at": "2026-07-25T01:00:00Z",
             "source_manifest_sha256": "f" * 64,
-            "frozen_plan_sha256": evaluator.sha256_value(frozen_plan),
+            "frozen_plan_sha256": frozen_plan_sha256,
             "selection": selection,
             "execution_contract": contract,
             "execution_gate": {
                 "status": "passed",
-                "expected_count": 2,
-                "passed_count": 2,
+                "expected_count": evaluator.EXPECTED_ROLE_COUNT,
+                "passed_count": evaluator.EXPECTED_ROLE_COUNT,
                 "ordered_identity_sha256": selection[
                     "ordered_identity_sha256"
                 ],
@@ -439,6 +508,13 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "ground_truth": {
                         "labels": self._labels(),
                         "confidence": "high",
+                        "detection_sha256": evaluator.sha256_value(
+                            {
+                                "stable_group_key": f"v2|fixture|{rank}",
+                                "rule_name": f"PRIVATE RULE {rank}",
+                                "source_ip": f"10.0.0.{rank}",
+                            }
+                        ),
                         "evidence_basis_sha256": "a" * 64,
                         "scope_timeline_sha256": "b" * 64,
                         "attribution_sha256": "c" * 64,
@@ -477,7 +553,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         return {
             "schema": evaluator.ADJUDICATION_SCHEMA,
             "experiment_id": "newest-20-unit",
-            "expected_count": 2,
+            "expected_count": evaluator.EXPECTED_ROLE_COUNT,
             "independent_review": True,
             "reviewer_count": 1,
             "adjudicated_at": "2026-07-25T02:00:00Z",
@@ -525,7 +601,6 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 "soc-analyst": self.soc_path,
             },
             adjudication_path=self.adjudication_path,
-            expected_count=2,
         )
 
         self.assertEqual(report["schema"], evaluator.REPORT_SCHEMA)
@@ -533,7 +608,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         soc = report["roles"]["soc-analyst"]
         self.assertEqual(
             incident["aggregate"]["classification_counts"],
-            {"pass": 1, "needs_review": 0, "fail": 1},
+            {"pass": 19, "needs_review": 0, "fail": 1},
         )
         self.assertEqual(incident["cases"][1]["raw_score"], 95.0)
         self.assertEqual(incident["cases"][1]["effective_score"], 0.0)
@@ -543,7 +618,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(
             soc["aggregate"]["classification_counts"],
-            {"pass": 0, "needs_review": 2, "fail": 0},
+            {"pass": 18, "needs_review": 2, "fail": 0},
         )
         self.assertFalse(soc["cases"][1]["exact_verdict_match"])
         self.assertEqual(
@@ -570,7 +645,6 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
-                expected_count=2,
             )
 
     def test_zero_tool_call_ledger_blocks_grading(self) -> None:
@@ -597,7 +671,6 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
-                expected_count=2,
             )
 
     def test_exact_reviewer_repair_is_gradeable_but_tampering_is_not(
@@ -651,7 +724,6 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 "soc-analyst": self.soc_path,
             },
             adjudication_path=self.adjudication_path,
-            expected_count=2,
         )
         self.assertEqual(report["schema"], evaluator.REPORT_SCHEMA)
 
@@ -671,7 +743,6 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
-                expected_count=2,
             )
 
     def test_offline_gate_recomputes_call_grammar_and_reviewer_facts(
@@ -711,7 +782,6 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                             "soc-analyst": self.soc_path,
                         },
                         adjudication_path=self.adjudication_path,
-                        expected_count=2,
                     )
 
     def test_query_audit_digest_mismatch_blocks_grading(self) -> None:
@@ -735,7 +805,6 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
-                expected_count=2,
             )
 
     def _single_role_adjudication(self, role: str) -> Path:
@@ -763,7 +832,6 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 "soc-analyst": self.soc_path,
             },
             adjudication_path=self.adjudication_path,
-            expected_count=2,
         )
         json_out = self.root / "reports" / "evaluation.json"
         markdown_out = self.root / "reports" / "evaluation.md"
@@ -808,7 +876,6 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
-                expected_count=2,
             )
 
         self._write_private(self.adjudication_path, self._adjudication())
@@ -828,7 +895,6 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
-                expected_count=2,
             )
 
         self._write_private(self.adjudication_path, self._adjudication())
@@ -848,7 +914,26 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
-                expected_count=2,
+            )
+
+    def test_rejects_stable_group_key_binding_drift(self) -> None:
+        self._write_fixture_documents()
+        document = json.loads(self.soc_path.read_text(encoding="utf-8"))
+        document["members"][0]["stable_group_key"] = "v2|changed"
+        document.pop("export_sha256")
+        document["export_sha256"] = evaluator.sha256_value(document)
+        self._write_private(self.soc_path, document)
+
+        with self.assertRaisesRegex(
+            evaluator.CohortEvaluationError,
+            "stable_group_key binding changed",
+        ):
+            evaluator.evaluate_cohorts(
+                result_paths={
+                    "incident-responder": self.ir_path,
+                    "soc-analyst": self.soc_path,
+                },
+                adjudication_path=self.adjudication_path,
             )
 
     def test_rejects_permissive_or_raw_result_exports(self) -> None:
@@ -863,7 +948,6 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
-                expected_count=2,
             )
 
         document = self._result_export(
@@ -882,7 +966,6 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
-                expected_count=2,
             )
 
     def test_cli_emits_safe_summary_and_optional_gate_failure(self) -> None:
@@ -898,8 +981,6 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 f"soc-analyst={self.soc_path}",
                 "--adjudication",
                 str(self.adjudication_path),
-                "--expected-count",
-                "2",
                 "--json-out",
                 str(json_out),
                 "--markdown-out",
@@ -921,7 +1002,6 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             evaluator.evaluate_cohorts(
                 result_paths={"soc-analyst": self.soc_path},
                 adjudication_path=self.adjudication_path,
-                expected_count=2,
             )
 
         self._write_private(
@@ -942,7 +1022,31 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "soc-analyst": self.soc_path,
                 },
                 adjudication_path=self.adjudication_path,
-                expected_count=2,
+            )
+
+    def test_refuses_same_source_identity_with_different_detection_snapshot(
+        self,
+    ) -> None:
+        self._write_fixture_documents()
+        self._write_private(
+            self.soc_path,
+            self._result_export(
+                "soc-analyst",
+                "soc-newest-unit",
+                first_detection_rule="DIFFERENT HYDRATED DETECTION",
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            evaluator.CohortEvaluationError,
+            "same frozen source cohort",
+        ):
+            evaluator.evaluate_cohorts(
+                result_paths={
+                    "incident-responder": self.ir_path,
+                    "soc-analyst": self.soc_path,
+                },
+                adjudication_path=self.adjudication_path,
             )
 
     def test_project_timestamp_double_space_remains_gradeable(self) -> None:
@@ -956,6 +1060,19 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 analysis = member["result"]["analysis"]
                 analysis["generated_at"] = (
                     "2026-07-25  18:02:00.000-06:00"
+                )
+                job = member["result"]["job"]
+                job["requested_at"] = (
+                    "2026-07-25  18:01:10.000-06:00"
+                )
+                job["completed_at"] = (
+                    "2026-07-25  18:02:30.000-06:00"
+                )
+                job["last_completed_at"] = (
+                    "2026-07-25  18:02:30.000-06:00"
+                )
+                job["updated_at"] = (
+                    "2026-07-25  18:02:31.000-06:00"
                 )
                 proof = member["execution_proof"]
                 proof["analysis_generated_at"] = (
@@ -979,9 +1096,97 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 "soc-analyst": self.soc_path,
             },
             adjudication_path=self.adjudication_path,
-            expected_count=2,
         )
         self.assertTrue(report["dual_role_execution_gate"]["passed"])
+
+    def test_rejects_legacy_or_missing_exact_durable_job_proof(self) -> None:
+        legacy = self._result_export(
+            "soc-analyst",
+            "soc-newest-unit",
+        )
+        legacy["schema"] = (
+            "onion-sentinel-incident-harness-cohort-export-v2"
+        )
+        legacy.pop("export_sha256")
+        legacy["export_sha256"] = evaluator.sha256_value(legacy)
+        self._write_private(self.soc_path, legacy)
+        with self.assertRaisesRegex(
+            evaluator.CohortEvaluationError,
+            "unsupported schema",
+        ):
+            evaluator.load_result_export(
+                self.soc_path,
+                role="soc-analyst",
+                expected_count=evaluator.EXPECTED_ROLE_COUNT,
+            )
+
+        mutations = {
+            "missing-job": lambda member: member["result"].pop("job"),
+            "wrong-job-id": lambda member: member["result"]["job"].update(
+                {"id": 999}
+            ),
+            "wrong-payload": lambda member: member["result"]["job"].update(
+                {"payload_sha256": "f" * 64}
+            ),
+            "wrong-release": lambda member: member["result"]["job"].update(
+                {"release_id": "b" * 40}
+            ),
+            "predispatch-job": lambda member: member["result"]["job"].update(
+                {"requested_at": "2026-07-25T00:00:59Z"}
+            ),
+            "postcompletion-analysis": lambda member: member["result"][
+                "job"
+            ].update({"completed_at": "2026-07-25T00:01:59Z"}),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                document = self._result_export(
+                    "soc-analyst",
+                    "soc-newest-unit",
+                )
+                mutate(document["members"][0])
+                document.pop("export_sha256")
+                document["export_sha256"] = evaluator.sha256_value(document)
+                self._write_private(self.soc_path, document)
+                with self.assertRaises(evaluator.CohortEvaluationError):
+                    evaluator.load_result_export(
+                        self.soc_path,
+                        role="soc-analyst",
+                        expected_count=evaluator.EXPECTED_ROLE_COUNT,
+                    )
+
+    def test_paired_newest_20_count_cannot_be_reduced(self) -> None:
+        self._write_fixture_documents()
+        with self.assertRaisesRegex(
+            evaluator.CohortEvaluationError,
+            "exactly 20 results per role",
+        ):
+            evaluator.evaluate_cohorts(
+                result_paths={
+                    "incident-responder": self.ir_path,
+                    "soc-analyst": self.soc_path,
+                },
+                adjudication_path=self.adjudication_path,
+                expected_count=1,
+            )
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                evaluator.build_parser().parse_args(
+                    [
+                        "--result",
+                        f"incident-responder={self.ir_path}",
+                        "--result",
+                        f"soc-analyst={self.soc_path}",
+                        "--adjudication",
+                        str(self.adjudication_path),
+                        "--expected-count",
+                        "1",
+                        "--json-out",
+                        str(self.root / "result.json"),
+                        "--markdown-out",
+                        str(self.root / "result.md"),
+                    ]
+                )
 
 
 if __name__ == "__main__":

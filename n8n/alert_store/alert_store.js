@@ -18,7 +18,11 @@ const {createProviderScheduler} = require('./lib/provider_scheduler');
 const {createDurableJobQueue} = require('./lib/durable_job_queue');
 const {createPipelineMetrics} = require('./lib/pipeline_metrics');
 const {createSocAnalysisPolicy} = require('./lib/soc_analysis_policy');
-const {stableGroupKey, stableGroupId} = require('./lib/group_identity');
+const {
+  stableGroupKey,
+  stableGroupId,
+  validPinnedStableGroupKey,
+} = require('./lib/group_identity');
 const {buildAlertObservables, compactCorrelationCandidates} = require('./lib/correlation_context');
 const {configureHttpServer, createRequestAdmission, readJsonObject} = require('./lib/http_runtime');
 const {requestJson: boundedRequestJson} = require('./lib/http_json_client');
@@ -3809,6 +3813,53 @@ async function storeAlert(rawAlert) {
   return result;
 }
 
+function controlledJobClaimIdentity(value) {
+  if (!value || typeof value !== 'object') return null;
+  const supplied = [
+    'expected_job_id',
+    'expected_representative_alert_id',
+    'expected_dispatch_id',
+    'expected_stable_group_key',
+  ].filter((field) => requestHasOwnField(value, field));
+  if (!supplied.length) return null;
+  if (supplied.length !== 4) {
+    throw incidentIdentityConflict(
+      'controlled durable job claim identity is incomplete',
+    );
+  }
+  const jobId = Number(value.expected_job_id);
+  const representativeAlertId = value.expected_representative_alert_id;
+  const dispatchId = value.expected_dispatch_id;
+  const stableGroupKey = value.expected_stable_group_key;
+  if (!Number.isSafeInteger(jobId) || jobId < 1) {
+    throw incidentIdentityConflict(
+      'controlled durable job claim ID is invalid',
+    );
+  }
+  if (
+    typeof representativeAlertId !== 'string'
+    || !representativeAlertIdPattern.test(representativeAlertId)
+  ) {
+    throw incidentIdentityConflict(
+      'controlled durable job representative identity is invalid',
+    );
+  }
+  if (
+    typeof dispatchId !== 'string'
+    || !dispatchIdPattern.test(dispatchId)
+  ) {
+    throw incidentIdentityConflict(
+      'controlled durable job dispatch identity is invalid',
+    );
+  }
+  if (!validPinnedStableGroupKey(stableGroupKey)) {
+    throw incidentIdentityConflict(
+      'controlled durable job stable group key is invalid',
+    );
+  }
+  return {jobId, representativeAlertId, dispatchId, stableGroupKey};
+}
+
 async function transitionDurableJobStatus(
   jobType,
   dedupeKey,
@@ -3816,9 +3867,70 @@ async function transitionDurableJobStatus(
   error = '',
   leaseToken = '',
   retryable = true,
+  requestedClaimIdentity = null,
 ) {
   let resolvedKey = dedupeKey;
+  const exactClaim = controlledJobClaimIdentity(requestedClaimIdentity);
+  let exactCandidate = null;
+  if (exactClaim) {
+    if (
+      status !== 'processing'
+      || leaseToken
+      || !['ai_analysis', 'incident_response_analysis'].includes(jobType)
+      || !stableGroupIdPattern.test(resolvedKey)
+    ) {
+      throw incidentIdentityConflict(
+        'controlled durable job claim is not valid for this transition',
+      );
+    }
+    exactCandidate = await get(
+      `SELECT id, job_type, dedupe_key, payload_json, status
+       FROM durable_jobs WHERE job_type = ? AND dedupe_key = ?`,
+      [jobType, resolvedKey],
+    );
+    if (
+      !exactCandidate
+      || Number(exactCandidate.id || 0) !== exactClaim.jobId
+      || exactCandidate.status !== 'pending'
+    ) {
+      throw incidentIdentityConflict(
+        'controlled durable job changed before it could be claimed',
+      );
+    }
+    const candidatePayload = incidentReanalysisJobPayload(exactCandidate);
+    const runtimeReleaseId = controlledRuntimeReleaseId();
+    if (
+      candidatePayload.alert_id !== exactClaim.representativeAlertId
+      || candidatePayload.representative_alert_id
+        !== exactClaim.representativeAlertId
+      || candidatePayload.group_id !== resolvedKey
+      || candidatePayload.stable_group_id !== resolvedKey
+      || candidatePayload.stable_group_key !== exactClaim.stableGroupKey
+      || candidatePayload.dispatch_id !== exactClaim.dispatchId
+      || !runtimeReleaseId
+      || candidatePayload.release_id !== runtimeReleaseId
+    ) {
+      throw incidentIdentityConflict(
+        'controlled durable job payload changed before it could be claimed',
+      );
+    }
+    const currentRepresentative = await get(
+      `SELECT stable_group_id, stable_group_key
+       FROM alerts WHERE alert_id = ? LIMIT 1`,
+      [exactClaim.representativeAlertId],
+    );
+    if (
+      currentRepresentative?.stable_group_id !== resolvedKey
+      || currentRepresentative?.stable_group_key !== exactClaim.stableGroupKey
+    ) {
+      throw incidentIdentityConflict(
+        'controlled durable job representative changed before it could be claimed',
+      );
+    }
+  }
   if (
+    !exactClaim
+    &&
     jobType === 'incident_response_analysis'
     && status === 'processing'
     && !leaseToken
@@ -3846,11 +3958,29 @@ async function transitionDurableJobStatus(
     }
   }
   let transition = await durableJobs.transition(
-    jobType, resolvedKey, status, error, leaseToken, retryable,
+    jobType,
+    resolvedKey,
+    status,
+    error,
+    leaseToken,
+    retryable,
+    exactClaim ? {
+      expectedJobId: exactClaim.jobId,
+      expectedPayloadJson: exactCandidate.payload_json,
+    } : {},
   );
   let updated = Boolean(transition?.updated);
+  if (exactClaim && !updated) {
+    throw incidentIdentityConflict(
+      'controlled durable job changed before it could be claimed',
+    );
+  }
   let claim = null;
-  if (!updated && ['ai_analysis', 'incident_response_analysis'].includes(jobType)) {
+  if (
+    !exactClaim
+    && !updated
+    && ['ai_analysis', 'incident_response_analysis'].includes(jobType)
+  ) {
     // Workers deployed before stable V2 group identities report the legacy
     // dashboard key. Resolve that key at the write boundary so rolling
     // upgrades cannot leave healthy analysis work permanently pending.
@@ -3893,6 +4023,7 @@ async function transitionDurableJobStatus(
       // read-only selection but before this lease is acquired. Bind every AI
       // worker to the exact durable-job snapshot that the lease claimed.
       claim = {
+        ...(exactClaim ? {job_id: Number(job.id || 0)} : {}),
         job_type: jobType,
         dedupe_key: resolvedKey,
         payload: incidentReanalysisJobPayload(job),
@@ -3976,7 +4107,256 @@ async function recoverExpiredDurableJobs() {
   }
 }
 
-async function resolveDashboardAlertGroup(dashboardGroupId) {
+const cohortIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/;
+const stableGroupIdPattern = /^[a-f0-9]{20}$/;
+const dispatchIdPattern = /^[a-f0-9]{64}$/;
+const releaseIdPattern = /^[a-f0-9]{40}$/;
+const representativeAlertIdPattern = /^[A-Za-z0-9._:@=-]{1,256}$/;
+
+function requestHasOwnField(payload, field) {
+  return Boolean(
+    payload
+    && typeof payload === 'object'
+    && Object.prototype.hasOwnProperty.call(payload, field)
+  );
+}
+
+function incidentIdentityConflict(message) {
+  const error = new Error(message);
+  error.statusCode = 409;
+  return error;
+}
+
+function controlledRuntimeReleaseId() {
+  const releaseId = process.env.ONION_SENTINEL_RELEASE_ID;
+  return (
+    typeof releaseId === 'string'
+    && releaseIdPattern.test(releaseId)
+  ) ? releaseId : '';
+}
+
+async function rejectProcessingControlledJob(jobType, groupIds) {
+  const keys = [...new Set(
+    (groupIds || [])
+      .map((value) => (typeof value === 'string' ? value.trim().toLowerCase() : ''))
+      .filter(Boolean),
+  )];
+  if (!keys.length) return;
+  const placeholders = keys.map(() => '?').join(', ');
+  const processing = await get(
+    `SELECT id, dedupe_key FROM durable_jobs
+     WHERE job_type = ? AND status = 'processing'
+       AND dedupe_key IN (${placeholders})
+     ORDER BY id ASC LIMIT 1`,
+    [jobType, ...keys],
+  );
+  if (processing) {
+    throw incidentIdentityConflict(
+      `controlled dispatch conflicts with processing ${jobType} job for ${processing.dedupe_key}`,
+    );
+  }
+}
+
+async function retirePendingIncidentJobs(groupIds, retiredAt) {
+  const keys = [...new Set(
+    (groupIds || [])
+      .map((value) => (typeof value === 'string' ? value.trim().toLowerCase() : ''))
+      .filter(Boolean),
+  )];
+  if (!keys.length) return 0;
+  const placeholders = keys.map(() => '?').join(', ');
+  const result = await run(
+    `UPDATE durable_jobs
+     SET status = 'completed', lease_expires_at = NULL, lease_token = NULL,
+         last_error = NULL, completed_at = COALESCE(completed_at, ?),
+         last_completed_at = COALESCE(last_completed_at, ?),
+         processing_started_at = NULL, rerun_requested = 0, updated_at = ?
+     WHERE job_type = 'incident_response_analysis'
+       AND status = 'pending' AND dedupe_key IN (${placeholders})`,
+    [retiredAt, retiredAt, retiredAt, ...keys],
+  );
+  return Number(result.changes || 0);
+}
+
+function resolveCanonicalAlertGroupIdentity(groupId, aliases) {
+  let current = typeof groupId === 'string' ? groupId.trim().toLowerCase() : '';
+  if (!current || !/^[a-f0-9]{12,64}$/.test(current)) {
+    throw incidentIdentityConflict('incident case contains an invalid stable group identity');
+  }
+  const visited = new Set();
+  let canonicalGroupKey = '';
+  for (let depth = 0; depth < 64; depth += 1) {
+    if (visited.has(current)) {
+      throw incidentIdentityConflict('incident case stable group alias cycle detected');
+    }
+    visited.add(current);
+    const alias = aliases.get(current);
+    if (!alias) return {stableGroupId: current, stableGroupKey: canonicalGroupKey};
+    const next = typeof alias.stable_group_id === 'string'
+      ? alias.stable_group_id.trim().toLowerCase()
+      : '';
+    if (!next || !/^[a-f0-9]{12,64}$/.test(next)) {
+      throw incidentIdentityConflict('incident case contains an invalid stable group alias');
+    }
+    const aliasGroupKey = typeof alias.stable_group_key === 'string'
+      ? alias.stable_group_key
+      : '';
+    if (
+      canonicalGroupKey
+      && aliasGroupKey
+      && canonicalGroupKey !== aliasGroupKey
+    ) {
+      throw incidentIdentityConflict('incident case stable group alias key is ambiguous');
+    }
+    if (aliasGroupKey) canonicalGroupKey = aliasGroupKey;
+    current = next;
+  }
+  throw incidentIdentityConflict('incident case stable group alias chain is too deep');
+}
+
+async function loadAlertGroupAliasSnapshot() {
+  const aliases = new Map();
+  const rows = await all(
+    `SELECT legacy_group_id, stable_group_id, stable_group_key
+     FROM alert_group_alias`,
+  );
+  for (const row of rows) {
+    const legacyGroupId = typeof row.legacy_group_id === 'string'
+      ? row.legacy_group_id.trim().toLowerCase()
+      : '';
+    if (!legacyGroupId || aliases.has(legacyGroupId)) {
+      throw incidentIdentityConflict('incident case stable group alias map is ambiguous');
+    }
+    aliases.set(legacyGroupId, row);
+  }
+  return aliases;
+}
+
+function manualDispatchIdentity(payload) {
+  const representativeAlertIdSupplied = requestHasOwnField(
+    payload,
+    'representative_alert_id',
+  );
+  const stableGroupIdSupplied = requestHasOwnField(payload, 'stable_group_id');
+  const stableGroupKeySupplied = requestHasOwnField(payload, 'stable_group_key');
+  const cohortIdSupplied = requestHasOwnField(payload, 'cohort_id');
+  const dispatchIdSupplied = requestHasOwnField(payload, 'dispatch_id');
+  const releaseIdSupplied = requestHasOwnField(payload, 'release_id');
+  const representativeAlertId = representativeAlertIdSupplied
+    && typeof payload.representative_alert_id === 'string'
+    ? payload.representative_alert_id
+    : '';
+  const stableGroupId = stableGroupIdSupplied
+    && typeof payload.stable_group_id === 'string'
+    ? payload.stable_group_id
+    : '';
+  const stableGroupKey = stableGroupKeySupplied
+    && typeof payload.stable_group_key === 'string'
+    ? payload.stable_group_key
+    : '';
+  const cohortId = cohortIdSupplied && typeof payload.cohort_id === 'string'
+    ? payload.cohort_id
+    : '';
+  const dispatchId = dispatchIdSupplied && typeof payload.dispatch_id === 'string'
+    ? payload.dispatch_id
+    : '';
+  const releaseId = releaseIdSupplied && typeof payload.release_id === 'string'
+    ? payload.release_id
+    : '';
+
+  if (
+    stableGroupIdSupplied
+    && (
+      typeof payload.stable_group_id !== 'string'
+      || !stableGroupIdPattern.test(stableGroupId)
+    )
+  ) {
+    const error = new Error('requested stable_group_id is invalid');
+    error.statusCode = 409;
+    throw error;
+  }
+  if (stableGroupKeySupplied && !validPinnedStableGroupKey(payload.stable_group_key)) {
+    const error = new Error('requested stable_group_key is invalid');
+    error.statusCode = 409;
+    throw error;
+  }
+  if (
+    cohortIdSupplied !== dispatchIdSupplied
+    || (cohortIdSupplied && !releaseIdSupplied)
+  ) {
+    const error = new Error(
+      'cohort_id, dispatch_id, and release_id must be supplied together',
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+  if (
+    cohortIdSupplied
+    && (
+      typeof payload.cohort_id !== 'string'
+      || typeof payload.dispatch_id !== 'string'
+      || typeof payload.release_id !== 'string'
+      || !cohortIdPattern.test(cohortId)
+      || !dispatchIdPattern.test(dispatchId)
+      || !releaseIdPattern.test(releaseId)
+    )
+  ) {
+    const error = new Error('cohort dispatch identity is invalid');
+    error.statusCode = 409;
+    throw error;
+  }
+  if (cohortIdSupplied) {
+    const runtimeReleaseId = controlledRuntimeReleaseId();
+    if (!runtimeReleaseId) {
+      throw incidentIdentityConflict(
+        'controlled cohort dispatch requires an exact deployed runtime release',
+      );
+    }
+    if (releaseId !== runtimeReleaseId) {
+      throw incidentIdentityConflict(
+        'controlled cohort dispatch release_id does not match the deployed runtime',
+      );
+    }
+  }
+  if (
+    cohortIdSupplied
+    && (
+      !representativeAlertIdSupplied
+      || !stableGroupIdSupplied
+      || !stableGroupKeySupplied
+    )
+  ) {
+    const error = new Error(
+      'cohort dispatch requires representative_alert_id, stable_group_id, and stable_group_key pins',
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+  if (
+    representativeAlertIdSupplied
+    && (
+      typeof payload.representative_alert_id !== 'string'
+      || !representativeAlertIdPattern.test(representativeAlertId)
+    )
+  ) {
+    const error = new Error('requested representative_alert_id is invalid');
+    error.statusCode = 409;
+    throw error;
+  }
+  return {
+    representativeAlertIdSupplied,
+    stableGroupIdSupplied,
+    stableGroupKeySupplied,
+    representativeAlertId,
+    stableGroupId,
+    stableGroupKey,
+    cohortId,
+    dispatchId,
+    releaseId,
+  };
+}
+
+async function resolveDashboardAlertGroup(dashboardGroupId, identity = {}) {
   let representative = await get(
     `SELECT a.alert_id, a.stable_group_id, a.stable_group_key
      FROM alert_group_summary AS g
@@ -3995,6 +4375,69 @@ async function resolveDashboardAlertGroup(dashboardGroupId) {
       [dashboardGroupId],
     );
   }
+  if (!representative) return null;
+
+  const resolvedStableGroupId = typeof representative.stable_group_id === 'string'
+    ? representative.stable_group_id
+    : '';
+  const resolvedStableGroupKey = typeof representative.stable_group_key === 'string'
+    ? representative.stable_group_key
+    : '';
+  if (
+    identity.stableGroupIdSupplied
+    && identity.stableGroupId !== resolvedStableGroupId
+  ) {
+    const error = new Error(
+      'requested stable_group_id no longer matches the dashboard group',
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+  if (
+    identity.stableGroupKeySupplied
+    && identity.stableGroupKey !== resolvedStableGroupKey
+  ) {
+    throw incidentIdentityConflict(
+      'requested stable_group_key no longer matches the dashboard group',
+    );
+  }
+  if (!identity.representativeAlertIdSupplied) return representative;
+
+  const pinned = await get(
+    `SELECT alert_id, stable_group_id, stable_group_key
+     FROM alerts WHERE alert_id = ? LIMIT 1`,
+    [identity.representativeAlertId],
+  );
+  const pinnedStableGroupId = typeof pinned?.stable_group_id === 'string'
+    ? pinned.stable_group_id
+    : '';
+  const pinnedStableGroupKey = typeof pinned?.stable_group_key === 'string'
+    ? pinned.stable_group_key
+    : '';
+  if (
+    !pinned?.alert_id
+    || !resolvedStableGroupId
+    || pinnedStableGroupId !== resolvedStableGroupId
+    || (
+      identity.stableGroupIdSupplied
+      && pinnedStableGroupId !== identity.stableGroupId
+    )
+    || (
+      resolvedStableGroupKey
+      && pinnedStableGroupKey !== resolvedStableGroupKey
+    )
+    || (
+      identity.stableGroupKeySupplied
+      && pinnedStableGroupKey !== identity.stableGroupKey
+    )
+  ) {
+    const error = new Error(
+      'requested representative_alert_id no longer belongs to the dashboard group',
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+  representative = pinned;
   return representative;
 }
 
@@ -4005,7 +4448,11 @@ async function requestAiReanalysis(payload) {
     error.statusCode = 400;
     throw error;
   }
-  const representative = await resolveDashboardAlertGroup(dashboardGroupId);
+  const identity = manualDispatchIdentity(payload);
+  const representative = await resolveDashboardAlertGroup(
+    dashboardGroupId,
+    identity,
+  );
   const stableGroupId = safeString(representative?.stable_group_id, 64).toLowerCase();
   if (!representative?.alert_id || !stableGroupId) {
     const error = new Error('SOC alert group was not found');
@@ -4023,10 +4470,27 @@ async function requestAiReanalysis(payload) {
   const pcapAnalysisLimit = Math.max(1, Math.min(25, Math.trunc(requestedPcapLimit)));
   const requestedBy = safeString(payload?.requested_by || 'dashboard', 100);
   const requestedAt = nowUtc();
+  if (identity.cohortId) {
+    await rejectProcessingControlledJob('ai_analysis', [stableGroupId]);
+  }
   await durableJobs.enqueue('ai_analysis', stableGroupId, {
     alert_id: representative.alert_id,
     group_id: stableGroupId,
     dashboard_group_id: dashboardGroupId,
+    ...(identity.representativeAlertIdSupplied ? {
+      representative_alert_id: representative.alert_id,
+    } : {}),
+    ...(identity.stableGroupIdSupplied ? {
+      stable_group_id: stableGroupId,
+    } : {}),
+    ...(identity.stableGroupKeySupplied ? {
+      stable_group_key: identity.stableGroupKey,
+    } : {}),
+    ...(identity.cohortId ? {
+      cohort_id: identity.cohortId,
+      dispatch_id: identity.dispatchId,
+      release_id: identity.releaseId,
+    } : {}),
     manual_reanalysis: true,
     requested_by: requestedBy,
     requested_at: requestedAt,
@@ -4043,6 +4507,17 @@ async function requestAiReanalysis(payload) {
     group_id: dashboardGroupId,
     queue_group_id: stableGroupId,
     representative_alert_id: representative.alert_id,
+    ...(identity.stableGroupIdSupplied ? {
+      stable_group_id: stableGroupId,
+    } : {}),
+    ...(identity.stableGroupKeySupplied ? {
+      stable_group_key: identity.stableGroupKey,
+    } : {}),
+    ...(identity.cohortId ? {
+      cohort_id: identity.cohortId,
+      dispatch_id: identity.dispatchId,
+      release_id: identity.releaseId,
+    } : {}),
     requested_at: requestedAt,
   };
 }
@@ -4054,7 +4529,11 @@ async function requestIncidentEscalation(payload) {
     error.statusCode = 400;
     throw error;
   }
-  const representative = await resolveDashboardAlertGroup(dashboardGroupId);
+  const identity = manualDispatchIdentity(payload);
+  const representative = await resolveDashboardAlertGroup(
+    dashboardGroupId,
+    identity,
+  );
   const stableGroupId = safeString(representative?.stable_group_id, 64).toLowerCase();
   if (!representative?.alert_id || !stableGroupId) {
     const error = new Error('SOC alert group was not found');
@@ -4074,6 +4553,13 @@ async function requestIncidentEscalation(payload) {
     manualReanalysis: false,
     eventType: 'escalated',
     priority: 1100,
+    cohortId: identity.cohortId,
+    dispatchId: identity.dispatchId,
+    releaseId: identity.releaseId,
+    representativeAlertIdPinned: identity.representativeAlertIdSupplied,
+    stableGroupIdPinned: identity.stableGroupIdSupplied,
+    stableGroupKey: identity.stableGroupKey,
+    stableGroupKeyPinned: identity.stableGroupKeySupplied,
   });
 }
 
@@ -4087,6 +4573,13 @@ async function queueIncidentResponseForGroup({
   manualReanalysis = false,
   eventType = 'escalated',
   priority = 1100,
+  cohortId = '',
+  dispatchId = '',
+  releaseId = '',
+  representativeAlertIdPinned = false,
+  stableGroupIdPinned = false,
+  stableGroupKey = '',
+  stableGroupKeyPinned = false,
 }) {
   const stableGroupId = safeString(representative?.stable_group_id, 64).toLowerCase();
   if (!representative?.alert_id || !stableGroupId) {
@@ -4105,6 +4598,12 @@ async function queueIncidentResponseForGroup({
   const actor = safeString(requestedBy, 100);
   const normalizedReason = safeString(reason, 1000);
   const caseId = `ir-${crypto.createHash('sha256').update(stableGroupId).digest('hex').slice(0, 16)}`;
+  if (cohortId) {
+    await rejectProcessingControlledJob(
+      'incident_response_analysis',
+      [stableGroupId],
+    );
+  }
   await run(
     `INSERT INTO incident_response_cases (
        case_id, group_id, dashboard_group_id, representative_alert_id, status,
@@ -4141,7 +4640,20 @@ async function queueIncidentResponseForGroup({
       incident.case_id,
       safeString(eventType, 64),
       actor,
-      jsonText({dashboard_group_id: dashboardGroupId, reason: normalizedReason}),
+      jsonText({
+        dashboard_group_id: dashboardGroupId,
+        ...(representativeAlertIdPinned ? {
+          representative_alert_id: representative.alert_id,
+        } : {}),
+        ...(stableGroupIdPinned ? {stable_group_id: stableGroupId} : {}),
+        ...(stableGroupKeyPinned ? {stable_group_key: stableGroupKey} : {}),
+        ...(cohortId ? {
+          cohort_id: cohortId,
+          dispatch_id: dispatchId,
+          release_id: releaseId,
+        } : {}),
+        reason: normalizedReason,
+      }),
       requestedAt,
     ],
   );
@@ -4151,6 +4663,16 @@ async function queueIncidentResponseForGroup({
     alert_id: representative.alert_id,
     group_id: stableGroupId,
     dashboard_group_id: dashboardGroupId,
+    ...(representativeAlertIdPinned ? {
+      representative_alert_id: representative.alert_id,
+    } : {}),
+    ...(stableGroupIdPinned ? {stable_group_id: stableGroupId} : {}),
+    ...(stableGroupKeyPinned ? {stable_group_key: stableGroupKey} : {}),
+    ...(cohortId ? {
+      cohort_id: cohortId,
+      dispatch_id: dispatchId,
+      release_id: releaseId,
+    } : {}),
     manual_reanalysis: Boolean(manualReanalysis),
     requested_by: actor,
     requested_at: requestedAt,
@@ -4168,6 +4690,13 @@ async function queueIncidentResponseForGroup({
     group_id: dashboardGroupId,
     queue_group_id: stableGroupId,
     representative_alert_id: representative.alert_id,
+    ...(stableGroupIdPinned ? {stable_group_id: stableGroupId} : {}),
+    ...(stableGroupKeyPinned ? {stable_group_key: stableGroupKey} : {}),
+    ...(cohortId ? {
+      cohort_id: cohortId,
+      dispatch_id: dispatchId,
+      release_id: releaseId,
+    } : {}),
     escalated_at: incident.escalated_at,
     requested_at: requestedAt,
   };
@@ -4263,6 +4792,20 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
     error.statusCode = 400;
     throw error;
   }
+  const identity = manualDispatchIdentity(payload);
+  const controlledIdentitySupplied = Boolean(
+    identity.representativeAlertIdSupplied
+    || identity.stableGroupIdSupplied
+    || identity.stableGroupKeySupplied
+    || identity.cohortId,
+  );
+  if (!caseId && controlledIdentitySupplied) {
+    const error = new Error(
+      'frozen dispatch identity is supported only for single-case reanalysis',
+    );
+    error.statusCode = 409;
+    throw error;
+  }
   const requestedBy = safeString(payload?.requested_by || 'dashboard', 100);
   const reason = safeString(
     payload?.reason || (
@@ -4300,6 +4843,193 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
     const error = new Error('incident case not found');
     error.statusCode = 404;
     throw error;
+  }
+  if (caseId && controlledIdentitySupplied) {
+    const incident = cases[0];
+    const storedGroupId = typeof incident.group_id === 'string'
+      ? incident.group_id
+      : '';
+    const storedRepresentativeAlertId = typeof incident.representative_alert_id === 'string'
+      ? incident.representative_alert_id
+      : '';
+    const representativeGroupId = typeof incident.representative_group_id === 'string'
+      ? incident.representative_group_id
+      : '';
+    const aliases = await loadAlertGroupAliasSnapshot();
+    const caseIdentity = resolveCanonicalAlertGroupIdentity(storedGroupId, aliases);
+    const requestedStableIdentity = identity.stableGroupIdSupplied
+      ? resolveCanonicalAlertGroupIdentity(identity.stableGroupId, aliases)
+      : caseIdentity;
+    if (
+      requestedStableIdentity.stableGroupId !== caseIdentity.stableGroupId
+      || (
+        identity.stableGroupIdSupplied
+        && identity.stableGroupId !== requestedStableIdentity.stableGroupId
+      )
+    ) {
+      throw incidentIdentityConflict(
+        'requested stable_group_id no longer matches the incident case',
+      );
+    }
+
+    const targetRepresentativeAlertId = identity.representativeAlertIdSupplied
+      ? identity.representativeAlertId
+      : storedRepresentativeAlertId;
+    const targetRepresentative = await get(
+      `SELECT alert_id, stable_group_id, stable_group_key
+       FROM alerts WHERE alert_id = ? LIMIT 1`,
+      [targetRepresentativeAlertId],
+    );
+    if (!targetRepresentative?.alert_id) {
+      throw incidentIdentityConflict(
+        'requested representative_alert_id no longer matches the incident case',
+      );
+    }
+    const targetRepresentativeGroupId = typeof targetRepresentative.stable_group_id === 'string'
+      ? targetRepresentative.stable_group_id.trim().toLowerCase()
+      : '';
+    const targetIdentity = resolveCanonicalAlertGroupIdentity(
+      targetRepresentativeGroupId,
+      aliases,
+    );
+    if (
+      targetIdentity.stableGroupId !== caseIdentity.stableGroupId
+      || (
+        identity.stableGroupIdSupplied
+        && targetIdentity.stableGroupId !== requestedStableIdentity.stableGroupId
+      )
+      // The worker currently proves a claim with the alert row's exact stable
+      // group. A pinned legacy alert would otherwise pass alias validation here
+      // and then deterministically fail after it acquires the durable lease.
+      || targetRepresentativeGroupId !== targetIdentity.stableGroupId
+    ) {
+      throw incidentIdentityConflict(
+        'requested representative_alert_id no longer matches the incident case',
+      );
+    }
+    const targetRepresentativeGroupKey = typeof targetRepresentative.stable_group_key === 'string'
+      ? targetRepresentative.stable_group_key
+      : '';
+    const canonicalAliasGroupKeys = [
+      caseIdentity.stableGroupKey,
+      requestedStableIdentity.stableGroupKey,
+    ].filter(Boolean);
+    if (
+      targetRepresentativeGroupKey
+      && canonicalAliasGroupKeys.some(
+        (groupKey) => groupKey !== targetRepresentativeGroupKey,
+      )
+    ) {
+      throw incidentIdentityConflict(
+        'requested representative_alert_id has an incompatible stable group key',
+      );
+    }
+    if (
+      identity.stableGroupKeySupplied
+      && targetRepresentativeGroupKey !== identity.stableGroupKey
+    ) {
+      throw incidentIdentityConflict(
+        'requested stable_group_key no longer matches the incident case',
+      );
+    }
+    if (
+      representativeGroupId === targetRepresentativeGroupId
+      && Number(incident.representative_exists || 0)
+      && typeof incident.representative_group_key === 'string'
+      && incident.representative_group_key
+      && targetRepresentativeGroupKey
+      && incident.representative_group_key !== targetRepresentativeGroupKey
+    ) {
+      throw incidentIdentityConflict(
+        'requested representative_alert_id has an incompatible stable group key',
+      );
+    }
+
+    const otherCases = await all(
+      `SELECT case_id, group_id FROM incident_response_cases
+       WHERE case_id != ?`,
+      [caseId],
+    );
+    for (const otherCase of otherCases) {
+      const otherIdentity = resolveCanonicalAlertGroupIdentity(
+        String(otherCase.group_id || ''),
+        aliases,
+      );
+      if (otherIdentity.stableGroupId === targetIdentity.stableGroupId) {
+        throw incidentIdentityConflict(
+          'requested stable_group_id belongs to another incident case',
+        );
+      }
+    }
+
+    const targetGroupId = targetIdentity.stableGroupId;
+    if (identity.cohortId) {
+      // This check is deliberately before the case rebind, run creation, event
+      // creation, or queue mutation. A controlled request may not replace the
+      // queued intent behind an already-running legacy or canonical attempt.
+      await rejectProcessingControlledJob(
+        'incident_response_analysis',
+        [storedGroupId, targetGroupId],
+      );
+    }
+    if (
+      storedGroupId !== targetGroupId
+      || storedRepresentativeAlertId !== targetRepresentativeAlertId
+    ) {
+      const updated = await run(
+        `UPDATE incident_response_cases
+         SET group_id = ?, representative_alert_id = ?, updated_at = ?
+         WHERE case_id = ? AND group_id = ? AND representative_alert_id = ?`,
+        [
+          targetGroupId,
+          targetRepresentativeAlertId,
+          requestedAt,
+          caseId,
+          storedGroupId,
+          storedRepresentativeAlertId,
+        ],
+      );
+      if (Number(updated.changes || 0) !== 1) {
+        throw incidentIdentityConflict(
+          'incident case identity changed during frozen dispatch validation',
+        );
+      }
+      await run(
+        `INSERT INTO incident_response_events (
+           case_id, event_type, actor, detail_json, created_at
+         ) VALUES (?, 'reanalysis_basis_rebound', ?, ?, ?)`,
+        [
+          caseId,
+          requestedBy,
+          jsonText({
+            previous_group_id: storedGroupId,
+            previous_representative_alert_id: storedRepresentativeAlertId,
+            group_id: targetGroupId,
+            representative_alert_id: targetRepresentativeAlertId,
+            ...(identity.stableGroupKeySupplied ? {
+              stable_group_key: identity.stableGroupKey,
+            } : {}),
+            ...(identity.cohortId ? {
+              cohort_id: identity.cohortId,
+              dispatch_id: identity.dispatchId,
+              release_id: identity.releaseId,
+            } : {}),
+          }),
+          requestedAt,
+        ],
+      );
+    }
+    // The loop below creates the run, run-case, and durable job from this
+    // server-validated frozen basis. Mutating the in-memory snapshot prevents
+    // the legacy identity-drift migration path from undoing the canonical bind.
+    incident.group_id = targetGroupId;
+    incident.representative_alert_id = targetRepresentativeAlertId;
+    incident.representative_exists = 1;
+    incident.representative_group_id = targetGroupId;
+    incident.representative_group_key = targetRepresentativeGroupKey;
+    incident.controlled_legacy_job_group_id = (
+      storedGroupId && storedGroupId !== targetGroupId ? storedGroupId : ''
+    );
   }
   await run(
     `INSERT INTO incident_reanalysis_runs (
@@ -4397,6 +5127,19 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
       }
     }
     await supersedeIncidentReanalysisCase(storedCaseId, runId, requestedAt);
+    const controlledLegacyJobGroupId = safeString(
+      incident.controlled_legacy_job_group_id,
+      64,
+    ).toLowerCase();
+    if (controlledLegacyJobGroupId) {
+      // The in-memory frozen-basis rebind above intentionally makes
+      // identityDrift false. Preserve and retire the former pending queue owner
+      // explicitly before the canonical job is enqueued.
+      await retirePendingIncidentJobs(
+        [controlledLegacyJobGroupId],
+        requestedAt,
+      );
+    }
     if (identityDrift && storedGroupId) {
       // Pending work under the former stable identity can no longer join an
       // authoritative alert row. Retire it atomically with the new queue
@@ -4439,6 +5182,20 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
       alert_id: representativeAlertId,
       group_id: groupId,
       dashboard_group_id: dashboardGroupId,
+      ...(identity.representativeAlertIdSupplied ? {
+        representative_alert_id: representativeAlertId,
+      } : {}),
+      ...(identity.stableGroupIdSupplied ? {
+        stable_group_id: groupId,
+      } : {}),
+      ...(identity.stableGroupKeySupplied ? {
+        stable_group_key: identity.stableGroupKey,
+      } : {}),
+      ...(identity.cohortId ? {
+        cohort_id: identity.cohortId,
+        dispatch_id: identity.dispatchId,
+        release_id: identity.releaseId,
+      } : {}),
       reanalysis_run_id: runId,
       reanalysis_release_id: releaseId,
       manual_reanalysis: true,
@@ -4461,7 +5218,24 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
       [
         storedCaseId,
         requestedBy,
-        jsonText({run_id: runId, release_id: releaseId, reason}),
+        jsonText({
+          run_id: runId,
+          release_id: releaseId,
+          ...(identity.representativeAlertIdSupplied ? {
+            representative_alert_id: representativeAlertId,
+          } : {}),
+          ...(identity.stableGroupIdSupplied ? {
+            stable_group_id: groupId,
+          } : {}),
+          ...(identity.stableGroupKeySupplied ? {
+            stable_group_key: identity.stableGroupKey,
+          } : {}),
+          ...(identity.cohortId ? {
+            cohort_id: identity.cohortId,
+            dispatch_id: identity.dispatchId,
+          } : {}),
+          reason,
+        }),
         requestedAt,
       ],
     );
@@ -4472,6 +5246,20 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
   return {
     ok: true,
     ...(await refreshIncidentReanalysisRun(runId)),
+    ...(identity.representativeAlertIdSupplied ? {
+      representative_alert_id: identity.representativeAlertId,
+    } : {}),
+    ...(identity.stableGroupIdSupplied ? {
+      stable_group_id: identity.stableGroupId,
+    } : {}),
+    ...(identity.stableGroupKeySupplied ? {
+      stable_group_key: identity.stableGroupKey,
+    } : {}),
+    ...(identity.cohortId ? {
+      cohort_id: identity.cohortId,
+      dispatch_id: identity.dispatchId,
+      release_id: identity.releaseId,
+    } : {}),
   };
 }
 
@@ -7106,8 +7894,16 @@ async function handleRequest(request, response) {
       const leaseToken = safeString(payload?.lease_token, 128);
       const retryable = payload?.retryable !== false;
       if (!jobType || !dedupeKey) throw new Error('job_type and dedupe_key are required');
-      const transition = await withSqliteWriteGate(() => transitionDurableJobStatus(
-        jobType, dedupeKey, status, safeString(payload?.error, 1000), leaseToken, retryable,
+      const transition = await withSqliteWriteGate(() => withImmediateTransaction(
+        () => transitionDurableJobStatus(
+          jobType,
+          dedupeKey,
+          status,
+          safeString(payload?.error, 1000),
+          leaseToken,
+          retryable,
+          payload,
+        ),
       ));
       sendJson(response, transition.updated ? 200 : 404, {
         ok: transition.updated,

@@ -21,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ALERT_STORE_DIR = REPO_ROOT / "n8n" / "alert_store"
 ALERT_STORE = ALERT_STORE_DIR / "alert_store.js"
 SCORING_RULES = ALERT_STORE_DIR / "config" / "scoring_rules.json"
+DEPLOYED_RELEASE = "d" * 40
 
 
 def available_port() -> int:
@@ -74,6 +75,7 @@ class AlertStorePcapRetryTest(unittest.TestCase):
             "PCAP_TRANSFER_MAX_RETRY_SECONDS": "300",
             "AI_ANALYSIS_WAKE_PATH": str(self.ai_wake_path),
             "PCAP_ANALYSIS_WAKE_PATH": str(self.pcap_wake_path),
+            "ONION_SENTINEL_RELEASE_ID": DEPLOYED_RELEASE,
         }
         self.process = subprocess.Popen(
             ["node", str(ALERT_STORE)],
@@ -112,6 +114,108 @@ class AlertStorePcapRetryTest(unittest.TestCase):
         status, result = request_json(f"{self.base_url}{path}", "POST", payload)
         self.assertEqual(status, 200, result)
         return result
+
+    def seed_manual_dispatch_group(self) -> dict[str, str]:
+        identity = {
+            "dashboard_group_id": "1234567890ab",
+            "stable_group_id": "abcdef1234567890abcd",
+            "stable_group_key": "v2|manual-dispatch-group",
+            "current_alert_id": "manual-dispatch-current-alert",
+            "pinned_alert_id": "manual-dispatch-frozen-alert",
+            "foreign_alert_id": "manual-dispatch-foreign-alert",
+            "key_collision_alert_id": "manual-dispatch-key-collision-alert",
+        }
+        timestamp = "2026-07-26  01:00:00-06:00"
+        rows = (
+            (
+                identity["current_alert_id"],
+                identity["stable_group_key"],
+                identity["stable_group_id"],
+                "192.0.2.10",
+                "198.51.100.10",
+            ),
+            (
+                identity["pinned_alert_id"],
+                identity["stable_group_key"],
+                identity["stable_group_id"],
+                "192.0.2.11",
+                "198.51.100.11",
+            ),
+            (
+                identity["foreign_alert_id"],
+                "v2|manual-dispatch-foreign",
+                "fedcba0987654321fedc",
+                "192.0.2.12",
+                "198.51.100.12",
+            ),
+            (
+                identity["key_collision_alert_id"],
+                "v2|manual-dispatch-conflicting-key",
+                identity["stable_group_id"],
+                "192.0.2.13",
+                "198.51.100.13",
+            ),
+        )
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            for alert_id, stable_key, stable_id, source_ip, destination_ip in rows:
+                alert = {
+                    "alert_id": alert_id,
+                    "timestamp": timestamp,
+                    "rule_name": "Synthetic frozen dispatch identity",
+                    "severity": 3,
+                    "severity_label": "high",
+                    "source": {"ip": source_ip},
+                    "destination": {"ip": destination_ip},
+                }
+                connection.execute(
+                    """
+                    INSERT INTO alerts (
+                      alert_id, first_seen, last_seen, timestamp, rule_name,
+                      severity, severity_label, source_ip, destination_ip,
+                      triage_level, filter_status, stable_group_key,
+                      stable_group_id, alert_json
+                    ) VALUES (?, ?, ?, ?, ?, 3, 'high', ?, ?, 'high',
+                              'accepted', ?, ?, ?)
+                    """,
+                    (
+                        alert_id,
+                        timestamp,
+                        timestamp,
+                        timestamp,
+                        alert["rule_name"],
+                        source_ip,
+                        destination_ip,
+                        stable_key,
+                        stable_id,
+                        json.dumps(alert),
+                    ),
+                )
+            connection.execute(
+                """
+                INSERT INTO alert_group_summary (
+                  group_id, group_key, representative_alert_id,
+                  triage_level, updated_at
+                ) VALUES (?, 'manual-dispatch-dashboard-group', ?, 'high', ?)
+                """,
+                (
+                    identity["dashboard_group_id"],
+                    identity["current_alert_id"],
+                    timestamp,
+                ),
+            )
+            connection.commit()
+        return identity
+
+    def manual_dispatch_request(
+        self,
+        path: str,
+        payload: dict,
+    ) -> tuple[int, dict]:
+        return request_json(
+            f"{self.base_url}{path}",
+            "POST",
+            payload,
+        )
 
     def test_retry_preserves_progress_honors_backoff_and_exhausts(self) -> None:
         created = self.post(
@@ -523,6 +627,613 @@ class AlertStorePcapRetryTest(unittest.TestCase):
             },
         )
         self.assertEqual(claim["claim"]["payload"], manual_payload)
+
+    def test_manual_ai_request_pins_and_echoes_frozen_dispatch_identity(
+        self,
+    ) -> None:
+        identity = self.seed_manual_dispatch_group()
+        status, legacy = self.manual_dispatch_request(
+            "/ai/request",
+            {"group_id": identity["dashboard_group_id"]},
+        )
+        self.assertEqual(status, 202, legacy)
+        self.assertEqual(
+            legacy["representative_alert_id"],
+            identity["current_alert_id"],
+        )
+        self.assertNotIn("stable_group_id", legacy)
+        self.assertNotIn("cohort_id", legacy)
+        self.assertNotIn("dispatch_id", legacy)
+        self.assertNotIn("release_id", legacy)
+
+        cohort_id = "newest-20-soc.2026_07_26"
+        dispatch_id = "a" * 64
+        status, pinned = self.manual_dispatch_request(
+            "/ai/request",
+            {
+                "group_id": identity["dashboard_group_id"],
+                "representative_alert_id": identity["pinned_alert_id"],
+                "stable_group_id": identity["stable_group_id"],
+                "stable_group_key": identity["stable_group_key"],
+                "cohort_id": cohort_id,
+                "dispatch_id": dispatch_id,
+                "release_id": DEPLOYED_RELEASE,
+            },
+        )
+        self.assertEqual(status, 202, pinned)
+        self.assertEqual(
+            pinned["representative_alert_id"],
+            identity["pinned_alert_id"],
+        )
+        self.assertEqual(pinned["stable_group_id"], identity["stable_group_id"])
+        self.assertEqual(pinned["stable_group_key"], identity["stable_group_key"])
+        self.assertEqual(pinned["cohort_id"], cohort_id)
+        self.assertEqual(pinned["dispatch_id"], dispatch_id)
+        self.assertEqual(pinned["release_id"], DEPLOYED_RELEASE)
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            payload_json = connection.execute(
+                """
+                SELECT payload_json FROM durable_jobs
+                WHERE job_type = 'ai_analysis' AND dedupe_key = ?
+                """,
+                (identity["stable_group_id"],),
+            ).fetchone()[0]
+        durable_payload = json.loads(payload_json)
+        self.assertEqual(
+            durable_payload["alert_id"],
+            identity["pinned_alert_id"],
+        )
+        self.assertEqual(
+            durable_payload["representative_alert_id"],
+            identity["pinned_alert_id"],
+        )
+        self.assertEqual(
+            durable_payload["stable_group_id"],
+            identity["stable_group_id"],
+        )
+        self.assertEqual(
+            durable_payload["stable_group_key"],
+            identity["stable_group_key"],
+        )
+        self.assertEqual(durable_payload["cohort_id"], cohort_id)
+        self.assertEqual(durable_payload["dispatch_id"], dispatch_id)
+        self.assertEqual(durable_payload["release_id"], DEPLOYED_RELEASE)
+
+        conflicts = (
+            {
+                "representative_alert_id": identity["foreign_alert_id"],
+                "stable_group_id": identity["stable_group_id"],
+                "stable_group_key": identity["stable_group_key"],
+                "cohort_id": cohort_id,
+                "dispatch_id": "b" * 64,
+                "release_id": DEPLOYED_RELEASE,
+            },
+            {
+                "representative_alert_id": identity[
+                    "key_collision_alert_id"
+                ],
+                "stable_group_id": identity["stable_group_id"],
+                "stable_group_key": identity["stable_group_key"],
+                "cohort_id": cohort_id,
+                "dispatch_id": "c" * 64,
+                "release_id": DEPLOYED_RELEASE,
+            },
+            {
+                "representative_alert_id": identity["pinned_alert_id"],
+                "stable_group_id": "fedcba0987654321fedc",
+                "stable_group_key": identity["stable_group_key"],
+                "cohort_id": cohort_id,
+                "dispatch_id": "d" * 64,
+                "release_id": DEPLOYED_RELEASE,
+            },
+            {
+                "representative_alert_id": identity["pinned_alert_id"],
+                "stable_group_id": identity["stable_group_id"],
+                "stable_group_key": identity["stable_group_key"],
+                "cohort_id": cohort_id,
+                "release_id": DEPLOYED_RELEASE,
+            },
+            {
+                "representative_alert_id": identity["pinned_alert_id"],
+                "stable_group_id": identity["stable_group_id"],
+                "stable_group_key": identity["stable_group_key"],
+                "cohort_id": cohort_id,
+                "dispatch_id": "4" * 64,
+            },
+            {
+                "representative_alert_id": identity["pinned_alert_id"],
+                "stable_group_id": identity["stable_group_id"],
+                "stable_group_key": identity["stable_group_key"],
+                "cohort_id": cohort_id,
+                "dispatch_id": "5" * 64,
+                "release_id": "e" * 40,
+            },
+            {
+                "representative_alert_id": identity["pinned_alert_id"],
+                "stable_group_id": identity["stable_group_id"].upper(),
+                "stable_group_key": identity["stable_group_key"],
+                "cohort_id": cohort_id,
+                "dispatch_id": "1" * 64,
+                "release_id": DEPLOYED_RELEASE,
+            },
+            {
+                "representative_alert_id": identity["pinned_alert_id"],
+                "stable_group_id": identity["stable_group_id"],
+                "stable_group_key": identity["stable_group_key"],
+                "cohort_id": f" {cohort_id}",
+                "dispatch_id": "2" * 64,
+                "release_id": DEPLOYED_RELEASE,
+            },
+            {
+                "representative_alert_id": identity["pinned_alert_id"],
+                "stable_group_id": identity["stable_group_id"],
+                "stable_group_key": identity["stable_group_key"],
+                "cohort_id": cohort_id,
+                "dispatch_id": "A" * 64,
+                "release_id": DEPLOYED_RELEASE,
+            },
+            {
+                "representative_alert_id": identity["pinned_alert_id"],
+                "stable_group_id": identity["stable_group_id"],
+                "stable_group_key": "v2|wrong-frozen-key",
+                "cohort_id": cohort_id,
+                "dispatch_id": "3" * 64,
+                "release_id": DEPLOYED_RELEASE,
+            },
+        )
+        for conflict in conflicts:
+            with self.subTest(conflict=conflict):
+                status, rejected = self.manual_dispatch_request(
+                    "/ai/request",
+                    {
+                        "group_id": identity["dashboard_group_id"],
+                        **conflict,
+                    },
+                )
+                self.assertEqual(status, 409, rejected)
+                self.assertFalse(rejected["ok"])
+
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            retained_json = connection.execute(
+                """
+                SELECT payload_json FROM durable_jobs
+                WHERE job_type = 'ai_analysis' AND dedupe_key = ?
+                """,
+                (identity["stable_group_id"],),
+            ).fetchone()[0]
+        self.assertEqual(json.loads(retained_json), durable_payload)
+
+    def test_controlled_stable_group_key_uses_utf8_bytes_at_request_and_claim(
+        self,
+    ) -> None:
+        identity = self.seed_manual_dispatch_group()
+        exact_multibyte_key = "\u00e9" * 1024
+        self.assertEqual(len(exact_multibyte_key.encode("utf-8")), 2048)
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            connection.executemany(
+                "UPDATE alerts SET stable_group_key = ? WHERE alert_id = ?",
+                (
+                    (exact_multibyte_key, identity["current_alert_id"]),
+                    (exact_multibyte_key, identity["pinned_alert_id"]),
+                ),
+            )
+            connection.commit()
+
+        request = {
+            "group_id": identity["dashboard_group_id"],
+            "representative_alert_id": identity["pinned_alert_id"],
+            "stable_group_id": identity["stable_group_id"],
+            "stable_group_key": exact_multibyte_key,
+            "cohort_id": "newest-20-soc.utf8-boundary",
+            "dispatch_id": "6" * 64,
+            "release_id": DEPLOYED_RELEASE,
+        }
+        status, queued = self.manual_dispatch_request("/ai/request", request)
+        self.assertEqual(status, 202, queued)
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            before = connection.execute(
+                """
+                SELECT id, payload_json, status, attempt_count, lease_token
+                FROM durable_jobs
+                WHERE job_type = 'ai_analysis' AND dedupe_key = ?
+                """,
+                (identity["stable_group_id"],),
+            ).fetchone()
+
+        invalid_keys = (
+            "\u00e9" * 1025,
+            "v2|bad\x00group",
+        )
+        for offset, invalid_key in enumerate(invalid_keys, start=7):
+            with self.subTest(boundary="manual", key=repr(invalid_key)):
+                status, rejected = self.manual_dispatch_request(
+                    "/ai/request",
+                    {
+                        **request,
+                        "stable_group_key": invalid_key,
+                        "dispatch_id": str(offset) * 64,
+                    },
+                )
+                self.assertEqual(status, 409, rejected)
+                self.assertIn(
+                    "stable_group_key is invalid",
+                    rejected["reason"],
+                )
+
+            with self.subTest(boundary="claim", key=repr(invalid_key)):
+                status, rejected = self.manual_dispatch_request(
+                    "/jobs/status",
+                    {
+                        "job_type": "ai_analysis",
+                        "dedupe_key": identity["stable_group_id"],
+                        "status": "processing",
+                        "expected_job_id": before[0],
+                        "expected_representative_alert_id": identity[
+                            "pinned_alert_id"
+                        ],
+                        "expected_dispatch_id": request["dispatch_id"],
+                        "expected_stable_group_key": invalid_key,
+                    },
+                )
+                self.assertEqual(status, 409, rejected)
+                self.assertIn(
+                    "stable group key is invalid",
+                    rejected["reason"],
+                )
+
+            with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+                after_rejection = connection.execute(
+                    """
+                    SELECT id, payload_json, status, attempt_count, lease_token
+                    FROM durable_jobs
+                    WHERE job_type = 'ai_analysis' AND dedupe_key = ?
+                    """,
+                    (identity["stable_group_id"],),
+                ).fetchone()
+            self.assertEqual(after_rejection, before)
+
+    def test_controlled_ai_claim_is_atomic_and_bound_to_exact_job(self) -> None:
+        identity = self.seed_manual_dispatch_group()
+        dispatch_id = "4" * 64
+        request = {
+            "group_id": identity["dashboard_group_id"],
+            "representative_alert_id": identity["pinned_alert_id"],
+            "stable_group_id": identity["stable_group_id"],
+            "stable_group_key": identity["stable_group_key"],
+            "cohort_id": "newest-20-soc.exact-claim",
+            "dispatch_id": dispatch_id,
+            "release_id": DEPLOYED_RELEASE,
+        }
+        status, queued = self.manual_dispatch_request("/ai/request", request)
+        self.assertEqual(status, 202, queued)
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            before = connection.execute(
+                """
+                SELECT id, payload_json, status, attempt_count, lease_token
+                FROM durable_jobs
+                WHERE job_type = 'ai_analysis' AND dedupe_key = ?
+                """,
+                (identity["stable_group_id"],),
+            ).fetchone()
+
+        status, rejected = self.manual_dispatch_request(
+            "/jobs/status",
+            {
+                "job_type": "ai_analysis",
+                "dedupe_key": identity["stable_group_id"],
+                "status": "processing",
+                "expected_job_id": before[0],
+                "expected_representative_alert_id": identity["pinned_alert_id"],
+                "expected_dispatch_id": "5" * 64,
+                "expected_stable_group_key": identity["stable_group_key"],
+            },
+        )
+        self.assertEqual(status, 409, rejected)
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            after_rejection = connection.execute(
+                """
+                SELECT id, payload_json, status, attempt_count, lease_token
+                FROM durable_jobs
+                WHERE job_type = 'ai_analysis' AND dedupe_key = ?
+                """,
+                (identity["stable_group_id"],),
+            ).fetchone()
+        self.assertEqual(after_rejection, before)
+
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            connection.execute(
+                "UPDATE alerts SET stable_group_key = ? WHERE alert_id = ?",
+                ("v2|post-queue-key-drift", identity["pinned_alert_id"]),
+            )
+            connection.commit()
+        status, drift_rejected = self.manual_dispatch_request(
+            "/jobs/status",
+            {
+                "job_type": "ai_analysis",
+                "dedupe_key": identity["stable_group_id"],
+                "status": "processing",
+                "expected_job_id": before[0],
+                "expected_representative_alert_id": identity["pinned_alert_id"],
+                "expected_dispatch_id": dispatch_id,
+                "expected_stable_group_key": identity["stable_group_key"],
+            },
+        )
+        self.assertEqual(status, 409, drift_rejected)
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            after_drift_rejection = connection.execute(
+                """
+                SELECT id, payload_json, status, attempt_count, lease_token
+                FROM durable_jobs
+                WHERE job_type = 'ai_analysis' AND dedupe_key = ?
+                """,
+                (identity["stable_group_id"],),
+            ).fetchone()
+            connection.execute(
+                "UPDATE alerts SET stable_group_key = ? WHERE alert_id = ?",
+                (identity["stable_group_key"], identity["pinned_alert_id"]),
+            )
+            connection.commit()
+        self.assertEqual(after_drift_rejection, before)
+
+        status, claimed = self.manual_dispatch_request(
+            "/jobs/status",
+            {
+                "job_type": "ai_analysis",
+                "dedupe_key": identity["stable_group_id"],
+                "status": "processing",
+                "expected_job_id": before[0],
+                "expected_representative_alert_id": identity["pinned_alert_id"],
+                "expected_dispatch_id": dispatch_id,
+                "expected_stable_group_key": identity["stable_group_key"],
+            },
+        )
+        self.assertEqual(status, 200, claimed)
+        self.assertEqual(claimed["claim"]["job_id"], before[0])
+        self.assertEqual(
+            claimed["claim"]["payload"],
+            json.loads(before[1]),
+        )
+
+    def test_controlled_ai_request_rejects_processing_job_without_mutation(
+        self,
+    ) -> None:
+        identity = self.seed_manual_dispatch_group()
+        status, _legacy = self.manual_dispatch_request(
+            "/ai/request",
+            {"group_id": identity["dashboard_group_id"]},
+        )
+        self.assertEqual(status, 202)
+        status, _claim = self.manual_dispatch_request(
+            "/jobs/status",
+            {
+                "job_type": "ai_analysis",
+                "dedupe_key": identity["stable_group_id"],
+                "status": "processing",
+            },
+        )
+        self.assertEqual(status, 200)
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            before = connection.execute(
+                """
+                SELECT payload_json, status, attempt_count, lease_token,
+                       rerun_requested
+                FROM durable_jobs
+                WHERE job_type = 'ai_analysis' AND dedupe_key = ?
+                """,
+                (identity["stable_group_id"],),
+            ).fetchone()
+
+        status, rejected = self.manual_dispatch_request(
+            "/ai/request",
+            {
+                "group_id": identity["dashboard_group_id"],
+                "representative_alert_id": identity["pinned_alert_id"],
+                "stable_group_id": identity["stable_group_id"],
+                "stable_group_key": identity["stable_group_key"],
+                "cohort_id": "newest-20-soc.processing-conflict",
+                "dispatch_id": "6" * 64,
+                "release_id": DEPLOYED_RELEASE,
+            },
+        )
+        self.assertEqual(status, 409, rejected)
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            after = connection.execute(
+                """
+                SELECT payload_json, status, attempt_count, lease_token,
+                       rerun_requested
+                FROM durable_jobs
+                WHERE job_type = 'ai_analysis' AND dedupe_key = ?
+                """,
+                (identity["stable_group_id"],),
+            ).fetchone()
+        self.assertEqual(after, before)
+
+    def test_manual_incident_escalation_uses_pinned_alert_for_case_and_job(
+        self,
+    ) -> None:
+        identity = self.seed_manual_dispatch_group()
+        status, legacy = self.manual_dispatch_request(
+            "/incidents/escalate",
+            {"group_id": identity["dashboard_group_id"]},
+        )
+        self.assertEqual(status, 202, legacy)
+        self.assertEqual(
+            legacy["representative_alert_id"],
+            identity["current_alert_id"],
+        )
+        self.assertNotIn("stable_group_id", legacy)
+        self.assertNotIn("cohort_id", legacy)
+        self.assertNotIn("dispatch_id", legacy)
+        self.assertNotIn("release_id", legacy)
+
+        cohort_id = "newest-20-ir.2026_07_26"
+        dispatch_id = "e" * 64
+        status, pinned = self.manual_dispatch_request(
+            "/incidents/escalate",
+            {
+                "group_id": identity["dashboard_group_id"],
+                "representative_alert_id": identity["pinned_alert_id"],
+                "stable_group_id": identity["stable_group_id"],
+                "stable_group_key": identity["stable_group_key"],
+                "cohort_id": cohort_id,
+                "dispatch_id": dispatch_id,
+                "release_id": DEPLOYED_RELEASE,
+            },
+        )
+        self.assertEqual(status, 202, pinned)
+        self.assertEqual(
+            pinned["representative_alert_id"],
+            identity["pinned_alert_id"],
+        )
+        self.assertEqual(pinned["stable_group_id"], identity["stable_group_id"])
+        self.assertEqual(pinned["stable_group_key"], identity["stable_group_key"])
+        self.assertEqual(pinned["cohort_id"], cohort_id)
+        self.assertEqual(pinned["dispatch_id"], dispatch_id)
+        self.assertEqual(pinned["release_id"], DEPLOYED_RELEASE)
+
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            case_alert_id = connection.execute(
+                """
+                SELECT representative_alert_id FROM incident_response_cases
+                WHERE group_id = ?
+                """,
+                (identity["stable_group_id"],),
+            ).fetchone()[0]
+            payload_json = connection.execute(
+                """
+                SELECT payload_json FROM durable_jobs
+                WHERE job_type = 'incident_response_analysis'
+                  AND dedupe_key = ?
+                """,
+                (identity["stable_group_id"],),
+            ).fetchone()[0]
+        self.assertEqual(case_alert_id, identity["pinned_alert_id"])
+        durable_payload = json.loads(payload_json)
+        self.assertEqual(
+            durable_payload["alert_id"],
+            identity["pinned_alert_id"],
+        )
+        self.assertEqual(
+            durable_payload["representative_alert_id"],
+            identity["pinned_alert_id"],
+        )
+        self.assertEqual(durable_payload["cohort_id"], cohort_id)
+        self.assertEqual(durable_payload["dispatch_id"], dispatch_id)
+        self.assertEqual(durable_payload["release_id"], DEPLOYED_RELEASE)
+        self.assertEqual(
+            durable_payload["stable_group_key"],
+            identity["stable_group_key"],
+        )
+
+        status, rejected = self.manual_dispatch_request(
+            "/incidents/escalate",
+            {
+                "group_id": identity["dashboard_group_id"],
+                "representative_alert_id": identity["foreign_alert_id"],
+                "stable_group_id": identity["stable_group_id"],
+                "stable_group_key": identity["stable_group_key"],
+                "cohort_id": cohort_id,
+                "dispatch_id": "f" * 64,
+                "release_id": DEPLOYED_RELEASE,
+            },
+        )
+        self.assertEqual(status, 409, rejected)
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            retained_case_alert_id = connection.execute(
+                """
+                SELECT representative_alert_id FROM incident_response_cases
+                WHERE group_id = ?
+                """,
+                (identity["stable_group_id"],),
+            ).fetchone()[0]
+            retained_payload_json = connection.execute(
+                """
+                SELECT payload_json FROM durable_jobs
+                WHERE job_type = 'incident_response_analysis'
+                  AND dedupe_key = ?
+                """,
+                (identity["stable_group_id"],),
+            ).fetchone()[0]
+        self.assertEqual(retained_case_alert_id, identity["pinned_alert_id"])
+        self.assertEqual(json.loads(retained_payload_json), durable_payload)
+
+    def test_controlled_escalation_rejects_processing_job_before_case_mutation(
+        self,
+    ) -> None:
+        identity = self.seed_manual_dispatch_group()
+        status, legacy = self.manual_dispatch_request(
+            "/incidents/escalate",
+            {"group_id": identity["dashboard_group_id"]},
+        )
+        self.assertEqual(status, 202, legacy)
+        status, _claim = self.manual_dispatch_request(
+            "/jobs/status",
+            {
+                "job_type": "incident_response_analysis",
+                "dedupe_key": identity["stable_group_id"],
+                "status": "processing",
+            },
+        )
+        self.assertEqual(status, 200)
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            before_case = connection.execute(
+                """
+                SELECT representative_alert_id, agent_status, updated_at
+                FROM incident_response_cases WHERE group_id = ?
+                """,
+                (identity["stable_group_id"],),
+            ).fetchone()
+            before_events = connection.execute(
+                "SELECT COUNT(*) FROM incident_response_events"
+            ).fetchone()[0]
+            before_job = connection.execute(
+                """
+                SELECT payload_json, status, attempt_count, lease_token,
+                       rerun_requested
+                FROM durable_jobs
+                WHERE job_type = 'incident_response_analysis'
+                  AND dedupe_key = ?
+                """,
+                (identity["stable_group_id"],),
+            ).fetchone()
+
+        status, rejected = self.manual_dispatch_request(
+            "/incidents/escalate",
+            {
+                "group_id": identity["dashboard_group_id"],
+                "representative_alert_id": identity["pinned_alert_id"],
+                "stable_group_id": identity["stable_group_id"],
+                "stable_group_key": identity["stable_group_key"],
+                "cohort_id": "newest-20-ir.processing-conflict",
+                "dispatch_id": "7" * 64,
+                "release_id": DEPLOYED_RELEASE,
+            },
+        )
+        self.assertEqual(status, 409, rejected)
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            after_case = connection.execute(
+                """
+                SELECT representative_alert_id, agent_status, updated_at
+                FROM incident_response_cases WHERE group_id = ?
+                """,
+                (identity["stable_group_id"],),
+            ).fetchone()
+            after_events = connection.execute(
+                "SELECT COUNT(*) FROM incident_response_events"
+            ).fetchone()[0]
+            after_job = connection.execute(
+                """
+                SELECT payload_json, status, attempt_count, lease_token,
+                       rerun_requested
+                FROM durable_jobs
+                WHERE job_type = 'incident_response_analysis'
+                  AND dedupe_key = ?
+                """,
+                (identity["stable_group_id"],),
+            ).fetchone()
+        self.assertEqual(after_case, before_case)
+        self.assertEqual(after_events, before_events)
+        self.assertEqual(after_job, before_job)
 
 
 if __name__ == "__main__":

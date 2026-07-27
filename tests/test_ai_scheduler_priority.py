@@ -16,6 +16,7 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEDULER_PATH = REPO_ROOT / "n8n" / "bin" / "auto-run-ai-analysis.py"
+DEPLOYED_RELEASE = "d" * 40
 
 
 def load_scheduler():
@@ -90,6 +91,12 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             "durable AI claim job identity is invalid",
             "durable AI claim group identity is invalid",
             "durable AI claim alert identity is invalid",
+            "controlled AI run requires a durable AI job claim",
+            "controlled AI run identity arguments are incomplete",
+            "controlled AI claim group identity did not match --only-group-id",
+            "controlled AI claim alert identity did not match --only-alert-id",
+            "controlled AI claim dispatch identity did not match --only-dispatch-id",
+            "controlled AI claim release_id did not match the deployed runtime",
         ):
             self.assertFalse(self.scheduler.ai_failure_is_retryable(detail))
 
@@ -100,6 +107,219 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             "Codex CLI analysis failed: provider connection closed unexpectedly",
         ):
             self.assertTrue(self.scheduler.ai_failure_is_retryable(detail))
+
+    def test_controlled_run_arguments_require_complete_frozen_identity(self) -> None:
+        group_id = "0123456789abcdefabcd"
+        alert_id = ".ds-logs-suricata.alerts-so-2026.07.24-000001:alert-1"
+        stable_group_key = "v2|frozen-group-key"
+        dispatch_id = "a" * 64
+
+        with mock.patch(
+            "sys.argv",
+            [
+                str(SCHEDULER_PATH),
+                "--only-group-id",
+                group_id,
+                "--only-alert-id",
+                alert_id,
+                "--only-stable-group-key",
+                stable_group_key,
+                "--only-dispatch-id",
+                dispatch_id,
+            ],
+        ):
+            args = self.scheduler.parse_args()
+
+        self.assertEqual(args.only_group_id, group_id)
+        self.assertEqual(args.only_alert_id, alert_id)
+        self.assertEqual(args.only_stable_group_key, stable_group_key)
+        self.assertEqual(args.only_dispatch_id, dispatch_id)
+
+        incomplete = (
+            ("--only-group-id", group_id),
+            ("--only-alert-id", alert_id),
+            ("--only-dispatch-id", dispatch_id),
+            (
+                "--only-group-id",
+                group_id,
+                "--only-alert-id",
+                alert_id,
+            ),
+            (
+                "--only-group-id",
+                group_id,
+                "--only-dispatch-id",
+                dispatch_id,
+            ),
+            (
+                "--only-alert-id",
+                alert_id,
+                "--only-dispatch-id",
+                dispatch_id,
+            ),
+        )
+        for cli_args in incomplete:
+            with self.subTest(cli_args=cli_args), mock.patch(
+                "sys.argv",
+                [str(SCHEDULER_PATH), *cli_args],
+            ), mock.patch("sys.stderr", io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    self.scheduler.parse_args()
+
+    def test_controlled_run_arguments_reject_unbounded_or_noncanonical_ids(
+        self,
+    ) -> None:
+        group_id = "0123456789abcdefabcd"
+        stable_group_key = "v2|frozen-group-key"
+        valid_dispatch_id = "a" * 64
+        invalid_id_sets = (
+            ("alert/with/path", valid_dispatch_id),
+            ("a" * 257, valid_dispatch_id),
+            ("valid-alert", "A" * 64),
+            ("valid-alert", "a" * 63),
+        )
+
+        for alert_id, dispatch_id in invalid_id_sets:
+            with self.subTest(
+                alert_id=alert_id,
+                dispatch_id=dispatch_id,
+            ), mock.patch(
+                "sys.argv",
+                [
+                    str(SCHEDULER_PATH),
+                    "--only-group-id",
+                    group_id,
+                    "--only-alert-id",
+                    alert_id,
+                    "--only-stable-group-key",
+                    stable_group_key,
+                    "--only-dispatch-id",
+                    dispatch_id,
+                ],
+            ), mock.patch("sys.stderr", io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    self.scheduler.parse_args()
+
+        with mock.patch(
+            "sys.argv",
+            [
+                str(SCHEDULER_PATH),
+                "--only-group-id",
+                group_id,
+                "--only-alert-id",
+                "valid-alert",
+                "--only-stable-group-key",
+                "x" * 2049,
+                "--only-dispatch-id",
+                valid_dispatch_id,
+            ],
+        ), mock.patch("sys.stderr", io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self.scheduler.parse_args()
+
+    def test_controlled_stable_group_key_uses_utf8_bytes_and_rejects_nul(
+        self,
+    ) -> None:
+        group_id = "0123456789abcdefabcd"
+        alert_id = "valid-alert"
+        dispatch_id = "a" * 64
+        exact_multibyte_key = "\u00e9" * 1024
+        self.assertEqual(len(exact_multibyte_key.encode("utf-8")), 2048)
+        self.assertTrue(
+            self.scheduler.valid_controlled_stable_group_key(
+                exact_multibyte_key
+            )
+        )
+
+        with mock.patch(
+            "sys.argv",
+            [
+                str(SCHEDULER_PATH),
+                "--only-group-id",
+                group_id,
+                "--only-alert-id",
+                alert_id,
+                "--only-stable-group-key",
+                exact_multibyte_key,
+                "--only-dispatch-id",
+                dispatch_id,
+            ],
+        ):
+            args = self.scheduler.parse_args()
+        self.assertEqual(args.only_stable_group_key, exact_multibyte_key)
+
+        invalid_keys = (
+            "\u00e9" * 1025,
+            "v2|bad\x00group",
+            "\ud800",
+        )
+        for invalid_key in invalid_keys:
+            with self.subTest(invalid_key=repr(invalid_key)):
+                self.assertFalse(
+                    self.scheduler.valid_controlled_stable_group_key(
+                        invalid_key
+                    )
+                )
+                with mock.patch(
+                    "sys.argv",
+                    [
+                        str(SCHEDULER_PATH),
+                        "--only-group-id",
+                        group_id,
+                        "--only-alert-id",
+                        alert_id,
+                        "--only-stable-group-key",
+                        invalid_key,
+                        "--only-dispatch-id",
+                        dispatch_id,
+                    ],
+                ), mock.patch("sys.stderr", io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        self.scheduler.parse_args()
+
+    def test_runtime_release_attestation_uses_literal_env_file_fallback(
+        self,
+    ) -> None:
+        env_path = Path(self.tempdir.name) / ".env"
+        env_path.write_text(
+            "# runtime metadata\n"
+            f"ONION_SENTINEL_RELEASE_ID={DEPLOYED_RELEASE}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            self.scheduler.current_runtime_release_id(
+                environ={},
+                env_path=env_path,
+            ),
+            DEPLOYED_RELEASE,
+        )
+        self.assertEqual(
+            self.scheduler.current_runtime_release_id(
+                environ={"ONION_SENTINEL_RELEASE_ID": "e" * 40},
+                env_path=env_path,
+            ),
+            "e" * 40,
+        )
+        self.assertEqual(
+            self.scheduler.current_runtime_release_id(
+                environ={"ONION_SENTINEL_RELEASE_ID": ""},
+                env_path=env_path,
+            ),
+            "",
+        )
+        env_path.write_text(
+            f"ONION_SENTINEL_RELEASE_ID={DEPLOYED_RELEASE}\n"
+            f"ONION_SENTINEL_RELEASE_ID={'e' * 40}\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            self.scheduler.current_runtime_release_id(
+                environ={},
+                env_path=env_path,
+            ),
+            "",
+        )
 
     def test_failure_status_contract_marks_deterministic_failure_non_retryable(self) -> None:
         response = io.BytesIO(b'{"ok":true}')
@@ -133,6 +353,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                     "lease_token": "claim-lease",
                     "dedupe_key": "outer-group",
                     "claim": {
+                        "job_id": 41,
                         "job_type": "ai_analysis",
                         "dedupe_key": "claimed-group",
                         "payload": {
@@ -148,23 +369,40 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             self.scheduler.urllib.request,
             "urlopen",
             return_value=response,
-        ):
+        ) as urlopen:
             claimed = self.scheduler.report_ai_job_status(
                 "http://127.0.0.1:8787",
                 "requested-group",
                 "processing",
+                expected_job_id=41,
+                expected_representative_alert_id="claimed-alert",
+                expected_dispatch_id="a" * 64,
+                expected_stable_group_key="v2|claimed-group",
             )
 
         self.assertIsInstance(claimed, self.scheduler.ClaimedAiLease)
         self.assertEqual(claimed, "claim-lease")
         self.assertEqual(claimed.job_type, "ai_analysis")
         self.assertEqual(claimed.resolved_key, "claimed-group")
+        self.assertEqual(claimed.job_id, 41)
         self.assertEqual(
             claimed.job_payload,
             {
                 "group_id": "claimed-group",
                 "alert_id": "claimed-alert",
             },
+        )
+        request_payload = json.loads(
+            urlopen.call_args.args[0].data.decode("utf-8")
+        )
+        self.assertEqual(request_payload["expected_job_id"], 41)
+        self.assertEqual(
+            request_payload["expected_representative_alert_id"],
+            "claimed-alert",
+        )
+        self.assertEqual(
+            request_payload["expected_stable_group_key"],
+            "v2|claimed-group",
         )
 
     def insert_alert(
@@ -280,16 +518,39 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         register_claimed_alert: bool = True,
         job_type: str = "ai_analysis",
         analysis_threshold: str = "medium",
+        only_group_id: str = "",
+        only_alert_id: str = "",
+        only_stable_group_key: str = "",
+        only_dispatch_id: str = "",
+        current_alert_group_key: str | None = None,
     ) -> dict[str, object]:
         """Run one indexed job through main() with inference boundaries mocked."""
         self.enable_indexed_scheduler()
         alert_id = f"{job_type}-{severity}-threshold-alert"
-        group_id = f"{job_type}-{severity}-threshold-group"
+        group_id = only_group_id or f"{job_type}-{severity}-threshold-group"
+        frozen_group_key = (
+            only_stable_group_key
+            or (f"key:{group_id}" if only_group_id else "")
+        )
+        queued_payload = dict(payload or {})
+        if only_group_id:
+            queued_payload.setdefault("alert_id", alert_id)
+            queued_payload.setdefault("representative_alert_id", alert_id)
+            queued_payload.setdefault("group_id", group_id)
+            queued_payload.setdefault("stable_group_id", group_id)
+            queued_payload.setdefault("stable_group_key", frozen_group_key)
+            queued_payload.setdefault("dispatch_id", only_dispatch_id)
+            queued_payload.setdefault("release_id", DEPLOYED_RELEASE)
         self.insert_alert(alert_id, severity, "2026-07-24  12:00:00Z", 80)
         self.set_stable_group(alert_id, group_id)
+        if current_alert_group_key is not None:
+            self.conn.execute(
+                "UPDATE alerts SET stable_group_key = ? WHERE alert_id = ?",
+                (current_alert_group_key, alert_id),
+            )
         self.insert_indexed_job(
             group_id,
-            payload=payload,
+            payload=queued_payload,
             job_type=job_type,
         )
         if claimed_payload and register_claimed_alert:
@@ -341,6 +602,10 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             levels="critical,high,medium,low,informational",
             hours=87600,
             max_per_run=1,
+            only_group_id=only_group_id,
+            only_alert_id=only_alert_id,
+            only_stable_group_key=frozen_group_key,
+            only_dispatch_id=only_dispatch_id,
             related_limit=8,
             correlation_limit=8,
             correlation_min_score=15,
@@ -364,15 +629,39 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             lease_token: str = "",
             job_type: str = "ai_analysis",
             retryable: bool = True,
+            expected_job_id: int = 0,
+            expected_representative_alert_id: str = "",
+            expected_dispatch_id: str = "",
+            expected_stable_group_key: str = "",
         ) -> bool | str:
             del lease_token, retryable
             if status != "processing":
                 return True
             authoritative_payload = dict(
-                claimed_payload if claimed_payload is not None else (payload or {})
+                claimed_payload
+                if claimed_payload is not None
+                else queued_payload
             )
             authoritative_payload.setdefault("alert_id", alert_id)
             authoritative_payload.setdefault("group_id", group_id)
+            if only_group_id:
+                authoritative_payload.setdefault(
+                    "representative_alert_id",
+                    queued_payload.get("representative_alert_id", alert_id),
+                )
+                authoritative_payload.setdefault("stable_group_id", group_id)
+                authoritative_payload.setdefault(
+                    "stable_group_key",
+                    frozen_group_key,
+                )
+                authoritative_payload.setdefault(
+                    "dispatch_id",
+                    only_dispatch_id,
+                )
+                authoritative_payload.setdefault(
+                    "release_id",
+                    DEPLOYED_RELEASE,
+                )
             return self.scheduler.ClaimedAiLease(
                 "threshold-test-lease",
                 job_payload=(
@@ -390,6 +679,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                     if claimed_resolved_key is not None
                     else group_id
                 ),
+                job_id=expected_job_id,
                 reanalysis_attempt_id=(
                     self.scheduler.job_reanalysis_attempt_id(
                         authoritative_payload,
@@ -430,6 +720,10 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                 return_value=completed_process,
             ) as run_analysis,
             mock.patch.object(self.scheduler, "signal_dashboard_refresh"),
+            mock.patch.dict(
+                os.environ,
+                {"ONION_SENTINEL_RELEASE_ID": DEPLOYED_RELEASE},
+            ),
         ):
             return_code = self.scheduler.main()
 
@@ -639,6 +933,217 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         self.assertEqual(failed.args[2], "failed")
         self.assertIn("alert identity is invalid", failed.args[3])
         self.assertIs(failed.kwargs["retryable"], False)
+
+    def test_controlled_worker_runs_only_for_exact_claim_identity(self) -> None:
+        group_id = "0123456789abcdefabcd"
+        alert_id = "ai_analysis-critical-threshold-alert"
+        dispatch_id = "a" * 64
+
+        result = self.run_indexed_worker_once(
+            severity="critical",
+            payload={
+                "manual_reanalysis": True,
+                "dispatch_id": dispatch_id,
+            },
+            only_group_id=group_id,
+            only_alert_id=alert_id,
+            only_dispatch_id=dispatch_id,
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["build_prompt"].assert_called_once()
+        result["run_analysis"].assert_called_once()
+        self.assertEqual(
+            result["build_prompt"].call_args.args[0],
+            alert_id,
+        )
+
+    def test_controlled_worker_rejects_replaced_claim_alert_before_prompt(
+        self,
+    ) -> None:
+        group_id = "0123456789abcdefabcd"
+        expected_alert_id = "ai_analysis-critical-threshold-alert"
+        dispatch_id = "b" * 64
+
+        result = self.run_indexed_worker_once(
+            severity="critical",
+            payload={
+                "manual_reanalysis": True,
+                "dispatch_id": dispatch_id,
+            },
+            claimed_payload={
+                "manual_reanalysis": True,
+                "alert_id": "replacement-alert",
+                "dispatch_id": dispatch_id,
+            },
+            only_group_id=group_id,
+            only_alert_id=expected_alert_id,
+            only_dispatch_id=dispatch_id,
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["collect_incident_evidence"].assert_not_called()
+        result["build_prompt"].assert_not_called()
+        result["run_analysis"].assert_not_called()
+        released = result["report_status"].call_args_list[-1]
+        self.assertEqual(released.args[2], "failed")
+        self.assertIn("alert identity", released.args[3])
+        self.assertIs(released.kwargs["retryable"], True)
+
+    def test_controlled_incident_worker_rejects_dispatch_drift_before_evidence(
+        self,
+    ) -> None:
+        group_id = "fedcba9876543210abcd"
+        alert_id = "incident_response_analysis-critical-threshold-alert"
+        expected_dispatch_id = "c" * 64
+
+        result = self.run_indexed_worker_once(
+            severity="critical",
+            payload={
+                "agent_role": "incident-responder",
+                "manual_reanalysis": True,
+                "dispatch_id": expected_dispatch_id,
+            },
+            claimed_payload={
+                "agent_role": "incident-responder",
+                "manual_reanalysis": True,
+                "dispatch_id": "d" * 64,
+            },
+            job_type="incident_response_analysis",
+            only_group_id=group_id,
+            only_alert_id=alert_id,
+            only_dispatch_id=expected_dispatch_id,
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["collect_incident_evidence"].assert_not_called()
+        result["build_prompt"].assert_not_called()
+        result["run_analysis"].assert_not_called()
+        released = result["report_status"].call_args_list[-1]
+        self.assertEqual(released.args[2], "failed")
+        self.assertIn("dispatch identity did not match", released.args[3])
+        self.assertIs(released.kwargs["retryable"], True)
+
+    def test_controlled_worker_rejects_mismatched_candidate_without_claim(self) -> None:
+        group_id = "abcdef0123456789abcd"
+        alert_id = "ai_analysis-critical-threshold-alert"
+        dispatch_id = "e" * 64
+        result = self.run_indexed_worker_once(
+            severity="critical",
+            payload={
+                "manual_reanalysis": True,
+                "alert_id": "ordinary-replacement-alert",
+                "dispatch_id": dispatch_id,
+            },
+            only_group_id=group_id,
+            only_alert_id=alert_id,
+            only_dispatch_id=dispatch_id,
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["report_status"].assert_not_called()
+        result["collect_incident_evidence"].assert_not_called()
+        result["build_prompt"].assert_not_called()
+        result["run_analysis"].assert_not_called()
+
+    def test_controlled_worker_rejects_release_mismatch_before_claim(self) -> None:
+        group_id = "abcdef0123456789abcd"
+        alert_id = "ai_analysis-critical-threshold-alert"
+        dispatch_id = "9" * 64
+        result = self.run_indexed_worker_once(
+            severity="critical",
+            payload={
+                "manual_reanalysis": True,
+                "dispatch_id": dispatch_id,
+                "release_id": "e" * 40,
+            },
+            only_group_id=group_id,
+            only_alert_id=alert_id,
+            only_dispatch_id=dispatch_id,
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["report_status"].assert_not_called()
+        result["collect_incident_evidence"].assert_not_called()
+        result["build_prompt"].assert_not_called()
+        result["run_analysis"].assert_not_called()
+
+    def test_controlled_worker_releases_only_owned_lease_on_release_drift(
+        self,
+    ) -> None:
+        group_id = "bbcdef0123456789abcd"
+        alert_id = "ai_analysis-critical-threshold-alert"
+        dispatch_id = "8" * 64
+        result = self.run_indexed_worker_once(
+            severity="critical",
+            payload={
+                "manual_reanalysis": True,
+                "dispatch_id": dispatch_id,
+            },
+            claimed_payload={
+                "manual_reanalysis": True,
+                "dispatch_id": dispatch_id,
+                "release_id": "e" * 40,
+            },
+            only_group_id=group_id,
+            only_alert_id=alert_id,
+            only_dispatch_id=dispatch_id,
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["build_prompt"].assert_not_called()
+        result["run_analysis"].assert_not_called()
+        released = result["report_status"].call_args_list[-1]
+        self.assertEqual(released.args[2], "failed")
+        self.assertIn("release_id did not match", released.args[3])
+        self.assertIs(released.kwargs["retryable"], True)
+
+    def test_controlled_worker_requeues_owned_lease_when_alert_key_drifts(
+        self,
+    ) -> None:
+        group_id = "bcdef0123456789abcde"
+        alert_id = "ai_analysis-critical-threshold-alert"
+        dispatch_id = "f" * 64
+        result = self.run_indexed_worker_once(
+            severity="critical",
+            payload={"manual_reanalysis": True, "dispatch_id": dispatch_id},
+            only_group_id=group_id,
+            only_alert_id=alert_id,
+            only_dispatch_id=dispatch_id,
+            current_alert_group_key="key:post-queue-drift",
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["build_prompt"].assert_not_called()
+        result["run_analysis"].assert_not_called()
+        released = result["report_status"].call_args_list[-1]
+        self.assertEqual(released.args[2], "failed")
+        self.assertIn("stable group key is invalid", released.args[3])
+        self.assertIs(released.kwargs["retryable"], True)
+
+    def test_worker_rejects_invalid_claimed_and_current_stable_group_key(
+        self,
+    ) -> None:
+        invalid_key = "v2|bad\x00group"
+        result = self.run_indexed_worker_once(
+            severity="critical",
+            payload={
+                "manual_reanalysis": True,
+                "stable_group_key": invalid_key,
+            },
+            claimed_payload={
+                "manual_reanalysis": True,
+                "stable_group_key": invalid_key,
+            },
+            current_alert_group_key=invalid_key,
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["build_prompt"].assert_not_called()
+        result["run_analysis"].assert_not_called()
+        released = result["report_status"].call_args_list[-1]
+        self.assertEqual(released.args[2], "failed")
+        self.assertIn("stable group key is invalid", released.args[3])
 
     def test_incident_responder_low_job_bypasses_medium_threshold(self) -> None:
         result = self.run_indexed_worker_once(

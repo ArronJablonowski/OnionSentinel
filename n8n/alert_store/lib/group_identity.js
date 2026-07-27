@@ -2,9 +2,26 @@
 
 const crypto = require('crypto');
 
+const STABLE_GROUP_KEY_MAX_UTF8_BYTES = 2048;
+
 function text(value, fallback) {
   const normalized = String(value ?? '').trim().toLowerCase();
   return normalized || fallback;
+}
+
+function validPinnedStableGroupKey(value) {
+  if (
+    typeof value !== 'string'
+    || value.length === 0
+    || value.includes('\0')
+  ) {
+    return false;
+  }
+  const encoded = Buffer.from(value, 'utf8');
+  return (
+    encoded.length <= STABLE_GROUP_KEY_MAX_UTF8_BYTES
+    && encoded.toString('utf8') === value
+  );
 }
 
 // V2 intentionally excludes severity, routing, filter state, and analyst state.
@@ -25,4 +42,9 @@ function stableGroupId(row) {
   return crypto.createHash('sha256').update(stableGroupKey(row)).digest('hex').slice(0, 20);
 }
 
-module.exports = {stableGroupKey, stableGroupId};
+module.exports = {
+  STABLE_GROUP_KEY_MAX_UTF8_BYTES,
+  stableGroupKey,
+  stableGroupId,
+  validPinnedStableGroupKey,
+};

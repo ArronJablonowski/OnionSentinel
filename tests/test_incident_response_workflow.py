@@ -383,6 +383,52 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertEqual(request["related_limit"], 250)
         self.assertEqual(request["pcap_analysis_limit"], 25)
 
+    def test_escalation_api_forwards_exact_frozen_dispatch_identity(self) -> None:
+        group_id = "a" * 12
+        identity = {
+            "representative_alert_id": "frozen-escalation-alert",
+            "stable_group_id": "abcdef1234567890abcd",
+            "stable_group_key": "v2|critical|escalation-test",
+            "cohort_id": "newest-20-ir.2026_07_26",
+            "dispatch_id": "b" * 64,
+            "release_id": "d" * 40,
+        }
+        with mock.patch.object(
+            self.portal,
+            "alert_store_post_json",
+            return_value={"ok": True, "case_id": "ir-unit", **identity},
+        ) as post:
+            status, payload = self.portal.soc_alert_escalate_response(
+                group_id,
+                identity,
+            )
+
+        self.assertEqual(status, 202)
+        self.assertTrue(payload["ok"])
+        path, request = post.call_args.args
+        self.assertEqual(path, "/incidents/escalate")
+        for field, expected in identity.items():
+            self.assertEqual(request[field], expected)
+
+    def test_escalation_api_preserves_alert_store_identity_conflict(self) -> None:
+        group_id = "a" * 12
+        with mock.patch.object(
+            self.portal,
+            "alert_store_post_json",
+            side_effect=self.portal.AlertStoreRequestError(
+                "frozen stable group no longer matches",
+                409,
+            ),
+        ):
+            status, payload = self.portal.soc_alert_escalate_response(
+                group_id,
+                {"stable_group_id": "abcdef1234567890abcd"},
+            )
+
+        self.assertEqual(status, 409)
+        self.assertFalse(payload["ok"])
+        self.assertIn("no longer matches", payload["error"])
+
     def test_adjudication_proxy_validates_and_forwards_bounded_human_fields(self) -> None:
         group_id = "a" * 12
         with mock.patch.object(
@@ -825,6 +871,39 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertEqual(len(captured), 2)
         for _path, forwarded in captured:
             self.assertNotIn("release_id", forwarded)
+
+    def test_case_reanalysis_forwards_exact_frozen_dispatch_identity(self) -> None:
+        identity = {
+            "representative_alert_id": "frozen-reanalysis-alert",
+            "stable_group_id": "abcdef1234567890abcd",
+            "stable_group_key": "v2|critical|reanalysis-test",
+            "cohort_id": "newest-20-ir.2026_07_26",
+            "dispatch_id": "c" * 64,
+            "release_id": "d" * 40,
+        }
+        with (
+            mock.patch.object(
+                self.portal,
+                "_soc_incident_case_group_id",
+                return_value=(200, "a" * 12),
+            ),
+            mock.patch.object(
+                self.portal,
+                "_soc_alert_store_mutation",
+                return_value=(202, {"ok": True, **identity}),
+            ) as mutation,
+        ):
+            status, payload = self.portal.soc_incident_reanalysis_response(
+                "ir-frozen-case",
+                identity,
+            )
+
+        self.assertEqual(status, 202)
+        self.assertTrue(payload["ok"])
+        path, request = mutation.call_args.args
+        self.assertEqual(path, "/incidents/reanalyze")
+        for field, expected in identity.items():
+            self.assertEqual(request[field], expected)
 
     def test_reanalysis_progress_api_reports_exact_case_counts(self) -> None:
         conn = sqlite3.connect(self.db_path)

@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import urllib.error
 import urllib.request
 import sys
@@ -71,6 +72,99 @@ AGENT_ROLES = (
     "cyber-threat-intel",
     "threat-hunter",
 )
+CONTROLLED_ALERT_ID_RE = re.compile(r"[A-Za-z0-9._:@=-]{1,256}")
+CONTROLLED_DISPATCH_ID_RE = re.compile(r"[a-f0-9]{64}")
+CONTROLLED_RELEASE_ID_RE = re.compile(r"[a-f0-9]{40}")
+CONTROLLED_STABLE_GROUP_KEY_MAX_LENGTH = 2048
+RUNTIME_RELEASE_ENV_KEY = "ONION_SENTINEL_RELEASE_ID"
+DEFAULT_RUNTIME_ENV_PATH = HOME / "n8n-local" / ".env"
+MAX_RUNTIME_ENV_BYTES = 1024 * 1024
+
+
+def valid_controlled_stable_group_key(value: object) -> bool:
+    """Return whether a frozen group key has one safe bounded UTF-8 encoding."""
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return len(encoded) <= CONTROLLED_STABLE_GROUP_KEY_MAX_LENGTH
+
+
+def current_runtime_release_id(
+    *,
+    environ: object | None = None,
+    env_path: Path | None = None,
+) -> str:
+    """Return the exact deployed commit attestation without evaluating .env.
+
+    LaunchAgents invoke this worker directly and therefore do not inherit the
+    runtime ``.env`` loaded by alert-store's shell wrapper. An explicitly
+    supplied process value is authoritative; only its absence permits the
+    bounded, literal fallback below.
+    """
+    source = os.environ if environ is None else environ
+    try:
+        explicitly_supplied = RUNTIME_RELEASE_ENV_KEY in source
+    except TypeError:
+        explicitly_supplied = False
+    if explicitly_supplied:
+        candidate = source.get(RUNTIME_RELEASE_ENV_KEY, "")
+        return (
+            candidate
+            if isinstance(candidate, str)
+            and CONTROLLED_RELEASE_ID_RE.fullmatch(candidate)
+            else ""
+        )
+
+    path = DEFAULT_RUNTIME_ENV_PATH if env_path is None else Path(env_path)
+    try:
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            return ""
+        if metadata.st_size > MAX_RUNTIME_ENV_BYTES:
+            return ""
+        raw = path.read_bytes()
+    except OSError:
+        return ""
+    if len(raw) > MAX_RUNTIME_ENV_BYTES:
+        return ""
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return ""
+
+    candidates: list[str] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() == RUNTIME_RELEASE_ENV_KEY:
+            candidates.append(value.strip())
+    if len(candidates) != 1:
+        return ""
+    candidate = candidates[0]
+    return candidate if CONTROLLED_RELEASE_ID_RE.fullmatch(candidate) else ""
+
+
+def require_controlled_release_attestation(
+    claimed_payload: dict[str, object],
+) -> str:
+    """Bind one controlled durable payload to the code running this worker."""
+    payload_release_id = claimed_payload.get("release_id")
+    runtime_release_id = current_runtime_release_id()
+    if (
+        not isinstance(payload_release_id, str)
+        or not CONTROLLED_RELEASE_ID_RE.fullmatch(payload_release_id)
+        or not runtime_release_id
+        or payload_release_id != runtime_release_id
+    ):
+        raise ControlledClaimRejected(
+            "controlled AI claim release_id did not match the deployed runtime"
+        )
+    return runtime_release_id
 
 
 def alert_time_sql(alias: str = "") -> str:
@@ -133,7 +227,34 @@ def parse_args() -> argparse.Namespace:
         default="",
         help=(
             "Process only one exact 20-hex stable detection group. "
-            "Intended for controlled, one-case evaluation runs."
+            "Controlled runs must also supply --only-alert-id, "
+            "--only-stable-group-key, and --only-dispatch-id."
+        ),
+    )
+    parser.add_argument(
+        "--only-alert-id",
+        default="",
+        help=(
+            "Require the claimed durable payload to contain this exact bounded "
+            "Security Onion/Elastic alert ID. Requires --only-group-id and "
+            "--only-stable-group-key and --only-dispatch-id."
+        ),
+    )
+    parser.add_argument(
+        "--only-stable-group-key",
+        default="",
+        help=(
+            "Require the claimed durable payload to contain this exact bounded "
+            "stable group key. Requires every other --only-* identity field."
+        ),
+    )
+    parser.add_argument(
+        "--only-dispatch-id",
+        default="",
+        help=(
+            "Require the claimed durable payload to contain this exact "
+            "64-character lowercase SHA-256 dispatch ID. Requires "
+            "--only-group-id, --only-alert-id, and --only-stable-group-key."
         ),
     )
     parser.add_argument("--related-limit", type=int, default=8, help="Related alert count passed to prompt builder")
@@ -162,8 +283,43 @@ def parse_args() -> argparse.Namespace:
     if args.max_per_run < 0:
         parser.error("--max-per-run must be zero or positive")
     args.only_group_id = str(args.only_group_id or "").strip().lower()
+    args.only_alert_id = str(args.only_alert_id or "").strip()
+    args.only_stable_group_key = str(args.only_stable_group_key or "")
+    args.only_dispatch_id = str(args.only_dispatch_id or "").strip()
+    controlled_identity = (
+        bool(args.only_group_id),
+        bool(args.only_alert_id),
+        bool(args.only_stable_group_key),
+        bool(args.only_dispatch_id),
+    )
+    if any(controlled_identity) and not all(controlled_identity):
+        parser.error(
+            "--only-group-id, --only-alert-id, --only-stable-group-key, "
+            "and --only-dispatch-id must be supplied together"
+        )
     if args.only_group_id and not re.fullmatch(r"[a-f0-9]{20}", args.only_group_id):
         parser.error("--only-group-id must be one exact 20-hex stable group id")
+    if args.only_alert_id and not CONTROLLED_ALERT_ID_RE.fullmatch(
+        args.only_alert_id
+    ):
+        parser.error(
+            "--only-alert-id must be one bounded Security Onion/Elastic alert ID"
+        )
+    if args.only_stable_group_key and not valid_controlled_stable_group_key(
+        args.only_stable_group_key
+    ):
+        parser.error(
+            "--only-stable-group-key must be non-empty valid UTF-8, contain "
+            "no NUL, and be no longer than "
+            f"{CONTROLLED_STABLE_GROUP_KEY_MAX_LENGTH} bytes"
+        )
+    if args.only_dispatch_id and not CONTROLLED_DISPATCH_ID_RE.fullmatch(
+        args.only_dispatch_id
+    ):
+        parser.error(
+            "--only-dispatch-id must be one exact 64-character lowercase "
+            "SHA-256 hex digest"
+        )
     if args.correlation_limit <= 0:
         parser.error("--correlation-limit must be positive")
     if args.correlation_min_score < 0 or args.correlation_min_score > 100:
@@ -292,12 +448,17 @@ def rows(conn: sqlite3.Connection, sql: str, params: Iterable[object] = ()) -> l
     return conn.execute(sql, tuple(params)).fetchall()
 
 
+class ControlledClaimRejected(RuntimeError):
+    """An exact controlled job was not claimed; no queue mutation is owned."""
+
+
 class ClaimedAiLease(str):
     """Lease token carrying the server-authoritative job snapshot it claimed."""
 
     job_payload: dict[str, object]
     job_type: str
     resolved_key: str
+    job_id: int
     reanalysis_attempt_id: str
 
     def __new__(
@@ -307,14 +468,20 @@ class ClaimedAiLease(str):
         job_payload: dict[str, object] | None = None,
         job_type: str = "",
         resolved_key: str = "",
+        job_id: int = 0,
         reanalysis_attempt_id: str = "",
     ):
         value = super().__new__(cls, token)
+        try:
+            normalized_job_id = int(job_id or 0)
+        except (TypeError, ValueError):
+            normalized_job_id = 0
         value.job_payload = (
             job_payload if isinstance(job_payload, dict) else {}
         )
         value.job_type = str(job_type or "")
         value.resolved_key = str(resolved_key or "")
+        value.job_id = normalized_job_id
         value.reanalysis_attempt_id = str(reanalysis_attempt_id or "")
         return value
 
@@ -327,6 +494,10 @@ def report_ai_job_status(
     lease_token: str = "",
     job_type: str = "ai_analysis",
     retryable: bool = True,
+    expected_job_id: int = 0,
+    expected_representative_alert_id: str = "",
+    expected_dispatch_id: str = "",
+    expected_stable_group_key: str = "",
 ) -> bool | str:
     """Transition durable AI intent through a bounded local HTTP contract.
 
@@ -335,14 +506,42 @@ def report_ai_job_status(
     worker never performs expensive inference without a durable processing
     lease in the current indexed architecture.
     """
-    payload = json.dumps({
+    request_payload = {
         "job_type": job_type,
         "dedupe_key": group_id,
         "status": status,
         "error": error[:1000],
         "lease_token": lease_token,
         "retryable": bool(retryable),
-    }).encode("utf-8")
+    }
+    exact_claim_values = (
+        int(expected_job_id or 0),
+        str(expected_representative_alert_id or ""),
+        str(expected_dispatch_id or ""),
+        str(expected_stable_group_key or ""),
+    )
+    if any(exact_claim_values):
+        if (
+            status != "processing"
+            or lease_token
+            or not all(exact_claim_values)
+        ):
+            raise ControlledClaimRejected(
+                "controlled durable AI claim identity is incomplete"
+            )
+        if not valid_controlled_stable_group_key(exact_claim_values[3]):
+            raise ControlledClaimRejected(
+                "controlled durable AI claim stable group key is invalid"
+            )
+        request_payload.update(
+            {
+                "expected_job_id": exact_claim_values[0],
+                "expected_representative_alert_id": exact_claim_values[1],
+                "expected_dispatch_id": exact_claim_values[2],
+                "expected_stable_group_key": exact_claim_values[3],
+            }
+        )
+    payload = json.dumps(request_payload).encode("utf-8")
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/jobs/status",
         data=payload,
@@ -363,6 +562,10 @@ def report_ai_job_status(
                 claim = result.get("claim")
                 claim = claim if isinstance(claim, dict) else {}
                 claimed_payload = claim.get("payload")
+                try:
+                    claimed_job_id = int(claim.get("job_id") or 0)
+                except (TypeError, ValueError):
+                    claimed_job_id = 0
                 return ClaimedAiLease(
                     claimed_token,
                     job_payload=(
@@ -376,12 +579,17 @@ def report_ai_job_status(
                         or result.get("dedupe_key")
                         or group_id
                     ),
+                    job_id=claimed_job_id,
                     reanalysis_attempt_id=str(
                         claim.get("reanalysis_attempt_id") or ""
                     ),
                 )
             return True
     except urllib.error.HTTPError as exc:
+        if exc.code == 409:
+            raise ControlledClaimRejected(
+                "controlled durable AI job changed before it could be claimed"
+            ) from exc
         if exc.code == 404:
             return False
         raise RuntimeError(f"AI job status returned HTTP {exc.code}") from exc
@@ -428,6 +636,12 @@ NON_RETRYABLE_AI_FAILURE_MARKERS = (
     "durable ai claim job identity is invalid",
     "durable ai claim group identity is invalid",
     "durable ai claim alert identity is invalid",
+    "controlled ai run requires a durable ai job claim",
+    "controlled ai run identity arguments are incomplete",
+    "controlled ai claim group identity did not match",
+    "controlled ai claim alert identity did not match",
+    "controlled ai claim dispatch identity did not match",
+    "controlled ai claim release_id did not match",
 )
 
 
@@ -975,6 +1189,7 @@ def select_next_alert_indexed(
                COALESCE(NULLIF(r.filter_status, ''), 'accepted') AS filter_status,
                r.stable_group_id, r.routing, r.suppression_key, r.queue_time,
                COALESCE(NULLIF(r.stable_group_key, ''), r.stable_group_id) AS queue_group_key,
+               p.id AS durable_job_id,
                p.payload_json AS durable_payload_json,
                p.job_type AS durable_job_type,
                CASE WHEN p.id IS NOT NULL THEN 1 ELSE 0 END AS has_durable_intent,
@@ -1215,6 +1430,7 @@ def claimed_durable_ai_job(
     *,
     expected_job_type: str,
     expected_group_id: str,
+    expected_job_id: int = 0,
 ) -> tuple[dict[str, object], str, str, str]:
     """Validate and return the exact durable AI snapshot bound to a lease."""
     claimed_payload = getattr(processing_transition, "job_payload", None)
@@ -1227,6 +1443,11 @@ def claimed_durable_ai_job(
         getattr(processing_transition, "job_type", "") or ""
     ).strip()
     if claimed_job_type != expected_job_type:
+        raise RuntimeError("durable AI claim job identity is invalid")
+    claimed_job_id = int(
+        getattr(processing_transition, "job_id", 0) or 0
+    )
+    if expected_job_id and claimed_job_id != expected_job_id:
         raise RuntimeError("durable AI claim job identity is invalid")
 
     resolved_group_id = str(
@@ -1261,7 +1482,7 @@ def claimed_durable_ai_job(
         try:
             alert = connection.execute(
                 """
-                SELECT stable_group_id, triage_level
+                SELECT stable_group_id, stable_group_key, triage_level
                 FROM alerts
                 WHERE alert_id = ?
                 LIMIT 1
@@ -1281,6 +1502,19 @@ def claimed_durable_ai_job(
         != resolved_group_id
     ):
         raise RuntimeError("durable AI claim alert identity is invalid")
+    claimed_stable_group_key = claimed_payload.get("stable_group_key")
+    if (
+        claimed_stable_group_key is not None
+        and (
+            not valid_controlled_stable_group_key(claimed_stable_group_key)
+            or not valid_controlled_stable_group_key(
+                alert["stable_group_key"]
+            )
+            or str(alert["stable_group_key"] or "")
+            != claimed_stable_group_key
+        )
+    ):
+        raise RuntimeError("durable AI claim stable group key is invalid")
     triage_level = str(alert["triage_level"] or "").strip().lower()
     if triage_level not in SEVERITY_PRIORITY:
         raise RuntimeError("durable AI claim alert identity is invalid")
@@ -1290,6 +1524,178 @@ def claimed_durable_ai_job(
         resolved_group_id,
         triage_level,
     )
+
+
+def require_controlled_claim_identity(
+    args: argparse.Namespace,
+    claimed_payload: dict[str, object],
+    *,
+    claimed_alert_id: str,
+    claimed_group_id: str,
+    claimed_job_id: int,
+    expected_job_id: int,
+) -> None:
+    """Fail closed when a controlled run leases a different frozen member."""
+    expected_group_id = str(
+        getattr(args, "only_group_id", "") or ""
+    ).strip().lower()
+    expected_alert_id = str(
+        getattr(args, "only_alert_id", "") or ""
+    ).strip()
+    expected_stable_group_key = str(
+        getattr(args, "only_stable_group_key", "") or ""
+    )
+    expected_dispatch_id = str(
+        getattr(args, "only_dispatch_id", "") or ""
+    ).strip()
+    configured_identity = (
+        bool(expected_group_id),
+        bool(expected_alert_id),
+        bool(expected_stable_group_key),
+        bool(expected_dispatch_id),
+    )
+    if not any(configured_identity):
+        return
+    if not all(configured_identity):
+        raise ControlledClaimRejected(
+            "controlled AI run identity arguments are incomplete"
+        )
+    if not valid_controlled_stable_group_key(expected_stable_group_key):
+        raise ControlledClaimRejected(
+            "controlled AI run stable group key is invalid"
+        )
+    require_controlled_release_attestation(claimed_payload)
+
+    if (
+        int(claimed_job_id or 0) != int(expected_job_id or 0)
+        or int(expected_job_id or 0) < 1
+    ):
+        raise ControlledClaimRejected(
+            "controlled AI claim job identity did not match the selected job"
+        )
+
+    payload_group_id = str(
+        claimed_payload.get("group_id") or ""
+    ).strip().lower()
+    payload_stable_group_id = str(
+        claimed_payload.get("stable_group_id") or ""
+    ).strip().lower()
+    if (
+        str(claimed_group_id or "").strip().lower() != expected_group_id
+        or payload_group_id != expected_group_id
+        or payload_stable_group_id != expected_group_id
+    ):
+        raise ControlledClaimRejected(
+            "controlled AI claim group identity did not match --only-group-id"
+        )
+
+    payload_alert_id = str(claimed_payload.get("alert_id") or "").strip()
+    payload_representative_alert_id = str(
+        claimed_payload.get("representative_alert_id") or ""
+    ).strip()
+    if (
+        str(claimed_alert_id or "").strip() != expected_alert_id
+        or payload_alert_id != expected_alert_id
+        or payload_representative_alert_id != expected_alert_id
+    ):
+        raise ControlledClaimRejected(
+            "controlled AI claim alert identity did not match --only-alert-id"
+        )
+
+    if (
+        not valid_controlled_stable_group_key(
+            claimed_payload.get("stable_group_key")
+        )
+        or claimed_payload.get("stable_group_key")
+        != expected_stable_group_key
+    ):
+        raise ControlledClaimRejected(
+            "controlled AI claim stable group key did not match "
+            "--only-stable-group-key"
+        )
+
+    payload_dispatch_id = str(
+        claimed_payload.get("dispatch_id") or ""
+    ).strip()
+    if payload_dispatch_id != expected_dispatch_id:
+        raise ControlledClaimRejected(
+            "controlled AI claim dispatch identity did not match "
+            "--only-dispatch-id"
+        )
+
+
+def controlled_claim_expectations(
+    args: argparse.Namespace,
+    selected: sqlite3.Row,
+    job_payload: dict[str, object],
+) -> dict[str, object]:
+    """Validate the read-only candidate before asking for an exact atomic claim."""
+    expected_group_id = str(
+        getattr(args, "only_group_id", "") or ""
+    ).strip().lower()
+    expected_alert_id = str(
+        getattr(args, "only_alert_id", "") or ""
+    ).strip()
+    expected_stable_group_key = str(
+        getattr(args, "only_stable_group_key", "") or ""
+    )
+    expected_dispatch_id = str(
+        getattr(args, "only_dispatch_id", "") or ""
+    ).strip()
+    identity = (
+        expected_group_id,
+        expected_alert_id,
+        expected_stable_group_key,
+        expected_dispatch_id,
+    )
+    if not any(identity):
+        return {}
+    if not all(identity):
+        raise ControlledClaimRejected(
+            "controlled AI run identity arguments are incomplete"
+        )
+    if not valid_controlled_stable_group_key(expected_stable_group_key):
+        raise ControlledClaimRejected(
+            "controlled AI run stable group key is invalid"
+        )
+    require_controlled_release_attestation(job_payload)
+    try:
+        expected_job_id = int(selected["durable_job_id"] or 0)
+    except (IndexError, KeyError, TypeError, ValueError):
+        expected_job_id = 0
+    if expected_job_id < 1:
+        raise ControlledClaimRejected(
+            "controlled AI run requires an exact durable AI job"
+        )
+    payload_alert_id = str(job_payload.get("alert_id") or "").strip()
+    payload_representative_alert_id = str(
+        job_payload.get("representative_alert_id") or ""
+    ).strip()
+    payload_group_id = str(job_payload.get("group_id") or "").strip().lower()
+    payload_stable_group_id = str(
+        job_payload.get("stable_group_id") or ""
+    ).strip().lower()
+    if (
+        payload_alert_id != expected_alert_id
+        or payload_representative_alert_id != expected_alert_id
+        or payload_group_id != expected_group_id
+        or payload_stable_group_id != expected_group_id
+        or not valid_controlled_stable_group_key(
+            job_payload.get("stable_group_key")
+        )
+        or job_payload.get("stable_group_key") != expected_stable_group_key
+        or str(job_payload.get("dispatch_id") or "").strip()
+        != expected_dispatch_id
+    ):
+        raise ControlledClaimRejected(
+            "controlled durable AI candidate no longer matches the frozen dispatch"
+        )
+    return {
+        "expected_job_id": expected_job_id,
+        "expected_representative_alert_id": expected_alert_id,
+        "expected_dispatch_id": expected_dispatch_id,
+        "expected_stable_group_key": expected_stable_group_key,
+    }
 
 
 def bounded_int(value: object, default: int, minimum: int, maximum: int) -> int:
@@ -1673,33 +2079,93 @@ def main() -> int:
             processing_recorded = False
             processing_lease_token = ""
             reanalysis_attempt_id = ""
+            exact_claim: dict[str, object] = {}
+            controlled_exact_lease_owned = False
             try:
+                controlled_identity_requested = any(
+                    str(getattr(args, field, "") or "")
+                    for field in (
+                        "only_group_id",
+                        "only_alert_id",
+                        "only_stable_group_key",
+                        "only_dispatch_id",
+                    )
+                )
+                if controlled_identity_requested and not (
+                    indexed_mode and durable_intent
+                ):
+                    raise ControlledClaimRejected(
+                        "controlled AI run requires a durable AI job claim"
+                    )
+                exact_claim = (
+                    controlled_claim_expectations(args, selected, job_payload)
+                    if controlled_identity_requested
+                    else {}
+                )
                 processing_transition = report_ai_job_status(
                     args.alert_store_url,
                     selected_group_id,
                     "processing",
                     job_type=durable_job_type,
+                    **exact_claim,
                 )
                 processing_recorded = bool(processing_transition)
                 processing_lease_token = (
                     processing_transition if isinstance(processing_transition, str) else ""
                 )
+                controlled_exact_lease_owned = bool(
+                    controlled_identity_requested
+                    and processing_recorded
+                    and int(
+                        getattr(processing_transition, "job_id", 0) or 0
+                    )
+                    == int(exact_claim.get("expected_job_id") or 0)
+                )
                 if indexed_mode and durable_intent and not processing_recorded:
-                    raise RuntimeError("durable AI job disappeared before its processing lease was recorded")
+                    if controlled_identity_requested:
+                        raise ControlledClaimRejected(
+                            "controlled durable AI job disappeared before "
+                            "its processing lease was recorded"
+                        )
+                    raise RuntimeError(
+                        "durable AI job disappeared before its processing "
+                        "lease was recorded"
+                    )
                 claimed_triage_level = str(
                     selected["triage_level"] or ""
                 ).strip().lower()
                 if indexed_mode and durable_intent:
-                    (
+                    try:
+                        (
+                            job_payload,
+                            alert_id,
+                            selected_group_id,
+                            claimed_triage_level,
+                        ) = claimed_durable_ai_job(
+                            processing_transition,
+                            args.db,
+                            expected_job_type=durable_job_type,
+                            expected_group_id=selected_group_id,
+                            expected_job_id=int(
+                                exact_claim.get("expected_job_id") or 0
+                            ),
+                        )
+                    except RuntimeError as error:
+                        if controlled_identity_requested:
+                            raise ControlledClaimRejected(str(error)) from error
+                        raise
+                if controlled_identity_requested:
+                    require_controlled_claim_identity(
+                        args,
                         job_payload,
-                        alert_id,
-                        selected_group_id,
-                        claimed_triage_level,
-                    ) = claimed_durable_ai_job(
-                        processing_transition,
-                        args.db,
-                        expected_job_type=durable_job_type,
-                        expected_group_id=selected_group_id,
+                        claimed_alert_id=alert_id,
+                        claimed_group_id=selected_group_id,
+                        claimed_job_id=int(
+                            getattr(processing_transition, "job_id", 0) or 0
+                        ),
+                        expected_job_id=int(
+                            exact_claim.get("expected_job_id") or 0
+                        ),
                     )
                 if durable_job_type == "incident_response_analysis":
                     claimed_reanalysis_run_id = str(
@@ -1814,6 +2280,36 @@ def main() -> int:
                         job_type=durable_job_type,
                     )
                 analyzed_count += 1
+            except ControlledClaimRejected as error:
+                # The exact-claim endpoint rejects before acquiring a lease.
+                # Never fail or otherwise mutate a possibly unrelated durable
+                # job when a frozen dispatch loses this race.
+                if controlled_exact_lease_owned:
+                    try:
+                        # A defensive post-claim validation can only release a
+                        # lease after the server echoed the exact selected job
+                        # ID. Retryable failure returns that owned job to the
+                        # pending queue; it never terminally fails it.
+                        report_ai_job_status(
+                            args.alert_store_url,
+                            selected_group_id,
+                            "failed",
+                            str(error),
+                            processing_lease_token,
+                            job_type=durable_job_type,
+                            retryable=True,
+                        )
+                    except RuntimeError as status_error:
+                        print(
+                            "controlled AI lease release also failed: "
+                            f"{status_error}",
+                            file=sys.stderr,
+                        )
+                print(
+                    f"{project_now()} controlled AI claim rejected: {error}",
+                    file=sys.stderr,
+                )
+                break
             except (BoundedProcessError, RuntimeError, OSError) as error:
                 if processing_recorded:
                     try:

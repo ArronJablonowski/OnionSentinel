@@ -48,6 +48,7 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         self.dashboard_c = "c" * 12
         self.stable_one = "1" * 20
         self.stable_two = "2" * 20
+        self.release_id = "a" * 40
         self._create_database()
 
     def tearDown(self) -> None:
@@ -88,6 +89,23 @@ class IncidentHarnessCohortTests(unittest.TestCase):
               stable_group_id TEXT NOT NULL,
               stable_group_key TEXT,
               updated_at TEXT
+            );
+            CREATE TABLE alerts (
+              alert_id TEXT PRIMARY KEY,
+              stable_group_id TEXT NOT NULL,
+              stable_group_key TEXT,
+              timestamp TEXT,
+              rule_name TEXT,
+              event_dataset TEXT,
+              severity INTEGER,
+              severity_label TEXT,
+              source_ip TEXT,
+              source_port INTEGER,
+              destination_ip TEXT,
+              destination_port INTEGER,
+              network_protocol TEXT,
+              transport_protocol TEXT,
+              traffic_direction TEXT
             );
             CREATE TABLE incident_response_cases (
               case_id TEXT PRIMARY KEY,
@@ -255,6 +273,37 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                     seen_at,
                 ),
             )
+            stable_group_id = (
+                self.stable_one
+                if dashboard in {self.dashboard_a, self.dashboard_b}
+                else self.stable_two
+            )
+            connection.execute(
+                """
+                INSERT INTO alerts (
+                  alert_id, stable_group_id, stable_group_key, timestamp,
+                  rule_name, event_dataset, severity, severity_label,
+                  source_ip, source_port, destination_ip, destination_port,
+                  network_protocol, transport_protocol, traffic_direction
+                ) VALUES (
+                  ?, ?, ?, ?, ?, 'suricata.alert', 3, 'high',
+                  ?, 12345, ?, 443, 'tcp', 'tcp', 'outbound'
+                )
+                """,
+                (
+                    alert_id,
+                    stable_group_id,
+                    (
+                        "v2|one"
+                        if stable_group_id == self.stable_one
+                        else "v2|two"
+                    ),
+                    seen_at,
+                    rule_name,
+                    source_ip,
+                    destination_ip,
+                ),
+            )
         connection.executemany(
             """
             INSERT INTO alert_group_alias (
@@ -292,7 +341,43 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             cohort_id="newest-20-evaluation",
             reason="Evaluate the new Incident Responder harness reproducibly.",
             count=count,
+            expected_release_id=self.release_id,
         )
+
+    def _rotate_dashboard_a_representative(
+        self,
+        alert_id: str = "alert-a-rotated",
+    ) -> None:
+        connection = self._connect()
+        connection.execute(
+            """
+            INSERT INTO alerts (
+              alert_id, stable_group_id, stable_group_key, timestamp,
+              rule_name, event_dataset, severity, severity_label,
+              source_ip, source_port, destination_ip, destination_port,
+              network_protocol, transport_protocol, traffic_direction
+            ) VALUES (
+              ?, ?, 'v2|one', '2026-07-25T12:02:00Z',
+              'Newest distinct detection', 'suricata.alert', 3, 'high',
+              '192.0.2.1', 12345, '198.51.100.1', 443,
+              'tcp', 'tcp', 'outbound'
+            )
+            """,
+            (alert_id, self.stable_one),
+        )
+        connection.execute(
+            """
+            UPDATE alert_group_summary
+            SET representative_alert_id = ?,
+                last_seen = '2026-07-25T12:02:00Z',
+                timestamp = '2026-07-25T12:02:00Z',
+                updated_at = '2026-07-25T12:02:00Z'
+            WHERE group_id = ?
+            """,
+            (alert_id, self.dashboard_a),
+        )
+        connection.commit()
+        connection.close()
 
     def _api_poster(self):
         calls: list[tuple[str, dict]] = []
@@ -320,14 +405,39 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 connection.execute(
                     """
                     INSERT INTO durable_jobs (
-                      job_type, dedupe_key, status, attempt_count,
+                      job_type, dedupe_key, payload_json, status, attempt_count,
                       requested_at, updated_at
                     ) VALUES (
-                      'incident_response_analysis', ?, 'pending', 0,
+                      'incident_response_analysis', ?, ?, 'pending', 0,
                       '2026-07-25T12:01:00Z', '2026-07-25T12:01:00Z'
                     )
                     """,
-                    (self.stable_one,),
+                    (
+                        self.stable_one,
+                        json.dumps(
+                            {
+                                "alert_id": payload[
+                                    "representative_alert_id"
+                                ],
+                                "representative_alert_id": payload[
+                                    "representative_alert_id"
+                                ],
+                                "group_id": payload["stable_group_id"],
+                                "stable_group_id": payload[
+                                    "stable_group_id"
+                                ],
+                                "stable_group_key": payload[
+                                    "stable_group_key"
+                                ],
+                                "dashboard_group_id": self.dashboard_a,
+                                "case_id": "ir-new",
+                                "cohort_id": payload["cohort_id"],
+                                "dispatch_id": payload["dispatch_id"],
+                                "release_id": payload["release_id"],
+                                "manual_reanalysis": False,
+                            }
+                        ),
+                    ),
                 )
                 response = {
                     "ok": True,
@@ -335,7 +445,12 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                     "case_id": "ir-new",
                     "group_id": self.dashboard_a,
                     "queue_group_id": self.stable_one,
+                    "stable_group_id": self.stable_one,
+                    "stable_group_key": payload["stable_group_key"],
                     "representative_alert_id": "alert-a-newest",
+                    "cohort_id": payload["cohort_id"],
+                    "dispatch_id": payload["dispatch_id"],
+                    "release_id": payload["release_id"],
                     "requested_at": "2026-07-25T12:01:00Z",
                 }
             elif url.endswith("/ir-existing/reanalyze"):
@@ -343,12 +458,12 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 connection.execute(
                     """
                     INSERT INTO incident_reanalysis_runs VALUES (
-                      ?, 'fixture-release', 'single_case', 'queued',
+                      ?, ?, 'single_case', 'queued',
                       'harness-cohort', ?, 1, '2026-07-25T12:01:01Z',
                       '2026-07-25T12:01:01Z', NULL
                     )
                     """,
-                    (run_id, payload["reason"]),
+                    (run_id, payload["release_id"], payload["reason"]),
                 )
                 connection.execute(
                     """
@@ -365,14 +480,40 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 connection.execute(
                     """
                     INSERT INTO durable_jobs (
-                      job_type, dedupe_key, status, attempt_count,
+                      job_type, dedupe_key, payload_json, status, attempt_count,
                       requested_at, updated_at
                     ) VALUES (
-                      'incident_response_analysis', ?, 'pending', 0,
+                      'incident_response_analysis', ?, ?, 'pending', 0,
                       '2026-07-25T12:01:01Z', '2026-07-25T12:01:01Z'
                     )
                     """,
-                    (self.stable_two,),
+                    (
+                        self.stable_two,
+                        json.dumps(
+                            {
+                                "alert_id": payload[
+                                    "representative_alert_id"
+                                ],
+                                "representative_alert_id": payload[
+                                    "representative_alert_id"
+                                ],
+                                "group_id": payload["stable_group_id"],
+                                "stable_group_id": payload[
+                                    "stable_group_id"
+                                ],
+                                "stable_group_key": payload[
+                                    "stable_group_key"
+                                ],
+                                "dashboard_group_id": self.dashboard_c,
+                                "case_id": "ir-existing",
+                                "reanalysis_run_id": run_id,
+                                "cohort_id": payload["cohort_id"],
+                                "dispatch_id": payload["dispatch_id"],
+                                "release_id": payload["release_id"],
+                                "manual_reanalysis": True,
+                            }
+                        ),
+                    ),
                 )
                 connection.execute(
                     """
@@ -385,17 +526,104 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 response = {
                     "ok": True,
                     "run_id": run_id,
-                    "release_id": "fixture-release",
+                    "release_id": payload["release_id"],
                     "scope": "single_case",
                     "status": "queued",
                     "total_count": 1,
                     "created_at": "2026-07-25T12:01:01Z",
+                    "stable_group_id": self.stable_two,
+                    "stable_group_key": payload["stable_group_key"],
+                    "representative_alert_id": "alert-c-existing",
+                    "cohort_id": payload["cohort_id"],
+                    "dispatch_id": payload["dispatch_id"],
                 }
             else:
                 connection.close()
                 raise AssertionError(f"unexpected URL: {url}")
             connection.commit()
             connection.close()
+            return cohort.HttpResult(
+                202,
+                response,
+                cohort.sha256_value(response),
+            )
+
+        return calls, post
+
+    def _soc_api_poster(self, *, create_fresh_analysis: bool = False):
+        calls: list[tuple[str, dict]] = []
+
+        def post(url: str, payload):
+            calls.append((url, dict(payload)))
+            self.assertTrue(
+                url.endswith(f"/{self.dashboard_a}/analyze")
+            )
+            connection = self._connect()
+            connection.execute(
+                """
+                INSERT INTO durable_jobs (
+                  job_type, dedupe_key, payload_json, status, attempt_count,
+                  requested_at, updated_at
+                ) VALUES (
+                  'ai_analysis', ?, ?, 'pending', 0,
+                  '2026-07-25T12:10:00Z', '2026-07-25T12:10:00Z'
+                )
+                """,
+                (
+                    self.stable_one,
+                    json.dumps(
+                        {
+                            "alert_id": payload[
+                                "representative_alert_id"
+                            ],
+                            "representative_alert_id": payload[
+                                "representative_alert_id"
+                            ],
+                            "group_id": payload["stable_group_id"],
+                            "stable_group_id": payload[
+                                "stable_group_id"
+                            ],
+                            "stable_group_key": payload[
+                                "stable_group_key"
+                            ],
+                            "dashboard_group_id": self.dashboard_a,
+                            "cohort_id": payload["cohort_id"],
+                            "dispatch_id": payload["dispatch_id"],
+                            "release_id": payload["release_id"],
+                            "manual_reanalysis": True,
+                        }
+                    ),
+                ),
+            )
+            if create_fresh_analysis:
+                connection.execute(
+                    """
+                    INSERT INTO ai_analysis_runs (
+                      analysis_id, group_id, alert_id, agent_role,
+                      generated_at, response_json, created_at
+                    ) VALUES (
+                      'analysis-raced-soc', ?, 'alert-a-newest',
+                      'soc-analyst', '2026-07-25T12:10:01Z', '{}',
+                      '2026-07-25T12:10:01Z'
+                    )
+                    """,
+                    (self.stable_one,),
+                )
+            connection.commit()
+            connection.close()
+            response = {
+                "ok": True,
+                "status": "queued",
+                "group_id": self.dashboard_a,
+                "queue_group_id": self.stable_one,
+                "stable_group_id": self.stable_one,
+                "stable_group_key": payload["stable_group_key"],
+                "representative_alert_id": "alert-a-newest",
+                "cohort_id": payload["cohort_id"],
+                "dispatch_id": payload["dispatch_id"],
+                "release_id": payload["release_id"],
+                "requested_at": "2026-07-25T12:10:00Z",
+            }
             return cohort.HttpResult(
                 202,
                 response,
@@ -412,6 +640,13 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             base_url="http://127.0.0.1:8766",
             poster=poster,
         )
+        for member in result["members"]:
+            member["dispatch"]["started_at"] = "2026-07-25T12:00:00Z"
+        result = cohort.write_private_json(
+            self.manifest_path,
+            result,
+            digest_field="manifest_sha256",
+        )
         return calls, result
 
     def test_freeze_selects_newest_distinct_stable_groups_owner_only(self) -> None:
@@ -424,6 +659,17 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         self.assertEqual(
             [item["stable_group_id"] for item in manifest["members"]],
             [self.stable_one, self.stable_two],
+        )
+        self.assertEqual(
+            [item["stable_group_key"] for item in manifest["members"]],
+            ["v2|one", "v2|two"],
+        )
+        self.assertTrue(
+            all(
+                item["stable_group_key"]
+                == item["detection"]["stable_group_key"]
+                for item in manifest["members"]
+            )
         )
         self.assertEqual(
             [item["dispatch"]["kind"] for item in manifest["members"]],
@@ -439,6 +685,81 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         )
         loaded = cohort.load_private_manifest(self.manifest_path)
         self.assertEqual(loaded["manifest_sha256"], manifest["manifest_sha256"])
+
+    def test_frozen_plan_digest_binds_detection_evidence(self) -> None:
+        self._freeze(count=1)
+        document = json.loads(
+            self.manifest_path.read_text(encoding="utf-8")
+        )
+        document["members"][0]["detection"]["source_ip"] = "203.0.113.99"
+        document.pop("manifest_sha256")
+        document["manifest_sha256"] = cohort.sha256_value(document)
+        self.manifest_path.write_text(
+            json.dumps(document),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "frozen plan digest does not match",
+        ):
+            cohort.load_private_manifest(self.manifest_path)
+
+    def test_frozen_plan_digest_binds_expected_release(self) -> None:
+        self._freeze(count=1)
+        document = json.loads(
+            self.manifest_path.read_text(encoding="utf-8")
+        )
+        document["execution_contract"]["expected_release_id"] = "b" * 40
+        document.pop("manifest_sha256")
+        document["manifest_sha256"] = cohort.sha256_value(document)
+        self.manifest_path.write_text(
+            json.dumps(document),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "frozen plan digest does not match",
+        ):
+            cohort.load_private_manifest(self.manifest_path)
+
+    def test_freeze_rejects_missing_stable_group_key(self) -> None:
+        connection = self._connect()
+        connection.execute(
+            """
+            UPDATE alerts
+            SET stable_group_key = ''
+            WHERE alert_id = 'alert-a-newest'
+            """
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "stable_group_key.*missing or malformed",
+        ):
+            self._freeze(count=1)
+
+    def test_freeze_rejects_oversized_stable_group_key(self) -> None:
+        connection = self._connect()
+        connection.execute(
+            """
+            UPDATE alerts
+            SET stable_group_key = ?
+            WHERE alert_id = 'alert-a-newest'
+            """,
+            ("x" * (cohort.MAX_STABLE_GROUP_KEY_BYTES + 1),),
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "bounded stable-group-key contract",
+        ):
+            self._freeze(count=1)
 
     def test_freeze_rejects_pending_or_processing_incident_job(self) -> None:
         connection = self._connect()
@@ -487,6 +808,7 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             cohort_id="preselected-live-cohort",
             reason="Preserve the exact request-time cohort selection order.",
             expected_count=2,
+            expected_release_id=self.release_id,
         )
 
         self.assertEqual(
@@ -499,6 +821,137 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             hashlib.sha256(source_path.read_bytes()).hexdigest(),
         )
         self.assertTrue(manifest["selection"]["order_preserved"])
+
+    def test_freeze_from_rows_allows_proven_representative_rotation(
+        self,
+    ) -> None:
+        connection = cohort.connect_read_only(self.db_path)
+        try:
+            frozen_summary = next(
+                row
+                for row in cohort._summary_rows(connection)
+                if row["group_id"] == self.dashboard_a
+            )
+        finally:
+            connection.close()
+        source_path = self.root / "frozen-rows.json"
+        source_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "dashboard_group_id": self.dashboard_a,
+                        "stable_group_id": self.stable_one,
+                        "representative_alert_id": "alert-a-newest",
+                        "detection": {
+                            key: value
+                            for key, value in frozen_summary.items()
+                            if key != "group_id"
+                        },
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        os.chmod(source_path, 0o600)
+        self._rotate_dashboard_a_representative()
+
+        manifest = cohort.freeze_cohort_from_rows(
+            self.db_path,
+            source_path,
+            self.manifest_path,
+            cohort_id="preselected-live-cohort",
+            reason="Preserve a proven frozen alert after summary rotation.",
+            expected_count=1,
+            expected_release_id=self.release_id,
+            agent_role="soc-analyst",
+        )
+
+        member = manifest["members"][0]
+        self.assertEqual(
+            member["representative_alert_id"],
+            "alert-a-newest",
+        )
+        self.assertEqual(
+            member["detection"]["timestamp"],
+            "2026-07-25T12:00:00Z",
+        )
+        validated = cohort.queue_cohort(
+            self.db_path,
+            self.manifest_path,
+            base_url="http://127.0.0.1:8766",
+            dry_run=True,
+        )
+        self.assertEqual(validated["state"], "frozen")
+
+    def test_freeze_from_rows_rejects_rotation_without_frozen_evidence(
+        self,
+    ) -> None:
+        source_path = self.root / "frozen-rows.json"
+        source_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "dashboard_group_id": self.dashboard_a,
+                        "stable_group_id": self.stable_one,
+                        "representative_alert_id": "alert-a-newest",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        os.chmod(source_path, 0o600)
+        self._rotate_dashboard_a_representative()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "missing immutable fields",
+        ):
+            cohort.freeze_cohort_from_rows(
+                self.db_path,
+                source_path,
+                self.manifest_path,
+                cohort_id="preselected-live-cohort",
+                reason="Reject unproven representative rotation safely.",
+                expected_count=1,
+                expected_release_id=self.release_id,
+                agent_role="soc-analyst",
+            )
+
+    def test_freeze_from_rows_rejects_supplied_stable_group_key_drift(
+        self,
+    ) -> None:
+        source_path = self.root / "frozen-rows.json"
+        source_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "dashboard_group_id": self.dashboard_a,
+                        "stable_group_id": self.stable_one,
+                        "representative_alert_id": "alert-a-newest",
+                        "detection": {
+                            "stable_group_key": "v2|mutated",
+                        },
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        os.chmod(source_path, 0o600)
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "immutable evidence drift.*stable_group_key",
+        ):
+            cohort.freeze_cohort_from_rows(
+                self.db_path,
+                source_path,
+                self.manifest_path,
+                cohort_id="preselected-live-cohort",
+                reason="Reject frozen source stable group key drift.",
+                expected_count=1,
+                expected_release_id=self.release_id,
+                agent_role="soc-analyst",
+            )
 
     def test_freeze_from_rows_rejects_identity_or_prestate_drift(self) -> None:
         source_path = self.root / "frozen-rows.json"
@@ -525,8 +978,122 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 cohort_id="preselected-live-cohort",
                 reason="Reject request-time identity drift before dispatch.",
                 expected_count=1,
+                expected_release_id=self.release_id,
             )
         self.assertFalse(self.manifest_path.exists())
+
+    def test_freeze_rejects_noncanonical_representative_alert_id(self) -> None:
+        connection = self._connect()
+        connection.execute(
+            """
+            UPDATE alert_group_summary
+            SET representative_alert_id = 'alert/with/path'
+            WHERE group_id = ?
+            """,
+            (self.dashboard_a,),
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "invalid representative alert ID",
+        ):
+            self._freeze(count=1)
+
+    def test_freeze_from_rows_rejects_noncanonical_representative_alert_id(
+        self,
+    ) -> None:
+        source_path = self.root / "frozen-rows.json"
+        source_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "dashboard_group_id": self.dashboard_a,
+                        "stable_group_id": self.stable_one,
+                        "representative_alert_id": "alert/with/path",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        os.chmod(source_path, 0o600)
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "invalid representative alert ID",
+        ):
+            cohort.freeze_cohort_from_rows(
+                self.db_path,
+                source_path,
+                self.manifest_path,
+                cohort_id="preselected-live-cohort",
+                reason="Reject invalid representative identity grammar.",
+                expected_count=1,
+                expected_release_id=self.release_id,
+            )
+
+    def test_case_and_run_identity_grammars_match_runtime_bounds(self) -> None:
+        self.assertIsNotNone(cohort.CASE_ID_RE.fullmatch("ir-case_1"))
+        self.assertIsNotNone(
+            cohort.CASE_ID_RE.fullmatch("ir-" + ("a" * 64))
+        )
+        self.assertIsNone(
+            cohort.CASE_ID_RE.fullmatch("ir-" + ("a" * 65))
+        )
+        self.assertIsNotNone(
+            cohort.RUN_ID_RE.fullmatch("irr-" + ("a" * 64))
+        )
+        self.assertIsNone(
+            cohort.RUN_ID_RE.fullmatch("irr-" + ("a" * 65))
+        )
+
+    def test_freeze_requires_exact_lowercase_git_release_id(self) -> None:
+        for release_id in ("a" * 39, "A" * 40, "g" * 40, "a" * 41):
+            with self.subTest(release_id=release_id), self.assertRaisesRegex(
+                cohort.CohortError,
+                "40 lowercase hexadecimal",
+            ):
+                cohort.freeze_cohort(
+                    self.db_path,
+                    self.manifest_path,
+                    cohort_id="release-bound-cohort",
+                    reason="Reject a malformed expected production release.",
+                    count=1,
+                    expected_release_id=release_id,
+                )
+
+    def test_completed_analysis_must_be_inside_exact_job_window(self) -> None:
+        dispatch = {"started_at": "2026-07-25T12:00:00Z"}
+        job = {
+            "status": "completed",
+            "requested_at": "2026-07-25T12:00:01Z",
+            "completed_at": "2026-07-25T12:00:03Z",
+            "last_completed_at": "2026-07-25T12:00:03Z",
+            "updated_at": "2026-07-25T12:00:04Z",
+        }
+        cohort._validate_completed_analysis_job_window(
+            dispatch=dispatch,
+            job=job,
+            analysis={"generated_at": "2026-07-25T12:00:02Z"},
+        )
+        for field, value in (
+            ("requested_at", "2026-07-25T11:59:59Z"),
+            ("completed_at", "2026-07-25T12:00:01Z"),
+            ("last_completed_at", "2026-07-25T12:00:01Z"),
+            ("updated_at", "2026-07-25T12:00:02Z"),
+        ):
+            mutated = dict(job)
+            mutated[field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(
+                cohort.CohortError,
+                "job window",
+            ):
+                cohort._validate_completed_analysis_job_window(
+                    dispatch=dispatch,
+                    job=mutated,
+                    analysis={"generated_at": "2026-07-25T12:00:02Z"},
+                )
 
     def test_queue_dry_run_never_calls_dashboard_or_mutates_manifest(self) -> None:
         manifest = self._freeze()
@@ -549,6 +1116,302 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             "frozen",
         )
 
+    def test_dispatch_rejects_noncanonical_representative_alert_id(self) -> None:
+        manifest = self._freeze()
+        manifest["members"][0]["representative_alert_id"] = "alert/with/path"
+        manifest["frozen_plan_sha256"] = cohort._frozen_plan_digest(manifest)
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "invalid frozen representative alert ID",
+        ):
+            cohort.deterministic_dispatch_id(
+                manifest,
+                manifest["members"][0],
+            )
+
+    def test_queue_allows_proven_representative_rotation_and_pins_frozen_alert(
+        self,
+    ) -> None:
+        frozen = self._freeze(count=1)
+        self._rotate_dashboard_a_representative()
+
+        calls, queued = self._queue()
+
+        self.assertEqual(len(calls), 1)
+        request = calls[0][1]
+        member = queued["members"][0]
+        dispatch = member["dispatch"]
+        self.assertEqual(
+            request["representative_alert_id"],
+            "alert-a-newest",
+        )
+        self.assertEqual(request["stable_group_id"], self.stable_one)
+        self.assertEqual(request["stable_group_key"], "v2|one")
+        self.assertEqual(request["cohort_id"], frozen["cohort_id"])
+        self.assertEqual(request["release_id"], self.release_id)
+        self.assertRegex(request["dispatch_id"], r"^[a-f0-9]{64}$")
+        self.assertEqual(
+            request["dispatch_id"],
+            cohort.deterministic_dispatch_id(queued, member),
+        )
+        self.assertEqual(dispatch["dispatch_id"], request["dispatch_id"])
+        self.assertTrue(
+            dispatch["representative_binding"]["representative_drifted"]
+        )
+        self.assertEqual(
+            dispatch["representative_binding"][
+                "current_representative_alert_id"
+            ],
+            "alert-a-rotated",
+        )
+        self.assertEqual(
+            dispatch["accepted"]["dispatch_id"],
+            request["dispatch_id"],
+        )
+        self.assertEqual(
+            dispatch["accepted"]["stable_group_key"],
+            request["stable_group_key"],
+        )
+        self.assertEqual(
+            dispatch["readback"]["dispatch_id"],
+            request["dispatch_id"],
+        )
+        self.assertEqual(
+            dispatch["readback"]["stable_group_key"],
+            request["stable_group_key"],
+        )
+        self.assertEqual(
+            dispatch["readback"]["representative_alert_id"],
+            "alert-a-newest",
+        )
+        self.assertEqual(dispatch["accepted"]["release_id"], self.release_id)
+        self.assertEqual(dispatch["readback"]["release_id"], self.release_id)
+        self.assertRegex(
+            dispatch["readback"]["job_payload_sha256"],
+            r"^[a-f0-9]{64}$",
+        )
+
+    def test_queue_rejects_stable_group_drift_after_freeze(self) -> None:
+        self._freeze(count=1)
+        connection = self._connect()
+        connection.execute(
+            """
+            UPDATE alert_group_alias
+            SET stable_group_id = ?
+            WHERE legacy_group_id = ?
+            """,
+            (self.stable_two, self.dashboard_a),
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "frozen stable identity drift",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                dry_run=True,
+            )
+
+    def test_queue_rejects_missing_frozen_alert_after_rotation(self) -> None:
+        self._freeze(count=1)
+        self._rotate_dashboard_a_representative()
+        connection = self._connect()
+        connection.execute(
+            "DELETE FROM alerts WHERE alert_id = 'alert-a-newest'"
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "frozen representative alert is missing",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                dry_run=True,
+            )
+
+    def test_queue_rejects_missing_frozen_alert_without_rotation(self) -> None:
+        self._freeze(count=1)
+        connection = self._connect()
+        connection.execute(
+            "DELETE FROM alerts WHERE alert_id = 'alert-a-newest'"
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "frozen representative alert is missing",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                dry_run=True,
+            )
+
+    def test_queue_rejects_missing_current_alert_after_rotation(self) -> None:
+        self._freeze(count=1)
+        self._rotate_dashboard_a_representative()
+        connection = self._connect()
+        connection.execute(
+            "DELETE FROM alerts WHERE alert_id = 'alert-a-rotated'"
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "current representative alert is missing",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                dry_run=True,
+            )
+
+    def test_queue_rejects_frozen_stable_id_drift_without_rotation(
+        self,
+    ) -> None:
+        self._freeze(count=1)
+        connection = self._connect()
+        connection.execute(
+            """
+            UPDATE alerts
+            SET stable_group_id = ?
+            WHERE alert_id = 'alert-a-newest'
+            """,
+            (self.stable_two,),
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "frozen representative alert stable identity drift",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                dry_run=True,
+            )
+
+    def test_queue_rejects_current_stable_id_drift_after_rotation(
+        self,
+    ) -> None:
+        self._freeze(count=1)
+        self._rotate_dashboard_a_representative()
+        connection = self._connect()
+        connection.execute(
+            """
+            UPDATE alerts
+            SET stable_group_id = ?
+            WHERE alert_id = 'alert-a-rotated'
+            """,
+            (self.stable_two,),
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "current representative alert stable identity drift",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                dry_run=True,
+            )
+
+    def test_queue_rejects_stable_group_key_drift_without_rotation(
+        self,
+    ) -> None:
+        self._freeze(count=1)
+        connection = self._connect()
+        connection.execute(
+            """
+            UPDATE alerts
+            SET stable_group_key = 'v2|mutated'
+            WHERE alert_id = 'alert-a-newest'
+            """
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "immutable evidence drift.*stable_group_key",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                dry_run=True,
+            )
+
+    def test_queue_rejects_incompatible_stable_group_key_after_rotation(
+        self,
+    ) -> None:
+        self._freeze(count=1)
+        self._rotate_dashboard_a_representative()
+        connection = self._connect()
+        connection.execute(
+            """
+            UPDATE alerts
+            SET stable_group_key = 'v2|mutated'
+            WHERE alert_id = 'alert-a-rotated'
+            """
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "representative alert stable group key drift",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                dry_run=True,
+            )
+
+    def test_queue_rejects_frozen_alert_immutable_evidence_drift(self) -> None:
+        self._freeze(count=1)
+        self._rotate_dashboard_a_representative()
+        connection = self._connect()
+        connection.execute(
+            """
+            UPDATE alerts
+            SET source_port = 54321
+            WHERE alert_id = 'alert-a-newest'
+            """
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "immutable evidence drift.*source_port",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                dry_run=True,
+            )
+
     def test_queue_uses_only_single_member_endpoints_and_is_exactly_once(self) -> None:
         self._freeze()
         calls, manifest = self._queue()
@@ -556,6 +1419,20 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertTrue(calls[0][0].endswith(f"/{self.dashboard_a}/escalate"))
         self.assertTrue(calls[1][0].endswith("/ir-existing/reanalyze"))
+        self.assertEqual(
+            calls[1][1]["stable_group_id"],
+            self.stable_two,
+        )
+        self.assertEqual(calls[0][1]["stable_group_key"], "v2|one")
+        self.assertEqual(calls[1][1]["stable_group_key"], "v2|two")
+        self.assertTrue(
+            all(payload["release_id"] == self.release_id for _, payload in calls)
+        )
+        self.assertEqual(
+            calls[1][1]["representative_alert_id"],
+            "alert-c-existing",
+        )
+        self.assertRegex(calls[1][1]["dispatch_id"], r"^[a-f0-9]{64}$")
         self.assertNotIn("reanalyze-all", "\n".join(url for url, _ in calls))
         self.assertTrue(
             all(
@@ -566,6 +1443,10 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         self.assertEqual(
             manifest["members"][1]["dispatch"]["accepted"]["run_id"],
             "irr-11111111-1111-1111-1111-111111111111",
+        )
+        self.assertEqual(
+            manifest["members"][1]["dispatch"]["readback"]["dispatch_id"],
+            calls[1][1]["dispatch_id"],
         )
 
         def forbidden(_url, _payload):
@@ -578,6 +1459,704 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             poster=forbidden,
         )
         self.assertEqual(replay["state"], "queued")
+
+    def test_queue_rejects_mismatched_response_dispatch_identity(self) -> None:
+        self._freeze(count=1)
+        _calls, accepted_poster = self._api_poster()
+
+        def mismatched(url, payload):
+            result = accepted_poster(url, payload)
+            response = dict(result.payload)
+            response["dispatch_id"] = "0" * 64
+            return cohort.HttpResult(
+                result.status,
+                response,
+                cohort.sha256_value(response),
+            )
+
+        with self.assertRaisesRegex(
+            cohort.AmbiguousDispatchError,
+            "response identity",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                poster=mismatched,
+            )
+
+    def test_queue_rejects_mismatched_response_stable_group_key(self) -> None:
+        self._freeze(count=1)
+        _calls, accepted_poster = self._api_poster()
+
+        def mismatched(url, payload):
+            result = accepted_poster(url, payload)
+            response = dict(result.payload)
+            response["stable_group_key"] = "v2|different"
+            return cohort.HttpResult(
+                result.status,
+                response,
+                cohort.sha256_value(response),
+            )
+
+        with self.assertRaisesRegex(
+            cohort.AmbiguousDispatchError,
+            "response identity",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                poster=mismatched,
+            )
+
+    def test_queue_rejects_durable_payload_with_unpaired_dispatch_id(
+        self,
+    ) -> None:
+        self._freeze(count=1)
+        _calls, accepted_poster = self._api_poster()
+
+        def unpaired(url, payload):
+            result = accepted_poster(url, payload)
+            connection = self._connect()
+            row = connection.execute(
+                """
+                SELECT payload_json
+                FROM durable_jobs
+                WHERE job_type = 'incident_response_analysis'
+                  AND dedupe_key = ?
+                """,
+                (self.stable_one,),
+            ).fetchone()
+            job_payload = json.loads(row[0])
+            job_payload.pop("dispatch_id")
+            connection.execute(
+                """
+                UPDATE durable_jobs
+                SET payload_json = ?
+                WHERE job_type = 'incident_response_analysis'
+                  AND dedupe_key = ?
+                """,
+                (json.dumps(job_payload), self.stable_one),
+            )
+            connection.commit()
+            connection.close()
+            return result
+
+        with self.assertRaisesRegex(
+            cohort.AmbiguousDispatchError,
+            "must be present together",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                poster=unpaired,
+            )
+
+    def test_queue_rejects_durable_payload_without_stable_group_key(
+        self,
+    ) -> None:
+        self._freeze(count=1)
+        _calls, accepted_poster = self._api_poster()
+
+        def missing_key(url, payload):
+            result = accepted_poster(url, payload)
+            connection = self._connect()
+            row = connection.execute(
+                """
+                SELECT payload_json
+                FROM durable_jobs
+                WHERE job_type = 'incident_response_analysis'
+                  AND dedupe_key = ?
+                """,
+                (self.stable_one,),
+            ).fetchone()
+            job_payload = json.loads(row[0])
+            job_payload.pop("stable_group_key")
+            connection.execute(
+                """
+                UPDATE durable_jobs
+                SET payload_json = ?
+                WHERE job_type = 'incident_response_analysis'
+                  AND dedupe_key = ?
+                """,
+                (json.dumps(job_payload), self.stable_one),
+            )
+            connection.commit()
+            connection.close()
+            return result
+
+        with self.assertRaisesRegex(
+            cohort.AmbiguousDispatchError,
+            "payload identity",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                poster=missing_key,
+            )
+
+    def test_queue_rejects_escalation_job_for_a_different_case(self) -> None:
+        self._freeze(count=1)
+        _calls, accepted_poster = self._api_poster()
+
+        def mismatched_case(url, payload):
+            result = accepted_poster(url, payload)
+            connection = self._connect()
+            row = connection.execute(
+                """
+                SELECT payload_json
+                FROM durable_jobs
+                WHERE job_type = 'incident_response_analysis'
+                  AND dedupe_key = ?
+                """,
+                (self.stable_one,),
+            ).fetchone()
+            job_payload = json.loads(row[0])
+            job_payload["case_id"] = "ir-different"
+            connection.execute(
+                """
+                UPDATE durable_jobs
+                SET payload_json = ?
+                WHERE job_type = 'incident_response_analysis'
+                  AND dedupe_key = ?
+                """,
+                (json.dumps(job_payload), self.stable_one),
+            )
+            connection.commit()
+            connection.close()
+            return result
+
+        with self.assertRaisesRegex(
+            cohort.AmbiguousDispatchError,
+            "payload identity",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                poster=mismatched_case,
+            )
+
+    def test_queue_rejects_reanalysis_job_for_a_different_run(self) -> None:
+        self._freeze()
+        _calls, accepted_poster = self._api_poster()
+
+        def mismatched_run(url, payload):
+            result = accepted_poster(url, payload)
+            if url.endswith("/ir-existing/reanalyze"):
+                connection = self._connect()
+                row = connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM durable_jobs
+                    WHERE job_type = 'incident_response_analysis'
+                      AND dedupe_key = ?
+                    """,
+                    (self.stable_two,),
+                ).fetchone()
+                job_payload = json.loads(row[0])
+                job_payload["reanalysis_run_id"] = (
+                    "irr-22222222-2222-2222-2222-222222222222"
+                )
+                connection.execute(
+                    """
+                    UPDATE durable_jobs
+                    SET payload_json = ?
+                    WHERE job_type = 'incident_response_analysis'
+                      AND dedupe_key = ?
+                    """,
+                    (json.dumps(job_payload), self.stable_two),
+                )
+                connection.commit()
+                connection.close()
+            return result
+
+        with self.assertRaisesRegex(
+            cohort.AmbiguousDispatchError,
+            "payload identity",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                poster=mismatched_run,
+            )
+
+    def test_monitor_rejects_accepted_job_payload_replacement(self) -> None:
+        self._freeze(count=1)
+        self._queue()
+        connection = self._connect()
+        row = connection.execute(
+            """
+            SELECT payload_json
+            FROM durable_jobs
+            WHERE job_type = 'incident_response_analysis'
+              AND dedupe_key = ?
+            """,
+            (self.stable_one,),
+        ).fetchone()
+        job_payload = json.loads(row[0])
+        job_payload["reason"] = "replacement after accepted readback"
+        connection.execute(
+            """
+            UPDATE durable_jobs
+            SET payload_json = ?
+            WHERE job_type = 'incident_response_analysis'
+              AND dedupe_key = ?
+            """,
+            (json.dumps(job_payload), self.stable_one),
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "payload changed during monitoring",
+        ):
+            cohort.monitor_cohort_once(
+                self.db_path,
+                self.manifest_path,
+            )
+
+    def test_monitor_rejects_accepted_job_identity_replacement(self) -> None:
+        self._freeze(count=1)
+        self._queue()
+        connection = self._connect()
+        connection.execute(
+            """
+            UPDATE durable_jobs
+            SET id = id + 100
+            WHERE job_type = 'incident_response_analysis'
+              AND dedupe_key = ?
+            """,
+            (self.stable_one,),
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "job identity changed during monitoring",
+        ):
+            cohort.monitor_cohort_once(
+                self.db_path,
+                self.manifest_path,
+            )
+
+    def test_monitor_rejects_release_provenance_mutation(self) -> None:
+        self._freeze(count=1)
+        self._queue()
+        manifest = cohort.load_private_manifest(self.manifest_path)
+        manifest["members"][0]["dispatch"]["readback"]["release_id"] = "b" * 40
+        cohort.write_private_json(
+            self.manifest_path,
+            manifest,
+            digest_field="manifest_sha256",
+        )
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "dispatch identity changed during monitoring",
+        ):
+            cohort.monitor_cohort_once(
+                self.db_path,
+                self.manifest_path,
+            )
+
+    def test_monitor_rejects_accepted_dispatch_identity_mutation(self) -> None:
+        self._freeze(count=1)
+        self._queue()
+        manifest = cohort.load_private_manifest(self.manifest_path)
+        manifest["members"][0]["dispatch"]["accepted"]["dispatch_id"] = (
+            "0" * 64
+        )
+        cohort.write_private_json(
+            self.manifest_path,
+            manifest,
+            digest_field="manifest_sha256",
+        )
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "accepted response dispatch identity changed",
+        ):
+            cohort.monitor_cohort_once(
+                self.db_path,
+                self.manifest_path,
+            )
+
+    def test_monitor_rejects_stable_group_key_provenance_mutation(self) -> None:
+        self._freeze(count=1)
+        self._queue()
+        manifest = cohort.load_private_manifest(self.manifest_path)
+        manifest["members"][0]["dispatch"]["readback"][
+            "stable_group_key"
+        ] = "v2|different"
+        cohort.write_private_json(
+            self.manifest_path,
+            manifest,
+            digest_field="manifest_sha256",
+        )
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "dispatch identity changed during monitoring",
+        ):
+            cohort.monitor_cohort_once(
+                self.db_path,
+                self.manifest_path,
+            )
+
+    def test_monitor_reproves_raw_stable_group_key_binding(self) -> None:
+        self._freeze(count=1)
+        self._queue()
+        connection = self._connect()
+        connection.execute(
+            """
+            UPDATE alerts
+            SET stable_group_key = 'v2|changed-after-acceptance'
+            WHERE alert_id = 'alert-a-newest'
+            """
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "immutable evidence drift.*stable_group_key",
+        ):
+            cohort.monitor_cohort_once(
+                self.db_path,
+                self.manifest_path,
+            )
+
+    def test_monitor_keeps_fresh_result_nonterminal_while_job_is_active(
+        self,
+    ) -> None:
+        self._freeze(count=1)
+        self._queue()
+        connection = self._connect()
+        connection.execute(
+            """
+            INSERT INTO ai_analysis_runs (
+              analysis_id, group_id, alert_id, agent_role, generated_at,
+              model, model_path, detection_outcome, confidence,
+              evidence_hash, response_json, created_at
+            ) VALUES (
+              'analysis-fresh-active', ?, 'alert-a-newest',
+              'incident-responder', '2026-07-25T12:02:00Z',
+              'gpt-5.6-sol', 'codex_cli',
+              'true_positive_suspicious', 'high', 'evidence-fresh-active',
+              '{}', '2026-07-25T12:02:00Z'
+            )
+            """,
+            (self.stable_one,),
+        )
+        connection.execute(
+            """
+            UPDATE incident_response_cases
+            SET agent_status = 'analyzed',
+                latest_analysis_id = 'analysis-fresh-active',
+                updated_at = '2026-07-25T12:02:00Z'
+            WHERE case_id = 'ir-new'
+            """
+        )
+        connection.commit()
+        connection.close()
+
+        monitored, terminal = cohort.monitor_cohort_once(
+            self.db_path,
+            self.manifest_path,
+        )
+
+        self.assertFalse(terminal)
+        self.assertEqual(
+            monitored["members"][0]["monitor"]["state"],
+            "queued",
+        )
+        self.assertEqual(
+            monitored["members"][0]["monitor"]["analysis_id"],
+            "",
+        )
+
+    def test_monitor_rejects_prefreeze_nonlatest_incident_analysis_id(
+        self,
+    ) -> None:
+        connection = self._connect()
+        for analysis_id, generated_at in (
+            ("analysis-ir-old-nonlatest", "2026-07-25T11:56:00Z"),
+            ("analysis-ir-latest-before-freeze", "2026-07-25T11:57:00Z"),
+        ):
+            connection.execute(
+                """
+                INSERT INTO ai_analysis_runs (
+                  analysis_id, group_id, alert_id, agent_role, generated_at,
+                  model, model_path, detection_outcome, confidence,
+                  evidence_hash, response_json, created_at
+                ) VALUES (
+                  ?, ?, 'alert-c-existing', 'incident-responder', ?,
+                  'gpt-5.6-sol', 'codex_cli',
+                  'true_positive_suspicious', 'high', ?, '{}', ?
+                )
+                """,
+                (
+                    analysis_id,
+                    self.stable_two,
+                    generated_at,
+                    f"evidence-{analysis_id}",
+                    generated_at,
+                ),
+            )
+        connection.execute(
+            """
+            UPDATE incident_response_cases
+            SET latest_analysis_id = 'analysis-ir-latest-before-freeze',
+                latest_model = 'gpt-5.6-sol',
+                latest_generated_at = '2026-07-25T11:57:00Z',
+                updated_at = '2026-07-25T11:57:00Z'
+            WHERE case_id = 'ir-existing'
+            """
+        )
+        connection.commit()
+        connection.close()
+
+        source_path = self.root / "prefreeze-ir-source.json"
+        source_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "dashboard_group_id": self.dashboard_c,
+                        "stable_group_id": self.stable_two,
+                        "representative_alert_id": "alert-c-existing",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        os.chmod(source_path, 0o600)
+        cohort.freeze_cohort_from_rows(
+            self.db_path,
+            source_path,
+            self.manifest_path,
+            cohort_id="prefreeze-nonlatest-ir-id",
+            reason=(
+                "Reject a pre-freeze nonlatest Incident Responder analysis."
+            ),
+            expected_count=1,
+            expected_release_id=self.release_id,
+        )
+        self._queue()
+
+        connection = self._connect()
+        connection.execute(
+            """
+            UPDATE incident_reanalysis_run_cases
+            SET status = 'completed',
+                analysis_id = 'analysis-ir-old-nonlatest',
+                completed_at = '2026-07-25T12:05:00Z',
+                updated_at = '2026-07-25T12:05:00Z'
+            WHERE case_id = 'ir-existing'
+            """
+        )
+        connection.execute(
+            """
+            UPDATE incident_response_cases
+            SET agent_status = 'analyzed',
+                latest_analysis_id = 'analysis-ir-old-nonlatest',
+                updated_at = '2026-07-25T12:05:00Z'
+            WHERE case_id = 'ir-existing'
+            """
+        )
+        connection.execute(
+            """
+            UPDATE durable_jobs
+            SET status = 'completed',
+                completed_at = '2026-07-25T12:05:00Z',
+                last_completed_at = '2026-07-25T12:05:00Z',
+                updated_at = '2026-07-25T12:05:00Z'
+            WHERE job_type = 'incident_response_analysis'
+              AND dedupe_key = ?
+            """,
+            (self.stable_two,),
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "not the exact fresh analysis",
+        ):
+            cohort.monitor_cohort_once(
+                self.db_path,
+                self.manifest_path,
+            )
+
+    def test_monitor_rejects_unrelated_group_analysis_alert(self) -> None:
+        self._freeze(count=1)
+        self._queue()
+        connection = self._connect()
+        connection.execute(
+            """
+            INSERT INTO ai_analysis_runs (
+              analysis_id, group_id, alert_id, agent_role, generated_at,
+              model, model_path, detection_outcome, confidence,
+              evidence_hash, response_json, created_at
+            ) VALUES (
+              'analysis-wrong-alert', ?, 'alert-c-existing',
+              'incident-responder', '2026-07-25T12:05:00Z',
+              'gpt-5.6-sol', 'codex_cli',
+              'true_positive_suspicious', 'high', 'evidence-wrong-alert',
+              '{}', '2026-07-25T12:05:00Z'
+            )
+            """,
+            (self.stable_one,),
+        )
+        connection.execute(
+            """
+            UPDATE incident_response_cases
+            SET agent_status = 'analyzed',
+                latest_analysis_id = 'analysis-wrong-alert',
+                updated_at = '2026-07-25T12:05:00Z'
+            WHERE case_id = 'ir-new'
+            """
+        )
+        connection.execute(
+            """
+            UPDATE durable_jobs
+            SET status = 'completed',
+                completed_at = '2026-07-25T12:05:00Z',
+                last_completed_at = '2026-07-25T12:05:00Z',
+                updated_at = '2026-07-25T12:05:00Z'
+            WHERE job_type = 'incident_response_analysis'
+              AND dedupe_key = ?
+            """,
+            (self.stable_one,),
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "not bound to the frozen incident-responder identity",
+        ):
+            cohort.monitor_cohort_once(
+                self.db_path,
+                self.manifest_path,
+            )
+
+    def test_soc_dispatch_rejects_analysis_race_during_readback(self) -> None:
+        source_path = self.root / "soc-race-source.json"
+        source_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "dashboard_group_id": self.dashboard_a,
+                        "stable_group_id": self.stable_one,
+                        "representative_alert_id": "alert-a-newest",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        os.chmod(source_path, 0o600)
+        cohort.freeze_cohort_from_rows(
+            self.db_path,
+            source_path,
+            self.manifest_path,
+            cohort_id="soc-readback-race",
+            reason="Reject a SOC worker result racing controlled readback.",
+            expected_count=1,
+            expected_release_id=self.release_id,
+            agent_role="soc-analyst",
+        )
+        _calls, poster = self._soc_api_poster(
+            create_fresh_analysis=True
+        )
+
+        with self.assertRaisesRegex(
+            cohort.AmbiguousDispatchError,
+            "fresh soc-analyst analysis appeared",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                poster=poster,
+            )
+
+    def test_escalation_rejects_analysis_race_during_readback(self) -> None:
+        self._freeze(count=1)
+        _calls, accepted_poster = self._api_poster()
+
+        def raced(url, payload):
+            result = accepted_poster(url, payload)
+            connection = self._connect()
+            connection.execute(
+                """
+                INSERT INTO ai_analysis_runs (
+                  analysis_id, group_id, alert_id, agent_role,
+                  generated_at, response_json, created_at
+                ) VALUES (
+                  'analysis-raced-escalation', ?, 'alert-a-newest',
+                  'incident-responder', '2026-07-25T12:01:01Z', '{}',
+                  '2026-07-25T12:01:01Z'
+                )
+                """,
+                (self.stable_one,),
+            )
+            connection.commit()
+            connection.close()
+            return result
+
+        with self.assertRaisesRegex(
+            cohort.AmbiguousDispatchError,
+            "fresh incident-responder analysis appeared",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                poster=raced,
+            )
+
+    def test_reanalysis_rejects_analysis_race_during_readback(self) -> None:
+        self._freeze()
+        _calls, accepted_poster = self._api_poster()
+
+        def raced(url, payload):
+            result = accepted_poster(url, payload)
+            if url.endswith("/ir-existing/reanalyze"):
+                connection = self._connect()
+                connection.execute(
+                    """
+                    INSERT INTO ai_analysis_runs (
+                      analysis_id, group_id, alert_id, agent_role,
+                      generated_at, response_json, created_at
+                    ) VALUES (
+                      'analysis-raced-reanalysis', ?, 'alert-c-existing',
+                      'incident-responder', '2026-07-25T12:01:02Z', '{}',
+                      '2026-07-25T12:01:02Z'
+                    )
+                    """,
+                    (self.stable_two,),
+                )
+                connection.commit()
+                connection.close()
+            return result
+
+        with self.assertRaisesRegex(
+            cohort.AmbiguousDispatchError,
+            "fresh incident-responder analysis appeared",
+        ):
+            cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                poster=raced,
+            )
 
     def test_soc_role_uses_analyze_and_monitors_exact_new_analysis_id(self) -> None:
         source_path = self.root / "shared-frozen-rows.json"
@@ -601,6 +2180,7 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             cohort_id="preselected-soc-cohort",
             reason="Exercise the SOC Analyst harness on the frozen cohort.",
             expected_count=1,
+            expected_release_id=self.release_id,
             agent_role="soc-analyst",
         )
         self.assertEqual(manifest["agent_role"], "soc-analyst")
@@ -617,14 +2197,38 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             connection.execute(
                 """
                 INSERT INTO durable_jobs (
-                  job_type, dedupe_key, status, attempt_count,
+                  job_type, dedupe_key, payload_json, status, attempt_count,
                   requested_at, updated_at
                 ) VALUES (
-                  'ai_analysis', ?, 'pending', 0,
+                  'ai_analysis', ?, ?, 'pending', 0,
                   '2026-07-25T12:10:00Z', '2026-07-25T12:10:00Z'
                 )
                 """,
-                (self.stable_one,),
+                (
+                    self.stable_one,
+                    json.dumps(
+                        {
+                            "alert_id": payload[
+                                "representative_alert_id"
+                            ],
+                            "representative_alert_id": payload[
+                                "representative_alert_id"
+                            ],
+                            "group_id": payload["stable_group_id"],
+                            "stable_group_id": payload[
+                                "stable_group_id"
+                            ],
+                            "stable_group_key": payload[
+                                "stable_group_key"
+                            ],
+                            "dashboard_group_id": self.dashboard_a,
+                            "cohort_id": payload["cohort_id"],
+                            "dispatch_id": payload["dispatch_id"],
+                            "release_id": payload["release_id"],
+                            "manual_reanalysis": True,
+                        }
+                    ),
+                ),
             )
             connection.commit()
             connection.close()
@@ -633,7 +2237,12 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 "status": "queued",
                 "group_id": self.dashboard_a,
                 "queue_group_id": self.stable_one,
+                "stable_group_id": self.stable_one,
+                "stable_group_key": payload["stable_group_key"],
                 "representative_alert_id": "alert-a-newest",
+                "cohort_id": payload["cohort_id"],
+                "dispatch_id": payload["dispatch_id"],
+                "release_id": payload["release_id"],
                 "requested_at": "2026-07-25T12:10:00Z",
             }
             return cohort.HttpResult(
@@ -653,6 +2262,14 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             calls[0][0].endswith(f"/{self.dashboard_a}/analyze")
         )
         self.assertEqual(queued["members"][0]["dispatch"]["state"], "accepted")
+        queued["members"][0]["dispatch"]["started_at"] = (
+            "2026-07-25T12:10:00Z"
+        )
+        cohort.write_private_json(
+            self.manifest_path,
+            queued,
+            digest_field="manifest_sha256",
+        )
 
         soc_tool_call_bindings = [
             {
@@ -757,14 +2374,6 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             "onion-sentinel",
         )
         manifest = cohort.load_private_manifest(self.manifest_path)
-        manifest["members"][0]["dispatch"]["started_at"] = (
-            "2026-07-25T12:10:00Z"
-        )
-        cohort.write_private_json(
-            self.manifest_path,
-            manifest,
-            digest_field="manifest_sha256",
-        )
         analysis = manifest["members"][0]["monitor"]["analysis"]
         exported_tool_bindings = analysis["query_audit"][
             "_investigation_query_audit"
@@ -784,6 +2393,7 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             "dispatch_accepted_once": True,
             "analysis_id": "analysis-soc-new",
             "analysis_generated_at": "2026-07-25T12:11:00Z",
+            "release_id": self.release_id,
             "harness": {
                 "run_id": "analysis-soc-new",
                 "trace_id": "trace-soc-export",
@@ -928,6 +2538,14 @@ class IncidentHarnessCohortTests(unittest.TestCase):
     def test_monitor_and_export_bind_exact_results_without_raw_content(self) -> None:
         self._freeze()
         self._queue()
+        queued_manifest = cohort.load_private_manifest(self.manifest_path)
+        for member in queued_manifest["members"]:
+            member["dispatch"]["started_at"] = "2026-07-25T12:00:00Z"
+        cohort.write_private_json(
+            self.manifest_path,
+            queued_manifest,
+            digest_field="manifest_sha256",
+        )
         secret_marker = "never-export-this-api-key"
         response = {
             "event_status": "observed",
@@ -1018,7 +2636,10 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         connection.execute(
             """
             UPDATE durable_jobs
-            SET status = 'completed', updated_at = '2026-07-25T12:05:00Z'
+            SET status = 'completed',
+                completed_at = '2026-07-25T12:05:00Z',
+                last_completed_at = '2026-07-25T12:05:00Z',
+                updated_at = '2026-07-25T12:05:00Z'
             """
         )
         connection.commit()
@@ -1093,6 +2714,7 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         manifest = {
             "agent_role": "soc-analyst",
             "execution_contract": cohort.execution_contract(
+                expected_release_id=self.release_id,
                 expected_assigned_route=(
                     "codex-cli:gpt-5.6-sol:high"
                 ),

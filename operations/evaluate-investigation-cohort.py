@@ -21,7 +21,6 @@ Example:
       --result incident-responder=/private/ir-export.json \
       --result soc-analyst=/private/soc-export.json \
       --adjudication /private/independent-adjudication.json \
-      --expected-count 20 \
       --json-out /private/cohort-evaluation.json \
       --markdown-out /private/cohort-evaluation.md
 """
@@ -44,13 +43,16 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-RESULT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v2"
-MANIFEST_SCHEMA = "onion-sentinel-incident-harness-cohort-v2"
+RESULT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v3"
+MANIFEST_SCHEMA = "onion-sentinel-incident-harness-cohort-v3"
 ADJUDICATION_SCHEMA = "onion-sentinel-investigation-cohort-adjudication-v1"
 REPORT_SCHEMA = "onion-sentinel-investigation-cohort-evaluation-v1"
 
 MAX_INPUT_BYTES = 10_000_000
 MAX_COHORT_SIZE = 100
+EXPECTED_ROLE_COUNT = 20
+EXPECTED_TOTAL_RESULTS = 40
+MAX_STABLE_GROUP_KEY_BYTES = 2048
 MAX_CODE_ITEMS = 16
 MAX_CODE_LENGTH = 80
 MAX_JSON_REPORT_BYTES = 5_000_000
@@ -62,11 +64,16 @@ ROLE_LABELS = {
     "soc-analyst": "SOC Analyst",
 }
 STABLE_GROUP_ID_RE = re.compile(r"[a-f0-9]{20}")
+DASHBOARD_GROUP_ID_RE = re.compile(r"[a-f0-9]{12}")
+COHORT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{2,63}")
+REPRESENTATIVE_ALERT_ID_RE = re.compile(r"[A-Za-z0-9._:@=-]{1,256}")
+RELEASE_ID_RE = re.compile(r"[a-f0-9]{40}")
 CODE_RE = re.compile(r"[a-z][a-z0-9_]{1,79}")
 SHA256_RE = re.compile(r"[a-f0-9]{64}")
 SAFE_ROUTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{2,255}")
 MODEL_CALL_CONTRACT_SCHEMA = "onion-sentinel-model-call-contract-v1"
 MAX_RUNTIME_MODEL_CALLS = 6
+DISPATCH_ID_SCHEMA = "onion-sentinel-cohort-member-dispatch-v1"
 MODEL_CALL_FACT_KEYS = frozenset(
     {
         "call_id",
@@ -199,6 +206,7 @@ GROUND_TRUTH_KEYS = frozenset(
     {
         "labels",
         "confidence",
+        "detection_sha256",
         "evidence_basis_sha256",
         "scope_timeline_sha256",
         "attribution_sha256",
@@ -235,13 +243,29 @@ def canonical_json(value: Any) -> str:
         value,
         sort_keys=True,
         separators=(",", ":"),
-        ensure_ascii=True,
+        ensure_ascii=False,
         default=str,
     )
 
 
 def sha256_value(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _stable_group_key(value: Any, label: str) -> str:
+    """Validate an opaque stable-group key without normalizing it."""
+
+    if not isinstance(value, str) or not value:
+        raise CohortEvaluationError(f"{label} is missing or malformed")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise CohortEvaluationError(f"{label} is not valid UTF-8") from exc
+    if len(encoded) > MAX_STABLE_GROUP_KEY_BYTES or "\x00" in value:
+        raise CohortEvaluationError(
+            f"{label} exceeds the bounded stable-group-key contract"
+        )
+    return value
 
 
 def _bounded_model_call_proof_valid(harness: Mapping[str, Any]) -> bool:
@@ -653,6 +677,7 @@ def validate_adjudication(
             )
         digests: dict[str, str] = {}
         for field in (
+            "detection_sha256",
             "evidence_basis_sha256",
             "scope_timeline_sha256",
             "attribution_sha256",
@@ -1047,6 +1072,9 @@ def _execution_contract(value: Any, label: str) -> dict[str, Any]:
         "harness_required": True,
         "harness_mode": "shadow",
         "memory_frozen": True,
+        "expected_release_id": str(
+            value.get("expected_release_id") or ""
+        ).strip(),
         "expected_assigned_route": str(
             value.get("expected_assigned_route") or ""
         ).strip(),
@@ -1059,6 +1087,10 @@ def _execution_contract(value: Any, label: str) -> dict[str, Any]:
     ):
         raise CohortEvaluationError(
             f"{label} execution contract is not the required shadow/frozen contract"
+        )
+    if not RELEASE_ID_RE.fullmatch(expected["expected_release_id"]):
+        raise CohortEvaluationError(
+            f"{label} expected release ID is malformed"
         )
     reviewer_route = expected["expected_reviewer_route"]
     if reviewer_route and not SAFE_ROUTE_RE.fullmatch(reviewer_route):
@@ -1074,11 +1106,11 @@ def _prior_analysis_ids(member: Mapping[str, Any]) -> set[str]:
         if isinstance(member.get("pre_state"), dict)
         else {}
     )
-    identities = {
-        str(item)
-        for item in pre_state.get("soc_analysis_ids", [])
-        if str(item)
-    } if isinstance(pre_state.get("soc_analysis_ids"), list) else set()
+    identities: set[str] = set()
+    for field in ("soc_analysis_ids", "incident_analysis_ids"):
+        values = pre_state.get(field)
+        if isinstance(values, list):
+            identities.update(str(item) for item in values if str(item))
     for source in (
         pre_state.get("latest_analysis"),
         pre_state.get("incident_case"),
@@ -1108,11 +1140,211 @@ def _expected_task_kind(role: str, dispatch_kind: str) -> str:
     return expected
 
 
+def _expected_dispatch_id(
+    *,
+    cohort_id: str,
+    frozen_plan_sha256: str,
+    member: Mapping[str, Any],
+    dispatch_kind: str,
+) -> str:
+    if (
+        not COHORT_ID_RE.fullmatch(cohort_id)
+        or not SHA256_RE.fullmatch(frozen_plan_sha256)
+        or dispatch_kind not in {"analyze", "escalate", "reanalyze"}
+    ):
+        raise CohortEvaluationError(
+            "export cannot derive an exact dispatch identity"
+        )
+    try:
+        rank = int(member.get("rank"))
+    except (TypeError, ValueError) as exc:
+        raise CohortEvaluationError(
+            "export member has an invalid dispatch rank"
+        ) from exc
+    dashboard_group_id = str(member.get("dashboard_group_id") or "")
+    stable_group_id = str(member.get("stable_group_id") or "")
+    stable_group_key = _stable_group_key(
+        member.get("stable_group_key"),
+        "export member stable_group_key",
+    )
+    representative_alert_id = str(
+        member.get("representative_alert_id") or ""
+    )
+    if (
+        rank < 1
+        or not DASHBOARD_GROUP_ID_RE.fullmatch(dashboard_group_id)
+        or not STABLE_GROUP_ID_RE.fullmatch(stable_group_id)
+        or not REPRESENTATIVE_ALERT_ID_RE.fullmatch(
+            representative_alert_id
+        )
+    ):
+        raise CohortEvaluationError(
+            "export member has malformed dispatch identity fields"
+        )
+    return sha256_value(
+        {
+            "schema": DISPATCH_ID_SCHEMA,
+            "cohort_id": cohort_id,
+            "frozen_plan_sha256": frozen_plan_sha256,
+            "rank": rank,
+            "dashboard_group_id": dashboard_group_id,
+            "stable_group_id": stable_group_id,
+            "stable_group_key": stable_group_key,
+            "representative_alert_id": representative_alert_id,
+            "dispatch_kind": dispatch_kind,
+        }
+    )
+
+
+def _validate_durable_job_proof(
+    *,
+    member: Mapping[str, Any],
+    result: Mapping[str, Any],
+    analysis: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    cohort_id: str,
+    frozen_plan_sha256: str,
+    label: str,
+) -> dict[str, Any]:
+    dispatch = (
+        member.get("dispatch")
+        if isinstance(member.get("dispatch"), dict)
+        else {}
+    )
+    accepted = (
+        dispatch.get("accepted")
+        if isinstance(dispatch.get("accepted"), dict)
+        else {}
+    )
+    readback = (
+        dispatch.get("readback")
+        if isinstance(dispatch.get("readback"), dict)
+        else {}
+    )
+    job = result.get("job") if isinstance(result.get("job"), dict) else {}
+    dispatch_kind = str(dispatch.get("kind") or "")
+    expected_dispatch_id = _expected_dispatch_id(
+        cohort_id=cohort_id,
+        frozen_plan_sha256=frozen_plan_sha256,
+        member=member,
+        dispatch_kind=dispatch_kind,
+    )
+    stable_group_id = str(member.get("stable_group_id") or "")
+    stable_group_key = _stable_group_key(
+        member.get("stable_group_key"),
+        f"{label} stable_group_key",
+    )
+    representative_alert_id = str(
+        member.get("representative_alert_id") or ""
+    )
+    release_id = str(contract.get("expected_release_id") or "")
+    expected_job_type = (
+        "ai_analysis"
+        if dispatch_kind == "analyze"
+        else "incident_response_analysis"
+    )
+    if str(dispatch.get("dispatch_id") or "") != expected_dispatch_id:
+        raise CohortEvaluationError(
+            f"{label} dispatch identity does not match"
+        )
+    provenance = (
+        ("accepted response", accepted),
+        ("durable readback", readback),
+        ("terminal durable job", job),
+    )
+    expected_shared = {
+        "dispatch_id": expected_dispatch_id,
+        "cohort_id": cohort_id,
+        "stable_group_key": stable_group_key,
+        "release_id": release_id,
+    }
+    for source_label, source in provenance:
+        for field, expected in expected_shared.items():
+            if str(source.get(field) or "") != expected:
+                raise CohortEvaluationError(
+                    f"{label} {source_label} {field} does not match"
+                )
+    for source_label, source in (
+        ("accepted response", accepted),
+        ("durable readback", readback),
+        ("terminal durable job", job),
+    ):
+        if (
+            str(source.get("stable_group_id") or "") != stable_group_id
+            or str(source.get("representative_alert_id") or "")
+            != representative_alert_id
+        ):
+            raise CohortEvaluationError(
+                f"{label} {source_label} stable/representative identity "
+                "does not match"
+            )
+    try:
+        readback_job_id = int(readback.get("job_id"))
+        terminal_job_id = int(job.get("id"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise CohortEvaluationError(
+            f"{label} durable job ID is invalid"
+        ) from exc
+    payload_sha256 = str(job.get("payload_sha256") or "")
+    if (
+        readback_job_id < 1
+        or terminal_job_id != readback_job_id
+        or not SHA256_RE.fullmatch(payload_sha256)
+        or str(readback.get("job_payload_sha256") or "")
+        != payload_sha256
+        or str(job.get("status") or "") != "completed"
+        or str(job.get("job_type") or "") != expected_job_type
+        or str(job.get("dedupe_key") or "") != stable_group_id
+    ):
+        raise CohortEvaluationError(
+            f"{label} exact completed durable job proof is invalid"
+        )
+    dispatch_started = _parse_timestamp(
+        dispatch.get("started_at"),
+        f"{label} dispatch started_at",
+    )
+    requested_at = _parse_timestamp(
+        job.get("requested_at"),
+        f"{label} job requested_at",
+    )
+    generated_at = _parse_timestamp(
+        analysis.get("generated_at"),
+        f"{label} analysis generated_at",
+    )
+    completed_at = _parse_timestamp(
+        job.get("completed_at"),
+        f"{label} job completed_at",
+    )
+    last_completed_at = _parse_timestamp(
+        job.get("last_completed_at"),
+        f"{label} job last_completed_at",
+    )
+    updated_at = _parse_timestamp(
+        job.get("updated_at"),
+        f"{label} job updated_at",
+    )
+    if (
+        requested_at < dispatch_started
+        or generated_at < dispatch_started
+        or generated_at < requested_at
+        or generated_at > completed_at
+        or generated_at > last_completed_at
+        or completed_at > last_completed_at
+        or last_completed_at > updated_at
+    ):
+        raise CohortEvaluationError(
+            f"{label} analysis is outside its exact durable job window"
+        )
+    return dict(job)
+
+
 def _validate_execution_proof(
     *,
     member: Mapping[str, Any],
     role: str,
     contract: Mapping[str, Any],
+    cohort_id: str,
+    frozen_plan_sha256: str,
     label: str,
 ) -> dict[str, Any]:
     result = member.get("result")
@@ -1161,6 +1393,15 @@ def _validate_execution_proof(
     )
     if generated_at < dispatch_started:
         raise CohortEvaluationError(f"{label} predates its dispatch")
+    _validate_durable_job_proof(
+        member=member,
+        result=result,
+        analysis=analysis,
+        contract=contract,
+        cohort_id=cohort_id,
+        frozen_plan_sha256=frozen_plan_sha256,
+        label=label,
+    )
     if str(analysis.get("agent_role") or "") != role:
         raise CohortEvaluationError(f"{label} agent role does not match")
     expected_route = str(contract["expected_assigned_route"])
@@ -1190,6 +1431,8 @@ def _validate_execution_proof(
         or proof.get("fresh_analysis") is not True
         or proof.get("dispatch_accepted_once") is not True
         or str(proof.get("analysis_id") or "") != analysis_id
+        or str(proof.get("release_id") or "")
+        != str(contract["expected_release_id"])
     ):
         raise CohortEvaluationError(f"{label} execution proof did not pass")
     proof_generated = _parse_timestamp(
@@ -1436,6 +1679,7 @@ def load_result_export(
         )
     normalized_members: dict[str, dict[str, Any]] = {}
     ordered_identities: list[dict[str, Any]] = []
+    ordered_detection_projection: list[dict[str, Any]] = []
     ranks: set[int] = set()
     for index, member in enumerate(members):
         if not isinstance(member, dict):
@@ -1481,14 +1725,32 @@ def load_result_export(
             raise CohortEvaluationError(
                 f"{label} member {rank} completed without an analysis ID"
             )
-        detection = member.get("detection")
-        detection_digest = sha256_value(
-            detection if isinstance(detection, dict) else {}
+        stable_group_key = _stable_group_key(
+            member.get("stable_group_key"),
+            f"{label} member {rank} stable_group_key",
         )
+        detection = member.get("detection")
+        if not isinstance(detection, dict):
+            raise CohortEvaluationError(
+                f"{label} member {rank} detection is invalid"
+            )
+        detection_group_key = _stable_group_key(
+            detection.get("stable_group_key"),
+            f"{label} member {rank} detection stable_group_key",
+        )
+        if detection_group_key != stable_group_key:
+            raise CohortEvaluationError(
+                f"{label} member {rank} stable_group_key binding changed"
+            )
+        detection_digest = sha256_value(detection)
         _validate_execution_proof(
             member=member,
             role=role,
             contract=contract,
+            cohort_id=str(document.get("cohort_id") or ""),
+            frozen_plan_sha256=str(
+                document.get("frozen_plan_sha256") or ""
+            ),
             label=f"{label} member {rank}",
         )
         ordered_identities.append(
@@ -1498,9 +1760,24 @@ def load_result_export(
                     member.get("dashboard_group_id") or ""
                 ),
                 "stable_group_id": stable_id,
+                "stable_group_key": stable_group_key,
                 "representative_alert_id": str(
                     member.get("representative_alert_id") or ""
                 ),
+            }
+        )
+        ordered_detection_projection.append(
+            {
+                "rank": rank,
+                "dashboard_group_id": str(
+                    member.get("dashboard_group_id") or ""
+                ),
+                "stable_group_id": stable_id,
+                "stable_group_key": stable_group_key,
+                "representative_alert_id": str(
+                    member.get("representative_alert_id") or ""
+                ),
+                "detection_sha256": detection_digest,
             }
         )
         normalized_members[stable_id] = {
@@ -1542,6 +1819,7 @@ def load_result_export(
             ),
         }
     ordered_identities.sort(key=lambda item: int(item["rank"]))
+    ordered_detection_projection.sort(key=lambda item: int(item["rank"]))
     if (
         sha256_value(ordered_identities) != ordered_identity_sha256
         or str(execution_gate.get("ordered_identity_sha256") or "")
@@ -1575,6 +1853,11 @@ def load_result_export(
                     if isinstance(member.get("pre_state"), dict)
                     else {}
                 ),
+                "detection_sha256": sha256_value(
+                    member.get("detection")
+                    if isinstance(member.get("detection"), dict)
+                    else {}
+                ),
                 "dispatch_kind": str(
                     (member.get("dispatch") or {}).get("kind") or ""
                 ),
@@ -1600,6 +1883,10 @@ def load_result_export(
         "source_rows_sha256": source_sha256,
         "ordered_identity_sha256": ordered_identity_sha256,
         "ordered_identities": ordered_identities,
+        "ordered_detection_projection": ordered_detection_projection,
+        "ordered_detection_sha256": sha256_value(
+            ordered_detection_projection
+        ),
         "frozen_plan_sha256": frozen_plan_sha256,
         "execution_contract": contract,
         "members": normalized_members,
@@ -1700,6 +1987,7 @@ def _case_evaluation(
         "required_query_classes": ground_truth["required_query_classes"],
         "telemetry_gap_codes": ground_truth["telemetry_gap_codes"],
         "ground_truth_digests": {
+            "detection_sha256": ground_truth["detection_sha256"],
             "evidence_basis_sha256": ground_truth["evidence_basis_sha256"],
             "scope_timeline_sha256": ground_truth["scope_timeline_sha256"],
             "attribution_sha256": ground_truth["attribution_sha256"],
@@ -1874,11 +2162,12 @@ def evaluate_cohorts(
     *,
     result_paths: Mapping[str, Path],
     adjudication_path: Path,
-    expected_count: int = 20,
+    expected_count: int = EXPECTED_ROLE_COUNT,
 ) -> dict[str, Any]:
-    if expected_count < 1 or expected_count > MAX_COHORT_SIZE:
+    if expected_count != EXPECTED_ROLE_COUNT:
         raise CohortEvaluationError(
-            f"expected count must be between 1 and {MAX_COHORT_SIZE}"
+            "paired newest-20 grading requires exactly 20 results per role "
+            f"and {EXPECTED_TOTAL_RESULTS} total"
         )
     roles = tuple(role for role in SUPPORTED_ROLES if role in result_paths)
     if set(result_paths) != set(SUPPORTED_ROLES):
@@ -1903,7 +2192,13 @@ def evaluate_cohorts(
             "ordered_identity_sha256": loaded[
                 "ordered_identity_sha256"
             ],
+            "ordered_detection_sha256": loaded[
+                "ordered_detection_sha256"
+            ],
             "frozen_plan_sha256": loaded["frozen_plan_sha256"],
+            "expected_release_id": loaded["execution_contract"][
+                "expected_release_id"
+            ],
         }
     incident_result = loaded_results["incident-responder"]
     soc_result = loaded_results["soc-analyst"]
@@ -1914,6 +2209,10 @@ def evaluate_cohorts(
         != soc_result["ordered_identity_sha256"]
         or incident_result["ordered_identities"]
         != soc_result["ordered_identities"]
+        or incident_result["ordered_detection_projection"]
+        != soc_result["ordered_detection_projection"]
+        or incident_result["execution_contract"]["expected_release_id"]
+        != soc_result["execution_contract"]["expected_release_id"]
     ):
         raise CohortEvaluationError(
             "SOC Analyst and Incident Responder exports are not the same "
@@ -1949,6 +2248,18 @@ def evaluate_cohorts(
                 f"{role} stable cohort differs from adjudication "
                 f"(missing={missing}, unexpected={unexpected})"
             )
+        for stable_id, result_member in loaded_results[role]["members"].items():
+            expected_detection_sha256 = adjudications_by_stable[stable_id][
+                "ground_truth"
+            ]["detection_sha256"]
+            if (
+                result_member["detection_sha256"]
+                != expected_detection_sha256
+            ):
+                raise CohortEvaluationError(
+                    f"{role} detection snapshot differs from adjudication "
+                    f"for {stable_id}"
+                )
 
     role_reports: dict[str, dict[str, Any]] = {}
     for role in roles:
@@ -2000,6 +2311,9 @@ def evaluate_cohorts(
             ],
             "ordered_identity_sha256": incident_result[
                 "ordered_identity_sha256"
+            ],
+            "ordered_detection_sha256": incident_result[
+                "ordered_detection_sha256"
             ],
             "controls": {
                 "fresh_results": True,
@@ -2271,7 +2585,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="metadata-only cohort export; repeat once per evaluated role",
     )
     parser.add_argument("--adjudication", required=True, type=Path)
-    parser.add_argument("--expected-count", type=int, default=20)
     parser.add_argument("--json-out", required=True, type=Path)
     parser.add_argument("--markdown-out", required=True, type=Path)
     parser.add_argument(
@@ -2298,7 +2611,6 @@ def main(argv: list[str] | None = None) -> int:
         report = evaluate_cohorts(
             result_paths=result_paths,
             adjudication_path=args.adjudication,
-            expected_count=args.expected_count,
         )
         write_private_json(
             args.json_out, report, replace=bool(args.replace)

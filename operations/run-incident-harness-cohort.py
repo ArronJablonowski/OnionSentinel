@@ -40,12 +40,13 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 
-SCHEMA = "onion-sentinel-incident-harness-cohort-v2"
-EXPORT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v2"
+SCHEMA = "onion-sentinel-incident-harness-cohort-v3"
+EXPORT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v3"
 MAX_COHORT_SIZE = 100
 MAX_HTTP_BODY_BYTES = 1_000_000
 MAX_SOURCE_ROWS_BYTES = 2_000_000
 MAX_MANIFEST_BYTES = 10_000_000
+MAX_STABLE_GROUP_KEY_BYTES = 2048
 TERMINAL_MONITOR_STATES = {"completed", "failed", "skipped"}
 ACTIVE_JOB_STATES = {"pending", "processing"}
 ACTIVE_AGENT_STATES = {"queued", "analyzing"}
@@ -54,13 +55,34 @@ AGENT_ROLES = {"incident-responder", "soc-analyst"}
 COHORT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{2,63}")
 DASHBOARD_GROUP_ID_RE = re.compile(r"[a-f0-9]{12}")
 STABLE_GROUP_ID_RE = re.compile(r"[a-f0-9]{20}")
-CASE_ID_RE = re.compile(r"ir-[a-z0-9-]{1,80}")
-RUN_ID_RE = re.compile(r"irr-[a-z0-9-]{1,80}")
+REPRESENTATIVE_ALERT_ID_RE = re.compile(r"[A-Za-z0-9._:@=-]{1,256}")
+CASE_ID_RE = re.compile(r"ir-[a-z0-9_-]{1,64}")
+RUN_ID_RE = re.compile(r"irr-[a-z0-9-]{1,64}")
 SHA256_RE = re.compile(r"[a-f0-9]{64}")
+RELEASE_ID_RE = re.compile(r"[a-f0-9]{40}")
 SAFE_ROUTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{2,255}")
 TRACE_EVALUATOR_PATH = Path(__file__).with_name("evaluate-harness-traces.py")
 MODEL_CALL_CONTRACT_SCHEMA = "onion-sentinel-model-call-contract-v1"
 MAX_RUNTIME_MODEL_CALLS = 6
+DISPATCH_ID_SCHEMA = "onion-sentinel-cohort-member-dispatch-v1"
+REPRESENTATIVE_BINDING_SCHEMA = (
+    "onion-sentinel-frozen-representative-binding-v1"
+)
+FROZEN_REPRESENTATIVE_IMMUTABLE_FIELDS = (
+    "stable_group_key",
+    "timestamp",
+    "rule_name",
+    "event_dataset",
+    "severity",
+    "severity_label",
+    "source_ip",
+    "source_port",
+    "destination_ip",
+    "destination_port",
+    "network_protocol",
+    "transport_protocol",
+    "traffic_direction",
+)
 
 
 class CohortError(RuntimeError):
@@ -193,6 +215,9 @@ def load_private_manifest(path: Path) -> dict[str, Any]:
         raise CohortError("cohort manifest has no members")
     contract = document.get("execution_contract")
     if not isinstance(contract, dict) or contract != execution_contract(
+        expected_release_id=str(
+            (contract or {}).get("expected_release_id") or ""
+        ),
         expected_assigned_route=str(
             (contract or {}).get("expected_assigned_route") or ""
         ),
@@ -278,8 +303,55 @@ def validate_model_route(value: str, label: str, *, allow_empty: bool = False) -
     return route
 
 
+def validate_release_id(value: Any, label: str = "expected release ID") -> str:
+    release_id = str(value or "").strip()
+    if not RELEASE_ID_RE.fullmatch(release_id):
+        raise CohortError(
+            f"{label} must be exactly 40 lowercase hexadecimal characters"
+        )
+    return release_id
+
+
+def validate_stable_group_key(value: Any, label: str) -> str:
+    """Validate an opaque stable-group key without changing its identity."""
+
+    if not isinstance(value, str) or not value:
+        raise CohortError(f"{label} is missing or malformed")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise CohortError(f"{label} is not valid UTF-8") from exc
+    if len(encoded) > MAX_STABLE_GROUP_KEY_BYTES or "\x00" in value:
+        raise CohortError(
+            f"{label} exceeds the bounded stable-group-key contract"
+        )
+    return value
+
+
+def _member_stable_group_key(member: Mapping[str, Any]) -> str:
+    """Return the exact top-level/detection-bound stable-group key."""
+
+    stable_group_key = validate_stable_group_key(
+        member.get("stable_group_key"),
+        "frozen member stable_group_key",
+    )
+    detection = member.get("detection")
+    if not isinstance(detection, dict):
+        raise CohortError("frozen member detection is missing or malformed")
+    detection_group_key = validate_stable_group_key(
+        detection.get("stable_group_key"),
+        "frozen detection stable_group_key",
+    )
+    if detection_group_key != stable_group_key:
+        raise CohortError(
+            "frozen member stable_group_key does not match detection evidence"
+        )
+    return stable_group_key
+
+
 def execution_contract(
     *,
+    expected_release_id: str,
     expected_assigned_route: str,
     expected_reviewer_route: str = "",
 ) -> dict[str, Any]:
@@ -289,6 +361,7 @@ def execution_contract(
         "harness_required": True,
         "harness_mode": "shadow",
         "memory_frozen": True,
+        "expected_release_id": validate_release_id(expected_release_id),
         "expected_assigned_route": validate_model_route(
             expected_assigned_route,
             "expected assigned route",
@@ -309,12 +382,20 @@ def ordered_identity_projection(
             "rank": int(member["rank"]),
             "dashboard_group_id": str(member["dashboard_group_id"]),
             "stable_group_id": str(member["stable_group_id"]),
+            "stable_group_key": _member_stable_group_key(member),
             "representative_alert_id": str(
                 member["representative_alert_id"]
             ),
         }
         for member in members
     ]
+
+
+def _member_detection_digest(member: Mapping[str, Any]) -> str:
+    detection = member.get("detection")
+    if not isinstance(detection, dict):
+        raise CohortError("frozen plan member detection is missing or malformed")
+    return sha256_value(detection)
 
 
 def _frozen_plan_digest(manifest: Mapping[str, Any]) -> str:
@@ -344,6 +425,7 @@ def _frozen_plan_digest(manifest: Mapping[str, Any]) -> str:
                         if isinstance(member.get("pre_state"), dict)
                         else {}
                     ),
+                    "detection_sha256": _member_detection_digest(member),
                     "dispatch_kind": str(
                         (member.get("dispatch") or {}).get("kind") or ""
                     ),
@@ -355,6 +437,67 @@ def _frozen_plan_digest(manifest: Mapping[str, Any]) -> str:
             ],
         }
     )
+
+
+def deterministic_dispatch_id(
+    manifest: Mapping[str, Any],
+    member: Mapping[str, Any],
+) -> str:
+    """Derive one replay-stable dispatch identity from the frozen plan."""
+
+    cohort_id = str(manifest.get("cohort_id") or "")
+    if not COHORT_ID_RE.fullmatch(cohort_id):
+        raise CohortError("cohort dispatch has an invalid cohort ID")
+    frozen_plan_sha256 = str(manifest.get("frozen_plan_sha256") or "")
+    if not SHA256_RE.fullmatch(frozen_plan_sha256):
+        raise CohortError("cohort dispatch has an invalid frozen plan digest")
+    dashboard_id = str(member.get("dashboard_group_id") or "")
+    stable_id = str(member.get("stable_group_id") or "")
+    representative_alert_id = str(
+        member.get("representative_alert_id") or ""
+    )
+    stable_group_key = _member_stable_group_key(member)
+    dispatch_kind = str((member.get("dispatch") or {}).get("kind") or "")
+    if not DASHBOARD_GROUP_ID_RE.fullmatch(dashboard_id):
+        raise CohortError("cohort dispatch has an invalid dashboard group ID")
+    if not STABLE_GROUP_ID_RE.fullmatch(stable_id):
+        raise CohortError("cohort dispatch has an invalid stable group ID")
+    if not REPRESENTATIVE_ALERT_ID_RE.fullmatch(representative_alert_id):
+        raise CohortError(
+            "cohort dispatch has an invalid frozen representative alert ID"
+        )
+    if dispatch_kind not in {"analyze", "escalate", "reanalyze"}:
+        raise CohortError(
+            f"cohort dispatch has unsupported kind: {dispatch_kind!r}"
+        )
+    try:
+        rank = int(member["rank"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CohortError("cohort dispatch has an invalid member rank") from exc
+    if rank < 1:
+        raise CohortError("cohort dispatch has an invalid member rank")
+    dispatch_id = sha256_value(
+        {
+            "schema": DISPATCH_ID_SCHEMA,
+            "cohort_id": cohort_id,
+            "frozen_plan_sha256": frozen_plan_sha256,
+            "rank": rank,
+            "dashboard_group_id": dashboard_id,
+            "stable_group_id": stable_id,
+            "stable_group_key": stable_group_key,
+            "representative_alert_id": representative_alert_id,
+            "dispatch_kind": dispatch_kind,
+        }
+    )
+    existing = str((member.get("dispatch") or {}).get("dispatch_id") or "")
+    if existing and (
+        not SHA256_RE.fullmatch(existing)
+        or not _constant_time_equal(existing, dispatch_id)
+    ):
+        raise CohortError(
+            f"dispatch ID does not match frozen member rank {rank}"
+        )
+    return dispatch_id
 
 
 def _parse_timestamp(value: Any, label: str) -> dt.datetime:
@@ -616,6 +759,47 @@ def _active_jobs(
     ]
 
 
+def _durable_dispatch_job(
+    connection: sqlite3.Connection,
+    *,
+    job_type: str,
+    stable_group_id: str,
+) -> dict[str, Any]:
+    if job_type not in {"incident_response_analysis", "ai_analysis"}:
+        raise CohortError(f"unsupported durable job type: {job_type}")
+    _require_columns(
+        connection,
+        "durable_jobs",
+        {
+            "id",
+            "job_type",
+            "dedupe_key",
+            "payload_json",
+            "status",
+            "attempt_count",
+            "requested_at",
+            "updated_at",
+            "completed_at",
+            "last_completed_at",
+        },
+    )
+    row = connection.execute(
+        """
+        SELECT id, job_type, dedupe_key, payload_json, status, attempt_count,
+               requested_at, updated_at, completed_at, last_completed_at
+        FROM durable_jobs
+        WHERE job_type = ? AND dedupe_key = ?
+        """,
+        (job_type, stable_group_id),
+    ).fetchone()
+    if row is None:
+        raise AmbiguousDispatchError(
+            "dashboard accepted the request but exact durable job readback "
+            "failed"
+        )
+    return dict(row)
+
+
 def _durable_job_snapshot(
     connection: sqlite3.Connection,
     *,
@@ -725,6 +909,61 @@ def _analysis_ids_for_group(
     return identities
 
 
+def _frozen_analysis_ids(
+    member: Mapping[str, Any],
+    *,
+    agent_role: str,
+    pre_state_field: str,
+) -> set[str]:
+    pre_state = member.get("pre_state")
+    if not isinstance(pre_state, dict):
+        raise CohortError("frozen member pre-state is missing or malformed")
+    prior_value = pre_state.get(pre_state_field)
+    if (
+        not isinstance(prior_value, list)
+        or any(not isinstance(item, str) or not item for item in prior_value)
+        or len(prior_value) != len(set(prior_value))
+    ):
+        raise CohortError(
+            f"frozen {agent_role} analysis identity set is malformed"
+        )
+    return set(prior_value)
+
+
+def _verify_zero_fresh_analyses(
+    connection: sqlite3.Connection,
+    member: Mapping[str, Any],
+    stable_group_id: str,
+    *,
+    agent_role: str,
+    pre_state_field: str,
+) -> list[str]:
+    """Prove no worker result raced the controlled dispatch readback."""
+
+    prior_ids = _frozen_analysis_ids(
+        member,
+        agent_role=agent_role,
+        pre_state_field=pre_state_field,
+    )
+    current_ids = set(
+        _analysis_ids_for_group(
+            connection,
+            stable_group_id,
+            agent_role=agent_role,
+        )
+    )
+    if not prior_ids.issubset(current_ids):
+        raise AmbiguousDispatchError(
+            f"prior {agent_role} analysis identities changed during dispatch"
+        )
+    if current_ids - prior_ids:
+        raise AmbiguousDispatchError(
+            f"a fresh {agent_role} analysis appeared during the "
+            "dispatch/readback window"
+        )
+    return sorted(current_ids)
+
+
 def _soc_pre_state(
     connection: sqlite3.Connection,
     stable_group_id: str,
@@ -829,6 +1068,11 @@ def _pre_state(
     latest_analysis_id = str((case or {}).get("latest_analysis_id") or "")
     return {
         "incident_case": case,
+        "incident_analysis_ids": _analysis_ids_for_group(
+            connection,
+            stable_group_id,
+            agent_role="incident-responder",
+        ),
         "latest_analysis": _latest_analysis_metadata(
             connection,
             latest_analysis_id,
@@ -845,11 +1089,13 @@ def freeze_cohort(
     cohort_id: str,
     reason: str,
     count: int,
+    expected_release_id: str,
     expected_assigned_route: str = "codex-cli:gpt-5.6-sol:high",
     expected_reviewer_route: str = "",
     dry_run: bool = False,
 ) -> dict[str, Any]:
     cohort_id, reason = validate_cohort_identity(cohort_id, reason)
+    expected_release_id = validate_release_id(expected_release_id)
     if count < 1 or count > MAX_COHORT_SIZE:
         raise CohortError(f"cohort size must be between 1 and {MAX_COHORT_SIZE}")
     if manifest_path.expanduser().exists() and not dry_run:
@@ -883,10 +1129,41 @@ def freeze_cohort(
             representative_alert_id = str(
                 summary.get("representative_alert_id") or ""
             ).strip()
-            if not representative_alert_id:
+            if not REPRESENTATIVE_ALERT_ID_RE.fullmatch(
+                representative_alert_id
+            ):
                 raise CohortError(
-                    f"dashboard group {dashboard_id} has no representative alert"
+                    f"dashboard group {dashboard_id} has an invalid "
+                    "representative alert ID"
                 )
+            detection = {
+                key: value
+                for key, value in summary.items()
+                if key != "group_id"
+            }
+            detection = _bind_representative_stable_group_key(
+                connection,
+                representative_alert_id,
+                detection,
+            )
+            stable_group_key = validate_stable_group_key(
+                detection.get("stable_group_key"),
+                (
+                    "representative alert stable_group_key for dashboard "
+                    f"group {dashboard_id}"
+                ),
+            )
+            _validate_representative_binding(
+                connection,
+                {
+                    "dashboard_group_id": dashboard_id,
+                    "stable_group_id": stable_id,
+                    "stable_group_key": stable_group_key,
+                    "representative_alert_id": representative_alert_id,
+                    "detection": detection,
+                },
+                representative_alert_id,
+            )
             pre_state = _pre_state(
                 connection,
                 stable_id,
@@ -899,12 +1176,9 @@ def freeze_cohort(
                     "rank": len(selected) + 1,
                     "dashboard_group_id": dashboard_id,
                     "stable_group_id": stable_id,
+                    "stable_group_key": stable_group_key,
                     "representative_alert_id": representative_alert_id,
-                    "detection": {
-                        key: value
-                        for key, value in summary.items()
-                        if key != "group_id"
-                    },
+                    "detection": detection,
                     "pre_state": pre_state,
                     "dispatch": {
                         "kind": (
@@ -941,6 +1215,7 @@ def freeze_cohort(
                 "ordered_identity_sha256": sha256_value(identities),
             },
             "execution_contract": execution_contract(
+                expected_release_id=expected_release_id,
                 expected_assigned_route=expected_assigned_route,
                 expected_reviewer_route=expected_reviewer_route,
             ),
@@ -988,26 +1263,23 @@ def _source_identity(row: Mapping[str, Any]) -> tuple[str, str, str]:
         raise CohortError(
             f"source row has invalid stable group ID: {stable_id!r}"
         )
-    if not representative_alert_id:
+    if not REPRESENTATIVE_ALERT_ID_RE.fullmatch(representative_alert_id):
         raise CohortError(
-            f"source row {dashboard_id} has no representative alert ID"
+            f"source row {dashboard_id} has an invalid representative "
+            "alert ID"
         )
     return dashboard_id, stable_id, representative_alert_id
 
 
-def _validate_source_detection(
+def _source_detection_projection(
     source: Mapping[str, Any],
-    current: Mapping[str, Any],
-    dashboard_id: str,
-) -> None:
+) -> dict[str, Any]:
     supplied_detection = source.get("detection")
     if supplied_detection is not None and not isinstance(
         supplied_detection,
         dict,
     ):
-        raise CohortError(
-            f"source row {dashboard_id} detection must be an object"
-        )
+        raise CohortError("source row detection must be an object")
     comparisons: dict[str, Any] = {}
     for key in SUMMARY_EXPORT_COLUMNS:
         if key == "group_id":
@@ -1023,12 +1295,40 @@ def _validate_source_detection(
         and "cohort_seen_at" in supplied_detection
     ):
         comparisons["cohort_seen_at"] = supplied_detection["cohort_seen_at"]
+    if "stable_group_key" in source:
+        comparisons["stable_group_key"] = source["stable_group_key"]
+    if (
+        isinstance(supplied_detection, dict)
+        and "stable_group_key" in supplied_detection
+    ):
+        comparisons["stable_group_key"] = supplied_detection[
+            "stable_group_key"
+        ]
+    return comparisons
+
+
+def _validate_source_detection(
+    source: Mapping[str, Any],
+    current: Mapping[str, Any],
+    dashboard_id: str,
+) -> dict[str, Any]:
+    try:
+        comparisons = _source_detection_projection(source)
+    except CohortError as exc:
+        raise CohortError(
+            f"source row {dashboard_id} detection must be an object"
+        ) from exc
     for key, value in comparisons.items():
+        if key == "stable_group_key":
+            # The summary table does not own this identity field. It is
+            # compared against the exact raw alert by representative binding.
+            continue
         if current.get(key) != value:
             raise CohortError(
                 f"source row {dashboard_id} no longer matches frozen "
                 f"detection field {key}"
             )
+    return comparisons
 
 
 def _validate_source_pre_state(
@@ -1062,6 +1362,7 @@ def freeze_cohort_from_rows(
     cohort_id: str,
     reason: str,
     expected_count: int,
+    expected_release_id: str,
     agent_role: str = "incident-responder",
     expected_assigned_route: str = "codex-cli:gpt-5.6-sol:high",
     expected_reviewer_route: str = "",
@@ -1071,6 +1372,7 @@ def freeze_cohort_from_rows(
 
     cohort_id, reason = validate_cohort_identity(cohort_id, reason)
     agent_role = validate_agent_role(agent_role)
+    expected_release_id = validate_release_id(expected_release_id)
     if expected_count < 1 or expected_count > MAX_COHORT_SIZE:
         raise CohortError(
             f"expected count must be between 1 and {MAX_COHORT_SIZE}"
@@ -1117,14 +1419,55 @@ def freeze_cohort_from_rows(
                 raise CohortError(
                     f"source stable identity changed for {dashboard_id}"
                 )
-            if (
-                str(current.get("representative_alert_id") or "")
-                != representative_alert_id
-            ):
-                raise CohortError(
-                    f"source representative alert changed for {dashboard_id}"
+            current_representative_alert_id = str(
+                current.get("representative_alert_id") or ""
+            )
+            if current_representative_alert_id == representative_alert_id:
+                source_detection = _validate_source_detection(
+                    source,
+                    current,
+                    dashboard_id,
                 )
-            _validate_source_detection(source, current, dashboard_id)
+                frozen_detection = {
+                    key: value
+                    for key, value in current.items()
+                    if key != "group_id"
+                }
+                if "stable_group_key" in source_detection:
+                    frozen_detection["stable_group_key"] = source_detection[
+                        "stable_group_key"
+                    ]
+            else:
+                try:
+                    frozen_detection = _source_detection_projection(source)
+                except CohortError as exc:
+                    raise CohortError(
+                        f"source row {dashboard_id} detection must be an "
+                        "object"
+                    ) from exc
+            frozen_detection = _bind_representative_stable_group_key(
+                connection,
+                representative_alert_id,
+                frozen_detection,
+            )
+            stable_group_key = validate_stable_group_key(
+                frozen_detection.get("stable_group_key"),
+                (
+                    "representative alert stable_group_key for dashboard "
+                    f"group {dashboard_id}"
+                ),
+            )
+            _validate_representative_binding(
+                connection,
+                {
+                    "dashboard_group_id": dashboard_id,
+                    "stable_group_id": stable_id,
+                    "stable_group_key": stable_group_key,
+                    "representative_alert_id": representative_alert_id,
+                    "detection": frozen_detection,
+                },
+                current_representative_alert_id,
+            )
             if agent_role == "soc-analyst":
                 pre_state = _soc_pre_state(
                     connection,
@@ -1146,12 +1489,9 @@ def freeze_cohort_from_rows(
                     "rank": index + 1,
                     "dashboard_group_id": dashboard_id,
                     "stable_group_id": stable_id,
+                    "stable_group_key": stable_group_key,
                     "representative_alert_id": representative_alert_id,
-                    "detection": {
-                        key: value
-                        for key, value in current.items()
-                        if key != "group_id"
-                    },
+                    "detection": frozen_detection,
                     "pre_state": pre_state,
                     "dispatch": {
                         "kind": (
@@ -1185,6 +1525,7 @@ def freeze_cohort_from_rows(
                 "ordered_identity_sha256": sha256_value(identities),
             },
             "execution_contract": execution_contract(
+                expected_release_id=expected_release_id,
                 expected_assigned_route=expected_assigned_route,
                 expected_reviewer_route=expected_reviewer_route,
             ),
@@ -1234,6 +1575,182 @@ def _current_summary_identity(
     )
 
 
+def _alert_representative_identity(
+    connection: sqlite3.Connection,
+    alert_id: str,
+) -> dict[str, Any] | None:
+    required = {
+        "alert_id",
+        "stable_group_id",
+        "stable_group_key",
+        *FROZEN_REPRESENTATIVE_IMMUTABLE_FIELDS,
+    }
+    _require_columns(connection, "alerts", required)
+    row = connection.execute(
+        "SELECT "
+        + ", ".join(sorted(required))
+        + " FROM alerts WHERE alert_id = ?",
+        (alert_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _bind_representative_stable_group_key(
+    connection: sqlite3.Connection,
+    representative_alert_id: str,
+    detection: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind the raw representative's group key into frozen evidence."""
+
+    bound = dict(detection)
+    if "stable_group_key" in bound:
+        return bound
+    alert = _alert_representative_identity(
+        connection,
+        representative_alert_id,
+    )
+    if alert is not None:
+        bound["stable_group_key"] = alert.get("stable_group_key")
+    return bound
+
+
+def _validate_representative_binding(
+    connection: sqlite3.Connection,
+    member: Mapping[str, Any],
+    current_representative_alert_id: str,
+) -> dict[str, Any]:
+    """Prove the frozen and current representatives remain one exact group."""
+
+    dashboard_id = str(member["dashboard_group_id"])
+    stable_id = str(member["stable_group_id"])
+    stable_group_key = _member_stable_group_key(member)
+    frozen_alert_id = str(member["representative_alert_id"])
+    if not REPRESENTATIVE_ALERT_ID_RE.fullmatch(frozen_alert_id):
+        raise CohortError(
+            f"frozen representative alert ID is invalid for dashboard "
+            f"group {dashboard_id}"
+        )
+    if not REPRESENTATIVE_ALERT_ID_RE.fullmatch(
+        current_representative_alert_id
+    ):
+        raise CohortError(
+            f"current representative alert ID is invalid for dashboard "
+            f"group {dashboard_id}"
+        )
+    frozen_alert = _alert_representative_identity(
+        connection,
+        frozen_alert_id,
+    )
+    if frozen_alert is None:
+        raise CohortError(
+            f"frozen representative alert is missing for dashboard group "
+            f"{dashboard_id}"
+        )
+    frozen_alert_stable = str(
+        frozen_alert.get("stable_group_id") or ""
+    )
+    if frozen_alert_stable != stable_id:
+        raise CohortError(
+            f"frozen representative alert stable identity drift for "
+            f"dashboard group {dashboard_id}"
+        )
+
+    detection = member.get("detection")
+    if not isinstance(detection, dict):
+        raise CohortError(
+            f"frozen representative detection is missing for dashboard "
+            f"group {dashboard_id}"
+        )
+    missing_fields = [
+        field
+        for field in FROZEN_REPRESENTATIVE_IMMUTABLE_FIELDS
+        if field not in detection
+    ]
+    if missing_fields:
+        raise CohortError(
+            f"frozen representative detection is missing immutable fields "
+            f"for dashboard group {dashboard_id}: "
+            + ", ".join(missing_fields)
+        )
+    drifted_fields = [
+        field
+        for field in FROZEN_REPRESENTATIVE_IMMUTABLE_FIELDS
+        if frozen_alert.get(field) != detection.get(field)
+    ]
+    if drifted_fields:
+        raise CohortError(
+            f"frozen representative immutable evidence drift for dashboard "
+            f"group {dashboard_id}: "
+            + ", ".join(drifted_fields)
+        )
+
+    current_alert = _alert_representative_identity(
+        connection,
+        current_representative_alert_id,
+    )
+    if current_alert is None:
+        raise CohortError(
+            f"current representative alert is missing for dashboard group "
+            f"{dashboard_id}"
+        )
+    current_alert_stable = str(
+        current_alert.get("stable_group_id") or ""
+    )
+    if current_alert_stable != stable_id:
+        raise CohortError(
+            f"current representative alert stable identity drift for "
+            f"dashboard group {dashboard_id}"
+        )
+    frozen_group_key = validate_stable_group_key(
+        frozen_alert.get("stable_group_key"),
+        (
+            "frozen representative alert stable_group_key for dashboard "
+            f"group {dashboard_id}"
+        ),
+    )
+    current_group_key = validate_stable_group_key(
+        current_alert.get("stable_group_key"),
+        (
+            "current representative alert stable_group_key for dashboard "
+            f"group {dashboard_id}"
+        ),
+    )
+    if frozen_group_key != stable_group_key:
+        raise CohortError(
+            f"frozen representative alert stable group key drift for "
+            f"dashboard group {dashboard_id}"
+        )
+    if frozen_group_key != current_group_key:
+        raise CohortError(
+            f"representative alert stable group key drift for dashboard "
+            f"group {dashboard_id}"
+        )
+
+    immutable_projection = {
+        field: frozen_alert.get(field)
+        for field in FROZEN_REPRESENTATIVE_IMMUTABLE_FIELDS
+    }
+    return {
+        "schema": REPRESENTATIVE_BINDING_SCHEMA,
+        "representative_drifted": (
+            current_representative_alert_id != frozen_alert_id
+        ),
+        "stable_group_id": stable_id,
+        "stable_group_key": stable_group_key,
+        "frozen_representative_alert_id": frozen_alert_id,
+        "current_representative_alert_id": (
+            current_representative_alert_id
+        ),
+        "immutable_fields": list(
+            FROZEN_REPRESENTATIVE_IMMUTABLE_FIELDS
+        ),
+        "frozen_immutable_evidence_sha256": sha256_value(
+            immutable_projection
+        ),
+        "stable_group_key_compatible": True,
+    }
+
+
 def _case_for_stable(
     connection: sqlite3.Connection,
     stable_group_id: str,
@@ -1250,20 +1767,23 @@ def _case_for_stable(
 def validate_member_preflight(
     connection: sqlite3.Connection,
     member: Mapping[str, Any],
-) -> None:
+) -> dict[str, Any]:
     aliases = load_aliases(connection)
     dashboard_id = str(member["dashboard_group_id"])
     stable_id = str(member["stable_group_id"])
     identity = _current_summary_identity(connection, dashboard_id, aliases)
     if identity is None:
         raise CohortError(f"frozen dashboard group disappeared: {dashboard_id}")
-    if identity != (
-        stable_id,
-        str(member["representative_alert_id"]),
-    ):
+    current_stable_id, current_representative_alert_id = identity
+    if current_stable_id != stable_id:
         raise CohortError(
-            f"frozen identity drift for dashboard group {dashboard_id}"
+            f"frozen stable identity drift for dashboard group {dashboard_id}"
         )
+    representative_binding = _validate_representative_binding(
+        connection,
+        member,
+        current_representative_alert_id,
+    )
     if str((member.get("dispatch") or {}).get("kind") or "") == "analyze":
         current_soc_state = _soc_pre_state(
             connection,
@@ -1274,7 +1794,24 @@ def validate_member_preflight(
             raise CohortError(
                 f"SOC Analyst pre-state changed for stable group {stable_id}"
             )
-        return
+        return representative_binding
+    frozen_incident_analysis_ids = _frozen_analysis_ids(
+        member,
+        agent_role="incident-responder",
+        pre_state_field="incident_analysis_ids",
+    )
+    current_incident_analysis_ids = set(
+        _analysis_ids_for_group(
+            connection,
+            stable_id,
+            agent_role="incident-responder",
+        )
+    )
+    if current_incident_analysis_ids != frozen_incident_analysis_ids:
+        raise CohortError(
+            f"Incident Responder analysis pre-state changed for stable "
+            f"group {stable_id}"
+        )
     pre_case = (member.get("pre_state") or {}).get("incident_case")
     current_case = _case_for_stable(connection, stable_id, aliases)
     if current_case != pre_case:
@@ -1298,6 +1835,7 @@ def validate_member_preflight(
         raise CohortError(
             f"stable group {stable_id} has a queued/running reanalysis"
         )
+    return representative_binding
 
 
 def validate_frozen_cohort(
@@ -1408,8 +1946,15 @@ def _request_for_member(
     member: Mapping[str, Any],
 ) -> tuple[str, dict[str, Any]]:
     cohort_id = str(manifest["cohort_id"])
+    dispatch_id = deterministic_dispatch_id(manifest, member)
     reason = f"[cohort:{cohort_id}] {manifest['reason']}"[:1000]
     requested_by = f"harness-cohort:{cohort_id}"[:100]
+    release_id = validate_release_id(
+        (manifest.get("execution_contract") or {}).get(
+            "expected_release_id"
+        ),
+    )
+    stable_group_key = _member_stable_group_key(member)
     dispatch_kind = str((member.get("dispatch") or {}).get("kind") or "")
     if dispatch_kind == "escalate":
         path = (
@@ -1422,6 +1967,14 @@ def _request_for_member(
             "requested_by": requested_by,
             "related_limit": 500,
             "pcap_analysis_limit": 25,
+            "stable_group_id": str(member["stable_group_id"]),
+            "stable_group_key": stable_group_key,
+            "representative_alert_id": str(
+                member["representative_alert_id"]
+            ),
+            "cohort_id": cohort_id,
+            "dispatch_id": dispatch_id,
+            "release_id": release_id,
         }
     elif dispatch_kind == "analyze":
         path = (
@@ -1434,6 +1987,14 @@ def _request_for_member(
             "requested_by": requested_by,
             "related_limit": 500,
             "pcap_analysis_limit": 25,
+            "stable_group_id": str(member["stable_group_id"]),
+            "stable_group_key": stable_group_key,
+            "representative_alert_id": str(
+                member["representative_alert_id"]
+            ),
+            "cohort_id": cohort_id,
+            "dispatch_id": dispatch_id,
+            "release_id": release_id,
         }
     elif dispatch_kind == "reanalyze":
         case_id = str(
@@ -1449,13 +2010,25 @@ def _request_for_member(
             + urllib.parse.quote(case_id, safe="")
             + "/reanalyze"
         )
-        payload = {"reason": reason, "requested_by": requested_by}
+        payload = {
+            "reason": reason,
+            "requested_by": requested_by,
+            "stable_group_id": str(member["stable_group_id"]),
+            "stable_group_key": stable_group_key,
+            "representative_alert_id": str(
+                member["representative_alert_id"]
+            ),
+            "cohort_id": cohort_id,
+            "dispatch_id": dispatch_id,
+            "release_id": release_id,
+        }
     else:
         raise CohortError(f"unsupported dispatch kind: {dispatch_kind!r}")
     return base_url + path, payload
 
 
 def _validate_success_response(
+    manifest: Mapping[str, Any],
     member: Mapping[str, Any],
     result: HttpResult,
 ) -> dict[str, Any]:
@@ -1481,9 +2054,16 @@ def _validate_success_response(
         expected = {
             "group_id": member["dashboard_group_id"],
             "queue_group_id": member["stable_group_id"],
+            "stable_group_id": member["stable_group_id"],
+            "stable_group_key": _member_stable_group_key(member),
             "representative_alert_id": member["representative_alert_id"],
+            "cohort_id": manifest["cohort_id"],
+            "dispatch_id": deterministic_dispatch_id(manifest, member),
+            "release_id": manifest["execution_contract"][
+                "expected_release_id"
+            ],
         }
-        if any(str(payload.get(key) or "") != str(value) for key, value in expected.items()):
+        if any(payload.get(key) != value for key, value in expected.items()):
             raise AmbiguousDispatchError(
                 "escalation response identity did not match the frozen member"
             )
@@ -1503,12 +2083,16 @@ def _validate_success_response(
         expected = {
             "group_id": member["dashboard_group_id"],
             "queue_group_id": member["stable_group_id"],
+            "stable_group_id": member["stable_group_id"],
+            "stable_group_key": _member_stable_group_key(member),
             "representative_alert_id": member["representative_alert_id"],
+            "cohort_id": manifest["cohort_id"],
+            "dispatch_id": deterministic_dispatch_id(manifest, member),
+            "release_id": manifest["execution_contract"][
+                "expected_release_id"
+            ],
         }
-        if any(
-            str(payload.get(key) or "") != str(value)
-            for key, value in expected.items()
-        ):
+        if any(payload.get(key) != value for key, value in expected.items()):
             raise AmbiguousDispatchError(
                 "SOC analysis response identity did not match the frozen member"
             )
@@ -1519,6 +2103,20 @@ def _validate_success_response(
             )
         accepted.update({**expected, "requested_at": requested_at})
     elif kind == "reanalyze":
+        expected = {
+            "stable_group_id": member["stable_group_id"],
+            "stable_group_key": _member_stable_group_key(member),
+            "representative_alert_id": member["representative_alert_id"],
+            "cohort_id": manifest["cohort_id"],
+            "dispatch_id": deterministic_dispatch_id(manifest, member),
+            "release_id": manifest["execution_contract"][
+                "expected_release_id"
+            ],
+        }
+        if any(payload.get(key) != value for key, value in expected.items()):
+            raise AmbiguousDispatchError(
+                "reanalysis response identity did not match the frozen member"
+            )
         run_id = str(payload.get("run_id") or "")
         try:
             total_count = int(payload.get("total_count") or 0)
@@ -1542,9 +2140,9 @@ def _validate_success_response(
         )
         accepted.update(
             {
+                **expected,
                 "run_id": run_id,
                 "case_id": case_id,
-                "release_id": str(payload.get("release_id") or ""),
                 "run_status": str(payload.get("status") or ""),
                 "created_at": str(payload.get("created_at") or ""),
             }
@@ -1554,8 +2152,66 @@ def _validate_success_response(
     return accepted
 
 
+def _validate_dispatch_job_payload(
+    manifest: Mapping[str, Any],
+    member: Mapping[str, Any],
+    job: Mapping[str, Any],
+    *,
+    manual_reanalysis: bool,
+    expected_case_id: str = "",
+    expected_reanalysis_run_id: str = "",
+) -> dict[str, Any]:
+    raw_payload = job.get("payload_json")
+    try:
+        payload = json.loads(str(raw_payload))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise AmbiguousDispatchError(
+            "durable job payload is not valid JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise AmbiguousDispatchError(
+            "durable job payload is not a JSON object"
+        )
+
+    cohort_present = bool(str(payload.get("cohort_id") or ""))
+    dispatch_present = bool(str(payload.get("dispatch_id") or ""))
+    if cohort_present != dispatch_present:
+        raise AmbiguousDispatchError(
+            "durable job cohort_id and dispatch_id must be present together"
+        )
+    expected = {
+        "alert_id": member["representative_alert_id"],
+        "representative_alert_id": member["representative_alert_id"],
+        "group_id": member["stable_group_id"],
+        "stable_group_id": member["stable_group_id"],
+        "stable_group_key": _member_stable_group_key(member),
+        "dashboard_group_id": member["dashboard_group_id"],
+        "cohort_id": manifest["cohort_id"],
+        "dispatch_id": deterministic_dispatch_id(manifest, member),
+        "release_id": manifest["execution_contract"]["expected_release_id"],
+    }
+    if expected_case_id:
+        expected["case_id"] = expected_case_id
+    if expected_reanalysis_run_id:
+        expected["reanalysis_run_id"] = expected_reanalysis_run_id
+    if any(payload.get(key) != value for key, value in expected.items()):
+        raise AmbiguousDispatchError(
+            "durable job payload identity did not match the frozen member"
+        )
+    if payload.get("manual_reanalysis") is not manual_reanalysis:
+        raise AmbiguousDispatchError(
+            "durable job manual_reanalysis did not match the dispatch kind"
+        )
+    return {
+        **expected,
+        "manual_reanalysis": manual_reanalysis,
+        "payload_sha256": sha256_value(payload),
+    }
+
+
 def _verify_dispatch_readback(
     database_path: Path,
+    manifest: Mapping[str, Any],
     member: Mapping[str, Any],
     accepted: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -1563,44 +2219,57 @@ def _verify_dispatch_readback(
     try:
         aliases = load_aliases(connection)
         stable_id = str(member["stable_group_id"])
+        stable_group_key = _member_stable_group_key(member)
         kind = str((member.get("dispatch") or {}).get("kind") or "")
         if kind == "analyze":
-            prior_ids = set(
-                (member.get("pre_state") or {}).get("soc_analysis_ids") or []
-            )
-            current_ids = set(
-                _analysis_ids_for_group(
-                    connection,
-                    stable_id,
-                    agent_role="soc-analyst",
-                )
-            )
-            new_ids = sorted(current_ids - prior_ids)
-            active_jobs = _active_jobs(
+            job = _durable_dispatch_job(
                 connection,
-                stable_id,
-                aliases,
                 job_type="ai_analysis",
+                stable_group_id=stable_id,
             )
-            if current_ids & prior_ids != prior_ids:
+            job_binding = _validate_dispatch_job_payload(
+                manifest,
+                member,
+                job,
+                manual_reanalysis=True,
+            )
+            _verify_zero_fresh_analyses(
+                connection,
+                member,
+                stable_id,
+                agent_role="soc-analyst",
+                pre_state_field="soc_analysis_ids",
+            )
+            job_status = str(job.get("status") or "")
+            if job_status not in ACTIVE_JOB_STATES:
                 raise AmbiguousDispatchError(
-                    "prior SOC analysis identities changed during dispatch"
-                )
-            if len(new_ids) > 1 or (not new_ids and not active_jobs):
-                raise AmbiguousDispatchError(
-                    "SOC analysis acceptance could not be bound to one exact job"
+                    "SOC analysis acceptance did not leave one exact active job"
                 )
             return {
                 "stable_group_id": stable_id,
+                "stable_group_key": stable_group_key,
                 "dashboard_group_id": str(member["dashboard_group_id"]),
                 "representative_alert_id": str(
                     member["representative_alert_id"]
                 ),
-                "job_status": (
-                    str(active_jobs[0]["status"]) if active_jobs else "completed"
+                "cohort_id": str(manifest["cohort_id"]),
+                "dispatch_id": deterministic_dispatch_id(manifest, member),
+                "release_id": str(
+                    manifest["execution_contract"]["expected_release_id"]
                 ),
-                "analysis_id": new_ids[0] if new_ids else "",
+                "job_id": int(job["id"]),
+                "job_status": job_status,
+                "job_payload_sha256": job_binding["payload_sha256"],
+                "analysis_id": "",
+                "fresh_analysis_count": 0,
             }
+        _verify_zero_fresh_analyses(
+            connection,
+            member,
+            stable_id,
+            agent_role="incident-responder",
+            pre_state_field="incident_analysis_ids",
+        )
         case_id = str(accepted["case_id"])
         case = _case_for_stable(connection, stable_id, aliases)
         if (
@@ -1611,7 +2280,7 @@ def _verify_dispatch_readback(
             or str(case.get("representative_alert_id") or "")
             != str(member["representative_alert_id"])
             or str(case.get("agent_status") or "")
-            not in {"queued", "analyzing", "analyzed", "failed"}
+            not in ACTIVE_AGENT_STATES
         ):
             raise AmbiguousDispatchError(
                 "dashboard accepted the request but exact case readback failed"
@@ -1619,10 +2288,47 @@ def _verify_dispatch_readback(
         output = {
             "case_id": case_id,
             "stable_group_id": stable_id,
+            "stable_group_key": stable_group_key,
             "dashboard_group_id": str(member["dashboard_group_id"]),
             "representative_alert_id": str(member["representative_alert_id"]),
+            "release_id": str(
+                manifest["execution_contract"]["expected_release_id"]
+            ),
             "agent_status": str(case.get("agent_status") or ""),
+            "fresh_analysis_count": 0,
         }
+        if kind == "escalate":
+            job = _durable_dispatch_job(
+                connection,
+                job_type="incident_response_analysis",
+                stable_group_id=stable_id,
+            )
+            job_binding = _validate_dispatch_job_payload(
+                manifest,
+                member,
+                job,
+                manual_reanalysis=False,
+                expected_case_id=case_id,
+            )
+            job_status = str(job.get("status") or "")
+            if job_status not in ACTIVE_JOB_STATES:
+                raise AmbiguousDispatchError(
+                    "escalation acceptance did not leave one exact active job"
+                )
+            output.update(
+                {
+                    "cohort_id": str(manifest["cohort_id"]),
+                    "dispatch_id": deterministic_dispatch_id(
+                        manifest,
+                        member,
+                    ),
+                    "job_id": int(job["id"]),
+                    "job_status": job_status,
+                    "job_payload_sha256": job_binding[
+                        "payload_sha256"
+                    ],
+                }
+            )
         if kind == "reanalyze":
             run_id = str(accepted.get("run_id") or "")
             row = connection.execute(
@@ -1642,21 +2348,197 @@ def _verify_dispatch_readback(
                 or str(row["representative_alert_id"] or "")
                 != str(member["representative_alert_id"])
                 or str(row["status"] or "")
-                not in {"queued", "running", "completed", "failed", "skipped"}
+                not in ACTIVE_REANALYSIS_STATES
             ):
                 raise AmbiguousDispatchError(
                     "dashboard accepted reanalysis but exact run readback failed"
+                )
+            job = _durable_dispatch_job(
+                connection,
+                job_type="incident_response_analysis",
+                stable_group_id=stable_id,
+            )
+            job_binding = _validate_dispatch_job_payload(
+                manifest,
+                member,
+                job,
+                manual_reanalysis=True,
+                expected_case_id=case_id,
+                expected_reanalysis_run_id=run_id,
+            )
+            job_status = str(job.get("status") or "")
+            if job_status not in ACTIVE_JOB_STATES:
+                raise AmbiguousDispatchError(
+                    "reanalysis acceptance did not leave one exact active job"
                 )
             output.update(
                 {
                     "run_id": run_id,
                     "run_case_status": str(row["status"]),
                     "queued_at": str(row["queued_at"] or ""),
+                    "cohort_id": str(manifest["cohort_id"]),
+                    "dispatch_id": deterministic_dispatch_id(
+                        manifest,
+                        member,
+                    ),
+                    "job_id": int(job["id"]),
+                    "job_status": job_status,
+                    "job_payload_sha256": job_binding[
+                        "payload_sha256"
+                    ],
                 }
             )
         return output
     finally:
         connection.close()
+
+
+def _monitor_dispatch_job_binding(
+    connection: sqlite3.Connection,
+    manifest: Mapping[str, Any],
+    member: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Re-prove the accepted durable job before trusting any monitor state."""
+
+    dispatch = member.get("dispatch")
+    if not isinstance(dispatch, dict):
+        raise CohortError("accepted member has no dispatch record")
+    accepted = dispatch.get("accepted")
+    readback = dispatch.get("readback")
+    if not isinstance(accepted, dict) or not isinstance(readback, dict):
+        raise CohortError("accepted member has incomplete dispatch provenance")
+
+    kind = str(dispatch.get("kind") or "")
+    if kind not in {"analyze", "escalate", "reanalyze"}:
+        raise CohortError(f"unsupported dispatch kind: {kind!r}")
+    stable_id = str(member["stable_group_id"])
+    stable_group_key = _member_stable_group_key(member)
+    aliases = load_aliases(connection)
+    current_identity = _current_summary_identity(
+        connection,
+        str(member["dashboard_group_id"]),
+        aliases,
+    )
+    if current_identity is None or current_identity[0] != stable_id:
+        raise CohortError(
+            "frozen representative identity changed during monitoring"
+        )
+    representative_binding = _validate_representative_binding(
+        connection,
+        member,
+        current_identity[1],
+    )
+    job_type = (
+        "ai_analysis"
+        if kind == "analyze"
+        else "incident_response_analysis"
+    )
+    case_id = str(accepted.get("case_id") or "") if kind != "analyze" else ""
+    run_id = (
+        str(accepted.get("run_id") or "")
+        if kind == "reanalyze"
+        else ""
+    )
+    job = _durable_dispatch_job(
+        connection,
+        job_type=job_type,
+        stable_group_id=stable_id,
+    )
+    binding = _validate_dispatch_job_payload(
+        manifest,
+        member,
+        job,
+        manual_reanalysis=kind != "escalate",
+        expected_case_id=case_id,
+        expected_reanalysis_run_id=run_id,
+    )
+
+    try:
+        expected_job_id = int(readback.get("job_id"))
+        current_job_id = int(job.get("id"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise CohortError("accepted dispatch has an invalid durable job ID") from exc
+    if expected_job_id < 1 or current_job_id != expected_job_id:
+        raise CohortError("accepted durable job identity changed during monitoring")
+
+    expected_payload_sha256 = str(
+        readback.get("job_payload_sha256") or ""
+    )
+    if (
+        not SHA256_RE.fullmatch(expected_payload_sha256)
+        or not _constant_time_equal(
+            expected_payload_sha256,
+            str(binding["payload_sha256"]),
+        )
+    ):
+        raise CohortError("accepted durable job payload changed during monitoring")
+
+    expected_dispatch_id = deterministic_dispatch_id(manifest, member)
+    expected_cohort_id = str(manifest["cohort_id"])
+    expected_release_id = str(
+        manifest["execution_contract"]["expected_release_id"]
+    )
+    provenance_sources = (
+        ("accepted response", accepted),
+        ("durable readback", readback),
+    )
+    for label, source in provenance_sources:
+        if (
+            source.get("dispatch_id") != expected_dispatch_id
+            or source.get("cohort_id") != expected_cohort_id
+            or source.get("stable_group_key") != stable_group_key
+            or source.get("release_id") != expected_release_id
+        ):
+            raise CohortError(
+                f"{label} dispatch identity changed during monitoring"
+            )
+    if str(dispatch.get("dispatch_id") or "") != expected_dispatch_id:
+        raise CohortError("member dispatch identity changed during monitoring")
+    if _parse_timestamp(
+        job.get("requested_at"),
+        "accepted durable job requested_at",
+    ) < _parse_timestamp(
+        dispatch.get("started_at"),
+        "accepted dispatch started_at",
+    ):
+        raise CohortError(
+            "accepted durable job predates the dispatch POST window"
+        )
+
+    expected_readback = {
+        "stable_group_id": stable_id,
+        "stable_group_key": stable_group_key,
+        "representative_alert_id": member["representative_alert_id"],
+        "release_id": expected_release_id,
+    }
+    if kind != "analyze":
+        expected_readback["case_id"] = case_id
+    if kind == "reanalyze":
+        expected_readback["run_id"] = run_id
+    if any(
+        readback.get(field) != expected
+        for field, expected in expected_readback.items()
+    ):
+        raise CohortError("durable readback identity changed during monitoring")
+
+    return {
+        key: value
+        for key, value in job.items()
+        if key != "payload_json"
+    } | {
+        "payload_sha256": binding["payload_sha256"],
+        "cohort_id": expected_cohort_id,
+        "dispatch_id": expected_dispatch_id,
+        "release_id": expected_release_id,
+        "stable_group_id": stable_id,
+        "stable_group_key": stable_group_key,
+        "representative_alert_id": str(
+            member["representative_alert_id"]
+        ),
+        "representative_binding_sha256": sha256_value(
+            representative_binding
+        ),
+    }
 
 
 Poster = Callable[[str, Mapping[str, Any]], HttpResult]
@@ -1685,8 +2567,16 @@ def queue_cohort(
             "ambiguous dispatch; refusing to send another request"
         )
     validate_frozen_cohort(database_path, manifest)
+    dispatch_ids = [
+        deterministic_dispatch_id(manifest, member)
+        for member in manifest["members"]
+    ]
+    if len(dispatch_ids) != len(set(dispatch_ids)):
+        raise CohortError("cohort members derived duplicate dispatch IDs")
     if dry_run:
         return manifest
+    for member, dispatch_id in zip(manifest["members"], dispatch_ids):
+        member["dispatch"]["dispatch_id"] = dispatch_id
 
     def do_post(url: str, payload: Mapping[str, Any]) -> HttpResult:
         if poster is not None:
@@ -1703,7 +2593,10 @@ def queue_cohort(
     for index, member in enumerate(manifest["members"]):
         connection = connect_read_only(database_path)
         try:
-            validate_member_preflight(connection, member)
+            representative_binding = validate_member_preflight(
+                connection,
+                member,
+            )
         finally:
             connection.close()
         url, payload = _request_for_member(base_url, manifest, member)
@@ -1715,6 +2608,7 @@ def queue_cohort(
                 "started_at": utc_now(),
                 "request_path": urllib.parse.urlsplit(url).path,
                 "request_sha256": sha256_value(payload),
+                "representative_binding": representative_binding,
             }
         )
         manifest["members"][index] = member
@@ -1725,9 +2619,10 @@ def queue_cohort(
         )
         try:
             result = do_post(url, payload)
-            accepted = _validate_success_response(member, result)
+            accepted = _validate_success_response(manifest, member, result)
             readback = _verify_dispatch_readback(
                 database_path,
+                manifest,
                 member,
                 accepted,
             )
@@ -1793,12 +2688,19 @@ def _analysis_metadata(
     analysis_id: str,
     stable_group_id: str,
     *,
+    expected_alert_id: str,
     expected_agent_role: str = "incident-responder",
 ) -> dict[str, Any]:
     columns = _require_columns(
         connection,
         "ai_analysis_runs",
-        {"analysis_id", "group_id", "agent_role", "response_json"},
+        {
+            "analysis_id",
+            "group_id",
+            "alert_id",
+            "agent_role",
+            "response_json",
+        },
     )
     allowed = [
         item
@@ -1828,6 +2730,7 @@ def _analysis_metadata(
     item = dict(row)
     if (
         str(item.get("group_id") or "") != stable_group_id
+        or str(item.get("alert_id") or "") != expected_alert_id
         or str(item.get("agent_role") or "") != expected_agent_role
     ):
         raise CohortError(
@@ -2296,8 +3199,106 @@ def _second_opinion_metadata(
     return dict(row) if row else None
 
 
+def _durable_job_monitor_state(job: Mapping[str, Any]) -> str:
+    """Return the bound job state after validating its terminal timestamps."""
+
+    status = str(job.get("status") or "")
+    state = {
+        "pending": "queued",
+        "processing": "running",
+        "completed": "completed",
+        "failed": "failed",
+    }.get(status)
+    if state is None:
+        raise CohortError(
+            f"accepted durable job has unsupported status: {status!r}"
+        )
+    requested_at = _parse_timestamp(
+        job.get("requested_at"),
+        "accepted durable job requested_at",
+    )
+    updated_at = _parse_timestamp(
+        job.get("updated_at"),
+        "accepted durable job updated_at",
+    )
+    if updated_at < requested_at:
+        raise CohortError(
+            "accepted durable job timestamp order is inconsistent"
+        )
+    if status != "completed":
+        return state
+    completed_at = _parse_timestamp(
+        job.get("completed_at"),
+        "accepted durable job completed_at",
+    )
+    last_completed_at = _parse_timestamp(
+        job.get("last_completed_at"),
+        "accepted durable job last_completed_at",
+    )
+    if (
+        completed_at < requested_at
+        or last_completed_at < completed_at
+        or updated_at < last_completed_at
+    ):
+        raise CohortError(
+            "accepted durable job completion timestamps are inconsistent"
+        )
+    return state
+
+
+def _validate_completed_analysis_job_window(
+    *,
+    dispatch: Mapping[str, Any],
+    job: Mapping[str, Any],
+    analysis: Mapping[str, Any],
+) -> None:
+    """Bind one credited analysis to its exact accepted job's lifetime."""
+
+    if str(job.get("status") or "") != "completed":
+        raise CohortError(
+            "credited analysis does not belong to a completed durable job"
+        )
+    dispatch_started = _parse_timestamp(
+        dispatch.get("started_at"),
+        "credited dispatch started_at",
+    )
+    requested_at = _parse_timestamp(
+        job.get("requested_at"),
+        "credited durable job requested_at",
+    )
+    generated_at = _parse_timestamp(
+        analysis.get("generated_at"),
+        "credited analysis generated_at",
+    )
+    completed_at = _parse_timestamp(
+        job.get("completed_at"),
+        "credited durable job completed_at",
+    )
+    last_completed_at = _parse_timestamp(
+        job.get("last_completed_at"),
+        "credited durable job last_completed_at",
+    )
+    updated_at = _parse_timestamp(
+        job.get("updated_at"),
+        "credited durable job updated_at",
+    )
+    if (
+        requested_at < dispatch_started
+        or generated_at < dispatch_started
+        or generated_at < requested_at
+        or generated_at > completed_at
+        or generated_at > last_completed_at
+        or completed_at > last_completed_at
+        or last_completed_at > updated_at
+    ):
+        raise CohortError(
+            "credited analysis falls outside its exact durable job window"
+        )
+
+
 def monitor_member(
     connection: sqlite3.Connection,
+    manifest: Mapping[str, Any],
     member: Mapping[str, Any],
 ) -> dict[str, Any]:
     dispatch = member.get("dispatch") or {}
@@ -2308,6 +3309,8 @@ def monitor_member(
     accepted = dispatch.get("accepted") or {}
     stable_id = str(member["stable_group_id"])
     kind = str(dispatch.get("kind") or "")
+    job = _monitor_dispatch_job_binding(connection, manifest, member)
+    job_state = _durable_job_monitor_state(job)
     if kind == "analyze":
         prior_ids = set(
             (member.get("pre_state") or {}).get("soc_analysis_ids") or []
@@ -2329,31 +3332,31 @@ def monitor_member(
                 f"more than one new SOC analysis exists for {stable_id}; "
                 "the cohort result is ambiguous"
             )
-        job = _durable_job_snapshot(
-            connection,
-            job_type="ai_analysis",
-            stable_group_id=stable_id,
-        )
-        if new_ids:
+        if new_ids and job_state == "completed":
             analysis_id = new_ids[0]
             state = "completed"
             analysis = _analysis_metadata(
                 connection,
                 analysis_id,
                 stable_id,
+                expected_alert_id=str(member["representative_alert_id"]),
                 expected_agent_role="soc-analyst",
+            )
+            _validate_completed_analysis_job_window(
+                dispatch=dispatch,
+                job=job,
+                analysis=analysis,
+            )
+        elif new_ids and job_state == "failed":
+            raise CohortError(
+                f"SOC job for {stable_id} failed but a fresh analysis exists"
             )
         else:
             analysis_id = ""
-            job_status = str((job or {}).get("status") or "")
-            state = {
-                "pending": "queued",
-                "processing": "running",
-                "failed": "failed",
-            }.get(job_status, job_status or "unknown")
-            if state not in {"queued", "running", "failed"}:
+            state = job_state
+            if state == "completed":
                 raise CohortError(
-                    f"SOC job for {stable_id} is {job_status or 'missing'} "
+                    f"SOC job for {stable_id} is completed "
                     "without one exact new analysis"
                 )
             analysis = None
@@ -2383,7 +3386,7 @@ def monitor_member(
         != str(member["representative_alert_id"])
     ):
         raise CohortError(f"incident case identity drifted: {case_id}")
-    status = str(case.get("agent_status") or "")
+    source_status = str(case.get("agent_status") or "")
     analysis_id = ""
     run_case: dict[str, Any] | None = None
     if kind == "reanalyze":
@@ -2415,33 +3418,98 @@ def monitor_member(
             raise CohortError(
                 f"exact reanalysis identity drifted: {run_id}/{case_id}"
             )
-        status = str(row["status"] or "")
+        source_status = str(row["status"] or "")
         analysis_id = str(row["analysis_id"] or "")
     elif kind == "escalate":
-        status = {
+        source_status = {
             "queued": "queued",
             "analyzing": "running",
             "analyzed": "completed",
             "failed": "failed",
-        }.get(status, status or "unknown")
+        }.get(source_status, source_status or "unknown")
         analysis_id = str(case.get("latest_analysis_id") or "")
     else:
         raise CohortError(f"unsupported dispatch kind: {kind!r}")
-    if status == "completed" and not analysis_id:
-        raise CohortError(
-            f"completed member {member.get('rank')} has no analysis ID"
+
+    prior_ids = _frozen_analysis_ids(
+        member,
+        agent_role="incident-responder",
+        pre_state_field="incident_analysis_ids",
+    )
+    current_ids = set(
+        _analysis_ids_for_group(
+            connection,
+            stable_id,
+            agent_role="incident-responder",
         )
+    )
+    if not prior_ids.issubset(current_ids):
+        raise CohortError(
+            f"prior Incident Responder analysis identity disappeared for "
+            f"{stable_id}"
+        )
+    fresh_ids = sorted(current_ids - prior_ids)
+    if len(fresh_ids) > 1:
+        raise CohortError(
+            f"more than one new Incident Responder analysis exists for "
+            f"{stable_id}; the cohort result is ambiguous"
+        )
+    fresh_analysis_id = fresh_ids[0] if fresh_ids else ""
+    if analysis_id and analysis_id != fresh_analysis_id:
+        raise CohortError(
+            f"incident result pointer is not the exact fresh analysis for "
+            f"{stable_id}"
+        )
+
+    if job_state in {"queued", "running"}:
+        status = job_state
+        analysis_id = ""
+    elif job_state == "failed":
+        if source_status != "failed" or fresh_analysis_id:
+            raise CohortError(
+                f"incident result state disagrees with failed accepted job "
+                f"for {stable_id}"
+            )
+        status = "failed"
+        analysis_id = ""
+    elif source_status == "skipped" and not fresh_analysis_id:
+        status = "skipped"
+        analysis_id = ""
+    elif (
+        source_status == "completed"
+        and fresh_analysis_id
+        and analysis_id == fresh_analysis_id
+    ):
+        status = "completed"
+    else:
+        raise CohortError(
+            f"incident result state does not agree with completed accepted "
+            f"job for {stable_id}"
+        )
+
     analysis = (
-        _analysis_metadata(connection, analysis_id, stable_id)
+        _analysis_metadata(
+            connection,
+            analysis_id,
+            stable_id,
+            expected_alert_id=str(member["representative_alert_id"]),
+        )
         if analysis_id
         else None
     )
+    if analysis is not None:
+        _validate_completed_analysis_job_window(
+            dispatch=dispatch,
+            job=job,
+            analysis=analysis,
+        )
     return {
         "state": status,
         "checked_at": utc_now(),
         "case_id": case_id,
         "run_id": str(accepted.get("run_id") or ""),
         "analysis_id": analysis_id,
+        "job": job,
         "case_agent_status": str(case.get("agent_status") or ""),
         "run_case": {
             key: value
@@ -2469,7 +3537,7 @@ def monitor_cohort_once(
         connection.execute("BEGIN")
         terminal = True
         for index, member in enumerate(manifest["members"]):
-            monitor = monitor_member(connection, member)
+            monitor = monitor_member(connection, manifest, member)
             member["monitor"] = monitor
             manifest["members"][index] = member
             terminal = terminal and monitor["state"] in TERMINAL_MONITOR_STATES
@@ -2522,11 +3590,11 @@ def _prior_analysis_ids(member: Mapping[str, Any]) -> set[str]:
         if isinstance(member.get("pre_state"), dict)
         else {}
     )
-    identities = {
-        str(item)
-        for item in pre_state.get("soc_analysis_ids", [])
-        if str(item)
-    } if isinstance(pre_state.get("soc_analysis_ids"), list) else set()
+    identities: set[str] = set()
+    for field in ("soc_analysis_ids", "incident_analysis_ids"):
+        values = pre_state.get(field)
+        if isinstance(values, list):
+            identities.update(str(item) for item in values if str(item))
     for source in (
         pre_state.get("latest_analysis"),
         pre_state.get("incident_case"),
@@ -2983,6 +4051,7 @@ def _harness_execution_proof(
         "dispatch_accepted_once": True,
         "analysis_id": analysis_id,
         "analysis_generated_at": str(analysis.get("generated_at") or ""),
+        "release_id": str(contract.get("expected_release_id") or ""),
         "harness": {
             "run_id": analysis_id,
             "trace_id": str(trace.get("trace_id") or ""),
@@ -3168,6 +4237,7 @@ def export_cohort(
                 "rank": member["rank"],
                 "dashboard_group_id": member["dashboard_group_id"],
                 "stable_group_id": member["stable_group_id"],
+                "stable_group_key": _member_stable_group_key(member),
                 "representative_alert_id": member["representative_alert_id"],
                 "detection": member["detection"],
                 "pre_state": member["pre_state"],
@@ -3262,6 +4332,7 @@ def build_parser() -> argparse.ArgumentParser:
     freeze.add_argument("--cohort-id", required=True)
     freeze.add_argument("--reason", required=True)
     freeze.add_argument("--count", required=True, type=int)
+    freeze.add_argument("--expected-release-id", required=True)
     freeze.add_argument("--expected-assigned-route", required=True)
     freeze.add_argument("--expected-reviewer-route", default="")
     freeze.add_argument(
@@ -3280,6 +4351,7 @@ def build_parser() -> argparse.ArgumentParser:
     imported.add_argument("--cohort-id", required=True)
     imported.add_argument("--reason", required=True)
     imported.add_argument("--expected-count", required=True, type=int)
+    imported.add_argument("--expected-release-id", required=True)
     imported.add_argument("--expected-assigned-route", required=True)
     imported.add_argument("--expected-reviewer-route", default="")
     imported.add_argument(
@@ -3343,6 +4415,7 @@ def main(argv: list[str] | None = None) -> int:
                 cohort_id=args.cohort_id,
                 reason=args.reason,
                 count=args.count,
+                expected_release_id=args.expected_release_id,
                 expected_assigned_route=args.expected_assigned_route,
                 expected_reviewer_route=args.expected_reviewer_route,
                 dry_run=args.dry_run,
@@ -3357,6 +4430,7 @@ def main(argv: list[str] | None = None) -> int:
                 cohort_id=args.cohort_id,
                 reason=args.reason,
                 expected_count=args.expected_count,
+                expected_release_id=args.expected_release_id,
                 agent_role=args.agent_role,
                 expected_assigned_route=args.expected_assigned_route,
                 expected_reviewer_route=args.expected_reviewer_route,

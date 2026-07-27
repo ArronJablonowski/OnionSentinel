@@ -330,6 +330,60 @@ test('external worker heartbeat extends only its current lease', async (context)
   );
 });
 
+test('exact external claim atomically binds job id and payload snapshot', async (context) => {
+  const env = await fixture();
+  context.after(env.close);
+  await env.queue.enqueue(
+    'ai_analysis',
+    'controlled-group',
+    {alert_id: 'frozen-alert', dispatch_id: 'dispatch-a'},
+  );
+  const selected = await env.get(
+    "SELECT id, payload_json FROM durable_jobs WHERE dedupe_key = 'controlled-group'",
+  );
+  await env.queue.enqueue(
+    'ai_analysis',
+    'controlled-group',
+    {alert_id: 'replacement-alert', dispatch_id: 'dispatch-b'},
+  );
+
+  const stale = await env.queue.transition(
+    'ai_analysis',
+    'controlled-group',
+    'processing',
+    '',
+    '',
+    true,
+    {
+      expectedJobId: selected.id,
+      expectedPayloadJson: selected.payload_json,
+    },
+  );
+  assert.equal(stale.updated, false);
+  const pending = await env.get(
+    "SELECT id, payload_json, status, attempt_count, lease_token FROM durable_jobs WHERE dedupe_key = 'controlled-group'",
+  );
+  assert.equal(pending.id, selected.id);
+  assert.equal(pending.status, 'pending');
+  assert.equal(pending.attempt_count, 0);
+  assert.equal(pending.lease_token, null);
+
+  const claimed = await env.queue.transition(
+    'ai_analysis',
+    'controlled-group',
+    'processing',
+    '',
+    '',
+    true,
+    {
+      expectedJobId: pending.id,
+      expectedPayloadJson: pending.payload_json,
+    },
+  );
+  assert.equal(claimed.updated, true);
+  assert.ok(claimed.leaseToken);
+});
+
 test('exhausted processing jobs become terminal instead of retrying forever', async (context) => {
   const env = await fixture();
   context.after(env.close);

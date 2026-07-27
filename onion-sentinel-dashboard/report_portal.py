@@ -8146,19 +8146,41 @@ def soc_alert_queue_analysis_response(group_id: str, payload: dict | None = None
         return soc_alert_api_error("Invalid SOC alert group id")
     payload = payload if isinstance(payload, dict) else {}
     try:
+        request_payload = {
+            "group_id": group_id,
+            "reason": str(payload.get("reason") or "SOC analyst requested fresh AI analysis")[:500],
+            "requested_by": str(payload.get("requested_by") or "dashboard")[:100],
+            "related_limit": max(1, min(500, int(payload.get("related_limit", 250)))),
+            "pcap_analysis_limit": max(1, min(25, int(payload.get("pcap_analysis_limit", 8)))),
+        }
+        for identity_field in (
+            "representative_alert_id",
+            "stable_group_id",
+            "stable_group_key",
+            "cohort_id",
+            "dispatch_id",
+        ):
+            if identity_field in payload:
+                # Alert-store owns identity validation. Preserve the caller's
+                # exact value so malformed or stale pins cannot be normalized
+                # into a different, apparently valid dispatch.
+                request_payload[identity_field] = payload[identity_field]
+        if "release_id" in payload and (
+            "cohort_id" in payload or "dispatch_id" in payload
+        ):
+            request_payload["release_id"] = payload["release_id"]
         data = alert_store_post_json(
             "/ai/request",
-            {
-                "group_id": group_id,
-                "reason": str(payload.get("reason") or "SOC analyst requested fresh AI analysis")[:500],
-                "requested_by": str(payload.get("requested_by") or "dashboard")[:100],
-                "related_limit": max(1, min(500, int(payload.get("related_limit", 250)))),
-                "pcap_analysis_limit": max(1, min(25, int(payload.get("pcap_analysis_limit", 8)))),
-            },
+            request_payload,
             timeout=10.0,
         )
     except (TypeError, ValueError):
         return soc_alert_api_error("AI analysis queue limits must be integers", 400)
+    except AlertStoreRequestError as exc:
+        return soc_alert_api_error(
+            f"Alert-store AI queue request failed: {exc}",
+            exc.status_code,
+        )
     except RuntimeError as exc:
         return soc_alert_api_error(f"Alert-store AI queue request failed: {exc}", 503)
     return 202, {
@@ -8176,19 +8198,38 @@ def soc_alert_escalate_response(group_id: str, payload: dict | None = None) -> t
         return soc_alert_api_error("Invalid SOC alert group id")
     payload = payload if isinstance(payload, dict) else {}
     try:
+        request_payload = {
+            "group_id": group_id,
+            "reason": str(payload.get("reason") or "Escalated from SOC Alerts for incident response")[:1000],
+            "requested_by": str(payload.get("requested_by") or "dashboard")[:100],
+            "related_limit": max(1, min(500, int(payload.get("related_limit", 250)))),
+            "pcap_analysis_limit": max(1, min(25, int(payload.get("pcap_analysis_limit", 25)))),
+        }
+        for identity_field in (
+            "representative_alert_id",
+            "stable_group_id",
+            "stable_group_key",
+            "cohort_id",
+            "dispatch_id",
+        ):
+            if identity_field in payload:
+                request_payload[identity_field] = payload[identity_field]
+        if "release_id" in payload and (
+            "cohort_id" in payload or "dispatch_id" in payload
+        ):
+            request_payload["release_id"] = payload["release_id"]
         data = alert_store_post_json(
             "/incidents/escalate",
-            {
-                "group_id": group_id,
-                "reason": str(payload.get("reason") or "Escalated from SOC Alerts for incident response")[:1000],
-                "requested_by": str(payload.get("requested_by") or "dashboard")[:100],
-                "related_limit": max(1, min(500, int(payload.get("related_limit", 250)))),
-                "pcap_analysis_limit": max(1, min(25, int(payload.get("pcap_analysis_limit", 25)))),
-            },
+            request_payload,
             timeout=10.0,
         )
     except (TypeError, ValueError):
         return soc_alert_api_error("Incident response queue limits must be integers", 400)
+    except AlertStoreRequestError as exc:
+        return soc_alert_api_error(
+            f"Incident response escalation failed: {exc}",
+            exc.status_code,
+        )
     except RuntimeError as exc:
         return soc_alert_api_error(f"Incident response escalation failed: {exc}", 503)
     return 202, {
@@ -8575,16 +8616,30 @@ def soc_incident_reanalysis_response(
             status,
         )
     payload = payload if isinstance(payload, dict) else {}
+    request_payload = {
+        "case_id": case_id,
+        "reason": str(
+            payload.get("reason")
+            or "Analyst requested fresh Incident Responder analysis"
+        )[:1000],
+        "requested_by": str(payload.get("requested_by") or "dashboard")[:100],
+    }
+    for identity_field in (
+        "representative_alert_id",
+        "stable_group_id",
+        "stable_group_key",
+        "cohort_id",
+        "dispatch_id",
+    ):
+        if identity_field in payload:
+            request_payload[identity_field] = payload[identity_field]
+    if "release_id" in payload and (
+        "cohort_id" in payload or "dispatch_id" in payload
+    ):
+        request_payload["release_id"] = payload["release_id"]
     return _soc_alert_store_mutation(
         "/incidents/reanalyze",
-        {
-            "case_id": case_id,
-            "reason": str(
-                payload.get("reason")
-                or "Analyst requested fresh Incident Responder analysis"
-            )[:1000],
-            "requested_by": str(payload.get("requested_by") or "dashboard")[:100],
-        },
+        request_payload,
         success_status=HTTPStatus.ACCEPTED,
     )
 
