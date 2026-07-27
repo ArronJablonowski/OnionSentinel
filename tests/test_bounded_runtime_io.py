@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +22,7 @@ for path in (BIN_DIR, DASHBOARD_DIR, RELAY_DIR):
         sys.path.insert(0, str(path))
 
 from bounded_http import BoundedHttpError, read_bounded_body, read_bounded_json  # noqa: E402
+import bounded_process as bounded_process_module  # noqa: E402
 from bounded_process import BoundedProcessError, run_bounded_command, run_bounded_command_to_file  # noqa: E402
 from jsonl_log import JsonlLogIndex  # noqa: E402
 from process_io import (  # noqa: E402
@@ -51,6 +56,58 @@ class BoundedHttpTests(unittest.TestCase):
 
 
 class BoundedProcessTests(unittest.TestCase):
+    @staticmethod
+    def _read_pid(path: Path) -> int:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                value = path.read_text(encoding="utf-8").strip()
+            except FileNotFoundError:
+                value = ""
+            if value:
+                return int(value)
+            time.sleep(0.02)
+        raise AssertionError(f"child PID was not written to {path}")
+
+    def assertProcessGone(self, pid: int) -> None:  # noqa: N802
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            result = subprocess.run(
+                ["ps", "-o", "state=", "-p", str(pid)],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            state = result.stdout.strip()
+            if result.returncode != 0 or not state or state.upper().startswith("Z"):
+                return
+            time.sleep(0.05)
+        self.fail(f"process {pid} survived bounded cleanup")
+
+    @staticmethod
+    def _detached_child_script(pid_path: Path, *, child_sleep: float, parent_sleep: float) -> str:
+        return textwrap.dedent(
+            f"""
+            import os
+            import pathlib
+            import subprocess
+            import sys
+            import time
+
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep({child_sleep!r})"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            pathlib.Path({str(pid_path)!r}).write_text(str(child.pid), encoding="utf-8")
+            time.sleep({parent_sleep!r})
+            os._exit(0)
+            """
+        )
+
     def test_captures_bounded_output(self) -> None:
         result = run_bounded_command(
             [sys.executable, "-c", "import sys; print(sys.stdin.read().upper())"],
@@ -61,6 +118,123 @@ class BoundedProcessTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "HELLO")
+
+    def test_repeated_fast_exit_commands_remain_supported(self) -> None:
+        for _ in range(20):
+            result = run_bounded_command(
+                ["/usr/bin/true"],
+                timeout_seconds=5,
+                max_stdout_bytes=100,
+                max_stderr_bytes=100,
+            )
+            self.assertEqual(result.returncode, 0)
+
+    def test_snapshot_failure_fails_closed_and_kills_direct_child(self) -> None:
+        started = time.monotonic()
+        with mock.patch.object(
+            bounded_process_module,
+            "_read_process_snapshot",
+            side_effect=bounded_process_module._ProcessSnapshotError("forced snapshot failure"),
+        ):
+            with self.assertRaisesRegex(BoundedProcessError, "forced snapshot failure") as caught:
+                run_bounded_command(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    timeout_seconds=10,
+                    max_stdout_bytes=100,
+                    max_stderr_bytes=100,
+                )
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertIn(
+            "forced snapshot failure",
+            getattr(caught.exception, "bounded_process_cleanup", ""),
+        )
+
+    def test_post_spawn_initialization_failure_kills_both_variants(
+        self,
+    ) -> None:
+        real_popen = subprocess.Popen
+        for file_variant in (False, True):
+            with self.subTest(file_variant=file_variant):
+                spawned: list[subprocess.Popen] = []
+
+                def capture_popen(*args: object, **kwargs: object):
+                    process = real_popen(*args, **kwargs)
+                    spawned.append(process)
+                    return process
+
+                with (
+                    tempfile.TemporaryDirectory() as tmp,
+                    mock.patch.object(
+                        bounded_process_module.subprocess,
+                        "Popen",
+                        side_effect=capture_popen,
+                    ),
+                    mock.patch.object(
+                        bounded_process_module.selectors,
+                        "DefaultSelector",
+                        side_effect=RuntimeError("forced selector failure"),
+                    ),
+                ):
+                    destination = Path(tmp) / "capture.bin"
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "forced selector failure",
+                    ):
+                        if file_variant:
+                            run_bounded_command_to_file(
+                                [
+                                    sys.executable,
+                                    "-c",
+                                    "import time; time.sleep(30)",
+                                ],
+                                destination,
+                                timeout_seconds=10,
+                                max_stdout_bytes=100,
+                                max_stderr_bytes=100,
+                            )
+                        else:
+                            run_bounded_command(
+                                [
+                                    sys.executable,
+                                    "-c",
+                                    "import time; time.sleep(30)",
+                                ],
+                                timeout_seconds=10,
+                                max_stdout_bytes=100,
+                                max_stderr_bytes=100,
+                            )
+                    self.assertEqual(len(spawned), 1)
+                    self.assertProcessGone(spawned[0].pid)
+                    self.assertIsNotNone(spawned[0].stdout)
+                    self.assertIsNotNone(spawned[0].stderr)
+                    self.assertTrue(spawned[0].stdout.closed)
+                    self.assertTrue(spawned[0].stderr.closed)
+                    self.assertFalse(destination.exists())
+
+    def test_steady_state_tracking_backs_off_from_startup_frequency(self) -> None:
+        identity = bounded_process_module._ProcessIdentity(
+            pid=424242,
+            pgid=424242,
+            uid=os.getuid(),
+            start_time="Mon Jul 27 10:00:00 2026",
+            command_hash="a" * 64,
+        )
+        record = bounded_process_module._ProcessRecord(
+            identity=identity,
+            ppid=1,
+            state="S",
+        )
+        tracker = bounded_process_module._DescendantTracker(identity.pid)
+        tracker._created_at -= bounded_process_module._PROCESS_STARTUP_TRACK_SECONDS + 1
+        with mock.patch.object(
+            bounded_process_module,
+            "_read_process_snapshot",
+            return_value={identity.pid: record},
+        ) as snapshot:
+            tracker.observe(force=True)
+            for _ in range(20):
+                tracker.observe()
+        self.assertEqual(snapshot.call_count, 1)
 
     def test_kills_output_overflow_and_timeout(self) -> None:
         with self.assertRaisesRegex(BoundedProcessError, "stdout exceeded"):
@@ -145,6 +319,322 @@ class BoundedProcessTests(unittest.TestCase):
                 progress_interval_seconds=0.05,
             )
         self.assertLess(time.monotonic() - started, 2)
+
+    def test_spoofed_containment_marker_is_replaced_without_losing_env(
+        self,
+    ) -> None:
+        fake_token = "0" * 64
+        original_fd = os.environ.get(
+            bounded_process_module._CONTAINMENT_FD_ENV
+        )
+        original_token = os.environ.get(
+            bounded_process_module._CONTAINMENT_TOKEN_ENV
+        )
+        environment = {
+            **os.environ,
+            bounded_process_module._CONTAINMENT_FD_ENV: "999999",
+            bounded_process_module._CONTAINMENT_TOKEN_ENV: fake_token,
+            "ONION_SENTINEL_TEST_ENV": "preserved",
+        }
+        result = run_bounded_command(
+            [
+                sys.executable,
+                "-c",
+                textwrap.dedent(
+                    f"""
+                    import os
+                    print(os.environ["ONION_SENTINEL_TEST_ENV"])
+                    print(
+                        os.environ[{bounded_process_module._CONTAINMENT_TOKEN_ENV!r}]
+                        != {fake_token!r}
+                    )
+                    """
+                ),
+            ],
+            timeout_seconds=5,
+            max_stdout_bytes=100,
+            max_stderr_bytes=100,
+            env=environment,
+        )
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["preserved", "True"],
+        )
+        self.assertEqual(
+            os.environ.get(bounded_process_module._CONTAINMENT_FD_ENV),
+            original_fd,
+        )
+        self.assertEqual(
+            os.environ.get(bounded_process_module._CONTAINMENT_TOKEN_ENV),
+            original_token,
+        )
+
+    def test_outer_callback_kills_nested_bounded_runner_and_inner_command(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested_pid_path = root / "nested-runner.pid"
+            inner_pid_path = root / "inner-command.pid"
+            nested_topology_path = root / "nested-runner.json"
+            inner_topology_path = root / "inner-command.json"
+            nested_script = textwrap.dedent(
+                f"""
+                import json
+                import os
+                import pathlib
+                import sys
+
+                sys.path.insert(0, {str(BIN_DIR)!r})
+                from bounded_process import run_bounded_command
+
+                pathlib.Path({str(nested_pid_path)!r}).write_text(
+                    str(os.getpid()),
+                    encoding="utf-8",
+                )
+                pathlib.Path({str(nested_topology_path)!r}).write_text(
+                    json.dumps({{
+                        "pid": os.getpid(),
+                        "pgid": os.getpgrp(),
+                        "sid": os.getsid(0),
+                    }}),
+                    encoding="utf-8",
+                )
+                inner_script = (
+                    "import json, os, pathlib, time; "
+                    f"pathlib.Path({str(inner_pid_path)!r}).write_text("
+                    "str(os.getpid()), encoding='utf-8'); "
+                    f"pathlib.Path({str(inner_topology_path)!r}).write_text("
+                    "json.dumps({{"
+                    "'pid': os.getpid(), "
+                    "'pgid': os.getpgrp(), "
+                    "'sid': os.getsid(0), "
+                    "'env': os.environ.get('ONION_SENTINEL_NESTED_ENV'),"
+                    "}}), encoding='utf-8'); "
+                    "time.sleep(30)"
+                )
+                run_bounded_command(
+                    [sys.executable, "-c", inner_script],
+                    timeout_seconds=30,
+                    max_stdout_bytes=100,
+                    max_stderr_bytes=100,
+                    env={{**os.environ, "ONION_SENTINEL_NESTED_ENV": "preserved"}},
+                )
+                """
+            )
+
+            def lose_lease() -> None:
+                self._read_pid(nested_pid_path)
+                self._read_pid(inner_pid_path)
+                raise RuntimeError("outer controlled lease lost")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "outer controlled lease lost",
+            ):
+                run_bounded_command(
+                    [sys.executable, "-c", nested_script],
+                    timeout_seconds=10,
+                    max_stdout_bytes=100,
+                    max_stderr_bytes=100,
+                    progress_callback=lose_lease,
+                    progress_interval_seconds=0.4,
+                )
+            self.assertProcessGone(self._read_pid(nested_pid_path))
+            self.assertProcessGone(self._read_pid(inner_pid_path))
+            nested_topology = json.loads(
+                nested_topology_path.read_text(encoding="utf-8")
+            )
+            inner_topology = json.loads(
+                inner_topology_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                nested_topology,
+                {
+                    "pid": nested_topology["pid"],
+                    "pgid": nested_topology["pid"],
+                    "sid": nested_topology["pid"],
+                },
+            )
+            self.assertEqual(inner_topology["pgid"], nested_topology["pid"])
+            self.assertEqual(inner_topology["sid"], nested_topology["pid"])
+            self.assertEqual(inner_topology["env"], "preserved")
+
+    def test_callback_failure_kills_detached_grandchild_and_preserves_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_path = Path(tmp) / "grandchild.pid"
+            script = self._detached_child_script(pid_path, child_sleep=30, parent_sleep=30)
+
+            def lose_lease() -> None:
+                raise RuntimeError("authoritative lease loss")
+
+            with self.assertRaisesRegex(RuntimeError, "authoritative lease loss"):
+                run_bounded_command(
+                    [sys.executable, "-c", script],
+                    timeout_seconds=10,
+                    max_stdout_bytes=100,
+                    max_stderr_bytes=100,
+                    progress_callback=lose_lease,
+                    progress_interval_seconds=0.4,
+                )
+            self.assertProcessGone(self._read_pid(pid_path))
+
+    def test_cleanup_failure_does_not_replace_callback_exception(self) -> None:
+        original_cleanup = bounded_process_module._terminate_process_tree
+
+        def cleanup_then_fail(*args: object, **kwargs: object) -> object:
+            original_cleanup(*args, **kwargs)
+            raise RuntimeError("secondary cleanup diagnostic")
+
+        def lose_lease() -> None:
+            raise RuntimeError("authoritative lease loss")
+
+        with mock.patch.object(
+            bounded_process_module,
+            "_terminate_process_tree",
+            side_effect=cleanup_then_fail,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "authoritative lease loss") as caught:
+                run_bounded_command(
+                    [sys.executable, "-c", "import time; time.sleep(5)"],
+                    timeout_seconds=10,
+                    max_stdout_bytes=100,
+                    max_stderr_bytes=100,
+                    progress_callback=lose_lease,
+                    progress_interval_seconds=0.1,
+                )
+        self.assertIn(
+            "secondary cleanup diagnostic",
+            getattr(caught.exception, "bounded_process_cleanup", ""),
+        )
+
+    def test_normal_exit_kills_and_reports_detached_descendant(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_path = Path(tmp) / "grandchild.pid"
+            script = self._detached_child_script(pid_path, child_sleep=30, parent_sleep=0.5)
+            with self.assertRaisesRegex(BoundedProcessError, "surviving descendants"):
+                run_bounded_command(
+                    [sys.executable, "-c", script],
+                    timeout_seconds=5,
+                    max_stdout_bytes=100,
+                    max_stderr_bytes=100,
+                )
+            self.assertProcessGone(self._read_pid(pid_path))
+
+    def test_natural_detached_descendant_exit_within_grace_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_path = Path(tmp) / "grandchild.pid"
+            script = self._detached_child_script(pid_path, child_sleep=0.8, parent_sleep=0.5)
+            result = run_bounded_command(
+                [sys.executable, "-c", script],
+                timeout_seconds=5,
+                max_stdout_bytes=100,
+                max_stderr_bytes=100,
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertProcessGone(self._read_pid(pid_path))
+
+    def test_file_variant_kills_and_reports_detached_descendant(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pid_path = root / "grandchild.pid"
+            destination = root / "capture.bin"
+            script = self._detached_child_script(pid_path, child_sleep=30, parent_sleep=0.5)
+            with self.assertRaisesRegex(BoundedProcessError, "surviving descendants"):
+                run_bounded_command_to_file(
+                    [sys.executable, "-c", script],
+                    destination,
+                    timeout_seconds=5,
+                    max_stdout_bytes=100,
+                    max_stderr_bytes=100,
+                )
+            self.assertFalse(destination.exists())
+            self.assertProcessGone(self._read_pid(pid_path))
+
+    def test_file_variant_allows_natural_descendant_exit_within_grace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pid_path = root / "grandchild.pid"
+            destination = root / "capture.bin"
+            script = self._detached_child_script(pid_path, child_sleep=0.8, parent_sleep=0.5)
+            result = run_bounded_command_to_file(
+                [sys.executable, "-c", script],
+                destination,
+                timeout_seconds=5,
+                max_stdout_bytes=100,
+                max_stderr_bytes=100,
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertTrue(destination.exists())
+            self.assertProcessGone(self._read_pid(pid_path))
+
+    def test_file_variant_timeout_kills_detached_grandchild(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pid_path = root / "grandchild.pid"
+            destination = root / "capture.bin"
+            script = self._detached_child_script(pid_path, child_sleep=30, parent_sleep=30)
+            with self.assertRaisesRegex(BoundedProcessError, "timed out"):
+                run_bounded_command_to_file(
+                    [sys.executable, "-c", script],
+                    destination,
+                    timeout_seconds=0.6,
+                    max_stdout_bytes=100,
+                    max_stderr_bytes=100,
+                )
+            self.assertFalse(destination.exists())
+            self.assertProcessGone(self._read_pid(pid_path))
+
+    def test_process_identity_mismatch_and_zombie_are_not_signal_targets(self) -> None:
+        identity = bounded_process_module._ProcessIdentity(
+            pid=424242,
+            pgid=424242,
+            uid=os.getuid(),
+            start_time="Mon Jul 27 10:00:00 2026",
+            command_hash="a" * 64,
+        )
+        mismatched = bounded_process_module._ProcessIdentity(
+            pid=identity.pid,
+            pgid=identity.pgid,
+            uid=identity.uid,
+            start_time=identity.start_time,
+            command_hash="b" * 64,
+        )
+        tracker = bounded_process_module._DescendantTracker(identity.pid)
+        tracker.root_identity = identity
+        tracker._remember(identity, depth=0)
+        live_mismatch = bounded_process_module._ProcessRecord(
+            identity=mismatched,
+            ppid=1,
+            state="S",
+        )
+        self.assertEqual(
+            tracker.verified_records({identity.pid: live_mismatch}, include_root=True),
+            [],
+        )
+        zombie = bounded_process_module._ProcessRecord(
+            identity=identity,
+            ppid=1,
+            state="Z",
+        )
+        self.assertEqual(
+            tracker.verified_records({identity.pid: zombie}, include_root=True),
+            [],
+        )
+
+    def test_process_snapshot_parser_accepts_bsd_and_gnu_layouts(self) -> None:
+        records = bounded_process_module._parse_ps_snapshot(
+            "  101     1   101   501 Ss   Mon Jul 27 10:00:00 2026     /bin/sleep 5\n"
+            "  202   101   202  1000 S    Tue Jul  7 09:08:07 2026 python -c worker\n"
+        )
+        self.assertEqual(set(records), {101, 202})
+        self.assertEqual(records[101].identity.pgid, 101)
+        self.assertEqual(records[202].ppid, 101)
+        self.assertEqual(records[202].identity.start_time, "Tue Jul 7 09:08:07 2026")
+        self.assertNotEqual(
+            records[101].identity.command_hash,
+            records[202].identity.command_hash,
+        )
 
 
 class JsonlLogIndexTests(unittest.TestCase):

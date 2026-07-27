@@ -4405,8 +4405,7 @@ async function controlledJobTransitionAdmission(payload) {
       String(currentPayload.representative_alert_id || ''),
     )
     || currentPayload.release_id !== controlledRuntimeReleaseId()
-    || safeString(currentPayload.agent_role, 64).toLowerCase()
-      !== expectedRole
+    || currentPayload.agent_role !== expectedRole
   ) {
     throw incidentIdentityConflict(
       'controlled evaluation lease is no longer active',
@@ -4502,14 +4501,7 @@ function applyControlledJobTransition(admission, transition) {
       ),
       stableGroupId: String(payload.stable_group_id || ''),
       stableGroupKey: String(payload.stable_group_key || ''),
-      agentRole: String(
-        payload.agent_role
-        || (
-          claim.job_type === 'incident_response_analysis'
-            ? 'incident-responder'
-            : 'soc-analyst'
-        ),
-      ),
+      agentRole: String(payload.agent_role || ''),
       reanalysisAttemptId: String(
         claim.reanalysis_attempt_id || '',
       ),
@@ -4662,6 +4654,7 @@ async function controlledEvaluationResultAdmission(payload) {
     || currentPayload.group_id !== stableGroupId
     || currentPayload.stable_group_id !== stableGroupId
     || currentPayload.stable_group_key !== stableGroupKey
+    || currentPayload.agent_role !== agentRole
   ) {
     throw incidentIdentityConflict(
       'controlled evaluation durable job changed before result commit',
@@ -4817,6 +4810,11 @@ async function transitionDurableJobStatus(
     }
     const candidatePayload = incidentReanalysisJobPayload(exactCandidate);
     const runtimeReleaseId = controlledRuntimeReleaseId();
+    const expectedRole = (
+      jobType === 'incident_response_analysis'
+        ? 'incident-responder'
+        : 'soc-analyst'
+    );
     if (
       candidatePayload.alert_id !== exactClaim.representativeAlertId
       || candidatePayload.representative_alert_id
@@ -4827,6 +4825,8 @@ async function transitionDurableJobStatus(
       || candidatePayload.dispatch_id !== exactClaim.dispatchId
       || !runtimeReleaseId
       || candidatePayload.release_id !== runtimeReleaseId
+      || typeof candidatePayload.agent_role !== 'string'
+      || candidatePayload.agent_role !== expectedRole
     ) {
       throw incidentIdentityConflict(
         'controlled durable job payload changed before it could be claimed',
@@ -5476,6 +5476,7 @@ async function requestAiReanalysis(payload) {
       cohort_id: identity.cohortId,
       dispatch_id: identity.dispatchId,
       release_id: identity.releaseId,
+      agent_role: 'soc-analyst',
     } : {}),
     manual_reanalysis: true,
     requested_by: requestedBy,

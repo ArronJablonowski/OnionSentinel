@@ -2258,6 +2258,7 @@ def _validate_dispatch_job_payload(
         "cohort_id": manifest["cohort_id"],
         "dispatch_id": deterministic_dispatch_id(manifest, member),
         "release_id": manifest["execution_contract"]["expected_release_id"],
+        "agent_role": manifest["agent_role"],
     }
     if expected_case_id:
         expected["case_id"] = expected_case_id

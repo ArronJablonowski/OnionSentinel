@@ -463,6 +463,7 @@ class ControlledAlertStoreTests(unittest.TestCase):
         stable_group_key: str,
         dispatch_id: str,
         cohort_id: str = "controlled-cohort-11",
+        agent_role: str | None = "soc-analyst",
     ) -> int:
         timestamp = "2020-01-01 00:00:00+00:00"
         job_payload = {
@@ -471,11 +472,12 @@ class ControlledAlertStoreTests(unittest.TestCase):
             "group_id": group_id,
             "stable_group_id": group_id,
             "stable_group_key": stable_group_key,
-            "agent_role": "soc-analyst",
             "cohort_id": cohort_id,
             "dispatch_id": dispatch_id,
             "release_id": RELEASE_ID,
         }
+        if agent_role is not None:
+            job_payload["agent_role"] = agent_role
         with closing(sqlite3.connect(self.db, timeout=5)) as connection:
             connection.execute(
                 """
@@ -1064,6 +1066,248 @@ class ControlledAlertStoreTests(unittest.TestCase):
                     "WHERE analysis_id = 'controlled-happy-result'"
                 ).fetchone()[0],
                 1,
+            )
+
+    def test_controlled_soc_dispatch_persists_role_and_renews_lease(
+        self,
+    ) -> None:
+        dashboard_group_id = "242424242424"
+        group_id = "24242424242424242424"
+        alert_id = "controlled-soc-dispatch-heartbeat"
+        stable_key = "v2|controlled|soc-dispatch-heartbeat"
+        dispatch_id = "2" * 64
+        timestamp = "2020-01-01 00:00:00+00:00"
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            connection.execute(
+                """
+                INSERT INTO alerts (
+                    alert_id, first_seen, last_seen, alert_json,
+                    stable_group_id, stable_group_key, triage_level,
+                    filter_status
+                ) VALUES (?, ?, ?, ?, ?, ?, 'medium', 'accepted')
+                """,
+                (
+                    alert_id,
+                    timestamp,
+                    timestamp,
+                    json.dumps({"alert_id": alert_id}),
+                    group_id,
+                    stable_key,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO alert_group_summary (
+                    group_id, group_key, representative_alert_id,
+                    first_seen, last_seen, raw_alert_count,
+                    total_seen_count, triage_level, filter_status, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 1, 1, 'medium', 'accepted', ?)
+                """,
+                (
+                    dashboard_group_id,
+                    stable_key,
+                    alert_id,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            connection.commit()
+
+        self.start_controlled()
+        request_payload = {
+            "group_id": dashboard_group_id,
+            "representative_alert_id": alert_id,
+            "stable_group_id": group_id,
+            "stable_group_key": stable_key,
+            "cohort_id": "controlled-cohort-soc-dispatch",
+            "dispatch_id": dispatch_id,
+            "release_id": RELEASE_ID,
+            "requested_by": "controlled-runtime-test",
+            "reason": "Prove controlled SOC dispatch role survives heartbeat.",
+        }
+        status, receipt = request_json(
+            f"{self.base_url}/ai/request",
+            "POST",
+            request_payload,
+        )
+        self.assertEqual(status, 202, receipt)
+
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            job_id, payload_json = connection.execute(
+                """
+                SELECT id, payload_json
+                FROM durable_jobs
+                WHERE job_type = 'ai_analysis' AND dedupe_key = ?
+                """,
+                (group_id,),
+            ).fetchone()
+        stored_payload = json.loads(payload_json)
+        self.assertEqual(stored_payload["agent_role"], "soc-analyst")
+
+        claim_status, claim = self.claim_controlled_job(
+            job_id=int(job_id),
+            group_id=group_id,
+            alert_id=alert_id,
+            stable_group_key=stable_key,
+            dispatch_id=dispatch_id,
+        )
+        self.assertEqual(claim_status, 200, claim)
+        heartbeat_status, heartbeat = request_json(
+            f"{self.base_url}/jobs/status",
+            "POST",
+            {
+                "job_type": "ai_analysis",
+                "dedupe_key": group_id,
+                "status": "processing",
+                "error": "",
+                "lease_token": claim["lease_token"],
+                "retryable": True,
+            },
+        )
+        self.assertEqual(heartbeat_status, 200, heartbeat)
+        self.assertEqual(
+            heartbeat["lease_token"],
+            claim["lease_token"],
+        )
+        release_status, release = request_json(
+            f"{self.base_url}/jobs/status",
+            "POST",
+            {
+                "job_type": "ai_analysis",
+                "dedupe_key": group_id,
+                "status": "failed",
+                "error": "controlled test releases the lease",
+                "lease_token": claim["lease_token"],
+                "retryable": True,
+            },
+        )
+        self.assertEqual(release_status, 200, release)
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    """
+                    SELECT status, attempt_count, lease_token, lease_expires_at
+                    FROM durable_jobs WHERE id = ?
+                    """,
+                    (job_id,),
+                ).fetchone(),
+                ("pending", 1, None, None),
+            )
+
+    def test_exact_claim_rejects_missing_role_before_acquiring_lease(
+        self,
+    ) -> None:
+        frozen = {
+            "group_id": "25252525252525252525",
+            "alert_id": "controlled-alert-missing-role",
+            "stable_group_key": "v2|controlled|missing-role",
+            "dispatch_id": "2" * 63 + "5",
+        }
+        job_id = self.seed_controlled_job(
+            **frozen,
+            agent_role=None,
+        )
+        self.start_controlled()
+        status, response = self.claim_controlled_job(
+            job_id=job_id,
+            **frozen,
+        )
+        self.assertEqual(status, 409, response)
+        self.assertEqual(response["status"], "rejected")
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    """
+                    SELECT status, attempt_count, lease_token, lease_expires_at
+                    FROM durable_jobs WHERE id = ?
+                    """,
+                    (job_id,),
+                ).fetchone(),
+                ("pending", 0, None, None),
+            )
+
+    def test_claimed_job_rejects_role_drift_before_heartbeat_or_result(
+        self,
+    ) -> None:
+        frozen = {
+            "group_id": "26262626262626262626",
+            "alert_id": "controlled-alert-role-drift",
+            "stable_group_key": "v2|controlled|role-drift",
+            "dispatch_id": "2" * 63 + "6",
+        }
+        job_id = self.seed_controlled_job(**frozen)
+        self.start_controlled()
+        status, claim = self.claim_controlled_job(
+            job_id=job_id,
+            **frozen,
+        )
+        self.assertEqual(status, 200, claim)
+
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            stored_payload = json.loads(
+                connection.execute(
+                    "SELECT payload_json FROM durable_jobs WHERE id = ?",
+                    (job_id,),
+                ).fetchone()[0]
+            )
+            stored_payload["agent_role"] = "SOC-ANALYST"
+            connection.execute(
+                "UPDATE durable_jobs SET payload_json = ? WHERE id = ?",
+                (
+                    json.dumps(
+                        stored_payload,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    job_id,
+                ),
+            )
+            connection.commit()
+
+        heartbeat_status, heartbeat = request_json(
+            f"{self.base_url}/jobs/status",
+            "POST",
+            {
+                "job_type": "ai_analysis",
+                "dedupe_key": frozen["group_id"],
+                "status": "processing",
+                "error": "",
+                "lease_token": claim["lease_token"],
+                "retryable": True,
+            },
+        )
+        self.assertEqual(heartbeat_status, 409, heartbeat)
+
+        result_payload = self.controlled_result_payload(
+            analysis_id="controlled-role-drift-result",
+            claim=claim,
+        )
+        result_status, result = request_json(
+            f"{self.base_url}/analysis/result",
+            "POST",
+            result_payload,
+        )
+        self.assertEqual(result_status, 409, result)
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    """
+                    SELECT status, attempt_count, lease_token
+                    FROM durable_jobs WHERE id = ?
+                    """,
+                    (job_id,),
+                ).fetchone(),
+                ("processing", 1, claim["lease_token"]),
+            )
+            self.assertEqual(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM ai_analysis_runs
+                    WHERE analysis_id = 'controlled-role-drift-result'
+                    """
+                ).fetchone()[0],
+                0,
             )
 
     def test_controlled_worker_clients_propagate_ephemeral_token(

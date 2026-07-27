@@ -434,6 +434,7 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                                 "cohort_id": payload["cohort_id"],
                                 "dispatch_id": payload["dispatch_id"],
                                 "release_id": payload["release_id"],
+                                "agent_role": "incident-responder",
                                 "manual_reanalysis": False,
                             }
                         ),
@@ -510,6 +511,7 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                                 "cohort_id": payload["cohort_id"],
                                 "dispatch_id": payload["dispatch_id"],
                                 "release_id": payload["release_id"],
+                                "agent_role": "incident-responder",
                                 "manual_reanalysis": True,
                             }
                         ),
@@ -590,6 +592,7 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                             "cohort_id": payload["cohort_id"],
                             "dispatch_id": payload["dispatch_id"],
                             "release_id": payload["release_id"],
+                            "agent_role": "soc-analyst",
                             "manual_reanalysis": True,
                         }
                     ),
@@ -1598,6 +1601,65 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 poster=missing_key,
             )
 
+    def test_dispatch_readback_requires_exact_agent_role(self) -> None:
+        base_manifest = self._freeze(count=1)
+        member = base_manifest["members"][0]
+        for expected_role in ("soc-analyst", "incident-responder"):
+            manifest = json.loads(json.dumps(base_manifest))
+            manifest["agent_role"] = expected_role
+            payload = {
+                "alert_id": member["representative_alert_id"],
+                "representative_alert_id": member[
+                    "representative_alert_id"
+                ],
+                "group_id": member["stable_group_id"],
+                "stable_group_id": member["stable_group_id"],
+                "stable_group_key": cohort._member_stable_group_key(member),
+                "dashboard_group_id": member["dashboard_group_id"],
+                "cohort_id": manifest["cohort_id"],
+                "dispatch_id": cohort.deterministic_dispatch_id(
+                    manifest,
+                    member,
+                ),
+                "release_id": manifest["execution_contract"][
+                    "expected_release_id"
+                ],
+                "agent_role": expected_role,
+                "manual_reanalysis": expected_role == "soc-analyst",
+            }
+            accepted = cohort._validate_dispatch_job_payload(
+                manifest,
+                member,
+                {"payload_json": json.dumps(payload)},
+                manual_reanalysis=payload["manual_reanalysis"],
+            )
+            self.assertEqual(accepted["agent_role"], expected_role)
+
+            for mutation in ("missing", "wrong"):
+                with self.subTest(
+                    expected_role=expected_role,
+                    mutation=mutation,
+                ):
+                    changed = dict(payload)
+                    if mutation == "missing":
+                        changed.pop("agent_role")
+                    else:
+                        changed["agent_role"] = (
+                            "incident-responder"
+                            if expected_role == "soc-analyst"
+                            else "soc-analyst"
+                        )
+                    with self.assertRaisesRegex(
+                        cohort.AmbiguousDispatchError,
+                        "payload identity",
+                    ):
+                        cohort._validate_dispatch_job_payload(
+                            manifest,
+                            member,
+                            {"payload_json": json.dumps(changed)},
+                            manual_reanalysis=payload["manual_reanalysis"],
+                        )
+
     def test_queue_rejects_escalation_job_for_a_different_case(self) -> None:
         self._freeze(count=1)
         _calls, accepted_poster = self._api_poster()
@@ -2225,6 +2287,7 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                             "cohort_id": payload["cohort_id"],
                             "dispatch_id": payload["dispatch_id"],
                             "release_id": payload["release_id"],
+                            "agent_role": "soc-analyst",
                             "manual_reanalysis": True,
                         }
                     ),
