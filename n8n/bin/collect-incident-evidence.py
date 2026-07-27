@@ -19,7 +19,6 @@ import sqlite3
 import sys
 import tempfile
 from pathlib import Path
-from typing import Iterable
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -40,6 +39,13 @@ DEFAULT_OUT = HOME / "n8n-local" / "soc-alerts" / "incident-evidence"
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_OBSERVABLES = 16
+MAX_TOTAL_OBSERVABLES = 24
+MAX_OBSERVABLES_BY_KIND = {
+    "ips": 8,
+    "domains": 8,
+    "hosts": 4,
+    "users": 4,
+}
 MAX_WINDOWS = 4
 WINDOW_DURATION = dt.timedelta(hours=24)
 WINDOW_PADDING = dt.timedelta(minutes=5)
@@ -164,47 +170,223 @@ def valid_atom(value: str) -> bool:
     return bool(SAFE_ATOM_RE.fullmatch(value))
 
 
-def nested_values(value: object, path: tuple[str, ...] = ()) -> Iterable[tuple[tuple[str, ...], object]]:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            yield from nested_values(child, (*path, str(key).lower()))
-    elif isinstance(value, list):
-        for child in value[:64]:
-            yield from nested_values(child, path)
-    else:
-        yield path, value
+def nested_value(document: object, path: str) -> object:
+    current = document
+    for part in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def add_values(target: list[str], value: object, validator) -> None:
+    values = value if isinstance(value, list) else [value]
+    for candidate in values[:MAX_OBSERVABLES]:
+        add_unique(target, candidate, validator)
+
+
+def add_address_values(found: dict[str, list[str]], value: object) -> None:
+    """Classify ECS address values without treating free text as a pivot."""
+    values = value if isinstance(value, list) else [value]
+    for candidate in values[:MAX_OBSERVABLES]:
+        text = str(candidate or "").strip().rstrip(".")
+        if valid_ip(text):
+            add_unique(found["ips"], text, valid_ip)
+        elif valid_domain(text):
+            add_unique(found["domains"], text, valid_domain)
+
+
+def parsed_observable_documents(item: sqlite3.Row) -> list[dict]:
+    """Return only explicit source-event documents, never enrichment payloads."""
+    keys = set(item.keys())
+    documents: list[dict] = []
+    if "alert_json" in keys:
+        try:
+            alert = json.loads(item["alert_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            alert = {}
+        if isinstance(alert, dict):
+            documents.append(alert)
+    if "raw_event_json" in keys:
+        try:
+            raw_event = json.loads(item["raw_event_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            raw_event = {}
+        event_data = (
+            raw_event.get("event_data")
+            if isinstance(raw_event, dict)
+            else None
+        )
+        if isinstance(event_data, dict):
+            documents.append(event_data)
+    return documents
+
+
+def network_sensor_alert(
+    item: sqlite3.Row,
+    documents: list[dict],
+) -> bool:
+    keys = set(item.keys())
+    datasets = [
+        str(item["event_dataset"] or "").strip().lower()
+        if "event_dataset" in keys
+        else ""
+    ]
+    datasets.extend(
+        str(nested_value(document, "event.dataset") or "").strip().lower()
+        for document in documents
+    )
+    alert_id = (
+        str(item["alert_id"] or "").strip().lower()
+        if "alert_id" in keys
+        else ""
+    )
+    return (
+        any(
+            dataset.startswith(("suricata.", "zeek."))
+            for dataset in datasets
+        )
+        or "logs-suricata." in alert_id
+        or "logs-zeek-" in alert_id
+    )
 
 
 def observables(grouped: list[sqlite3.Row]) -> dict[str, list[str]]:
+    """Derive bounded pivots from explicit alert-source ECS paths.
+
+    Alert JSON can contain nested external-intelligence provider responses.
+    Those values describe enrichment about an indicator; they are not
+    observables seen in the selected detection and must never become SIEM
+    query pivots. Collector/sensor host metadata is likewise excluded from
+    network-sensor detections.
+    """
     found = {"ips": [], "domains": [], "hosts": [], "users": []}
-    ip_leafs = {"ip", "source_ip", "destination_ip", "client_ip", "server_ip"}
-    domain_leafs = {"domain", "hostname", "sni", "query", "question_name", "server_name"}
-    host_leafs = {"host_id", "host_name", "agent_id"}
-    user_leafs = {"user_id", "user_name", "username"}
+    primary_ip_paths = (
+        "source.ip",
+        "destination.ip",
+        "client.ip",
+        "server.ip",
+    )
+    primary_address_paths = (
+        "source.address",
+        "destination.address",
+        "client.address",
+        "server.address",
+    )
+    supplemental_ip_paths = (
+        "dns.resolved_ip",
+        "related.ip",
+    )
+    domain_paths = (
+        "dns.question.name",
+        "dns.query.name",
+        "url.domain",
+        "tls.server.name",
+        "ssl.server_name",
+        "http.virtual_host",
+        "quic.server_name",
+        "source.domain",
+        "destination.domain",
+        "client.domain",
+        "server.domain",
+    )
+    host_paths = (
+        "host.hostname",
+        "host.name",
+        "host.id",
+        "agent.id",
+        "agent.name",
+        "related.hosts",
+    )
+    user_paths = (
+        "user.name",
+        "source.user.name",
+        "destination.user.name",
+        "client.user.name",
+        "user.id",
+        "related.user",
+    )
+
+    # Stable alert-store endpoints are the highest-confidence pivots, so
+    # collect them for the complete duplicate group before any optional ECS
+    # context can consume a category limit.
     for item in grouped:
         keys = set(item.keys())
         add_unique(found["ips"], item["source_ip"] if "source_ip" in keys else None, valid_ip)
         add_unique(found["ips"], item["destination_ip"] if "destination_ip" in keys else None, valid_ip)
-        for json_column in ("alert_json", "raw_event_json"):
-            if json_column not in keys:
-                continue
-            try:
-                payload = json.loads(item[json_column] or "{}")
-            except json.JSONDecodeError:
-                continue
-            for path, value in nested_values(payload):
-                leaf = path[-1] if path else ""
-                if leaf in ip_leafs or (leaf == "address" and any(part in {"source", "destination", "host"} for part in path)):
-                    values = value if isinstance(value, list) else [value]
-                    for candidate in values:
-                        add_unique(found["ips"], candidate, valid_ip)
-                elif leaf in domain_leafs:
-                    add_unique(found["domains"], value, valid_domain)
-                elif leaf in host_leafs:
-                    add_unique(found["hosts"], value, valid_atom)
-                elif leaf in user_leafs:
-                    add_unique(found["users"], value, valid_atom)
-    return found
+
+    parsed_rows = [
+        (
+            parsed_observable_documents(item),
+            item,
+        )
+        for item in grouped
+    ]
+    # Preserve explicit event endpoints before supplemental related/dns values
+    # can consume the per-category bound.
+    for documents, _item in parsed_rows:
+        for document in documents:
+            for path in primary_ip_paths:
+                add_values(
+                    found["ips"],
+                    nested_value(document, path),
+                    valid_ip,
+                )
+
+    # ECS address fields can contain either an IP address or a domain name.
+    for documents, _item in parsed_rows:
+        for document in documents:
+            for path in primary_address_paths:
+                add_address_values(
+                    found,
+                    nested_value(document, path),
+                )
+
+    for documents, item in parsed_rows:
+        sensor_alert = network_sensor_alert(item, documents)
+        for document in documents:
+            if not sensor_alert:
+                add_values(
+                    found["ips"],
+                    nested_value(document, "host.ip"),
+                    valid_ip,
+                )
+            for path in supplemental_ip_paths:
+                add_values(
+                    found["ips"],
+                    nested_value(document, path),
+                    valid_ip,
+                )
+            for path in domain_paths:
+                add_values(
+                    found["domains"],
+                    nested_value(document, path),
+                    valid_domain,
+                )
+            if not sensor_alert:
+                for path in host_paths:
+                    add_values(
+                        found["hosts"],
+                        nested_value(document, path),
+                        valid_atom,
+                    )
+            for path in user_paths:
+                add_values(
+                    found["users"],
+                    nested_value(document, path),
+                    valid_atom,
+                )
+
+    bounded: dict[str, list[str]] = {}
+    remaining = MAX_TOTAL_OBSERVABLES
+    for kind in ("ips", "domains", "hosts", "users"):
+        category_limit = min(
+            remaining,
+            MAX_OBSERVABLES_BY_KIND[kind],
+        )
+        bounded[kind] = found[kind][:category_limit]
+        remaining -= len(bounded[kind])
+    return bounded
 
 
 def evidence_windows(grouped: list[sqlite3.Row]) -> tuple[list[dict[str, str]], str]:

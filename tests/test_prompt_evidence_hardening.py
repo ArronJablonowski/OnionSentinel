@@ -303,6 +303,129 @@ class PromptEvidenceHardeningTests(unittest.TestCase):
         self.assertFalse(compact["tshark"]["icmp_semantics"]["raw_payloads_included"])
         self.assertEqual(compact["detection_context"]["rule"]["sid"], "999999")
 
+    def test_prompt_budget_uses_lossless_compact_json_before_reducing_evidence(self):
+        package = {
+            "instructions": ["bounded-evidence"] * 20_000,
+            "prior_analyses": [{"id": value} for value in range(3)],
+            "related_alerts": [{"id": value} for value in range(10)],
+            "recent_notifications": [{"id": value} for value in range(10)],
+            "grouped_alert_context": {
+                "timeline_sample": [{"id": value} for value in range(12)],
+            },
+            "incident_response_evidence": {
+                "security_onion_response": {"results": []},
+            },
+        }
+        pretty_bytes = len(
+            json.dumps(
+                {
+                    **package,
+                    "package_budget": {
+                        "max_bytes": 450_000,
+                        "compacted": False,
+                        "compaction_steps": [],
+                        "serialization": "pretty",
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+            ).encode("utf-8")
+        )
+        self.assertGreater(pretty_bytes, 450_000)
+
+        compacted, output = builder.compact_package_to_budget(
+            package,
+            450_000,
+        )
+
+        self.assertLessEqual(len(output.encode("utf-8")), 450_000)
+        self.assertEqual(json.loads(output), compacted)
+        self.assertEqual(
+            compacted["package_budget"]["serialization"],
+            "compact",
+        )
+        self.assertIn(
+            "json_whitespace",
+            compacted["package_budget"]["compaction_steps"],
+        )
+        self.assertEqual(
+            compacted["instructions"],
+            ["bounded-evidence"] * 20_000,
+        )
+        self.assertEqual(len(compacted["prior_analyses"]), 3)
+        self.assertEqual(len(compacted["related_alerts"]), 10)
+        self.assertEqual(len(compacted["recent_notifications"]), 10)
+        self.assertEqual(
+            len(compacted["grouped_alert_context"]["timeline_sample"]),
+            12,
+        )
+        self.assertEqual(
+            compacted["package_budget"]["serialized_bytes"],
+            len(output.encode("utf-8")),
+        )
+
+    def test_prompt_budget_keeps_pretty_json_when_it_already_fits(self):
+        package = {"instructions": ["small"]}
+
+        compacted, output = builder.compact_package_to_budget(
+            package,
+            262_144,
+        )
+
+        self.assertEqual(
+            compacted["package_budget"]["serialization"],
+            "pretty",
+        )
+        self.assertNotIn(
+            "json_whitespace",
+            compacted["package_budget"]["compaction_steps"],
+        )
+        self.assertIn("\n  ", output)
+        self.assertEqual(json.loads(output), compacted)
+        self.assertEqual(
+            compacted["package_budget"]["serialized_bytes"],
+            len(output.encode("utf-8")),
+        )
+
+    def test_prompt_budget_compacts_when_size_metadata_crosses_boundary(self):
+        compacted, output = builder.compact_package_to_budget(
+            {"x": ""},
+            148,
+        )
+
+        self.assertLessEqual(len(output.encode("utf-8")), 148)
+        self.assertEqual(
+            compacted["package_budget"]["serialization"],
+            "compact",
+        )
+        self.assertEqual(json.loads(output), compacted)
+        self.assertEqual(
+            compacted["package_budget"]["serialized_bytes"],
+            len(output.encode("utf-8")),
+        )
+
+    def test_prompt_budget_compact_output_is_deterministic_with_unicode(self):
+        source = {
+            "instructions": ["évidence"] * 20_000,
+            "prior_analyses": [{"id": "α"}, {"id": "β"}],
+        }
+
+        first_package, first_output = builder.compact_package_to_budget(
+            copy.deepcopy(source),
+            500_000,
+        )
+        second_package, second_output = builder.compact_package_to_budget(
+            copy.deepcopy(source),
+            500_000,
+        )
+
+        self.assertEqual(first_output, second_output)
+        self.assertEqual(first_package, second_package)
+        self.assertEqual(
+            first_package["package_budget"]["serialized_bytes"],
+            len(first_output.encode("utf-8")),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

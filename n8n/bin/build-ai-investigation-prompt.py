@@ -2392,24 +2392,42 @@ def compact_package_to_budget(package: dict, max_bytes: int) -> tuple[dict, str]
         "max_bytes": max_bytes,
         "compacted": False,
         "compaction_steps": [],
+        "serialization": "pretty",
     }
 
     def serialize() -> str:
+        if package["package_budget"]["serialization"] == "compact":
+            return json.dumps(
+                package,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
         return json.dumps(package, indent=2, sort_keys=True)
 
-    output = serialize()
-    if len(output.encode("utf-8")) <= max_bytes:
-        # The size field changes the serialized size. Iterate until the value
-        # is self-consistent, then enforce the hard admission ceiling again.
-        for _ in range(3):
-            package["package_budget"]["serialized_bytes"] = len(output.encode("utf-8"))
+    def stabilized_output() -> str:
+        """Return bytes whose declared serialized size is self-consistent."""
+        for _ in range(8):
             output = serialize()
-        if len(output.encode("utf-8")) > max_bytes:
-            raise ValueError(f"prompt package exceeds {max_bytes} bytes after budget metadata")
+            actual_bytes = len(output.encode("utf-8"))
+            if package["package_budget"].get("serialized_bytes") == actual_bytes:
+                return output
+            package["package_budget"]["serialized_bytes"] = actual_bytes
+        raise ValueError("prompt package byte-size metadata did not stabilize")
+
+    output = stabilized_output()
+    if len(output.encode("utf-8")) <= max_bytes:
         return package, output
 
     steps: list[str] = package["package_budget"]["compaction_steps"]
     package["package_budget"]["compacted"] = True
+    # Try a deterministic, lossless encoding before reducing any evidence.
+    # Pretty-print whitespace has no evidentiary value.
+    package["package_budget"]["serialization"] = "compact"
+    steps.append("json_whitespace")
+    output = stabilized_output()
+    if len(output.encode("utf-8")) <= max_bytes:
+        return package, output
+
     rollup = package.get("latest_daily_rollup")
     if isinstance(rollup, dict) and len(str(rollup.get("content") or "")) > 2000:
         rollup["content"] = str(rollup["content"])[:2000]
@@ -2505,7 +2523,7 @@ def compact_package_to_budget(package: dict, max_bytes: int) -> tuple[dict, str]
                 memory[key] = value[:2500] + "\n[truncated for prompt package budget]"
         steps.append("agent_memory")
 
-    output = serialize()
+    output = stabilized_output()
     if len(output.encode("utf-8")) > max_bytes and isinstance(incident, dict):
         response = incident.get("security_onion_response")
         results = response.get("results") if isinstance(response, dict) else None
@@ -2517,10 +2535,7 @@ def compact_package_to_budget(package: dict, max_bytes: int) -> tuple[dict, str]
             ):
                 validate_incident_evidence_artifact(incident)
                 steps.append("incident_response_hits")
-                output = serialize()
-    for _ in range(3):
-        package["package_budget"]["serialized_bytes"] = len(output.encode("utf-8"))
-        output = serialize()
+                output = stabilized_output()
     if len(output.encode("utf-8")) > max_bytes:
         raise ValueError(
             f"prompt package remains above {max_bytes} bytes after deterministic compaction"

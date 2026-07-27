@@ -252,6 +252,222 @@ class SecurityOnionIncidentEvidenceExportTests(unittest.TestCase):
             "id": "preferred-id",
         })
 
+    def test_collector_observables_exclude_enrichment_and_sensor_metadata(self) -> None:
+        row = {
+            "alert_id": (
+                ".ds-logs-suricata.alerts-so-2026.07.22-000001:"
+                "source-event"
+            ),
+            "event_dataset": "suricata.alert",
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "alert_json": json.dumps({
+                "event": {"dataset": "suricata.alert"},
+                "source": {"ip": "192.0.2.10"},
+                "destination": {"ip": "198.51.100.20"},
+                "tls": {"server": {"name": "observed.example"}},
+                "host": {
+                    "ip": ["172.17.1.1"],
+                    "name": "security-onion-sensor",
+                },
+                "enrichment": {
+                    "external_intel": {
+                        "records": [{
+                            "raw_response": {
+                                "ip": "203.0.113.200",
+                                "domain": "provider-result.example",
+                                "username": "intel-author",
+                            },
+                        }],
+                    },
+                },
+            }),
+            "raw_event_json": json.dumps({
+                "metadata": {
+                    "input": {
+                        "beats": {
+                            "host": {"ip": "192.168.1.7"},
+                        },
+                    },
+                },
+                "event_data": {
+                    "event": {"dataset": "suricata.alert"},
+                    "dns": {
+                        "question": {"name": "wire-observed.example"},
+                    },
+                },
+            }),
+        }
+
+        result = self.collector.observables([row])
+
+        self.assertEqual(
+            result["ips"],
+            ["192.0.2.10", "198.51.100.20"],
+        )
+        self.assertEqual(
+            result["domains"],
+            ["observed.example", "wire-observed.example"],
+        )
+        self.assertEqual(result["hosts"], [])
+        self.assertEqual(result["users"], [])
+        serialized = json.dumps(result, sort_keys=True)
+        self.assertNotIn("203.0.113.200", serialized)
+        self.assertNotIn("provider-result.example", serialized)
+        self.assertNotIn("intel-author", serialized)
+        self.assertNotIn("192.168.1.7", serialized)
+        self.assertNotIn("security-onion-sensor", serialized)
+
+    def test_collector_retains_explicit_endpoint_observables_with_global_bound(self) -> None:
+        row = {
+            "alert_id": (
+                ".ds-logs-detections.alerts-so-2026.07.22-000001:"
+                "endpoint-event"
+            ),
+            "event_dataset": "sigma.alert",
+            "source_ip": "",
+            "destination_ip": "",
+            "alert_json": json.dumps({
+                "event": {"dataset": "sigma.alert"},
+                "host": {
+                    "name": "endpoint-01",
+                    "id": "host-id-01",
+                    "ip": ["203.0.113.77"],
+                },
+                "agent": {"id": "agent-id-01"},
+                "user": {"name": "alice"},
+                "destination": {"address": "destination-observed.example"},
+                "related": {
+                    "ip": [f"192.0.2.{value}" for value in range(1, 17)],
+                },
+            }),
+            "raw_event_json": json.dumps({
+                "event_data": {
+                    "event": {"dataset": "endpoint.events.network"},
+                    "source": {"ip": "198.51.100.10"},
+                    "destination": {"ip": "198.51.100.20"},
+                    "dns": {
+                        "question": {
+                            "name": "endpoint-observed.example",
+                        },
+                    },
+                },
+            }),
+        }
+
+        result = self.collector.observables([row])
+
+        self.assertIn("198.51.100.10", result["ips"])
+        self.assertIn("198.51.100.20", result["ips"])
+        self.assertIn("203.0.113.77", result["ips"])
+        self.assertIn("endpoint-observed.example", result["domains"])
+        self.assertIn("destination-observed.example", result["domains"])
+        self.assertEqual(
+            result["hosts"],
+            ["endpoint-01", "host-id-01", "agent-id-01"],
+        )
+        self.assertEqual(result["users"], ["alice"])
+        self.assertLessEqual(
+            sum(len(values) for values in result.values()),
+            self.collector.MAX_TOTAL_OBSERVABLES,
+        )
+        for kind, values in result.items():
+            self.assertLessEqual(
+                len(values),
+                self.collector.MAX_OBSERVABLES_BY_KIND[kind],
+            )
+
+    def test_collector_classifies_explicit_ecs_address_values(self) -> None:
+        row = {
+            "alert_id": (
+                ".ds-logs-detections.alerts-so-2026.07.22-000001:"
+                "endpoint-address-event"
+            ),
+            "event_dataset": "sigma.alert",
+            "source_ip": "",
+            "destination_ip": "",
+            "alert_json": json.dumps({
+                "event": {"dataset": "sigma.alert"},
+                "source": {"address": "192.0.2.44"},
+                "destination": {"address": "destination.example."},
+                "client": {"address": "198.51.100.44"},
+                "server": {"address": "server.example"},
+            }),
+            "raw_event_json": "{}",
+        }
+
+        result = self.collector.observables([row])
+
+        self.assertEqual(
+            result["ips"],
+            ["192.0.2.44", "198.51.100.44"],
+        )
+        self.assertEqual(
+            result["domains"],
+            ["destination.example", "server.example"],
+        )
+
+    def test_collector_prioritizes_endpoints_and_excludes_sensor_host_ip(self) -> None:
+        grouped = []
+        for value in range(1, 10):
+            grouped.append({
+                "alert_id": (
+                    ".ds-logs-suricata.alerts-so-2026.07.22-000001:"
+                    f"sensor-event-{value}"
+                ),
+                "event_dataset": "suricata.alert",
+                "source_ip": f"192.0.2.{value}",
+                "destination_ip": f"198.51.100.{value}",
+                "alert_json": json.dumps({
+                    "event": {"dataset": "suricata.alert"},
+                    "host": {"ip": [f"203.0.113.{value}"]},
+                    "related": {
+                        "ip": [f"10.0.0.{value}"],
+                    },
+                    "dns": {
+                        "question": {
+                            "name": f"observed-{value}.example",
+                        },
+                    },
+                    "url": {
+                        "domain": f"url-{value}.example",
+                    },
+                }),
+                "raw_event_json": "{}",
+            })
+
+        result = self.collector.observables(grouped)
+
+        self.assertEqual(
+            result["ips"],
+            [
+                "192.0.2.1",
+                "198.51.100.1",
+                "192.0.2.2",
+                "198.51.100.2",
+                "192.0.2.3",
+                "198.51.100.3",
+                "192.0.2.4",
+                "198.51.100.4",
+            ],
+        )
+        self.assertEqual(len(result["domains"]), 8)
+        self.assertFalse(
+            any(value.startswith("203.0.113.") for value in result["ips"])
+        )
+        self.assertFalse(
+            any(value.startswith("10.0.0.") for value in result["ips"])
+        )
+        self.assertLessEqual(
+            sum(len(values) for values in result.values()),
+            self.collector.MAX_TOTAL_OBSERVABLES,
+        )
+        for kind, values in result.items():
+            self.assertLessEqual(
+                len(values),
+                self.collector.MAX_OBSERVABLES_BY_KIND[kind],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
