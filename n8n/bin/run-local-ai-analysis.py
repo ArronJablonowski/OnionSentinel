@@ -32,7 +32,12 @@ from typing import Any, Callable, NoReturn
 BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
-from agent_memory import normalize_memory_candidates, persist_memory_candidates  # noqa: E402
+from agent_memory import (  # noqa: E402
+    normalize_memory_candidates,
+    persist_memory_candidates,
+    role_prompt_file,
+    role_second_opinion_prompt_file,
+)
 from bounded_http import BoundedHttpError, read_bounded_json  # noqa: E402
 from bounded_process import BoundedProcessError, run_bounded_command  # noqa: E402
 from incident_evidence_contract import validate_incident_evidence_artifact  # noqa: E402
@@ -151,6 +156,12 @@ CODEX_CLI_MODEL_CATALOG = (
     "gpt-5.6-terra",
     "gpt-5.6-luna",
 )
+# The builder is held below the complete Codex transport ceiling so runtime
+# citation contracts and the one authoritative role prompt still have bounded
+# room.  The final invariant is enforced against the exact compact stdin, not
+# merely the saved prompt package.
+CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES = 384 * 1024
+CODEX_CLI_MAX_STDIN_BYTES = 448 * 1024
 CLI_HARNESS_MODEL_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,239}$"
 )
@@ -6112,6 +6123,106 @@ def response_output_json_schema(template: dict[str, Any]) -> dict[str, Any]:
     return root
 
 
+def canonical_cli_system_prompt_file(
+    prompt_package: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    system_prompt_file: Path | None = None,
+    independent_review: bool = False,
+) -> Path:
+    """Resolve the role prompt from trusted runtime configuration.
+
+    Prompt packages contain provenance paths, but those model-facing values are
+    not allowed to choose a local file at execution time.  A package with a
+    recognized role always uses the canonical prompt beside the admitted AI
+    settings file.  The explicit path remains a compatibility fallback only
+    for legacy/synthetic packages that do not declare an agent role.
+    """
+    agent_role = str(prompt_package.get("agent_role") or "").strip().lower()
+    if agent_role in CYBER_SECURITY_AGENT_ROLES:
+        settings_path = Path(
+            getattr(args, "ai_settings_file", DEFAULT_AI_SETTINGS_FILE)
+            or DEFAULT_AI_SETTINGS_FILE
+        )
+        resolver = (
+            role_second_opinion_prompt_file
+            if independent_review
+            else role_prompt_file
+        )
+        return resolver(settings_path.parent, agent_role)
+    if system_prompt_file is not None:
+        return Path(system_prompt_file)
+    return Path(
+        getattr(args, "system_prompt_file", DEFAULT_SYSTEM_PROMPT_FILE)
+        or DEFAULT_SYSTEM_PROMPT_FILE
+    )
+
+
+def load_canonical_cli_system_prompt(path: Path, agent_role: str) -> str:
+    """Read one canonical role prompt without fallback or symlink traversal."""
+    try:
+        admitted = path.lstat()
+    except OSError as exc:
+        raise SystemExit(
+            f"canonical {agent_role} system prompt is unavailable"
+        ) from exc
+    if stat.S_ISLNK(admitted.st_mode) or not stat.S_ISREG(admitted.st_mode):
+        raise SystemExit(
+            f"canonical {agent_role} system prompt must be a regular file"
+        )
+    if admitted.st_size > DEFAULT_MAX_SYSTEM_PROMPT_BYTES:
+        raise SystemExit(
+            f"canonical {agent_role} system prompt exceeds its byte limit"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino)
+            != (admitted.st_dev, admitted.st_ino)
+        ):
+            raise SystemExit(
+                f"canonical {agent_role} system prompt changed during admission"
+            )
+        chunks = bytearray()
+        while len(chunks) <= DEFAULT_MAX_SYSTEM_PROMPT_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(
+                    64 * 1024,
+                    DEFAULT_MAX_SYSTEM_PROMPT_BYTES + 1 - len(chunks),
+                ),
+            )
+            if not chunk:
+                break
+            chunks.extend(chunk)
+    except OSError as exc:
+        raise SystemExit(
+            f"canonical {agent_role} system prompt could not be read"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if len(chunks) > DEFAULT_MAX_SYSTEM_PROMPT_BYTES:
+        raise SystemExit(
+            f"canonical {agent_role} system prompt exceeds its byte limit"
+        )
+    try:
+        prompt = bytes(chunks).decode("utf-8", errors="strict").strip()
+    except UnicodeError as exc:
+        raise SystemExit(
+            f"canonical {agent_role} system prompt is not valid UTF-8"
+        ) from exc
+    if not prompt:
+        raise SystemExit(
+            f"canonical {agent_role} system prompt is empty"
+        )
+    return prompt
+
+
 def cli_analysis_payload(
     prompt_package: dict[str, Any],
     args: argparse.Namespace,
@@ -6157,11 +6268,74 @@ def cli_analysis_payload(
             "tool access, arbitrary query syntax, or raw packet payloads."
         )
     )
+    prompt_path = canonical_cli_system_prompt_file(
+        prompt_package,
+        args,
+        system_prompt_file=system_prompt_file,
+        independent_review=independent_review,
+    )
+    agent_role = str(prompt_package.get("agent_role") or "").strip().lower()
+    system_prompt = (
+        load_canonical_cli_system_prompt(prompt_path, agent_role)
+        if agent_role in CYBER_SECURITY_AGENT_ROLES
+        else load_system_prompt(prompt_path)
+    )
+    transported_package = model_safe_copy(prompt_package, hosted=hosted)
+    instructions = transported_package.get("instructions")
+    if isinstance(instructions, dict):
+        embedded_role = instructions.get("role")
+        if independent_review:
+            # A blind reviewer must never receive the primary role prompt.
+            instructions.pop("role", None)
+        elif isinstance(embedded_role, str) and embedded_role.strip():
+            if embedded_role.strip() != system_prompt.strip():
+                raise SystemExit(
+                    "prompt package role instructions do not match the canonical "
+                    "agent system prompt"
+                )
+            # The authoritative role prompt is already supplied once as the
+            # outer system message.  Removing the exact duplicate avoids both
+            # conflicting authority and avoidable context consumption.
+            instructions.pop("role", None)
     return {
         "task": task,
-        "system_prompt": load_system_prompt(system_prompt_file or args.system_prompt_file),
-        "prompt_package": model_safe_copy(prompt_package, hosted=hosted),
+        "system_prompt": system_prompt,
+        "prompt_package": transported_package,
     }
+
+
+def prepare_codex_cli_transport(
+    prompt_package: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    system_prompt_file: Path | None = None,
+    independent_review: bool = False,
+) -> tuple[dict[str, Any], str]:
+    """Return the one exact, admitted compact stdin used by Codex.
+
+    Admission happens after hosted-field filtering, role resolution,
+    role-prompt deduplication, runtime citation attachment, and task framing.
+    Callers must pass the returned string unchanged to the subprocess.
+    """
+    payload = cli_analysis_payload(
+        prompt_package,
+        args,
+        hosted=True,
+        system_prompt_file=system_prompt_file,
+        independent_review=independent_review,
+    )
+    serialized = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    serialized_bytes = len(serialized.encode("utf-8"))
+    if serialized_bytes > CODEX_CLI_MAX_STDIN_BYTES:
+        raise SystemExit(
+            "Codex CLI complete transport exceeds the "
+            f"{CODEX_CLI_MAX_STDIN_BYTES}-byte context admission limit"
+        )
+    return payload, serialized
 
 
 def cloud_cli_chat(
@@ -6186,10 +6360,9 @@ def cloud_cli_chat(
         raise SystemExit("Codex CLI model name is invalid")
     if effort not in CODEX_CLI_REASONING_EFFORTS:
         raise SystemExit("Codex CLI reasoning effort is invalid")
-    stdin_payload = cli_analysis_payload(
+    stdin_payload, serialized_stdin = prepare_codex_cli_transport(
         prompt_package,
         args,
-        hosted=True,
         system_prompt_file=system_prompt_file,
         independent_review=independent_review,
     )
@@ -6217,6 +6390,8 @@ def cloud_cli_chat(
         cmd = [
             executable,
             "exec",
+            "--ignore-user-config",
+            "--ignore-rules",
             "--model",
             model,
             "-c",
@@ -6241,11 +6416,12 @@ def cloud_cli_chat(
         try:
             proc = run_bounded_command(
                 cmd,
-                stdin_text=json.dumps(stdin_payload, separators=(",", ":")),
+                stdin_text=serialized_stdin,
                 timeout_seconds=args.timeout,
                 max_stdout_bytes=args.max_response_bytes,
                 max_stderr_bytes=DEFAULT_CLOUD_MAX_STDERR_BYTES,
                 cwd=work_dir,
+                env=sanitized_cli_harness_env(executable),
             )
         except FileNotFoundError as exc:
             raise SystemExit(f"Codex CLI executable was not found: {executable}") from exc
@@ -8230,10 +8406,19 @@ def apply_configured_second_opinion(
             trigger_reason=trigger,
         )
         return primary_response
-    reviewer_prompt = Path(
-        str(
-            prompt_package.get("second_opinion_system_prompt_file")
-            or getattr(args, "second_opinion_prompt_file", DEFAULT_SECOND_OPINION_PROMPT_FILE)
+    settings_path = getattr(args, "ai_settings_file", None)
+    reviewer_prompt = (
+        role_second_opinion_prompt_file(Path(settings_path).parent, agent_role)
+        if settings_path
+        else Path(
+            str(
+                prompt_package.get("second_opinion_system_prompt_file")
+                or getattr(
+                    args,
+                    "second_opinion_prompt_file",
+                    DEFAULT_SECOND_OPINION_PROMPT_FILE,
+                )
+            )
         )
     )
     notify_analysis_phase(
@@ -10899,6 +11084,27 @@ def main() -> int:
         agent_role = str(prompt_package.get("agent_role") or "soc-analyst").strip().lower()
         if agent_role not in CYBER_SECURITY_AGENT_ROLES:
             raise SystemExit(f"unexpected cyber-security agent role in {prompt_path}: {agent_role}")
+        config_dir = Path(
+            getattr(args, "ai_settings_file", DEFAULT_AI_SETTINGS_FILE)
+            or DEFAULT_AI_SETTINGS_FILE
+        ).parent
+        canonical_prompt_paths = {
+            "system_prompt_file": role_prompt_file(config_dir, agent_role),
+            "second_opinion_system_prompt_file": role_second_opinion_prompt_file(
+                config_dir,
+                agent_role,
+            ),
+        }
+        for field, expected_path in canonical_prompt_paths.items():
+            declared_path = str(prompt_package.get(field) or "").strip()
+            if (
+                declared_path
+                and Path(declared_path).expanduser() != expected_path.expanduser()
+            ):
+                raise SystemExit(
+                    f"prompt package {field} does not match the canonical "
+                    f"{agent_role} runtime path"
+                )
         if agent_role == "incident-responder":
             validate_incident_evidence_artifact(prompt_package.get("incident_response_evidence"))
 

@@ -27,6 +27,7 @@ BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 from disk_capacity import require_runtime_capacity
+from agent_memory import role_prompt_file, role_second_opinion_prompt_file
 from bounded_http import BoundedHttpError, read_bounded_json
 from bounded_process import BoundedProcessError, run_bounded_command
 
@@ -54,6 +55,7 @@ SEVERITY_PRIORITY = ("critical", "high", "medium", "low", "informational")
 ELIGIBLE_FILTER_STATUSES = ("accepted", "escalated", "unknown", "suppressed")
 TEST_PREFIXES = ("phase%", "config-%", "internal-test-%", "sqlite-%", "policy-%", "codex-%")
 DEFAULT_MAX_PROMPT_BYTES = max(256 * 1024, int(os.environ.get("SOC_AI_MAX_PROMPT_PACKAGE_BYTES", 4 * 1024 * 1024)))
+CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES = 384 * 1024
 DEFAULT_MAX_CHILD_STDOUT_BYTES = max(1024 * 1024, int(os.environ.get("SOC_AI_SCHEDULER_MAX_STDOUT_BYTES", 16 * 1024 * 1024)))
 DEFAULT_MAX_CHILD_STDERR_BYTES = max(256 * 1024, int(os.environ.get("SOC_AI_SCHEDULER_MAX_STDERR_BYTES", 2 * 1024 * 1024)))
 DEFAULT_MAX_CONTROL_RESPONSE_BYTES = 1024 * 1024
@@ -379,6 +381,47 @@ def cli_agent_roles(settings_path: Path) -> set[str]:
     return cli_roles
 
 
+def effective_prompt_package_limit(
+    args: argparse.Namespace,
+    *,
+    agent_role: str = "",
+) -> int:
+    """Clamp hosted Codex work to the checked-in context-safe package budget."""
+    configured = int(
+        getattr(args, "max_prompt_bytes", DEFAULT_MAX_PROMPT_BYTES)
+        or DEFAULT_MAX_PROMPT_BYTES
+    )
+    role = str(agent_role or "").strip()
+    settings_path = Path(
+        getattr(args, "ai_settings_file", DEFAULT_AI_SETTINGS)
+    )
+    routes: list[str] = []
+    try:
+        if (
+            settings_path.is_file()
+            and settings_path.stat().st_size <= MAX_AI_SETTINGS_BYTES
+        ):
+            raw = json.loads(settings_path.read_text(encoding="utf-8"))
+        else:
+            raw = {}
+        if isinstance(raw, dict):
+            for field in ("agent_models", "agent_second_opinion_models"):
+                mapping = raw.get(field)
+                if isinstance(mapping, dict):
+                    routes.append(
+                        str(mapping.get(role) or "").strip().lower()
+                    )
+    except (OSError, ValueError, TypeError):
+        routes = []
+    if any(
+        route in {"gpt-cli", "codex-cli"}
+        or route.startswith("codex-cli:")
+        for route in routes
+    ):
+        return min(configured, CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES)
+    return configured
+
+
 def configured_analysis_levels(settings_path: Path, configured_levels: str) -> list[str]:
     """Return the launch allowlist constrained by the saved automatic AI floor.
 
@@ -622,6 +665,7 @@ NON_RETRYABLE_AI_FAILURE_MARKERS = (
     "model context window exhausted",
     "prompt package remains above",
     "prompt package exceeded",
+    "codex cli complete transport exceeds",
     "investigation follow-up prompt exceeds",
     "no safe prompt budget remains",
     "codex cli executable was not found",
@@ -1773,6 +1817,12 @@ def build_prompt(
     job_payload = job_payload or {}
     related_limit = bounded_int(job_payload.get("related_limit"), args.related_limit, 1, 500)
     pcap_analysis_limit = bounded_int(job_payload.get("pcap_analysis_limit"), 8, 1, 25)
+    agent_role = str(job_payload.get("agent_role") or "soc-analyst")
+    prompt_limit = effective_prompt_package_limit(
+        args,
+        agent_role=agent_role,
+    )
+    config_dir = Path(args.ai_settings_file).parent
     cmd = [
         sys.executable,
         str(builder),
@@ -1789,9 +1839,13 @@ def build_prompt(
         "--pcap-analysis-limit",
         str(pcap_analysis_limit),
         "--max-package-bytes",
-        str(args.max_prompt_bytes),
+        str(prompt_limit),
         "--agent-role",
-        str(job_payload.get("agent_role") or "soc-analyst"),
+        agent_role,
+        "--system-prompt-file",
+        str(role_prompt_file(config_dir, agent_role)),
+        "--second-opinion-prompt-file",
+        str(role_second_opinion_prompt_file(config_dir, agent_role)),
     ]
     if incident_evidence_path is not None:
         cmd.extend(["--incident-evidence-file", str(incident_evidence_path)])
@@ -1819,8 +1873,10 @@ def build_prompt(
         prompt_path.resolve().relative_to(args.prompt_dir.resolve())
     except ValueError as exc:
         raise RuntimeError("prompt builder returned a path outside the configured prompt directory") from exc
-    if prompt_path.stat().st_size > args.max_prompt_bytes:
-        raise RuntimeError(f"prompt package exceeded the {args.max_prompt_bytes}-byte worker limit")
+    if prompt_path.stat().st_size > prompt_limit:
+        raise RuntimeError(
+            f"prompt package exceeded the {prompt_limit}-byte worker limit"
+        )
     return prompt_path
 
 
@@ -1829,6 +1885,7 @@ def analysis_command(
     args: argparse.Namespace,
     *,
     reanalysis_attempt_id: str = "",
+    agent_role: str = "",
 ) -> list[str]:
     runner = Path(__file__).with_name("run-local-ai-analysis.py")
     cmd = [
@@ -1842,9 +1899,9 @@ def analysis_command(
         str(args.timeout),
         "--max-prompt-bytes",
         str(
-            int(
-                getattr(args, "max_prompt_bytes", DEFAULT_MAX_PROMPT_BYTES)
-                or DEFAULT_MAX_PROMPT_BYTES
+            effective_prompt_package_limit(
+                args,
+                agent_role=agent_role,
             )
         ),
         "--alert-store-url",
@@ -1865,11 +1922,13 @@ def run_analysis(
     *,
     progress_callback=None,
     reanalysis_attempt_id: str = "",
+    agent_role: str = "",
 ):
     cmd = analysis_command(
         prompt_path,
         args,
         reanalysis_attempt_id=reanalysis_attempt_id,
+        agent_role=agent_role,
     )
     # One durable analysis may now include the initial inference, as many as
     # three bounded evidence-pivot follow-ups, and an independent review.  The
@@ -2252,6 +2311,9 @@ def main() -> int:
                     args,
                     progress_callback=renew_processing_lease if processing_recorded else None,
                     reanalysis_attempt_id=reanalysis_attempt_id,
+                    agent_role=str(
+                        job_payload.get("agent_role") or "soc-analyst"
+                    ),
                 )
                 if proc.stdout:
                     print(proc.stdout, end="")

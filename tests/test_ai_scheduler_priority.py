@@ -1473,6 +1473,188 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             "ira-" + ("a" * 40),
         )
 
+    def test_cli_lane_clamps_builder_and_runner_prompt_package_budget(self) -> None:
+        settings_path = Path(self.tempdir.name) / "custom-ai-settings.json"
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "codex_cli_models": [
+                        {
+                            "model": "gpt-5.5",
+                            "reasoning_effort": "high",
+                            "enabled": True,
+                        }
+                    ],
+                    "agent_models": {
+                        "soc-analyst": "codex-cli:gpt-5.5:high",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        args = SimpleNamespace(
+            analysis_dir=Path(self.tempdir.name) / "analysis",
+            timeout=600,
+            max_prompt_bytes=1024 * 1024,
+            alert_store_url="http://127.0.0.1:8787",
+            ai_settings_file=settings_path,
+            provider_lane="cli",
+            model=None,
+        )
+
+        self.assertEqual(
+            self.scheduler.effective_prompt_package_limit(
+                args,
+                agent_role="soc-analyst",
+            ),
+            self.scheduler.CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES,
+        )
+        command = self.scheduler.analysis_command(
+            Path(self.tempdir.name) / "prompt.json",
+            args,
+            agent_role="soc-analyst",
+        )
+        self.assertEqual(
+            command[command.index("--max-prompt-bytes") + 1],
+            str(self.scheduler.CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES),
+        )
+
+    def test_local_lane_retains_operator_prompt_package_budget(self) -> None:
+        args = SimpleNamespace(
+            max_prompt_bytes=1024 * 1024,
+            provider_lane="ollama",
+            ai_settings_file=Path(self.tempdir.name) / "missing-settings.json",
+        )
+
+        self.assertEqual(
+            self.scheduler.effective_prompt_package_limit(
+                args,
+                agent_role="soc-analyst",
+            ),
+            1024 * 1024,
+        )
+
+    def test_codex_second_opinion_also_clamps_prompt_package_budget(self) -> None:
+        settings_path = Path(self.tempdir.name) / "reviewer-settings.json"
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "agent_models": {
+                        "soc-analyst": "ollama:local-primary",
+                    },
+                    "agent_second_opinion_models": {
+                        "soc-analyst": "codex-cli:gpt-5.6-sol:xhigh",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        args = SimpleNamespace(
+            max_prompt_bytes=1024 * 1024,
+            ai_settings_file=settings_path,
+        )
+
+        self.assertEqual(
+            self.scheduler.effective_prompt_package_limit(
+                args,
+                agent_role="soc-analyst",
+            ),
+            self.scheduler.CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES,
+        )
+
+    def test_prompt_builder_and_runner_share_custom_role_prompt_directory(self) -> None:
+        root = Path(self.tempdir.name)
+        config_dir = root / "custom-config"
+        config_dir.mkdir()
+        settings_path = config_dir / "ai_model_settings.json"
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "agent_models": {
+                        "incident-responder": "codex-cli:gpt-5.5:high",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        prompt_path = root / "prompts" / "prompt.json"
+        prompt_path.parent.mkdir()
+        prompt_path.write_text("{}", encoding="utf-8")
+        args = SimpleNamespace(
+            prompt_dir=prompt_path.parent,
+            related_limit=8,
+            correlation_limit=8,
+            correlation_min_score=15,
+            max_prompt_bytes=1024 * 1024,
+            ai_settings_file=settings_path,
+            include_tests=False,
+        )
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=str(prompt_path) + "\n",
+            stderr="",
+        )
+
+        with mock.patch.object(
+            self.scheduler,
+            "run_command",
+            return_value=completed,
+        ) as run:
+            returned = self.scheduler.build_prompt(
+                "synthetic-alert",
+                args,
+                {"agent_role": "incident-responder"},
+            )
+
+        command = run.call_args.args[0]
+        self.assertEqual(returned, prompt_path)
+        self.assertEqual(
+            command[command.index("--system-prompt-file") + 1],
+            str(
+                self.scheduler.role_prompt_file(
+                    config_dir,
+                    "incident-responder",
+                )
+            ),
+        )
+        self.assertEqual(
+            command[command.index("--second-opinion-prompt-file") + 1],
+            str(
+                self.scheduler.role_second_opinion_prompt_file(
+                    config_dir,
+                    "incident-responder",
+                )
+            ),
+        )
+
+    def test_hermes_only_route_keeps_its_separate_prompt_budget(self) -> None:
+        settings_path = Path(self.tempdir.name) / "hermes-settings.json"
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "agent_models": {
+                        "soc-analyst": "hermes-agent:gpt-5.6-sol:medium",
+                    },
+                    "agent_second_opinion_models": {
+                        "soc-analyst": "",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        args = SimpleNamespace(
+            max_prompt_bytes=1024 * 1024,
+            ai_settings_file=settings_path,
+        )
+
+        self.assertEqual(
+            self.scheduler.effective_prompt_package_limit(
+                args,
+                agent_role="soc-analyst",
+            ),
+            1024 * 1024,
+        )
+
     def test_indexed_contract_rejects_partial_schema(self) -> None:
         self.conn.execute("ALTER TABLE alerts ADD COLUMN stable_group_id TEXT")
         self.conn.execute("ALTER TABLE alerts ADD COLUMN stable_group_key TEXT")

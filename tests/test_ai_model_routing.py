@@ -495,8 +495,237 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertIn("--sandbox", seen_command)
         self.assertIn("read-only", seen_command)
         self.assertIn("--ephemeral", seen_command)
+        self.assertIn("--ignore-user-config", seen_command)
+        self.assertIn("--ignore-rules", seen_command)
         self.assertNotIn("sh", seen_command)
         self.assertNotIn("this must never execute", " ".join(seen_command))
+
+    def test_codex_rejects_oversized_complete_transport_before_spawn(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "system_prompt_file": Path("/tmp/nonexistent-system-prompt.md"),
+                "timeout": 60,
+                "max_response_bytes": 1024 * 1024,
+            },
+        )()
+        prompt_package = {
+            "response_schema": {"type": "object"},
+            "alert": {
+                "rule_name": "Synthetic",
+                "oversized_runtime_evidence": "x"
+                * self.runner.CODEX_CLI_MAX_STDIN_BYTES,
+            },
+        }
+        with (
+            mock.patch.object(
+                self.runner,
+                "resolve_codex_cli",
+                return_value="/usr/local/bin/codex",
+            ),
+            mock.patch.object(self.runner, "run_bounded_command") as run,
+            self.assertRaisesRegex(
+                SystemExit,
+                "Codex CLI complete transport exceeds the "
+                f"{self.runner.CODEX_CLI_MAX_STDIN_BYTES}-byte",
+            ),
+        ):
+            self.runner.cloud_cli_chat(
+                prompt_package,
+                args,
+                self.runner.default_ai_settings(),
+            )
+
+        run.assert_not_called()
+
+    def test_codex_uses_canonical_incident_prompt_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            config_dir = Path(temp_name)
+            settings_path = config_dir / "ai_model_settings.json"
+            settings_path.write_text("{}", encoding="utf-8")
+            incident_prompt = self.runner.role_prompt_file(
+                config_dir,
+                "incident-responder",
+            )
+            incident_prompt.write_text(
+                "INCIDENT RESPONDER CANONICAL MARKER",
+                encoding="utf-8",
+            )
+            soc_prompt = self.runner.role_prompt_file(config_dir, "soc-analyst")
+            soc_prompt.write_text(
+                "SOC ANALYST WRONG MARKER",
+                encoding="utf-8",
+            )
+            args = type(
+                "Args",
+                (),
+                {
+                    "ai_settings_file": settings_path,
+                    "system_prompt_file": soc_prompt,
+                },
+            )()
+            original = {
+                "agent_role": "incident-responder",
+                "instructions": {
+                    "role": "INCIDENT RESPONDER CANONICAL MARKER",
+                    "grounding": ["Use supplied evidence."],
+                },
+                "response_schema": {"type": "object"},
+            }
+
+            payload, serialized = self.runner.prepare_codex_cli_transport(
+                original,
+                args,
+            )
+
+        self.assertEqual(
+            payload["system_prompt"],
+            "INCIDENT RESPONDER CANONICAL MARKER",
+        )
+        self.assertNotIn("role", payload["prompt_package"]["instructions"])
+        self.assertEqual(
+            original["instructions"]["role"],
+            "INCIDENT RESPONDER CANONICAL MARKER",
+        )
+        self.assertEqual(
+            serialized.count("INCIDENT RESPONDER CANONICAL MARKER"),
+            1,
+        )
+        self.assertNotIn("SOC ANALYST WRONG MARKER", serialized)
+
+    def test_codex_fails_closed_on_embedded_role_prompt_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            config_dir = Path(temp_name)
+            settings_path = config_dir / "ai_model_settings.json"
+            settings_path.write_text("{}", encoding="utf-8")
+            self.runner.role_prompt_file(
+                config_dir,
+                "incident-responder",
+            ).write_text("CANONICAL INCIDENT ROLE", encoding="utf-8")
+            args = type(
+                "Args",
+                (),
+                {"ai_settings_file": settings_path},
+            )()
+            with self.assertRaisesRegex(
+                SystemExit,
+                "role instructions do not match",
+            ):
+                self.runner.prepare_codex_cli_transport(
+                    {
+                        "agent_role": "incident-responder",
+                        "instructions": {"role": "STALE OR FOREIGN ROLE"},
+                    },
+                    args,
+                )
+
+    def test_codex_reviewer_requires_its_canonical_role_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            config_dir = Path(temp_name)
+            settings_path = config_dir / "ai_model_settings.json"
+            settings_path.write_text("{}", encoding="utf-8")
+            args = type(
+                "Args",
+                (),
+                {"ai_settings_file": settings_path},
+            )()
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "canonical incident-responder system prompt is unavailable",
+            ):
+                self.runner.prepare_codex_cli_transport(
+                    {
+                        "agent_role": "incident-responder",
+                        "response_schema": {"type": "object"},
+                    },
+                    args,
+                    independent_review=True,
+                )
+
+    def test_codex_reviewer_oversize_uses_same_pre_spawn_gate(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "system_prompt_file": Path("/tmp/nonexistent-system-prompt.md"),
+                "timeout": 60,
+                "max_response_bytes": 1024 * 1024,
+            },
+        )()
+        with (
+            mock.patch.object(
+                self.runner,
+                "resolve_codex_cli",
+                return_value="/usr/local/bin/codex",
+            ),
+            mock.patch.object(self.runner, "run_bounded_command") as run,
+            self.assertRaisesRegex(
+                SystemExit,
+                "Codex CLI complete transport exceeds",
+            ),
+        ):
+            self.runner.cloud_cli_chat(
+                {
+                    "response_schema": {"type": "object"},
+                    "review_contract": {
+                        "case_id": "case-oversized-review",
+                        "evidence_hash": "a" * 64,
+                    },
+                    "oversized_review_evidence": "x"
+                    * self.runner.CODEX_CLI_MAX_STDIN_BYTES,
+                },
+                args,
+                self.runner.default_ai_settings(),
+                independent_review=True,
+            )
+
+        run.assert_not_called()
+
+    def test_codex_follow_up_variants_use_same_pre_spawn_gate(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "system_prompt_file": Path("/tmp/nonexistent-system-prompt.md"),
+                "timeout": 60,
+                "max_response_bytes": 1024 * 1024,
+            },
+        )()
+        for marker in (
+            "investigation_follow_up",
+            "investigation_query_planning_retry",
+            "live_osquery_follow_up",
+        ):
+            with self.subTest(marker=marker):
+                prompt_package = {
+                    marker: {"active": True},
+                    "response_schema": {"type": "object"},
+                    "oversized_follow_up_evidence": "x"
+                    * self.runner.CODEX_CLI_MAX_STDIN_BYTES,
+                }
+                with (
+                    mock.patch.object(
+                        self.runner,
+                        "resolve_codex_cli",
+                        return_value="/usr/local/bin/codex",
+                    ),
+                    mock.patch.object(
+                        self.runner,
+                        "run_bounded_command",
+                    ) as run,
+                    self.assertRaisesRegex(
+                        SystemExit,
+                        "Codex CLI complete transport exceeds",
+                    ),
+                ):
+                    self.runner.cloud_cli_chat(
+                        prompt_package,
+                        args,
+                        self.runner.default_ai_settings(),
+                    )
+                run.assert_not_called()
 
     def test_codex_reviewer_uses_strict_output_schema_and_explicit_effort(self) -> None:
         args = type(
