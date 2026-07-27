@@ -293,6 +293,8 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(body["options"]["num_predict"], 4096)
         self.assertEqual(captured["timeout"], 60)
         self.assertEqual(response["_analysis_model"], "reviewer:latest")
+        self.assertEqual(response["_analysis_model_path"], "ollama")
+        self.assertEqual(response["_analysis_provider"], "ollama")
 
     def test_ollama_exchange_unloads_once_after_all_model_turns(self) -> None:
         args = type("Args", (), {"timeout": 60})()
@@ -385,7 +387,12 @@ class AiModelRoutingTests(unittest.TestCase):
                 for role in self.runner.CYBER_SECURITY_AGENT_ROLES
             },
         }
-        local_response = {"summary": "assigned model"}
+        local_response = {
+            "summary": "assigned model",
+            "_analysis_model": "assigned:latest",
+            "_analysis_model_path": "ollama",
+            "_analysis_provider": "ollama",
+        }
 
         with (
             mock.patch.object(self.runner, "effective_ai_settings", return_value=settings),
@@ -424,7 +431,12 @@ class AiModelRoutingTests(unittest.TestCase):
                 for role in self.runner.CYBER_SECURITY_AGENT_ROLES
             },
         }
-        cloud_response = {"summary": "assigned GPT CLI"}
+        cloud_response = {
+            "summary": "assigned GPT CLI",
+            "_analysis_model": "gpt-5.5",
+            "_analysis_model_path": "frontier-codex-cli",
+            "_analysis_provider": "codex-cli",
+        }
 
         with (
             mock.patch.object(self.runner, "effective_ai_settings", return_value=settings),
@@ -756,6 +768,154 @@ class AiModelRoutingTests(unittest.TestCase):
                         "openclaw_model": model,
                     },
                 )
+
+    def test_onion_sentinel_harness_requires_policy_and_eligible_routes(
+        self,
+    ) -> None:
+        cases = (
+            {
+                "label": "policy disabled",
+                "enabled": False,
+                "primary": "codex-cli:gpt-5.6-sol:high",
+                "reviewer": "ollama:gemma4:31b",
+                "expected": False,
+                "reason": "investigation harness policy is disabled",
+            },
+            {
+                "label": "codex primary and ollama reviewer",
+                "enabled": True,
+                "primary": "codex-cli:gpt-5.6-sol:high",
+                "reviewer": "ollama:gemma4:31b",
+                "expected": True,
+                "reason": "policy enabled and selected routes are eligible",
+            },
+            {
+                "label": "ollama primary and codex reviewer",
+                "enabled": True,
+                "primary": "ollama:devstral-small-2:24b",
+                "reviewer": "codex-cli:gpt-5.6-sol:xhigh",
+                "expected": True,
+                "reason": "policy enabled and selected routes are eligible",
+            },
+            {
+                "label": "Hermes primary",
+                "enabled": True,
+                "primary": "hermes-agent:gpt-5.6-sol:medium",
+                "reviewer": "ollama:gemma4:31b",
+                "expected": False,
+                "reason": "assigned route uses the external hermes-agent harness",
+            },
+            {
+                "label": "OpenClaw primary",
+                "enabled": True,
+                "primary": "openclaw:ollama/gemma4:26b-mlx:high",
+                "reviewer": "",
+                "expected": False,
+                "reason": "assigned route uses the external openclaw harness",
+            },
+            {
+                "label": "Hermes reviewer",
+                "enabled": True,
+                "primary": "ollama:devstral-small-2:24b",
+                "reviewer": "hermes-agent:gpt-5.6-sol:medium",
+                "expected": False,
+                "reason": "second-opinion route uses the external hermes-agent harness",
+            },
+            {
+                "label": "OpenClaw reviewer",
+                "enabled": True,
+                "primary": "codex-cli:gpt-5.5:medium",
+                "reviewer": "openclaw:ollama/gemma4:26b-mlx:xhigh",
+                "expected": False,
+                "reason": "second-opinion route uses the external openclaw harness",
+            },
+            {
+                "label": "provider-like text inside an ordinary route",
+                "enabled": True,
+                "primary": "ollama:openclaw-model:latest",
+                "reviewer": "codex-cli:hermes-agent-compatible:medium",
+                "expected": True,
+                "reason": "policy enabled and selected routes are eligible",
+            },
+        )
+        for case in cases:
+            with self.subTest(case["label"]):
+                allowed, reason = (
+                    self.runner.should_start_onion_sentinel_harness(
+                        policy_enabled=case["enabled"],
+                        assigned_route=case["primary"],
+                        reviewer_route=case["reviewer"],
+                    )
+                )
+                self.assertIs(allowed, case["expected"])
+                self.assertEqual(reason, case["reason"])
+
+    def test_external_agent_harness_detection_is_exact_and_fail_closed(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self.runner.external_agent_harness_provider("hermes-agent"),
+            "hermes-agent",
+        )
+        self.assertEqual(
+            self.runner.external_agent_harness_provider(
+                "HERMES-AGENT:gpt-5.6-sol:medium"
+            ),
+            "hermes-agent",
+        )
+        self.assertEqual(
+            self.runner.external_agent_harness_provider("openclaw:malformed"),
+            "openclaw",
+        )
+        self.assertEqual(
+            self.runner.external_agent_harness_provider(
+                "ollama:openclaw-model:latest"
+            ),
+            "",
+        )
+        self.assertEqual(
+            self.runner.external_agent_harness_provider(
+                "codex-cli:hermes-agent-compatible:medium"
+            ),
+            "",
+        )
+
+    def test_controlled_evaluation_can_freeze_memory_without_changing_baseline(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self.runner.apply_evaluation_memory_freeze(
+                True,
+                "eligible after authoritative analysis commit",
+                freeze_enabled=False,
+            ),
+            (
+                True,
+                "eligible after authoritative analysis commit",
+            ),
+        )
+        self.assertEqual(
+            self.runner.apply_evaluation_memory_freeze(
+                True,
+                "eligible after authoritative analysis commit",
+                freeze_enabled=True,
+            ),
+            (
+                False,
+                "controlled harness evaluation froze memory writeback",
+            ),
+        )
+        self.assertEqual(
+            self.runner.apply_evaluation_memory_freeze(
+                False,
+                "reviewer disagreement",
+                freeze_enabled=True,
+            ),
+            (
+                False,
+                "controlled harness evaluation froze memory writeback",
+            ),
+        )
 
     def test_each_harness_dispatches_every_agent_role_without_provider_fallback(
         self,
@@ -2952,6 +3112,107 @@ class AiModelRoutingTests(unittest.TestCase):
             eligible, reason = self.runner.second_opinion_memory_eligibility(candidate)
             self.assertFalse(eligible)
             self.assertIn(expected, reason)
+
+    def test_memory_writeback_is_staged_until_authoritative_commit(self) -> None:
+        candidate = {
+            "scope": "agent",
+            "category": "investigation_pivot",
+            "finding": (
+                "Correlate TLS SNI with certificate and destination history."
+            ),
+            "use_when": "A later TLS alert has the same infrastructure.",
+            "evidence_basis": ["Zeek and alert evidence independently agreed."],
+            "confidence": "medium",
+            "tags": ["tls", "zeek"],
+            "ttl_days": 30,
+        }
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            role_memory = root / "role.md"
+            shared_memory = root / "shared.md"
+            receipt_dir = root / "receipts"
+            role_memory.write_text("# Role Memory\n", encoding="utf-8")
+            shared_memory.write_text("# Shared Memory\n", encoding="utf-8")
+
+            plan = self.runner.memory_writeback_plan(
+                [candidate],
+                allowed=True,
+                eligibility_reason="eligible after authoritative commit",
+            )
+            self.assertEqual(
+                plan["persistence_status"],
+                "pending_authoritative_commit",
+            )
+            self.assertNotIn(
+                "ONION_SENTINEL_MANAGED_MEMORY_START",
+                role_memory.read_text(encoding="utf-8"),
+            )
+
+            receipt, receipt_path = (
+                self.runner.persist_postcommit_memory_writeback(
+                    analysis_id="postcommit-memory-test",
+                    agent_role="soc-analyst",
+                    role_memory_file=role_memory,
+                    shared_memory_file=shared_memory,
+                    source_artifact="/tmp/synthetic-analysis.json",
+                    primary_candidates=[candidate],
+                    primary_allowed=True,
+                    primary_reason="eligible after authoritative commit",
+                    reviewer_candidates=[],
+                    reviewer_allowed=False,
+                    reviewer_reason="reviewer did not complete",
+                    receipt_dir=receipt_dir,
+                )
+            )
+            self.assertTrue(receipt["ok"])
+            self.assertEqual(receipt["primary"]["status"], "persisted")
+            self.assertEqual(receipt["reviewer"]["status"], "blocked")
+            self.assertIsNotNone(receipt_path)
+            assert receipt_path is not None
+            self.assertEqual(receipt_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(receipt_dir.stat().st_mode & 0o777, 0o700)
+            receipt_text = receipt_path.read_text(encoding="utf-8")
+            self.assertNotIn(candidate["finding"], receipt_text)
+            self.assertIn(
+                "ONION_SENTINEL_MANAGED_MEMORY_START",
+                role_memory.read_text(encoding="utf-8"),
+            )
+
+    def test_blocked_postcommit_memory_plan_never_mutates_memory(self) -> None:
+        candidate = {
+            "scope": "agent",
+            "category": "investigation_pivot",
+            "finding": "Treat a prior model claim only as a lead.",
+            "use_when": "A related alert is investigated.",
+            "evidence_basis": ["One prior model observation."],
+            "confidence": "medium",
+            "tags": ["lead"],
+            "ttl_days": 30,
+        }
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            role_memory = root / "role.md"
+            shared_memory = root / "shared.md"
+            role_memory.write_text("# Role Memory\n", encoding="utf-8")
+            shared_memory.write_text("# Shared Memory\n", encoding="utf-8")
+            before = role_memory.read_bytes()
+
+            receipt, _ = self.runner.persist_postcommit_memory_writeback(
+                analysis_id="blocked-memory-test",
+                agent_role="soc-analyst",
+                role_memory_file=role_memory,
+                shared_memory_file=shared_memory,
+                source_artifact="/tmp/synthetic-analysis.json",
+                primary_candidates=[candidate],
+                primary_allowed=False,
+                primary_reason="explicit human approval is required",
+                reviewer_candidates=[],
+                reviewer_allowed=False,
+                reviewer_reason="reviewer did not complete",
+                receipt_dir=root / "receipts",
+            )
+            self.assertEqual(receipt["primary"]["status"], "blocked")
+            self.assertEqual(role_memory.read_bytes(), before)
 
     def test_confident_primary_does_not_spend_second_model_call(self) -> None:
         args = type("Args", (), {})()

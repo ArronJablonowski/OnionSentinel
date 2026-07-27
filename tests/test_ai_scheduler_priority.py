@@ -85,6 +85,8 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             "command stderr exceeded the 1048576-byte limit",
             "Codex CLI analysis failed: provider authentication failed",
             "Codex CLI analysis failed: configured model is unavailable or unauthorized",
+            "incident reanalysis claim did not return its server-authoritative job identity",
+            "incident reanalysis lease identity did not match its server-bound attempt",
         ):
             self.assertFalse(self.scheduler.ai_failure_is_retryable(detail))
 
@@ -482,6 +484,29 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             "",
         )
 
+    def test_legacy_manual_incident_escalation_without_run_id_runs_unbound(
+        self,
+    ) -> None:
+        """Old escalation rows used manual_reanalysis without a run ledger."""
+        result = self.run_indexed_worker_once(
+            severity="low",
+            payload={
+                "agent_role": "incident-responder",
+                "case_id": "ir-legacy-escalation",
+                "manual_reanalysis": True,
+            },
+            job_type="incident_response_analysis",
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["collect_incident_evidence"].assert_called_once()
+        result["build_prompt"].assert_called_once()
+        result["run_analysis"].assert_called_once()
+        self.assertEqual(
+            result["run_analysis"].call_args.kwargs["reanalysis_attempt_id"],
+            "",
+        )
+
     def test_incident_worker_uses_claim_identity_when_payload_changes_preclaim(
         self,
     ) -> None:
@@ -797,6 +822,43 @@ class AiSchedulerPriorityTest(unittest.TestCase):
 
         self.assertIsNotNone(selected)
         self.assertEqual(selected["alert_id"], "rerun-alert")
+
+    def test_indexed_controlled_run_selects_only_exact_stable_group(self) -> None:
+        self.enable_indexed_scheduler()
+        target_group = "0123456789abcdefabcd"
+        other_group = "fedcba9876543210abcd"
+        self.insert_alert("target-low", "low", "2026-07-19  10:00:00Z", 10)
+        self.insert_alert(
+            "other-critical",
+            "critical",
+            "2026-07-19  11:00:00Z",
+            100,
+        )
+        self.set_stable_group("target-low", target_group)
+        self.set_stable_group("other-critical", other_group)
+        self.insert_indexed_job(
+            target_group,
+            payload={"manual_reanalysis": True},
+        )
+        self.insert_indexed_job(
+            other_group,
+            payload={"manual_reanalysis": True},
+        )
+        self.args.only_group_id = target_group
+        self.conn.commit()
+
+        selected = self.scheduler.select_next_alert_indexed(self.conn, self.args)
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["stable_group_id"], target_group)
+        self.assertEqual(selected["alert_id"], "target-low")
+
+    def test_controlled_run_rejects_malformed_stable_group(self) -> None:
+        self.enable_indexed_scheduler()
+        self.args.only_group_id = "not-a-stable-group"
+
+        with self.assertRaisesRegex(SystemExit, "one exact 20-hex"):
+            self.scheduler.select_next_alert_indexed(self.conn, self.args)
 
     def test_indexed_queue_preserves_severity_and_due_time(self) -> None:
         self.enable_indexed_scheduler()

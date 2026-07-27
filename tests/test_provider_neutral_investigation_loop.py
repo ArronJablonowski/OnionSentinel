@@ -2,6 +2,7 @@
 """Focused contracts for the provider-neutral investigation pivot loop."""
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import sys
@@ -26,6 +27,97 @@ def load_module(name: str, path: Path):
     return module
 
 
+class RecordingHarness:
+    """Minimal harness double that makes call ordering observable."""
+
+    class _Policy:
+        def __init__(self, mode: str) -> None:
+            self.mode = mode
+
+    class _Decision:
+        def __init__(self, allowed: bool, backend: str) -> None:
+            self.allowed = allowed
+            self.capability = f"query.{backend}"
+            self.reason = "test policy decision"
+
+    def __init__(
+        self,
+        events: list[tuple],
+        *,
+        mode: str = "enforce",
+        tool_allowed: bool = True,
+        fail_authorization: bool = False,
+    ) -> None:
+        self.events = events
+        self.policy = self._Policy(mode)
+        self.tool_allowed = tool_allowed
+        self.fail_authorization = fail_authorization
+
+    def phase(self, phase: str, route: str = "", reason: str = "") -> None:
+        self.events.append(("phase", phase, route, reason))
+
+    def authorize_tool(
+        self,
+        *,
+        round_number: int,
+        query_id: str,
+        backend: str,
+    ) -> _Decision:
+        self.events.append(
+            ("authorize_tool", round_number, query_id, backend)
+        )
+        if self.fail_authorization:
+            raise RuntimeError("synthetic shadow observation failure")
+        return self._Decision(self.tool_allowed, backend)
+
+    def preflight_query_batch(
+        self,
+        *,
+        round_number: int,
+        request_count: int,
+    ) -> None:
+        self.events.append(
+            ("preflight_query_batch", round_number, request_count)
+        )
+
+    def query_round(self, round_result: dict) -> None:
+        self.events.append(("query_round", round_result.get("round")))
+
+    def catalogue_prompt_evidence(self, _prompt_package: dict) -> None:
+        self.events.append(("catalogue_prompt_evidence",))
+
+    def preflight_model_call(
+        self,
+        *,
+        call_id: str,
+        input_value: object,
+        requested_route: str,
+        purpose: str,
+        independent_review: bool = False,
+    ) -> None:
+        self.events.append(
+            (
+                "preflight_model_call",
+                call_id,
+                independent_review,
+                bool(input_value),
+                requested_route,
+                purpose,
+            )
+        )
+
+    def model_call(
+        self,
+        *,
+        call_id: str,
+        independent_review: bool = False,
+        **_kwargs,
+    ) -> None:
+        self.events.append(
+            ("model_call", call_id, independent_review)
+        )
+
+
 class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -41,6 +133,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             "provider_neutral_investigation_contract",
             BIN_DIR / "investigation_query_contract.py",
         )
+        cls.harness = sys.modules["onion_sentinel_harness"]
 
     @staticmethod
     def elastic_request(query_id: str = "pivot-1") -> dict:
@@ -932,6 +1025,406 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
 
         self.assertNotEqual(first, second)
 
+    def test_initial_model_preflight_precedes_model_execution(self) -> None:
+        events: list[tuple] = []
+        harness = RecordingHarness(events)
+
+        def model_executor(*_args, **_kwargs):
+            events.append(("initial_model_executor",))
+            return {"summary": "Initial analysis completed."}
+
+        settings = {
+            "agent_models": {
+                "soc-analyst": "codex-cli:gpt-5.6-sol:high",
+            }
+        }
+        with mock.patch.object(
+            self.runner,
+            "analyze_model_route",
+            side_effect=model_executor,
+        ):
+            response = self.runner.analyze_with_config(
+                {"case_id": "case-preflight-order"},
+                object(),
+                settings=settings,
+                harness_runtime=harness,
+            )
+
+        self.assertEqual(response["summary"], "Initial analysis completed.")
+        preflight_position = next(
+            index
+            for index, event in enumerate(events)
+            if event[:2] == ("preflight_model_call", "primary-initial")
+        )
+        execution_position = events.index(("initial_model_executor",))
+        self.assertLess(preflight_position, execution_position)
+
+    def test_query_authorization_and_batch_preflight_precede_executor(
+        self,
+    ) -> None:
+        events: list[tuple] = []
+        harness = RecordingHarness(events)
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                    "id": "alert-order",
+                },
+            },
+        }
+
+        def query_executor(
+            _package,
+            requests,
+            *,
+            round_number,
+            live_osquery_config,
+        ):
+            self.assertIsNone(live_osquery_config)
+            events.append(("query_executor", round_number))
+            return {
+                "schema": self.runner.INVESTIGATION_QUERY_RESULT_SCHEMA,
+                "round": round_number,
+                "requests": requests,
+                "results": [
+                    {
+                        "query_id": requests[0]["query_id"],
+                        "backend": "elastic",
+                        "status": "ok",
+                        "read_only": True,
+                        "query_digest": "a" * 64,
+                        "result_digest": "b" * 64,
+                        "returned_hits": 1,
+                    }
+                ],
+                "audit": [],
+            }
+
+        response = self.runner.apply_investigation_query_loop(
+            prompt_package,
+            {"investigation_query_requests": [self.elastic_request()]},
+            object(),
+            {"agent_models": {"soc-analyst": "codex-cli:gpt-5.5:medium"}},
+            "soc-analyst",
+            harness_runtime=harness,
+            model_executor=mock.Mock(return_value={"summary": "done"}),
+            query_executor=query_executor,
+        )
+
+        self.assertEqual(response["summary"], "done")
+        authorization_position = next(
+            index
+            for index, event in enumerate(events)
+            if event[0] == "authorize_tool"
+        )
+        preflight_position = next(
+            index
+            for index, event in enumerate(events)
+            if event[0] == "preflight_query_batch"
+        )
+        execution_position = events.index(("query_executor", 1))
+        self.assertLess(authorization_position, preflight_position)
+        self.assertLess(preflight_position, execution_position)
+
+    def test_enforce_tool_denial_prevents_query_execution(self) -> None:
+        events: list[tuple] = []
+        harness = RecordingHarness(
+            events,
+            mode="enforce",
+            tool_allowed=False,
+        )
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                    "id": "alert-denied",
+                },
+            },
+        }
+        query_executor = mock.Mock()
+
+        response = self.runner.apply_investigation_query_loop(
+            prompt_package,
+            {"investigation_query_requests": [self.elastic_request()]},
+            object(),
+            {"agent_models": {"soc-analyst": "codex-cli:gpt-5.5:medium"}},
+            "soc-analyst",
+            harness_runtime=harness,
+            model_executor=mock.Mock(return_value={"summary": "denied"}),
+            query_executor=query_executor,
+        )
+
+        query_executor.assert_not_called()
+        self.assertFalse(
+            any(event[0] == "preflight_query_batch" for event in events)
+        )
+        result = response["_investigation_query_audit"]["rounds"][0]["results"][0]
+        self.assertEqual(result["status"], "rejected")
+        self.assertIn("harness denied capability", result["error"].lower())
+
+    def test_shadow_observation_failure_does_not_change_normal_response(
+        self,
+    ) -> None:
+        template = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                    "id": "alert-shadow",
+                },
+            },
+        }
+
+        def query_executor(
+            _package,
+            requests,
+            *,
+            round_number,
+            live_osquery_config,
+        ):
+            self.assertIsNone(live_osquery_config)
+            return {
+                "schema": self.runner.INVESTIGATION_QUERY_RESULT_SCHEMA,
+                "round": round_number,
+                "requests": copy.deepcopy(requests),
+                "results": [
+                    {
+                        "query_id": requests[0]["query_id"],
+                        "backend": "elastic",
+                        "status": "ok",
+                        "read_only": True,
+                        "query_digest": "c" * 64,
+                        "result_digest": "d" * 64,
+                        "returned_hits": 2,
+                    }
+                ],
+                "audit": [],
+            }
+
+        def execute(prompt_package, harness_runtime=None):
+            return self.runner.apply_investigation_query_loop(
+                prompt_package,
+                {"investigation_query_requests": [self.elastic_request()]},
+                object(),
+                {
+                    "agent_models": {
+                        "soc-analyst": "codex-cli:gpt-5.5:medium",
+                    }
+                },
+                "soc-analyst",
+                harness_runtime=harness_runtime,
+                model_executor=mock.Mock(
+                    return_value={"summary": "normal response"}
+                ),
+                query_executor=query_executor,
+            )
+
+        baseline = execute(copy.deepcopy(template))
+        events: list[tuple] = []
+        shadow = RecordingHarness(
+            events,
+            mode="shadow",
+            fail_authorization=True,
+        )
+        with mock.patch.object(self.runner.sys, "stderr"):
+            observed = execute(copy.deepcopy(template), shadow)
+
+        self.assertEqual(observed, baseline)
+        self.assertTrue(
+            any(event[0] == "authorize_tool" for event in events)
+        )
+
+    def test_result_digest_can_be_recatalogued_after_follow_up_query(
+        self,
+    ) -> None:
+        prompt_package = {
+            "case_id": "case-query-result-digest",
+            "alert": {
+                "alert_id": (
+                    ".ds-logs-suricata.alerts-so-2026.07.24-000001:"
+                    "alert-result-digest"
+                ),
+            },
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                    "id": "alert-result-digest",
+                },
+            },
+        }
+        self.runner.attach_evidence_reference_contract(prompt_package)
+        policy_value = json.loads(
+            (
+                REPO_ROOT
+                / "n8n"
+                / "config"
+                / "investigation_harness_policy.json"
+            ).read_text(encoding="utf-8")
+        )
+        policy_value["enabled"] = True
+        policy_value["mode"] = "enforce"
+        policy = self.harness.HarnessPolicy.from_dict(policy_value)
+        query_digest = "e" * 64
+        result_digest = "f" * 64
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            runtime = self.harness.start_harness_run(
+                run_id="run-query-result-digest",
+                prompt_package=prompt_package,
+                role="soc-analyst",
+                assigned_route="codex-cli:gpt-5.5:medium",
+                configuration={"test": True},
+                policy=policy,
+                db_path=Path(temp_name) / "harness.sqlite3",
+            )
+            self.assertIsNotNone(runtime)
+
+            def query_executor(
+                _package,
+                requests,
+                *,
+                round_number,
+                live_osquery_config,
+            ):
+                self.assertIsNone(live_osquery_config)
+                return {
+                    "schema": self.runner.INVESTIGATION_QUERY_RESULT_SCHEMA,
+                    "round": round_number,
+                    "requests": requests,
+                    "results": [
+                        {
+                            "query_id": requests[0]["query_id"],
+                            "backend": "elastic",
+                            "pack": "network_flow",
+                            "status": "ok",
+                            "read_only": True,
+                            "query_digest": query_digest,
+                            "result_digest": result_digest,
+                            "returned_hits": 1,
+                            "trusted_query_audit": [
+                                {
+                                    "query_id": requests[0]["query_id"],
+                                    "status": "ok",
+                                    "query_digest": query_digest,
+                                    "result_digest": result_digest,
+                                    "evidence_ref": f"query:{query_digest}",
+                                    "returned_hits": 1,
+                                }
+                            ],
+                        }
+                    ],
+                    "audit": [],
+                }
+
+            response = self.runner.apply_investigation_query_loop(
+                prompt_package,
+                {"investigation_query_requests": [self.elastic_request()]},
+                object(),
+                {
+                    "agent_models": {
+                        "soc-analyst": "codex-cli:gpt-5.5:medium",
+                    }
+                },
+                "soc-analyst",
+                harness_runtime=runtime,
+                model_executor=mock.Mock(
+                    return_value={
+                        "summary": "digest recatalogued",
+                        "_analysis_model_route": (
+                            "codex-cli:gpt-5.5:medium"
+                        ),
+                    }
+                ),
+                query_executor=query_executor,
+            )
+            exported = runtime.store.export_trace(runtime.run_id)
+
+        self.assertEqual(response["summary"], "digest recatalogued")
+        query_evidence = next(
+            item
+            for item in exported["evidence"]
+            if item["evidence_ref"] == f"query:{query_digest}"
+        )
+        self.assertEqual(query_evidence["evidence_digest"], result_digest)
+
+    def test_reviewer_preflight_precedes_reviewer_execution(self) -> None:
+        events: list[tuple] = []
+        harness = RecordingHarness(events)
+        primary = {
+            "summary": "Primary result.",
+            "second_opinion_recommended": True,
+            "second_opinion_reason": "Independent validation requested.",
+        }
+        settings = {
+            "agent_models": {
+                "soc-analyst": "codex-cli:gpt-5.5:medium",
+            },
+            "agent_second_opinion_models": {
+                "soc-analyst": "ollama:reviewer:latest",
+            },
+        }
+
+        def reviewer_executor(*_args, **_kwargs):
+            events.append(("reviewer_executor",))
+            raise RuntimeError("synthetic reviewer stop")
+
+        with (
+            mock.patch.object(
+                self.runner,
+                "analyze_model_route",
+                side_effect=reviewer_executor,
+            ),
+            mock.patch.object(
+                self.runner,
+                "reconcile_incident_response_report",
+            ),
+        ):
+            response = self.runner.apply_configured_second_opinion(
+                {},
+                primary,
+                type(
+                    "Args",
+                    (),
+                    {
+                        "second_opinion_prompt_file": Path(
+                            "/tmp/synthetic-reviewer-prompt.md"
+                        )
+                    },
+                )(),
+                settings,
+                "soc-analyst",
+                harness_runtime=harness,
+            )
+
+        preflight_position = next(
+            index
+            for index, event in enumerate(events)
+            if event[:3]
+            == (
+                "preflight_model_call",
+                "independent-review-1",
+                True,
+            )
+        )
+        execution_position = events.index(("reviewer_executor",))
+        self.assertLess(preflight_position, execution_position)
+        self.assertEqual(response["_second_opinion"]["status"], "failed")
+
     def test_loop_reuses_exact_route_and_enforces_round_budget(self) -> None:
         prompt_package = {
             "investigation_query_capability": {
@@ -1009,6 +1502,59 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         self.assertEqual(
             len(prompt_package["investigation_query_results"]["rounds"]),
             self.runner.MAX_INVESTIGATION_QUERY_ROUNDS,
+        )
+
+    def test_loop_refreshes_citation_contract_before_follow_up_model_call(
+        self,
+    ) -> None:
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                    "id": "alert-1",
+                }
+            },
+        }
+        query_digest = "a" * 64
+
+        def model_executor(_route, package, _args, _settings):
+            refs = {
+                item["ref"]
+                for item in package["evidence_reference_contract"]["references"]
+            }
+            self.assertIn(f"query:{query_digest}", refs)
+            return {"summary": "The trusted query is now citable."}
+
+        self.runner.apply_investigation_query_loop(
+            prompt_package,
+            {"investigation_query_requests": [self.elastic_request()]},
+            object(),
+            {"agent_models": {"soc-analyst": "codex-cli:gpt-5.5:medium"}},
+            "soc-analyst",
+            model_executor=model_executor,
+            query_executor=mock.Mock(
+                return_value={
+                    "schema": self.runner.INVESTIGATION_QUERY_RESULT_SCHEMA,
+                    "round": 1,
+                    "requests": [self.elastic_request()],
+                    "results": [
+                        {
+                            "query_id": "pivot-1",
+                            "backend": "elastic",
+                            "pack": "network_flow",
+                            "query_digest": query_digest,
+                            "status": "ok",
+                            "returned_hits": 1,
+                            "total_hits": 1,
+                        }
+                    ],
+                    "audit": [],
+                }
+            ),
         )
 
     def test_loop_rejects_disabled_or_unadvertised_backend_before_execution(self) -> None:
@@ -1562,6 +2108,78 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             self.builder.INVESTIGATION_QUERY_MAX_ROUNDS,
         )
         self.assertNotIn("anchor", capability)
+
+    def test_builder_preserves_every_specialist_role_and_rejects_unknown_role(
+        self,
+    ) -> None:
+        row = {
+            "alert_id": ".ds-logs-suricata.alerts-so-2026.07.24-000001:alert-role",
+            "alert_json": json.dumps(
+                {
+                    "elastic_index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                    "elastic_id": "alert-role",
+                }
+            ),
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "timestamp": "2026-07-24T18:30:00Z",
+        }
+        for role in (
+            "soc-analyst",
+            "incident-responder",
+            "siem-engineer",
+            "cyber-threat-intel",
+            "threat-hunter",
+        ):
+            with self.subTest(role=role):
+                _capability, local = self.builder.investigation_query_context(
+                    row,
+                    [row],
+                    "group-role",
+                    role,
+                    False,
+                )
+                self.assertEqual(local["actor_role"], role.replace("-", "_"))
+                authorized = self.contract.authorize_investigation_query_request(
+                    {
+                        "query_contract": self.runner.INVESTIGATION_QUERY_CONTRACT,
+                        "batch_id": f"batch-{role}",
+                        "queries": [
+                            {
+                                "query_id": f"query-{role}",
+                                "dialect": "elastic",
+                                "pack": "network_flow",
+                                "purpose": "correlate_observable",
+                                "window": {
+                                    "start": "2026-07-24T18:00:00Z",
+                                    "end": "2026-07-24T19:00:00Z",
+                                },
+                                "observables": {
+                                    "ips": ["192.0.2.10"],
+                                    "domains": [],
+                                    "hosts": [],
+                                    "users": [],
+                                },
+                                "size": 25,
+                                "aggregation": "events",
+                            }
+                        ],
+                    },
+                    local,
+                )
+                self.assertEqual(
+                    authorized["authorization"]["actor_role"],
+                    role.replace("-", "_"),
+                )
+
+        with self.assertRaisesRegex(ValueError, "unsupported.*actor role"):
+            self.builder.investigation_query_context(
+                row,
+                [row],
+                "group-role",
+                "unknown-specialist",
+                False,
+            )
 
     def test_builder_authorizes_sigma_original_event_system_auth_pivot(self) -> None:
         row = {

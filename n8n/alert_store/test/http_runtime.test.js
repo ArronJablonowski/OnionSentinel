@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const http = require('node:http');
 const test = require('node:test');
 const {PassThrough} = require('node:stream');
@@ -17,6 +18,28 @@ test('accepts one bounded JSON object', async () => {
   const parsed = readJsonObject(request, {maxBytes: 1024});
   request.end('{"ok":true}');
   assert.deepEqual(await parsed, {ok: true});
+});
+
+test('optionally binds the parsed object to the exact submitted body bytes', async () => {
+  const rawBody = Buffer.from('{\n  "second": 2,\n  "first": 1\n}\n', 'utf8');
+  const request = requestWith({'content-length': String(rawBody.length)});
+  const parsed = readJsonObject(request, {
+    maxBytes: 1024,
+    includeBodySha256: true,
+  });
+  request.end(rawBody);
+
+  const payload = await parsed;
+  assert.deepEqual(payload, {second: 2, first: 1});
+  assert.equal(
+    payload.__body_sha256,
+    crypto.createHash('sha256').update(rawBody).digest('hex'),
+  );
+  assert.equal(
+    Object.prototype.propertyIsEnumerable.call(payload, '__body_sha256'),
+    false,
+  );
+  assert.equal(JSON.stringify(payload), '{"second":2,"first":1}');
 });
 
 test('rejects arrays and malformed or truncated bodies', async (context) => {

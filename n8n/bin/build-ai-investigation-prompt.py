@@ -1660,8 +1660,10 @@ def investigation_query_context(
         case_seed.encode("utf-8")
     ).hexdigest()[:32]
     normalized_actor_role = str(actor_role or "").strip().lower().replace("-", "_")
-    if normalized_actor_role not in {"soc_analyst", "incident_responder"}:
-        normalized_actor_role = "soc_analyst"
+    if normalized_actor_role not in INVESTIGATION_CONTRACT.ALLOWED_ACTOR_ROLES:
+        raise ValueError(
+            f"unsupported investigation-query actor role: {actor_role or 'empty'}"
+        )
     security_query_enabled = bool(anchor) and any(permitted.values())
     local_context = {
         "context_id": "context-" + hashlib.sha256(

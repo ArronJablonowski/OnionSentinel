@@ -44,7 +44,13 @@ ALLOWED_PURPOSES = {
     "identify_related_activity",
     "test_benign_hypothesis",
 }
-ALLOWED_ACTOR_ROLES = {"soc_analyst", "incident_responder"}
+ALLOWED_ACTOR_ROLES = {
+    "soc_analyst",
+    "incident_responder",
+    "siem_engineer",
+    "cyber_threat_intel",
+    "threat_hunter",
+}
 ALLOWED_STATUSES = {"ok", "timeout", "output_limit", "error", "invalid_response"}
 ALLOWED_ROLE_SEMANTICS = {
     "event_native",

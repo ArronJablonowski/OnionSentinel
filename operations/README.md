@@ -59,3 +59,69 @@ Each model receives six bounded requests containing 36 total cases. The JSON
 artifact contains case-level evidence-discipline results and timing data; a
 Markdown summary is written beside it. `--yield-seconds` leaves an interval
 between models for the production AI worker on a shared Ollama host.
+
+## Incident Responder harness cohort
+
+`run-incident-harness-cohort.py` provides a reproducible control plane for a
+small Incident Responder evaluation. It selects through the local SQLite
+summary and stable-alias tables using a read-only connection, refuses groups
+that already have queued or running work, and writes owner-only,
+digest-protected manifests. It never contacts Security Onion.
+
+If the cohort was already selected, import the exact owner-only JSON array
+instead of selecting again:
+
+```bash
+python3 operations/run-incident-harness-cohort.py freeze-from-rows \
+  --db ~/n8n-local/alert_store_data/alerts.sqlite3 \
+  --source-rows /path/to/private/frozen-rows.json \
+  --manifest /path/to/private/cohort.json \
+  --cohort-id newest-20-harness-evaluation \
+  --reason "Evaluate the Incident Responder harness against a frozen cohort." \
+  --expected-count 20
+```
+
+The import preserves source order and validates every dashboard group, stable
+group, representative alert, supplied case state, and inactive queue state
+against SQLite. Use `freeze --count 20` only when a new selection is intended.
+The default role is `incident-responder`. To produce a separate SOC Analyst
+manifest from the same source array, choose a different manifest path and add
+`--agent-role soc-analyst`. That variant freezes the complete set of prior SOC
+analysis IDs, dispatches only `/api/soc-alerts/{group}/analyze`, and identifies
+the result by an exact one-ID set difference.
+
+Validate without HTTP, then enqueue each exact member through the loopback
+single-case dashboard routes:
+
+```bash
+python3 operations/run-incident-harness-cohort.py queue \
+  --db ~/n8n-local/alert_store_data/alerts.sqlite3 \
+  --manifest /path/to/private/cohort.json \
+  --dry-run
+
+python3 operations/run-incident-harness-cohort.py queue \
+  --db ~/n8n-local/alert_store_data/alerts.sqlite3 \
+  --manifest /path/to/private/cohort.json
+```
+
+The tool records a dispatching intent before each request. An ambiguous
+response or interrupted dispatch is never retried automatically. It never
+calls the bulk `reanalyze-all` route.
+
+Monitor and export exact run/result metadata:
+
+```bash
+python3 operations/run-incident-harness-cohort.py monitor \
+  --db ~/n8n-local/alert_store_data/alerts.sqlite3 \
+  --manifest /path/to/private/cohort.json \
+  --timeout 7200
+
+python3 operations/run-incident-harness-cohort.py export \
+  --db ~/n8n-local/alert_store_data/alerts.sqlite3 \
+  --manifest /path/to/private/cohort.json \
+  --output /path/to/private/cohort-results.json
+```
+
+The export includes identities, execution routing, result classifications,
+query-pack status/count/digests, and response hashes. It excludes raw alerts,
+prompts, model responses, query text/results, job payloads, and credentials.

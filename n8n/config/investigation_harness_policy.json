@@ -1,0 +1,112 @@
+{
+  "schema": "onion-sentinel-investigation-harness-policy-v1",
+  "version": "1.0.0",
+  "enabled": false,
+  "mode": "shadow",
+  "budgets": {
+    "max_model_calls": 6,
+    "max_query_rounds": 3,
+    "max_queries_total": 12,
+    "max_queries_per_round": 4,
+    "max_prompt_evidence_bytes": 1048576,
+    "max_prompt_evidence_rows": 600,
+    "max_run_seconds": 3900
+  },
+  "role_capabilities": {
+    "soc-analyst": [
+      "alerts.read",
+      "reports.read",
+      "security-onion.events.query",
+      "security-onion.oql.query",
+      "endpoint.osquery.query",
+      "pcap.derived.query",
+      "zeek.derived.query",
+      "suricata.events.read",
+      "threat-intel.lookup",
+      "detections.read",
+      "memory.read",
+      "alerts.acknowledge",
+      "alerts.suppress",
+      "cases.write",
+      "notifications.send",
+      "memory.promote"
+    ],
+    "incident-responder": [
+      "alerts.read",
+      "cases.read",
+      "reports.read",
+      "security-onion.events.query",
+      "security-onion.oql.query",
+      "endpoint.osquery.query",
+      "pcap.derived.query",
+      "zeek.derived.query",
+      "suricata.events.read",
+      "threat-intel.lookup",
+      "detections.read",
+      "memory.read",
+      "cases.write",
+      "notifications.send",
+      "response.contain",
+      "memory.promote"
+    ],
+    "siem-engineer": [
+      "alerts.read",
+      "cases.read",
+      "reports.read",
+      "security-onion.events.query",
+      "security-onion.oql.query",
+      "pcap.derived.query",
+      "zeek.derived.query",
+      "suricata.events.read",
+      "detections.read",
+      "memory.read",
+      "detections.write",
+      "memory.promote"
+    ],
+    "cyber-threat-intel": [
+      "alerts.read",
+      "cases.read",
+      "reports.read",
+      "security-onion.events.query",
+      "security-onion.oql.query",
+      "pcap.derived.query",
+      "zeek.derived.query",
+      "suricata.events.read",
+      "threat-intel.lookup",
+      "detections.read",
+      "memory.read",
+      "memory.promote"
+    ],
+    "threat-hunter": [
+      "alerts.read",
+      "cases.read",
+      "reports.read",
+      "security-onion.events.query",
+      "security-onion.oql.query",
+      "endpoint.osquery.query",
+      "pcap.derived.query",
+      "zeek.derived.query",
+      "suricata.events.read",
+      "threat-intel.lookup",
+      "detections.read",
+      "memory.read",
+      "cases.write",
+      "detections.write",
+      "memory.promote"
+    ]
+  },
+  "approval_required": [
+    "alerts.acknowledge",
+    "alerts.suppress",
+    "cases.write",
+    "detections.write",
+    "endpoint.osquery.query",
+    "notifications.send",
+    "response.contain",
+    "memory.promote"
+  ],
+  "memory": {
+    "require_independent_agreement": true,
+    "shared_requires_human_approval": true
+  }
+}

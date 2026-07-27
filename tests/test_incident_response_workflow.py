@@ -746,6 +746,7 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn("async function requestIncidentEscalation", source)
         self.assertIn("durableJobs.enqueue('incident_response_analysis'", source)
         self.assertIn("agent_role: 'incident-responder'", source)
+        self.assertIn("manualReanalysis: false", source)
         self.assertIn("parsedUrl.pathname === '/incidents/escalate'", source)
 
     def test_case_bound_reanalysis_has_durable_run_progress_contract(self) -> None:

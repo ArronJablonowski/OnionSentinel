@@ -36,6 +36,10 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `bin/agent_memory.py` | Shared role-aware Markdown memory library with relevance retrieval, validation, locking, deduplication, and expiry. |
 | `bin/manage-agent-memory.py` | Query/writeback CLI adapter for SOC Analyst, Incident Responder, SIEM Engineer, Cyber Threat Intel, and Threat Hunter workflows. |
 | `bin/verify-agent-memory.py` | Read-only deployment verifier for every agent prompt, role memory, shared memory, permissions, and retrieval contract. |
+| `bin/onion_sentinel_harness.py` | Disabled-by-default investigation control plane with role policy, budgets, durable state, evidence/model/tool/decision ledgers, memory gates, and a hash-chained audit trace. |
+| `config/investigation_harness_policy.json` | Safe checked-in harness policy template (`enabled: false`, `mode: shadow`); the installer preserves the operator-owned runtime copy. |
+| `config/investigation_harness_policy.schema.json` | Strict JSON Schema for the versioned harness policy contract. |
+| `../operations/evaluate-harness-traces.py` | Read-only integrity and aggregate-quality evaluator for the private runtime harness database. |
 | `config/soc_analyst_system_prompt.md` | SOC analyst system prompt used for alert analysis. |
 | `config/siem_engineer_system_prompt.md` | SIEM engineering prompt used for periodic tuning and detection recommendations. |
 | `config/threat_hunter_system_prompt.md` | Threat hunter prompt used for hunt hypothesis and query recommendation work. |
@@ -109,6 +113,33 @@ inputs independently. `query` remains available for read-only memory inspection.
 The non-SOC agent workflows remain manual/planned, but their prompts and the CLI
 now use the same read/write contract so future harnesses do not create separate
 memory formats.
+
+The custom investigation harness is installed but intentionally disabled by
+the committed policy. When an operator later enables shadow mode, it observes
+the existing analysis runner without changing selected results or production
+authorization. Its owner-only SQLite state records policy-bound job identity,
+phase transitions, evidence provenance, requested and observed model identity,
+bounded query activity, hypothesis and decision references, and memory
+promotion decisions. Analysis submissions use an immutable owner-only spool;
+eligible memory intent is response-bound and crash-recoverable, and cannot
+cross into role/shared memory until alert-store returns a matching commit
+receipt. Enforce mode is a separate production promotion and must not be
+enabled until the replay, recovery, SLO, and soak gates in
+`../docs/onion-sentinel-investigation-harness.md` pass.
+
+Per run, the policy must be enabled and both the assigned and second-opinion
+routes must use ordinary Ollama or Codex CLI adapters. Selecting Hermes Agent
+or OpenClaw for either route always bypasses the Onion Sentinel harness because
+those providers already supply an agent harness and must not be nested.
+
+Audit a copied or quiescent runtime trace database without contacting a model
+or Security Onion:
+
+```bash
+python3 operations/evaluate-harness-traces.py \
+  --db "$HOME/n8n-local/alert_store_data/investigation-harness.sqlite3" \
+  --fail-on-invalid-chain
+```
 
 Verify the complete five-agent memory contract after installation or prompt
 maintenance:

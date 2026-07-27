@@ -172,6 +172,30 @@ fi
   --source "$REPO_DIR/n8n/config/ai_model_settings.json" \
   --destination "$STACK_DIR/config/ai_model_settings.json" \
   --accepted-prior-sha256 "fd9f93123b22c0664d147fdcd012d1c016329566ffaea97cb4bfa7c5d7daaf2b"
+# The investigation harness policy is operator-owned runtime policy. Seed the
+# checked-in, disabled-by-default baseline only on first install and preserve
+# all later operator changes. Refuse a symlink so chmod/copy cannot be redirected
+# outside the runtime config directory.
+if [[ -L "$STACK_DIR/config/investigation_harness_policy.schema.json" ]] \
+  || [[ -e "$STACK_DIR/config/investigation_harness_policy.schema.json" \
+    && ! -f "$STACK_DIR/config/investigation_harness_policy.schema.json" ]]; then
+  echo "Refusing install: investigation harness policy schema must be a regular file." >&2
+  exit 1
+fi
+cp "$REPO_DIR/n8n/config/investigation_harness_policy.schema.json" \
+  "$STACK_DIR/config/investigation_harness_policy.schema.json"
+chmod 0644 "$STACK_DIR/config/investigation_harness_policy.schema.json"
+if [[ -L "$STACK_DIR/config/investigation_harness_policy.json" ]] \
+  || [[ -e "$STACK_DIR/config/investigation_harness_policy.json" \
+    && ! -f "$STACK_DIR/config/investigation_harness_policy.json" ]]; then
+  echo "Refusing install: investigation harness policy must be a regular file." >&2
+  exit 1
+fi
+if [[ ! -f "$STACK_DIR/config/investigation_harness_policy.json" ]]; then
+  cp "$REPO_DIR/n8n/config/investigation_harness_policy.json" \
+    "$STACK_DIR/config/investigation_harness_policy.json"
+fi
+chmod 0600 "$STACK_DIR/config/investigation_harness_policy.json"
 cp "$REPO_DIR/n8n/config/detection_playbooks.json" "$STACK_DIR/config/detection_playbooks.json"
 if [[ ! -f "$STACK_DIR/config/asset_inventory.json" ]]; then
   cp "$REPO_DIR/n8n/config/asset_inventory.example.json" "$STACK_DIR/config/asset_inventory.json"
@@ -264,6 +288,8 @@ cp "$REPO_DIR/n8n/bin/install-investigation-query-runtime.py" "$STACK_DIR/bin/in
 cp "$REPO_DIR/n8n/bin/live_osquery_contract.py" "$STACK_DIR/bin/live_osquery_contract.py"
 cp "$REPO_DIR/n8n/bin/live_osquery_client.py" "$STACK_DIR/bin/live_osquery_client.py"
 cp "$REPO_DIR/n8n/bin/collect-live-osquery.py" "$STACK_DIR/bin/collect-live-osquery.py"
+cp "$REPO_DIR/n8n/bin/onion_sentinel_harness.py" "$STACK_DIR/bin/onion_sentinel_harness.py"
+cp "$REPO_DIR/operations/evaluate-harness-traces.py" "$STACK_DIR/bin/evaluate-harness-traces.py"
 cp "$REPO_DIR/n8n/bin/run-local-ai-analysis.py" "$STACK_DIR/bin/run-local-ai-analysis.py"
 cp "$REPO_DIR/n8n/bin/export-adjudicated-analysis-replays.py" "$STACK_DIR/bin/export-adjudicated-analysis-replays.py"
 cp "$REPO_DIR/n8n/bin/bounded_http.py" "$STACK_DIR/bin/bounded_http.py"

@@ -1,5 +1,7 @@
 'use strict';
 
+const crypto = require('crypto');
+
 // HTTP resource limits are kept outside alert-store business logic so the
 // ingestion contract can be tested without initializing SQLite or providers.
 function positiveNumber(value, fallback, minimum = 1) {
@@ -13,7 +15,7 @@ function statusError(message, statusCode) {
   return error;
 }
 
-function readJsonObject(request, {maxBytes}) {
+function readJsonObject(request, {maxBytes, includeBodySha256 = false}) {
   const limit = positiveNumber(maxBytes, 10 * 1024 * 1024, 1024);
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -57,9 +59,18 @@ function readJsonObject(request, {maxBytes}) {
         return;
       }
       try {
-        const payload = JSON.parse(Buffer.concat(chunks, bytes).toString('utf8') || '{}');
+        const rawBody = Buffer.concat(chunks, bytes);
+        const payload = JSON.parse(rawBody.toString('utf8') || '{}');
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
           throw statusError('payload must be a JSON object', 400);
+        }
+        if (includeBodySha256) {
+          Object.defineProperty(payload, '__body_sha256', {
+            value: crypto.createHash('sha256').update(rawBody).digest('hex'),
+            enumerable: false,
+            configurable: false,
+            writable: false,
+          });
         }
         finish(resolve, payload);
       } catch (error) {

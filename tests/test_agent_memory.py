@@ -41,13 +41,18 @@ class AgentMemoryTests(unittest.TestCase):
             "ttl_days": 30,
         }
 
-    def persist(self, candidates: list[dict]) -> dict:
+    def persist(
+        self,
+        candidates: list[dict],
+        *,
+        analysis_id: str = "analysis-test-1",
+    ) -> dict:
         return MEMORY.persist_memory_candidates(
             agent_role="soc-analyst",
             role_memory_file=self.role,
             shared_memory_file=self.shared,
             candidates=candidates,
-            analysis_id="analysis-test-1",
+            analysis_id=analysis_id,
             source_artifact="/tmp/synthetic-analysis.json",
         )
 
@@ -64,11 +69,23 @@ class AgentMemoryTests(unittest.TestCase):
 
     def test_reinforces_duplicate_instead_of_appending_it(self) -> None:
         self.persist([self.candidate()])
-        result = self.persist([self.candidate()])
+        result = self.persist(
+            [self.candidate()],
+            analysis_id="analysis-test-2",
+        )
         _, records = MEMORY.read_memory_file(self.role)
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["reinforced_count"], 2)
         self.assertEqual(result["role"]["reinforced"], 1)
+
+    def test_replaying_same_analysis_is_idempotent(self) -> None:
+        self.persist([self.candidate()])
+        result = self.persist([self.candidate()])
+        _, records = MEMORY.read_memory_file(self.role)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["reinforced_count"], 1)
+        self.assertEqual(result["role"]["reinforced"], 0)
+        self.assertEqual(result["role"]["replayed"], 1)
 
     def test_relevance_retrieval_prefers_matching_memory(self) -> None:
         self.persist([

@@ -2563,6 +2563,10 @@ async function recordAiAnalysisResult(payload) {
   const artifactPath = safeString(payload?.artifact_path, 2048);
   const evidenceHash = safeString(payload?.evidence_hash, 128).toLowerCase();
   const responseJson = jsonText(response);
+  const storedResponseSha256 = crypto
+    .createHash('sha256')
+    .update(canonicalJsonText(response))
+    .digest('hex');
 
   // analysis_id is an immutable acceptance key, not an upsert handle. An
   // exact replay is a read-only success; any changed provenance or content is
@@ -2660,6 +2664,7 @@ async function recordAiAnalysisResult(payload) {
       status: 'analysis_indexed',
       idempotent: true,
       analysis_id: analysisId,
+      stored_response_sha256: storedResponseSha256,
       group_id: groupId,
       correlations: Number(correlationRow?.count || 0),
       second_opinion_recorded: Boolean(secondOpinionRow),
@@ -2876,6 +2881,7 @@ async function recordAiAnalysisResult(payload) {
     ok: true,
     status: 'analysis_indexed',
     analysis_id: analysisId,
+    stored_response_sha256: storedResponseSha256,
     group_id: groupId,
     correlations,
     second_opinion_recorded: secondOpinionRecorded,
@@ -4050,7 +4056,10 @@ async function requestIncidentEscalation(payload) {
     reason: payload?.reason || 'Escalated from SOC Alerts for incident response',
     relatedLimit: payload?.related_limit ?? 250,
     pcapAnalysisLimit: payload?.pcap_analysis_limit ?? 25,
-    manualReanalysis: true,
+    // Escalation creates the case's initial Incident Responder analysis. It is
+    // manually requested, but it is not a case-bound reanalysis run and must
+    // not be mistaken for one by the immutable attempt-lineage contract.
+    manualReanalysis: false,
     eventType: 'escalated',
     priority: 1100,
   });
@@ -6846,8 +6855,11 @@ async function completePcapAnalysis(payload) {
   };
 }
 
-function readJsonBody(request) {
-  return readJsonObject(request, {maxBytes: maxRequestBytes});
+function readJsonBody(request, includeBodySha256 = false) {
+  return readJsonObject(request, {
+    maxBytes: maxRequestBytes,
+    includeBodySha256,
+  });
 }
 
 function sendJson(response, code, payload) {
@@ -7004,11 +7016,14 @@ async function handleRequest(request, response) {
       // AI workers submit compact, structured results here so alert-store
       // remains the only SQLite writer. The endpoint is idempotent by
       // analysis_id and never accepts raw PCAP bytes or unbounded artifacts.
-      const payload = await readJsonBody(request);
+      const payload = await readJsonBody(request, true);
       const result = await withSqliteWriteGate(() => withImmediateTransaction(
         () => recordAiAnalysisResult(payload),
       ));
-      sendJson(response, 200, result);
+      sendJson(response, 200, {
+        ...result,
+        submission_sha256: payload.__body_sha256,
+      });
       return;
     }
     if (request.method === 'POST' && parsedUrl.pathname === '/ai/request') {

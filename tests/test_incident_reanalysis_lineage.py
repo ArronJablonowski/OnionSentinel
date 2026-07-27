@@ -342,6 +342,58 @@ class IncidentReanalysisLineageTests(unittest.TestCase):
                 )
             connection.commit()
 
+    def test_initial_escalation_is_not_claimed_as_case_bound_reanalysis(
+        self,
+    ) -> None:
+        with closing(sqlite3.connect(self.db_path, timeout=5)) as connection:
+            connection.execute(
+                """
+                INSERT INTO alert_group_summary (
+                  group_id, group_key, representative_alert_id,
+                  raw_alert_count, total_seen_count, updated_at
+                ) VALUES (?, 'lineage-dashboard-group', ?, 1, 1, ?)
+                """,
+                (
+                    self.dashboard_group_id,
+                    self.alert_id,
+                    self.generated_at(),
+                ),
+            )
+            connection.commit()
+
+        self.post(
+            "/incidents/escalate",
+            {
+                "group_id": self.dashboard_group_id,
+                "requested_by": "initial-escalation-test",
+            },
+            expected_status=202,
+        )
+
+        with closing(sqlite3.connect(self.db_path, timeout=5)) as connection:
+            payload_json = connection.execute(
+                """
+                SELECT payload_json FROM durable_jobs
+                WHERE job_type = 'incident_response_analysis'
+                  AND dedupe_key = ?
+                """,
+                (self.group_id,),
+            ).fetchone()[0]
+        payload = json.loads(payload_json)
+        self.assertIs(payload["manual_reanalysis"], False)
+        self.assertNotIn("reanalysis_run_id", payload)
+
+        claim = self.post(
+            "/jobs/status",
+            {
+                "job_type": "incident_response_analysis",
+                "dedupe_key": self.group_id,
+                "status": "processing",
+            },
+        )
+        self.assertIs(claim["claim"]["payload"]["manual_reanalysis"], False)
+        self.assertIsNone(claim["claim"]["reanalysis_attempt_id"])
+
     def test_overlap_preserves_attempt_owner_and_result_lineage(self) -> None:
         first = self.post(
             "/incidents/reanalyze",
@@ -579,6 +631,98 @@ class IncidentReanalysisLineageTests(unittest.TestCase):
             ).fetchall()
         self.assertEqual(attempts, [(second["run_id"],)])
 
+    def test_analysis_commit_ack_binds_raw_submission_and_stored_response(
+        self,
+    ) -> None:
+        payload = self.analysis_payload(
+            "commit-ack-binding-analysis",
+            model="gpt-5.6-sol",
+            model_path="frontier-codex-cli",
+            provider="openai-codex",
+            reanalysis_attempt_id=None,
+            analysis_started_at="2026-07-25T18:00:00Z",
+            generated_at="2026-07-25T18:00:01Z",
+        )
+        payload["response"]["observed_at"] = "2026-07-25T18:00:00Z"
+
+        raw_body = json.dumps(
+            payload,
+            indent=2,
+            sort_keys=False,
+        ).encode("utf-8") + b"\n"
+        request = urllib.request.Request(
+            f"{self.base_url}/analysis/result",
+            data=raw_body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            self.assertEqual(response.status, 200)
+            accepted = json.loads(response.read())
+
+        self.assertEqual(accepted["analysis_id"], payload["analysis_id"])
+        self.assertEqual(
+            accepted["submission_sha256"],
+            hashlib.sha256(raw_body).hexdigest(),
+        )
+        self.assertFalse(accepted.get("idempotent", False))
+
+        with closing(sqlite3.connect(self.db_path, timeout=5)) as connection:
+            stored_response_json = connection.execute(
+                """
+                SELECT response_json FROM ai_analysis_runs
+                WHERE analysis_id = ?
+                """,
+                (payload["analysis_id"],),
+            ).fetchone()[0]
+        stored_response = json.loads(stored_response_json)
+        canonical_stored_response = json.dumps(
+            stored_response,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        expected_stored_digest = hashlib.sha256(
+            canonical_stored_response
+        ).hexdigest()
+        self.assertEqual(
+            accepted["stored_response_sha256"],
+            expected_stored_digest,
+        )
+        self.assertNotEqual(
+            stored_response["observed_at"],
+            payload["response"]["observed_at"],
+        )
+
+        replay_body = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        replay_request = urllib.request.Request(
+            f"{self.base_url}/analysis/result",
+            data=replay_body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(replay_request, timeout=5) as response:
+            self.assertEqual(response.status, 200)
+            replay = json.loads(response.read())
+
+        self.assertTrue(replay["idempotent"])
+        self.assertEqual(replay["analysis_id"], payload["analysis_id"])
+        self.assertEqual(
+            replay["submission_sha256"],
+            hashlib.sha256(replay_body).hexdigest(),
+        )
+        self.assertNotEqual(
+            replay["submission_sha256"],
+            accepted["submission_sha256"],
+        )
+        self.assertEqual(
+            replay["stored_response_sha256"],
+            expected_stored_digest,
+        )
+
     def test_analysis_replay_is_read_only_and_provenance_is_immutable(self) -> None:
         rerun = self.post(
             "/incidents/reanalyze",
@@ -605,6 +749,20 @@ class IncidentReanalysisLineageTests(unittest.TestCase):
         )
         accepted = self.post("/analysis/result", payload)
         self.assertFalse(accepted.get("idempotent", False))
+        self.assertEqual(
+            accepted["submission_sha256"],
+            hashlib.sha256(
+                json.dumps(payload).encode("utf-8")
+            ).hexdigest(),
+        )
+        self.assertRegex(
+            accepted["stored_response_sha256"],
+            r"^[a-f0-9]{64}$",
+        )
+        self.assertEqual(
+            accepted["analysis_id"],
+            payload["analysis_id"],
+        )
         with closing(sqlite3.connect(self.db_path, timeout=5)) as connection:
             event_count = connection.execute(
                 """
@@ -616,6 +774,14 @@ class IncidentReanalysisLineageTests(unittest.TestCase):
 
         replay = self.post("/analysis/result", payload)
         self.assertTrue(replay["idempotent"])
+        self.assertEqual(
+            replay["submission_sha256"],
+            accepted["submission_sha256"],
+        )
+        self.assertEqual(
+            replay["stored_response_sha256"],
+            accepted["stored_response_sha256"],
+        )
         mutated = json.loads(json.dumps(payload))
         mutated["model"] = "gpt-5.6-terra"
         rejected = self.post(

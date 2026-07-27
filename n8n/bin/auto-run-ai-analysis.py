@@ -128,6 +128,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--levels", default=DEFAULT_LEVELS, help="Comma-separated triage levels to analyze")
     parser.add_argument("--hours", type=int, default=87600, help="Lookback window for eligible alerts")
     parser.add_argument("--max-per-run", type=int, default=0, help="Maximum unique alert groups to analyze per scheduler run; 0 drains the queue until no eligible alerts remain")
+    parser.add_argument(
+        "--only-group-id",
+        default="",
+        help=(
+            "Process only one exact 20-hex stable detection group. "
+            "Intended for controlled, one-case evaluation runs."
+        ),
+    )
     parser.add_argument("--related-limit", type=int, default=8, help="Related alert count passed to prompt builder")
     parser.add_argument("--correlation-limit", type=int, default=8, help="Scored correlation candidates passed to prompt builder")
     parser.add_argument("--correlation-min-score", type=int, default=15, help="Minimum deterministic correlation score")
@@ -153,6 +161,9 @@ def parse_args() -> argparse.Namespace:
         parser.error("--max-prompt-bytes must be at least 262144")
     if args.max_per_run < 0:
         parser.error("--max-per-run must be zero or positive")
+    args.only_group_id = str(args.only_group_id or "").strip().lower()
+    if args.only_group_id and not re.fullmatch(r"[a-f0-9]{20}", args.only_group_id):
+        parser.error("--only-group-id must be one exact 20-hex stable group id")
     if args.correlation_limit <= 0:
         parser.error("--correlation-limit must be positive")
     if args.correlation_min_score < 0 or args.correlation_min_score > 100:
@@ -408,6 +419,8 @@ NON_RETRYABLE_AI_FAILURE_MARKERS = (
     "configured model is unavailable or unauthorized",
     "command stderr exceeded the",
     "command stdout exceeded the",
+    "incident reanalysis claim did not return its server-authoritative job identity",
+    "incident reanalysis lease identity did not match its server-bound attempt",
 )
 
 
@@ -908,6 +921,11 @@ def select_next_alert_indexed(
         else ""
     )
     lane_sql, lane_params = provider_lane_sql(args)
+    only_group_id = str(getattr(args, "only_group_id", "") or "").strip().lower()
+    if only_group_id and not re.fullmatch(r"[a-f0-9]{20}", only_group_id):
+        raise SystemExit("--only-group-id must be one exact 20-hex stable group id")
+    group_filter_sql = "AND r.stable_group_id = ?" if only_group_id else ""
+    group_filter_params: list[object] = [only_group_id] if only_group_id else []
     # Indexed groups are guarded by durable job state. Do not apply the legacy
     # per-process exclusion set: a request coalesced while inference is active
     # becomes a fresh pending job and should be eligible immediately.
@@ -990,13 +1008,22 @@ def select_next_alert_indexed(
               )
             )
           )
+          {group_filter_sql}
           {lane_sql}
         ORDER BY request_bucket ASC, COALESCE(p.priority, 0) DESC,
                  severity_rank ASC, queue_time_sort DESC,
                  COALESCE(r.triage_score, 0) DESC, r.alert_id DESC
         LIMIT 1
         """,
-        [project_now(), since, *levels, *ELIGIBLE_FILTER_STATUSES, *test_params, *lane_params],
+        [
+            project_now(),
+            since,
+            *levels,
+            *ELIGIBLE_FILTER_STATUSES,
+            *test_params,
+            *group_filter_params,
+            *lane_params,
+        ],
     ).fetchone()
     return candidate
 
@@ -1040,6 +1067,9 @@ def select_next_alert(
     )
     pending_group_ids = pending_ai_job_ids(conn)
     skipped_groups = set(already_selected_groups or set())
+    only_group_id = str(getattr(args, "only_group_id", "") or "").strip().lower()
+    if only_group_id and not re.fullmatch(r"[a-f0-9]{20}", only_group_id):
+        raise SystemExit("--only-group-id must be one exact 20-hex stable group id")
     alert_columns = {str(item[1]) for item in conn.execute("PRAGMA table_info(alerts)").fetchall()}
     stable_group_select = "stable_group_id" if "stable_group_id" in alert_columns else "NULL AS stable_group_id"
     candidates = rows(
@@ -1103,6 +1133,8 @@ def select_next_alert(
         group_key = candidate["queue_group_key"] or alert_group_key(candidate)
         stable_id = str(candidate["stable_group_id"] or "").strip()
         queue_group_id = stable_id or alert_group_id(str(group_key))
+        if only_group_id and queue_group_id != only_group_id:
+            continue
         if group_key in skipped_groups:
             continue
         if queue_group_id in pending_group_ids:
@@ -1607,19 +1639,22 @@ def main() -> int:
                         ).strip()
                         if claimed_group_id:
                             selected_group_id = claimed_group_id
-                    if job_payload.get("manual_reanalysis") is True:
+                    claimed_reanalysis_run_id = str(
+                        job_payload.get("reanalysis_run_id") or ""
+                    ).strip()
+                    claimed_attempt_id = str(
+                        getattr(
+                            processing_transition,
+                            "reanalysis_attempt_id",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+                    if claimed_reanalysis_run_id or claimed_attempt_id:
                         expected_attempt_id = job_reanalysis_attempt_id(
                             job_payload,
                             processing_lease_token,
                         )
-                        claimed_attempt_id = str(
-                            getattr(
-                                processing_transition,
-                                "reanalysis_attempt_id",
-                                "",
-                            )
-                            or ""
-                        ).strip()
                         if (
                             not expected_attempt_id
                             or claimed_attempt_id != expected_attempt_id

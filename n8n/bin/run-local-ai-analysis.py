@@ -63,6 +63,15 @@ from pcap_evidence_query import (  # noqa: E402
     _normalize_filters as normalize_pcap_filters,
     query_derived_pcap_evidence,
 )
+from onion_sentinel_harness import (  # noqa: E402
+    DEFAULT_DB_PATH as DEFAULT_INVESTIGATION_HARNESS_DB,
+    DEFAULT_POLICY_PATH as DEFAULT_INVESTIGATION_HARNESS_POLICY,
+    HarnessRun as OnionSentinelHarnessRun,
+    external_agent_harness_provider,
+    load_policy as load_investigation_harness_policy,
+    should_start_onion_sentinel_harness,
+    start_harness_run,
+)
 
 
 HOME = Path.home()
@@ -76,6 +85,20 @@ DEFAULT_ANALYSIS_INDEX_QUEUE_DIR = DEFAULT_LLM_LOG_DIR / "analysis-index-pending
 DEFAULT_ANALYSIS_INDEX_QUARANTINE_DIR = (
     DEFAULT_LLM_LOG_DIR / "analysis-index-quarantine"
 )
+DEFAULT_MEMORY_WRITEBACK_RECEIPT_DIR = (
+    DEFAULT_LLM_LOG_DIR / "memory-writeback-receipts"
+)
+DEFAULT_MEMORY_WRITEBACK_PENDING_DIR = (
+    DEFAULT_LLM_LOG_DIR / "memory-writeback-pending"
+)
+DEFAULT_MEMORY_WRITEBACK_COMMITTED_DIR = (
+    DEFAULT_LLM_LOG_DIR / "memory-writeback-committed"
+)
+EVALUATION_FREEZE_MEMORY_ENV = (
+    "ONION_SENTINEL_EVALUATION_FREEZE_MEMORY"
+)
+MEMORY_WRITEBACK_TASK_SCHEMA = "onion-sentinel-memory-writeback-task-v1"
+MAX_MEMORY_WRITEBACK_TASK_BYTES = 256 * 1024
 DEFAULT_SYSTEM_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system_prompt.md"
 DEFAULT_SECOND_OPINION_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_second_opinion_prompt.md"
 DEFAULT_AI_SETTINGS_FILE = HOME / "n8n-local" / "config" / "ai_model_settings.json"
@@ -427,6 +450,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt-dir", type=Path, default=DEFAULT_PROMPT_DIR, help="Directory containing prompt packages")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help="Directory for AI analysis JSON/Markdown output")
     parser.add_argument("--ai-settings-file", type=Path, default=DEFAULT_AI_SETTINGS_FILE, help="AI model routing settings JSON")
+    parser.add_argument(
+        "--investigation-harness-policy",
+        type=Path,
+        default=DEFAULT_INVESTIGATION_HARNESS_POLICY,
+        help="Versioned Onion Sentinel investigation harness policy",
+    )
+    parser.add_argument(
+        "--investigation-harness-db",
+        type=Path,
+        default=DEFAULT_INVESTIGATION_HARNESS_DB,
+        help="Owner-only durable investigation harness event store",
+    )
     parser.add_argument("--analysis-mode", choices=("ollama", "cloud", "hybrid"), help="Override configured analysis mode")
     parser.add_argument(
         "--model",
@@ -809,6 +844,45 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def atomic_write_private_json(path: Path, data: dict[str, Any]) -> None:
+    """Atomically write owner-only runtime state."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, stat.S_IRWXU)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    tmp = Path(tmp_name)
+    try:
+        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp.replace(path)
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def canonical_payload_digest(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def active_analysis_record_path(run_id: object, active_dir: Path | None = None) -> Path:
     directory = active_dir if active_dir is not None else DEFAULT_LLM_ACTIVE_DIR
     safe_run_id = re.sub(r"[^A-Za-z0-9_-]+", "-", str(run_id or "analysis")).strip("-_")
@@ -819,6 +893,15 @@ def append_jsonl(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(data, sort_keys=True) + "\n")
+
+
+def best_effort_warning(message: str) -> None:
+    """Report supplemental failures without risking the committed job result."""
+    try:
+        sys.stderr.write(f"warning: {message}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
 
 
 def analysis_index_payload(
@@ -855,8 +938,13 @@ def analysis_index_payload(
     }
 
 
-def post_analysis_index(payload: dict[str, Any], alert_store_url: str, timeout: int = 10) -> None:
+def post_analysis_index(
+    payload: dict[str, Any],
+    alert_store_url: str,
+    timeout: int = 10,
+) -> dict[str, Any]:
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    submission_sha256 = hashlib.sha256(body).hexdigest()
     request = urllib.request.Request(
         alert_store_url.rstrip("/") + "/analysis/result",
         data=body,
@@ -899,12 +987,289 @@ def post_analysis_index(payload: dict[str, Any], alert_store_url: str, timeout: 
             status_code=200,
             response_sha256=hashlib.sha256(response_body).hexdigest(),
         )
+    expected_analysis_id = str(payload.get("analysis_id") or "").lower()
+    stored_response_sha256 = str(
+        result.get("stored_response_sha256") or ""
+    ).lower()
+    if (
+        str(result.get("analysis_id") or "").lower() != expected_analysis_id
+        or str(result.get("submission_sha256") or "").lower()
+        != submission_sha256
+        or not re.fullmatch(r"[a-f0-9]{64}", stored_response_sha256)
+    ):
+        response_body = json.dumps(
+            result,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        raise AnalysisIndexSubmissionError(
+            "alert-store commit receipt did not bind the submitted analysis",
+            # A malformed success receipt is indeterminate: the transaction
+            # may already have committed. Retain the exact payload for an
+            # idempotent replay instead of quarantining it or promoting memory.
+            retryable=True,
+            status_code=200,
+            response_sha256=hashlib.sha256(response_body).hexdigest(),
+        )
+    return {
+        "analysis_id": expected_analysis_id,
+        "submission_sha256": submission_sha256,
+        "stored_response_sha256": stored_response_sha256,
+        "idempotent": bool(result.get("idempotent")),
+    }
 
 
 def queue_analysis_index(payload: dict[str, Any], queue_dir: Path = DEFAULT_ANALYSIS_INDEX_QUEUE_DIR) -> Path:
-    path = queue_dir / f"{safe_filename(payload.get('analysis_id'))}.json"
-    atomic_write_json(path, payload)
+    analysis_id = str(payload.get("analysis_id") or "")
+    if not analysis_id or len(analysis_id) > 128:
+        raise RuntimeError("analysis index spool identity is invalid")
+    path = queue_dir / f"{safe_filename(analysis_id)}.json"
+    if path.exists():
+        existing = load_json(path)
+        if canonical_payload_digest(existing) != canonical_payload_digest(
+            payload
+        ):
+            raise RuntimeError(
+                "analysis index spool identity collides with different content"
+            )
+        return path
+    atomic_write_private_json(path, payload)
     return path
+
+
+def stage_memory_writeback_task(
+    *,
+    analysis_id: str,
+    response_digest: str,
+    agent_role: str,
+    role_memory_file: Path,
+    shared_memory_file: Path,
+    source_artifact: str,
+    primary_candidates: Any,
+    primary_allowed: bool,
+    primary_reason: str,
+    reviewer_candidates: Any,
+    reviewer_allowed: bool,
+    reviewer_reason: str,
+    pending_dir: Path = DEFAULT_MEMORY_WRITEBACK_PENDING_DIR,
+) -> Path | None:
+    """Durably stage eligible memory intent before the authoritative commit."""
+    analysis_identity = str(analysis_id)
+    if not analysis_identity or len(analysis_identity) > 128:
+        raise RuntimeError("memory writeback analysis identity is invalid")
+    normalized_response_digest = str(response_digest).lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", normalized_response_digest):
+        raise RuntimeError("memory writeback response digest is invalid")
+    primary = (
+        normalize_memory_candidates(primary_candidates)
+        if primary_allowed
+        else []
+    )
+    reviewer = (
+        normalize_memory_candidates(reviewer_candidates)
+        if reviewer_allowed
+        else []
+    )
+    if not primary and not reviewer:
+        return None
+    task = {
+        "schema": MEMORY_WRITEBACK_TASK_SCHEMA,
+        "analysis_id": analysis_identity,
+        "submitted_response_sha256": normalized_response_digest,
+        "agent_role": str(agent_role),
+        "role_memory_file": str(role_memory_file),
+        "shared_memory_file": str(shared_memory_file),
+        "source_artifact": str(source_artifact),
+        "primary": {
+            "allowed": bool(primary_allowed),
+            "reason": str(primary_reason or "")[:500],
+            "candidates": primary,
+            "candidate_manifest_digest": canonical_payload_digest(primary),
+        },
+        "reviewer": {
+            "allowed": bool(reviewer_allowed),
+            "reason": str(reviewer_reason or "")[:500],
+            "candidates": reviewer,
+            "candidate_manifest_digest": canonical_payload_digest(reviewer),
+        },
+    }
+    encoded = json.dumps(
+        task,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > MAX_MEMORY_WRITEBACK_TASK_BYTES:
+        raise RuntimeError("memory writeback task exceeds its byte limit")
+    path = pending_dir / f"{safe_filename(analysis_id)}.json"
+    if path.exists():
+        existing = load_json(path, MAX_MEMORY_WRITEBACK_TASK_BYTES)
+        if canonical_payload_digest(existing) != canonical_payload_digest(task):
+            raise RuntimeError(
+                "memory writeback task identity collides with different content"
+            )
+        return path
+    atomic_write_private_json(path, task)
+    return path
+
+
+def mark_memory_writeback_committed(
+    analysis_id: str,
+    *,
+    expected_response_digest: str = "",
+    pending_dir: Path = DEFAULT_MEMORY_WRITEBACK_PENDING_DIR,
+    committed_dir: Path = DEFAULT_MEMORY_WRITEBACK_COMMITTED_DIR,
+) -> Path | None:
+    """Move a staged task across the commit boundary atomically."""
+    expected_digest = str(expected_response_digest or "").lower()
+    if expected_digest and not re.fullmatch(r"[a-f0-9]{64}", expected_digest):
+        raise RuntimeError("expected memory response digest is invalid")
+
+    def validate_binding(task: dict[str, Any]) -> None:
+        if str(task.get("analysis_id") or "") != str(analysis_id):
+            raise RuntimeError("memory task analysis identity is invalid")
+        if (
+            expected_digest
+            and str(task.get("submitted_response_sha256") or "").lower()
+            != expected_digest
+        ):
+            raise RuntimeError(
+                "memory task is not bound to the committed response"
+            )
+
+    name = f"{safe_filename(analysis_id)}.json"
+    pending_path = pending_dir / name
+    committed_path = committed_dir / name
+    if committed_path.exists():
+        committed = load_json(
+            committed_path,
+            MAX_MEMORY_WRITEBACK_TASK_BYTES,
+        )
+        validate_binding(committed)
+        if pending_path.exists():
+            pending = load_json(
+                pending_path,
+                MAX_MEMORY_WRITEBACK_TASK_BYTES,
+            )
+            validate_binding(pending)
+            if canonical_payload_digest(pending) != canonical_payload_digest(
+                committed
+            ):
+                raise RuntimeError(
+                    "pending and committed memory tasks disagree"
+                )
+            pending_path.unlink()
+        return committed_path
+    if not pending_path.exists():
+        return None
+    pending = load_json(
+        pending_path,
+        MAX_MEMORY_WRITEBACK_TASK_BYTES,
+    )
+    validate_binding(pending)
+    committed_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(committed_dir, stat.S_IRWXU)
+    os.replace(pending_path, committed_path)
+    os.chmod(committed_path, stat.S_IRUSR | stat.S_IWUSR)
+    directory_fd = os.open(committed_dir, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    pending_directory_fd = os.open(pending_dir, os.O_RDONLY)
+    try:
+        os.fsync(pending_directory_fd)
+    finally:
+        os.close(pending_directory_fd)
+    return committed_path
+
+
+def process_committed_memory_writeback(
+    task_path: Path,
+    *,
+    receipt_dir: Path = DEFAULT_MEMORY_WRITEBACK_RECEIPT_DIR,
+) -> tuple[dict[str, Any], Path | None]:
+    """Replay one post-commit task; successful lanes are analysis-idempotent."""
+    if task_path.is_symlink() or not task_path.is_file():
+        raise RuntimeError("committed memory task must be a regular file")
+    task = load_json(task_path, MAX_MEMORY_WRITEBACK_TASK_BYTES)
+    if task.get("schema") != MEMORY_WRITEBACK_TASK_SCHEMA:
+        raise RuntimeError("committed memory task schema is invalid")
+    analysis_id = str(task.get("analysis_id") or "")
+    if task_path.name != f"{safe_filename(analysis_id)}.json":
+        raise RuntimeError("committed memory task identity is invalid")
+    response_digest = str(
+        task.get("submitted_response_sha256") or ""
+    ).lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", response_digest):
+        raise RuntimeError("committed memory task response digest is invalid")
+    primary = task.get("primary")
+    reviewer = task.get("reviewer")
+    if not isinstance(primary, dict) or not isinstance(reviewer, dict):
+        raise RuntimeError("committed memory task lanes are invalid")
+    for lane in (primary, reviewer):
+        candidates = lane.get("candidates")
+        if (
+            not isinstance(candidates, list)
+            or canonical_payload_digest(candidates)
+            != str(lane.get("candidate_manifest_digest") or "")
+        ):
+            raise RuntimeError("committed memory candidate manifest is invalid")
+    receipt, receipt_path = persist_postcommit_memory_writeback(
+        analysis_id=analysis_id,
+        agent_role=str(task.get("agent_role") or ""),
+        role_memory_file=Path(
+            str(task.get("role_memory_file") or "")
+        ).expanduser(),
+        shared_memory_file=Path(
+            str(task.get("shared_memory_file") or "")
+        ).expanduser(),
+        source_artifact=str(task.get("source_artifact") or ""),
+        primary_candidates=primary["candidates"],
+        primary_allowed=bool(primary.get("allowed")),
+        primary_reason=str(primary.get("reason") or ""),
+        reviewer_candidates=reviewer["candidates"],
+        reviewer_allowed=bool(reviewer.get("allowed")),
+        reviewer_reason=str(reviewer.get("reason") or ""),
+        receipt_dir=receipt_dir,
+    )
+    if receipt.get("ok") is True and receipt_path is not None:
+        task_path.unlink()
+    return receipt, receipt_path
+
+
+def resume_committed_memory_writebacks(
+    *,
+    committed_dir: Path = DEFAULT_MEMORY_WRITEBACK_COMMITTED_DIR,
+    receipt_dir: Path = DEFAULT_MEMORY_WRITEBACK_RECEIPT_DIR,
+    limit: int = 100,
+) -> tuple[int, int]:
+    if not committed_dir.exists():
+        return 0, 0
+    completed = 0
+    failed = 0
+    for task_path in sorted(committed_dir.glob("*.json"))[:limit]:
+        try:
+            receipt, receipt_path = process_committed_memory_writeback(
+                task_path,
+                receipt_dir=receipt_dir,
+            )
+            if receipt.get("ok") is True and receipt_path is not None:
+                completed += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+    return completed, failed
+
+
+def discard_pending_memory_writeback(
+    analysis_id: str,
+    *,
+    pending_dir: Path = DEFAULT_MEMORY_WRITEBACK_PENDING_DIR,
+) -> None:
+    (pending_dir / f"{safe_filename(analysis_id)}.json").unlink(
+        missing_ok=True
+    )
 
 
 def quarantine_analysis_index(
@@ -953,8 +1318,19 @@ def flush_analysis_index_queue(
     alert_store_url: str,
     queue_dir: Path = DEFAULT_ANALYSIS_INDEX_QUEUE_DIR,
     quarantine_dir: Path = DEFAULT_ANALYSIS_INDEX_QUARANTINE_DIR,
+    memory_pending_dir: Path = DEFAULT_MEMORY_WRITEBACK_PENDING_DIR,
+    memory_committed_dir: Path = DEFAULT_MEMORY_WRITEBACK_COMMITTED_DIR,
+    memory_receipt_dir: Path = DEFAULT_MEMORY_WRITEBACK_RECEIPT_DIR,
     limit: int = 100,
 ) -> tuple[int, int, int]:
+    # A previous process may have crashed after the authoritative commit. These
+    # tasks are safe to replay because memory reinforcement is analysis-id
+    # idempotent.
+    resume_committed_memory_writebacks(
+        committed_dir=memory_committed_dir,
+        receipt_dir=memory_receipt_dir,
+        limit=limit,
+    )
     if not queue_dir.exists():
         return 0, 0, 0
     completed = 0
@@ -964,8 +1340,27 @@ def flush_analysis_index_queue(
         try:
             payload = load_json(path)
             post_analysis_index(payload, alert_store_url)
+            committed_task = mark_memory_writeback_committed(
+                str(payload.get("analysis_id") or ""),
+                expected_response_digest=canonical_payload_digest(
+                    payload.get("response")
+                ),
+                pending_dir=memory_pending_dir,
+                committed_dir=memory_committed_dir,
+            )
             path.unlink(missing_ok=True)
             completed += 1
+            if committed_task is not None:
+                # Memory is supplemental. A recoverable lane or receipt failure
+                # keeps the committed task for the next startup but does not
+                # reclassify the already-committed analysis index as failed.
+                try:
+                    process_committed_memory_writeback(
+                        committed_task,
+                        receipt_dir=memory_receipt_dir,
+                    )
+                except Exception:
+                    pass
         except AnalysisIndexSubmissionError as exc:
             if exc.retryable:
                 failed += 1
@@ -975,6 +1370,10 @@ def flush_analysis_index_queue(
                 payload,
                 exc,
                 quarantine_dir=quarantine_dir,
+            )
+            discard_pending_memory_writeback(
+                str(payload.get("analysis_id") or ""),
+                pending_dir=memory_pending_dir,
             )
             quarantined += 1
         except Exception:
@@ -1243,6 +1642,21 @@ def boolean_setting(value: Any, default: bool = False) -> bool:
     return default
 
 
+def apply_evaluation_memory_freeze(
+    allowed: bool,
+    reason: str,
+    *,
+    freeze_enabled: bool,
+) -> tuple[bool, str]:
+    """Disable only memory persistence during a controlled evaluation run."""
+    if freeze_enabled:
+        return (
+            False,
+            "controlled harness evaluation froze memory writeback",
+        )
+    return allowed, reason
+
+
 def codex_cli_route(model: str, effort: str) -> str:
     return f"codex-cli:{model}:{effort}"
 
@@ -1501,6 +1915,39 @@ def model_route_metadata(
         if model:
             return canonical, model, "frontier-codex-cli", "codex-cli"
     return canonical, "", "unknown", "unknown"
+
+
+def attest_model_route_response(
+    settings: dict[str, Any],
+    route: str,
+    response: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind collector-observed adapter identity to one exact configured route."""
+    canonical, expected_model, expected_path, expected_provider = (
+        model_route_metadata(settings, route)
+    )
+    observed = {
+        "model": str(response.get("_analysis_model") or ""),
+        "model_path": str(response.get("_analysis_model_path") or ""),
+        "provider": str(response.get("_analysis_provider") or ""),
+    }
+    expected = {
+        "model": expected_model,
+        "model_path": expected_path,
+        "provider": expected_provider,
+    }
+    mismatches = [
+        key
+        for key in expected
+        if not expected[key] or observed[key] != expected[key]
+    ]
+    if mismatches:
+        raise SystemExit(
+            "Model adapter identity does not match the configured route: "
+            + ", ".join(mismatches)
+        )
+    response["_analysis_model_route"] = canonical
+    return response
 
 
 def current_analysis_phase_record(
@@ -2372,6 +2819,7 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
         status: Any = "",
         returned: Any = None,
         source_class: Any = "",
+        evidence_digest: Any = "",
     ) -> None:
         ref = _bounded_reference(reference)
         if not ref or len(entries) >= EVIDENCE_REFERENCE_MAX:
@@ -2394,6 +2842,11 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
             "corroborating": bool(corroborating),
             "status": _bounded_reference(status)[:40],
             "returned": returned_count,
+            "evidence_digest": (
+                _bounded_reference(evidence_digest)[:64]
+                if re.fullmatch(r"[a-fA-F0-9]{64}", str(evidence_digest or ""))
+                else ""
+            ),
         }
         if current is None or (candidate["corroborating"] and not current["corroborating"]):
             entries[ref] = candidate
@@ -2449,6 +2902,7 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
                 None,
             )
             digest = value.get("query_digest")
+            result_digest = value.get("result_digest")
             if digest:
                 digest_text = _bounded_reference(digest)
                 add(
@@ -2458,6 +2912,7 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
                     corroborating=str(status or "").lower() in {"ok", "success", "completed"},
                     status=status,
                     returned=returned,
+                    evidence_digest=result_digest,
                 )
                 pack = value.get("pack")
                 if pack:
@@ -2468,6 +2923,7 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
                         corroborating=str(status or "").lower() in {"ok", "success", "completed"},
                         status=status,
                         returned=returned,
+                        evidence_digest=result_digest,
                     )
             evidence_ref = value.get("evidence_ref")
             if evidence_ref:
@@ -2480,6 +2936,7 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
                     },
                     status=status,
                     returned=returned,
+                    evidence_digest=result_digest,
                 )
             query_id = value.get("query_id")
             if query_id and digest:
@@ -2490,6 +2947,7 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
                     corroborating=str(status or "").lower() in {"ok", "success", "completed"},
                     status=status,
                     returned=returned,
+                    evidence_digest=result_digest,
                 )
             request_id = value.get("request_id")
             if request_id:
@@ -4506,6 +4964,7 @@ def apply_investigation_query_loop(
     agent_role: str,
     *,
     live_osquery_config: dict[str, Any] | None = None,
+    harness_runtime: OnionSentinelHarnessRun | None = None,
     model_executor: Callable[[str, dict[str, Any], argparse.Namespace, dict[str, Any]], dict[str, Any]]
     | None = None,
     query_executor: Callable[..., dict[str, Any]] | None = None,
@@ -4526,10 +4985,35 @@ def apply_investigation_query_loop(
     total_requests = 0
     ignored_requests = 0
     seen_semantic_requests: set[str] = set()
+
+    def observe_harness(call: Callable[[], Any]) -> Any:
+        if harness_runtime is None:
+            return None
+        try:
+            return call()
+        except Exception as exc:
+            if harness_runtime.policy.mode == "enforce":
+                raise
+            print(
+                "warning: Onion Sentinel harness shadow query observation "
+                f"failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return None
+
     for round_number in range(1, MAX_INVESTIGATION_QUERY_ROUNDS + 1):
         raw_requests = pop_investigation_query_requests(response)
         if not raw_requests:
             break
+        observe_harness(
+            lambda: harness_runtime.phase(
+                "investigation_query_planning",
+                route,
+                f"round {round_number}",
+            )
+            if harness_runtime is not None
+            else None
+        )
         remaining = MAX_INVESTIGATION_QUERIES_TOTAL - total_requests
         allowed_count = min(MAX_INVESTIGATION_QUERIES_PER_ROUND, remaining)
         admitted_raw = raw_requests[:allowed_count]
@@ -4587,6 +5071,34 @@ def apply_investigation_query_loop(
                         }
                     )
                     continue
+                tool_decision = observe_harness(
+                    lambda: harness_runtime.authorize_tool(
+                        round_number=round_number,
+                        query_id=request["query_id"],
+                        backend=request["backend"],
+                    )
+                    if harness_runtime is not None
+                    else None
+                )
+                if (
+                    harness_runtime is not None
+                    and harness_runtime.policy.mode == "enforce"
+                    and tool_decision is not None
+                    and not tool_decision.allowed
+                ):
+                    rejected.append(
+                        {
+                            "query_id": request["query_id"],
+                            "backend": request["backend"],
+                            "status": "rejected",
+                            "read_only": True,
+                            "error": (
+                                "Onion Sentinel harness denied capability "
+                                f"{tool_decision.capability}: {tool_decision.reason}"
+                            ),
+                        }
+                    )
+                    continue
                 seen_semantic_requests.add(semantic_digest)
                 normalized.append(request)
             except InvestigationQueryError as exc:
@@ -4600,6 +5112,23 @@ def apply_investigation_query_loop(
                     }
                 )
         if normalized:
+            observe_harness(
+                lambda: harness_runtime.preflight_query_batch(
+                    round_number=round_number,
+                    request_count=len(normalized),
+                )
+                if harness_runtime is not None
+                else None
+            )
+            observe_harness(
+                lambda: harness_runtime.phase(
+                    "investigation_query_execution",
+                    route,
+                    f"round {round_number}; {len(normalized)} admitted request(s)",
+                )
+                if harness_runtime is not None
+                else None
+            )
             round_result = query_executor(
                 prompt_package,
                 normalized,
@@ -4617,6 +5146,11 @@ def apply_investigation_query_loop(
             }
         round_result.setdefault("results", []).extend(rejected)
         rounds.append(round_result)
+        observe_harness(
+            lambda: harness_runtime.query_round(round_result)
+            if harness_runtime is not None
+            else None
+        )
 
         local_context = prompt_package.get("_local_investigation_query_context")
         if isinstance(local_context, dict):
@@ -4694,6 +5228,15 @@ def apply_investigation_query_loop(
                 maximum_bytes=evidence_budget,
             )
         )
+        # Refresh the exact citation allowlist after each trusted broker round.
+        # Otherwise the model can see a query result but cannot cite its
+        # collector-owned digest during final deterministic validation.
+        attach_evidence_reference_contract(prompt_package)
+        observe_harness(
+            lambda: harness_runtime.catalogue_prompt_evidence(prompt_package)
+            if harness_runtime is not None
+            else None
+        )
         serialized_prompt_bytes = len(
             json.dumps(
                 model_safe_copy(prompt_package, hosted=hosted_route),
@@ -4706,7 +5249,58 @@ def apply_investigation_query_loop(
             raise InvestigationQueryError(
                 "investigation follow-up prompt exceeds max_prompt_bytes"
             )
-        response = model_executor(route, prompt_package, args, settings)
+        model_call_id = f"primary-followup-{round_number}"
+        observe_harness(
+            lambda: harness_runtime.preflight_model_call(
+                call_id=model_call_id,
+                input_value=prompt_package,
+                requested_route=route,
+                purpose=(
+                    f"primary investigation follow-up round {round_number}"
+                ),
+            )
+            if harness_runtime is not None
+            else None
+        )
+        model_started = time.monotonic()
+        try:
+            response = model_executor(route, prompt_package, args, settings)
+        except (Exception, SystemExit) as exc:
+            observe_harness(
+                lambda: harness_runtime.model_call(
+                    call_id=model_call_id,
+                    purpose=f"primary investigation follow-up round {round_number}",
+                    requested_route=route,
+                    response={},
+                    input_value=prompt_package,
+                    duration_seconds=time.monotonic() - model_started,
+                    status=f"failed:{type(exc).__name__}",
+                )
+                if harness_runtime is not None
+                else None
+            )
+            raise
+        observe_harness(
+            lambda: harness_runtime.model_call(
+                call_id=model_call_id,
+                purpose=f"primary investigation follow-up round {round_number}",
+                requested_route=route,
+                response=response,
+                input_value=prompt_package,
+                duration_seconds=time.monotonic() - model_started,
+            )
+            if harness_runtime is not None
+            else None
+        )
+        observe_harness(
+            lambda: harness_runtime.phase(
+                "evidence_synthesis",
+                route,
+                f"round {round_number} evidence assimilated",
+            )
+            if harness_runtime is not None
+            else None
+        )
         if remaining_rounds <= 0 or remaining_queries <= 0:
             ignored_requests += len(pop_investigation_query_requests(response))
             break
@@ -4789,6 +5383,7 @@ def _ollama_request(
     response = extract_json_object(content)
     response["_analysis_model"] = model
     response["_analysis_model_path"] = "ollama"
+    response["_analysis_provider"] = "ollama"
     return response
 
 
@@ -5951,19 +6546,19 @@ def analyze_model_route(
             f"Configured analysis model route is not enabled: {route or 'none'}"
         )
     if route in {"gpt-cli", "codex-cli"}:
-        return cloud_cli_chat(
+        response = cloud_cli_chat(
             prompt_package,
             args,
             settings,
             system_prompt_file=system_prompt_file,
             independent_review=independent_review,
         )
-    if route.startswith("codex-cli:"):
+    elif route.startswith("codex-cli:"):
         parsed = parse_codex_cli_route(route)
         if not parsed:
             raise SystemExit("Configured Codex CLI route is invalid")
         model, effort = parsed
-        return cloud_cli_chat(
+        response = cloud_cli_chat(
             prompt_package,
             args,
             settings,
@@ -5972,12 +6567,12 @@ def analyze_model_route(
             system_prompt_file=system_prompt_file,
             independent_review=independent_review,
         )
-    if route.startswith("hermes-agent:"):
+    elif route.startswith("hermes-agent:"):
         parsed = parse_cli_harness_route(route, "hermes-agent")
         if not parsed:
             raise SystemExit("Configured Hermes Agent route is invalid")
         model, effort = parsed
-        return hermes_agent_chat(
+        response = hermes_agent_chat(
             prompt_package,
             args,
             settings,
@@ -5986,12 +6581,12 @@ def analyze_model_route(
             system_prompt_file=system_prompt_file,
             independent_review=independent_review,
         )
-    if route.startswith("openclaw:"):
+    elif route.startswith("openclaw:"):
         parsed = parse_cli_harness_route(route, "openclaw")
         if not parsed:
             raise SystemExit("Configured OpenClaw route is invalid")
         model, effort = parsed
-        return openclaw_infer_chat(
+        response = openclaw_infer_chat(
             prompt_package,
             args,
             settings,
@@ -6000,7 +6595,7 @@ def analyze_model_route(
             system_prompt_file=system_prompt_file,
             independent_review=independent_review,
         )
-    if route.startswith("ollama:"):
+    elif route.startswith("ollama:"):
         model = route.removeprefix("ollama:").strip()
         if not model:
             raise SystemExit("Configured Ollama route has an empty model name")
@@ -6011,7 +6606,7 @@ def analyze_model_route(
                 "mode": "independent",
                 "instruction": "Analyze the supplied evidence independently; the primary conclusion is withheld.",
             }
-        return _ollama_chat_for_model(
+        response = _ollama_chat_for_model(
             review_package,
             args,
             settings,
@@ -6019,7 +6614,12 @@ def analyze_model_route(
             system_prompt_file=system_prompt_file,
             independent_review=independent_review,
         )
-    raise SystemExit(f"Unsupported or disabled analysis model route: {route or 'none'}")
+    else:
+        raise SystemExit(
+            "Unsupported or disabled analysis model route: "
+            f"{route or 'none'}"
+        )
+    return attest_model_route_response(settings, route, response)
 
 
 def model_route_identity(
@@ -6615,6 +7215,157 @@ def second_opinion_memory_eligibility(second_opinion: Any) -> tuple[bool, str]:
     return True, "high-confidence independent agreement"
 
 
+def memory_writeback_plan(
+    candidates: Any,
+    *,
+    allowed: bool,
+    eligibility_reason: str,
+) -> dict[str, Any]:
+    """Describe a commit-gated memory operation without changing memory."""
+    submitted = len(candidates) if isinstance(candidates, list) else 0
+    normalized = normalize_memory_candidates(candidates)
+    plan = {
+        "submitted": submitted,
+        "accepted": len(normalized),
+        "rejected": max(0, submitted - len(normalized)),
+        "commit_gated": True,
+        "eligibility_reason": str(eligibility_reason or "")[:500],
+    }
+    if not allowed:
+        return {
+            **plan,
+            "skipped": True,
+            "persistence_status": "blocked_before_commit",
+        }
+    if not normalized:
+        return {
+            **plan,
+            "skipped": True,
+            "persistence_status": "no_candidates",
+        }
+    return {
+        **plan,
+        "skipped": False,
+        "persistence_status": "pending_authoritative_commit",
+    }
+
+
+def persist_postcommit_memory_writeback(
+    *,
+    analysis_id: str,
+    agent_role: str,
+    role_memory_file: Path,
+    shared_memory_file: Path,
+    source_artifact: str,
+    primary_candidates: Any,
+    primary_allowed: bool,
+    primary_reason: str,
+    reviewer_candidates: Any,
+    reviewer_allowed: bool,
+    reviewer_reason: str,
+    receipt_dir: Path = DEFAULT_MEMORY_WRITEBACK_RECEIPT_DIR,
+) -> tuple[dict[str, Any], Path | None]:
+    """Persist eligible memory only after the alert store has committed.
+
+    Candidate text is never copied into the receipt or harness trace. A failed
+    post-commit write is supplemental and must not invalidate the authoritative
+    analysis or cause the model job to be retried.
+    """
+
+    def persist_lane(
+        *,
+        lane: str,
+        candidates: Any,
+        allowed: bool,
+        reason: str,
+        lane_analysis_id: str,
+    ) -> dict[str, Any]:
+        normalized = normalize_memory_candidates(candidates)
+        lane_receipt: dict[str, Any] = {
+            "lane": lane,
+            "candidate_count": len(normalized),
+            "candidate_manifest_digest": canonical_payload_digest(normalized),
+            "eligibility_reason": str(reason or "")[:500],
+        }
+        if not allowed:
+            return {**lane_receipt, "status": "blocked"}
+        if not normalized:
+            return {**lane_receipt, "status": "no_candidates"}
+        if not str(role_memory_file) or not str(shared_memory_file):
+            return {
+                **lane_receipt,
+                "status": "failed",
+                "error_type": "MissingMemoryTarget",
+                "error_digest": canonical_payload_digest(
+                    "memory target path is missing"
+                ),
+            }
+        try:
+            result = persist_memory_candidates(
+                agent_role=agent_role,
+                role_memory_file=role_memory_file,
+                shared_memory_file=shared_memory_file,
+                candidates=normalized,
+                analysis_id=lane_analysis_id,
+                source_artifact=source_artifact,
+            )
+        except Exception as exc:
+            return {
+                **lane_receipt,
+                "status": "failed",
+                "error_type": type(exc).__name__,
+                "error_digest": canonical_payload_digest(str(exc)),
+            }
+        return {
+            **lane_receipt,
+            "status": "persisted",
+            "result": result,
+        }
+
+    receipt: dict[str, Any] = {
+        "schema": "onion-sentinel-memory-writeback-receipt-v1",
+        "analysis_id": str(analysis_id)[:128],
+        "authoritative_analysis_committed": True,
+        "committed_memory_at": project_now(),
+        "primary": persist_lane(
+            lane="primary",
+            candidates=primary_candidates,
+            allowed=primary_allowed,
+            reason=primary_reason,
+            lane_analysis_id=analysis_id,
+        ),
+        "reviewer": persist_lane(
+            lane="reviewer",
+            candidates=reviewer_candidates,
+            allowed=reviewer_allowed,
+            reason=reviewer_reason,
+            lane_analysis_id=f"{analysis_id}-reviewer",
+        ),
+    }
+    receipt["ok"] = all(
+        receipt[lane]["status"] != "failed"
+        for lane in ("primary", "reviewer")
+    )
+    receipt_path = receipt_dir / f"{safe_filename(analysis_id)}.json"
+    receipt["receipt_storage"] = {
+        "status": "stored",
+        # This binds the privacy-preserving receipt payload. The storage
+        # envelope itself is intentionally excluded to avoid a self-hash.
+        "receipt_payload_digest": canonical_payload_digest(receipt),
+    }
+    try:
+        atomic_write_private_json(receipt_path, receipt)
+    except Exception as exc:
+        receipt["ok"] = False
+        receipt["receipt_storage"] = {
+            "status": "failed",
+            "error_type": type(exc).__name__,
+            "error_digest": canonical_payload_digest(str(exc)),
+        }
+        return receipt, None
+    return receipt, receipt_path
+
+
 def apply_review_required_gate(
     response: dict[str, Any],
     *,
@@ -6738,6 +7489,7 @@ def apply_configured_second_opinion(
     settings: dict[str, Any],
     agent_role: str,
     phase_callback: Callable[[str, str, str], None] | None = None,
+    harness_runtime: OnionSentinelHarnessRun | None = None,
 ) -> dict[str, Any]:
     """Run an optional independent reviewer while preserving primary success.
 
@@ -6804,22 +7556,95 @@ def apply_configured_second_opinion(
     )
     started_monotonic = time.monotonic()
     review_package = independent_reviewer_package(prompt_package)
+
+    def observe_harness(call: Callable[[], Any]) -> Any:
+        if harness_runtime is None:
+            return None
+        try:
+            return call()
+        except Exception as exc:
+            if harness_runtime.policy.mode == "enforce":
+                raise
+            print(
+                "warning: Onion Sentinel harness shadow reviewer observation "
+                f"failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return None
+
     try:
         validation_failures: list[str] = []
         secondary: dict[str, Any] | None = None
         for attempt in range(1, 3):
-            candidate = analyze_model_route(
-                route,
-                review_package,
-                args,
-                settings,
-                system_prompt_file=reviewer_prompt,
-                independent_review=True,
+            call_id = f"independent-review-{attempt}"
+            observe_harness(
+                lambda: harness_runtime.preflight_model_call(
+                    call_id=call_id,
+                    input_value=review_package,
+                    requested_route=route,
+                    purpose="independent second-opinion review",
+                    independent_review=True,
+                )
+                if harness_runtime is not None
+                else None
             )
+            attempt_started = time.monotonic()
+            try:
+                candidate = analyze_model_route(
+                    route,
+                    review_package,
+                    args,
+                    settings,
+                    system_prompt_file=reviewer_prompt,
+                    independent_review=True,
+                )
+            except (Exception, SystemExit) as exc:
+                observe_harness(
+                    lambda: harness_runtime.model_call(
+                        call_id=call_id,
+                        purpose="independent second-opinion review",
+                        requested_route=route,
+                        response={},
+                        input_value=review_package,
+                        duration_seconds=time.monotonic() - attempt_started,
+                        independent_review=True,
+                        status=f"failed:{type(exc).__name__}",
+                    )
+                    if harness_runtime is not None
+                    else None
+                )
+                raise
             try:
                 secondary = validate_reviewer_response(candidate, review_package)
+                observe_harness(
+                    lambda: harness_runtime.model_call(
+                        call_id=call_id,
+                        purpose="independent second-opinion review",
+                        requested_route=route,
+                        response=candidate,
+                        input_value=review_package,
+                        duration_seconds=time.monotonic() - attempt_started,
+                        independent_review=True,
+                    )
+                    if harness_runtime is not None
+                    else None
+                )
                 break
             except ReviewerValidationError as exc:
+                observe_harness(
+                    lambda: harness_runtime.model_call(
+                        call_id=call_id,
+                        purpose="independent second-opinion review",
+                        requested_route=route,
+                        response=candidate,
+                        input_value=review_package,
+                        duration_seconds=time.monotonic() - attempt_started,
+                        independent_review=True,
+                        status="validation-failed",
+                    )
+                    if harness_runtime is not None
+                    else None
+                )
                 validation_failures.append(str(exc)[:1000])
                 if attempt >= 2:
                     raise
@@ -6932,6 +7757,7 @@ def analyze_with_config(
     settings: dict[str, Any] | None = None,
     live_osquery_config: dict[str, Any] | None = None,
     phase_callback: Callable[[str, str, str], None] | None = None,
+    harness_runtime: OnionSentinelHarnessRun | None = None,
 ) -> dict[str, Any]:
     """Run exactly the model assigned to the requested cyber-security agent.
 
@@ -6952,7 +7778,62 @@ def analyze_with_config(
     if not route:
         raise SystemExit(f"Agent {agent_role} has no enabled analysis model assignment")
     notify_analysis_phase(phase_callback, "primary_analysis", route)
-    primary = analyze_model_route(route, prompt_package, args, settings)
+
+    def observe_harness(call: Callable[[], Any]) -> Any:
+        if harness_runtime is None:
+            return None
+        try:
+            return call()
+        except Exception as exc:
+            if harness_runtime.policy.mode == "enforce":
+                raise
+            print(
+                "warning: Onion Sentinel harness shadow model observation "
+                f"failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return None
+
+    observe_harness(
+        lambda: harness_runtime.preflight_model_call(
+            call_id="primary-initial",
+            input_value=prompt_package,
+            requested_route=route,
+            purpose="initial primary analysis",
+        )
+        if harness_runtime is not None
+        else None
+    )
+    model_started = time.monotonic()
+    try:
+        primary = analyze_model_route(route, prompt_package, args, settings)
+    except (Exception, SystemExit) as exc:
+        observe_harness(
+            lambda: harness_runtime.model_call(
+                call_id="primary-initial",
+                purpose="initial primary analysis",
+                requested_route=route,
+                response={},
+                input_value=prompt_package,
+                duration_seconds=time.monotonic() - model_started,
+                status=f"failed:{type(exc).__name__}",
+            )
+            if harness_runtime is not None
+            else None
+        )
+        raise
+    observe_harness(
+        lambda: harness_runtime.model_call(
+            call_id="primary-initial",
+            purpose="initial primary analysis",
+            requested_route=route,
+            response=primary,
+            input_value=prompt_package,
+            duration_seconds=time.monotonic() - model_started,
+        )
+        if harness_runtime is not None
+        else None
+    )
     return apply_investigation_query_loop(
         prompt_package,
         primary,
@@ -6960,6 +7841,7 @@ def analyze_with_config(
         settings,
         agent_role,
         live_osquery_config=live_osquery_config,
+        harness_runtime=harness_runtime,
     )
 
 
@@ -9148,12 +10030,21 @@ def main() -> int:
     status = "failure"
     error = ""
     monitor_started = False
+    harness_runtime: OnionSentinelHarnessRun | None = None
 
     try:
         # Retry compact analysis-index submissions before spending resources on
         # another inference. A failed local API call never requires rerunning
         # the LLM because the completed result remains in this durable spool.
-        flush_analysis_index_queue(args.alert_store_url)
+        _, pending_index_failures, _ = flush_analysis_index_queue(
+            args.alert_store_url
+        )
+        if pending_index_failures:
+            raise RuntimeError(
+                "a deferred analysis index could not be reconciled; "
+                "refusing to invoke another model until the ordered spool "
+                "can reach alert-store"
+            )
         if args.generate_prompt:
             prompt_path = generate_prompt(args)
         if prompt_path is None:
@@ -9169,7 +10060,90 @@ def main() -> int:
             validate_incident_evidence_artifact(prompt_package.get("incident_response_evidence"))
 
         settings = effective_ai_settings(args)
+        evaluation_memory_frozen = boolean_setting(
+            os.environ.get(EVALUATION_FREEZE_MEMORY_ENV)
+        )
         live_osquery_config = prepare_live_osquery_context(prompt_package, agent_role)
+        attach_evidence_reference_contract(prompt_package)
+        enabled_routes = enabled_agent_model_routes(settings)
+        assigned_route = canonical_model_route(
+            (settings.get("agent_models") or {}).get(agent_role),
+            enabled_routes,
+        )
+        reviewer_route = canonical_model_route(
+            (settings.get("agent_second_opinion_models") or {}).get(
+                agent_role
+            ),
+            enabled_routes,
+        )
+        harness_configuration = {
+            "query_contract": INVESTIGATION_QUERY_CONTRACT,
+            "agent_role": agent_role,
+            "assigned_route": assigned_route,
+            "reviewer_route": reviewer_route,
+            "evaluation_memory_frozen": evaluation_memory_frozen,
+            "limits": {
+                "max_query_rounds": MAX_INVESTIGATION_QUERY_ROUNDS,
+                "max_queries_total": MAX_INVESTIGATION_QUERIES_TOTAL,
+                "max_queries_per_round": MAX_INVESTIGATION_QUERIES_PER_ROUND,
+                "max_prompt_bytes": args.max_prompt_bytes,
+                "max_response_bytes": args.max_response_bytes,
+            },
+        }
+        configured_harness_policy = load_investigation_harness_policy(
+            args.investigation_harness_policy
+        )
+        (
+            harness_start_allowed,
+            harness_activation_reason,
+        ) = should_start_onion_sentinel_harness(
+            policy_enabled=configured_harness_policy.enabled,
+            assigned_route=assigned_route,
+            reviewer_route=reviewer_route,
+        )
+        if harness_start_allowed:
+            try:
+                harness_runtime = start_harness_run(
+                    run_id=run_id,
+                    prompt_package=prompt_package,
+                    role=agent_role,
+                    assigned_route=assigned_route,
+                    configuration=harness_configuration,
+                    reanalysis_attempt_id=args.reanalysis_attempt_id,
+                    policy_path=args.investigation_harness_policy,
+                    db_path=args.investigation_harness_db,
+                    policy=configured_harness_policy,
+                )
+            except Exception as exc:
+                if configured_harness_policy.mode == "enforce":
+                    raise
+                print(
+                    "warning: Onion Sentinel harness shadow initialization "
+                    f"failed: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+        elif configured_harness_policy.enabled:
+            print(
+                "Onion Sentinel investigation harness bypassed: "
+                f"{harness_activation_reason}.",
+                file=sys.stderr,
+            )
+
+        def observe_harness(call: Callable[[], Any]) -> Any:
+            if harness_runtime is None:
+                return None
+            try:
+                return call()
+            except Exception as exc:
+                if harness_runtime.policy.mode == "enforce":
+                    raise
+                print(
+                    "warning: Onion Sentinel harness shadow observation "
+                    f"failed: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                return None
+
         running_record = build_llm_log_record(
             run_id=run_id,
             status="running",
@@ -9201,6 +10175,15 @@ def main() -> int:
                 trigger_reason=trigger_reason,
                 active_record_path=active_record_path,
             )
+            observe_harness(
+                lambda: harness_runtime.phase(
+                    phase,
+                    model_route,
+                    trigger_reason,
+                )
+                if harness_runtime is not None
+                else None
+            )
 
         resource_monitor.start()
         monitor_started = True
@@ -9216,8 +10199,19 @@ def main() -> int:
                 settings=settings,
                 live_osquery_config=live_osquery_config,
                 phase_callback=update_current_phase,
+                harness_runtime=harness_runtime,
             )
         response = validate_response(response, prompt_package)
+        observe_harness(
+            lambda: harness_runtime.record_response(
+                response,
+                decision_id="primary",
+                decision_type="primary-analysis",
+                hypothesis_revision=50,
+            )
+            if harness_runtime is not None
+            else None
+        )
         if not args.response_json:
             response = apply_configured_second_opinion(
                 prompt_package,
@@ -9226,6 +10220,7 @@ def main() -> int:
                 settings,
                 agent_role,
                 phase_callback=update_current_phase,
+                harness_runtime=harness_runtime,
             )
         else:
             response = apply_saved_response_review_gate(
@@ -9233,6 +10228,19 @@ def main() -> int:
                 response,
             )
             notify_analysis_phase(update_current_phase, "post_processing")
+        if isinstance(response.get("_second_opinion"), dict):
+            reviewer_response = response["_second_opinion"].get("response")
+            if isinstance(reviewer_response, dict):
+                observe_harness(
+                    lambda: harness_runtime.record_response(
+                        reviewer_response,
+                        decision_id="independent-review",
+                        decision_type="independent-review",
+                        hypothesis_revision=75,
+                    )
+                    if harness_runtime is not None
+                    else None
+                )
         if agent_role == "incident-responder":
             # Attach collector-owned provenance after every model call. This is
             # deliberately not accepted from model output: only the restricted
@@ -9250,89 +10258,233 @@ def main() -> int:
                 and not response["_incident_osquery_audit"].get("queries")
             ):
                 raise RuntimeError("incident response OSquery audit contains no validated commands")
+        raw_memory_candidates = (
+            response.get("memory_candidates")
+            if isinstance(response.get("memory_candidates"), list)
+            else []
+        )
+        reviewer_memory_candidates: list[Any] = []
+        second_opinion = response.get("_second_opinion")
+        if isinstance(second_opinion, dict):
+            reviewer_payload = second_opinion.get("response")
+            if isinstance(reviewer_payload, dict) and isinstance(
+                reviewer_payload.get("memory_candidates"),
+                list,
+            ):
+                reviewer_memory_candidates = reviewer_payload[
+                    "memory_candidates"
+                ]
+        all_memory_candidates = [
+            *raw_memory_candidates,
+            *reviewer_memory_candidates,
+        ]
+        harness_memory_blocked_reason = ""
+        if harness_runtime is not None:
+            has_shared_memory_candidates = any(
+                isinstance(item, dict)
+                and str(item.get("scope") or "").strip().lower() == "shared"
+                for item in all_memory_candidates
+            )
+            if all_memory_candidates:
+                memory_decision = harness_runtime.memory_promotion_decision(
+                    response,
+                    has_shared_candidates=has_shared_memory_candidates,
+                    human_approved=False,
+                )
+                memory_promotion_audit = {
+                    "allowed": memory_decision.allowed,
+                    "requires_approval": memory_decision.requires_approval,
+                    "reason": memory_decision.reason,
+                    "candidate_count": len(all_memory_candidates),
+                    "primary_candidate_count": len(raw_memory_candidates),
+                    "reviewer_candidate_count": len(
+                        reviewer_memory_candidates
+                    ),
+                }
+                if (
+                    harness_runtime.policy.mode == "enforce"
+                    and not memory_decision.allowed
+                ):
+                    harness_memory_blocked_reason = memory_decision.reason[:500]
+                    controls = (
+                        dict(response.get("_automation_controls"))
+                        if isinstance(response.get("_automation_controls"), dict)
+                        else {}
+                    )
+                    controls.update(
+                        {
+                            "memory_writeback_blocked": True,
+                            "requires_human_review": (
+                                controls.get("requires_human_review")
+                                or memory_decision.requires_approval
+                            ),
+                            "reason": harness_memory_blocked_reason,
+                        }
+                    )
+                    response["_automation_controls"] = controls
+            else:
+                memory_promotion_audit = {
+                    "allowed": False,
+                    "requires_approval": False,
+                    "reason": "no memory candidates",
+                    "candidate_count": 0,
+                    "primary_candidate_count": 0,
+                    "reviewer_candidate_count": 0,
+                }
+            # Shadow telemetry belongs only in the harness ledger. It must not
+            # alter the model response or the authoritative alert-store payload.
+            observe_harness(
+                lambda: harness_runtime.store.append_event(
+                    harness_runtime.run_id,
+                    "policy.memory-promotion",
+                    "post-processing",
+                    memory_promotion_audit,
+                    idempotency_key="policy.memory-promotion",
+                )
+            )
         automation_controls = (
             response.get("_automation_controls")
             if isinstance(response.get("_automation_controls"), dict)
             else {}
         )
-        if automation_controls.get("memory_writeback_blocked"):
-            response["_memory_writeback"] = {
-                "submitted": 0,
-                "accepted": 0,
-                "rejected": 0,
-                "skipped": True,
-                "eligibility_reason": str(
-                    automation_controls.get("reason")
-                    or "memory writeback blocked by analysis guardrail"
-                )[:500],
-            }
-        else:
-            try:
-                response["_memory_writeback"] = persist_memory_candidates(
-                    agent_role=agent_role,
-                    role_memory_file=Path(str(prompt_package.get("agent_memory_file") or "")),
-                    shared_memory_file=Path(str(prompt_package.get("shared_memory_file") or "")),
-                    candidates=response.get("memory_candidates", []),
-                    analysis_id=run_id,
-                    source_artifact=str(prompt_path),
-                )
-            except Exception as exc:
-                # Memory is supplemental context. A writeback failure must remain
-                # visible in the artifact without discarding a completed analysis.
-                response["_memory_writeback"] = {"ok": False, "error": str(exc)[:500]}
-        second_opinion = response.get("_second_opinion")
-        eligible, eligibility_reason = second_opinion_memory_eligibility(second_opinion)
+        primary_memory_allowed = not bool(
+            automation_controls.get("memory_writeback_blocked")
+        )
+        primary_memory_reason = (
+            str(
+                automation_controls.get("reason")
+                or "memory writeback blocked by analysis guardrail"
+            )[:500]
+            if not primary_memory_allowed
+            else "eligible after authoritative analysis commit"
+        )
+        (
+            primary_memory_allowed,
+            primary_memory_reason,
+        ) = apply_evaluation_memory_freeze(
+            primary_memory_allowed,
+            primary_memory_reason,
+            freeze_enabled=evaluation_memory_frozen,
+        )
+        response["_memory_writeback"] = memory_writeback_plan(
+            raw_memory_candidates,
+            allowed=primary_memory_allowed,
+            eligibility_reason=primary_memory_reason,
+        )
+        reviewer_memory_allowed, reviewer_memory_reason = (
+            second_opinion_memory_eligibility(second_opinion)
+        )
+        if harness_memory_blocked_reason:
+            reviewer_memory_allowed = False
+            reviewer_memory_reason = harness_memory_blocked_reason
+        (
+            reviewer_memory_allowed,
+            reviewer_memory_reason,
+        ) = apply_evaluation_memory_freeze(
+            reviewer_memory_allowed,
+            reviewer_memory_reason,
+            freeze_enabled=evaluation_memory_frozen,
+        )
         if isinstance(second_opinion, dict):
-            if eligible:
-                try:
-                    reviewer_response = second_opinion.get("response")
-                    second_opinion["memory_writeback"] = persist_memory_candidates(
-                        agent_role=agent_role,
-                        role_memory_file=Path(str(prompt_package.get("agent_memory_file") or "")),
-                        shared_memory_file=Path(str(prompt_package.get("shared_memory_file") or "")),
-                        candidates=(
-                            reviewer_response.get("memory_candidates", [])
-                            if isinstance(reviewer_response, dict)
-                            else []
-                        ),
-                        analysis_id=f"{run_id}-reviewer",
-                        source_artifact=str(prompt_path),
-                    )
-                    second_opinion["memory_writeback"]["eligibility_reason"] = eligibility_reason
-                except Exception as exc:
-                    second_opinion["memory_writeback"] = {
-                        "ok": False,
-                        "eligibility_reason": eligibility_reason,
-                        "error": str(exc)[:500],
-                    }
-            else:
-                second_opinion["memory_writeback"] = {
-                    "submitted": 0,
-                    "accepted": 0,
-                    "rejected": 0,
-                    "skipped": True,
-                    "eligibility_reason": eligibility_reason,
-                }
-        json_path, md_path, generated_at = write_outputs(prompt_path, prompt_package, response, args, run_id)
-        index_payload = analysis_index_payload(
-            run_id,
-            prompt_package,
-            response,
-            args.reanalysis_attempt_id,
-            started_at,
-            generated_at,
-            json_path,
+            second_opinion["memory_writeback"] = memory_writeback_plan(
+                reviewer_memory_candidates,
+                allowed=reviewer_memory_allowed,
+                eligibility_reason=reviewer_memory_reason,
+            )
+        role_memory_file = Path(
+            str(prompt_package.get("agent_memory_file") or "")
+        ).expanduser()
+        shared_memory_file = Path(
+            str(prompt_package.get("shared_memory_file") or "")
+        ).expanduser()
+        # All enforce-mode runtime checks finish before artifact or alert-store
+        # persistence creates a production side effect. Memory remains a staged
+        # plan until the authoritative analysis commit succeeds.
+        observe_harness(
+            lambda: harness_runtime.preflight_completion(
+                operation_id="pre-side-effects",
+            )
+            if harness_runtime is not None
+            else None
+        )
+        observe_harness(
+            lambda: harness_runtime.record_response(
+                response,
+                decision_id="final",
+                decision_type="post-review-analysis",
+                hypothesis_revision=100,
+            )
+            if harness_runtime is not None
+            else None
+        )
+        submitted_response_sha256 = canonical_payload_digest(response)
+        staged_memory_task = stage_memory_writeback_task(
+            analysis_id=run_id,
+            response_digest=submitted_response_sha256,
+            agent_role=agent_role,
+            role_memory_file=role_memory_file,
+            shared_memory_file=shared_memory_file,
+            source_artifact=str(prompt_path),
+            primary_candidates=raw_memory_candidates,
+            primary_allowed=primary_memory_allowed,
+            primary_reason=primary_memory_reason,
+            reviewer_candidates=reviewer_memory_candidates,
+            reviewer_allowed=reviewer_memory_allowed,
+            reviewer_reason=reviewer_memory_reason,
         )
         try:
-            post_analysis_index(index_payload, args.alert_store_url)
+            json_path, md_path, generated_at = write_outputs(
+                prompt_path,
+                prompt_package,
+                response,
+                args,
+                run_id,
+            )
+            index_payload = analysis_index_payload(
+                run_id,
+                prompt_package,
+                response,
+                args.reanalysis_attempt_id,
+                started_at,
+                generated_at,
+                json_path,
+            )
+            # Re-check the deadline before creating a replayable submission. A
+            # failed enforce-mode deadline must not leave work that a later
+            # startup would publish.
+            observe_harness(
+                lambda: harness_runtime.preflight_completion(
+                    operation_id="pre-index-commit",
+                )
+                if harness_runtime is not None
+                else None
+            )
+            # The exact submission is durably staged before the network call.
+            # If the worker dies after alert-store commits but before local
+            # bookkeeping, startup can replay the immutable analysis_id,
+            # obtain an idempotent receipt, and safely cross the memory commit
+            # boundary.
+            pending_index_path = queue_analysis_index(index_payload)
+        except Exception:
+            discard_pending_memory_writeback(run_id)
+            for unpublished_artifact in (json_path, md_path):
+                if unpublished_artifact is not None:
+                    unpublished_artifact.unlink(missing_ok=True)
+            raise
+        commit_receipt: dict[str, Any] = {}
+        try:
+            commit_receipt = post_analysis_index(
+                index_payload,
+                args.alert_store_url,
+            )
         except AnalysisIndexSubmissionError as exc:
-            pending_path = queue_analysis_index(index_payload)
             if not exc.retryable:
                 rejected_path = quarantine_analysis_index(
-                    pending_path,
+                    pending_index_path,
                     index_payload,
                     exc,
                 )
+                discard_pending_memory_writeback(run_id)
                 raise RuntimeError(
                     "analysis index was deterministically rejected and "
                     f"quarantined as {rejected_path.name}"
@@ -9341,18 +10493,154 @@ def main() -> int:
             # remain pending until alert-store commits this result. The next
             # scheduler pass publishes the compact spool before any new model
             # call, then reconciles the original job without duplicate GPU work.
-            raise RuntimeError(f"analysis index deferred to {pending_path}: {exc}") from exc
-        except Exception as exc:
-            pending_path = queue_analysis_index(index_payload)
             raise RuntimeError(
-                f"analysis index deferred to {pending_path}: {exc}"
+                f"analysis index deferred to {pending_index_path}: {exc}"
             ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"analysis index deferred to {pending_index_path}: {exc}"
+            ) from exc
+        # The alert store now owns the committed success. A subsequent audit
+        # finalization problem must be visible, but must not turn that durable
+        # success into a failed model job that gets retried.
         status = "success"
+        memory_receipt: dict[str, Any] = {}
+        memory_receipt_path: Path | None = None
+        try:
+            if staged_memory_task is not None:
+                committed_memory_task = mark_memory_writeback_committed(
+                    run_id,
+                    expected_response_digest=submitted_response_sha256,
+                )
+                if committed_memory_task is None:
+                    raise RuntimeError(
+                        "staged memory task disappeared before commit "
+                        "promotion"
+                    )
+                # Once this rename succeeds the committed task is independently
+                # recoverable, so the analysis spool can be retired before
+                # supplemental memory processing begins.
+                pending_index_path.unlink(missing_ok=True)
+                memory_receipt, memory_receipt_path = (
+                    process_committed_memory_writeback(
+                        committed_memory_task
+                    )
+                )
+            else:
+                pending_index_path.unlink(missing_ok=True)
+                memory_receipt, memory_receipt_path = (
+                    persist_postcommit_memory_writeback(
+                        analysis_id=run_id,
+                        agent_role=agent_role,
+                        role_memory_file=role_memory_file,
+                        shared_memory_file=shared_memory_file,
+                        source_artifact=str(prompt_path),
+                        primary_candidates=raw_memory_candidates,
+                        primary_allowed=primary_memory_allowed,
+                        primary_reason=primary_memory_reason,
+                        reviewer_candidates=reviewer_memory_candidates,
+                        reviewer_allowed=reviewer_memory_allowed,
+                        reviewer_reason=reviewer_memory_reason,
+                    )
+                )
+        except Exception as memory_exc:
+            # This boundary is intentionally non-fatal: the alert store already
+            # owns the result and retrying the model could duplicate conclusions.
+            # If promotion failed, the still-present analysis spool will obtain
+            # another idempotent commit receipt on startup. If a committed task
+            # failed, that task itself remains replayable.
+            memory_receipt = {
+                "schema": "onion-sentinel-memory-writeback-receipt-v1",
+                "analysis_id": run_id,
+                "authoritative_analysis_committed": True,
+                "ok": False,
+                "error_type": type(memory_exc).__name__,
+                "error_digest": canonical_payload_digest(str(memory_exc)),
+            }
+            best_effort_warning(
+                "post-commit memory writeback failed: "
+                f"{type(memory_exc).__name__}"
+            )
+        if harness_runtime is not None:
+            postcommit_runtime: dict[str, Any] = {}
+            try:
+                harness_runtime.record_memory_writeback(
+                    {
+                        "receipt_digest": canonical_payload_digest(
+                            memory_receipt
+                        ),
+                        "receipt_stored": memory_receipt_path is not None,
+                        "ok": bool(memory_receipt.get("ok")),
+                        "primary_status": (
+                            memory_receipt.get("primary", {}).get("status")
+                            if isinstance(memory_receipt.get("primary"), dict)
+                            else "unknown"
+                        ),
+                        "reviewer_status": (
+                            memory_receipt.get("reviewer", {}).get("status")
+                            if isinstance(memory_receipt.get("reviewer"), dict)
+                            else "unknown"
+                        ),
+                    }
+                )
+                postcommit_runtime = (
+                    harness_runtime.observe_postcommit_runtime()
+                )
+            except Exception as harness_exc:
+                best_effort_warning(
+                    "Onion Sentinel harness could not record "
+                    "post-commit audit state: "
+                    f"{type(harness_exc).__name__}: {harness_exc}"
+                )
+            try:
+                harness_runtime.complete(
+                    {
+                        "analysis_id": run_id,
+                        "submitted_response_sha256": (
+                            submitted_response_sha256
+                        ),
+                        "commit_submission_sha256": commit_receipt.get(
+                            "submission_sha256"
+                        ),
+                        "stored_response_sha256": commit_receipt.get(
+                            "stored_response_sha256"
+                        ),
+                        "artifact_json_sha256": hashlib.sha256(
+                            json_path.read_bytes()
+                        ).hexdigest(),
+                        "artifact_markdown_sha256": hashlib.sha256(
+                            md_path.read_bytes()
+                        ).hexdigest(),
+                        "detection_outcome": response.get(
+                            "detection_outcome"
+                        ),
+                        "final_disposition_status": response.get(
+                            "final_disposition_status"
+                        ),
+                        "memory_writeback_receipt_sha256": (
+                            canonical_payload_digest(memory_receipt)
+                        ),
+                        "postcommit_runtime": postcommit_runtime,
+                    },
+                    check_budget=False,
+                )
+            except Exception as harness_exc:
+                best_effort_warning(
+                    "Onion Sentinel harness could not finalize "
+                    f"committed analysis: {type(harness_exc).__name__}: "
+                    f"{harness_exc}"
+                )
 
-        print(md_path)
-        print(json_path)
-        if args.stdout:
-            print(json.dumps(response, indent=2, sort_keys=True))
+        try:
+            print(md_path)
+            print(json_path)
+            if args.stdout:
+                print(json.dumps(response, indent=2, sort_keys=True))
+        except Exception as output_exc:
+            best_effort_warning(
+                "committed analysis output could not be printed: "
+                f"{type(output_exc).__name__}"
+            )
         return 0
     except SystemExit as exc:
         error = str(exc) if str(exc) else f"SystemExit({exc.code})"
@@ -9362,31 +10650,46 @@ def main() -> int:
         raise
     finally:
         try:
-            if monitor_started:
-                resource_monitor.stop()
-            finished_at = project_now()
-            runtime_seconds = time.monotonic() - started_monotonic
-            if prompt_path or prompt_package:
-                record = build_llm_log_record(
-                    run_id=run_id,
-                    status=status,
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    runtime_seconds=runtime_seconds,
-                    prompt_path=prompt_path,
-                    prompt_package=prompt_package,
-                    settings=settings or effective_ai_settings(args),
-                    response=response,
-                    json_path=json_path,
-                    md_path=md_path,
-                    resource_monitor=resource_monitor,
-                    error=error,
-                    runtime_observation=running_record,
+            try:
+                if (
+                    harness_runtime is not None
+                    and status != "success"
+                ):
+                    harness_runtime.fail(error or "analysis did not complete")
+                if monitor_started:
+                    resource_monitor.stop()
+                finished_at = project_now()
+                runtime_seconds = time.monotonic() - started_monotonic
+                if prompt_path or prompt_package:
+                    record = build_llm_log_record(
+                        run_id=run_id,
+                        status=status,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        runtime_seconds=runtime_seconds,
+                        prompt_path=prompt_path,
+                        prompt_package=prompt_package,
+                        settings=settings or effective_ai_settings(args),
+                        response=response,
+                        json_path=json_path,
+                        md_path=md_path,
+                        resource_monitor=resource_monitor,
+                        error=error,
+                        runtime_observation=running_record,
+                    )
+                    append_jsonl(DEFAULT_LLM_LOG_FILE, record)
+                    # Retain the legacy single-record artifact for rolling
+                    # upgrades and last-completed-run consumers. Live state uses
+                    # per-run files.
+                    atomic_write_json(DEFAULT_LLM_CURRENT_FILE, record)
+            except Exception as telemetry_exc:
+                # Telemetry is deliberately outside the job's transaction. It
+                # must neither mask the original failure nor turn a committed
+                # success into a retryable failure.
+                best_effort_warning(
+                    "analysis telemetry finalization failed: "
+                    f"{type(telemetry_exc).__name__}"
                 )
-                append_jsonl(DEFAULT_LLM_LOG_FILE, record)
-                # Retain the legacy single-record artifact for rolling upgrades
-                # and last-completed-run consumers. Live state uses per-run files.
-                atomic_write_json(DEFAULT_LLM_CURRENT_FILE, record)
         finally:
             try:
                 active_record_path.unlink(missing_ok=True)

@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onion-sentinel.local/schemas/investigation-harness-policy-v1.json",
+  "title": "Onion Sentinel investigation harness policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "enabled",
+    "mode",
+    "budgets",
+    "role_capabilities",
+    "approval_required",
+    "memory"
+  ],
+  "properties": {
+    "schema": {
+      "const": "onion-sentinel-investigation-harness-policy-v1"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9.][A-Za-z0-9._:@+=/-]{0,63}$"
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "mode": {
+      "enum": [
+        "shadow",
+        "enforce"
+      ]
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_model_calls",
+        "max_query_rounds",
+        "max_queries_total",
+        "max_queries_per_round",
+        "max_prompt_evidence_bytes",
+        "max_prompt_evidence_rows",
+        "max_run_seconds"
+      ],
+      "properties": {
+        "max_model_calls": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 106
+        },
+        "max_query_rounds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 103
+        },
+        "max_queries_total": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 192
+        },
+        "max_queries_per_round": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 104
+        },
+        "max_prompt_evidence_bytes": {
+          "type": "integer",
+          "minimum": 4096,
+          "maximum": 16777216
+        },
+        "max_prompt_evidence_rows": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9600
+        },
+        "max_run_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 62400
+        }
+      }
+    },
+    "role_capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "soc-analyst",
+        "incident-responder",
+        "siem-engineer",
+        "cyber-threat-intel",
+        "threat-hunter"
+      ],
+      "properties": {
+        "soc-analyst": {
+          "$ref": "#/$defs/capabilities"
+        },
+        "incident-responder": {
+          "$ref": "#/$defs/capabilities"
+        },
+        "siem-engineer": {
+          "$ref": "#/$defs/capabilities"
+        },
+        "cyber-threat-intel": {
+          "$ref": "#/$defs/capabilities"
+        },
+        "threat-hunter": {
+          "$ref": "#/$defs/capabilities"
+        }
+      }
+    },
+    "approval_required": {
+      "$ref": "#/$defs/capabilities"
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "require_independent_agreement",
+        "shared_requires_human_approval"
+      ],
+      "properties": {
+        "require_independent_agreement": {
+          "type": "boolean"
+        },
+        "shared_requires_human_approval": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "alerts.read",
+          "cases.read",
+          "reports.read",
+          "security-onion.events.query",
+          "security-onion.oql.query",
+          "endpoint.osquery.query",
+          "pcap.derived.query",
+          "zeek.derived.query",
+          "suricata.events.read",
+          "threat-intel.lookup",
+          "detections.read",
+          "memory.read",
+          "alerts.acknowledge",
+          "alerts.suppress",
+          "cases.write",
+          "detections.write",
+          "notifications.send",
+          "response.contain",
+          "memory.promote"
+        ]
+      }
+    }
+  }
+}

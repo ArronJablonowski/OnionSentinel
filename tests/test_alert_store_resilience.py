@@ -181,7 +181,8 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertNotIn("refreshAlertGroupSummary(", rebuild)
 
     def test_oversized_payload_returns_413_without_socket_destroy(self) -> None:
-        self.assertIn("readJsonObject(request, {maxBytes: maxRequestBytes})", self.code)
+        self.assertIn("return readJsonObject(request, {", self.code)
+        self.assertIn("maxBytes: maxRequestBytes,", self.code)
         self.assertIn("statusError(`payload exceeds ${limit} byte limit`, 413)", self.http_runtime)
         self.assertNotIn("request.destroy", self.http_runtime)
 

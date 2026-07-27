@@ -710,11 +710,21 @@ def _write_records(
             by_id = {str(record.get("id")): record for record in active}
             added = 0
             reinforced = 0
+            replayed = 0
             for record in incoming:
                 record_id = str(record["id"])
                 if record_id in by_id:
-                    by_id[record_id] = _merge_record(by_id[record_id], record)
-                    reinforced += 1
+                    existing = by_id[record_id]
+                    if (
+                        str(existing.get("source_analysis_id") or "")
+                        == str(record.get("source_analysis_id") or "")
+                    ):
+                        # A crash-replayed post-commit task must be a no-op,
+                        # not a synthetic second observation.
+                        replayed += 1
+                    else:
+                        by_id[record_id] = _merge_record(existing, record)
+                        reinforced += 1
                 else:
                     by_id[record_id] = record
                     added += 1
@@ -734,6 +744,7 @@ def _write_records(
             return {
                 "added": added,
                 "reinforced": reinforced,
+                "replayed": replayed,
                 "expired_removed": max(0, len(existing_records) - len(active)),
                 "retained": len(records),
             }
@@ -771,8 +782,20 @@ def persist_memory_candidates(
         "submitted": submitted,
         "accepted": len(normalized),
         "rejected": max(0, submitted - len(normalized)),
-        "role": {"added": 0, "reinforced": 0, "expired_removed": 0, "retained": 0},
-        "shared": {"added": 0, "reinforced": 0, "expired_removed": 0, "retained": 0},
+        "role": {
+            "added": 0,
+            "reinforced": 0,
+            "replayed": 0,
+            "expired_removed": 0,
+            "retained": 0,
+        },
+        "shared": {
+            "added": 0,
+            "reinforced": 0,
+            "replayed": 0,
+            "expired_removed": 0,
+            "retained": 0,
+        },
     }
     if role_records:
         result["role"] = _write_records(
