@@ -2728,6 +2728,484 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertTrue(result["_automation_controls"]["automatic_closure_blocked"])
         self.assertTrue(result["_automation_controls"]["containment_blocked"])
 
+    def test_controlled_evaluation_reviewer_gate_allows_first_or_repaired_response(
+        self,
+    ) -> None:
+        args = type(
+            "Args",
+            (),
+            {"second_opinion_prompt_file": Path("/tmp/reviewer.md")},
+        )()
+        settings = self.runner.default_ai_settings()
+        settings["enabled_ollama_models"] = [
+            "primary:latest",
+            "reviewer:latest",
+        ]
+        settings["agent_models"]["soc-analyst"] = "ollama:primary:latest"
+        settings["agent_second_opinion_models"][
+            "soc-analyst"
+        ] = "ollama:reviewer:latest"
+        prompt_package = {"alert": {"alert_id": "evaluation-review-case"}}
+
+        def candidate(review_package, *, valid):
+            contract = review_package["review_contract"]
+            return {
+                **self.complete_response(
+                    confidence="high",
+                    confidence_score=0.9,
+                    evidence_used=[
+                        "alert",
+                        "alert:evaluation-review-case",
+                    ],
+                    event_status="unknown",
+                    detection_validity="unknown",
+                    activity_disposition="unknown",
+                    handling="investigate",
+                    duplicate_of=None,
+                    hypotheses=[],
+                ),
+                "review_case_id": (
+                    contract["case_id"] if valid else "foreign-case"
+                ),
+                "review_evidence_hash": contract["evidence_hash"],
+                "observables_used": [],
+            }
+
+        for repaired in (False, True):
+            with self.subTest(repaired=repaired):
+                primary = self.runner.validate_response(
+                    self.complete_response(
+                        confidence="low",
+                        confidence_score=0.3,
+                        detection_outcome="inconclusive",
+                    ),
+                    prompt_package,
+                )
+                trigger = self.runner.second_opinion_trigger(
+                    primary,
+                    prompt_package,
+                )
+                calls = 0
+
+                def reviewed_response(
+                    _route,
+                    review_package,
+                    *_args,
+                    **_kwargs,
+                ):
+                    nonlocal calls
+                    calls += 1
+                    return candidate(
+                        review_package,
+                        valid=not repaired or calls == 2,
+                    )
+
+                with mock.patch.object(
+                    self.runner,
+                    "analyze_model_route",
+                    side_effect=reviewed_response,
+                ):
+                    response = self.runner.apply_configured_second_opinion(
+                        prompt_package,
+                        primary,
+                        args,
+                        settings,
+                        "soc-analyst",
+                    )
+
+                reviewer = (
+                    self.runner.precommit_controlled_evaluation_reviewer_gate(
+                        prompt_package,
+                        response,
+                        settings,
+                        "soc-analyst",
+                        trigger_reason=trigger,
+                        freeze_enabled=True,
+                    )
+                )
+                self.assertIs(
+                    reviewer,
+                    response["_second_opinion"]["response"],
+                )
+                self.assertEqual(calls, 2 if repaired else 1)
+                self.assertEqual(
+                    response["_second_opinion"]["attempts"],
+                    2 if repaired else 1,
+                )
+                self.assertEqual(
+                    len(response["_second_opinion"]["validation_failures"]),
+                    1 if repaired else 0,
+                )
+
+    def test_controlled_evaluation_two_invalid_reviews_stop_before_result_commit(
+        self,
+    ) -> None:
+        settings = self.runner.default_ai_settings()
+        settings["enabled_ollama_models"] = [
+            "primary:latest",
+            "reviewer:latest",
+        ]
+        settings["agent_models"]["soc-analyst"] = "ollama:primary:latest"
+        settings["agent_second_opinion_models"][
+            "soc-analyst"
+        ] = "ollama:reviewer:latest"
+        primary = self.complete_response(
+            confidence="low",
+            confidence_score=0.3,
+            detection_outcome="inconclusive",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            prompt_path = root / "prompt.json"
+            out_dir = root / "results"
+            prompt_path.write_text(
+                json.dumps(
+                    {
+                        "package_type": "soc-ai-investigation-prompt",
+                        "agent_role": "soc-analyst",
+                        "alert": {"alert_id": "two-invalid-reviews"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = self.runner.argparse.Namespace(
+                flush_index_only=False,
+                alert_store_url="http://127.0.0.1:8766",
+                generate_prompt=False,
+                prompt_package=prompt_path,
+                prompt_dir=root,
+                max_prompt_bytes=self.runner.DEFAULT_MAX_PROMPT_BYTES,
+                response_json=None,
+                max_response_bytes=self.runner.DEFAULT_MAX_JSON_ARTIFACT_BYTES,
+                investigation_harness_policy=root / "policy.json",
+                investigation_harness_db=root / "harness.sqlite3",
+                reanalysis_attempt_id="controlled-evaluation-attempt",
+                second_opinion_prompt_file=root / "reviewer.md",
+                system_prompt_file=root / "primary.md",
+                out_dir=out_dir,
+                stdout=False,
+            )
+            policy = mock.Mock(enabled=True, mode="shadow")
+            harness = mock.Mock()
+            harness.policy.mode = "shadow"
+            monitor = mock.Mock()
+
+            def invalid_reviewer(
+                _route,
+                review_package,
+                *_args,
+                **_kwargs,
+            ):
+                contract = review_package["review_contract"]
+                return {
+                    **self.complete_response(
+                        evidence_used=[
+                            "alert",
+                            "alert:two-invalid-reviews",
+                        ],
+                        event_status="unknown",
+                        detection_validity="unknown",
+                        activity_disposition="unknown",
+                        handling="investigate",
+                        duplicate_of=None,
+                        hypotheses=[],
+                    ),
+                    "review_case_id": "foreign-case",
+                    "review_evidence_hash": contract["evidence_hash"],
+                    "observables_used": [],
+                }
+
+            with (
+                mock.patch.dict(
+                    self.runner.os.environ,
+                    {self.runner.EVALUATION_FREEZE_MEMORY_ENV: "1"},
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "parse_args",
+                    return_value=args,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "flush_analysis_index_queue",
+                    return_value=(0, 0, 0),
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "effective_ai_settings",
+                    return_value=settings,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "prepare_live_osquery_context",
+                    return_value=None,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "load_investigation_harness_policy",
+                    return_value=policy,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "should_start_onion_sentinel_harness",
+                    return_value=(True, "synthetic"),
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "start_harness_run",
+                    return_value=harness,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "SystemResourceMonitor",
+                    return_value=monitor,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "active_analysis_record_path",
+                    return_value=root / "active.json",
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "build_llm_log_record",
+                    return_value={},
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "publish_current_analysis_phase",
+                    return_value={},
+                ),
+                mock.patch.object(self.runner, "atomic_write_json"),
+                mock.patch.object(self.runner, "append_jsonl"),
+                mock.patch.object(
+                    self.runner,
+                    "analyze_with_config",
+                    return_value=primary,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "analyze_model_route",
+                    side_effect=invalid_reviewer,
+                ) as analyze,
+                mock.patch.object(self.runner, "write_outputs") as write,
+                mock.patch.object(
+                    self.runner,
+                    "queue_analysis_index",
+                ) as queue,
+                mock.patch.object(
+                    self.runner,
+                    "post_analysis_index",
+                ) as commit,
+                self.assertRaisesRegex(
+                    self.runner.ControlledEvaluationReviewerGateError,
+                    "produced no validated response",
+                ),
+            ):
+                self.runner.main()
+
+            self.assertEqual(analyze.call_count, 2)
+            write.assert_not_called()
+            queue.assert_not_called()
+            commit.assert_not_called()
+            self.assertFalse(out_dir.exists())
+
+        # Outside a frozen evaluation the same advisory failure remains
+        # production-compatible and does not raise the precommit exception.
+        reviewer = self.runner.precommit_controlled_evaluation_reviewer_gate(
+            {"alert": {"alert_id": "two-invalid-reviews"}},
+            {
+                "_second_opinion": {
+                    "status": "failed",
+                    "trigger": "synthetic",
+                }
+            },
+            settings,
+            "soc-analyst",
+            trigger_reason="synthetic",
+            freeze_enabled=False,
+        )
+        self.assertIsNone(reviewer)
+
+    def test_elasticsearch_alert_id_suffix_is_not_a_community_id(self) -> None:
+        alert_id = (
+            ".ds-logs-suricata.alerts-so-2026.07.24-000001-"
+            "000535:XuBJm58BIwAfe8Cpckf6"
+        )
+        prompt_package = self.runner.independent_reviewer_package(
+            {"alert": {"alert_id": alert_id}}
+        )
+        contract = prompt_package["review_contract"]
+        response = {
+            **self.complete_response(
+                summary=f"Reviewed Elasticsearch alert document {alert_id}.",
+                evidence_used=["alert", f"alert:{alert_id}"],
+                event_status="unknown",
+                detection_validity="unknown",
+                activity_disposition="unknown",
+                handling="investigate",
+                duplicate_of=None,
+                hypotheses=[],
+            ),
+            "review_case_id": contract["case_id"],
+            "review_evidence_hash": contract["evidence_hash"],
+            "observables_used": [],
+        }
+
+        validated = self.runner.validate_reviewer_response(
+            response,
+            prompt_package,
+        )
+
+        self.assertTrue(validated["_review_contract_validation"]["valid"])
+        community_id = "1:Y9R9syXYWvDIRM6pRrzmcXHA1c4="
+        self.assertEqual(
+            self.runner.REVIEW_COMMUNITY_ID_RE.findall(community_id),
+            [community_id],
+        )
+        self.assertEqual(
+            self.runner.REVIEW_COMMUNITY_ID_RE.findall(
+                "01:Y9R9syXYWvDIRM6pRrzmcXHA1c4="
+            ),
+            [],
+        )
+        self.assertEqual(
+            self.runner.REVIEW_COMMUNITY_ID_RE.findall(
+                "1:Y9R9syXYWvDIRM6pRrzmcXHA1c5="
+            ),
+            [],
+        )
+        self.assertEqual(
+            self.runner.REVIEW_COMMUNITY_ID_RE.findall(alert_id),
+            [],
+        )
+
+    def test_foreign_community_retry_records_bounded_attempt_telemetry(
+        self,
+    ) -> None:
+        args = type(
+            "Args",
+            (),
+            {"second_opinion_prompt_file": Path("/tmp/reviewer.md")},
+        )()
+        settings = self.runner.default_ai_settings()
+        settings["enabled_ollama_models"] = [
+            "primary:latest",
+            "reviewer:latest",
+        ]
+        settings["agent_models"]["soc-analyst"] = "ollama:primary:latest"
+        settings["agent_second_opinion_models"][
+            "soc-analyst"
+        ] = "ollama:reviewer:latest"
+        primary = self.runner.validate_response(
+            self.complete_response(
+                confidence="low",
+                confidence_score=0.3,
+                detection_outcome="inconclusive",
+            )
+        )
+        allowed_community_id = "1:gVOca2cr2eIKwoIKZ8QnLwW2gqU="
+        foreign_community_id = "1:Y9R9syXYWvDIRM6pRrzmcXHA1c4="
+        repair_packages: list[dict] = []
+
+        def invalid_response(_route, review_package, *_args, **_kwargs):
+            if isinstance(review_package.get("review_contract_repair"), dict):
+                repair_packages.append(
+                    json.loads(
+                        json.dumps(
+                            review_package["review_contract_repair"]
+                        )
+                    )
+                )
+            contract = review_package["review_contract"]
+            return {
+                **self.complete_response(
+                    confidence="high",
+                    confidence_score=0.9,
+                    evidence_used=["alert", "alert:community-id-case"],
+                    summary=(
+                        "The supplied evidence included Community ID "
+                        f"{foreign_community_id}."
+                    ),
+                ),
+                "event_status": "observed",
+                "detection_validity": "matched_intent",
+                "activity_disposition": "suspicious",
+                "handling": "escalate",
+                "duplicate_of": None,
+                "hypotheses": [],
+                "review_case_id": contract["case_id"],
+                "review_evidence_hash": contract["evidence_hash"],
+                "observables_used": [],
+            }
+
+        with mock.patch.object(
+            self.runner,
+            "analyze_model_route",
+            side_effect=invalid_response,
+        ) as analyze:
+            result = self.runner.apply_configured_second_opinion(
+                {
+                    "alert": {
+                        "alert_id": "community-id-case",
+                        "community_id": allowed_community_id,
+                    },
+                },
+                primary,
+                args,
+                settings,
+                "soc-analyst",
+            )
+
+        self.assertEqual(analyze.call_count, 2)
+        self.assertEqual(result["_second_opinion"]["status"], "failed")
+        self.assertEqual(result["_second_opinion"]["attempts"], 2)
+        failures = result["_second_opinion"]["validation_failures"]
+        self.assertEqual(len(failures), 2)
+        self.assertEqual(
+            [failure["attempt"] for failure in failures],
+            [1, 2],
+        )
+        self.assertEqual(
+            [failure["call_id"] for failure in failures],
+            ["independent-review-1", "independent-review-2"],
+        )
+        self.assertNotEqual(
+            failures[0]["input_digest"],
+            failures[1]["input_digest"],
+        )
+        self.assertEqual(
+            failures[0]["output_digest"],
+            failures[1]["output_digest"],
+        )
+        for failure in failures:
+            self.assertEqual(
+                failure["schema"],
+                self.runner.REVIEW_VALIDATION_FAILURE_SCHEMA,
+            )
+            self.assertEqual(failure["status"], "validation-failed")
+            self.assertIn("foreign community ID", failure["message"])
+            self.assertIn(foreign_community_id, failure["message"])
+            self.assertRegex(failure["input_digest"], r"^[a-f0-9]{64}$")
+            self.assertRegex(failure["output_digest"], r"^[a-f0-9]{64}$")
+            self.assertLessEqual(
+                len(failure["message"]),
+                self.runner.REVIEW_VALIDATION_MESSAGE_MAX,
+            )
+            self.assertNotIn("response", failure)
+            self.assertNotIn("candidate", failure)
+
+        self.assertEqual(len(repair_packages), 1)
+        repair = repair_packages[0]
+        self.assertIn(
+            "foreign community ID",
+            repair["validation_errors"],
+        )
+        guidance = " ".join(repair["field_guidance"])
+        self.assertIn("Elastic index/document identifiers", guidance)
+        self.assertIn("not Community IDs", guidance)
+        self.assertIn("allowed_observables", guidance)
+
     def test_reviewer_observable_overflow_cannot_hide_foreign_host(self) -> None:
         review_package = self.runner.independent_reviewer_package(
             {

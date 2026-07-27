@@ -26,7 +26,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NoReturn
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -2747,6 +2747,10 @@ EVIDENCE_REFERENCE_TEXT_MAX = 256
 REVIEW_OBSERVABLE_MAX = 256
 REVIEW_EVIDENCE_USED_MAX = 100
 REVIEW_HYPOTHESES_MAX = 20
+REVIEW_VALIDATION_MESSAGE_MAX = 1000
+REVIEW_VALIDATION_FAILURE_SCHEMA = (
+    "onion-sentinel-reviewer-validation-failure-v1"
+)
 REVIEW_IPV4_RE = re.compile(
     r"(?<![A-Za-z0-9])(?:25[0-5]|2[0-4]\d|1?\d?\d)"
     r"(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?![A-Za-z0-9])"
@@ -2756,7 +2760,14 @@ REVIEW_DOMAIN_RE = re.compile(
     r"[a-z]{2,63}(?![A-Za-z0-9_-])"
 )
 REVIEW_COMMUNITY_ID_RE = re.compile(
-    r"(?<![A-Za-z0-9_])\d+:[A-Za-z0-9_+/=-]{8,}(?![A-Za-z0-9_])"
+    # Community ID v1 is the literal version prefix plus a base64-encoded
+    # SHA-1 digest: 27 data characters and one padding character. Requiring
+    # that exact shape prevents Elasticsearch document-ID suffixes such as
+    # ``000535:XuBJm58BIwAfe8Cpckf6`` from becoming foreign observables.
+    # Twenty input bytes leave four significant bits in the final base64
+    # character, so its two pad bits must be zero for the canonical encoding.
+    r"(?<![A-Za-z0-9_])1:[A-Za-z0-9+/]{26}[AEIMQUYcgkosw048]="
+    r"(?![A-Za-z0-9_+/=])"
 )
 REVIEW_OBSERVABLE_KINDS = frozenset({"ip", "domain", "host", "user", "community_id"})
 REVIEW_NON_DOMAIN_SUFFIXES = frozenset(
@@ -7047,6 +7058,73 @@ class ReviewerValidationError(ValueError):
     """An independent review failed its identity or evidence-isolation contract."""
 
 
+def reviewer_validation_failure(
+    *,
+    attempt: int,
+    call_id: str,
+    error: ReviewerValidationError,
+    input_value: Any,
+    response: dict[str, Any],
+) -> dict[str, Any]:
+    """Return bounded validator telemetry without retaining model output."""
+    message = str(error).strip()[:REVIEW_VALIDATION_MESSAGE_MAX]
+    return {
+        "schema": REVIEW_VALIDATION_FAILURE_SCHEMA,
+        "attempt": int(attempt),
+        "call_id": str(call_id)[:128],
+        "status": "validation-failed",
+        "message": message or "reviewer validation failed",
+        "input_digest": harness_digest_json(input_value),
+        "output_digest": harness_digest_json(response),
+    }
+
+
+def reviewer_repair_guidance(validation_message: str) -> list[str]:
+    """Translate validator output into bounded, field-specific repair steps."""
+    message = str(validation_message or "")[:REVIEW_VALIDATION_MESSAGE_MAX]
+    guidance = [
+        (
+            "Return a fresh complete object and correct only against "
+            "response_schema, review_contract, and evidence_reference_contract."
+        )
+    ]
+    if "foreign community ID value(s)" in message:
+        guidance.append(
+            "Community ID correction: use only exact values whose kind is "
+            "community_id in review_contract.allowed_observables. Elastic "
+            "index/document identifiers, including rollover-number and "
+            "document-ID text separated by a colon, are record identifiers, "
+            "not Community IDs; do not add them to observables_used or describe "
+            "them as Community IDs. Cite the matching evidence reference instead."
+        )
+    if (
+        "foreign observables" in message
+        or "omitted from observables_used" in message
+    ):
+        guidance.append(
+            "Observable correction: enumerate each material IP, domain, FQDN, "
+            "or Community ID exactly once using its exact kind and value from "
+            "review_contract.allowed_observables; omit every other value."
+        )
+    if "outside the current contract" in message or "no current corroborating" in message:
+        guidance.append(
+            "Evidence correction: evidence_used may contain only exact refs from "
+            "evidence_reference_contract and must include current corroborating "
+            "collector-owned evidence."
+        )
+    if "review_case_id" in message or "review_evidence_hash" in message:
+        guidance.append(
+            "Identity correction: copy review_contract.case_id and "
+            "review_contract.evidence_hash byte-for-byte into their matching "
+            "response fields."
+        )
+    return guidance[:4]
+
+
+class ControlledEvaluationReviewerGateError(RuntimeError):
+    """A controlled evaluation cannot commit without its reviewer decision."""
+
+
 def reviewer_case_id(prompt_package: dict[str, Any]) -> str:
     local = prompt_package.get("_local_investigation_query_context")
     incident = prompt_package.get("incident_response_evidence")
@@ -7182,6 +7260,10 @@ def independent_reviewer_package(prompt_package: dict[str, Any]) -> dict[str, An
             "Echo case_id and evidence_hash exactly in review_case_id and review_evidence_hash.",
             "List every material IP, domain, host, user, and community_id used in observables_used.",
             "Use only exact allowed_observables and exact evidence_reference_contract refs.",
+            (
+                "Treat Elastic index/document identifiers as record identifiers, "
+                "not Community IDs; never add them to observables_used as community_id."
+            ),
             "Do not repeat boilerplate or introduce facts from another case.",
         ],
     }
@@ -7966,10 +8048,12 @@ def apply_configured_second_opinion(
             )
             return None
 
+    validation_failures: list[dict[str, Any]] = []
+    attempts_started = 0
     try:
-        validation_failures: list[str] = []
         secondary: dict[str, Any] | None = None
         for attempt in range(1, 3):
+            attempts_started = attempt
             call_id = f"independent-review-{attempt}"
             observe_harness(
                 lambda: harness_runtime.preflight_model_call(
@@ -8039,9 +8123,18 @@ def apply_configured_second_opinion(
                     if harness_runtime is not None
                     else None
                 )
-                validation_failures.append(str(exc)[:1000])
+                validation_failures.append(
+                    reviewer_validation_failure(
+                        attempt=attempt,
+                        call_id=call_id,
+                        error=exc,
+                        input_value=review_package,
+                        response=candidate,
+                    )
+                )
                 if attempt >= 2:
                     raise
+                validation_message = validation_failures[-1]["message"]
                 review_package["review_contract_repair"] = {
                     "attempt": 1,
                     "instruction": (
@@ -8049,7 +8142,10 @@ def apply_configured_second_opinion(
                         "complete object matching response_schema; do not copy or discuss the "
                         "invalid response."
                     ),
-                    "validation_errors": validation_failures[-1],
+                    "validation_errors": validation_message,
+                    "field_guidance": reviewer_repair_guidance(
+                        validation_message
+                    ),
                 }
         if secondary is None:
             raise ReviewerValidationError("reviewer produced no validated response")
@@ -8064,7 +8160,7 @@ def apply_configured_second_opinion(
             "model_route": route,
             "system_prompt_file": str(reviewer_prompt),
             "runtime_seconds": round(time.monotonic() - started_monotonic, 3),
-            "attempts": 1 + len(validation_failures),
+            "attempts": attempts_started,
             "validation_failures": validation_failures,
             "comparison": comparison,
             "response": secondary,
@@ -8118,6 +8214,8 @@ def apply_configured_second_opinion(
             "model_route": route,
             "system_prompt_file": str(reviewer_prompt),
             "runtime_seconds": round(time.monotonic() - started_monotonic, 3),
+            "attempts": attempts_started,
+            "validation_failures": validation_failures,
             "error": str(exc)[:1000],
         }
     except Exception as exc:
@@ -8132,6 +8230,8 @@ def apply_configured_second_opinion(
             "model_route": route,
             "system_prompt_file": str(reviewer_prompt),
             "runtime_seconds": round(time.monotonic() - started_monotonic, 3),
+            "attempts": attempts_started,
+            "validation_failures": validation_failures,
             "error": f"{type(exc).__name__}: {exc}"[:1000],
         }
     finally:
@@ -8142,6 +8242,117 @@ def apply_configured_second_opinion(
             trigger_reason=trigger,
         )
     return primary_response
+
+
+def precommit_controlled_evaluation_reviewer_gate(
+    prompt_package: dict[str, Any],
+    response: dict[str, Any],
+    settings: dict[str, Any],
+    agent_role: str,
+    *,
+    trigger_reason: str,
+    freeze_enabled: bool,
+) -> dict[str, Any] | None:
+    """Require one validated reviewer decision before evaluation persistence.
+
+    Production deliberately retains its advisory reviewer behavior. A frozen
+    controlled evaluation is different: when an independently configured
+    reviewer was triggered, a primary-only result would be incomplete yet
+    could otherwise reach the artifact and alert-store commit boundary.
+    Revalidate the single retained reviewer response and its bounded repair
+    grammar before the caller records the decision in the harness ledger.
+    """
+    second_opinion = (
+        response.get("_second_opinion")
+        if isinstance(response.get("_second_opinion"), dict)
+        else None
+    )
+    reviewer_response = (
+        second_opinion.get("response")
+        if isinstance(second_opinion, dict)
+        and isinstance(second_opinion.get("response"), dict)
+        else None
+    )
+    if not freeze_enabled:
+        return reviewer_response
+    trigger = str(trigger_reason or "").strip()
+    if not trigger:
+        return reviewer_response
+
+    reviewer_route = str(
+        (settings.get("agent_second_opinion_models") or {}).get(agent_role)
+        or ""
+    ).strip()
+    if not reviewer_route:
+        return reviewer_response
+    primary_route = str(
+        (settings.get("agent_models") or {}).get(agent_role) or ""
+    ).strip()
+    if model_route_identity(primary_route, settings) == model_route_identity(
+        reviewer_route,
+        settings,
+    ):
+        return reviewer_response
+
+    def reject(reason: str) -> NoReturn:
+        raise ControlledEvaluationReviewerGateError(
+            "controlled evaluation reviewer precommit gate failed: "
+            f"{reason[:1000]}"
+        )
+
+    if second_opinion is None or reviewer_response is None:
+        status = (
+            str(second_opinion.get("status") or "missing")
+            if isinstance(second_opinion, dict)
+            else "missing"
+        )
+        error = (
+            str(second_opinion.get("error") or "").strip()
+            if isinstance(second_opinion, dict)
+            else ""
+        )
+        reject(
+            "the triggered independent reviewer produced no validated "
+            f"response (status={status}{'; error=' + error if error else ''})"
+        )
+
+    status = str(second_opinion.get("status") or "").strip().lower()
+    if status not in {"completed", "invalid"}:
+        reject(f"reviewer response has non-recordable status {status or 'missing'}")
+    attempts = second_opinion.get("attempts")
+    failures = second_opinion.get("validation_failures")
+    if (
+        isinstance(attempts, bool)
+        or attempts not in {1, 2}
+        or not isinstance(failures, list)
+        or len(failures) != attempts - 1
+    ):
+        reject("reviewer attempt history exceeds or violates the one-repair contract")
+
+    review_package = independent_reviewer_package(prompt_package)
+    try:
+        validated = validate_reviewer_response(
+            reviewer_response,
+            review_package,
+        )
+        validate_response(validated, review_package)
+    except (ReviewerValidationError, SystemExit, TypeError, ValueError) as exc:
+        reject(f"retained reviewer response is not recordable: {exc}")
+
+    attestation = reviewer_response.get("_review_contract_validation")
+    expected_contract = review_package["review_contract"]
+    if (
+        not isinstance(attestation, dict)
+        or attestation.get("schema")
+        != "onion-sentinel-independent-review-validation-v1"
+        or attestation.get("valid") is not True
+        or str(attestation.get("case_id") or "")
+        != str(expected_contract.get("case_id") or "")
+        or str(attestation.get("evidence_hash") or "")
+        != str(expected_contract.get("evidence_hash") or "")
+    ):
+        reject("reviewer validation attestation is missing or does not bind this case")
+    return reviewer_response
 
 
 def analyze_with_config(
@@ -10634,6 +10845,10 @@ def main() -> int:
             if harness_runtime is not None
             else None
         )
+        configured_reviewer_trigger = second_opinion_trigger(
+            response,
+            prompt_package,
+        )
         if not args.response_json:
             response = apply_configured_second_opinion(
                 prompt_package,
@@ -10650,19 +10865,25 @@ def main() -> int:
                 response,
             )
             notify_analysis_phase(update_current_phase, "post_processing")
-        if isinstance(response.get("_second_opinion"), dict):
-            reviewer_response = response["_second_opinion"].get("response")
-            if isinstance(reviewer_response, dict):
-                observe_harness(
-                    lambda: harness_runtime.record_response(
-                        reviewer_response,
-                        decision_id="independent-review",
-                        decision_type="independent-review",
-                        hypothesis_revision=75,
-                    )
-                    if harness_runtime is not None
-                    else None
+        reviewer_response = precommit_controlled_evaluation_reviewer_gate(
+            prompt_package,
+            response,
+            settings,
+            agent_role,
+            trigger_reason=configured_reviewer_trigger,
+            freeze_enabled=evaluation_memory_frozen,
+        )
+        if isinstance(reviewer_response, dict):
+            observe_harness(
+                lambda: harness_runtime.record_response(
+                    reviewer_response,
+                    decision_id="independent-review",
+                    decision_type="independent-review",
+                    hypothesis_revision=75,
                 )
+                if harness_runtime is not None
+                else None
+            )
         if agent_role == "incident-responder":
             # Attach collector-owned provenance after every model call. This is
             # deliberately not accepted from model output: only the restricted
