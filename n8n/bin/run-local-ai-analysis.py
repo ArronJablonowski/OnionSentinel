@@ -2855,7 +2855,6 @@ def _exact_hosted_columnar_envelope(
             zip(
                 INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS,
                 row,
-                strict=True,
             )
         )
         round_number = item.get("round")
@@ -3723,7 +3722,6 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
                 zip(
                     INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS,
                     row,
-                    strict=True,
                 )
             )
             round_number = canonical_integer(item.get("round"), minimum=1)

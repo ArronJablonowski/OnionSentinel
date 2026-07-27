@@ -2,6 +2,7 @@
 """Focused contracts for the provider-neutral investigation pivot loop."""
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import importlib.util
@@ -135,6 +136,22 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             BIN_DIR / "investigation_query_contract.py",
         )
         cls.harness = sys.modules["onion_sentinel_harness"]
+
+    def test_runner_does_not_require_python310_zip_strict(self) -> None:
+        tree = ast.parse(
+            (BIN_DIR / "run-local-ai-analysis.py").read_text(
+                encoding="utf-8",
+            )
+        )
+        incompatible_calls = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "zip"
+            and any(keyword.arg == "strict" for keyword in node.keywords)
+        ]
+        self.assertEqual(incompatible_calls, [])
 
     @staticmethod
     def elastic_request(query_id: str = "pivot-1") -> dict:
@@ -3166,7 +3183,6 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         for source, compact in zip(
             trusted_query_audit,
             result["trusted_query_audit"],
-            strict=True,
         ):
             self.assertEqual(
                 compact["prompt_projection"],
@@ -3843,8 +3859,8 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             ).hexdigest(),
         )
         columns = columnar["columns"]
-        for source, row in zip(expected, columnar["rows"], strict=True):
-            values = dict(zip(columns, row, strict=True))
+        for source, row in zip(expected, columnar["rows"]):
+            values = dict(zip(columns, row))
             self.assertEqual(values["round"], source["round"])
             self.assertEqual(values["query_id"], source["query_id"])
             self.assertEqual(
@@ -3938,7 +3954,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         )
         columns = hosted_columnar["columns"]
         hosted_row = dict(
-            zip(columns, hosted_columnar["rows"][0], strict=True)
+            zip(columns, hosted_columnar["rows"][0])
         )
         self.assertEqual(
             hosted_row["evidence_ref_or_empty"],
@@ -4227,7 +4243,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         columns = columnar["columns"]
         self.assertEqual(
             [
-                dict(zip(columns, row, strict=True))["returned"]
+                dict(zip(columns, row))["returned"]
                 for row in columnar["rows"]
             ],
             [0, 7],
@@ -4374,7 +4390,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         columns = columnar["columns"]
         observed_statuses = [
             status_values[
-                dict(zip(columns, row, strict=True))["status_index"]
+                dict(zip(columns, row))["status_index"]
             ]
             for row in columnar["rows"]
         ]
@@ -4619,7 +4635,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         columns = columnar["columns"]
         semantic_documents = [
             json.loads(columnar["semantics_values"][
-                dict(zip(columns, row, strict=True))["semantics_index"]
+                dict(zip(columns, row))["semantics_index"]
             ])
             for row in columnar["rows"]
         ]
