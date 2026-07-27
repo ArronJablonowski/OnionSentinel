@@ -3356,10 +3356,21 @@ class HarnessRun:
                 if DIGEST_RE.fullmatch(digest):
                     trusted_query_digests.append(digest)
                     returned_count = observed_returned_count(audit)
-                    ref = str(
+                    result_digest = str(
+                        audit.get("result_digest") or ""
+                    ).lower()
+                    if not DIGEST_RE.fullmatch(result_digest):
+                        result_digest = ""
+                    supplied_ref = str(
                         audit.get("evidence_ref")
                         or f"query:{digest}"
-                    )[:512]
+                    ).strip()
+                    if not supplied_ref or supplied_ref.startswith("query:"):
+                        ref = f"query:{digest}"
+                        if DIGEST_RE.fullmatch(result_digest):
+                            ref += f":{result_digest}"
+                    else:
+                        ref = supplied_ref[:512]
                     self.store.register_evidence(
                         self.run_id,
                         evidence_ref=ref,
@@ -3380,7 +3391,7 @@ class HarnessRun:
                         ),
                         status=str(audit.get("status") or status),
                         evidence_digest=str(
-                            audit.get("result_digest") or digest
+                            result_digest or digest
                         ),
                         metadata={
                             "query_id": audit.get("query_id"),

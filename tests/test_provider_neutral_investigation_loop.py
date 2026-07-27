@@ -1953,9 +1953,232 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         query_evidence = next(
             item
             for item in exported["evidence"]
-            if item["evidence_ref"] == f"query:{query_digest}"
+            if item["evidence_ref"]
+            == f"query:{query_digest}:{result_digest}"
         )
         self.assertEqual(query_evidence["evidence_digest"], result_digest)
+        self.assertNotIn(
+            f"query:{query_digest}",
+            {
+                item["evidence_ref"]
+                for item in exported["evidence"]
+            },
+        )
+
+    def test_result_digest_recatalogue_survives_sparse_trusted_audit(
+        self,
+    ) -> None:
+        prompt_package = {
+            "case_id": "case-sparse-query-audit",
+            "alert": {
+                "alert_id": (
+                    ".ds-logs-suricata.alerts-so-2026.07.24-000001:"
+                    "alert-sparse-query-audit"
+                ),
+            },
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": (
+                        ".ds-logs-suricata.alerts-so-"
+                        "2026.07.24-000001"
+                    ),
+                    "id": "alert-sparse-query-audit",
+                },
+            },
+        }
+        self.runner.attach_evidence_reference_contract(prompt_package)
+        policy_value = json.loads(
+            (
+                REPO_ROOT
+                / "n8n"
+                / "config"
+                / "investigation_harness_policy.json"
+            ).read_text(encoding="utf-8")
+        )
+        policy_value["enabled"] = True
+        policy_value["mode"] = "enforce"
+        policy = self.harness.HarnessPolicy.from_dict(policy_value)
+        query_digest = "1" * 64
+        result_digest = "2" * 64
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            runtime = self.harness.start_harness_run(
+                run_id="run-sparse-query-audit",
+                prompt_package=prompt_package,
+                role="soc-analyst",
+                assigned_route="codex-cli:gpt-5.5:medium",
+                configuration={"test": True},
+                policy=policy,
+                db_path=Path(temp_name) / "harness.sqlite3",
+            )
+            self.assertIsNotNone(runtime)
+
+            def query_executor(
+                _package,
+                requests,
+                *,
+                round_number,
+                live_osquery_config,
+            ):
+                self.assertIsNone(live_osquery_config)
+                return {
+                    "schema": (
+                        self.runner.INVESTIGATION_QUERY_RESULT_SCHEMA
+                    ),
+                    "round": round_number,
+                    "requests": requests,
+                    "results": [
+                        {
+                            "query_id": requests[0]["query_id"],
+                            "backend": "elastic",
+                            "pack": "network_flow",
+                            "status": "ok",
+                            "read_only": True,
+                            "query_digest": query_digest,
+                            "result_digest": result_digest,
+                            "returned_hits": 0,
+                            "trusted_query_audit": [
+                                {
+                                    "query_id": requests[0]["query_id"],
+                                    "status": "ok",
+                                    "query_digest": query_digest,
+                                    "result_digest": "not-a-digest",
+                                    "returned_hits": 0,
+                                }
+                            ],
+                        }
+                    ],
+                    "audit": [],
+                }
+
+            response = self.runner.apply_investigation_query_loop(
+                prompt_package,
+                {
+                    "investigation_query_requests": [
+                        self.elastic_request()
+                    ]
+                },
+                object(),
+                {
+                    "agent_models": {
+                        "soc-analyst": "codex-cli:gpt-5.5:medium",
+                    }
+                },
+                "soc-analyst",
+                harness_runtime=runtime,
+                model_executor=mock.Mock(
+                    return_value={
+                        "summary": "sparse audit recatalogued",
+                        "_analysis_model_route": (
+                            "codex-cli:gpt-5.5:medium"
+                        ),
+                    }
+                ),
+                query_executor=query_executor,
+            )
+            exported = runtime.store.export_trace(runtime.run_id)
+
+        self.assertEqual(
+            response["summary"],
+            "sparse audit recatalogued",
+        )
+        refs = {
+            item["evidence_ref"]: item["evidence_digest"]
+            for item in exported["evidence"]
+        }
+        self.assertEqual(
+            refs[f"query:{query_digest}"],
+            query_digest,
+        )
+        self.assertEqual(
+            refs[f"query:{query_digest}:{result_digest}"],
+            result_digest,
+        )
+
+    def test_result_bound_query_references_preserve_full_digests(
+        self,
+    ) -> None:
+        result_digest = "a" * 64
+        first_query = "b" * 64
+        second_query = "c" * 64
+        for namespace in ("pack", "query-id"):
+            with self.subTest(namespace=namespace):
+                first_ref, first_digest = (
+                    self.runner.result_bound_query_reference(
+                        first_query.upper(),
+                        result_digest.upper(),
+                        namespace=namespace,
+                        label="long-label-" * 40,
+                    )
+                )
+                second_ref, second_digest = (
+                    self.runner.result_bound_query_reference(
+                        second_query,
+                        result_digest,
+                        namespace=namespace,
+                        label="long-label-" * 40,
+                    )
+                )
+                self.assertNotEqual(first_ref, second_ref)
+                self.assertLessEqual(
+                    len(first_ref),
+                    self.runner.EVIDENCE_REFERENCE_TEXT_MAX,
+                )
+                self.assertIn(first_query, first_ref)
+                self.assertIn(second_query, second_ref)
+                self.assertTrue(first_ref.endswith(result_digest))
+                self.assertTrue(second_ref.endswith(result_digest))
+                self.assertEqual(first_digest, result_digest)
+                self.assertEqual(second_digest, result_digest)
+
+        legacy_ref, legacy_digest = (
+            self.runner.result_bound_query_reference(
+                first_query.upper(),
+                "not-a-digest",
+            )
+        )
+        self.assertEqual(legacy_ref, f"query:{first_query}")
+        self.assertEqual(legacy_digest, first_query)
+        changed_result_ref, _ = (
+            self.runner.result_bound_query_reference(
+                first_query,
+                "d" * 64,
+            )
+        )
+        self.assertNotEqual(
+            changed_result_ref,
+            self.runner.result_bound_query_reference(
+                first_query,
+                result_digest,
+            )[0],
+        )
+
+        contract = self.runner.evidence_reference_contract(
+            {
+                "investigation_query_results": {
+                    "results": [
+                        {
+                            "query_id": "query-one",
+                            "query_digest": first_query,
+                            "result_digest": result_digest,
+                            "evidence_ref": f"query:{second_query}",
+                            "status": "ok",
+                            "returned_hits": 1,
+                        }
+                    ]
+                }
+            }
+        )
+        refs = {item["ref"] for item in contract["references"]}
+        self.assertIn(
+            f"query:{first_query}:{result_digest}",
+            refs,
+        )
+        self.assertNotIn(f"query:{second_query}", refs)
 
     def test_reviewer_preflight_precedes_reviewer_execution(self) -> None:
         events: list[tuple] = []

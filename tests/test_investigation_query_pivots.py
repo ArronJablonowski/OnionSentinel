@@ -20,6 +20,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 BIN_DIR = REPO_ROOT / "n8n" / "bin"
 WRAPPER_PATH = REPO_ROOT / "security-onion" / "bin" / "export-incident-evidence"
 COLLECTOR_PATH = BIN_DIR / "collect-investigation-pivots.py"
+COMPAT_V1_COLLECTOR_PATH = (
+    REPO_ROOT
+    / "n8n"
+    / "compat"
+    / "investigation-pivots-v1"
+    / "collect-investigation-pivots.py"
+)
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
@@ -1146,6 +1153,10 @@ class InvestigationPivotCollectorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.collector = load_source_module("investigation_pivot_collector_test", COLLECTOR_PATH)
+        cls.compat_v1_collector = load_source_module(
+            "investigation_pivot_collector_v1_test",
+            COMPAT_V1_COLLECTOR_PATH,
+        )
 
     def test_collector_returns_model_evidence_and_full_query_audit(self) -> None:
         request = authorize_investigation_query_request(proposal(), context())
@@ -1163,13 +1174,29 @@ class InvestigationPivotCollectorTests(unittest.TestCase):
             )
 
         self.assertTrue(artifact["complete"])
-        self.assertEqual(artifact["model_evidence"]["results"][0]["query_id"], "query-1")
+        model_result = artifact["model_evidence"]["results"][0]
+        self.assertEqual(model_result["query_id"], "query-1")
         audit = artifact["query_audit"][0]
         self.assertEqual(audit["query_dsl"], build_query_dsl(request["queries"][0]))
         self.assertEqual(audit["index_scope"], PACKS["dns_activity"]["indices"])
+        expected_result_digest = canonical_digest(response["results"][0])
+        self.assertEqual(model_result["result_digest"], expected_result_digest)
+        self.assertEqual(audit["result_digest"], expected_result_digest)
         self.assertEqual(
             artifact["audit"]["security_onion_response_digest"],
             canonical_digest(response),
+        )
+        compat_model_result = self.compat_v1_collector._model_evidence(
+            response
+        )["results"][0]
+        compat_audit = self.compat_v1_collector._query_audit(response)[0]
+        self.assertEqual(
+            compat_model_result["result_digest"],
+            expected_result_digest,
+        )
+        self.assertEqual(
+            compat_audit["result_digest"],
+            expected_result_digest,
         )
 
     def test_model_evidence_withholds_hits_when_controls_fail(self) -> None:

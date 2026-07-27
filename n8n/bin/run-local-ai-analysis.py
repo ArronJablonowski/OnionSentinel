@@ -2804,6 +2804,48 @@ def evidence_source_class(source: Any) -> str:
     }.get(root, root or "unknown")
 
 
+def result_bound_query_reference(
+    query_digest: Any,
+    result_digest: Any = "",
+    *,
+    namespace: str = "query",
+    label: Any = "",
+) -> tuple[str, str]:
+    """Return an immutable query evidence ref and its strongest safe digest.
+
+    A query digest identifies the statement, not the returned snapshot. When a
+    collector supplies a result digest, include it in the reference so a later
+    execution of the same query cannot collide with or silently reuse evidence
+    from a different result set.
+    """
+    query_text = _bounded_reference(query_digest)[:64].lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", query_text):
+        return "", ""
+    result_text = _bounded_reference(result_digest)[:64].lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", result_text):
+        result_text = ""
+    namespace = str(namespace or "").strip().lower()
+    if namespace not in {"query", "pack", "query-id"}:
+        return "", ""
+    suffix = f":{query_text}"
+    if result_text:
+        suffix += f":{result_text}"
+    if namespace == "query":
+        reference = f"query{suffix}"
+    else:
+        maximum_label = (
+            EVIDENCE_REFERENCE_TEXT_MAX
+            - len(namespace)
+            - 1
+            - len(suffix)
+        )
+        bounded_label = _bounded_reference(label)[:maximum_label]
+        if not bounded_label:
+            return "", ""
+        reference = f"{namespace}:{bounded_label}{suffix}"
+    return reference, result_text or query_text
+
+
 def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any]:
     """Build a bounded allowlist of model-citeable, collector-owned references.
 
@@ -2907,31 +2949,51 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
             digest = value.get("query_digest")
             result_digest = value.get("result_digest")
             if digest:
-                digest_text = _bounded_reference(digest)
+                query_ref, query_evidence_digest = (
+                    result_bound_query_reference(
+                        digest,
+                        result_digest,
+                    )
+                )
                 add(
-                    f"query:{digest_text}",
+                    query_ref,
                     source=".".join(path[-3:]) or "query",
                     source_class=path[0] if path else "query",
                     corroborating=str(status or "").lower() in {"ok", "success", "completed"},
                     status=status,
                     returned=returned,
-                    evidence_digest=result_digest,
+                    evidence_digest=query_evidence_digest,
                 )
                 pack = value.get("pack")
                 if pack:
+                    pack_ref, _ = result_bound_query_reference(
+                        digest,
+                        result_digest,
+                        namespace="pack",
+                        label=pack,
+                    )
                     add(
-                        f"pack:{_bounded_reference(pack)}:{digest_text}",
+                        pack_ref,
                         source=".".join(path[-3:]) or "query",
                         source_class=path[0] if path else "query",
                         corroborating=str(status or "").lower() in {"ok", "success", "completed"},
                         status=status,
                         returned=returned,
-                        evidence_digest=result_digest,
+                        evidence_digest=query_evidence_digest,
                     )
             evidence_ref = value.get("evidence_ref")
             if evidence_ref:
+                normalized_evidence_ref = _bounded_reference(evidence_ref)
+                evidence_ref_digest = result_digest
+                if normalized_evidence_ref.startswith("query:") and digest:
+                    normalized_evidence_ref, evidence_ref_digest = (
+                        result_bound_query_reference(
+                            digest,
+                            result_digest,
+                        )
+                    )
                 add(
-                    evidence_ref,
+                    normalized_evidence_ref,
                     source=".".join(path[-3:]) or "evidence",
                     source_class=path[0] if path else "evidence",
                     corroborating=str(status or "ok").lower() in {
@@ -2939,18 +3001,24 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
                     },
                     status=status,
                     returned=returned,
-                    evidence_digest=result_digest,
+                    evidence_digest=evidence_ref_digest,
                 )
             query_id = value.get("query_id")
             if query_id and digest:
+                query_id_ref, _ = result_bound_query_reference(
+                    digest,
+                    result_digest,
+                    namespace="query-id",
+                    label=query_id,
+                )
                 add(
-                    f"query-id:{_bounded_reference(query_id)}:{_bounded_reference(digest)}",
+                    query_id_ref,
                     source=".".join(path[-3:]) or "query",
                     source_class=path[0] if path else "query",
                     corroborating=str(status or "").lower() in {"ok", "success", "completed"},
                     status=status,
                     returned=returned,
-                    evidence_digest=result_digest,
+                    evidence_digest=query_evidence_digest,
                 )
             request_id = value.get("request_id")
             if request_id:
