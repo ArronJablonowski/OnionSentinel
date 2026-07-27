@@ -130,6 +130,13 @@ Configuration remains disabled by default:
 - Relay: `/etc/so-alert-relay/live-osquery.json`
 - Security Onion: `/etc/onion-sentinel/live-osquery.json`
 
+The three-node configuration is the operator enablement boundary for the
+legacy provider-neutral workflow when the custom Onion Sentinel harness is not
+active. When that harness is active, live endpoint OSQuery is additionally an
+explicit approval-gated operational capability. A missing, denied, or failed
+approval decision blocks dispatch in both shadow and enforce modes; enabling
+the transport configuration alone does not manufacture per-run approval.
+
 Enable it only after configuring exact operator aliases on all three nodes,
 mapping each alias to one exact Fleet agent ID on Security Onion, pinning both
 SSH host keys, installing the two dedicated keys, configuring a trusted Kibana

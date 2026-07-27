@@ -77,6 +77,9 @@ from onion_sentinel_harness import (  # noqa: E402
     digest_json as harness_digest_json,
     external_agent_harness_provider,
     load_policy as load_investigation_harness_policy,
+    policy_decision_is_effective,
+    query_backend_capability,
+    query_backend_is_approval_gated,
     resolve_query_binding,
     should_start_onion_sentinel_harness,
     start_harness_run,
@@ -7141,12 +7144,38 @@ def apply_investigation_query_loop(
                     if harness_runtime is not None
                     else None
                 )
+                missing_required_decision = bool(
+                    harness_runtime is not None
+                    and tool_decision is None
+                    and query_backend_is_approval_gated(
+                        request["backend"]
+                    )
+                )
                 if (
                     harness_runtime is not None
-                    and harness_runtime.policy.mode == "enforce"
-                    and tool_decision is not None
-                    and not tool_decision.allowed
+                    and (
+                        missing_required_decision
+                        or (
+                            tool_decision is not None
+                            and not policy_decision_is_effective(
+                                harness_runtime.policy.mode,
+                                tool_decision,
+                            )
+                        )
+                    )
                 ):
+                    denied_capability = (
+                        tool_decision.capability
+                        if tool_decision is not None
+                        else query_backend_capability(
+                            request["backend"]
+                        )
+                    )
+                    denied_reason = (
+                        tool_decision.reason
+                        if tool_decision is not None
+                        else "approval authorization was unavailable"
+                    )
                     rejected.append(
                         {
                             "query_id": request["query_id"],
@@ -7155,7 +7184,7 @@ def apply_investigation_query_loop(
                             "read_only": True,
                             "error": (
                                 "Onion Sentinel harness denied capability "
-                                f"{tool_decision.capability}: {tool_decision.reason}"
+                                f"{denied_capability}: {denied_reason}"
                             ),
                         }
                     )
@@ -12989,9 +13018,9 @@ def main() -> int:
                         reviewer_memory_candidates
                     ),
                 }
-                if (
-                    harness_runtime.policy.mode == "enforce"
-                    and not memory_decision.allowed
+                if not policy_decision_is_effective(
+                    harness_runtime.policy.mode,
+                    memory_decision,
                 ):
                     harness_memory_blocked_reason = memory_decision.reason[:500]
                     controls = (
@@ -13019,8 +13048,9 @@ def main() -> int:
                     "primary_candidate_count": 0,
                     "reviewer_candidate_count": 0,
                 }
-            # Shadow telemetry belongs only in the harness ledger. It must not
-            # alter the model response or the authoritative alert-store payload.
+            # Ordinary shadow qualification telemetry belongs only in the
+            # harness ledger. A missing explicit approval is a safety boundary,
+            # so that denial may still block writeback in every policy mode.
             observe_harness(
                 lambda: harness_runtime.store.append_event(
                     harness_runtime.run_id,

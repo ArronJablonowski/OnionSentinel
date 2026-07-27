@@ -191,6 +191,20 @@ APPROVAL_GATED_CAPABILITIES = (
     MUTATING_CAPABILITIES | SENSITIVE_ACTIVE_CAPABILITIES
 )
 ALL_CAPABILITIES = READ_ONLY_CAPABILITIES | MUTATING_CAPABILITIES
+QUERY_BACKEND_CAPABILITIES = {
+    "elastic": "security-onion.events.query",
+    "oql": "security-onion.oql.query",
+    "osquery": "endpoint.osquery.query",
+    "pcap_zeek": "pcap.derived.query",
+}
+
+
+def query_backend_capability(backend: object) -> str:
+    return QUERY_BACKEND_CAPABILITIES.get(str(backend), "unknown")
+
+
+def query_backend_is_approval_gated(backend: object) -> bool:
+    return query_backend_capability(backend) in APPROVAL_GATED_CAPABILITIES
 
 DEFAULT_ROLE_CAPABILITIES: dict[str, frozenset[str]] = {
     AgentRole.SOC_ANALYST.value: frozenset(
@@ -876,6 +890,25 @@ class PolicyDecision:
     requires_approval: bool = False
 
 
+def policy_decision_is_effective(
+    mode: str,
+    decision: PolicyDecision,
+) -> bool:
+    """Return whether a policy decision permits the requested operation.
+
+    Shadow mode may observe ordinary policy denials without changing the
+    existing workflow, but it must never manufacture consent for an operation
+    that explicitly requires human approval.
+    """
+    return bool(
+        decision.allowed
+        or (
+            str(mode).strip().lower() == "shadow"
+            and not decision.requires_approval
+        )
+    )
+
+
 @dataclasses.dataclass(frozen=True)
 class HarnessPolicy:
     version: str
@@ -1066,13 +1099,23 @@ class HarnessPolicy:
         *,
         approved: bool = False,
     ) -> PolicyDecision:
+        requires_approval = capability in self.approval_required
         if role not in self.role_capabilities:
-            return PolicyDecision(False, capability, "unknown agent role")
+            return PolicyDecision(
+                False,
+                capability,
+                "unknown agent role",
+                requires_approval=requires_approval,
+            )
         if capability not in ALL_CAPABILITIES:
             return PolicyDecision(False, capability, "capability is not registered")
         if capability not in self.role_capabilities[role]:
-            return PolicyDecision(False, capability, "capability is not assigned to role")
-        requires_approval = capability in self.approval_required
+            return PolicyDecision(
+                False,
+                capability,
+                "capability is not assigned to role",
+                requires_approval=requires_approval,
+            )
         if requires_approval and not approved:
             return PolicyDecision(
                 False,
@@ -3218,13 +3261,7 @@ class HarnessRun:
         backend: str,
         approved: bool = False,
     ) -> PolicyDecision:
-        capability_by_backend = {
-            "elastic": "security-onion.events.query",
-            "oql": "security-onion.oql.query",
-            "osquery": "endpoint.osquery.query",
-            "pcap_zeek": "pcap.derived.query",
-        }
-        capability = capability_by_backend.get(str(backend), "unknown")
+        capability = query_backend_capability(backend)
         decision = self.policy.authorize(
             self.envelope.role,
             capability,
@@ -3250,8 +3287,9 @@ class HarnessRun:
                 "capability": capability,
                 "allowed": decision.allowed,
                 "approved": approved,
-                "effective_in_shadow": (
-                    decision.allowed or self.policy.mode == "shadow"
+                "effective_in_shadow": policy_decision_is_effective(
+                    "shadow",
+                    decision,
                 ),
                 "requires_approval": decision.requires_approval,
                 "reason": decision.reason,
@@ -3604,12 +3642,6 @@ class HarnessRun:
                     or "proposal rejected before execution",
                     "rejected_before_execution": True,
                 }
-        capability_by_backend = {
-            "elastic": "security-onion.events.query",
-            "oql": "security-onion.oql.query",
-            "osquery": "endpoint.osquery.query",
-            "pcap_zeek": "pcap.derived.query",
-        }
         for query_id, request in request_by_id.items():
             result = result_by_id.get(query_id, {})
             backend = str(request.get("backend") or result.get("backend") or "")
@@ -3644,7 +3676,7 @@ class HarnessRun:
                 call_id=f"round-{round_number}-{query_id}"[:128],
                 round_number=round_number,
                 backend=backend,
-                capability=capability_by_backend.get(backend, "unknown"),
+                capability=query_backend_capability(backend),
                 purpose=str(request.get("purpose") or ""),
                 request_digest=digest_json(request),
                 result_digest=digest_json(result),

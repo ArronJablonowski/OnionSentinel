@@ -37,10 +37,17 @@ class RecordingHarness:
             self.mode = mode
 
     class _Decision:
-        def __init__(self, allowed: bool, backend: str) -> None:
+        def __init__(
+            self,
+            allowed: bool,
+            backend: str,
+            *,
+            requires_approval: bool,
+        ) -> None:
             self.allowed = allowed
             self.capability = f"query.{backend}"
             self.reason = "test policy decision"
+            self.requires_approval = requires_approval
 
     def __init__(
         self,
@@ -48,11 +55,13 @@ class RecordingHarness:
         *,
         mode: str = "enforce",
         tool_allowed: bool = True,
+        tool_requires_approval: bool = False,
         fail_authorization: bool = False,
     ) -> None:
         self.events = events
         self.policy = self._Policy(mode)
         self.tool_allowed = tool_allowed
+        self.tool_requires_approval = tool_requires_approval
         self.fail_authorization = fail_authorization
 
     def phase(self, phase: str, route: str = "", reason: str = "") -> None:
@@ -70,7 +79,11 @@ class RecordingHarness:
         )
         if self.fail_authorization:
             raise RuntimeError("synthetic shadow observation failure")
-        return self._Decision(self.tool_allowed, backend)
+        return self._Decision(
+            self.tool_allowed,
+            backend,
+            requires_approval=self.tool_requires_approval,
+        )
 
     def preflight_query_batch(
         self,
@@ -2220,6 +2233,210 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         result = response["_investigation_query_audit"]["rounds"][0]["results"][0]
         self.assertEqual(result["status"], "rejected")
         self.assertIn("harness denied capability", result["error"].lower())
+
+    def test_shadow_approval_denial_prevents_operational_query_execution(
+        self,
+    ) -> None:
+        events: list[tuple] = []
+        harness = RecordingHarness(
+            events,
+            mode="shadow",
+            tool_allowed=False,
+            tool_requires_approval=True,
+        )
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"osquery": {"enabled": True}},
+            },
+        }
+        request = {
+            "query_id": "live-endpoint-denied",
+            "backend": "osquery",
+            "purpose": "Inspect a bounded endpoint process fact.",
+            "parameters": {
+                "target_alias": "endpoint-a",
+                "query": "SELECT pid FROM processes LIMIT 1",
+            },
+        }
+        query_executor = mock.Mock()
+
+        response = self.runner.apply_investigation_query_loop(
+            prompt_package,
+            {"investigation_query_requests": [request]},
+            object(),
+            {"agent_models": {"soc-analyst": "codex-cli:gpt-5.5:medium"}},
+            "soc-analyst",
+            live_osquery_config={
+                "enabled": True,
+                "allowed_target_aliases": ["endpoint-a"],
+            },
+            harness_runtime=harness,
+            model_executor=mock.Mock(return_value={"summary": "denied"}),
+            query_executor=query_executor,
+        )
+
+        query_executor.assert_not_called()
+        self.assertFalse(
+            any(event[0] == "preflight_query_batch" for event in events)
+        )
+        result = response["_investigation_query_audit"]["rounds"][0]["results"][0]
+        self.assertEqual(result["status"], "rejected")
+        self.assertIn("harness denied capability", result["error"].lower())
+
+    def test_real_shadow_harness_never_dispatches_unapproved_live_osquery(
+        self,
+    ) -> None:
+        route = "codex-cli:gpt-5.5:medium"
+        prompt_package = {
+            "case_id": "case-shadow-live-osquery-denied",
+            "alert": {"alert_id": "alert-shadow-live-osquery-denied"},
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"osquery": {"enabled": True}},
+            },
+        }
+        request = {
+            "query_id": "live-endpoint-real-policy-denied",
+            "backend": "osquery",
+            "purpose": "Inspect a bounded endpoint process fact.",
+            "parameters": {
+                "target_alias": "endpoint-a",
+                "query": "SELECT pid FROM processes LIMIT 1",
+            },
+        }
+        policy_value = json.loads(
+            (
+                REPO_ROOT
+                / "n8n"
+                / "config"
+                / "investigation_harness_policy.json"
+            ).read_text(encoding="utf-8")
+        )
+        policy_value["enabled"] = True
+        policy_value["mode"] = "shadow"
+        policy = self.harness.HarnessPolicy.from_dict(policy_value)
+        query_executor = mock.Mock(
+            side_effect=AssertionError("live OSQuery collector was invoked")
+        )
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            runtime = self.harness.start_harness_run(
+                run_id="run-shadow-live-osquery-denied",
+                prompt_package=prompt_package,
+                role="soc-analyst",
+                assigned_route=route,
+                configuration={
+                    "reviewer_route": "codex-cli:gpt-5.6-sol:high",
+                },
+                policy=policy,
+                db_path=Path(temp_name) / "harness.sqlite3",
+            )
+            self.assertIsNotNone(runtime)
+            response = self.runner.apply_investigation_query_loop(
+                prompt_package,
+                {"investigation_query_requests": [request]},
+                object(),
+                {"agent_models": {"soc-analyst": route}},
+                "soc-analyst",
+                live_osquery_config={
+                    "enabled": True,
+                    "allowed_target_aliases": ["endpoint-a"],
+                },
+                harness_runtime=runtime,
+                model_executor=mock.Mock(
+                    return_value={
+                        "summary": "Unapproved endpoint query stayed blocked.",
+                        "_analysis_model_route": route,
+                    }
+                ),
+                query_executor=query_executor,
+            )
+            trace = runtime.store.export_trace(runtime.run_id)
+
+        query_executor.assert_not_called()
+        result = response["_investigation_query_audit"]["rounds"][0]["results"][0]
+        self.assertEqual(result["status"], "rejected")
+        authorization = next(
+            event["payload"]
+            for event in trace["events"]
+            if event["event_type"] == "policy.tool-authorization"
+        )
+        self.assertFalse(authorization["allowed"])
+        self.assertTrue(authorization["requires_approval"])
+        self.assertFalse(authorization["effective_in_shadow"])
+        tool_call = next(
+            item
+            for item in trace["tool_calls"]
+            if item["backend"] == "osquery"
+        )
+        self.assertEqual(tool_call["status"], "rejected")
+        self.assertEqual(tool_call["coverage"], "evidence-gap")
+        self.assertFalse(
+            any(
+                item["source_class"] == "live_endpoint_osquery"
+                for item in trace["evidence"]
+            )
+        )
+
+    def test_shadow_authorization_failure_blocks_approval_gated_osquery(
+        self,
+    ) -> None:
+        harness = RecordingHarness(
+            [],
+            mode="shadow",
+            fail_authorization=True,
+        )
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"osquery": {"enabled": True}},
+            },
+        }
+        request = {
+            "query_id": "live-endpoint-authorization-error",
+            "backend": "osquery",
+            "purpose": "Inspect a bounded endpoint process fact.",
+            "parameters": {
+                "target_alias": "endpoint-a",
+                "query": "SELECT pid FROM processes LIMIT 1",
+            },
+        }
+        query_executor = mock.Mock(
+            side_effect=AssertionError("live OSQuery collector was invoked")
+        )
+
+        with mock.patch.object(self.runner.sys, "stderr"):
+            response = self.runner.apply_investigation_query_loop(
+                prompt_package,
+                {"investigation_query_requests": [request]},
+                object(),
+                {
+                    "agent_models": {
+                        "soc-analyst": "codex-cli:gpt-5.5:medium",
+                    }
+                },
+                "soc-analyst",
+                live_osquery_config={
+                    "enabled": True,
+                    "allowed_target_aliases": ["endpoint-a"],
+                },
+                harness_runtime=harness,
+                model_executor=mock.Mock(
+                    return_value={
+                        "summary": "Authorization failure stayed closed.",
+                    }
+                ),
+                query_executor=query_executor,
+            )
+
+        query_executor.assert_not_called()
+        result = response["_investigation_query_audit"]["rounds"][0]["results"][0]
+        self.assertEqual(result["status"], "rejected")
+        self.assertIn(
+            "approval authorization was unavailable",
+            result["error"],
+        )
 
     def test_shadow_observation_failure_does_not_change_normal_response(
         self,

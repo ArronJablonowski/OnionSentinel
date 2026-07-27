@@ -337,6 +337,12 @@ class OnionSentinelHarnessTests(unittest.TestCase):
         self.assertFalse(mutation.allowed)
         self.assertTrue(mutation.requires_approval)
         self.assertIn("human approval", mutation.reason)
+        self.assertFalse(
+            HARNESS.policy_decision_is_effective("shadow", mutation)
+        )
+        self.assertFalse(
+            HARNESS.policy_decision_is_effective("enforce", mutation)
+        )
         self.assertTrue(
             policy.authorize(
                 HARNESS.AgentRole.SOC_ANALYST.value,
@@ -360,6 +366,33 @@ class OnionSentinelHarnessTests(unittest.TestCase):
                 HARNESS.AgentRole.SOC_ANALYST.value,
                 "shell.execute",
             ).allowed
+        )
+        ordinary_shadow_denial = HARNESS.PolicyDecision(
+            False,
+            "synthetic.read",
+            "synthetic qualification denial",
+        )
+        self.assertTrue(
+            HARNESS.policy_decision_is_effective(
+                "shadow",
+                ordinary_shadow_denial,
+            )
+        )
+        self.assertFalse(
+            HARNESS.policy_decision_is_effective(
+                "enforce",
+                ordinary_shadow_denial,
+            )
+        )
+        self.assertTrue(
+            HARNESS.query_backend_is_approval_gated("osquery")
+        )
+        self.assertFalse(
+            HARNESS.query_backend_is_approval_gated("elastic")
+        )
+        self.assertEqual(
+            HARNESS.query_backend_capability("osquery"),
+            "endpoint.osquery.query",
         )
 
     def test_policy_rejects_unknown_fields_capabilities_and_unsafe_shapes(
@@ -1528,6 +1561,7 @@ class OnionSentinelHarnessTests(unittest.TestCase):
             approved=True,
         )
         self.assertFalse(role_denied.allowed)
+        self.assertTrue(role_denied.requires_approval)
         self.assertIn("not assigned", role_denied.reason)
 
         authorization_events = [
@@ -1543,7 +1577,7 @@ class OnionSentinelHarnessTests(unittest.TestCase):
         )
         self.assertFalse(unapproved_payload["allowed"])
         self.assertTrue(unapproved_payload["requires_approval"])
-        self.assertTrue(unapproved_payload["effective_in_shadow"])
+        self.assertFalse(unapproved_payload["effective_in_shadow"])
 
     def test_query_round_records_result_semantics_and_rejected_proposals(
         self,
@@ -2252,6 +2286,9 @@ class OnionSentinelHarnessTests(unittest.TestCase):
         )
         self.assertFalse(needs_approval.allowed)
         self.assertTrue(needs_approval.requires_approval)
+        self.assertFalse(
+            HARNESS.policy_decision_is_effective("shadow", needs_approval)
+        )
 
         shared_needs_approval = HARNESS.memory_promotion_decision(
             policy,

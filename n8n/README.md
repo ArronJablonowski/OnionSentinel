@@ -128,6 +128,11 @@ receipt. Enforce mode is a separate production promotion and must not be
 enabled until the replay, recovery, SLO, and soak gates in
 `../docs/onion-sentinel-investigation-harness.md` pass.
 
+Shadow observation never bypasses an explicit approval gate. A live endpoint
+OSQuery dispatch, memory promotion, mutation, or other operational capability
+denied for missing human approval remains blocked in both shadow and enforce
+modes.
+
 Per run, the policy must be enabled and both the assigned and second-opinion
 routes must use ordinary Ollama or Codex CLI adapters. Selecting Hermes Agent
 or OpenClaw for either route always bypasses the Onion Sentinel harness because
@@ -897,6 +902,10 @@ targets are forbidden. The final model call receives only bounded results plus
 an auditable request/status record. See
 `docs/incident-response-query-and-model-routing.md` for the exact baseline
 queries, live allowlist, and enablement gates.
+
+When the custom Onion Sentinel harness is active, live endpoint OSQuery also
+requires an explicit per-run approval decision. Missing approval or a failed
+authorization audit blocks dispatch in both shadow and enforce modes.
 
 The production Incident Responder route is `gpt-cli`, resolved to the local
 Codex CLI with model `gpt-5.5` and `medium` reasoning. The runner searches the

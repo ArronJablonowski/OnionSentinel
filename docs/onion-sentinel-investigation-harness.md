@@ -28,7 +28,9 @@ the assigned model or the configured second-opinion model uses Hermes Agent or
 OpenClaw. Those providers are already agent harnesses and must not be nested
 inside the Onion Sentinel harness. Ordinary Ollama and Codex CLI routes remain
 eligible; `mode: shadow` observes them without enforcement, while
-`mode: enforce` applies the qualified controls.
+`mode: enforce` applies the qualified controls. Explicit approval gates are a
+safety boundary rather than a qualification control: shadow mode never turns
+a denied approval-gated mutation or operational action into permission.
 
 No harness can guarantee perfect conclusions. The engineering goal is to make
 accuracy, uncertainty, provenance, failure, and operational safety measurable,
@@ -104,6 +106,10 @@ policy are denied. Every mutation remains approval-gated even if a policy
 author accidentally omits it from the approval list. This complements, rather
 than replaces, Security Onion's own
 [role-based access control](https://docs.securityonion.net/en/2.4/rbac.html).
+Approval-gated operational actions, including live endpoint OSQuery dispatch,
+also fail closed in shadow mode. Shadow mode may observe ordinary policy and
+budget denials without interrupting production, but it cannot manufacture
+human consent.
 
 ### Evidence before narrative
 
@@ -639,12 +645,13 @@ The current foundation's promotion decision requires:
 - explicit human approval for every durable promotion, with an additional
   explicit shared-memory check for shared candidates.
 
-This gate is only active when the harness itself is enabled. In shadow mode it
-must log the decision without silently changing production behavior.
-Enforcement may block a rejected write only after qualification. The current
-foundation has no durable approval/resume workflow, so enforce mode
-intentionally blocks every candidate-bearing automatic memory write until that
-workflow exists; it does not silently treat a missing approval as consent.
+This gate is only active when the harness itself is enabled. In shadow mode,
+quality and qualification denials are logged without silently changing
+production behavior. Missing explicit approval is different: it is a safety
+boundary and blocks the write in both shadow and enforce modes. The current
+foundation has no durable approval/resume workflow, so every candidate-bearing
+automatic memory write that reaches the approval gate remains blocked until
+that workflow exists; it does not silently treat missing approval as consent.
 
 Memory persistence is also commit-gated. The response contains only a
 deterministic pending or blocked plan; no memory file changes before the
@@ -876,8 +883,10 @@ than one-time model tests.
 
 - Enable `shadow` only through operator-managed configuration on a qualified
   host.
-- Observe real runs without changing the selected model response, memory,
-  query authorization, alert state, case state, or notifications.
+- Observe real runs without changing the selected model response, ordinary
+  read-only query authorization, alert state, case state, or notifications.
+  Explicit approval gates remain fail-closed, including for live endpoint
+  OSQuery and otherwise eligible memory promotion.
 - Run continuously for at least the existing 48-hour soak requirement with no
   unresolved ingestion, analysis, disk, PCAP, or recovery warning.
 - Review trace growth, retention, free disk, and failure isolation.
