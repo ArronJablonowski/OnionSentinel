@@ -325,6 +325,18 @@ class AlertStorePcapRetryTest(unittest.TestCase):
             "/jobs/status",
             {"job_type": "ai_analysis", "dedupe_key": "synthetic-wake-group", "status": "processing"},
         )
+        self.assertEqual(
+            claimed["claim"],
+            {
+                "job_type": "ai_analysis",
+                "dedupe_key": "synthetic-wake-group",
+                "payload": {
+                    "group_id": "synthetic-wake-group",
+                    "group_key": "synthetic-wake-key",
+                    "representative_alert_id": "synthetic-wake-alert",
+                },
+            },
+        )
         lease_token = claimed["lease_token"]
         self.post("/pcap/analysis-status", {"request_id": request_id, "status": "completed"})
         self.post(
@@ -365,6 +377,152 @@ class AlertStorePcapRetryTest(unittest.TestCase):
                 ("synthetic-wake-group",),
             ).fetchone()
         self.assertEqual(completed, ("completed",))
+
+    def test_automatic_evidence_enqueue_cannot_replace_pending_manual_analysis(
+        self,
+    ) -> None:
+        dashboard_group_id = "1234567890ab"
+        stable_group_id = "1234567890abcdefabcd"
+        stable_group_key = "manual-authority-live-group"
+        alert_id = "manual-authority-live-alert"
+        timestamp = "2026-07-16  09:00:00-06:00"
+        alert = {
+            "alert_id": alert_id,
+            "timestamp": timestamp,
+            "rule_name": "Synthetic manual authority validation",
+            "severity": 3,
+            "severity_label": "high",
+            "source": {"ip": "192.0.2.30"},
+            "destination": {"ip": "198.51.100.30"},
+        }
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            connection.execute(
+                """
+                INSERT INTO alerts (
+                  alert_id, first_seen, last_seen, timestamp, rule_name,
+                  severity, severity_label, source_ip, destination_ip,
+                  triage_level, filter_status, stable_group_key,
+                  stable_group_id, alert_json
+                ) VALUES (?, ?, ?, ?, ?, 3, 'high', ?, ?, 'high',
+                          'accepted', ?, ?, ?)
+                """,
+                (
+                    alert_id,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    alert["rule_name"],
+                    alert["source"]["ip"],
+                    alert["destination"]["ip"],
+                    stable_group_key,
+                    stable_group_id,
+                    json.dumps(alert),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO alert_group_summary (
+                  group_id, group_key, representative_alert_id,
+                  triage_level, updated_at
+                ) VALUES (?, ?, ?, 'high', ?)
+                """,
+                (
+                    dashboard_group_id,
+                    stable_group_key,
+                    alert_id,
+                    timestamp,
+                ),
+            )
+            connection.commit()
+
+        status, requested = request_json(
+            f"{self.base_url}/ai/request",
+            "POST",
+            {
+                "group_id": dashboard_group_id,
+                "requested_by": "live-authority-test",
+                "reason": "Preserve this operator-authoritative request",
+                "related_limit": 500,
+                "pcap_analysis_limit": 25,
+            },
+        )
+        self.assertEqual(status, 202, requested)
+        self.assertTrue(requested["ok"])
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            before = connection.execute(
+                """
+                SELECT payload_json, priority, max_attempts, requested_at
+                FROM durable_jobs
+                WHERE job_type = 'ai_analysis' AND dedupe_key = ?
+                """,
+                (stable_group_id,),
+            ).fetchone()
+        manual_payload = json.loads(before[0])
+        self.assertIs(manual_payload["manual_reanalysis"], True)
+        self.assertEqual(before[1:3], (1000, 12))
+
+        created = self.post(
+            "/pcap/request",
+            {
+                "alert_id": alert_id,
+                "group_id": dashboard_group_id,
+                "group_key": stable_group_key,
+                "first_seen": timestamp,
+                "last_seen": timestamp,
+                "source_ip": alert["source"]["ip"],
+                "destination_ip": alert["destination"]["ip"],
+                "destination_port": 443,
+                "transport_protocol": "tcp",
+                "reason": "Synthetic lower-authority evidence refresh",
+            },
+        )
+        request_id = created["request"]["request_id"]
+        self.post(
+            "/pcap/claim",
+            {"request_id": request_id, "relay_host": "relay-a"},
+        )
+        self.post(
+            "/pcap/complete",
+            {
+                "request_id": request_id,
+                "status": "fulfilled",
+                "artifact_path": "/tmp/manual-authority-live.pcap",
+                "artifact_sha256": "b" * 64,
+                "artifact_size_bytes": 2048,
+                "relay_host": "relay-a",
+            },
+        )
+        self.post(
+            "/pcap/analysis-status",
+            {"request_id": request_id, "status": "processing"},
+        )
+        self.post(
+            "/pcap/analysis-status",
+            {"request_id": request_id, "status": "completed"},
+        )
+
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            after = connection.execute(
+                """
+                SELECT payload_json, priority, max_attempts, requested_at
+                FROM durable_jobs
+                WHERE job_type = 'ai_analysis' AND dedupe_key = ?
+                """,
+                (stable_group_id,),
+            ).fetchone()
+        self.assertEqual(json.loads(after[0]), manual_payload)
+        self.assertEqual(after[1:3], (1000, 12))
+        self.assertEqual(after[3], before[3])
+
+        claim = self.post(
+            "/jobs/status",
+            {
+                "job_type": "ai_analysis",
+                "dedupe_key": stable_group_id,
+                "status": "processing",
+            },
+        )
+        self.assertEqual(claim["claim"]["payload"], manual_payload)
 
 
 if __name__ == "__main__":

@@ -3884,6 +3884,20 @@ async function transitionDurableJobStatus(
       // one coalesced rerun request; wake launchd after the completed run.
       void signalAiWorkers('ai-rerun-pending');
     }
+    if (
+      ['ai_analysis', 'incident_response_analysis'].includes(jobType)
+      && status === 'processing'
+      && job?.status === 'processing'
+    ) {
+      // The payload can be replaced by a coalescing enqueue after a worker's
+      // read-only selection but before this lease is acquired. Bind every AI
+      // worker to the exact durable-job snapshot that the lease claimed.
+      claim = {
+        job_type: jobType,
+        dedupe_key: resolvedKey,
+        payload: incidentReanalysisJobPayload(job),
+      };
+    }
     if (jobType === 'incident_response_analysis') {
       const progressLeaseToken = leaseToken || transition?.leaseToken || '';
       const progress = await updateIncidentReanalysisProgress({
@@ -3907,9 +3921,7 @@ async function transitionDurableJobStatus(
       }
       if (status === 'processing' && job?.status === 'processing') {
         claim = {
-          job_type: jobType,
-          dedupe_key: resolvedKey,
-          payload: incidentReanalysisJobPayload(job),
+          ...claim,
           reanalysis_attempt_id: progress?.attempt_id || null,
           reanalysis_run_id: progress?.run_id || null,
           case_id: progress?.case_id || null,

@@ -528,6 +528,39 @@ class OnionSentinelHarnessTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertFalse(self.db_path.exists())
 
+    def test_prompt_execution_lineage_drives_soc_manual_and_automatic_tasks(
+        self,
+    ) -> None:
+        stable_group_id = "abcdef1234567890abcd"
+        manual_package = self.prompt_package()
+        manual_package.update(
+            {
+                "group_id": stable_group_id,
+                "manual_reanalysis": True,
+            }
+        )
+        automatic_package = self.prompt_package()
+        automatic_package.update(
+            {
+                "group_id": stable_group_id,
+                "manual_reanalysis": False,
+            }
+        )
+
+        manual = self.envelope(
+            "manual-lineage-run",
+            prompt_package=manual_package,
+        )
+        automatic = self.envelope(
+            "automatic-lineage-run",
+            prompt_package=automatic_package,
+        )
+
+        self.assertEqual(manual.correlation_id, stable_group_id)
+        self.assertEqual(manual.task_kind, "reanalysis")
+        self.assertEqual(automatic.correlation_id, stable_group_id)
+        self.assertEqual(automatic.task_kind, "alert-triage")
+
     def test_external_agent_routes_never_start_or_create_harness_state(
         self,
     ) -> None:

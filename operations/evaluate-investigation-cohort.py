@@ -65,6 +65,26 @@ STABLE_GROUP_ID_RE = re.compile(r"[a-f0-9]{20}")
 CODE_RE = re.compile(r"[a-z][a-z0-9_]{1,79}")
 SHA256_RE = re.compile(r"[a-f0-9]{64}")
 SAFE_ROUTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{2,255}")
+MODEL_CALL_CONTRACT_SCHEMA = "onion-sentinel-model-call-contract-v1"
+MAX_RUNTIME_MODEL_CALLS = 6
+MODEL_CALL_FACT_KEYS = frozenset(
+    {
+        "call_id",
+        "purpose",
+        "requested_route",
+        "independent_review",
+        "status",
+    }
+)
+PRIMARY_MODEL_CALLS = {
+    "primary-initial": "initial primary analysis",
+    "primary-query-planning-retry-1": (
+        "evaluation query-planning retry 1 of 1"
+    ),
+}
+FOLLOWUP_CALL_RE = re.compile(r"primary-followup-([1-3])")
+REVIEWER_CALL_IDS = ("independent-review-1", "independent-review-2")
+REVIEWER_PURPOSE = "independent second-opinion review"
 
 RUBRIC_WEIGHTS = {
     "occurrence_validity": 14,
@@ -222,6 +242,187 @@ def canonical_json(value: Any) -> str:
 
 def sha256_value(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _bounded_model_call_proof_valid(harness: Mapping[str, Any]) -> bool:
+    """Recompute the bounded call/reviewer facts in an offline export."""
+
+    contract = harness.get("model_call_contract")
+    reviewer = harness.get("reviewer_completion")
+    if not isinstance(contract, dict) or not isinstance(reviewer, dict):
+        return False
+    facts = contract.get("facts")
+    if (
+        contract.get("schema") != MODEL_CALL_CONTRACT_SCHEMA
+        or contract.get("valid") is not True
+        or not isinstance(facts, list)
+        or not 1 <= len(facts) <= MAX_RUNTIME_MODEL_CALLS
+        or str(contract.get("facts_sha256") or "") != sha256_value(facts)
+        or int(contract.get("model_call_count") or 0) != len(facts)
+        or int(contract.get("canonical_model_call_count") or 0)
+        != len(facts)
+        or int(contract.get("noncanonical_model_call_count") or 0) != 0
+        or int(contract.get("violation_count") or 0) != 0
+        or contract.get("violations") != []
+        or contract.get("global_reasons") != []
+    ):
+        return False
+
+    primary_route = str(harness.get("assigned_route") or "")
+    reviewer_route = str(harness.get("assigned_reviewer_route") or "")
+    call_ids: list[str] = []
+    followup_rounds: list[int] = []
+    reviewer_facts: list[Mapping[str, Any]] = []
+    purpose_keys: set[tuple[bool, str, str]] = set()
+    completed_count = 0
+    completed_primary_count = 0
+    planning_count = 0
+    for fact in facts:
+        if not isinstance(fact, dict) or set(fact) != MODEL_CALL_FACT_KEYS:
+            return False
+        call_id = str(fact.get("call_id") or "")
+        purpose = str(fact.get("purpose") or "")
+        route = str(fact.get("requested_route") or "")
+        status = str(fact.get("status") or "")
+        independent = fact.get("independent_review")
+        if (
+            not call_id
+            or not SAFE_ROUTE_RE.fullmatch(route)
+            or not isinstance(independent, bool)
+        ):
+            return False
+        call_ids.append(call_id)
+        purpose_keys.add((independent, purpose, route))
+        if status == "completed":
+            completed_count += 1
+            if independent is False:
+                completed_primary_count += 1
+        if call_id in PRIMARY_MODEL_CALLS:
+            if (
+                independent
+                or purpose != PRIMARY_MODEL_CALLS[call_id]
+                or status != "completed"
+                or route != primary_route
+            ):
+                return False
+            if call_id == "primary-query-planning-retry-1":
+                planning_count += 1
+            continue
+        followup_match = FOLLOWUP_CALL_RE.fullmatch(call_id)
+        if followup_match:
+            round_number = int(followup_match.group(1))
+            followup_rounds.append(round_number)
+            if (
+                independent
+                or purpose
+                != f"primary investigation follow-up round {round_number}"
+                or status != "completed"
+                or route != primary_route
+            ):
+                return False
+            continue
+        if call_id not in REVIEWER_CALL_IDS:
+            return False
+        reviewer_facts.append(fact)
+        allowed_statuses = (
+            {"completed", "validation-failed"}
+            if call_id == REVIEWER_CALL_IDS[0]
+            else {"completed"}
+        )
+        if (
+            independent is not True
+            or purpose != REVIEWER_PURPOSE
+            or status not in allowed_statuses
+            or not reviewer_route
+            or route != reviewer_route
+        ):
+            return False
+
+    if len(call_ids) != len(set(call_ids)):
+        return False
+    primary_initial_count = call_ids.count("primary-initial")
+    unique_followups = sorted(set(followup_rounds))
+    if (
+        primary_initial_count != 1
+        or planning_count not in {0, 1}
+        or len(unique_followups) != len(followup_rounds)
+        or (
+            unique_followups
+            and unique_followups
+            != list(range(1, max(unique_followups) + 1))
+        )
+        or len(unique_followups) > (2 if planning_count else 3)
+    ):
+        return False
+    reviewer_ids = [str(fact["call_id"]) for fact in reviewer_facts]
+    reviewer_statuses = [str(fact["status"]) for fact in reviewer_facts]
+    exact_repair_count = 0
+    if reviewer_facts:
+        if reviewer_ids == [REVIEWER_CALL_IDS[0]] and reviewer_statuses == [
+            "completed"
+        ]:
+            pass
+        elif reviewer_ids == list(REVIEWER_CALL_IDS) and reviewer_statuses == [
+            "validation-failed",
+            "completed",
+        ]:
+            exact_repair_count = 1
+        else:
+            return False
+
+    if (
+        int(contract.get("primary_initial_call_count") or 0) != 1
+        or int(contract.get("query_planning_call_count") or 0)
+        != planning_count
+        or int(contract.get("primary_followup_call_count") or 0)
+        != len(followup_rounds)
+        or int(contract.get("reviewer_model_call_count") or 0)
+        != len(reviewer_facts)
+        or int(harness.get("model_call_count") or 0) != len(facts)
+        or int(harness.get("successful_model_call_count") or 0)
+        != completed_count
+        or int(harness.get("successful_primary_model_call_count") or 0)
+        != completed_primary_count
+        or int(harness.get("model_purpose_count") or 0)
+        != len(purpose_keys)
+        or int(harness.get("exact_reviewer_repair_count") or 0)
+        != exact_repair_count
+        or int(
+            harness.get("superseded_validation_failure_count") or 0
+        )
+        != exact_repair_count
+    ):
+        return False
+
+    reviewer_call_count = int(reviewer.get("model_call_count") or 0)
+    if (
+        reviewer_call_count != len(reviewer_facts)
+        or int(reviewer.get("completed_model_call_count") or 0)
+        != len(reviewer_facts) - exact_repair_count
+    ):
+        return False
+    if reviewer_call_count:
+        return bool(
+            int(reviewer.get("completed_model_call_count") or 0) == 1
+            and int(reviewer.get("primary_decision_count") or 0) == 1
+            and int(reviewer.get("reviewer_decision_count") or 0) == 1
+            and reviewer.get("has_primary_decision") is True
+            and reviewer.get("has_reviewer_decision") is True
+            and reviewer.get("decision_comparable") is True
+            and reviewer.get("missing_reviewer_decision") is False
+            and reviewer.get("completion_contract_required") is True
+            and reviewer.get("completion_contract_satisfied") is True
+            and reviewer.get("completion_contract_failure_reasons") == []
+            and reviewer_call_count == 1 + exact_repair_count
+        )
+    return bool(
+        reviewer.get("completion_contract_required") is False
+        and reviewer.get("completion_contract_satisfied") is True
+        and reviewer.get("completion_contract_failure_reasons") == []
+        and int(reviewer.get("reviewer_decision_count") or 0) == 0
+        and reviewer.get("has_reviewer_decision") is False
+        and reviewer.get("missing_reviewer_decision") is False
+    )
 
 
 def file_sha256(path: Path) -> str:
@@ -1047,9 +1248,42 @@ def _validate_execution_proof(
         harness.get("chain_valid") is not True
         or harness.get("ledger_manifest_bound") is not True
         or harness.get("memory_frozen") is not True
+        or not _bounded_model_call_proof_valid(harness)
         or int(harness.get("successful_primary_model_call_count") or 0) < 1
+        or int(harness.get("model_purpose_count") or 0) < 1
+        or int(
+            harness.get("terminally_successful_model_purpose_count")
+            or 0
+        )
+        != int(harness.get("model_purpose_count") or 0)
+        or int(harness.get("incomplete_model_purpose_count") or 0)
+        != 0
+        or int(harness.get("successful_model_call_count") or 0)
+        != int(harness.get("model_purpose_count") or 0)
         or int(harness.get("model_call_count") or 0)
-        != int(harness.get("successful_model_call_count") or 0)
+        != (
+            int(harness.get("successful_model_call_count") or 0)
+            + int(
+                harness.get("superseded_validation_failure_count")
+                or 0
+            )
+        )
+        or int(harness.get("exact_reviewer_repair_count") or 0)
+        != int(
+            harness.get("superseded_validation_failure_count") or 0
+        )
+        or int(harness.get("exact_reviewer_repair_count") or 0)
+        not in {0, 1}
+        or int(
+            harness.get("unexpected_unsuccessful_model_call_count")
+            or 0
+        )
+        != 0
+        or int(
+            harness.get("malformed_model_purpose_sequence_count")
+            or 0
+        )
+        != 0
         or int(harness.get("route_authorization_failure_count") or 0)
         or int(harness.get("route_identity_mismatch_count") or 0)
         or int(harness.get("tool_call_count") or 0) < 1

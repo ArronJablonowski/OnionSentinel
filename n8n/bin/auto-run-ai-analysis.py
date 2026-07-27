@@ -296,6 +296,7 @@ class ClaimedAiLease(str):
     """Lease token carrying the server-authoritative job snapshot it claimed."""
 
     job_payload: dict[str, object]
+    job_type: str
     resolved_key: str
     reanalysis_attempt_id: str
 
@@ -304,6 +305,7 @@ class ClaimedAiLease(str):
         token: str,
         *,
         job_payload: dict[str, object] | None = None,
+        job_type: str = "",
         resolved_key: str = "",
         reanalysis_attempt_id: str = "",
     ):
@@ -311,6 +313,7 @@ class ClaimedAiLease(str):
         value.job_payload = (
             job_payload if isinstance(job_payload, dict) else {}
         )
+        value.job_type = str(job_type or "")
         value.resolved_key = str(resolved_key or "")
         value.reanalysis_attempt_id = str(reanalysis_attempt_id or "")
         return value
@@ -367,6 +370,7 @@ def report_ai_job_status(
                         if isinstance(claimed_payload, dict)
                         else {}
                     ),
+                    job_type=str(claim.get("job_type") or ""),
                     resolved_key=str(
                         claim.get("dedupe_key")
                         or result.get("dedupe_key")
@@ -421,6 +425,9 @@ NON_RETRYABLE_AI_FAILURE_MARKERS = (
     "command stdout exceeded the",
     "incident reanalysis claim did not return its server-authoritative job identity",
     "incident reanalysis lease identity did not match its server-bound attempt",
+    "durable ai claim job identity is invalid",
+    "durable ai claim group identity is invalid",
+    "durable ai claim alert identity is invalid",
 )
 
 
@@ -1202,6 +1209,89 @@ def durable_payload(selected: sqlite3.Row) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
+def claimed_durable_ai_job(
+    processing_transition: object,
+    database_path: Path,
+    *,
+    expected_job_type: str,
+    expected_group_id: str,
+) -> tuple[dict[str, object], str, str, str]:
+    """Validate and return the exact durable AI snapshot bound to a lease."""
+    claimed_payload = getattr(processing_transition, "job_payload", None)
+    if not isinstance(claimed_payload, dict) or not claimed_payload:
+        raise RuntimeError(
+            "durable AI claim did not return its server-authoritative job identity"
+        )
+
+    claimed_job_type = str(
+        getattr(processing_transition, "job_type", "") or ""
+    ).strip()
+    if claimed_job_type != expected_job_type:
+        raise RuntimeError("durable AI claim job identity is invalid")
+
+    resolved_group_id = str(
+        getattr(processing_transition, "resolved_key", "") or ""
+    ).strip().lower()
+    payload_group_id = str(
+        claimed_payload.get("group_id") or ""
+    ).strip().lower()
+    if (
+        not resolved_group_id
+        or resolved_group_id != expected_group_id.strip().lower()
+        or not payload_group_id
+        or payload_group_id != resolved_group_id
+    ):
+        raise RuntimeError("durable AI claim group identity is invalid")
+
+    payload_alert_ids = {
+        str(claimed_payload.get(field) or "").strip()
+        for field in ("alert_id", "representative_alert_id")
+        if str(claimed_payload.get(field) or "").strip()
+    }
+    if len(payload_alert_ids) != 1:
+        raise RuntimeError("durable AI claim alert identity is invalid")
+    claimed_alert_id = next(iter(payload_alert_ids))
+
+    try:
+        connection = sqlite3.connect(
+            f"file:{database_path}?mode=ro",
+            uri=True,
+        )
+        connection.row_factory = sqlite3.Row
+        try:
+            alert = connection.execute(
+                """
+                SELECT stable_group_id, triage_level
+                FROM alerts
+                WHERE alert_id = ?
+                LIMIT 1
+                """,
+                (claimed_alert_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        raise RuntimeError(
+            "durable AI claim identity verification failed"
+        ) from exc
+
+    if (
+        not alert
+        or str(alert["stable_group_id"] or "").strip().lower()
+        != resolved_group_id
+    ):
+        raise RuntimeError("durable AI claim alert identity is invalid")
+    triage_level = str(alert["triage_level"] or "").strip().lower()
+    if triage_level not in SEVERITY_PRIORITY:
+        raise RuntimeError("durable AI claim alert identity is invalid")
+    return (
+        dict(claimed_payload),
+        claimed_alert_id,
+        resolved_group_id,
+        triage_level,
+    )
+
+
 def bounded_int(value: object, default: int, minimum: int, maximum: int) -> int:
     try:
         parsed = int(value)
@@ -1560,14 +1650,6 @@ def main() -> int:
                 if "has_durable_intent" in selected.keys()
                 else False
             )
-            automatic_analysis_below_floor = (
-                indexed_mode
-                and durable_intent
-                and durable_job_type == "ai_analysis"
-                and job_payload.get("manual_reanalysis") is not True
-                and str(selected["triage_level"] or "").strip().lower()
-                not in set(allowed_analysis_levels)
-            )
             attempted_count += 1
             print(
                 json.dumps(
@@ -1604,41 +1686,22 @@ def main() -> int:
                 )
                 if indexed_mode and durable_intent and not processing_recorded:
                     raise RuntimeError("durable AI job disappeared before its processing lease was recorded")
-                if durable_job_type == "incident_response_analysis":
-                    claimed_payload = getattr(
+                claimed_triage_level = str(
+                    selected["triage_level"] or ""
+                ).strip().lower()
+                if indexed_mode and durable_intent:
+                    (
+                        job_payload,
+                        alert_id,
+                        selected_group_id,
+                        claimed_triage_level,
+                    ) = claimed_durable_ai_job(
                         processing_transition,
-                        "job_payload",
-                        {},
+                        args.db,
+                        expected_job_type=durable_job_type,
+                        expected_group_id=selected_group_id,
                     )
-                    if not isinstance(claimed_payload, dict) or not claimed_payload:
-                        if job_payload.get("manual_reanalysis") is True:
-                            raise RuntimeError(
-                                "incident reanalysis claim did not return its "
-                                "server-authoritative job identity"
-                            )
-                    else:
-                        # The deduped payload may be replaced after SQLite
-                        # selection but before this processing transition. Use
-                        # only the payload atomically returned with the lease.
-                        job_payload = claimed_payload
-                        claimed_alert_id = str(
-                            job_payload.get("alert_id") or ""
-                        ).strip()
-                        if not claimed_alert_id:
-                            raise RuntimeError(
-                                "incident response claim omitted its alert identity"
-                            )
-                        alert_id = claimed_alert_id
-                        claimed_group_id = str(
-                            getattr(
-                                processing_transition,
-                                "resolved_key",
-                                "",
-                            )
-                            or ""
-                        ).strip()
-                        if claimed_group_id:
-                            selected_group_id = claimed_group_id
+                if durable_job_type == "incident_response_analysis":
                     claimed_reanalysis_run_id = str(
                         job_payload.get("reanalysis_run_id") or ""
                     ).strip()
@@ -1664,6 +1727,13 @@ def main() -> int:
                                 "match its server-bound attempt"
                             )
                         reanalysis_attempt_id = claimed_attempt_id
+                automatic_analysis_below_floor = (
+                    indexed_mode
+                    and durable_intent
+                    and durable_job_type == "ai_analysis"
+                    and job_payload.get("manual_reanalysis") is not True
+                    and claimed_triage_level not in set(allowed_analysis_levels)
+                )
                 if automatic_analysis_below_floor:
                     report_ai_job_status(
                         args.alert_store_url,
@@ -1674,7 +1744,7 @@ def main() -> int:
                     )
                     print(
                         f"{project_now()} skipped automatic AI analysis for "
-                        f"{selected['triage_level']} group below configured threshold",
+                        f"{claimed_triage_level} group below configured threshold",
                         flush=True,
                     )
                     continue

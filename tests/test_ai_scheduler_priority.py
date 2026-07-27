@@ -87,11 +87,15 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             "Codex CLI analysis failed: configured model is unavailable or unauthorized",
             "incident reanalysis claim did not return its server-authoritative job identity",
             "incident reanalysis lease identity did not match its server-bound attempt",
+            "durable AI claim job identity is invalid",
+            "durable AI claim group identity is invalid",
+            "durable AI claim alert identity is invalid",
         ):
             self.assertFalse(self.scheduler.ai_failure_is_retryable(detail))
 
         for detail in (
             "prompt builder failed rc=1",
+            "durable AI claim did not return its server-authoritative job identity",
             "Codex CLI analysis failed: provider rate or usage limit reached",
             "Codex CLI analysis failed: provider connection closed unexpectedly",
         ):
@@ -120,6 +124,48 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         payload = json.loads(request.data.decode("utf-8"))
         self.assertIs(payload["retryable"], False)
         self.assertEqual(payload["error"], "model context window exhausted")
+
+    def test_processing_status_returns_server_bound_ai_claim(self) -> None:
+        response = io.BytesIO(
+            json.dumps(
+                {
+                    "ok": True,
+                    "lease_token": "claim-lease",
+                    "dedupe_key": "outer-group",
+                    "claim": {
+                        "job_type": "ai_analysis",
+                        "dedupe_key": "claimed-group",
+                        "payload": {
+                            "group_id": "claimed-group",
+                            "alert_id": "claimed-alert",
+                        },
+                    },
+                }
+            ).encode("utf-8")
+        )
+        response.status = 200
+        with mock.patch.object(
+            self.scheduler.urllib.request,
+            "urlopen",
+            return_value=response,
+        ):
+            claimed = self.scheduler.report_ai_job_status(
+                "http://127.0.0.1:8787",
+                "requested-group",
+                "processing",
+            )
+
+        self.assertIsInstance(claimed, self.scheduler.ClaimedAiLease)
+        self.assertEqual(claimed, "claim-lease")
+        self.assertEqual(claimed.job_type, "ai_analysis")
+        self.assertEqual(claimed.resolved_key, "claimed-group")
+        self.assertEqual(
+            claimed.job_payload,
+            {
+                "group_id": "claimed-group",
+                "alert_id": "claimed-alert",
+            },
+        )
 
     def insert_alert(
         self,
@@ -228,6 +274,10 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         severity: str,
         payload: dict | None = None,
         claimed_payload: dict | None = None,
+        claimed_payload_available: bool = True,
+        claimed_job_type: str | None = None,
+        claimed_resolved_key: str | None = None,
+        register_claimed_alert: bool = True,
         job_type: str = "ai_analysis",
         analysis_threshold: str = "medium",
     ) -> dict[str, object]:
@@ -242,6 +292,22 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             payload=payload,
             job_type=job_type,
         )
+        if claimed_payload and register_claimed_alert:
+            claimed_alert_ids = {
+                str(claimed_payload.get(field) or "").strip()
+                for field in ("alert_id", "representative_alert_id")
+                if str(claimed_payload.get(field) or "").strip()
+            }
+            for claimed_alert_id in claimed_alert_ids:
+                if claimed_alert_id == alert_id:
+                    continue
+                self.insert_alert(
+                    claimed_alert_id,
+                    severity,
+                    "2026-07-24  12:00:01Z",
+                    80,
+                )
+                self.set_stable_group(claimed_alert_id, group_id)
         self.conn.commit()
 
         root = Path(self.tempdir.name)
@@ -297,8 +363,9 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             *,
             lease_token: str = "",
             job_type: str = "ai_analysis",
+            retryable: bool = True,
         ) -> bool | str:
-            del lease_token
+            del lease_token, retryable
             if status != "processing":
                 return True
             authoritative_payload = dict(
@@ -308,8 +375,21 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             authoritative_payload.setdefault("group_id", group_id)
             return self.scheduler.ClaimedAiLease(
                 "threshold-test-lease",
-                job_payload=authoritative_payload,
-                resolved_key=group_id,
+                job_payload=(
+                    authoritative_payload
+                    if claimed_payload_available
+                    else {}
+                ),
+                job_type=(
+                    claimed_job_type
+                    if claimed_job_type is not None
+                    else job_type
+                ),
+                resolved_key=(
+                    claimed_resolved_key
+                    if claimed_resolved_key is not None
+                    else group_id
+                ),
                 reanalysis_attempt_id=(
                     self.scheduler.job_reanalysis_attempt_id(
                         authoritative_payload,
@@ -446,6 +526,119 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         self.assertEqual(result["return_code"], 0)
         result["build_prompt"].assert_called_once()
         result["run_analysis"].assert_called_once()
+
+    def test_soc_worker_uses_coalesced_claim_payload_before_threshold_decision(
+        self,
+    ) -> None:
+        result = self.run_indexed_worker_once(
+            severity="low",
+            payload={
+                "manual_reanalysis": False,
+                "related_limit": 8,
+            },
+            claimed_payload={
+                "manual_reanalysis": True,
+                "related_limit": 500,
+            },
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["build_prompt"].assert_called_once()
+        result["run_analysis"].assert_called_once()
+        claimed = result["build_prompt"].call_args.args[2]
+        self.assertIs(claimed["manual_reanalysis"], True)
+        self.assertEqual(claimed["related_limit"], 500)
+
+    def test_soc_worker_retires_coalesced_automatic_job_below_threshold(
+        self,
+    ) -> None:
+        result = self.run_indexed_worker_once(
+            severity="low",
+            payload={"manual_reanalysis": True},
+            claimed_payload={"manual_reanalysis": False},
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["build_prompt"].assert_not_called()
+        result["run_analysis"].assert_not_called()
+        self.assertEqual(
+            [call.args[2] for call in result["report_status"].call_args_list],
+            ["processing", "completed"],
+        )
+
+    def test_soc_worker_rejects_claim_with_mismatched_group_identity(
+        self,
+    ) -> None:
+        result = self.run_indexed_worker_once(
+            severity="critical",
+            payload={"manual_reanalysis": True},
+            claimed_payload={"manual_reanalysis": True},
+            claimed_resolved_key="different-stable-group",
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["build_prompt"].assert_not_called()
+        result["run_analysis"].assert_not_called()
+        failed = result["report_status"].call_args_list[-1]
+        self.assertEqual(failed.args[2], "failed")
+        self.assertIn("group identity is invalid", failed.args[3])
+        self.assertIs(failed.kwargs["retryable"], False)
+
+    def test_payload_less_rolling_deploy_claim_remains_retryable(
+        self,
+    ) -> None:
+        result = self.run_indexed_worker_once(
+            severity="critical",
+            payload={"manual_reanalysis": True},
+            claimed_payload_available=False,
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["build_prompt"].assert_not_called()
+        result["run_analysis"].assert_not_called()
+        failed = result["report_status"].call_args_list[-1]
+        self.assertEqual(failed.args[2], "failed")
+        self.assertIn("server-authoritative job identity", failed.args[3])
+        self.assertIs(failed.kwargs["retryable"], True)
+
+    def test_soc_worker_rejects_claim_with_mismatched_job_identity(
+        self,
+    ) -> None:
+        result = self.run_indexed_worker_once(
+            severity="critical",
+            payload={"manual_reanalysis": True},
+            claimed_payload={"manual_reanalysis": True},
+            claimed_job_type="incident_response_analysis",
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["build_prompt"].assert_not_called()
+        result["run_analysis"].assert_not_called()
+        failed = result["report_status"].call_args_list[-1]
+        self.assertEqual(failed.args[2], "failed")
+        self.assertIn("job identity is invalid", failed.args[3])
+        self.assertIs(failed.kwargs["retryable"], False)
+
+    def test_soc_worker_rejects_claim_with_unknown_alert_identity(
+        self,
+    ) -> None:
+        result = self.run_indexed_worker_once(
+            severity="critical",
+            payload={"manual_reanalysis": True},
+            claimed_payload={
+                "manual_reanalysis": True,
+                "alert_id": "not-in-alert-store",
+            },
+            register_claimed_alert=False,
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["build_prompt"].assert_not_called()
+        result["run_analysis"].assert_not_called()
+        failed = result["report_status"].call_args_list[-1]
+        self.assertEqual(failed.args[2], "failed")
+        self.assertIn("alert identity is invalid", failed.args[3])
+        self.assertIs(failed.kwargs["retryable"], False)
 
     def test_incident_responder_low_job_bypasses_medium_threshold(self) -> None:
         result = self.run_indexed_worker_once(

@@ -59,6 +59,8 @@ RUN_ID_RE = re.compile(r"irr-[a-z0-9-]{1,80}")
 SHA256_RE = re.compile(r"[a-f0-9]{64}")
 SAFE_ROUTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{2,255}")
 TRACE_EVALUATOR_PATH = Path(__file__).with_name("evaluate-harness-traces.py")
+MODEL_CALL_CONTRACT_SCHEMA = "onion-sentinel-model-call-contract-v1"
+MAX_RUNTIME_MODEL_CALLS = 6
 
 
 class CohortError(RuntimeError):
@@ -2656,6 +2658,16 @@ def _harness_execution_proof(
         if isinstance(trace.get("models"), dict)
         else {}
     )
+    reviewer = (
+        trace.get("reviewer")
+        if isinstance(trace.get("reviewer"), dict)
+        else {}
+    )
+    model_call_contract = (
+        models.get("model_call_contract")
+        if isinstance(models.get("model_call_contract"), dict)
+        else {}
+    )
     terminal = (
         trace.get("terminal_execution_summary")
         if isinstance(trace.get("terminal_execution_summary"), dict)
@@ -2700,10 +2712,117 @@ def _harness_execution_proof(
         failures.append("harness-terminal-ledger-unbound")
     if int(models.get("successful_primary_call_count") or 0) < 1:
         failures.append("harness-primary-model-call-missing")
-    if int(models.get("successful_call_count") or 0) != int(
+    model_call_count = int(
         (trace.get("counts") or {}).get("model_calls") or 0
+    )
+    successful_model_call_count = int(
+        models.get("successful_call_count") or 0
+    )
+    model_purpose_count = int(models.get("purpose_count") or 0)
+    terminally_successful_model_purpose_count = int(
+        models.get("terminally_successful_purpose_count") or 0
+    )
+    incomplete_model_purpose_count = int(
+        models.get("incomplete_purpose_count") or 0
+    )
+    exact_reviewer_repair_count = int(
+        models.get("exact_reviewer_repair_count") or 0
+    )
+    superseded_validation_failure_count = int(
+        models.get("superseded_validation_failure_count") or 0
+    )
+    unexpected_unsuccessful_model_call_count = int(
+        models.get("unexpected_unsuccessful_call_count") or 0
+    )
+    malformed_model_purpose_sequence_count = int(
+        models.get("malformed_purpose_sequence_count") or 0
+    )
+    reviewer_model_call_count = int(
+        reviewer.get("model_call_count") or 0
+    )
+    reviewer_completed_model_call_count = int(
+        reviewer.get("completed_model_call_count") or 0
+    )
+    reviewer_primary_decision_count = int(
+        reviewer.get("primary_decision_count") or 0
+    )
+    reviewer_decision_count = int(
+        reviewer.get("reviewer_decision_count") or 0
+    )
+    if reviewer_model_call_count > 0 and (
+        reviewer_completed_model_call_count != 1
+        or reviewer_primary_decision_count != 1
+        or reviewer_decision_count != 1
+        or reviewer.get("has_primary_decision") is not True
+        or reviewer.get("has_reviewer_decision") is not True
+        or reviewer.get("decision_comparable") is not True
+        or reviewer.get("missing_reviewer_decision") is not False
+        or reviewer_model_call_count != 1 + exact_reviewer_repair_count
+        or reviewer.get("completion_contract_required") is not True
+        or reviewer.get("completion_contract_satisfied") is not True
+        or reviewer.get("completion_contract_failure_reasons") != []
     ):
-        failures.append("harness-model-call-incomplete")
+        failures.append("harness-reviewer-completion-incomplete")
+    elif reviewer_model_call_count == 0 and (
+        reviewer_completed_model_call_count != 0
+        or reviewer_decision_count != 0
+        or reviewer.get("has_reviewer_decision") is not False
+        or reviewer.get("missing_reviewer_decision") is not False
+        or reviewer.get("completion_contract_required") is not False
+        or reviewer.get("completion_contract_satisfied") is not True
+        or reviewer.get("completion_contract_failure_reasons") != []
+    ):
+        failures.append("harness-reviewer-completion-incomplete")
+    model_call_facts = model_call_contract.get("facts")
+    if (
+        model_call_contract.get("schema") != MODEL_CALL_CONTRACT_SCHEMA
+        or model_call_contract.get("valid") is not True
+        or int(model_call_contract.get("model_call_count") or 0)
+        != model_call_count
+        or int(
+            model_call_contract.get("canonical_model_call_count") or 0
+        )
+        != model_call_count
+        or int(
+            model_call_contract.get("noncanonical_model_call_count") or 0
+        )
+        != 0
+        or int(
+            model_call_contract.get("primary_initial_call_count") or 0
+        )
+        != 1
+        or int(model_call_contract.get("violation_count") or 0) != 0
+        or model_call_contract.get("violations") != []
+        or model_call_contract.get("global_reasons") != []
+        or not isinstance(model_call_facts, list)
+        or len(model_call_facts) != model_call_count
+        or len(model_call_facts) > MAX_RUNTIME_MODEL_CALLS
+        or str(model_call_contract.get("facts_sha256") or "")
+        != sha256_value(model_call_facts)
+        or int(
+            model_call_contract.get("reviewer_model_call_count") or 0
+        )
+        != reviewer_model_call_count
+    ):
+        failures.append("harness-model-call-contract-noncanonical")
+    if (
+        model_purpose_count < 1
+        or terminally_successful_model_purpose_count
+        != model_purpose_count
+        or incomplete_model_purpose_count != 0
+        or successful_model_call_count != model_purpose_count
+        or model_call_count
+        != (
+            successful_model_call_count
+            + superseded_validation_failure_count
+        )
+        or exact_reviewer_repair_count
+        != superseded_validation_failure_count
+        or exact_reviewer_repair_count not in {0, 1}
+        or unexpected_unsuccessful_model_call_count != 0
+        or malformed_model_purpose_sequence_count != 0
+    ):
+        failures.append("harness-model-purpose-incomplete")
     for field in (
         "authorization_failure_count",
         "authorization_denied_event_count",
@@ -2889,12 +3008,102 @@ def _harness_execution_proof(
             "model_call_count": int(
                 (trace.get("counts") or {}).get("model_calls") or 0
             ),
-            "successful_model_call_count": int(
-                models.get("successful_call_count") or 0
-            ),
+            "successful_model_call_count": successful_model_call_count,
             "successful_primary_model_call_count": int(
                 models.get("successful_primary_call_count") or 0
             ),
+            "model_purpose_count": model_purpose_count,
+            "terminally_successful_model_purpose_count": (
+                terminally_successful_model_purpose_count
+            ),
+            "incomplete_model_purpose_count": (
+                incomplete_model_purpose_count
+            ),
+            "exact_reviewer_repair_count": (
+                exact_reviewer_repair_count
+            ),
+            "superseded_validation_failure_count": (
+                superseded_validation_failure_count
+            ),
+            "unexpected_unsuccessful_model_call_count": (
+                unexpected_unsuccessful_model_call_count
+            ),
+            "malformed_model_purpose_sequence_count": (
+                malformed_model_purpose_sequence_count
+            ),
+            "model_call_contract": {
+                "schema": str(model_call_contract.get("schema") or ""),
+                "valid": model_call_contract.get("valid") is True,
+                "model_call_count": int(
+                    model_call_contract.get("model_call_count") or 0
+                ),
+                "canonical_model_call_count": int(
+                    model_call_contract.get("canonical_model_call_count")
+                    or 0
+                ),
+                "noncanonical_model_call_count": int(
+                    model_call_contract.get("noncanonical_model_call_count")
+                    or 0
+                ),
+                "primary_initial_call_count": int(
+                    model_call_contract.get("primary_initial_call_count")
+                    or 0
+                ),
+                "query_planning_call_count": int(
+                    model_call_contract.get("query_planning_call_count")
+                    or 0
+                ),
+                "primary_followup_call_count": int(
+                    model_call_contract.get("primary_followup_call_count")
+                    or 0
+                ),
+                "reviewer_model_call_count": int(
+                    model_call_contract.get("reviewer_model_call_count")
+                    or 0
+                ),
+                "facts": list(model_call_facts or []),
+                "facts_sha256": str(
+                    model_call_contract.get("facts_sha256") or ""
+                ),
+                "violation_count": int(
+                    model_call_contract.get("violation_count") or 0
+                ),
+                "violations": list(
+                    model_call_contract.get("violations") or []
+                ),
+                "global_reasons": list(
+                    model_call_contract.get("global_reasons") or []
+                ),
+            },
+            "reviewer_completion": {
+                "model_call_count": reviewer_model_call_count,
+                "completed_model_call_count": (
+                    reviewer_completed_model_call_count
+                ),
+                "primary_decision_count": reviewer_primary_decision_count,
+                "reviewer_decision_count": reviewer_decision_count,
+                "has_primary_decision": (
+                    reviewer.get("has_primary_decision") is True
+                ),
+                "has_reviewer_decision": (
+                    reviewer.get("has_reviewer_decision") is True
+                ),
+                "decision_comparable": (
+                    reviewer.get("decision_comparable") is True
+                ),
+                "missing_reviewer_decision": (
+                    reviewer.get("missing_reviewer_decision") is True
+                ),
+                "completion_contract_required": (
+                    reviewer.get("completion_contract_required") is True
+                ),
+                "completion_contract_satisfied": (
+                    reviewer.get("completion_contract_satisfied") is True
+                ),
+                "completion_contract_failure_reasons": list(
+                    reviewer.get("completion_contract_failure_reasons") or []
+                ),
+            },
             "route_authorization_failure_count": 0,
             "route_identity_mismatch_count": 0,
             "tool_call_count": tool_call_count,

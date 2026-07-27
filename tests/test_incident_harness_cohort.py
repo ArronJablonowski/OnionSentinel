@@ -769,6 +769,15 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         exported_tool_bindings = analysis["query_audit"][
             "_investigation_query_audit"
         ]["tool_call_bindings"]
+        exported_model_call_facts = [
+            {
+                "call_id": "primary-initial",
+                "purpose": "initial primary analysis",
+                "requested_route": "codex-cli:gpt-5.6-sol:high",
+                "independent_review": False,
+                "status": "completed",
+            }
+        ]
         proof = {
             "status": "passed",
             "fresh_analysis": True,
@@ -798,6 +807,44 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 "model_call_count": 1,
                 "successful_model_call_count": 1,
                 "successful_primary_model_call_count": 1,
+                "model_purpose_count": 1,
+                "terminally_successful_model_purpose_count": 1,
+                "incomplete_model_purpose_count": 0,
+                "exact_reviewer_repair_count": 0,
+                "superseded_validation_failure_count": 0,
+                "unexpected_unsuccessful_model_call_count": 0,
+                "malformed_model_purpose_sequence_count": 0,
+                "model_call_contract": {
+                    "schema": "onion-sentinel-model-call-contract-v1",
+                    "valid": True,
+                    "model_call_count": 1,
+                    "canonical_model_call_count": 1,
+                    "noncanonical_model_call_count": 0,
+                    "primary_initial_call_count": 1,
+                    "query_planning_call_count": 0,
+                    "primary_followup_call_count": 0,
+                    "reviewer_model_call_count": 0,
+                    "facts": exported_model_call_facts,
+                    "facts_sha256": cohort.sha256_value(
+                        exported_model_call_facts
+                    ),
+                    "violation_count": 0,
+                    "violations": [],
+                    "global_reasons": [],
+                },
+                "reviewer_completion": {
+                    "model_call_count": 0,
+                    "completed_model_call_count": 0,
+                    "primary_decision_count": 1,
+                    "reviewer_decision_count": 0,
+                    "has_primary_decision": True,
+                    "has_reviewer_decision": False,
+                    "decision_comparable": False,
+                    "missing_reviewer_decision": False,
+                    "completion_contract_required": False,
+                    "completion_contract_satisfied": True,
+                    "completion_contract_failure_reasons": [],
+                },
                 "route_authorization_failure_count": 0,
                 "route_identity_mismatch_count": 0,
                 "tool_call_count": 1,
@@ -1129,6 +1176,22 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             "identity_mismatch_count": 0,
             "identity_unverified_call_count": 0,
         }
+        model_call_facts = [
+            {
+                "call_id": "primary-initial",
+                "purpose": "initial primary analysis",
+                "requested_route": "codex-cli:gpt-5.6-sol:high",
+                "independent_review": False,
+                "status": "completed",
+            },
+            {
+                "call_id": "independent-review-1",
+                "purpose": "independent second-opinion review",
+                "requested_route": "codex-cli:gpt-5.6-sol:xhigh",
+                "independent_review": True,
+                "status": "completed",
+            },
+        ]
         trace_report = {
             "runs": [
                 {
@@ -1161,11 +1224,51 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                             "onion-sentinel-harness-ledger-manifest-v2"
                         ),
                     },
-                    "counts": {"model_calls": 1, "tool_calls": 1},
+                    "counts": {"model_calls": 2, "tool_calls": 1},
                     "models": {
-                        "successful_call_count": 1,
+                        "successful_call_count": 2,
                         "successful_primary_call_count": 1,
+                        "purpose_count": 2,
+                        "terminally_successful_purpose_count": 2,
+                        "incomplete_purpose_count": 0,
+                        "exact_reviewer_repair_count": 0,
+                        "superseded_validation_failure_count": 0,
+                        "unexpected_unsuccessful_call_count": 0,
+                        "malformed_purpose_sequence_count": 0,
+                        "model_call_contract": {
+                            "schema": (
+                                "onion-sentinel-model-call-contract-v1"
+                            ),
+                            "valid": True,
+                            "model_call_count": 2,
+                            "canonical_model_call_count": 2,
+                            "noncanonical_model_call_count": 0,
+                            "primary_initial_call_count": 1,
+                            "query_planning_call_count": 0,
+                            "primary_followup_call_count": 0,
+                            "reviewer_model_call_count": 1,
+                            "facts": model_call_facts,
+                            "facts_sha256": cohort.sha256_value(
+                                model_call_facts
+                            ),
+                            "violation_count": 0,
+                            "violations": [],
+                            "global_reasons": [],
+                        },
                         "route_consistency": zero_routes,
+                    },
+                    "reviewer": {
+                        "model_call_count": 1,
+                        "completed_model_call_count": 1,
+                        "primary_decision_count": 1,
+                        "reviewer_decision_count": 1,
+                        "has_primary_decision": True,
+                        "has_reviewer_decision": True,
+                        "decision_comparable": True,
+                        "missing_reviewer_decision": False,
+                        "completion_contract_required": True,
+                        "completion_contract_satisfied": True,
+                        "completion_contract_failure_reasons": [],
                     },
                     "tools": {
                         "successful_call_count": 1,
@@ -1211,6 +1314,183 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             proof["harness"]["successful_tool_call_count"],
             1,
         )
+
+        trace = trace_report["runs"][0]
+        trace["counts"]["model_calls"] = 1
+        trace["models"].update(
+            {
+                "successful_call_count": 1,
+                "purpose_count": 1,
+                "terminally_successful_purpose_count": 1,
+            }
+        )
+        trace["models"]["model_call_contract"].update(
+            {
+                "model_call_count": 1,
+                "canonical_model_call_count": 1,
+                "reviewer_model_call_count": 0,
+                "facts": model_call_facts[:1],
+                "facts_sha256": cohort.sha256_value(
+                    model_call_facts[:1]
+                ),
+            }
+        )
+        trace["reviewer"].update(
+            {
+                "model_call_count": 0,
+                "completed_model_call_count": 0,
+                "reviewer_decision_count": 0,
+                "has_reviewer_decision": False,
+                "decision_comparable": False,
+                "missing_reviewer_decision": False,
+                "completion_contract_required": False,
+                "completion_contract_satisfied": True,
+            }
+        )
+        with mock.patch.object(
+            cohort,
+            "_load_trace_evaluator",
+            return_value=fake_evaluator,
+        ):
+            optional_reviewer_proof = cohort._harness_execution_proof(
+                harness_database_path=self.root / "synthetic-harness.sqlite3",
+                manifest=manifest,
+                member=member,
+                monitor=monitor,
+            )
+        self.assertEqual(
+            optional_reviewer_proof["harness"]["reviewer_completion"][
+                "model_call_count"
+            ],
+            0,
+        )
+
+        trace["counts"]["model_calls"] = 3
+        trace["models"].update(
+            {
+                "successful_call_count": 2,
+                "purpose_count": 2,
+                "terminally_successful_purpose_count": 2,
+                "exact_reviewer_repair_count": 1,
+                "superseded_validation_failure_count": 1,
+            }
+        )
+        trace["reviewer"]["model_call_count"] = 2
+        trace["reviewer"].update(
+            {
+                "completed_model_call_count": 1,
+                "reviewer_decision_count": 1,
+                "has_reviewer_decision": True,
+                "decision_comparable": True,
+                "completion_contract_required": True,
+                "completion_contract_satisfied": True,
+            }
+        )
+        trace["models"]["model_call_contract"].update(
+            {
+                "model_call_count": 3,
+                "canonical_model_call_count": 3,
+                "reviewer_model_call_count": 2,
+            }
+        )
+        repaired_facts = [
+            model_call_facts[0],
+            {
+                **model_call_facts[1],
+                "status": "validation-failed",
+            },
+            {
+                **model_call_facts[1],
+                "call_id": "independent-review-2",
+            },
+        ]
+        trace["models"]["model_call_contract"]["facts"] = repaired_facts
+        trace["models"]["model_call_contract"]["facts_sha256"] = (
+            cohort.sha256_value(repaired_facts)
+        )
+        with mock.patch.object(
+            cohort,
+            "_load_trace_evaluator",
+            return_value=fake_evaluator,
+        ):
+            repaired_proof = cohort._harness_execution_proof(
+                harness_database_path=self.root / "synthetic-harness.sqlite3",
+                manifest=manifest,
+                member=member,
+                monitor=monitor,
+            )
+        self.assertEqual(
+            repaired_proof["harness"][
+                "superseded_validation_failure_count"
+            ],
+            1,
+        )
+
+        trace["reviewer"]["decision_comparable"] = False
+        trace["reviewer"]["completion_contract_satisfied"] = False
+        trace["reviewer"]["completion_contract_failure_reasons"] = [
+            "reviewer-decision-not-comparable"
+        ]
+        with mock.patch.object(
+            cohort,
+            "_load_trace_evaluator",
+            return_value=fake_evaluator,
+        ):
+            with self.assertRaisesRegex(
+                cohort.CohortError,
+                "harness-reviewer-completion-incomplete",
+            ):
+                cohort._harness_execution_proof(
+                    harness_database_path=(
+                        self.root / "synthetic-harness.sqlite3"
+                    ),
+                    manifest=manifest,
+                    member=member,
+                    monitor=monitor,
+                )
+        trace["reviewer"]["decision_comparable"] = True
+        trace["reviewer"]["completion_contract_satisfied"] = True
+        trace["reviewer"]["completion_contract_failure_reasons"] = []
+
+        trace["models"]["model_call_contract"]["valid"] = False
+        with mock.patch.object(
+            cohort,
+            "_load_trace_evaluator",
+            return_value=fake_evaluator,
+        ):
+            with self.assertRaisesRegex(
+                cohort.CohortError,
+                "harness-model-call-contract-noncanonical",
+            ):
+                cohort._harness_execution_proof(
+                    harness_database_path=(
+                        self.root / "synthetic-harness.sqlite3"
+                    ),
+                    manifest=manifest,
+                    member=member,
+                    monitor=monitor,
+                )
+        trace["models"]["model_call_contract"]["valid"] = True
+
+        trace["models"]["unexpected_unsuccessful_call_count"] = 1
+        with mock.patch.object(
+            cohort,
+            "_load_trace_evaluator",
+            return_value=fake_evaluator,
+        ):
+            with self.assertRaisesRegex(
+                cohort.CohortError,
+                "harness-model-purpose-incomplete",
+            ):
+                cohort._harness_execution_proof(
+                    harness_database_path=(
+                        self.root / "synthetic-harness.sqlite3"
+                    ),
+                    manifest=manifest,
+                    member=member,
+                    monitor=monitor,
+                )
+        trace["models"]["unexpected_unsuccessful_call_count"] = 0
 
         trace_report["runs"][0]["counts"]["tool_calls"] = 0
         trace_report["runs"][0]["tools"]["successful_call_count"] = 0

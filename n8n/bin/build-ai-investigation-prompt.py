@@ -17,7 +17,7 @@ import re
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -466,6 +466,24 @@ def alert_group_key(row_value: sqlite3.Row) -> str:
 
 def alert_group_id(group_key: str) -> str:
     return hashlib.sha1(str(group_key or "").encode("utf-8")).hexdigest()[:12]
+
+
+def execution_lineage(
+    selected: Any,
+    *,
+    blind_reanalysis: bool,
+) -> dict[str, Any]:
+    """Return collector-owned identifiers used by the durable harness trace."""
+
+    stable_group_id = str(
+        sqlite_value(selected, "stable_group_id") or ""
+    ).strip().lower()
+    if not stable_group_id:
+        stable_group_id = alert_group_id(alert_group_key(selected))
+    return {
+        "group_id": stable_group_id,
+        "manual_reanalysis": bool(blind_reanalysis),
+    }
 
 
 def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -2139,6 +2157,10 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
     package = {
         "package_type": "soc-ai-investigation-prompt",
         "agent_role": args.agent_role,
+        **execution_lineage(
+            selected,
+            blind_reanalysis=args.blind_reanalysis,
+        ),
         "generated_at": project_now(),
         "analysis_policy": model_policy(selected["triage_level"]),
         "system_prompt_file": str(args.system_prompt_file),

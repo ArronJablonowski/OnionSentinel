@@ -104,6 +104,201 @@ test('enqueue during processing coalesces exactly one rerun', async (context) =>
   assert.ok(after.last_completed_at);
 });
 
+test('pending higher-authority payload survives lower-priority coalescing', async (context) => {
+  const env = await fixture();
+  context.after(env.close);
+  const manual = {
+    manual_reanalysis: true,
+    alert_id: 'manual-alert',
+    requested_by: 'operator',
+  };
+  await env.queue.enqueue(
+    'ai_analysis',
+    'manual-group',
+    manual,
+    {priority: 1000, maxAttempts: 12},
+  );
+  await env.queue.enqueue(
+    'ai_analysis',
+    'manual-group',
+    {manual_reanalysis: false, representative_alert_id: 'automatic-alert'},
+    {priority: 4, maxAttempts: 8},
+  );
+
+  const pending = await env.get(
+    "SELECT * FROM durable_jobs WHERE dedupe_key = 'manual-group'",
+  );
+  assert.deepEqual(JSON.parse(pending.payload_json), manual);
+  assert.equal(pending.priority, 1000);
+  assert.equal(pending.max_attempts, 12);
+  const claimed = await env.queue.claim('ai_analysis');
+  assert.deepEqual(claimed.payload, manual);
+  assert.equal(await env.queue.complete(claimed), true);
+
+  const automatic = {
+    manual_reanalysis: false,
+    representative_alert_id: 'post-manual-alert',
+  };
+  await env.queue.enqueue(
+    'ai_analysis',
+    'manual-group',
+    automatic,
+    {priority: 4, maxAttempts: 8},
+  );
+  const postManual = await env.get(
+    "SELECT * FROM durable_jobs WHERE dedupe_key = 'manual-group'",
+  );
+  assert.deepEqual(JSON.parse(postManual.payload_json), automatic);
+  assert.equal(postManual.priority, 4);
+  assert.equal(postManual.max_attempts, 8);
+});
+
+test('equal-priority automatic enqueue refreshes an ordinary pending payload', async (context) => {
+  const env = await fixture();
+  context.after(env.close);
+  await env.queue.enqueue(
+    'ai_analysis',
+    'automatic-refresh-group',
+    {version: 1, representative_alert_id: 'old-alert'},
+    {priority: 3, maxAttempts: 8},
+  );
+  const refreshed = {
+    version: 2,
+    representative_alert_id: 'new-alert',
+  };
+  await env.queue.enqueue(
+    'ai_analysis',
+    'automatic-refresh-group',
+    refreshed,
+    {priority: 3, maxAttempts: 9},
+  );
+
+  const pending = await env.get(
+    "SELECT * FROM durable_jobs WHERE dedupe_key = 'automatic-refresh-group'",
+  );
+  assert.deepEqual(JSON.parse(pending.payload_json), refreshed);
+  assert.equal(pending.priority, 3);
+  assert.equal(pending.max_attempts, 9);
+});
+
+test('higher-priority manual request supersedes a pending automatic payload', async (context) => {
+  const env = await fixture();
+  context.after(env.close);
+  await env.queue.enqueue(
+    'ai_analysis',
+    'manual-supersedes-group',
+    {manual_reanalysis: false, representative_alert_id: 'automatic-alert'},
+    {priority: 4, maxAttempts: 8},
+  );
+  const manual = {
+    manual_reanalysis: true,
+    alert_id: 'manual-alert',
+    requested_by: 'operator',
+  };
+  await env.queue.enqueue(
+    'ai_analysis',
+    'manual-supersedes-group',
+    manual,
+    {priority: 1000, maxAttempts: 12},
+  );
+
+  const pending = await env.get(
+    "SELECT * FROM durable_jobs WHERE dedupe_key = 'manual-supersedes-group'",
+  );
+  assert.deepEqual(JSON.parse(pending.payload_json), manual);
+  assert.equal(pending.priority, 1000);
+  assert.equal(pending.max_attempts, 12);
+});
+
+test('processing manual snapshot remains immutable while automatic evidence schedules rerun', async (context) => {
+  const env = await fixture();
+  context.after(env.close);
+  const manual = {
+    manual_reanalysis: true,
+    alert_id: 'manual-alert',
+  };
+  await env.queue.enqueue(
+    'ai_analysis',
+    'processing-manual-group',
+    manual,
+    {priority: 1000, maxAttempts: 12},
+  );
+  const claimed = await env.queue.claim('ai_analysis');
+  assert.deepEqual(claimed.payload, manual);
+
+  const automatic = {
+    manual_reanalysis: false,
+    representative_alert_id: 'automatic-alert',
+  };
+  await env.queue.enqueue(
+    'ai_analysis',
+    'processing-manual-group',
+    automatic,
+    {priority: 4, maxAttempts: 8},
+  );
+  const during = await env.get(
+    "SELECT * FROM durable_jobs WHERE dedupe_key = 'processing-manual-group'",
+  );
+  assert.equal(during.status, 'processing');
+  assert.equal(during.rerun_requested, 1);
+  assert.deepEqual(JSON.parse(during.payload_json), automatic);
+  assert.equal(during.priority, 4);
+  assert.equal(during.max_attempts, 8);
+
+  assert.equal(await env.queue.complete(claimed), true);
+  const rerun = await env.queue.claim('ai_analysis');
+  assert.deepEqual(rerun.payload, automatic);
+});
+
+test('manual intent arriving during automatic processing owns the rerun', async (context) => {
+  const env = await fixture();
+  context.after(env.close);
+  const automatic = {
+    manual_reanalysis: false,
+    representative_alert_id: 'automatic-alert',
+  };
+  await env.queue.enqueue(
+    'ai_analysis',
+    'processing-automatic-group',
+    automatic,
+    {priority: 4, maxAttempts: 8},
+  );
+  const claimed = await env.queue.claim('ai_analysis');
+  assert.deepEqual(claimed.payload, automatic);
+
+  const manual = {
+    manual_reanalysis: true,
+    alert_id: 'manual-alert',
+  };
+  await env.queue.enqueue(
+    'ai_analysis',
+    'processing-automatic-group',
+    manual,
+    {priority: 1000, maxAttempts: 12},
+  );
+  await env.queue.enqueue(
+    'ai_analysis',
+    'processing-automatic-group',
+    {
+      manual_reanalysis: false,
+      representative_alert_id: 'later-automatic-alert',
+    },
+    {priority: 4, maxAttempts: 8},
+  );
+  const during = await env.get(
+    "SELECT * FROM durable_jobs WHERE dedupe_key = 'processing-automatic-group'",
+  );
+  assert.equal(during.status, 'processing');
+  assert.equal(during.rerun_requested, 1);
+  assert.deepEqual(JSON.parse(during.payload_json), manual);
+  assert.equal(during.priority, 1000);
+  assert.equal(during.max_attempts, 12);
+
+  assert.equal(await env.queue.complete(claimed), true);
+  const rerun = await env.queue.claim('ai_analysis');
+  assert.deepEqual(rerun.payload, manual);
+});
+
 test('external worker heartbeat extends only its current lease', async (context) => {
   const env = await fixture({transitionLeaseSeconds: 120});
   context.after(env.close);

@@ -82,21 +82,72 @@ function createDurableJobQueue({run, get, all, now, transitionLeaseSeconds = 900
 
   async function enqueue(jobType, dedupeKey, payload, options = {}) {
     const timestamp = now();
+    // A queued higher-priority request is the authoritative intent. This
+    // includes a pending job and the already-latched rerun behind a processing
+    // lease. The first enqueue during processing always owns the rerun because
+    // the worker already holds an immutable snapshot of the current attempt.
+    // Equal/newer or higher-authority requests may replace queued intent.
+    const preserveQueuedAuthority = `
+      (
+        durable_jobs.status = 'pending'
+        OR (
+          durable_jobs.status = 'processing'
+          AND durable_jobs.rerun_requested = 1
+        )
+      )
+      AND durable_jobs.priority > excluded.priority
+    `;
     await run(
       `INSERT INTO durable_jobs (
          job_type, dedupe_key, payload_json, status, priority, max_attempts,
          next_attempt_at, created_at, updated_at, requested_at
        ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
        ON CONFLICT(job_type, dedupe_key) DO UPDATE SET
-         payload_json = excluded.payload_json,
-         priority = MAX(durable_jobs.priority, excluded.priority),
-         max_attempts = excluded.max_attempts,
+         payload_json = CASE
+           WHEN ${preserveQueuedAuthority}
+           THEN durable_jobs.payload_json
+           ELSE excluded.payload_json
+         END,
+         priority = CASE
+           WHEN ${preserveQueuedAuthority}
+           THEN durable_jobs.priority
+           ELSE excluded.priority
+         END,
+         max_attempts = CASE
+           WHEN ${preserveQueuedAuthority}
+           THEN durable_jobs.max_attempts
+           ELSE excluded.max_attempts
+         END,
          status = CASE WHEN durable_jobs.status = 'processing' THEN 'processing' ELSE 'pending' END,
-         next_attempt_at = CASE WHEN durable_jobs.status = 'processing' THEN durable_jobs.next_attempt_at ELSE excluded.next_attempt_at END,
-         attempt_count = CASE WHEN durable_jobs.status = 'processing' THEN durable_jobs.attempt_count ELSE 0 END,
-         completed_at = CASE WHEN durable_jobs.status = 'processing' THEN durable_jobs.completed_at ELSE NULL END,
-         last_error = CASE WHEN durable_jobs.status = 'processing' THEN durable_jobs.last_error ELSE NULL END,
-         requested_at = excluded.requested_at,
+         next_attempt_at = CASE
+           WHEN durable_jobs.status = 'processing'
+             OR ${preserveQueuedAuthority}
+           THEN durable_jobs.next_attempt_at
+           ELSE excluded.next_attempt_at
+         END,
+         attempt_count = CASE
+           WHEN durable_jobs.status = 'processing'
+             OR ${preserveQueuedAuthority}
+           THEN durable_jobs.attempt_count
+           ELSE 0
+         END,
+         completed_at = CASE
+           WHEN durable_jobs.status = 'processing'
+             OR ${preserveQueuedAuthority}
+           THEN durable_jobs.completed_at
+           ELSE NULL
+         END,
+         last_error = CASE
+           WHEN durable_jobs.status = 'processing'
+             OR ${preserveQueuedAuthority}
+           THEN durable_jobs.last_error
+           ELSE NULL
+         END,
+         requested_at = CASE
+           WHEN ${preserveQueuedAuthority}
+           THEN durable_jobs.requested_at
+           ELSE excluded.requested_at
+         END,
          processing_started_at = CASE WHEN durable_jobs.status = 'processing' THEN durable_jobs.processing_started_at ELSE NULL END,
          rerun_requested = CASE WHEN durable_jobs.status = 'processing' THEN 1 ELSE 0 END,
          updated_at = excluded.updated_at`,

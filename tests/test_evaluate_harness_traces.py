@@ -333,8 +333,8 @@ def create_trace_database(path: Path) -> None:
             [
                 (
                     "run-1",
-                    "primary-call",
-                    "primary-analysis",
+                    "primary-initial",
+                    evaluator.PRIMARY_INITIAL_PURPOSE,
                     "codex:gpt-5.6-terra",
                     "gpt-5.6-terra",
                     "codex-cli",
@@ -345,8 +345,8 @@ def create_trace_database(path: Path) -> None:
                 ),
                 (
                     "run-1",
-                    "review-call",
-                    "independent-review",
+                    "independent-review-1",
+                    evaluator.REVIEWER_REPAIR_PURPOSE,
                     "codex:gpt-5.6-sol",
                     "gpt-5.6-sol",
                     "codex-cli",
@@ -537,6 +537,28 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
             self.assertTrue(report["integrity"]["all_chains_valid"])
             self.assertEqual(report["models"]["call_count"], 2)
             self.assertEqual(report["models"]["independent_review_call_count"], 1)
+            self.assertEqual(report["models"]["purpose_count"], 2)
+            self.assertEqual(
+                report["models"]["terminally_successful_purpose_count"],
+                2,
+            )
+            self.assertEqual(report["models"]["incomplete_purpose_count"], 0)
+            self.assertEqual(
+                report["models"]["malformed_purpose_sequence_count"],
+                0,
+            )
+            model_contract = report["runs"][0]["models"][
+                "model_call_contract"
+            ]
+            self.assertTrue(model_contract["valid"])
+            self.assertEqual(
+                model_contract["canonical_model_call_count"],
+                2,
+            )
+            self.assertEqual(
+                model_contract["facts_sha256"],
+                evaluator.digest_json(model_contract["facts"]),
+            )
             self.assertEqual(report["tools"]["call_count"], 3)
             self.assertEqual(report["tools"]["successful_call_count"], 2)
             self.assertEqual(report["tools"]["read_only_call_count"], 2)
@@ -614,6 +636,361 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
                 before_digest,
             )
             self.assertEqual(database.stat().st_mtime_ns, before_mtime)
+
+    def test_exact_reviewer_validation_repair_completes_one_purpose(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "harness.sqlite3"
+            policy = harness.HarnessPolicy.from_dict(
+                {
+                    "schema": harness.POLICY_SCHEMA,
+                    "version": "reviewer-repair-test",
+                    "enabled": True,
+                    "mode": "shadow",
+                    "budgets": dict(harness.DEFAULT_BUDGETS),
+                    "role_capabilities": {
+                        role: sorted(capabilities)
+                        for role, capabilities
+                        in harness.DEFAULT_ROLE_CAPABILITIES.items()
+                    },
+                    "approval_required": [],
+                    "memory": {
+                        "require_independent_agreement": True,
+                        "shared_requires_human_approval": True,
+                    },
+                }
+            )
+            primary_route = "codex-cli:gpt-5.5:high"
+            reviewer_route = "codex-cli:gpt-5.6-sol:xhigh"
+            prompt = {
+                "alert": {"alert_id": "reviewer-repair-alert"},
+                "evidence_reference_contract": {"references": []},
+            }
+            envelope = harness.JobEnvelope.from_prompt(
+                run_id="reviewer-repair-run",
+                prompt_package=prompt,
+                role=harness.AgentRole.SOC_ANALYST.value,
+                assigned_route=primary_route,
+                configuration={"reviewer_route": reviewer_route},
+            )
+            run = harness.HarnessRun(
+                harness.HarnessStore(database),
+                envelope,
+                policy,
+            )
+            primary_response = {
+                "_analysis_model": "gpt-5.5",
+                "_analysis_model_path": "frontier-codex-cli",
+                "_analysis_provider": "codex-cli",
+                "_analysis_model_route": primary_route,
+            }
+            run.preflight_model_call(
+                call_id="primary-initial",
+                input_value=prompt,
+                requested_route=primary_route,
+                purpose="initial primary analysis",
+            )
+            run.model_call(
+                call_id="primary-initial",
+                purpose="initial primary analysis",
+                requested_route=primary_route,
+                response=primary_response,
+                input_value=prompt,
+                duration_seconds=0.1,
+            )
+            run.record_response(
+                {
+                    "detection_outcome": "inconclusive",
+                    "confidence": "medium",
+                    "confidence_score": 0.5,
+                },
+                decision_id="primary",
+                decision_type="primary-analysis",
+                hypothesis_revision=1,
+            )
+            reviewer_response = {
+                "_analysis_model": "gpt-5.6-sol",
+                "_analysis_model_path": "frontier-codex-cli",
+                "_analysis_provider": "codex-cli",
+                "_analysis_model_route": reviewer_route,
+            }
+            for attempt, status in (
+                (1, "validation-failed"),
+                (2, "completed"),
+            ):
+                call_id = f"independent-review-{attempt}"
+                run.preflight_model_call(
+                    call_id=call_id,
+                    input_value=prompt,
+                    requested_route=reviewer_route,
+                    purpose=evaluator.REVIEWER_REPAIR_PURPOSE,
+                    independent_review=True,
+                )
+                run.model_call(
+                    call_id=call_id,
+                    purpose=evaluator.REVIEWER_REPAIR_PURPOSE,
+                    requested_route=reviewer_route,
+                    response=reviewer_response,
+                    input_value=prompt,
+                    duration_seconds=0.1,
+                    independent_review=True,
+                    status=status,
+                )
+            run.record_response(
+                {
+                    "detection_outcome": "inconclusive",
+                    "confidence": "medium",
+                    "confidence_score": 0.5,
+                },
+                decision_id="independent-review",
+                decision_type="independent-review",
+                hypothesis_revision=1,
+            )
+            run.complete(check_budget=False)
+
+            report = evaluator.evaluate_database(database, run.run_id)
+            models = report["runs"][0]["models"]
+
+            self.assertEqual(models["successful_call_count"], 2)
+            self.assertEqual(models["purpose_count"], 2)
+            self.assertEqual(
+                models["terminally_successful_purpose_count"],
+                2,
+            )
+            self.assertEqual(models["incomplete_purpose_count"], 0)
+            self.assertEqual(models["exact_reviewer_repair_count"], 1)
+            self.assertEqual(
+                models["superseded_validation_failure_count"],
+                1,
+            )
+            self.assertEqual(
+                models["unexpected_unsuccessful_call_count"],
+                0,
+            )
+            self.assertEqual(
+                models["malformed_purpose_sequence_count"],
+                0,
+            )
+            classifications = {
+                item["call_id"]: item["classification"]
+                for item in models["call_status_classifications"]
+            }
+            self.assertEqual(
+                classifications["independent-review-1"],
+                "superseded-validation-failure",
+            )
+            self.assertEqual(
+                classifications["independent-review-2"],
+                "successful",
+            )
+            self.assertNotIn(
+                "model-purpose-incomplete",
+                report["runs"][0]["coverage_gap_reasons"],
+            )
+            self.assertTrue(
+                report["runs"][0]["reviewer"][
+                    "completion_contract_satisfied"
+                ]
+            )
+            self.assertEqual(
+                report["models"]["exact_reviewer_repair_count"],
+                1,
+            )
+            self.assertTrue(report["runs"][0]["integrity"]["valid"])
+
+    def test_model_purpose_completion_rejects_malformed_retry_patterns(self):
+        reviewer = {"has_reviewer_decision": True}
+
+        def call(
+            call_id,
+            status,
+            *,
+            purpose=evaluator.REVIEWER_REPAIR_PURPOSE,
+            independent_review=1,
+            created_at="2026-07-25T00:00:20Z",
+        ):
+            return {
+                "call_id": call_id,
+                "purpose": purpose,
+                "requested_route": "codex-cli:gpt-5.6-sol:xhigh",
+                "independent_review": independent_review,
+                "status": status,
+                "created_at": created_at,
+            }
+
+        accepted_single = evaluator.model_purpose_completion(
+            [call("independent-review-1", "completed")],
+            reviewer,
+        )
+        self.assertEqual(
+            accepted_single["terminally_successful_purpose_count"],
+            1,
+        )
+        self.assertEqual(
+            accepted_single["malformed_purpose_sequence_count"],
+            0,
+        )
+
+        malformed_cases = {
+            "lone-validation-failure": [
+                call("independent-review-1", "validation-failed"),
+            ],
+            "runtime-failure-then-success": [
+                call("independent-review-1", "failed:RuntimeError"),
+                call(
+                    "independent-review-2",
+                    "completed",
+                    created_at="2026-07-25T00:00:30Z",
+                ),
+            ],
+            "three-attempts": [
+                call("independent-review-1", "validation-failed"),
+                call(
+                    "independent-review-2",
+                    "validation-failed",
+                    created_at="2026-07-25T00:00:30Z",
+                ),
+                call(
+                    "independent-review-3",
+                    "completed",
+                    created_at="2026-07-25T00:00:40Z",
+                ),
+            ],
+            "wrong-purpose": [
+                call(
+                    "independent-review-1",
+                    "validation-failed",
+                    purpose="renamed reviewer purpose",
+                ),
+                call(
+                    "independent-review-2",
+                    "completed",
+                    purpose="renamed reviewer purpose",
+                    created_at="2026-07-25T00:00:30Z",
+                ),
+            ],
+            "success-then-validation-failure": [
+                call("independent-review-1", "completed"),
+                call(
+                    "independent-review-2",
+                    "validation-failed",
+                    created_at="2026-07-25T00:00:30Z",
+                ),
+            ],
+            "renamed-single-reviewer": [
+                call(
+                    "renamed-review-call",
+                    "completed",
+                    purpose="renamed reviewer purpose",
+                ),
+            ],
+            "empty-primary-purpose": [
+                call(
+                    "primary-empty-purpose",
+                    "completed",
+                    purpose="",
+                    independent_review=0,
+                ),
+            ],
+        }
+        for label, calls in malformed_cases.items():
+            with self.subTest(label=label):
+                result = evaluator.model_purpose_completion(
+                    calls,
+                    reviewer,
+                )
+                self.assertEqual(result["exact_reviewer_repair_count"], 0)
+                self.assertGreater(
+                    result["malformed_purpose_sequence_count"],
+                    0,
+                )
+                if label not in {
+                    "renamed-single-reviewer",
+                    "empty-primary-purpose",
+                }:
+                    self.assertGreater(
+                        result["unexpected_unsuccessful_call_count"],
+                        0,
+                    )
+
+        missing_decision = evaluator.model_purpose_completion(
+            [
+                call("independent-review-1", "validation-failed"),
+                call(
+                    "independent-review-2",
+                    "completed",
+                    created_at="2026-07-25T00:00:30Z",
+                ),
+            ],
+            {"has_reviewer_decision": False},
+        )
+        self.assertEqual(missing_decision["exact_reviewer_repair_count"], 0)
+        self.assertEqual(
+            missing_decision["malformed_purpose_sequence_count"],
+            1,
+        )
+        self.assertEqual(
+            missing_decision["unexpected_unsuccessful_call_count"],
+            1,
+        )
+
+    def test_model_call_contract_is_closed_and_reviewer_is_conditional(self):
+        primary = {
+            "call_id": "primary-initial",
+            "purpose": evaluator.PRIMARY_INITIAL_PURPOSE,
+            "requested_route": "codex-cli:gpt-5.5:high",
+            "independent_review": 0,
+            "status": "completed",
+            "created_at": "2026-07-25T00:00:10Z",
+        }
+        contract = evaluator.canonical_model_call_contract([primary])
+        self.assertTrue(contract["valid"])
+        self.assertEqual(contract["canonical_model_call_count"], 1)
+        no_reviewer = {
+            "model_call_count": 0,
+            "completed_model_call_count": 0,
+            "primary_decision_count": 1,
+            "reviewer_decision_count": 0,
+            "has_primary_decision": True,
+            "has_reviewer_decision": False,
+            "decision_comparable": False,
+            "missing_reviewer_decision": False,
+        }
+        completion = evaluator.reviewer_completion_contract(
+            no_reviewer,
+            {"exact_reviewer_repair_count": 0},
+        )
+        self.assertFalse(completion["completion_contract_required"])
+        self.assertTrue(completion["completion_contract_satisfied"])
+
+        for field, value in (
+            ("call_id", "invented-call"),
+            ("purpose", "renamed purpose"),
+            ("status", "success"),
+        ):
+            with self.subTest(field=field):
+                changed = dict(primary)
+                changed[field] = value
+                rejected = evaluator.canonical_model_call_contract([changed])
+                self.assertFalse(rejected["valid"])
+                self.assertEqual(
+                    rejected["noncanonical_model_call_count"],
+                    1,
+                )
+
+        incomplete_reviewer = {
+            **no_reviewer,
+            "model_call_count": 1,
+            "completed_model_call_count": 1,
+            "reviewer_decision_count": 1,
+            "has_reviewer_decision": True,
+            "decision_comparable": False,
+        }
+        completion = evaluator.reviewer_completion_contract(
+            incomplete_reviewer,
+            {"exact_reviewer_repair_count": 0},
+        )
+        self.assertTrue(completion["completion_contract_required"])
+        self.assertFalse(completion["completion_contract_satisfied"])
 
     def test_run_filter_unknown_run_and_private_json_output(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -823,6 +1200,7 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
                 },
                 input_value={"case": "route-audit"},
                 duration_seconds=0.1,
+                status="validation-failed",
             )
             run.model_call(
                 call_id="missing-authorization",

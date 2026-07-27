@@ -15,6 +15,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -49,6 +50,19 @@ TERMINAL_STATUSES = frozenset(
 SUCCESS_STATUSES = frozenset(
     {"ok", "complete", "completed", "success", "succeeded"}
 )
+REVIEWER_REPAIR_PURPOSE = "independent second-opinion review"
+REVIEWER_REPAIR_CALL_IDS = (
+    "independent-review-1",
+    "independent-review-2",
+)
+VALIDATION_FAILED_STATUS = "validation-failed"
+MODEL_CALL_CONTRACT_SCHEMA = "onion-sentinel-model-call-contract-v1"
+MAX_RUNTIME_MODEL_CALLS = 6
+PRIMARY_INITIAL_CALL_ID = "primary-initial"
+PRIMARY_INITIAL_PURPOSE = "initial primary analysis"
+QUERY_PLANNING_CALL_ID = "primary-query-planning-retry-1"
+QUERY_PLANNING_PURPOSE = "evaluation query-planning retry 1 of 1"
+FOLLOWUP_CALL_RE = re.compile(r"primary-followup-([1-3])")
 REJECTION_STATUSES = frozenset(
     {"rejected", "denied", "blocked", "unauthorized", "forbidden"}
 )
@@ -522,6 +536,16 @@ def reviewer_result(
     payloads = decision_payloads(decisions, malformed)
     primary = payloads.get("primary")
     reviewer = payloads.get("independent-review")
+    primary_decision_count = sum(
+        str(row.get("decision_id") or "") == "primary"
+        and str(row.get("decision_type") or "") == "primary-analysis"
+        for row in decisions
+    )
+    reviewer_decision_count = sum(
+        str(row.get("decision_id") or "") == "independent-review"
+        and str(row.get("decision_type") or "") == "independent-review"
+        for row in decisions
+    )
     disputed_fields: list[str] = []
     if isinstance(primary, dict) and isinstance(reviewer, dict):
         disputed_fields = [
@@ -532,9 +556,11 @@ def reviewer_result(
     return {
         "model_call_count": len(reviewer_calls),
         "completed_model_call_count": sum(
-            normalize_status(row.get("status")) in SUCCESS_STATUSES
+            normalize_status(row.get("status")) == "completed"
             for row in reviewer_calls
         ),
+        "primary_decision_count": primary_decision_count,
+        "reviewer_decision_count": reviewer_decision_count,
         "has_primary_decision": isinstance(primary, dict),
         "has_reviewer_decision": isinstance(reviewer, dict),
         "comparison_basis": (
@@ -549,6 +575,327 @@ def reviewer_result(
         "disputed_fields": disputed_fields,
         "missing_reviewer_decision": bool(reviewer_calls)
         and not isinstance(reviewer, dict),
+    }
+
+
+def reviewer_completion_contract(
+    reviewer: Mapping[str, Any],
+    purpose_completion: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Fail closed on incomplete reviewer evidence only when review ran."""
+
+    call_count = nonnegative_int(reviewer.get("model_call_count"))
+    exact_repair_count = nonnegative_int(
+        purpose_completion.get("exact_reviewer_repair_count")
+    )
+    required = call_count > 0
+    failures: list[str] = []
+    if required:
+        if nonnegative_int(reviewer.get("completed_model_call_count")) != 1:
+            failures.append("completed-reviewer-call-count-not-one")
+        if nonnegative_int(reviewer.get("primary_decision_count")) != 1:
+            failures.append("primary-decision-count-not-one")
+        if nonnegative_int(reviewer.get("reviewer_decision_count")) != 1:
+            failures.append("reviewer-decision-count-not-one")
+        if reviewer.get("has_primary_decision") is not True:
+            failures.append("primary-decision-missing")
+        if reviewer.get("has_reviewer_decision") is not True:
+            failures.append("reviewer-decision-missing")
+        if reviewer.get("decision_comparable") is not True:
+            failures.append("reviewer-decision-not-comparable")
+        if reviewer.get("missing_reviewer_decision") is not False:
+            failures.append("reviewer-decision-marked-missing")
+        if call_count != 1 + exact_repair_count:
+            failures.append("reviewer-call-count-does-not-match-repair")
+    return {
+        "completion_contract_required": required,
+        "completion_contract_satisfied": not failures,
+        "completion_contract_failure_reasons": failures,
+    }
+
+
+def canonical_model_call_contract(
+    model_calls: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Validate the closed model-call grammar emitted by the current runtime."""
+
+    ordered_calls = sorted(
+        (
+            (ordinal, row)
+            for ordinal, row in enumerate(model_calls)
+            if isinstance(row, dict)
+        ),
+        key=lambda item: (
+            str(item[1].get("created_at") or ""),
+            str(item[1].get("call_id") or ""),
+            item[0],
+        ),
+    )
+    facts: list[dict[str, Any]] = []
+    violations: list[dict[str, Any]] = []
+    followup_rounds: list[int] = []
+    primary_initial_count = 0
+    query_planning_count = 0
+    canonical_count = 0
+    for ordinal, row in ordered_calls:
+        call_id = str(row.get("call_id") or "")
+        purpose = str(row.get("purpose") or "")
+        requested_route = str(row.get("requested_route") or "")
+        status = normalize_status(row.get("status"))
+        independent_review = int(row.get("independent_review") or 0) == 1
+        reasons: list[str] = []
+        followup_match = FOLLOWUP_CALL_RE.fullmatch(call_id)
+        if call_id == PRIMARY_INITIAL_CALL_ID:
+            primary_initial_count += 1
+            if purpose != PRIMARY_INITIAL_PURPOSE:
+                reasons.append("primary-initial-purpose-mismatch")
+            if independent_review:
+                reasons.append("primary-initial-marked-reviewer")
+            if status != "completed":
+                reasons.append("primary-initial-status-not-completed")
+        elif call_id == QUERY_PLANNING_CALL_ID:
+            query_planning_count += 1
+            if purpose != QUERY_PLANNING_PURPOSE:
+                reasons.append("query-planning-purpose-mismatch")
+            if independent_review:
+                reasons.append("query-planning-marked-reviewer")
+            if status != "completed":
+                reasons.append("query-planning-status-not-completed")
+        elif followup_match:
+            round_number = int(followup_match.group(1))
+            followup_rounds.append(round_number)
+            if purpose != (
+                f"primary investigation follow-up round {round_number}"
+            ):
+                reasons.append("primary-followup-purpose-mismatch")
+            if independent_review:
+                reasons.append("primary-followup-marked-reviewer")
+            if status != "completed":
+                reasons.append("primary-followup-status-not-completed")
+        elif call_id in REVIEWER_REPAIR_CALL_IDS:
+            attempt = REVIEWER_REPAIR_CALL_IDS.index(call_id) + 1
+            if purpose != REVIEWER_REPAIR_PURPOSE:
+                reasons.append("reviewer-purpose-mismatch")
+            if not independent_review:
+                reasons.append("reviewer-call-not-marked-independent")
+            allowed_statuses = (
+                {"completed", VALIDATION_FAILED_STATUS}
+                if attempt == 1
+                else {"completed"}
+            )
+            if status not in allowed_statuses:
+                reasons.append("reviewer-status-not-canonical")
+        else:
+            reasons.append("unknown-model-call-id")
+        if not requested_route:
+            reasons.append("requested-route-missing")
+        fact = {
+            "call_id": call_id,
+            "purpose": purpose,
+            "requested_route": requested_route,
+            "independent_review": independent_review,
+            "status": status,
+        }
+        if len(facts) < MAX_RUNTIME_MODEL_CALLS:
+            facts.append(fact)
+        if reasons:
+            if len(violations) < MAX_RUNTIME_MODEL_CALLS:
+                violations.append(
+                    {
+                        "call_id": call_id or f"ordinal-{ordinal}",
+                        "reasons": reasons,
+                    }
+                )
+        else:
+            canonical_count += 1
+
+    global_reasons: list[str] = []
+    if len(ordered_calls) > MAX_RUNTIME_MODEL_CALLS:
+        global_reasons.append("model-call-budget-exceeded")
+    if primary_initial_count != 1:
+        global_reasons.append("primary-initial-count-not-one")
+    if query_planning_count not in {0, 1}:
+        global_reasons.append("query-planning-count-invalid")
+    unique_followups = sorted(set(followup_rounds))
+    if len(unique_followups) != len(followup_rounds):
+        global_reasons.append("duplicate-primary-followup-round")
+    if unique_followups and unique_followups != list(
+        range(1, max(unique_followups) + 1)
+    ):
+        global_reasons.append("noncontiguous-primary-followup-rounds")
+    maximum_followups = 2 if query_planning_count else 3
+    if len(unique_followups) > maximum_followups:
+        global_reasons.append("too-many-primary-followup-rounds")
+    return {
+        "schema": MODEL_CALL_CONTRACT_SCHEMA,
+        "valid": not violations and not global_reasons,
+        "model_call_count": len(ordered_calls),
+        "canonical_model_call_count": canonical_count,
+        "noncanonical_model_call_count": len(ordered_calls) - canonical_count,
+        "primary_initial_call_count": primary_initial_count,
+        "query_planning_call_count": query_planning_count,
+        "primary_followup_call_count": len(followup_rounds),
+        "reviewer_model_call_count": sum(
+            int(row.get("independent_review") or 0) == 1
+            for _ordinal, row in ordered_calls
+        ),
+        "facts": facts,
+        "facts_sha256": digest_json(facts),
+        "violation_count": len(violations) + len(global_reasons),
+        "violations": violations,
+        "global_reasons": global_reasons,
+    }
+
+
+def model_purpose_completion(
+    model_calls: list[dict[str, Any]],
+    reviewer: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Classify bounded model retries without treating bad output as success.
+
+    The runtime has one explicit schema-repair path: the independent reviewer
+    may return one deterministically invalid response and then one successful
+    repair. Every invocation remains in the budget and audit ledgers. No other
+    failed call or duplicate purpose is allowed to hide behind a later success.
+    """
+
+    ordered_calls = sorted(
+        (
+            (ordinal, row)
+            for ordinal, row in enumerate(model_calls)
+            if isinstance(row, dict)
+        ),
+        key=lambda item: (
+            str(item[1].get("created_at") or ""),
+            str(item[1].get("call_id") or ""),
+            item[0],
+        ),
+    )
+    groups: dict[tuple[bool, str, str], list[dict[str, Any]]] = {}
+    call_classifications: dict[str, str] = {}
+    for ordinal, row in ordered_calls:
+        independent_review = int(row.get("independent_review") or 0) == 1
+        purpose = str(row.get("purpose") or "")
+        requested_route = str(row.get("requested_route") or "")
+        groups.setdefault(
+            (independent_review, purpose, requested_route),
+            [],
+        ).append(row)
+        call_id = str(row.get("call_id") or f"ordinal-{ordinal}")
+        call_classifications[call_id] = (
+            "successful"
+            if normalize_status(row.get("status")) in SUCCESS_STATUSES
+            else "unexpected-unsuccessful"
+        )
+
+    terminally_successful = 0
+    exact_reviewer_repairs = 0
+    superseded_validation_failures = 0
+    malformed_sequences = 0
+    purpose_summaries: list[dict[str, Any]] = []
+    for (
+        independent_review,
+        purpose,
+        requested_route,
+    ), calls in groups.items():
+        call_ids = [str(row.get("call_id") or "") for row in calls]
+        statuses = [normalize_status(row.get("status")) for row in calls]
+        terminal_success = bool(
+            statuses and statuses[-1] in SUCCESS_STATUSES
+        )
+        if terminal_success:
+            terminally_successful += 1
+
+        reviewer_like = bool(
+            independent_review
+            or purpose == REVIEWER_REPAIR_PURPOSE
+            or any(
+                call_id.startswith("independent-review-")
+                for call_id in call_ids
+            )
+        )
+        valid_single = bool(
+            len(calls) == 1
+            and terminal_success
+            and bool(purpose)
+            and bool(requested_route)
+            and (
+                not reviewer_like
+                or (
+                    independent_review
+                    and purpose == REVIEWER_REPAIR_PURPOSE
+                    and call_ids == [REVIEWER_REPAIR_CALL_IDS[0]]
+                    and reviewer.get("has_reviewer_decision") is True
+                )
+            )
+        )
+        exact_repair = bool(
+            reviewer_like
+            and independent_review
+            and purpose == REVIEWER_REPAIR_PURPOSE
+            and bool(requested_route)
+            and call_ids == list(REVIEWER_REPAIR_CALL_IDS)
+            and statuses[0] == VALIDATION_FAILED_STATUS
+            and statuses[1] in SUCCESS_STATUSES
+            and reviewer.get("has_reviewer_decision") is True
+        )
+        if exact_repair:
+            exact_reviewer_repairs += 1
+            superseded_validation_failures += 1
+            call_classifications[call_ids[0]] = (
+                "superseded-validation-failure"
+            )
+            sequence_classification = "exact-reviewer-repair"
+        elif valid_single:
+            sequence_classification = "single-success"
+        else:
+            malformed_sequences += 1
+            sequence_classification = "malformed"
+        purpose_summaries.append(
+            {
+                "independent_review": independent_review,
+                "purpose": purpose[:160],
+                "requested_route": requested_route[:256],
+                "call_ids": call_ids,
+                "statuses": statuses,
+                "terminally_successful": terminal_success,
+                "sequence_classification": sequence_classification,
+            }
+        )
+
+    classified_calls = [
+        {
+            "call_id": str(row.get("call_id") or f"ordinal-{ordinal}"),
+            "status": normalize_status(row.get("status")),
+            "classification": call_classifications[
+                str(row.get("call_id") or f"ordinal-{ordinal}")
+            ],
+        }
+        for ordinal, row in ordered_calls
+    ]
+    classification_counts = collections.Counter(
+        item["classification"] for item in classified_calls
+    )
+    return {
+        "purpose_count": len(groups),
+        "terminally_successful_purpose_count": terminally_successful,
+        "incomplete_purpose_count": len(groups) - terminally_successful,
+        "exact_reviewer_repair_count": exact_reviewer_repairs,
+        "superseded_validation_failure_count": (
+            superseded_validation_failures
+        ),
+        "unexpected_unsuccessful_call_count": classification_counts.get(
+            "unexpected-unsuccessful",
+            0,
+        ),
+        "malformed_purpose_sequence_count": malformed_sequences,
+        "call_status_classification_counts": counter_dict(
+            classification_counts
+        ),
+        "call_status_classifications": classified_calls[
+            :MAX_REPORTED_IDS
+        ],
+        "purpose_summaries": purpose_summaries[:MAX_REPORTED_IDS],
     }
 
 
@@ -832,7 +1179,9 @@ def model_route_consistency(
         else:
             authorization_unverified_call_ids.append(call_id)
 
-        if normalize_status(row.get("status")) not in SUCCESS_STATUSES:
+        if normalize_status(row.get("status")) not in (
+            SUCCESS_STATUSES | {VALIDATION_FAILED_STATUS}
+        ):
             identity_not_applicable_count += 1
             continue
         expected_identity = expected_route_identity(requested_route)
@@ -1150,6 +1499,14 @@ def evaluate_run(
         )
     ]
     reviewer = reviewer_result(model_calls, decisions, malformed)
+    purpose_completion = model_purpose_completion(
+        model_calls,
+        reviewer,
+    )
+    reviewer.update(
+        reviewer_completion_contract(reviewer, purpose_completion)
+    )
+    model_call_contract = canonical_model_call_contract(model_calls)
     route_consistency = model_route_consistency(
         run,
         events,
@@ -1180,6 +1537,16 @@ def evaluate_run(
         coverage_reasons.append("non-read-only-tool-call")
     if reviewer["missing_reviewer_decision"]:
         coverage_reasons.append("reviewer-call-without-decision")
+    if reviewer["completion_contract_satisfied"] is not True:
+        coverage_reasons.append("reviewer-completion-contract-failed")
+    if model_call_contract["valid"] is not True:
+        coverage_reasons.append("noncanonical-model-call-contract")
+    if purpose_completion["incomplete_purpose_count"]:
+        coverage_reasons.append("model-purpose-incomplete")
+    if purpose_completion["malformed_purpose_sequence_count"]:
+        coverage_reasons.append("model-purpose-sequence-malformed")
+    if purpose_completion["unexpected_unsuccessful_call_count"]:
+        coverage_reasons.append("unexpected-unsuccessful-model-call")
     if route_consistency["authorization_failure_count"]:
         coverage_reasons.append("model-route-authorization-failure")
     if route_consistency["identity_mismatch_count"]:
@@ -1249,6 +1616,8 @@ def evaluate_run(
                 and int(row.get("independent_review") or 0) == 0
                 for row in model_calls
             ),
+            **purpose_completion,
+            "model_call_contract": model_call_contract,
             "duration_ms": sum(
                 nonnegative_int(row.get("duration_ms")) for row in model_calls
             ),
@@ -1342,6 +1711,7 @@ def summarize(
     corroborating_evidence = 0
     reviewer_runs = comparable_reviews = reviewer_disagreements = 0
     missing_reviewer_decisions = 0
+    reviewer_completion_failure_runs = 0
     budget_violation_runs = 0
     budget_violation_operation_count = 0
     memory_decisions = memory_allowed = memory_blocked = 0
@@ -1353,6 +1723,11 @@ def summarize(
     model_observation_denials = 0
     route_authorization_unverified = model_identity_mismatches = 0
     model_identity_unverified = 0
+    model_purpose_count = terminally_successful_model_purposes = 0
+    incomplete_model_purposes = exact_reviewer_repairs = 0
+    superseded_validation_failures = unexpected_unsuccessful_model_calls = 0
+    malformed_model_purpose_sequences = 0
+    noncanonical_model_calls = invalid_model_call_contract_runs = 0
     route_authorization_failure_run_ids: list[str] = []
     model_identity_failure_run_ids: list[str] = []
 
@@ -1374,6 +1749,31 @@ def summarize(
         independent_review_calls += result["models"][
             "independent_review_calls"
         ]
+        model_purpose_count += result["models"]["purpose_count"]
+        terminally_successful_model_purposes += result["models"][
+            "terminally_successful_purpose_count"
+        ]
+        incomplete_model_purposes += result["models"][
+            "incomplete_purpose_count"
+        ]
+        exact_reviewer_repairs += result["models"][
+            "exact_reviewer_repair_count"
+        ]
+        superseded_validation_failures += result["models"][
+            "superseded_validation_failure_count"
+        ]
+        unexpected_unsuccessful_model_calls += result["models"][
+            "unexpected_unsuccessful_call_count"
+        ]
+        malformed_model_purpose_sequences += result["models"][
+            "malformed_purpose_sequence_count"
+        ]
+        model_call_contract = result["models"]["model_call_contract"]
+        noncanonical_model_calls += model_call_contract[
+            "noncanonical_model_call_count"
+        ]
+        if model_call_contract["valid"] is not True:
+            invalid_model_call_contract_runs += 1
         route_consistency = result["models"]["route_consistency"]
         route_authorization_failures += route_consistency[
             "authorization_failure_count"
@@ -1432,6 +1832,8 @@ def summarize(
             review_disputes.update(reviewer["disputed_fields"])
         if reviewer["missing_reviewer_decision"]:
             missing_reviewer_decisions += 1
+        if reviewer["completion_contract_satisfied"] is not True:
+            reviewer_completion_failure_runs += 1
         for promotion in result["memory_promotions"]:
             memory_decisions += 1
             memory_candidates += promotion["candidate_count"]
@@ -1526,6 +1928,25 @@ def summarize(
                 else None
             ),
             "independent_review_call_count": independent_review_calls,
+            "purpose_count": model_purpose_count,
+            "terminally_successful_purpose_count": (
+                terminally_successful_model_purposes
+            ),
+            "incomplete_purpose_count": incomplete_model_purposes,
+            "exact_reviewer_repair_count": exact_reviewer_repairs,
+            "superseded_validation_failure_count": (
+                superseded_validation_failures
+            ),
+            "unexpected_unsuccessful_call_count": (
+                unexpected_unsuccessful_model_calls
+            ),
+            "malformed_purpose_sequence_count": (
+                malformed_model_purpose_sequences
+            ),
+            "noncanonical_call_count": noncanonical_model_calls,
+            "invalid_call_contract_run_count": (
+                invalid_model_call_contract_runs
+            ),
             "by_model": counter_dict(model_names),
             "by_provider": counter_dict(model_providers),
             "by_purpose": counter_dict(model_purposes),
@@ -1599,6 +2020,9 @@ def summarize(
                 reviewer_disagreements, comparable_reviews
             ),
             "missing_reviewer_decision_runs": missing_reviewer_decisions,
+            "completion_contract_failure_runs": (
+                reviewer_completion_failure_runs
+            ),
             "disputed_field_counts": counter_dict(review_disputes),
         },
         "budgets": {

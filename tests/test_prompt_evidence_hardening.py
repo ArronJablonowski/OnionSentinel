@@ -4,7 +4,10 @@ import importlib.util
 import json
 import sys
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,13 +73,114 @@ def alert_row():
         "filter_status": "accepted",
         "filter_reason": "",
         "suppression_key": "fixture",
-        "stable_group_id": "abcdef123456",
+        "stable_group_id": "abcdef1234567890abcd",
         "raw_event_json": json.dumps(raw),
         "alert_json": json.dumps(alert),
     }
 
 
 class PromptEvidenceHardeningTests(unittest.TestCase):
+    def test_execution_lineage_uses_stable_group_and_blind_rerun_flag(self):
+        lineage = builder.execution_lineage(
+            alert_row(),
+            blind_reanalysis=True,
+        )
+
+        self.assertEqual(lineage["group_id"], "abcdef1234567890abcd")
+        self.assertIs(lineage["manual_reanalysis"], True)
+
+    def test_execution_lineage_has_deterministic_legacy_group_fallback(self):
+        selected = alert_row()
+        selected["stable_group_id"] = ""
+
+        lineage = builder.execution_lineage(
+            selected,
+            blind_reanalysis=False,
+        )
+
+        self.assertEqual(
+            lineage["group_id"],
+            builder.alert_group_id(builder.alert_group_key(selected)),
+        )
+        self.assertIs(lineage["manual_reanalysis"], False)
+
+    def test_build_package_propagates_execution_lineage_for_manual_and_automatic_runs(self):
+        args = SimpleNamespace(
+            agent_role="soc-analyst",
+            blind_reanalysis=False,
+            rollup_dir=Path("/unused"),
+            rollup_bytes=1,
+            related_limit=1,
+            include_tests=False,
+            pcap_analysis_dir=Path("/unused"),
+            pcap_analysis_limit=1,
+            correlation_limit=1,
+            correlation_min_score=1,
+            detection_playbooks=Path("/unused"),
+            asset_inventory_file=Path("/unused"),
+            agent_memory_file=Path("/unused"),
+            shared_memory_file=Path("/unused"),
+            memory_bytes=1,
+            incident_evidence_file=None,
+            system_prompt_file=Path("/unused"),
+            second_opinion_prompt_file=Path("/unused"),
+            analysis_dir=Path("/unused"),
+        )
+        replacements = {
+            "latest_rollup": {},
+            "grouped_alert_context": {},
+            "pcap_evidence_context": {"parsed_evidence": []},
+            "public_enrichment_context": {},
+            "analyst_state_context": {"group_id": "dashboard-group"},
+            "correlated_alert_context": {},
+            "compact_alert": {},
+            "alert_group_rows": [],
+            "parse_alert_json": {},
+            "parse_json_object": {},
+            "extract_rule_context": {},
+            "exact_detection_group_rows": (
+                [],
+                {"input_truncated": False},
+            ),
+            "load_detection_playbooks": {},
+            "resolve_detection_playbook": None,
+            "marker_specs": [],
+            "extract_group_packet_features": {},
+            "build_detection_validation": {},
+            "load_asset_inventory": {},
+            "asset_observables_and_events": ([], []),
+            "resolve_asset_context": {},
+            "investigation_query_context": ({}, {}),
+            "build_agent_memory_context": {},
+            "blind_model_authored_context": ({}, {}),
+            "model_policy": {},
+            "load_system_prompt": "",
+            "related_alerts": [],
+            "notification_context": [],
+            "prior_analysis_context": {},
+        }
+        with ExitStack() as stack:
+            for name, value in replacements.items():
+                stack.enter_context(
+                    mock.patch.object(
+                        builder,
+                        name,
+                        return_value=value,
+                    )
+                )
+            for blind_reanalysis in (False, True):
+                with self.subTest(blind_reanalysis=blind_reanalysis):
+                    args.blind_reanalysis = blind_reanalysis
+                    package = builder.build_package(None, alert_row(), args)
+                    self.assertEqual(
+                        package["group_id"],
+                        "abcdef1234567890abcd",
+                    )
+                    self.assertIs(
+                        package["manual_reanalysis"],
+                        blind_reanalysis,
+                    )
+
     def test_each_specialist_role_has_a_bounded_role_specific_objective(self):
         expectations = {
             "incident-responder": "incident-response investigation",

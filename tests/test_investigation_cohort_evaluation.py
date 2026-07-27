@@ -167,6 +167,22 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                         }
                     ],
                 }
+            model_call_facts = [
+                {
+                    "call_id": "primary-initial",
+                    "purpose": "initial primary analysis",
+                    "requested_route": expected_route,
+                    "independent_review": False,
+                    "status": "completed",
+                },
+                {
+                    "call_id": "independent-review-1",
+                    "purpose": "independent second-opinion review",
+                    "requested_route": reviewer_route,
+                    "independent_review": True,
+                    "status": "completed",
+                },
+            ]
             execution_proof = {
                 "status": "passed",
                 "fresh_analysis": True,
@@ -197,9 +213,49 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "ledger_manifest_schema": (
                         "onion-sentinel-harness-ledger-manifest-v2"
                     ),
-                    "model_call_count": 1,
-                    "successful_model_call_count": 1,
+                    "model_call_count": 2,
+                    "successful_model_call_count": 2,
                     "successful_primary_model_call_count": 1,
+                    "model_purpose_count": 2,
+                    "terminally_successful_model_purpose_count": 2,
+                    "incomplete_model_purpose_count": 0,
+                    "exact_reviewer_repair_count": 0,
+                    "superseded_validation_failure_count": 0,
+                    "unexpected_unsuccessful_model_call_count": 0,
+                    "malformed_model_purpose_sequence_count": 0,
+                    "model_call_contract": {
+                        "schema": (
+                            "onion-sentinel-model-call-contract-v1"
+                        ),
+                        "valid": True,
+                        "model_call_count": 2,
+                        "canonical_model_call_count": 2,
+                        "noncanonical_model_call_count": 0,
+                        "primary_initial_call_count": 1,
+                        "query_planning_call_count": 0,
+                        "primary_followup_call_count": 0,
+                        "reviewer_model_call_count": 1,
+                        "facts": model_call_facts,
+                        "facts_sha256": evaluator.sha256_value(
+                            model_call_facts
+                        ),
+                        "violation_count": 0,
+                        "violations": [],
+                        "global_reasons": [],
+                    },
+                    "reviewer_completion": {
+                        "model_call_count": 1,
+                        "completed_model_call_count": 1,
+                        "primary_decision_count": 1,
+                        "reviewer_decision_count": 1,
+                        "has_primary_decision": True,
+                        "has_reviewer_decision": True,
+                        "decision_comparable": True,
+                        "missing_reviewer_decision": False,
+                        "completion_contract_required": True,
+                        "completion_contract_satisfied": True,
+                        "completion_contract_failure_reasons": [],
+                    },
                     "route_authorization_failure_count": 0,
                     "route_identity_mismatch_count": 0,
                     "tool_call_count": 1,
@@ -543,6 +599,120 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 adjudication_path=self.adjudication_path,
                 expected_count=2,
             )
+
+    def test_exact_reviewer_repair_is_gradeable_but_tampering_is_not(
+        self,
+    ) -> None:
+        self._write_fixture_documents()
+        document = json.loads(self.soc_path.read_text(encoding="utf-8"))
+        proof = document["members"][0]["execution_proof"]
+        harness = proof["harness"]
+        harness.update(
+            {
+                "model_call_count": 3,
+                "successful_model_call_count": 2,
+                "model_purpose_count": 2,
+                "terminally_successful_model_purpose_count": 2,
+                "exact_reviewer_repair_count": 1,
+                "superseded_validation_failure_count": 1,
+            }
+        )
+        contract = harness["model_call_contract"]
+        repaired_facts = [
+            contract["facts"][0],
+            {
+                **contract["facts"][1],
+                "status": "validation-failed",
+            },
+            {
+                **contract["facts"][1],
+                "call_id": "independent-review-2",
+            },
+        ]
+        contract.update(
+            {
+                "model_call_count": 3,
+                "canonical_model_call_count": 3,
+                "reviewer_model_call_count": 2,
+                "facts": repaired_facts,
+                "facts_sha256": evaluator.sha256_value(repaired_facts),
+            }
+        )
+        harness["reviewer_completion"]["model_call_count"] = 2
+        proof.pop("proof_sha256")
+        proof["proof_sha256"] = evaluator.sha256_value(proof)
+        document.pop("export_sha256")
+        document["export_sha256"] = evaluator.sha256_value(document)
+        self._write_private(self.soc_path, document)
+
+        report = evaluator.evaluate_cohorts(
+            result_paths={
+                "incident-responder": self.ir_path,
+                "soc-analyst": self.soc_path,
+            },
+            adjudication_path=self.adjudication_path,
+            expected_count=2,
+        )
+        self.assertEqual(report["schema"], evaluator.REPORT_SCHEMA)
+
+        harness["unexpected_unsuccessful_model_call_count"] = 1
+        proof.pop("proof_sha256")
+        proof["proof_sha256"] = evaluator.sha256_value(proof)
+        document.pop("export_sha256")
+        document["export_sha256"] = evaluator.sha256_value(document)
+        self._write_private(self.soc_path, document)
+        with self.assertRaisesRegex(
+            evaluator.CohortEvaluationError,
+            "read-only/freeze gate failed",
+        ):
+            evaluator.evaluate_cohorts(
+                result_paths={
+                    "incident-responder": self.ir_path,
+                    "soc-analyst": self.soc_path,
+                },
+                adjudication_path=self.adjudication_path,
+                expected_count=2,
+            )
+
+    def test_offline_gate_recomputes_call_grammar_and_reviewer_facts(
+        self,
+    ) -> None:
+        for tamper in ("call-purpose", "reviewer-comparison"):
+            with self.subTest(tamper=tamper):
+                self._write_fixture_documents()
+                document = json.loads(
+                    self.soc_path.read_text(encoding="utf-8")
+                )
+                proof = document["members"][0]["execution_proof"]
+                harness = proof["harness"]
+                if tamper == "call-purpose":
+                    contract = harness["model_call_contract"]
+                    contract["facts"][0]["purpose"] = "renamed purpose"
+                    contract["facts_sha256"] = evaluator.sha256_value(
+                        contract["facts"]
+                    )
+                else:
+                    harness["reviewer_completion"][
+                        "decision_comparable"
+                    ] = False
+                proof.pop("proof_sha256")
+                proof["proof_sha256"] = evaluator.sha256_value(proof)
+                document.pop("export_sha256")
+                document["export_sha256"] = evaluator.sha256_value(document)
+                self._write_private(self.soc_path, document)
+
+                with self.assertRaisesRegex(
+                    evaluator.CohortEvaluationError,
+                    "read-only/freeze gate failed",
+                ):
+                    evaluator.evaluate_cohorts(
+                        result_paths={
+                            "incident-responder": self.ir_path,
+                            "soc-analyst": self.soc_path,
+                        },
+                        adjudication_path=self.adjudication_path,
+                        expected_count=2,
+                    )
 
     def test_query_audit_digest_mismatch_blocks_grading(self) -> None:
         self._write_fixture_documents()
