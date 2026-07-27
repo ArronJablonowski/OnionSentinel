@@ -8,6 +8,8 @@ routing, reporting, and notification policy live in Mac Studio alert-store/n8n.
 Troubleshooting usually starts with the final JSON summary printed by this
 script.
 """
+from __future__ import annotations
+
 import argparse
 import importlib.util
 import fcntl
@@ -1500,14 +1502,25 @@ def pcap_outcome_from_error(error: object) -> str:
 def process_pcap_requests(config: dict) -> dict:
     broker = config.get("pcap_broker", {})
     if not broker.get("enabled"):
-        return {"ok": True, "enabled": False, "processed": 0}
+        return {
+            "ok": True,
+            "enabled": False,
+            "processed": 0,
+            "operational_failures": 0,
+        }
     lock_path = Path(str(broker.get("lock_path") or "/tmp/onion-sentinel-pcap-broker.lock"))
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("w", encoding="utf-8") as lock_handle:
         try:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return {"ok": True, "enabled": True, "locked": True, "processed": 0}
+            return {
+                "ok": True,
+                "enabled": True,
+                "locked": True,
+                "processed": 0,
+                "operational_failures": 0,
+            }
         lock_handle.write(f"{os.getpid()}\n")
         lock_handle.flush()
         try:
@@ -1739,6 +1752,9 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
     return {
         "ok": True,
         "enabled": True,
+        # This is an end-to-end recovery proof for the health wrapper. Local
+        # capture holds, disabled mode, and lock skips return before this point.
+        "broker_contacted": True,
         "processed": processed,
         "fulfilled": fulfilled,
         "failed": failed,

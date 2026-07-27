@@ -120,7 +120,12 @@ class RelayPcapBrokerTest(unittest.TestCase):
         with mock.patch.object(self.relay, "broker_request") as broker_request:
             result = self.relay.process_pcap_requests({"pcap_broker": {"enabled": False}})
 
-        self.assertEqual(result, {"ok": True, "enabled": False, "processed": 0})
+        self.assertEqual(result, {
+            "ok": True,
+            "enabled": False,
+            "processed": 0,
+            "operational_failures": 0,
+        })
         broker_request.assert_not_called()
 
     def test_spool_configuration_cannot_raise_admission_above_seventy_five_percent(self) -> None:
@@ -185,6 +190,7 @@ class RelayPcapBrokerTest(unittest.TestCase):
 
         self.assertEqual(result["fulfilled"], 1)
         self.assertEqual(result["failed"], 0)
+        self.assertTrue(result["broker_contacted"])
         export.assert_called_once()
         self.assertEqual(calls[-1][1], "/pcap/complete")
         self.assertEqual(calls[-1][2]["status"], "fulfilled")

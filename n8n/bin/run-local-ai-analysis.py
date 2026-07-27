@@ -29,6 +29,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, NoReturn
+from urllib.parse import urlparse
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -109,6 +110,31 @@ DEFAULT_MEMORY_WRITEBACK_COMMITTED_DIR = (
 EVALUATION_FREEZE_MEMORY_ENV = (
     "ONION_SENTINEL_EVALUATION_FREEZE_MEMORY"
 )
+CONTROLLED_EVALUATION_MODE_ENV = "ONION_SENTINEL_EVALUATION_MODE"
+CONTROLLED_EVALUATION_RUNTIME_DIR_ENV = (
+    "ONION_SENTINEL_EVALUATION_RUNTIME_DIR"
+)
+CONTROLLED_EVALUATION_TOKEN_ENV = "ONION_SENTINEL_EVALUATION_TOKEN"
+CONTROLLED_EVALUATION_TOKEN_HEADER = (
+    "X-Onion-Sentinel-Evaluation-Token"
+)
+CONTROLLED_EVALUATION_TOKEN_RE = re.compile(r"[a-f0-9]{64}")
+CONTROLLED_RESULT_ENVIRONMENT = {
+    "job_id": "ONION_SENTINEL_EVALUATION_JOB_ID",
+    "job_type": "ONION_SENTINEL_EVALUATION_JOB_TYPE",
+    "lease_token": "ONION_SENTINEL_EVALUATION_LEASE_TOKEN",
+    "cohort_id": "ONION_SENTINEL_EVALUATION_COHORT_ID",
+    "dispatch_id": "ONION_SENTINEL_EVALUATION_DISPATCH_ID",
+    "representative_alert_id": (
+        "ONION_SENTINEL_EVALUATION_REPRESENTATIVE_ALERT_ID"
+    ),
+    "stable_group_id": "ONION_SENTINEL_EVALUATION_STABLE_GROUP_ID",
+    "stable_group_key": "ONION_SENTINEL_EVALUATION_STABLE_GROUP_KEY",
+    "agent_role": "ONION_SENTINEL_EVALUATION_AGENT_ROLE",
+    "reanalysis_attempt_id": (
+        "ONION_SENTINEL_EVALUATION_REANALYSIS_ATTEMPT_ID"
+    ),
+}
 MEMORY_WRITEBACK_TASK_SCHEMA = "onion-sentinel-memory-writeback-task-v1"
 MAX_MEMORY_WRITEBACK_TASK_BYTES = 256 * 1024
 DEFAULT_SYSTEM_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system_prompt.md"
@@ -151,6 +177,11 @@ DEFAULT_MAX_SETTINGS_BYTES = max(
     int(os.environ.get("SOC_AI_MAX_SETTINGS_BYTES", str(256 * 1024))),
 )
 ANALYSIS_INDEX_MAX_RESPONSE_BYTES = 1024 * 1024
+CONTROLLED_RESULT_SUBMISSION_ATTEMPTS = 3
+CONTROLLED_RESULT_SUBMISSION_INDETERMINATE = (
+    "controlled analysis result submission remains indeterminate"
+)
+_CONTROLLED_EVALUATION_TOKEN = ""
 SAVED_RESPONSE_INPUT_MODE = "saved_response"
 DEFAULT_CLOUD_MAX_STDERR_BYTES = int(os.environ.get("SOC_AI_CLOUD_MAX_STDERR_BYTES", str(1024 * 1024)))
 CODEX_CLI_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
@@ -986,10 +1017,30 @@ def post_analysis_index(
 ) -> dict[str, Any]:
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     submission_sha256 = hashlib.sha256(body).hexdigest()
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Onion-Sentinel-AI/1.0",
+    }
+    supplied_token = str(
+        os.environ.get(CONTROLLED_EVALUATION_TOKEN_ENV) or ""
+    ).strip()
+    evaluation_token = (
+        supplied_token
+        if CONTROLLED_EVALUATION_TOKEN_RE.fullmatch(supplied_token)
+        else _CONTROLLED_EVALUATION_TOKEN
+    )
+    if (
+        str(
+            os.environ.get(CONTROLLED_EVALUATION_MODE_ENV) or ""
+        ).strip()
+        == "1"
+        and CONTROLLED_EVALUATION_TOKEN_RE.fullmatch(evaluation_token)
+    ):
+        headers[CONTROLLED_EVALUATION_TOKEN_HEADER] = evaluation_token
     request = urllib.request.Request(
         alert_store_url.rstrip("/") + "/analysis/result",
         data=body,
-        headers={"Content-Type": "application/json", "User-Agent": "Onion-Sentinel-AI/1.0"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -1058,6 +1109,29 @@ def post_analysis_index(
         "stored_response_sha256": stored_response_sha256,
         "idempotent": bool(result.get("idempotent")),
     }
+
+
+def post_controlled_analysis_index(
+    payload: dict[str, Any],
+    alert_store_url: str,
+    *,
+    attempts: int = CONTROLLED_RESULT_SUBMISSION_ATTEMPTS,
+) -> dict[str, Any]:
+    """Retry one immutable controlled result while its exact lease is live."""
+    bounded_attempts = max(1, min(int(attempts), 5))
+    last_error: AnalysisIndexSubmissionError | None = None
+    for attempt_index in range(bounded_attempts):
+        if attempt_index:
+            time.sleep(0.05 * attempt_index)
+        try:
+            return post_analysis_index(payload, alert_store_url)
+        except AnalysisIndexSubmissionError as exc:
+            if not exc.retryable:
+                raise
+            last_error = exc
+    if last_error is None:
+        raise RuntimeError("controlled result retry invariant failed")
+    raise last_error
 
 
 def queue_analysis_index(payload: dict[str, Any], queue_dir: Path = DEFAULT_ANALYSIS_INDEX_QUEUE_DIR) -> Path:
@@ -1683,6 +1757,228 @@ def boolean_setting(value: Any, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "off", "disabled", ""}:
             return False
     return default
+
+
+def controlled_evaluation_runtime(
+    alert_store_url: str,
+) -> tuple[bool, Path | None]:
+    """Resolve an owner-only spool root for one controlled evaluation."""
+    mode_value = str(
+        os.environ.get(CONTROLLED_EVALUATION_MODE_ENV) or ""
+    ).strip()
+    if mode_value not in {"", "0", "1"}:
+        raise SystemExit(
+            f"{CONTROLLED_EVALUATION_MODE_ENV} must be unset, 0, or 1"
+        )
+    if mode_value != "1":
+        return False, None
+    evaluation_token = str(
+        os.environ.get(CONTROLLED_EVALUATION_TOKEN_ENV) or ""
+    ).strip()
+    if not CONTROLLED_EVALUATION_TOKEN_RE.fullmatch(evaluation_token):
+        raise SystemExit(
+            "controlled evaluation requires an exact ephemeral "
+            "authorization token"
+        )
+    try:
+        alert_store_origin = urlparse(str(alert_store_url or ""))
+        alert_store_port = alert_store_origin.port
+    except ValueError as exc:
+        raise SystemExit(
+            "controlled evaluation alert-store origin is unsafe"
+        ) from exc
+    if (
+        alert_store_origin.scheme != "http"
+        or alert_store_origin.hostname != "127.0.0.1"
+        or alert_store_port is None
+        or alert_store_port < 1
+        or alert_store_port == 8787
+        or alert_store_origin.username is not None
+        or alert_store_origin.password is not None
+        or alert_store_origin.path not in {"", "/"}
+        or alert_store_origin.params
+        or alert_store_origin.query
+        or alert_store_origin.fragment
+    ):
+        raise SystemExit(
+            "controlled evaluation requires one alternate loopback "
+            "alert-store origin"
+        )
+    raw_root = str(
+        os.environ.get(CONTROLLED_EVALUATION_RUNTIME_DIR_ENV) or ""
+    ).strip()
+    if not raw_root:
+        raise SystemExit(
+            "controlled evaluation runtime directory is required"
+        )
+    root = Path(raw_root).expanduser()
+    try:
+        metadata = root.lstat()
+        resolved = root.resolve(strict=True)
+        expected_parent = (
+            HOME / "n8n-local" / "harness-evaluations"
+        ).resolve(strict=True)
+        resolved.relative_to(expected_parent)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise SystemExit(
+            f"controlled evaluation runtime directory is unsafe: {exc}"
+        ) from exc
+    if (
+        not root.is_absolute()
+        or resolved != root
+        or root.is_symlink()
+        or not root.is_dir()
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        raise SystemExit(
+            "controlled evaluation runtime directory must be owner-only"
+        )
+    return True, resolved
+
+
+def controlled_evaluation_output_dir(
+    out_dir: Path,
+    runtime_root: Path,
+) -> Path:
+    """Keep direct controlled output inside its owner-only evaluation root."""
+    candidate = out_dir.expanduser()
+    try:
+        resolved = candidate.resolve(strict=False)
+        resolved.relative_to(runtime_root)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(
+            "controlled evaluation out_dir must stay inside its runtime "
+            "directory"
+        ) from exc
+    if not candidate.is_absolute() or resolved != candidate:
+        raise SystemExit(
+            "controlled evaluation out_dir must stay inside its runtime "
+            "directory"
+        )
+    return resolved
+
+
+def consume_controlled_evaluation_token(enabled: bool) -> str:
+    """Remove the mutation credential before invoking any model subprocess."""
+    global _CONTROLLED_EVALUATION_TOKEN
+    supplied = str(
+        os.environ.pop(CONTROLLED_EVALUATION_TOKEN_ENV, "") or ""
+    ).strip()
+    if enabled:
+        if not CONTROLLED_EVALUATION_TOKEN_RE.fullmatch(supplied):
+            raise SystemExit(
+                "controlled evaluation requires an exact ephemeral "
+                "authorization token"
+            )
+        _CONTROLLED_EVALUATION_TOKEN = supplied
+    else:
+        _CONTROLLED_EVALUATION_TOKEN = ""
+    return _CONTROLLED_EVALUATION_TOKEN
+
+
+def controlled_evaluation_result_identity(
+    enabled: bool,
+    *,
+    reanalysis_attempt_id: str,
+) -> dict[str, Any] | None:
+    """Bind an evaluation result to the exact server-owned durable lease."""
+    supplied = {
+        field: str(os.environ.get(environment_key) or "")
+        for field, environment_key in CONTROLLED_RESULT_ENVIRONMENT.items()
+    }
+    for environment_key in CONTROLLED_RESULT_ENVIRONMENT.values():
+        os.environ.pop(environment_key, None)
+    if not enabled:
+        if any(supplied.values()):
+            raise SystemExit(
+                "controlled result identity requires controlled evaluation mode"
+            )
+        return None
+    if any(
+        not value
+        for field, value in supplied.items()
+        if field != "reanalysis_attempt_id"
+    ):
+        raise SystemExit("controlled evaluation result identity is incomplete")
+    try:
+        job_id = int(supplied["job_id"])
+    except ValueError as exc:
+        raise SystemExit(
+            "controlled evaluation job identity is invalid"
+        ) from exc
+    job_type = supplied["job_type"]
+    expected_role = {
+        "ai_analysis": "soc-analyst",
+        "incident_response_analysis": "incident-responder",
+    }.get(job_type)
+    attempt_id = supplied["reanalysis_attempt_id"]
+    stable_group_key = supplied["stable_group_key"]
+    try:
+        stable_group_key_bytes = stable_group_key.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise SystemExit(
+            "controlled evaluation stable group key is invalid"
+        ) from exc
+    if (
+        job_id < 1
+        or expected_role is None
+        or supplied["agent_role"] != expected_role
+        or not re.fullmatch(
+            r"[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-"
+            r"[89ab][a-f0-9]{3}-[a-f0-9]{12}",
+            supplied["lease_token"],
+        )
+        or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{2,63}",
+            supplied["cohort_id"],
+        )
+        or not re.fullmatch(r"[a-f0-9]{64}", supplied["dispatch_id"])
+        or not re.fullmatch(
+            r"[A-Za-z0-9._:@=-]{1,256}",
+            supplied["representative_alert_id"],
+        )
+        or not re.fullmatch(r"[a-f0-9]{20}", supplied["stable_group_id"])
+        or not stable_group_key
+        or "\x00" in stable_group_key
+        or len(stable_group_key_bytes) > 2048
+        or (
+            job_type == "ai_analysis"
+            and attempt_id
+        )
+        or (
+            job_type == "incident_response_analysis"
+            and not re.fullmatch(r"ira-[a-f0-9]{40}", attempt_id)
+        )
+        or attempt_id != str(reanalysis_attempt_id or "")
+    ):
+        raise SystemExit(
+            "controlled evaluation result identity is invalid"
+        )
+    release_id = str(
+        os.environ.get("ONION_SENTINEL_RELEASE_ID") or ""
+    ).strip()
+    if not re.fullmatch(r"[a-f0-9]{40}", release_id):
+        raise SystemExit(
+            "controlled evaluation release identity is invalid"
+        )
+    return {
+        **supplied,
+        "job_id": job_id,
+        "release_id": release_id,
+    }
+
+
+def controlled_evaluation_claim_digest(identity: dict[str, Any]) -> str:
+    """Hash lease lineage without persisting the bearer token itself."""
+    return hashlib.sha256(
+        json.dumps(
+            identity,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def apply_evaluation_memory_freeze(
@@ -12673,6 +12969,66 @@ def write_outputs(
 
 def main() -> int:
     args = parse_args()
+    controlled_evaluation, evaluation_runtime_dir = (
+        controlled_evaluation_runtime(args.alert_store_url)
+    )
+    if (
+        controlled_evaluation
+        and str(os.environ.get(EVALUATION_FREEZE_MEMORY_ENV) or "").strip()
+        != "1"
+    ):
+        raise SystemExit(
+            "controlled evaluation requires "
+            f"{EVALUATION_FREEZE_MEMORY_ENV}=1"
+        )
+    if evaluation_runtime_dir is not None:
+        args.out_dir = controlled_evaluation_output_dir(
+            args.out_dir,
+            evaluation_runtime_dir,
+        )
+    consume_controlled_evaluation_token(controlled_evaluation)
+    controlled_result_identity = controlled_evaluation_result_identity(
+        controlled_evaluation,
+        reanalysis_attempt_id=args.reanalysis_attempt_id,
+    )
+    if evaluation_runtime_dir is not None:
+        # Harness events are evaluation evidence, never production memory.
+        args.investigation_harness_db = (
+            evaluation_runtime_dir / "investigation-harness.sqlite3"
+        )
+    evaluation_log_dir = (
+        evaluation_runtime_dir / "llm-analysis-logs"
+        if evaluation_runtime_dir is not None
+        else DEFAULT_LLM_LOG_DIR
+    )
+    evaluation_log_file = evaluation_log_dir / "llm-analysis-log.jsonl"
+    evaluation_current_file = evaluation_log_dir / "current-analysis.json"
+    evaluation_active_dir = evaluation_log_dir / "active"
+    evaluation_index_queue_dir = (
+        evaluation_runtime_dir / "analysis-index-pending"
+        if evaluation_runtime_dir is not None
+        else DEFAULT_ANALYSIS_INDEX_QUEUE_DIR
+    )
+    evaluation_index_quarantine_dir = (
+        evaluation_runtime_dir / "analysis-index-quarantine"
+        if evaluation_runtime_dir is not None
+        else DEFAULT_ANALYSIS_INDEX_QUARANTINE_DIR
+    )
+    evaluation_memory_receipt_dir = (
+        evaluation_runtime_dir / "memory-writeback-receipts"
+        if evaluation_runtime_dir is not None
+        else DEFAULT_MEMORY_WRITEBACK_RECEIPT_DIR
+    )
+    evaluation_memory_pending_dir = (
+        evaluation_runtime_dir / "memory-writeback-pending"
+        if evaluation_runtime_dir is not None
+        else DEFAULT_MEMORY_WRITEBACK_PENDING_DIR
+    )
+    evaluation_memory_committed_dir = (
+        evaluation_runtime_dir / "memory-writeback-committed"
+        if evaluation_runtime_dir is not None
+        else DEFAULT_MEMORY_WRITEBACK_COMMITTED_DIR
+    )
     # Evaluation isolation must be known before any crash-recovery journal is
     # replayed. Publishing a completed analysis remains safe while frozen, but
     # its committed memory task must stay durable and untouched until a normal
@@ -12681,6 +13037,11 @@ def main() -> int:
         os.environ.get(EVALUATION_FREEZE_MEMORY_ENV)
     )
     if args.flush_index_only:
+        if controlled_evaluation:
+            raise SystemExit(
+                "global analysis-index flush is disabled in controlled "
+                "evaluation mode"
+            )
         completed, failed, quarantined = flush_analysis_index_queue(
             args.alert_store_url,
             memory_writeback_enabled=not evaluation_memory_frozen,
@@ -12702,7 +13063,10 @@ def main() -> int:
     started_at = project_now()
     started_monotonic = time.monotonic()
     run_id = hashlib.sha1(f"{started_at}:{prompt_path or ''}:{os.getpid()}".encode("utf-8")).hexdigest()[:16]
-    active_record_path = active_analysis_record_path(run_id)
+    active_record_path = active_analysis_record_path(
+        run_id,
+        active_dir=evaluation_active_dir,
+    )
     resource_monitor = SystemResourceMonitor()
     status = "failure"
     error = ""
@@ -12713,10 +13077,12 @@ def main() -> int:
         # Retry compact analysis-index submissions before spending resources on
         # another inference. A failed local API call never requires rerunning
         # the LLM because the completed result remains in this durable spool.
-        _, pending_index_failures, _ = flush_analysis_index_queue(
-            args.alert_store_url,
-            memory_writeback_enabled=not evaluation_memory_frozen,
-        )
+        pending_index_failures = 0
+        if not controlled_evaluation:
+            _, pending_index_failures, _ = flush_analysis_index_queue(
+                args.alert_store_url,
+                memory_writeback_enabled=not evaluation_memory_frozen,
+            )
         if pending_index_failures:
             raise RuntimeError(
                 "a deferred analysis index could not be reconciled; "
@@ -13116,6 +13482,12 @@ def main() -> int:
         response["_analysis_evaluation_memory_frozen"] = (
             evaluation_memory_frozen
         )
+        if controlled_result_identity is not None:
+            response["_analysis_controlled_claim_sha256"] = (
+                controlled_evaluation_claim_digest(
+                    controlled_result_identity
+                )
+            )
         role_memory_file = Path(
             str(prompt_package.get("agent_memory_file") or "")
         ).expanduser()
@@ -13156,6 +13528,7 @@ def main() -> int:
             reviewer_candidates=reviewer_memory_candidates,
             reviewer_allowed=reviewer_memory_allowed,
             reviewer_reason=reviewer_memory_reason,
+            pending_dir=evaluation_memory_pending_dir,
         )
         try:
             json_path, md_path, generated_at = write_outputs(
@@ -13174,6 +13547,10 @@ def main() -> int:
                 generated_at,
                 json_path,
             )
+            if controlled_result_identity is not None:
+                index_payload["controlled_job"] = (
+                    controlled_result_identity
+                )
             # Re-check the deadline before creating a replayable submission. A
             # failed enforce-mode deadline must not leave work that a later
             # startup would publish.
@@ -13189,27 +13566,46 @@ def main() -> int:
             # bookkeeping, startup can replay the immutable analysis_id,
             # obtain an idempotent receipt, and safely cross the memory commit
             # boundary.
-            pending_index_path = queue_analysis_index(index_payload)
+            if controlled_evaluation:
+                pending_index_path = queue_analysis_index(
+                    index_payload,
+                    queue_dir=evaluation_index_queue_dir,
+                )
+            else:
+                pending_index_path = queue_analysis_index(index_payload)
         except Exception:
-            discard_pending_memory_writeback(run_id)
+            discard_pending_memory_writeback(
+                run_id,
+                pending_dir=evaluation_memory_pending_dir,
+            )
             for unpublished_artifact in (json_path, md_path):
                 if unpublished_artifact is not None:
                     unpublished_artifact.unlink(missing_ok=True)
             raise
         commit_receipt: dict[str, Any] = {}
         try:
-            commit_receipt = post_analysis_index(
-                index_payload,
-                args.alert_store_url,
-            )
+            if controlled_evaluation:
+                commit_receipt = post_controlled_analysis_index(
+                    index_payload,
+                    args.alert_store_url,
+                )
+            else:
+                commit_receipt = post_analysis_index(
+                    index_payload,
+                    args.alert_store_url,
+                )
         except AnalysisIndexSubmissionError as exc:
             if not exc.retryable:
                 rejected_path = quarantine_analysis_index(
                     pending_index_path,
                     index_payload,
                     exc,
+                    quarantine_dir=evaluation_index_quarantine_dir,
                 )
-                discard_pending_memory_writeback(run_id)
+                discard_pending_memory_writeback(
+                    run_id,
+                    pending_dir=evaluation_memory_pending_dir,
+                )
                 raise RuntimeError(
                     "analysis index was deterministically rejected and "
                     f"quarantined as {rejected_path.name}"
@@ -13218,10 +13614,20 @@ def main() -> int:
             # remain pending until alert-store commits this result. The next
             # scheduler pass publishes the compact spool before any new model
             # call, then reconciles the original job without duplicate GPU work.
+            if controlled_evaluation:
+                raise RuntimeError(
+                    f"{CONTROLLED_RESULT_SUBMISSION_INDETERMINATE}; "
+                    f"exact result retained at {pending_index_path}"
+                ) from exc
             raise RuntimeError(
                 f"analysis index deferred to {pending_index_path}: {exc}"
             ) from exc
         except Exception as exc:
+            if controlled_evaluation:
+                raise RuntimeError(
+                    f"{CONTROLLED_RESULT_SUBMISSION_INDETERMINATE}; "
+                    f"exact result retained at {pending_index_path}"
+                ) from exc
             raise RuntimeError(
                 f"analysis index deferred to {pending_index_path}: {exc}"
             ) from exc
@@ -13236,6 +13642,8 @@ def main() -> int:
                 committed_memory_task = mark_memory_writeback_committed(
                     run_id,
                     expected_response_digest=submitted_response_sha256,
+                    pending_dir=evaluation_memory_pending_dir,
+                    committed_dir=evaluation_memory_committed_dir,
                 )
                 if committed_memory_task is None:
                     raise RuntimeError(
@@ -13248,7 +13656,8 @@ def main() -> int:
                 pending_index_path.unlink(missing_ok=True)
                 memory_receipt, memory_receipt_path = (
                     process_committed_memory_writeback(
-                        committed_memory_task
+                        committed_memory_task,
+                        receipt_dir=evaluation_memory_receipt_dir,
                     )
                 )
             else:
@@ -13266,6 +13675,7 @@ def main() -> int:
                         reviewer_candidates=reviewer_memory_candidates,
                         reviewer_allowed=reviewer_memory_allowed,
                         reviewer_reason=reviewer_memory_reason,
+                        receipt_dir=evaluation_memory_receipt_dir,
                     )
                 )
         except Exception as memory_exc:
@@ -13405,11 +13815,11 @@ def main() -> int:
                         error=error,
                         runtime_observation=running_record,
                     )
-                    append_jsonl(DEFAULT_LLM_LOG_FILE, record)
+                    append_jsonl(evaluation_log_file, record)
                     # Retain the legacy single-record artifact for rolling
                     # upgrades and last-completed-run consumers. Live state uses
                     # per-run files.
-                    atomic_write_json(DEFAULT_LLM_CURRENT_FILE, record)
+                    atomic_write_json(evaluation_current_file, record)
             except Exception as telemetry_exc:
                 # Telemetry is deliberately outside the job's transaction. It
                 # must neither mask the original failure nor turn a committed

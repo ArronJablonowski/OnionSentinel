@@ -524,8 +524,11 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         only_stable_group_key: str = "",
         only_dispatch_id: str = "",
         current_alert_group_key: str | None = None,
+        controlled_evaluation: bool | None = None,
     ) -> dict[str, object]:
         """Run one indexed job through main() with inference boundaries mocked."""
+        if controlled_evaluation is None:
+            controlled_evaluation = bool(only_group_id)
         self.enable_indexed_scheduler()
         alert_id = f"{job_type}-{severity}-threshold-alert"
         group_id = only_group_id or f"{job_type}-{severity}-threshold-group"
@@ -572,7 +575,19 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                 self.set_stable_group(claimed_alert_id, group_id)
         self.conn.commit()
 
-        root = Path(self.tempdir.name)
+        root = Path(self.tempdir.name).resolve()
+        controlled_home = root / "controlled-home"
+        controlled_runtime = (
+            controlled_home
+            / "n8n-local"
+            / "harness-evaluations"
+            / "scheduler-test"
+        )
+        if controlled_evaluation:
+            controlled_runtime.mkdir(parents=True, mode=0o700)
+            controlled_runtime.parent.chmod(0o700)
+            controlled_runtime.chmod(0o700)
+        worker_root = controlled_runtime if controlled_evaluation else root
         db_path = root / "alerts.sqlite3"
         disk_conn = sqlite3.connect(db_path)
         try:
@@ -591,15 +606,15 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         )
         args = SimpleNamespace(
             db=db_path,
-            prompt_dir=root / "prompts",
-            analysis_dir=root / "analysis",
-            pcap_analysis_dir=root / "pcap-analysis",
-            incident_evidence_dir=root / "incident-evidence",
+            prompt_dir=worker_root / "prompts",
+            analysis_dir=worker_root / "analysis",
+            pcap_analysis_dir=worker_root / "pcap-analysis",
+            incident_evidence_dir=worker_root / "incident-evidence",
             incident_evidence_config=root / "incident-evidence.json",
             ai_settings_file=settings_path,
             provider_lane="any",
-            lock_file=root / "worker.lock",
-            wake_file=root / "worker.wake",
+            lock_file=worker_root / "worker.lock",
+            wake_file=worker_root / "worker.wake",
             levels="critical,high,medium,low,informational",
             hours=87600,
             max_per_run=1,
@@ -613,9 +628,13 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             model=None,
             timeout=30,
             max_prompt_bytes=1024 * 1024,
-            portal_wake_file=root / "portal.wake",
+            portal_wake_file=worker_root / "portal.wake",
             no_portal_refresh=True,
-            alert_store_url="http://127.0.0.1:8787",
+            alert_store_url=(
+                "http://127.0.0.1:18787"
+                if controlled_evaluation
+                else "http://127.0.0.1:8787"
+            ),
             include_tests=True,
             dry_run=False,
         )
@@ -694,8 +713,25 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         prompt_path = root / "prompt.json"
         incident_evidence_path = root / "incident-evidence.json"
         completed_process = SimpleNamespace(returncode=0, stdout="", stderr="")
+        worker_environment = {
+            "ONION_SENTINEL_EVALUATION_MODE": (
+                "1" if controlled_evaluation else "0"
+            ),
+            "ONION_SENTINEL_RELEASE_ID": DEPLOYED_RELEASE,
+        }
+        if controlled_evaluation:
+            worker_environment.update(
+                {
+                    "ONION_SENTINEL_EVALUATION_RUNTIME_DIR": str(
+                        controlled_runtime
+                    ),
+                    "ONION_SENTINEL_EVALUATION_FREEZE_MEMORY": "1",
+                    "ONION_SENTINEL_EVALUATION_TOKEN": "f" * 64,
+                }
+            )
         with (
             mock.patch.object(self.scheduler, "parse_args", return_value=args),
+            mock.patch.object(self.scheduler, "HOME", controlled_home),
             mock.patch.object(self.scheduler, "require_runtime_capacity"),
             mock.patch.object(self.scheduler, "consume_wake_marker"),
             mock.patch.object(self.scheduler, "flush_deferred_analysis_results"),
@@ -723,7 +759,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             mock.patch.object(self.scheduler, "signal_dashboard_refresh"),
             mock.patch.dict(
                 os.environ,
-                {"ONION_SENTINEL_RELEASE_ID": DEPLOYED_RELEASE},
+                worker_environment,
             ),
         ):
             return_code = self.scheduler.main()

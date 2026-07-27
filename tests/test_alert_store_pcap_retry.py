@@ -803,7 +803,7 @@ class AlertStorePcapRetryTest(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(json.loads(retained_json), durable_payload)
 
-    def test_controlled_stable_group_key_uses_utf8_bytes_at_request_and_claim(
+    def test_frozen_stable_group_key_uses_utf8_bytes_at_request_boundary(
         self,
     ) -> None:
         identity = self.seed_manual_dispatch_group()
@@ -860,27 +860,6 @@ class AlertStorePcapRetryTest(unittest.TestCase):
                     rejected["reason"],
                 )
 
-            with self.subTest(boundary="claim", key=repr(invalid_key)):
-                status, rejected = self.manual_dispatch_request(
-                    "/jobs/status",
-                    {
-                        "job_type": "ai_analysis",
-                        "dedupe_key": identity["stable_group_id"],
-                        "status": "processing",
-                        "expected_job_id": before[0],
-                        "expected_representative_alert_id": identity[
-                            "pinned_alert_id"
-                        ],
-                        "expected_dispatch_id": request["dispatch_id"],
-                        "expected_stable_group_key": invalid_key,
-                    },
-                )
-                self.assertEqual(status, 409, rejected)
-                self.assertIn(
-                    "stable group key is invalid",
-                    rejected["reason"],
-                )
-
             with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
                 after_rejection = connection.execute(
                     """
@@ -892,7 +871,9 @@ class AlertStorePcapRetryTest(unittest.TestCase):
                 ).fetchone()
             self.assertEqual(after_rejection, before)
 
-    def test_controlled_ai_claim_is_atomic_and_bound_to_exact_job(self) -> None:
+    def test_production_claim_ignores_controlled_exact_identity_fields(
+        self,
+    ) -> None:
         identity = self.seed_manual_dispatch_group()
         dispatch_id = "4" * 64
         request = {
@@ -916,7 +897,7 @@ class AlertStorePcapRetryTest(unittest.TestCase):
                 (identity["stable_group_id"],),
             ).fetchone()
 
-        status, rejected = self.manual_dispatch_request(
+        status, claimed = self.manual_dispatch_request(
             "/jobs/status",
             {
                 "job_type": "ai_analysis",
@@ -928,71 +909,36 @@ class AlertStorePcapRetryTest(unittest.TestCase):
                 "expected_stable_group_key": identity["stable_group_key"],
             },
         )
-        self.assertEqual(status, 409, rejected)
-        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
-            after_rejection = connection.execute(
-                """
-                SELECT id, payload_json, status, attempt_count, lease_token
-                FROM durable_jobs
-                WHERE job_type = 'ai_analysis' AND dedupe_key = ?
-                """,
-                (identity["stable_group_id"],),
-            ).fetchone()
-        self.assertEqual(after_rejection, before)
-
-        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
-            connection.execute(
-                "UPDATE alerts SET stable_group_key = ? WHERE alert_id = ?",
-                ("v2|post-queue-key-drift", identity["pinned_alert_id"]),
-            )
-            connection.commit()
-        status, drift_rejected = self.manual_dispatch_request(
-            "/jobs/status",
-            {
-                "job_type": "ai_analysis",
-                "dedupe_key": identity["stable_group_id"],
-                "status": "processing",
-                "expected_job_id": before[0],
-                "expected_representative_alert_id": identity["pinned_alert_id"],
-                "expected_dispatch_id": dispatch_id,
-                "expected_stable_group_key": identity["stable_group_key"],
-            },
-        )
-        self.assertEqual(status, 409, drift_rejected)
-        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
-            after_drift_rejection = connection.execute(
-                """
-                SELECT id, payload_json, status, attempt_count, lease_token
-                FROM durable_jobs
-                WHERE job_type = 'ai_analysis' AND dedupe_key = ?
-                """,
-                (identity["stable_group_id"],),
-            ).fetchone()
-            connection.execute(
-                "UPDATE alerts SET stable_group_key = ? WHERE alert_id = ?",
-                (identity["stable_group_key"], identity["pinned_alert_id"]),
-            )
-            connection.commit()
-        self.assertEqual(after_drift_rejection, before)
-
-        status, claimed = self.manual_dispatch_request(
-            "/jobs/status",
-            {
-                "job_type": "ai_analysis",
-                "dedupe_key": identity["stable_group_id"],
-                "status": "processing",
-                "expected_job_id": before[0],
-                "expected_representative_alert_id": identity["pinned_alert_id"],
-                "expected_dispatch_id": dispatch_id,
-                "expected_stable_group_key": identity["stable_group_key"],
-            },
-        )
         self.assertEqual(status, 200, claimed)
-        self.assertEqual(claimed["claim"]["job_id"], before[0])
-        self.assertEqual(
-            claimed["claim"]["payload"],
-            json.loads(before[1]),
+        self.assertTrue(claimed["lease_token"])
+        self.assertNotIn("job_id", claimed["claim"])
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            after_claim = connection.execute(
+                """
+                SELECT id, payload_json, status, attempt_count, lease_token
+                FROM durable_jobs
+                WHERE job_type = 'ai_analysis' AND dedupe_key = ?
+                """,
+                (identity["stable_group_id"],),
+            ).fetchone()
+        self.assertEqual(after_claim[0:2], before[0:2])
+        self.assertEqual(after_claim[2:4], ("processing", 1))
+        self.assertEqual(after_claim[4], claimed["lease_token"])
+
+        status, replay = self.manual_dispatch_request(
+            "/jobs/status",
+            {
+                "job_type": "ai_analysis",
+                "dedupe_key": identity["stable_group_id"],
+                "status": "processing",
+                "expected_job_id": before[0],
+                "expected_representative_alert_id": identity["pinned_alert_id"],
+                "expected_dispatch_id": dispatch_id,
+                "expected_stable_group_key": identity["stable_group_key"],
+            },
         )
+        self.assertEqual(status, 404, replay)
+        self.assertIsNone(replay["lease_token"])
 
     def test_controlled_ai_request_rejects_processing_job_without_mutation(
         self,

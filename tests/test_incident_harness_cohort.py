@@ -2695,7 +2695,7 @@ class IncidentHarnessCohortTests(unittest.TestCase):
 
     def test_dashboard_transport_is_loopback_only_and_has_no_bulk_route(self) -> None:
         with self.assertRaisesRegex(cohort.CohortError, "loopback"):
-            cohort.validate_loopback_base_url("http://10.77.7.225:8766")
+            cohort.validate_loopback_base_url("http://192.0.2.10:8766")
         self.assertEqual(
             cohort.validate_loopback_base_url("http://127.0.0.1:8766"),
             "http://127.0.0.1:8766",

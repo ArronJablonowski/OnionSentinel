@@ -8,6 +8,7 @@ not a runtime dependency and cannot publish or mutate Onion Sentinel content.
 from __future__ import annotations
 
 import argparse
+import hmac
 import html
 import json
 import mimetypes
@@ -26,6 +27,24 @@ HOME = Path.home()
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8766
 DEFAULT_DASHBOARD_ROOT = HOME / "SOC Alerts Web"
+EVALUATION_MODE_VALUE = str(
+    os.environ.get("ONION_SENTINEL_EVALUATION_MODE") or ""
+).strip()
+if EVALUATION_MODE_VALUE not in {"", "0", "1"}:
+    raise RuntimeError(
+        "ONION_SENTINEL_EVALUATION_MODE must be unset, 0, or 1"
+    )
+CONTROLLED_EVALUATION_MODE = EVALUATION_MODE_VALUE == "1"
+RUNTIME_RELEASE_ID = str(
+    os.environ.get("ONION_SENTINEL_RELEASE_ID") or ""
+).strip()
+CONTROLLED_EVALUATION_TOKEN = str(
+    os.environ.get("ONION_SENTINEL_EVALUATION_TOKEN") or ""
+).strip()
+CONTROLLED_EVALUATION_DISPATCH_ROUTES = (
+    "POST /api/soc-alerts/{12hex}/analyze",
+    "POST /api/soc-incidents/{case_id}/reanalyze",
+)
 
 GET_API_ROUTES = {
     "/api/system-health/beacons",
@@ -160,6 +179,49 @@ def is_soc_post_api(path: str) -> bool:
     )
 
 
+def is_controlled_evaluation_dispatch(path: str) -> bool:
+    """Allow only the two frozen-cohort queue routes in evaluation mode."""
+    return bool(
+        re.fullmatch(r"/api/soc-alerts/[a-f0-9]{12}/analyze", path)
+        or re.fullmatch(
+            r"/api/soc-incidents/ir-[a-z0-9_-]{1,64}/reanalyze",
+            path,
+            re.IGNORECASE,
+        )
+    )
+
+
+def controlled_alert_store_readiness() -> tuple[bool, dict[str, object]]:
+    """Verify that the configured downstream is this evaluation's store."""
+    origin = urlparse(runtime.SOC_ALERT_STORE_API_URL)
+    expected_port = origin.port
+    try:
+        health = runtime.alert_store_get_json("/health", timeout=1.0)
+    except Exception:
+        return False, {"status": "unavailable"}
+    ready = bool(
+        health.get("service") == "onion-sentinel-alert-store"
+        and health.get("controlled_evaluation") is True
+        and health.get("runtime_mode") == "controlled-evaluation"
+        and health.get("release_id") == RUNTIME_RELEASE_ID
+        and health.get("listen_host") == "127.0.0.1"
+        and health.get("listen_port") == expected_port
+        and health.get("accepting_requests") is True
+    )
+    return ready, {
+        "status": "ready" if ready else "identity_mismatch",
+        "service": str(health.get("service") or ""),
+        "controlled_evaluation": (
+            health.get("controlled_evaluation") is True
+        ),
+        "runtime_mode": str(health.get("runtime_mode") or ""),
+        "release_id": str(health.get("release_id") or ""),
+        "listen_host": str(health.get("listen_host") or ""),
+        "listen_port": health.get("listen_port"),
+        "accepting_requests": health.get("accepting_requests") is True,
+    }
+
+
 def is_same_origin_json_request(headers: object) -> tuple[bool, int, str]:
     """Validate the browser contract for state-changing SOC API requests.
 
@@ -232,6 +294,30 @@ def render_admin_status() -> bytes:
 class OnionSentinelHandler(runtime.PortalHandler):
     server_version = "OnionSentinel/1.0"
 
+    def parse_request(self) -> bool:
+        """Reject request targets normalized by the standard-library parser.
+
+        ``BaseHTTPRequestHandler`` rewrites a leading ``//`` to ``/`` before
+        dispatch. Controlled evaluation authorizes only byte-for-byte route
+        shapes, so accepting that rewrite would let an alternate raw target
+        reach an allowlisted handler.
+        """
+        accepted = super().parse_request()
+        if not accepted or not CONTROLLED_EVALUATION_MODE:
+            return accepted
+        fields = self.requestline.split()
+        raw_target = fields[1] if len(fields) >= 2 else ""
+        if raw_target == self.path:
+            return True
+        self.send_response(HTTPStatus.FORBIDDEN)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        for key, value in self._security_headers().items():
+            self.send_header(key, value)
+        self.end_headers()
+        return False
+
     def _soc_settings_write_authorized(self) -> bool:
         """Allow Settings saves until the dedicated service ships its sign-in UI.
 
@@ -290,7 +376,15 @@ class OnionSentinelHandler(runtime.PortalHandler):
             self.close_connection = True
 
     def do_HEAD(self) -> None:
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if (
+            CONTROLLED_EVALUATION_MODE
+            and self.path != "/healthz"
+        ):
+            self.send_response(HTTPStatus.FORBIDDEN)
+            self.end_headers()
+            return
         target = resolve_dashboard_target(self.dashboard_root, self.path)
         if path in ("/healthz", "/admin", "/admin/login") or is_soc_get_api(path) or target:
             self.send_response(HTTPStatus.OK)
@@ -306,12 +400,58 @@ class OnionSentinelHandler(runtime.PortalHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
+        if (
+            CONTROLLED_EVALUATION_MODE
+            and self.path != "/healthz"
+        ):
+            return self._send(
+                HTTPStatus.FORBIDDEN,
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": (
+                            "route is disabled in controlled evaluation mode"
+                        ),
+                    }
+                ).encode(),
+                "application/json; charset=utf-8",
+            )
         if path == "/healthz":
+            alert_store_ready = runtime.SOC_ALERT_STORE_DB.is_file()
+            alert_store_health: dict[str, object] = {
+                "status": (
+                    "local_database_ready"
+                    if alert_store_ready
+                    else "local_database_missing"
+                ),
+            }
+            if CONTROLLED_EVALUATION_MODE:
+                (
+                    downstream_ready,
+                    alert_store_health,
+                ) = controlled_alert_store_readiness()
+                alert_store_ready = (
+                    alert_store_ready and downstream_ready
+                )
             data = {
-                "ok": (self.dashboard_root / "index.html").is_file() and runtime.SOC_ALERT_STORE_DB.is_file(),
+                "ok": (
+                    (self.dashboard_root / "index.html").is_file()
+                    and alert_store_ready
+                ),
                 "service": "onion-sentinel",
+                "controlled_evaluation": CONTROLLED_EVALUATION_MODE,
+                "release_id": RUNTIME_RELEASE_ID or "unversioned",
+                "listen_host": self.server.server_address[0],  # type: ignore[attr-defined]
+                "listen_port": self.server.server_address[1],  # type: ignore[attr-defined]
+                "alert_store_origin": runtime.SOC_ALERT_STORE_API_URL,
+                "dispatch_route_patterns": (
+                    list(CONTROLLED_EVALUATION_DISPATCH_ROUTES)
+                    if CONTROLLED_EVALUATION_MODE
+                    else []
+                ),
                 "dashboard_ready": (self.dashboard_root / "index.html").is_file(),
-                "alert_store_ready": runtime.SOC_ALERT_STORE_DB.is_file(),
+                "alert_store_ready": alert_store_ready,
+                "alert_store_health": alert_store_health,
                 "time": runtime.now_iso_local(),
                 "http_runtime": self.server.runtime_snapshot(),  # type: ignore[attr-defined]
             }
@@ -335,6 +475,47 @@ class OnionSentinelHandler(runtime.PortalHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
+        if (
+            CONTROLLED_EVALUATION_MODE
+            and (
+                not is_controlled_evaluation_dispatch(path)
+                or self.path != path
+            )
+        ):
+            return self._send(
+                HTTPStatus.FORBIDDEN,
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": (
+                            "route is disabled in controlled evaluation mode"
+                        ),
+                    }
+                ).encode(),
+                "application/json; charset=utf-8",
+            )
+        if CONTROLLED_EVALUATION_MODE and not hmac.compare_digest(
+            str(
+                self.headers.get(
+                    "X-Onion-Sentinel-Evaluation-Token",
+                    "",
+                )
+            ),
+            CONTROLLED_EVALUATION_TOKEN,
+        ):
+            self.close_connection = True
+            return self._send(
+                HTTPStatus.FORBIDDEN,
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": (
+                            "controlled evaluation authorization failed"
+                        ),
+                    }
+                ).encode(),
+                "application/json; charset=utf-8",
+            )
         if path in ("/admin/login", "/admin/logout"):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -392,8 +573,52 @@ def main() -> None:
     parser.add_argument("--max-active-requests", type=int, default=int(os.environ.get("ONION_SENTINEL_MAX_ACTIVE_REQUESTS", "96")))
     parser.add_argument("--request-timeout-seconds", type=float, default=float(os.environ.get("ONION_SENTINEL_REQUEST_TIMEOUT_SECONDS", "30")))
     args = parser.parse_args()
+    if CONTROLLED_EVALUATION_MODE:
+        dashboard_root = args.dashboard_root.expanduser()
+        try:
+            dashboard_metadata = dashboard_root.lstat()
+            resolved_dashboard_root = dashboard_root.resolve(strict=True)
+        except OSError as exc:
+            raise SystemExit(
+                f"controlled evaluation dashboard root is unsafe: {exc}"
+            ) from exc
+        alert_store_origin = urlparse(runtime.SOC_ALERT_STORE_API_URL)
+        if (
+            args.host != "127.0.0.1"
+            or not 1024 <= args.port <= 65535
+            or args.port == DEFAULT_PORT
+            or not re.fullmatch(r"[a-f0-9]{40}", RUNTIME_RELEASE_ID)
+            or not re.fullmatch(
+                r"[a-f0-9]{64}",
+                CONTROLLED_EVALUATION_TOKEN,
+            )
+            or not dashboard_root.is_absolute()
+            or resolved_dashboard_root != dashboard_root
+            or dashboard_root.is_symlink()
+            or not dashboard_root.is_dir()
+            or (
+                hasattr(os, "getuid")
+                and dashboard_metadata.st_uid != os.getuid()
+            )
+            or dashboard_metadata.st_mode & 0o022
+            or alert_store_origin.scheme != "http"
+            or alert_store_origin.hostname != "127.0.0.1"
+            or alert_store_origin.port is None
+            or alert_store_origin.port == 8787
+            or alert_store_origin.username is not None
+            or alert_store_origin.password is not None
+            or alert_store_origin.path not in {"", "/"}
+            or alert_store_origin.params
+            or alert_store_origin.query
+            or alert_store_origin.fragment
+        ):
+            raise SystemExit(
+                "controlled evaluation requires owner-only runtime content, "
+                "loopback listeners, and an exact release ID"
+            )
     configure_runtime_paths(args.dashboard_root)
-    args.dashboard_root.mkdir(parents=True, exist_ok=True)
+    if not CONTROLLED_EVALUATION_MODE:
+        args.dashboard_root.mkdir(parents=True, exist_ok=True)
     server = OnionSentinelHTTPServer(
         (args.host, args.port),
         args.dashboard_root,

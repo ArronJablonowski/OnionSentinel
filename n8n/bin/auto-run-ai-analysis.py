@@ -13,15 +13,18 @@ import datetime as dt
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
 import stat
+import time
 import urllib.error
 import urllib.request
 import sys
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
+from urllib.parse import urlparse
 
 BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
@@ -60,6 +63,12 @@ CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES = 384 * 1024
 DEFAULT_MAX_CHILD_STDOUT_BYTES = max(1024 * 1024, int(os.environ.get("SOC_AI_SCHEDULER_MAX_STDOUT_BYTES", 16 * 1024 * 1024)))
 DEFAULT_MAX_CHILD_STDERR_BYTES = max(256 * 1024, int(os.environ.get("SOC_AI_SCHEDULER_MAX_STDERR_BYTES", 2 * 1024 * 1024)))
 DEFAULT_MAX_CONTROL_RESPONSE_BYTES = 1024 * 1024
+MAX_CONTROLLED_RESULT_SPOOL_BYTES = 16 * 1024 * 1024
+CONTROLLED_RESULT_SUBMISSION_ATTEMPTS = 3
+CONTROLLED_EXACT_CLAIM_ATTEMPTS = 3
+CONTROLLED_RESULT_SUBMISSION_INDETERMINATE = (
+    "controlled analysis result submission remains indeterminate"
+)
 MAX_AI_SETTINGS_BYTES = 256 * 1024
 CODEX_CLI_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
 CODEX_CLI_MODEL_CATALOG = frozenset({
@@ -78,10 +87,220 @@ AGENT_ROLES = (
 CONTROLLED_ALERT_ID_RE = re.compile(r"[A-Za-z0-9._:@=-]{1,256}")
 CONTROLLED_DISPATCH_ID_RE = re.compile(r"[a-f0-9]{64}")
 CONTROLLED_RELEASE_ID_RE = re.compile(r"[a-f0-9]{40}")
+CONTROLLED_COHORT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{2,63}")
+CONTROLLED_LEASE_TOKEN_RE = re.compile(
+    r"[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-"
+    r"[89ab][a-f0-9]{3}-[a-f0-9]{12}"
+)
+CONTROLLED_ANALYSIS_ID_RE = re.compile(r"[a-z0-9_-]{8,120}")
 CONTROLLED_STABLE_GROUP_KEY_MAX_LENGTH = 2048
+CONTROLLED_EVALUATION_TOKEN_ENV = "ONION_SENTINEL_EVALUATION_TOKEN"
+CONTROLLED_EVALUATION_TOKEN_HEADER = (
+    "X-Onion-Sentinel-Evaluation-Token"
+)
+CONTROLLED_EVALUATION_TOKEN_RE = re.compile(r"[a-f0-9]{64}")
+CONTROLLED_JS_WHITESPACE_CLASS = (
+    r"\u0009-\u000d\u0020\u00a0\u1680\u2000-\u200a"
+    r"\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+CONTROLLED_TIMESTAMP_SEPARATOR_RE = re.compile(
+    rf"(\d{{4}}-\d{{2}}-\d{{2}})"
+    rf"(?:T|[{CONTROLLED_JS_WHITESPACE_CLASS}]+)"
+    rf"(?=\d{{2}}:\d{{2}}:\d{{2}})"
+)
+CONTROLLED_TIMESTAMP_RE = re.compile(
+    rf"(?<![A-Za-z0-9_])\d{{4}}-\d{{2}}-\d{{2}}"
+    rf"(?:T|[{CONTROLLED_JS_WHITESPACE_CLASS}]+)"
+    rf"\d{{2}}:\d{{2}}:\d{{2}}"
+    rf"(?:\.\d+)?(?:Z|[+-]\d{{2}}:?\d{{2}})?"
+    rf"(?![A-Za-z0-9_])",
+)
 RUNTIME_RELEASE_ENV_KEY = "ONION_SENTINEL_RELEASE_ID"
 DEFAULT_RUNTIME_ENV_PATH = HOME / "n8n-local" / ".env"
 MAX_RUNTIME_ENV_BYTES = 1024 * 1024
+_CONTROLLED_EVALUATION_TOKEN = ""
+
+
+def javascript_trim(value: str) -> str:
+    """Mirror ECMAScript String.prototype.trim(), not Python str.strip()."""
+    return re.sub(
+        rf"^[{CONTROLLED_JS_WHITESPACE_CLASS}]+"
+        rf"|[{CONTROLLED_JS_WHITESPACE_CLASS}]+$",
+        "",
+        value,
+    )
+
+
+def javascript_string_value(value: object) -> str:
+    """Mirror String(value ?? '') for bounded JSON metadata fields."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, (int, float)):
+        try:
+            number = float(value)
+        except OverflowError:
+            number = math.inf if value > 0 else -math.inf
+        if math.isnan(number):
+            return "NaN"
+        if math.isinf(number):
+            return "Infinity" if number > 0 else "-Infinity"
+        return javascript_json_number(number)
+    if isinstance(value, list):
+        return ",".join(
+            javascript_string_value(item) if item is not None else ""
+            for item in value
+        )
+    if isinstance(value, dict):
+        return "[object Object]"
+    return str(value)
+
+
+def javascript_safe_string(value: object, max_length: int) -> str:
+    """Project safeString() through node-sqlite3's stored-text encoding."""
+    collapsed = re.sub(
+        rf"[{CONTROLLED_JS_WHITESPACE_CLASS}]+",
+        " ",
+        javascript_trim(javascript_string_value(value)),
+    )
+    encoded = collapsed.encode("utf-16-le", errors="surrogatepass")
+    sliced = encoded[: max(0, int(max_length)) * 2].decode(
+        "utf-16-le",
+        errors="surrogatepass",
+    )
+    # UTF-16 slice() may split a non-BMP character. Node's SQLite binding
+    # persists each resulting lone surrogate as the Unicode replacement
+    # character, which is what a read-only terminal proof observes.
+    return "".join(
+        "\ufffd" if 0xD800 <= ord(character) <= 0xDFFF else character
+        for character in sliced
+    )
+
+
+def javascript_truthy(value: object) -> bool:
+    """Return JavaScript truthiness for JSON-compatible values."""
+    if value is None or value is False:
+        return False
+    if isinstance(value, (int, float)):
+        try:
+            number = float(value)
+        except OverflowError:
+            number = math.inf if value > 0 else -math.inf
+        if number == 0 or math.isnan(number):
+            return False
+    if isinstance(value, str) and value == "":
+        return False
+    return True
+
+
+def controlled_evaluation_runtime(
+    args: argparse.Namespace,
+) -> Path | None:
+    """Validate the one-member, owner-only evaluation worker boundary."""
+    mode_value = str(
+        os.environ.get("ONION_SENTINEL_EVALUATION_MODE") or ""
+    ).strip()
+    if mode_value not in {"", "0", "1"}:
+        raise SystemExit(
+            "ONION_SENTINEL_EVALUATION_MODE must be unset, 0, or 1"
+        )
+    if mode_value != "1":
+        return None
+    raw_root = str(
+        os.environ.get("ONION_SENTINEL_EVALUATION_RUNTIME_DIR") or ""
+    ).strip()
+    try:
+        root = Path(raw_root)
+        metadata = root.lstat()
+        resolved_root = root.resolve(strict=True)
+        expected_parent = (
+            HOME / "n8n-local" / "harness-evaluations"
+        ).resolve(strict=True)
+        resolved_root.relative_to(expected_parent)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise SystemExit(
+            f"controlled evaluation runtime directory is unsafe: {exc}"
+        ) from exc
+    writable_paths = (
+        args.prompt_dir,
+        args.analysis_dir,
+        args.incident_evidence_dir,
+        args.lock_file,
+        args.wake_file,
+        args.portal_wake_file,
+    )
+    try:
+        alert_store_origin = urlparse(args.alert_store_url)
+        alert_store_port = alert_store_origin.port
+    except ValueError as exc:
+        raise SystemExit(
+            "controlled evaluation alert-store origin is unsafe"
+        ) from exc
+    controlled_identity = (
+        args.only_group_id,
+        args.only_alert_id,
+        args.only_stable_group_key,
+        args.only_dispatch_id,
+    )
+    if (
+        not raw_root
+        or not root.is_absolute()
+        or resolved_root != root
+        or root.is_symlink()
+        or not root.is_dir()
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+        or str(
+            os.environ.get("ONION_SENTINEL_EVALUATION_FREEZE_MEMORY")
+            or ""
+        ).strip() != "1"
+        or not CONTROLLED_RELEASE_ID_RE.fullmatch(
+            str(os.environ.get(RUNTIME_RELEASE_ENV_KEY) or "")
+        )
+        or not CONTROLLED_EVALUATION_TOKEN_RE.fullmatch(
+            str(
+                os.environ.get(CONTROLLED_EVALUATION_TOKEN_ENV)
+                or ""
+            ).strip()
+        )
+        or not all(controlled_identity)
+        or args.max_per_run != 1
+        or alert_store_origin.scheme != "http"
+        or alert_store_origin.hostname != "127.0.0.1"
+        or alert_store_port is None
+        or alert_store_port < 1
+        or alert_store_port == 8787
+        or alert_store_origin.username is not None
+        or alert_store_origin.password is not None
+        or alert_store_origin.path not in {"", "/"}
+        or alert_store_origin.params
+        or alert_store_origin.query
+        or alert_store_origin.fragment
+    ):
+        raise SystemExit(
+            "controlled evaluation requires one exact frozen job, an "
+            "owner-only runtime, frozen memory, a loopback alert store, "
+            "an exact release ID, and an ephemeral authorization token"
+        )
+    for candidate in writable_paths:
+        candidate = candidate.expanduser()
+        if not candidate.is_absolute():
+            raise SystemExit(
+                "controlled evaluation writable paths must be absolute"
+            )
+        try:
+            candidate.resolve(strict=False).relative_to(resolved_root)
+        except ValueError as exc:
+            raise SystemExit(
+                "controlled evaluation writable paths must stay inside "
+                "its runtime directory"
+            ) from exc
+    return resolved_root
 
 
 def valid_controlled_stable_group_key(value: object) -> bool:
@@ -93,6 +312,949 @@ def valid_controlled_stable_group_key(value: object) -> bool:
     except UnicodeEncodeError:
         return False
     return len(encoded) <= CONTROLLED_STABLE_GROUP_KEY_MAX_LENGTH
+
+
+def controlled_canonical_digest(value: object, *, ensure_ascii: bool = True) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=ensure_ascii,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def consume_controlled_evaluation_token(enabled: bool) -> str:
+    """Keep the mutation credential out of unrelated child environments."""
+    global _CONTROLLED_EVALUATION_TOKEN
+    supplied = str(
+        os.environ.pop(CONTROLLED_EVALUATION_TOKEN_ENV, "") or ""
+    ).strip()
+    if enabled:
+        if not CONTROLLED_EVALUATION_TOKEN_RE.fullmatch(supplied):
+            raise SystemExit(
+                "controlled evaluation requires an exact ephemeral "
+                "authorization token"
+            )
+        _CONTROLLED_EVALUATION_TOKEN = supplied
+    else:
+        _CONTROLLED_EVALUATION_TOKEN = ""
+    return _CONTROLLED_EVALUATION_TOKEN
+
+
+def alert_store_mutation_headers(*, user_agent: str = "") -> dict[str, str]:
+    """Attach the ephemeral token only inside controlled evaluation mode."""
+    headers = {"Content-Type": "application/json"}
+    if user_agent:
+        headers["User-Agent"] = user_agent
+    supplied_token = str(
+        os.environ.get(CONTROLLED_EVALUATION_TOKEN_ENV) or ""
+    ).strip()
+    evaluation_token = (
+        supplied_token
+        if CONTROLLED_EVALUATION_TOKEN_RE.fullmatch(supplied_token)
+        else _CONTROLLED_EVALUATION_TOKEN
+    )
+    if (
+        str(
+            os.environ.get("ONION_SENTINEL_EVALUATION_MODE") or ""
+        ).strip()
+        == "1"
+        and CONTROLLED_EVALUATION_TOKEN_RE.fullmatch(evaluation_token)
+    ):
+        headers[CONTROLLED_EVALUATION_TOKEN_HEADER] = evaluation_token
+    return headers
+
+
+def controlled_parse_javascript_timestamp(
+    value: str,
+) -> tuple[dt.datetime, int]:
+    """Parse ISO fields that JavaScript Date normalizes beyond fromisoformat."""
+    matched = re.fullmatch(
+        r"(?P<year>[0-9]{4})-(?P<month>[0-9]{2})-"
+        r"(?P<day>[0-9]{2})T(?P<hour>[0-9]{2}):"
+        r"(?P<minute>[0-9]{2}):(?P<second>[0-9]{2})"
+        r"(?:\.(?P<fraction>[0-9]+))?"
+        r"(?P<zone>Z|[+-][0-9]{2}:?[0-9]{2})",
+        value,
+        re.ASCII,
+    )
+    if not matched:
+        raise ValueError("timestamp does not match JavaScript ISO fields")
+    year = int(matched.group("year"))
+    month = int(matched.group("month"))
+    day = int(matched.group("day"))
+    hour = int(matched.group("hour"))
+    minute = int(matched.group("minute"))
+    second = int(matched.group("second"))
+    fraction = matched.group("fraction") or ""
+    if (
+        month not in range(1, 13)
+        or day not in range(1, 32)
+        or hour not in range(0, 25)
+        or minute not in range(0, 60)
+        or second not in range(0, 60)
+        or (
+            hour == 24
+            and (
+                minute
+                or second
+                or any(character != "0" for character in fraction)
+            )
+        )
+    ):
+        raise ValueError("timestamp fields are outside JavaScript Date bounds")
+    zone = matched.group("zone")
+    if zone == "Z":
+        timezone = dt.timezone.utc
+    else:
+        zone_hours = int(zone[1:3])
+        zone_minutes = int(zone[-2:])
+        if zone_hours > 23 or zone_minutes > 59:
+            raise ValueError("timestamp offset is outside JavaScript bounds")
+        direction = 1 if zone[0] == "+" else -1
+        timezone = dt.timezone(
+            direction
+            * dt.timedelta(hours=zone_hours, minutes=zone_minutes)
+        )
+    # Python datetime cannot represent a local conversion that crosses year
+    # zero or 10000. Gregorian calendars and projected timezone rules repeat
+    # every 400 years, so shift only these boundary years into its safe range.
+    if year <= 1:
+        parse_year = year + 400
+        year_adjustment = -400
+    elif year >= 9999:
+        parse_year = year - 400
+        year_adjustment = 400
+    else:
+        parse_year = year
+        year_adjustment = 0
+    microseconds = int((fraction + "000000")[:6]) if fraction else 0
+    parsed = dt.datetime(
+        parse_year,
+        month,
+        1,
+        tzinfo=timezone,
+    ) + dt.timedelta(
+        days=day - 1,
+        hours=hour,
+        minutes=minute,
+        seconds=second,
+        microseconds=microseconds,
+    )
+    return parsed, year_adjustment
+
+
+def controlled_normalize_timestamp(value: str) -> str | None:
+    """Mirror alert-store's normalizeTimestampValue() for stored JSON."""
+    if value == "":
+        return None
+    text = javascript_trim(value)
+
+    def replace_timestamp(match: re.Match[str]) -> str:
+        timestamp = match.group(0)
+        parseable = CONTROLLED_TIMESTAMP_SEPARATOR_RE.sub(
+            r"\1T", timestamp, count=1
+        )
+        if not re.search(r"(?:Z|[+-]\d{2}:?\d{2})$", parseable):
+            parseable = f"{parseable}Z"
+        year_adjustment = 0
+        try:
+            timestamp_year = int(parseable[:4])
+            if timestamp_year <= 1 or timestamp_year >= 9999:
+                parsed, year_adjustment = (
+                    controlled_parse_javascript_timestamp(parseable)
+                )
+            else:
+                parsed = dt.datetime.fromisoformat(
+                    parseable[:-1] + "+00:00"
+                    if parseable.endswith("Z")
+                    else parseable
+                )
+        except ValueError:
+            try:
+                parsed, year_adjustment = (
+                    controlled_parse_javascript_timestamp(parseable)
+                )
+            except ValueError:
+                return CONTROLLED_TIMESTAMP_SEPARATOR_RE.sub(
+                    r"\1  ", timestamp
+                )
+        try:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt.timezone.utc)
+            local = parsed.astimezone()
+            offset = local.utcoffset()
+            if offset is None:
+                raise ValueError("timestamp has no UTC offset")
+        except (OverflowError, ValueError):
+            return CONTROLLED_TIMESTAMP_SEPARATOR_RE.sub(
+                r"\1  ", timestamp
+            )
+        milliseconds = local.microsecond // 1000
+        fractional = f".{milliseconds:03d}" if milliseconds else ""
+        offset_minutes = int(offset.total_seconds() / 60)
+        offset_sign = "+" if offset_minutes >= 0 else "-"
+        offset_minutes = abs(offset_minutes)
+        return (
+            # Node's formatProjectTimestamp() deliberately does not pad
+            # getFullYear(), including for historical four-digit inputs.
+            f"{local.year + year_adjustment}-"
+            f"{local.month:02d}-{local.day:02d}  "
+            f"{local.hour:02d}:{local.minute:02d}:{local.second:02d}"
+            f"{fractional}{offset_sign}{offset_minutes // 60:02d}:"
+            f"{offset_minutes % 60:02d}"
+        )
+
+    return CONTROLLED_TIMESTAMP_RE.sub(replace_timestamp, text)
+
+
+def controlled_normalize_stored_json(value: object) -> object:
+    """Mirror alert-store's recursive normalizeJsonTimestamps()."""
+    if isinstance(value, str):
+        return controlled_normalize_timestamp(value)
+    if isinstance(value, list):
+        return [
+            controlled_normalize_stored_json(item)
+            for item in value
+        ]
+    if isinstance(value, dict):
+        return {
+            str(key): controlled_normalize_stored_json(item)
+            for key, item in value.items()
+        }
+    return value
+
+
+def javascript_json_number(value: int | float) -> str:
+    """Render a JSON number with ECMAScript's JSON.stringify thresholds."""
+    try:
+        number = float(value)
+    except OverflowError:
+        return "null"
+    if not math.isfinite(number):
+        return "null"
+    if number == 0:
+        return "0"
+    sign = "-" if number < 0 else ""
+    representation = repr(abs(number)).lower()
+    if "e" in representation:
+        mantissa, raw_exponent = representation.split("e", 1)
+        exponent = int(raw_exponent)
+    else:
+        mantissa = representation
+        exponent = 0
+    if "." in mantissa:
+        integer, fraction = mantissa.split(".", 1)
+        digits = integer + fraction
+        decimal_position = len(integer) + exponent
+    else:
+        digits = mantissa
+        decimal_position = len(mantissa) + exponent
+    leading_zero_count = len(digits) - len(digits.lstrip("0"))
+    digits = digits.lstrip("0").rstrip("0") or "0"
+    decimal_position -= leading_zero_count
+    scientific_exponent = decimal_position - 1
+    if -6 <= scientific_exponent < 21:
+        if decimal_position <= 0:
+            rendered = f"0.{('0' * -decimal_position)}{digits}"
+        elif decimal_position >= len(digits):
+            rendered = digits + ("0" * (decimal_position - len(digits)))
+        else:
+            rendered = (
+                f"{digits[:decimal_position]}."
+                f"{digits[decimal_position:]}"
+            )
+        return sign + rendered
+    coefficient = (
+        digits
+        if len(digits) == 1
+        else f"{digits[0]}.{digits[1:]}"
+    )
+    exponent_sign = "+" if scientific_exponent >= 0 else ""
+    return f"{sign}{coefficient}e{exponent_sign}{scientific_exponent}"
+
+
+def javascript_object_key_order(value: dict[str, object]) -> list[str]:
+    """Return JSON.stringify order after canonical Object.fromEntries()."""
+    array_indexes: list[tuple[int, str]] = []
+    ordinary_keys: list[str] = []
+    for key in value:
+        if (
+            re.fullmatch(r"0|[1-9][0-9]*", key, re.ASCII)
+            and int(key) < (2**32 - 1)
+        ):
+            array_indexes.append((int(key), key))
+        else:
+            ordinary_keys.append(key)
+    array_indexes.sort()
+    ordinary_keys.sort(
+        key=lambda key: key.encode("utf-16-be", errors="surrogatepass")
+    )
+    return [key for _, key in array_indexes] + ordinary_keys
+
+
+def javascript_json_string(value: str) -> str:
+    """Use well-formed JSON.stringify escaping while preserving Unicode."""
+    encoded = json.dumps(value, ensure_ascii=False)
+    return "".join(
+        f"\\u{ord(character):04x}"
+        if 0xD800 <= ord(character) <= 0xDFFF
+        else character
+        for character in encoded
+    )
+
+
+def controlled_storage_canonical_json(value: object) -> str:
+    """Mirror alert-store canonicalJsonText() for terminal DB proof."""
+    normalized = controlled_normalize_stored_json(value)
+
+    def serialize(item: object) -> str:
+        if item is None:
+            return "null"
+        if item is True:
+            return "true"
+        if item is False:
+            return "false"
+        if isinstance(item, (int, float)):
+            return javascript_json_number(item)
+        if isinstance(item, str):
+            return javascript_json_string(item)
+        if isinstance(item, list):
+            return "[" + ",".join(serialize(entry) for entry in item) + "]"
+        if isinstance(item, dict):
+            keys = javascript_object_key_order(item)
+            return (
+                "{"
+                + ",".join(
+                    f"{javascript_json_string(key)}:{serialize(item[key])}"
+                    for key in keys
+                )
+                + "}"
+            )
+        raise TypeError(
+            "controlled stored response contains a non-JSON value"
+        )
+
+    return serialize(normalized)
+
+
+def controlled_storage_canonical_digest(value: object) -> str:
+    return hashlib.sha256(
+        controlled_storage_canonical_json(value).encode("utf-8")
+    ).hexdigest()
+
+
+def controlled_expected_accepted_fields(
+    payload: dict[str, Any],
+    response: dict[str, Any],
+) -> dict[str, str | None]:
+    """Rebuild recordAiAnalysisResult's immutable acceptance projection."""
+    payload_model = payload.get("model")
+    payload_model_path = payload.get("model_path")
+    generated_at = javascript_safe_string(
+        payload.get("generated_at"),
+        64,
+    )
+    return {
+        # An omitted/empty generated_at is replaced by server time. No
+        # immutable spool-to-row proof is possible for that dynamic value.
+        "generated_at": generated_at or None,
+        "model": javascript_safe_string(
+            payload_model
+            if javascript_truthy(payload_model)
+            else response.get("_analysis_model"),
+            200,
+        ),
+        "model_path": javascript_safe_string(
+            payload_model_path
+            if javascript_truthy(payload_model_path)
+            else response.get("_analysis_model_path"),
+            100,
+        ),
+        "detection_outcome": javascript_safe_string(
+            response.get("detection_outcome"),
+            100,
+        ),
+        "bluf": javascript_safe_string(response.get("bluf"), 4000),
+        "summary": javascript_safe_string(
+            response.get("summary"),
+            8000,
+        ),
+        "confidence": javascript_safe_string(
+            response.get("confidence"),
+            16,
+        ).lower(),
+        "artifact_path": javascript_safe_string(
+            payload.get("artifact_path"),
+            2048,
+        ),
+        "evidence_hash": javascript_safe_string(
+            payload.get("evidence_hash"),
+            128,
+        ).lower(),
+    }
+
+
+def controlled_accepted_fields_match(
+    accepted: sqlite3.Row,
+    expected: dict[str, str | None],
+) -> bool:
+    """Match every immutable field checked by recordAiAnalysisResult replay."""
+    expected_generated_at = expected.get("generated_at")
+    if not isinstance(expected_generated_at, str):
+        return False
+    actual_generated_at = javascript_safe_string(
+        accepted["generated_at"],
+        64,
+    )
+    if (
+        controlled_normalize_timestamp(actual_generated_at)
+        != controlled_normalize_timestamp(expected_generated_at)
+    ):
+        return False
+    limits = {
+        "model": 200,
+        "model_path": 100,
+        "detection_outcome": 100,
+        "bluf": 4000,
+        "summary": 8000,
+        "confidence": 16,
+        "artifact_path": 2048,
+        "evidence_hash": 128,
+    }
+    for field, limit in limits.items():
+        actual = javascript_safe_string(accepted[field], limit)
+        expected_value = expected.get(field)
+        if field in {"confidence", "evidence_hash"}:
+            actual = actual.lower()
+        if actual != expected_value:
+            return False
+    return True
+
+
+def owner_private_directory(path: Path, runtime_root: Path) -> bool:
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(runtime_root)
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+    return bool(
+        resolved == path
+        and not path.is_symlink()
+        and path.is_dir()
+        and metadata.st_uid == os.getuid()
+        and not (stat.S_IMODE(metadata.st_mode) & 0o077)
+    )
+
+
+def load_owner_private_json(
+    path: Path,
+    runtime_root: Path,
+    *,
+    max_bytes: int,
+) -> dict[str, Any]:
+    """Read one non-symlink owner-only evaluation artifact with a byte cap."""
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(runtime_root)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise RuntimeError(
+            "controlled evaluation recovery artifact is unsafe"
+        ) from exc
+    if resolved != path or path.parent.resolve(strict=True) != path.parent:
+        raise RuntimeError(
+            "controlled evaluation recovery artifact is not canonical"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+            or metadata.st_size > max_bytes
+        ):
+            raise RuntimeError(
+                "controlled evaluation recovery artifact must be one "
+                "bounded owner-only regular file"
+            )
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = -1
+            payload = json.load(handle)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "controlled evaluation recovery artifact is invalid JSON"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            "controlled evaluation recovery artifact must contain an object"
+        )
+    return payload
+
+
+def post_controlled_recovery_result(
+    payload: dict[str, Any],
+    alert_store_url: str,
+    *,
+    attempts: int = CONTROLLED_RESULT_SUBMISSION_ATTEMPTS,
+) -> dict[str, Any]:
+    """Replay the exact immutable result with bounded immediate retries."""
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    submission_sha256 = hashlib.sha256(body).hexdigest()
+    last_error = ""
+    for attempt_index in range(max(1, min(int(attempts), 5))):
+        if attempt_index:
+            time.sleep(0.05 * attempt_index)
+        request = urllib.request.Request(
+            f"{alert_store_url.rstrip('/')}/analysis/result",
+            data=body,
+            headers=alert_store_mutation_headers(
+                user_agent="Onion-Sentinel-AI-Recovery/1.0",
+            ),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                if response.status not in range(200, 300):
+                    status_code = int(response.status)
+                    detail = (
+                        f"analysis result recovery returned HTTP "
+                        f"{status_code}"
+                    )
+                    if status_code == 409:
+                        raise RuntimeError(
+                            f"{CONTROLLED_RESULT_SUBMISSION_INDETERMINATE}: "
+                            f"{detail}"
+                        )
+                    if (
+                        status_code < 500
+                        and status_code not in {408, 425, 429}
+                    ):
+                        raise RuntimeError(detail)
+                    last_error = detail
+                    continue
+                result = read_bounded_json(
+                    response,
+                    max_bytes=DEFAULT_MAX_CONTROL_RESPONSE_BYTES,
+                )
+            stored_response_sha256 = str(
+                result.get("stored_response_sha256") or ""
+            ).lower()
+            if (
+                result.get("ok") is True
+                and str(result.get("analysis_id") or "").lower()
+                == str(payload.get("analysis_id") or "").lower()
+                and str(result.get("submission_sha256") or "").lower()
+                == submission_sha256
+                and re.fullmatch(r"[a-f0-9]{64}", stored_response_sha256)
+            ):
+                return result
+            last_error = "analysis result recovery receipt was not exact"
+        except urllib.error.HTTPError as exc:
+            status_code = int(exc.code)
+            exc.close()
+            last_error = (
+                f"analysis result recovery returned HTTP {status_code}"
+            )
+            if status_code == 409:
+                # Node safeString() can produce a lone surrogate at a UTF-16
+                # field limit that SQLite stores as U+FFFD. The original
+                # transaction is authoritative but its exact HTTP replay then
+                # conflicts. Only the complete terminal DB proof may retire it.
+                raise RuntimeError(
+                    f"{CONTROLLED_RESULT_SUBMISSION_INDETERMINATE}: "
+                    f"{last_error}"
+                ) from exc
+            if status_code < 500 and status_code not in {408, 425, 429}:
+                raise RuntimeError(last_error) from exc
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            BoundedHttpError,
+        ) as exc:
+            last_error = (
+                f"analysis result recovery transport failed: "
+                f"{type(exc).__name__}"
+            )
+    raise RuntimeError(
+        f"{CONTROLLED_RESULT_SUBMISSION_INDETERMINATE}: {last_error}"
+    )
+
+
+def validate_controlled_recovery_payload(
+    payload: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Bind a spooled result to the frozen scheduler pins and old lease."""
+    identity = payload.get("controlled_job")
+    response = payload.get("response")
+    expected_identity_fields = {
+        "job_id",
+        "job_type",
+        "lease_token",
+        "cohort_id",
+        "dispatch_id",
+        "representative_alert_id",
+        "stable_group_id",
+        "stable_group_key",
+        "agent_role",
+        "reanalysis_attempt_id",
+        "release_id",
+    }
+    if (
+        not isinstance(identity, dict)
+        or set(identity) != expected_identity_fields
+        or not isinstance(response, dict)
+    ):
+        raise RuntimeError(
+            "controlled evaluation recovery identity is incomplete"
+        )
+    job_id = identity.get("job_id")
+    job_type = identity.get("job_type")
+    lease_token = identity.get("lease_token")
+    cohort_id = identity.get("cohort_id")
+    role = identity.get("agent_role")
+    attempt_id = identity.get("reanalysis_attempt_id")
+    release_id = identity.get("release_id")
+    expected_role = {
+        "ai_analysis": "soc-analyst",
+        "incident_response_analysis": "incident-responder",
+    }.get(job_type)
+    expected_attempt = (
+        ""
+        if job_type == "ai_analysis"
+        else incident_reanalysis_attempt_id(str(lease_token or ""))
+    )
+    runtime_release_id = current_runtime_release_id()
+    claim_digest = controlled_canonical_digest(
+        identity,
+        ensure_ascii=False,
+    )
+    analysis_id = payload.get("analysis_id")
+    if (
+        not isinstance(job_id, int)
+        or isinstance(job_id, bool)
+        or job_id < 1
+        or not isinstance(job_type, str)
+        or not isinstance(lease_token, str)
+        or not CONTROLLED_LEASE_TOKEN_RE.fullmatch(lease_token)
+        or not isinstance(cohort_id, str)
+        or not CONTROLLED_COHORT_ID_RE.fullmatch(cohort_id)
+        or identity.get("dispatch_id") != args.only_dispatch_id
+        or identity.get("representative_alert_id") != args.only_alert_id
+        or identity.get("stable_group_id") != args.only_group_id
+        or identity.get("stable_group_key") != args.only_stable_group_key
+        or not isinstance(role, str)
+        or role != expected_role
+        or not isinstance(attempt_id, str)
+        or attempt_id != expected_attempt
+        or not isinstance(release_id, str)
+        or release_id != runtime_release_id
+        or not isinstance(analysis_id, str)
+        or not CONTROLLED_ANALYSIS_ID_RE.fullmatch(analysis_id)
+        or payload.get("alert_id") != args.only_alert_id
+        or payload.get("agent_role") != role
+        or str(payload.get("reanalysis_attempt_id") or "") != attempt_id
+        or response.get("_analysis_evaluation_memory_frozen") is not True
+        or response.get("_analysis_controlled_claim_sha256")
+        != claim_digest
+    ):
+        raise RuntimeError(
+            "controlled evaluation recovery identity does not match "
+            "the frozen scheduler pins"
+        )
+    return {
+        "analysis_id": analysis_id,
+        "job_id": job_id,
+        "job_type": job_type,
+        "lease_token": lease_token,
+        "stable_group_id": args.only_group_id,
+        # The runner binds frozen-memory tasks to its pre-storage response
+        # digest. Alert-store separately normalizes timestamps before hashing
+        # the stored response, so recovery must retain both exact bindings.
+        "response_digest": controlled_canonical_digest(response),
+        "stored_response_fallback_digest": (
+            controlled_storage_canonical_digest(response)
+        ),
+        "accepted_fields": controlled_expected_accepted_fields(
+            payload,
+            response,
+        ),
+        "claim_digest": claim_digest,
+        "identity": identity,
+    }
+
+
+def settle_controlled_frozen_memory_artifacts(
+    runtime_root: Path,
+    recovery: dict[str, Any],
+) -> None:
+    """Remove only frozen, response-bound memory tasks for this analysis."""
+    analysis_id = str(recovery["analysis_id"])
+    task_name = f"{analysis_id}.json"
+    for directory_name in (
+        "memory-writeback-pending",
+        "memory-writeback-committed",
+    ):
+        directory = runtime_root / directory_name
+        if not directory.exists():
+            continue
+        if not owner_private_directory(directory, runtime_root):
+            raise RuntimeError(
+                "controlled evaluation memory recovery directory is unsafe"
+            )
+        task_path = directory / task_name
+        if not task_path.exists():
+            continue
+        task = load_owner_private_json(
+            task_path,
+            runtime_root,
+            max_bytes=256 * 1024,
+        )
+        lanes = (task.get("primary"), task.get("reviewer"))
+        if (
+            task.get("schema")
+            != "onion-sentinel-memory-writeback-task-v1"
+            or task.get("analysis_id") != analysis_id
+            or task.get("submitted_response_sha256")
+            != recovery["response_digest"]
+            or any(
+                not isinstance(lane, dict)
+                or lane.get("allowed") is not False
+                or lane.get("candidates") != []
+                for lane in lanes
+            )
+        ):
+            raise RuntimeError(
+                "controlled evaluation frozen-memory task is not exact"
+            )
+        task_path.unlink()
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+
+def recover_controlled_evaluation_spool(
+    args: argparse.Namespace,
+    runtime_root: Path,
+) -> bool:
+    """Commit and retire one prior exact lease before any new inference."""
+    queue_dir = runtime_root / "analysis-index-pending"
+    if not queue_dir.exists():
+        return False
+    if not owner_private_directory(queue_dir, runtime_root):
+        raise RuntimeError(
+            "controlled evaluation recovery spool directory is unsafe"
+        )
+    entries = list(queue_dir.iterdir())
+    spool_files = [path for path in entries if path.suffix == ".json"]
+    if not spool_files:
+        if entries:
+            raise RuntimeError(
+                "controlled evaluation recovery spool contains "
+                "an unexpected artifact"
+            )
+        return False
+    if len(entries) != 1 or len(spool_files) != 1:
+        raise RuntimeError(
+            "controlled evaluation recovery requires exactly one spool"
+        )
+    spool_path = spool_files[0]
+    payload = load_owner_private_json(
+        spool_path,
+        runtime_root,
+        max_bytes=MAX_CONTROLLED_RESULT_SPOOL_BYTES,
+    )
+    recovery = validate_controlled_recovery_payload(payload, args)
+    if spool_path.name != f"{recovery['analysis_id']}.json":
+        raise RuntimeError(
+            "controlled evaluation recovery spool filename is not exact"
+        )
+    try:
+        receipt = post_controlled_recovery_result(
+            payload,
+            args.alert_store_url,
+        )
+        recovery["stored_response_digest"] = str(
+            receipt.get("stored_response_sha256") or ""
+        ).lower()
+    except RuntimeError as replay_error:
+        if (
+            CONTROLLED_RESULT_SUBMISSION_INDETERMINATE
+            not in str(replay_error)
+            or not controlled_recovery_terminal_success(args, recovery)
+        ):
+            raise
+    else:
+        if not controlled_recovery_terminal_success(args, recovery):
+            raise RuntimeError(
+                "controlled evaluation recovered result has no exact terminal "
+                "database proof"
+            )
+    settle_controlled_frozen_memory_artifacts(runtime_root, recovery)
+    spool_path.unlink()
+    directory_fd = os.open(queue_dir, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    return True
+
+
+def controlled_recovery_spool_pending(runtime_root: Path) -> bool:
+    """Return true without following an unsafe recovery-directory symlink."""
+    queue_dir = runtime_root / "analysis-index-pending"
+    try:
+        metadata = queue_dir.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    if (
+        queue_dir.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        return True
+    try:
+        return any(queue_dir.iterdir())
+    except OSError:
+        return True
+
+
+def controlled_recovery_terminal_success(
+    args: argparse.Namespace,
+    recovery: dict[str, Any],
+) -> bool:
+    """Prove a lost completion response from immutable read-only DB state."""
+    try:
+        connection = sqlite3.connect(
+            f"file:{args.db}?mode=ro",
+            uri=True,
+            timeout=5,
+        )
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN")
+            job = connection.execute(
+                """
+                SELECT id, status, lease_token, lease_expires_at,
+                       rerun_requested, payload_json
+                FROM durable_jobs
+                WHERE job_type = ? AND dedupe_key = ?
+                """,
+                (
+                    recovery["job_type"],
+                    recovery["stable_group_id"],
+                ),
+            ).fetchone()
+            accepted = connection.execute(
+                """
+                SELECT group_id, alert_id, agent_role, generated_at, model,
+                       model_path, detection_outcome, bluf, summary,
+                       confidence, artifact_path, evidence_hash, response_json
+                FROM ai_analysis_runs WHERE analysis_id = ?
+                """,
+                (recovery["analysis_id"],),
+            ).fetchone()
+            incident_attempt = connection.execute(
+                """
+                SELECT attempt_id, run_id, case_id, group_id, status,
+                       analysis_id
+                FROM incident_reanalysis_attempts
+                WHERE analysis_id = ?
+                """,
+                (recovery["analysis_id"],),
+            ).fetchone()
+        finally:
+            connection.close()
+        job_payload = json.loads(str(job["payload_json"])) if job else {}
+        stored_response = (
+            json.loads(str(accepted["response_json"])) if accepted else {}
+        )
+    except (
+        OSError,
+        sqlite3.Error,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        return False
+    identity = recovery["identity"]
+    expected_stored_response_digest = str(
+        recovery.get("stored_response_digest")
+        or recovery.get("stored_response_fallback_digest")
+        or recovery["response_digest"]
+    ).lower()
+    return bool(
+        job
+        and accepted
+        and int(job["id"] or 0) == int(recovery["job_id"])
+        and job["status"] == "completed"
+        and not job["lease_token"]
+        and not job["lease_expires_at"]
+        and int(job["rerun_requested"] or 0) == 0
+        and job_payload.get("cohort_id") == identity["cohort_id"]
+        and job_payload.get("dispatch_id") == identity["dispatch_id"]
+        and job_payload.get("release_id") == identity["release_id"]
+        and job_payload.get("alert_id")
+        == identity["representative_alert_id"]
+        and job_payload.get("representative_alert_id")
+        == identity["representative_alert_id"]
+        and job_payload.get("group_id") == identity["stable_group_id"]
+        and job_payload.get("stable_group_id")
+        == identity["stable_group_id"]
+        and job_payload.get("stable_group_key")
+        == identity["stable_group_key"]
+        and accepted["group_id"] == identity["stable_group_id"]
+        and accepted["alert_id"] == identity["representative_alert_id"]
+        and accepted["agent_role"] == identity["agent_role"]
+        and controlled_accepted_fields_match(
+            accepted,
+            recovery["accepted_fields"],
+        )
+        and isinstance(stored_response, dict)
+        and stored_response.get("_analysis_controlled_claim_sha256")
+        == recovery["claim_digest"]
+        and re.fullmatch(
+            r"[a-f0-9]{64}",
+            expected_stored_response_digest,
+        )
+        and controlled_storage_canonical_digest(stored_response)
+        == expected_stored_response_digest
+        and (
+            (
+                recovery["job_type"] == "ai_analysis"
+                and incident_attempt is None
+            )
+            or (
+                recovery["job_type"] == "incident_response_analysis"
+                and incident_attempt is not None
+                and incident_attempt["attempt_id"]
+                == identity["reanalysis_attempt_id"]
+                and incident_attempt["run_id"]
+                == job_payload.get("reanalysis_run_id")
+                and incident_attempt["case_id"]
+                == job_payload.get("case_id")
+                and incident_attempt["group_id"]
+                == identity["stable_group_id"]
+                and incident_attempt["status"] == "completed"
+                and incident_attempt["analysis_id"]
+                == recovery["analysis_id"]
+            )
+        )
+    )
 
 
 def current_runtime_release_id(
@@ -610,59 +1772,111 @@ def report_ai_job_status(
             }
         )
     payload = json.dumps(request_payload).encode("utf-8")
-    request = urllib.request.Request(
-        f"{base_url.rstrip('/')}/jobs/status",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            if response.status not in range(200, 300):
-                raise RuntimeError(f"AI job status returned HTTP {response.status}")
-            result = read_bounded_json(response, max_bytes=DEFAULT_MAX_CONTROL_RESPONSE_BYTES)
-            if not result.get("ok", True):
-                raise RuntimeError(str(result.get("reason") or "AI job status was rejected"))
-            if status == "processing":
-                claimed_token = str(result.get("lease_token") or "")
-                if not claimed_token:
-                    raise RuntimeError("AI job processing transition did not return a lease token")
-                claim = result.get("claim")
-                claim = claim if isinstance(claim, dict) else {}
-                claimed_payload = claim.get("payload")
-                try:
-                    claimed_job_id = int(claim.get("job_id") or 0)
-                except (TypeError, ValueError):
-                    claimed_job_id = 0
-                return ClaimedAiLease(
-                    claimed_token,
-                    job_payload=(
-                        claimed_payload
-                        if isinstance(claimed_payload, dict)
-                        else {}
-                    ),
-                    job_type=str(claim.get("job_type") or ""),
-                    resolved_key=str(
-                        claim.get("dedupe_key")
-                        or result.get("dedupe_key")
-                        or group_id
-                    ),
-                    job_id=claimed_job_id,
-                    reanalysis_attempt_id=str(
-                        claim.get("reanalysis_attempt_id") or ""
-                    ),
+    exact_claim = bool(all(exact_claim_values))
+    attempts = CONTROLLED_EXACT_CLAIM_ATTEMPTS if exact_claim else 1
+    last_error: Exception | None = None
+    for attempt_index in range(attempts):
+        if attempt_index:
+            time.sleep(0.05 * attempt_index)
+        request = urllib.request.Request(
+            f"{base_url.rstrip('/')}/jobs/status",
+            data=payload,
+            headers=alert_store_mutation_headers(),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                if response.status not in range(200, 300):
+                    raise RuntimeError(
+                        f"AI job status returned HTTP {response.status}"
+                    )
+                result = read_bounded_json(
+                    response,
+                    max_bytes=DEFAULT_MAX_CONTROL_RESPONSE_BYTES,
                 )
-            return True
-    except urllib.error.HTTPError as exc:
-        if exc.code == 409:
-            raise ControlledClaimRejected(
-                "controlled durable AI job changed before it could be claimed"
-            ) from exc
-        if exc.code == 404:
-            return False
-        raise RuntimeError(f"AI job status returned HTTP {exc.code}") from exc
-    except (urllib.error.URLError, BoundedHttpError) as exc:
-        raise RuntimeError(f"AI job status request failed: {exc}") from exc
+            if not result.get("ok", True):
+                raise RuntimeError(
+                    str(
+                        result.get("reason")
+                        or "AI job status was rejected"
+                    )
+                )
+            if status != "processing":
+                return True
+            claimed_token = str(result.get("lease_token") or "")
+            claim = result.get("claim")
+            claim = claim if isinstance(claim, dict) else {}
+            claimed_payload = claim.get("payload")
+            if (
+                not claimed_token
+                or (
+                    exact_claim
+                    and not isinstance(claimed_payload, dict)
+                )
+            ):
+                error = RuntimeError(
+                    "AI job processing transition did not return an exact "
+                    "lease receipt"
+                )
+                if exact_claim and attempt_index + 1 < attempts:
+                    last_error = error
+                    continue
+                raise error
+            try:
+                claimed_job_id = int(claim.get("job_id") or 0)
+            except (TypeError, ValueError):
+                claimed_job_id = 0
+            return ClaimedAiLease(
+                claimed_token,
+                job_payload=(
+                    claimed_payload
+                    if isinstance(claimed_payload, dict)
+                    else {}
+                ),
+                job_type=str(claim.get("job_type") or ""),
+                resolved_key=str(
+                    claim.get("dedupe_key")
+                    or result.get("dedupe_key")
+                    or group_id
+                ),
+                job_id=claimed_job_id,
+                reanalysis_attempt_id=str(
+                    claim.get("reanalysis_attempt_id") or ""
+                ),
+            )
+        except urllib.error.HTTPError as exc:
+            status_code = int(exc.code)
+            exc.close()
+            if status_code == 409:
+                raise ControlledClaimRejected(
+                    "controlled durable AI job changed before it could be "
+                    "claimed"
+                ) from exc
+            if status_code == 404:
+                return False
+            error = RuntimeError(
+                f"AI job status returned HTTP {status_code}"
+            )
+            if (
+                exact_claim
+                and (
+                    status_code >= 500
+                    or status_code in {408, 425, 429}
+                )
+                and attempt_index + 1 < attempts
+            ):
+                last_error = error
+                continue
+            raise error from exc
+        except (urllib.error.URLError, TimeoutError, OSError, BoundedHttpError) as exc:
+            error = RuntimeError(f"AI job status request failed: {exc}")
+            if exact_claim and attempt_index + 1 < attempts:
+                last_error = error
+                continue
+            raise error from exc
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("AI job status retry invariant failed")
 
 
 def incident_reanalysis_attempt_id(lease_token: str) -> str:
@@ -732,7 +1946,7 @@ def reconcile_completed_ai_jobs(base_url: str, group_ids: set[str]) -> int:
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/jobs/reconcile-completed",
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers=alert_store_mutation_headers(),
         method="POST",
     )
     try:
@@ -1782,6 +2996,7 @@ def run_command(
     timeout_seconds: float,
     max_stdout_bytes: int = DEFAULT_MAX_CHILD_STDOUT_BYTES,
     max_stderr_bytes: int = DEFAULT_MAX_CHILD_STDERR_BYTES,
+    env: dict[str, str] | None = None,
     progress_callback=None,
     progress_interval_seconds: float = 30,
 ):
@@ -1792,6 +3007,7 @@ def run_command(
         timeout_seconds=timeout_seconds,
         max_stdout_bytes=max_stdout_bytes,
         max_stderr_bytes=max_stderr_bytes,
+        env=env,
         progress_callback=progress_callback,
         progress_interval_seconds=progress_interval_seconds,
     )
@@ -1949,6 +3165,7 @@ def run_analysis(
     progress_callback=None,
     reanalysis_attempt_id: str = "",
     agent_role: str = "",
+    controlled_result_identity: dict[str, object] | None = None,
 ):
     cmd = analysis_command(
         prompt_path,
@@ -1962,11 +3179,50 @@ def run_analysis(
     # must not terminate a healthy multi-turn investigation after only one
     # model-call allowance.
     worker_timeout = (args.timeout * 5) + 300
+    child_environment = None
+    if controlled_result_identity:
+        field_environment = {
+            "job_id": "ONION_SENTINEL_EVALUATION_JOB_ID",
+            "job_type": "ONION_SENTINEL_EVALUATION_JOB_TYPE",
+            "lease_token": "ONION_SENTINEL_EVALUATION_LEASE_TOKEN",
+            "cohort_id": "ONION_SENTINEL_EVALUATION_COHORT_ID",
+            "dispatch_id": "ONION_SENTINEL_EVALUATION_DISPATCH_ID",
+            "representative_alert_id": (
+                "ONION_SENTINEL_EVALUATION_REPRESENTATIVE_ALERT_ID"
+            ),
+            "stable_group_id": (
+                "ONION_SENTINEL_EVALUATION_STABLE_GROUP_ID"
+            ),
+            "stable_group_key": (
+                "ONION_SENTINEL_EVALUATION_STABLE_GROUP_KEY"
+            ),
+            "agent_role": "ONION_SENTINEL_EVALUATION_AGENT_ROLE",
+            "reanalysis_attempt_id": (
+                "ONION_SENTINEL_EVALUATION_REANALYSIS_ATTEMPT_ID"
+            ),
+        }
+        child_environment = dict(os.environ)
+        evaluation_token = (
+            str(
+                os.environ.get(CONTROLLED_EVALUATION_TOKEN_ENV)
+                or ""
+            ).strip()
+            or _CONTROLLED_EVALUATION_TOKEN
+        )
+        if CONTROLLED_EVALUATION_TOKEN_RE.fullmatch(evaluation_token):
+            child_environment[
+                CONTROLLED_EVALUATION_TOKEN_ENV
+            ] = evaluation_token
+        for field, environment_key in field_environment.items():
+            child_environment[environment_key] = str(
+                controlled_result_identity.get(field) or ""
+            )
     return run_command(
         cmd,
         timeout_seconds=worker_timeout,
         max_stdout_bytes=DEFAULT_MAX_CHILD_STDOUT_BYTES,
         max_stderr_bytes=DEFAULT_MAX_CHILD_STDERR_BYTES,
+        env=child_environment,
         progress_callback=progress_callback,
         progress_interval_seconds=60,
     )
@@ -1992,14 +3248,21 @@ def flush_deferred_analysis_results(args: argparse.Namespace) -> None:
         raise RuntimeError(f"deferred analysis index flush failed: {detail}")
 
 
-def signal_dashboard_refresh(args: argparse.Namespace) -> None:
+def signal_dashboard_refresh(
+    args: argparse.Namespace,
+    *,
+    controlled_evaluation: bool = False,
+) -> None:
     """Wake the independent portal worker without delaying local inference.
 
     The Web UI polls fast-changing AI state from the API. Static dashboard
     generation is therefore eventual presentation work and must never sit on
     the alert-analysis critical path.
     """
-    if args.no_portal_refresh:
+    if (
+        args.no_portal_refresh
+        or controlled_evaluation
+    ):
         return
     try:
         args.portal_wake_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -2024,8 +3287,18 @@ def consume_wake_marker(path: Path) -> None:
         print(f"AI wake marker could not be consumed: {error}", file=sys.stderr)
 
 
-def reconcile_worker_state(args: argparse.Namespace, indexed_mode: bool) -> int:
+def reconcile_worker_state(
+    args: argparse.Namespace,
+    indexed_mode: bool,
+    *,
+    controlled_evaluation: bool = False,
+) -> int:
     """Reconcile durable queue state without scanning artifacts in modern mode."""
+    if controlled_evaluation:
+        # A controlled cohort invocation owns exactly one freshly dispatched
+        # durable job. Global reconciliation could otherwise complete unrelated
+        # production jobs whose older artifacts happen to be current.
+        return 0
     conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
@@ -2047,6 +3320,10 @@ def reconcile_worker_state(args: argparse.Namespace, indexed_mode: bool) -> int:
 
 def main() -> int:
     args = parse_args()
+    controlled_evaluation_dir = controlled_evaluation_runtime(args)
+    consume_controlled_evaluation_token(
+        controlled_evaluation_dir is not None
+    )
     launch_levels = args.levels
     require_runtime_capacity(args.analysis_dir, 0, label="AI analysis")
     if not args.db.exists():
@@ -2061,7 +3338,8 @@ def main() -> int:
             print(f"{project_now()} another AI analysis run is already active")
             return 0
 
-        consume_wake_marker(args.wake_file)
+        if controlled_evaluation_dir is None:
+            consume_wake_marker(args.wake_file)
         args.prompt_dir.mkdir(parents=True, exist_ok=True)
         args.analysis_dir.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
@@ -2070,6 +3348,20 @@ def main() -> int:
             indexed_mode = indexed_scheduler_available(conn)
         finally:
             conn.close()
+
+        if (
+            controlled_evaluation_dir is not None
+            and recover_controlled_evaluation_spool(
+                args,
+                controlled_evaluation_dir,
+            )
+        ):
+            print(
+                f"{project_now()} recovered one exact controlled result "
+                "and completed its prior lease without inference",
+                flush=True,
+            )
+            return 0
 
         if not indexed_mode and args.provider_lane == "cli":
             # Legacy databases do not expose the durable job payload that owns
@@ -2081,12 +3373,16 @@ def main() -> int:
             )
             return 0
 
-        if indexed_mode:
+        if indexed_mode and controlled_evaluation_dir is None:
             # A model result is first written atomically to local disk, then
             # indexed through alert-store. Publish any result left behind by a
             # transient callback failure before considering another inference.
             flush_deferred_analysis_results(args)
-        reconciled = reconcile_worker_state(args, indexed_mode)
+        reconciled = reconcile_worker_state(
+            args,
+            indexed_mode,
+            controlled_evaluation=controlled_evaluation_dir is not None,
+        )
         if reconciled:
             print(f"{project_now()} reconciled {reconciled} completed durable AI job(s)", flush=True)
         selected_groups: set[str] = set()
@@ -2166,15 +3462,10 @@ def main() -> int:
             reanalysis_attempt_id = ""
             exact_claim: dict[str, object] = {}
             controlled_exact_lease_owned = False
+            controlled_result_identity: dict[str, object] | None = None
             try:
-                controlled_identity_requested = any(
-                    str(getattr(args, field, "") or "")
-                    for field in (
-                        "only_group_id",
-                        "only_alert_id",
-                        "only_stable_group_key",
-                        "only_dispatch_id",
-                    )
+                controlled_identity_requested = (
+                    controlled_evaluation_dir is not None
                 )
                 if controlled_identity_requested and not (
                     indexed_mode and durable_intent
@@ -2332,34 +3623,96 @@ def main() -> int:
                     else reusable_prompt_for_alert(args.prompt_dir, selected, args.pcap_analysis_dir)
                     or build_prompt(alert_id, args)
                 )
+                assigned_agent_role = str(
+                    job_payload.get("agent_role") or "soc-analyst"
+                )
+                if controlled_identity_requested:
+                    controlled_result_identity = {
+                        "job_id": int(
+                            getattr(processing_transition, "job_id", 0) or 0
+                        ),
+                        "job_type": durable_job_type,
+                        "lease_token": processing_lease_token,
+                        "cohort_id": str(
+                            job_payload.get("cohort_id") or ""
+                        ),
+                        "dispatch_id": str(
+                            job_payload.get("dispatch_id") or ""
+                        ),
+                        "representative_alert_id": alert_id,
+                        "stable_group_id": selected_group_id,
+                        "stable_group_key": str(
+                            job_payload.get("stable_group_key") or ""
+                        ),
+                        "agent_role": assigned_agent_role,
+                        "reanalysis_attempt_id": reanalysis_attempt_id,
+                    }
                 proc = run_analysis(
                     prompt_path,
                     args,
                     progress_callback=renew_processing_lease if processing_recorded else None,
                     reanalysis_attempt_id=reanalysis_attempt_id,
-                    agent_role=str(
-                        job_payload.get("agent_role") or "soc-analyst"
-                    ),
+                    agent_role=assigned_agent_role,
+                    controlled_result_identity=controlled_result_identity,
                 )
                 if proc.stdout:
                     print(proc.stdout, end="")
                 if proc.returncode != 0:
                     detail = proc.stderr.strip() or f"local AI analysis failed rc={proc.returncode}"
+                    result_submission_indeterminate = bool(
+                        controlled_identity_requested
+                        and CONTROLLED_RESULT_SUBMISSION_INDETERMINATE
+                        in detail
+                    )
+                    recovered_indeterminate_result = False
                     if processing_recorded:
-                        report_ai_job_status(
-                            args.alert_store_url,
-                            selected_group_id,
-                            "failed",
-                            detail,
-                            processing_lease_token,
-                            job_type=durable_job_type,
-                            retryable=ai_failure_is_retryable(detail),
-                        )
+                        if result_submission_indeterminate:
+                            print(
+                                f"{project_now()} exact controlled result "
+                                "is retained for recovery; its owned job "
+                                "remains processing",
+                                file=sys.stderr,
+                            )
+                            try:
+                                if recover_controlled_evaluation_spool(
+                                    args,
+                                    controlled_evaluation_dir,
+                                ):
+                                    recovered_indeterminate_result = True
+                                    print(
+                                        f"{project_now()} recovered the "
+                                        "indeterminate controlled result "
+                                        "without another inference",
+                                        flush=True,
+                                    )
+                            except RuntimeError as recovery_error:
+                                print(
+                                    f"{project_now()} controlled result "
+                                    "remains safely spooled: "
+                                    f"{recovery_error}",
+                                    file=sys.stderr,
+                                )
+                        else:
+                            report_ai_job_status(
+                                args.alert_store_url,
+                                selected_group_id,
+                                "failed",
+                                detail,
+                                processing_lease_token,
+                                job_type=durable_job_type,
+                                retryable=ai_failure_is_retryable(detail),
+                            )
                     print(detail, file=sys.stderr)
+                    if recovered_indeterminate_result:
+                        analyzed_count += 1
+                        break
                     continue
                 if proc.stderr:
                     print(proc.stderr, file=sys.stderr, end="")
-                if processing_recorded:
+                if (
+                    processing_recorded
+                    and controlled_evaluation_dir is None
+                ):
                     report_ai_job_status(
                         args.alert_store_url,
                         selected_group_id,
@@ -2399,30 +3752,65 @@ def main() -> int:
                 )
                 break
             except (BoundedProcessError, RuntimeError, OSError) as error:
-                if processing_recorded:
+                controlled_result_may_be_spooled = bool(
+                    controlled_exact_lease_owned
+                    and controlled_evaluation_dir is not None
+                    and controlled_recovery_spool_pending(
+                        controlled_evaluation_dir
+                    )
+                )
+                if controlled_result_may_be_spooled:
                     try:
-                        report_ai_job_status(
-                            args.alert_store_url,
-                            selected_group_id,
-                            "failed",
-                            str(error),
-                            processing_lease_token,
-                            job_type=durable_job_type,
-                            retryable=ai_failure_is_retryable(error),
+                        if recover_controlled_evaluation_spool(
+                            args,
+                            controlled_evaluation_dir,
+                        ):
+                            analyzed_count += 1
+                            print(
+                                f"{project_now()} recovered a controlled "
+                                "result after its child process ended "
+                                "indeterminately",
+                                flush=True,
+                            )
+                            continue
+                    except RuntimeError as recovery_error:
+                        print(
+                            f"{project_now()} controlled result remains "
+                            f"safely spooled: {recovery_error}",
+                            file=sys.stderr,
                         )
-                    except RuntimeError as status_error:
-                        print(f"AI failure callback also failed: {status_error}", file=sys.stderr)
+                if processing_recorded:
+                    if not controlled_result_may_be_spooled:
+                        try:
+                            report_ai_job_status(
+                                args.alert_store_url,
+                                selected_group_id,
+                                "failed",
+                                str(error),
+                                processing_lease_token,
+                                job_type=durable_job_type,
+                                retryable=ai_failure_is_retryable(error),
+                            )
+                        except RuntimeError as status_error:
+                            print(f"AI failure callback also failed: {status_error}", file=sys.stderr)
                 print(f"{project_now()} AI group {selected_group_id} failed: {error}", file=sys.stderr)
                 continue
 
         if analyzed_count:
             print(f"{project_now()} analyzed {analyzed_count} unique alert group(s)")
-            signal_dashboard_refresh(args)
+            signal_dashboard_refresh(
+                args,
+                controlled_evaluation=controlled_evaluation_dir is not None,
+            )
         # Reconcile again before exit because alerts can enqueue durable intent
         # while a long-running inference is active. This prevents a completed
         # artifact from waiting for the next five-minute scheduler invocation
         # before queue/SLO state becomes accurate.
-        reconciled = reconcile_worker_state(args, indexed_mode)
+        reconciled = reconcile_worker_state(
+            args,
+            indexed_mode,
+            controlled_evaluation=controlled_evaluation_dir is not None,
+        )
         if reconciled:
             print(f"{project_now()} reconciled {reconciled} completed durable AI job(s) before exit", flush=True)
         return 0

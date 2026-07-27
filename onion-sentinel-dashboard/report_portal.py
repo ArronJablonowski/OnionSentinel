@@ -63,6 +63,9 @@ MACOS_UPDATE_STATUS_FILE = HOME / "report_portal" / ".macos_update_status.json"
 SOC_ALERT_STATUS_FILE = HOME / "report_portal" / ".soc_alert_status.json"
 SOC_ALERT_STORE_DB = HOME / "n8n-local" / "alert_store_data" / "alerts.sqlite3"
 SOC_ALERT_STORE_API_URL = os.environ.get("SOC_ALERT_STORE_API_URL", "http://127.0.0.1:8787").rstrip("/")
+SOC_ALERT_STORE_EVALUATION_TOKEN = str(
+    os.environ.get("ONION_SENTINEL_EVALUATION_TOKEN") or ""
+).strip()
 SOC_ALERT_DASHBOARD_DIR = HOME / "report_portal" / "library" / "Cybersecurity" / "SOC Alerts"
 SOC_ALERT_DETAIL_DIR = SOC_ALERT_DASHBOARD_DIR / "details"
 SOC_ALERT_STATIC_STATUS_FILE = SOC_ALERT_DASHBOARD_DIR / "soc-alerts-status.json"
@@ -5967,11 +5970,19 @@ class AlertStoreRequestError(RuntimeError):
 def alert_store_post_json(path: str, payload: dict, timeout: float = 5.0) -> dict:
     """POST to the host alert-store and preserve its bounded error detail."""
     encoded = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Content-Length": str(len(encoded)),
+    }
+    if SOC_ALERT_STORE_EVALUATION_TOKEN:
+        headers["X-Onion-Sentinel-Evaluation-Token"] = (
+            SOC_ALERT_STORE_EVALUATION_TOKEN
+        )
     req = urllib_request.Request(
         f"{SOC_ALERT_STORE_API_URL}{path}",
         data=encoded,
         method="POST",
-        headers={"Content-Type": "application/json", "Content-Length": str(len(encoded))},
+        headers=headers,
     )
     try:
         with urllib_request.urlopen(req, timeout=timeout) as response:

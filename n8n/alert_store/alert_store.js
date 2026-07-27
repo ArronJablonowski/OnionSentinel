@@ -50,6 +50,95 @@ const beaconHistoryPaths = (process.env.ALERT_STORE_BEACON_HISTORY_PATHS || '')
   .filter(Boolean);
 const host = process.env.ALERT_STORE_HOST || '127.0.0.1';
 const port = Number(process.env.ALERT_STORE_PORT || 8787);
+const evaluationModeValue = String(
+  process.env.ONION_SENTINEL_EVALUATION_MODE || '',
+).trim();
+if (!['', '0', '1'].includes(evaluationModeValue)) {
+  throw new Error(
+    'ONION_SENTINEL_EVALUATION_MODE must be unset, 0, or 1',
+  );
+}
+const controlledEvaluationMode = evaluationModeValue === '1';
+const runtimeReleaseIdValue = String(
+  process.env.ONION_SENTINEL_RELEASE_ID || '',
+).trim();
+const controlledEvaluationToken = String(
+  process.env.ONION_SENTINEL_EVALUATION_TOKEN || '',
+).trim();
+const evaluationCredentialEnvironmentKeys = Object.freeze([
+  'TELEGRAM_BOT_TOKEN',
+  'TELEGRAM_CHAT_ID',
+  'N8N_POST_COMMIT_TOKEN',
+  'ABUSEIPDB_API_KEY',
+  'GREYNOISE_API_KEY',
+  'OTX_API_KEY',
+  'URLHAUS_AUTH_KEY',
+  'VIRUSTOTAL_API_KEY',
+  'URLSCAN_API_KEY',
+  'GOOGLE_SAFE_BROWSING_API_KEY',
+  'PHISHTANK_API_KEY',
+  'MALWAREBAZAAR_AUTH_KEY',
+  'THREATFOX_AUTH_KEY',
+  'SHODAN_API_KEY',
+  'CENSYS_API_ID',
+  'CENSYS_API_SECRET',
+  'CENSYS_API_TOKEN',
+  'CENSYS_ORGANIZATION_ID',
+  'NVD_API_KEY',
+]);
+if (controlledEvaluationMode) {
+  const configuredCredentialKeys = evaluationCredentialEnvironmentKeys.filter(
+    (key) => String(process.env[key] || '').trim(),
+  );
+  const explicitRuntimeKeys = [
+    'ALERT_STORE_DB',
+    'ALERT_STORE_HOST',
+    'ALERT_STORE_PORT',
+    'SCORING_RULES_PATH',
+  ];
+  if (
+    explicitRuntimeKeys.some(
+      (key) => (
+        !Object.prototype.hasOwnProperty.call(process.env, key)
+        || !String(process.env[key] || '').trim()
+      ),
+    )
+    || host !== '127.0.0.1'
+    || !Number.isSafeInteger(port)
+    || port < 1024
+    || port > 65535
+    || port === 8787
+    || !path.isAbsolute(dbPath)
+    || !/^[a-f0-9]{40}$/.test(runtimeReleaseIdValue)
+    || !/^[a-f0-9]{64}$/.test(controlledEvaluationToken)
+    || configuredCredentialKeys.length
+  ) {
+    throw new Error(
+      'controlled evaluation requires loopback, an explicit existing '
+      + 'database, an exact release ID, an ephemeral authorization token, '
+      + 'and no configured production credentials',
+    );
+  }
+  const evaluationScoringPath = path.resolve(scoringRulesPath);
+  const evaluationScoringMetadata = fs.lstatSync(
+    evaluationScoringPath,
+  );
+  const evaluationOwner = typeof process.getuid === 'function'
+    ? process.getuid()
+    : evaluationScoringMetadata.uid;
+  if (
+    evaluationScoringPath !== scoringRulesPath
+    || fs.realpathSync(evaluationScoringPath) !== evaluationScoringPath
+    || !evaluationScoringMetadata.isFile()
+    || evaluationScoringMetadata.isSymbolicLink()
+    || evaluationScoringMetadata.uid !== evaluationOwner
+    || (evaluationScoringMetadata.mode & 0o022) !== 0
+  ) {
+    throw new Error(
+      'controlled evaluation scoring rules must be an owner-controlled regular file',
+    );
+  }
+}
 const telegramBotToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const telegramChatId = (process.env.TELEGRAM_CHAT_ID || '').trim();
 const maxRequestBytes = Math.max(1024, Number(process.env.ALERT_STORE_MAX_REQUEST_BYTES || 10 * 1024 * 1024));
@@ -467,6 +556,7 @@ async function signalWorker(wakePath, eventName) {
 }
 
 async function signalAiWorkers(eventName) {
+  if (controlledEvaluationMode) return false;
   const results = await Promise.all(
     aiAnalysisWakePaths.map((wakePath) => signalWorker(wakePath, eventName)),
   );
@@ -1024,6 +1114,11 @@ function hasUsableExternalIntel(alert) {
 }
 
 function requestJson(options) {
+  if (controlledEvaluationMode) {
+    throw new Error(
+      'outbound HTTP is disabled in controlled evaluation mode',
+    );
+  }
   return boundedRequestJson({
     timeoutMs: enrichmentTimeoutMs,
     maxResponseBytes: httpJsonMaxResponseBytes,
@@ -1771,8 +1866,38 @@ function scoreAlert(alert) {
   };
 }
 
-fs.mkdirSync(path.dirname(dbPath), {recursive: true});
-const db = new sqlite3.Database(dbPath);
+if (controlledEvaluationMode) {
+  const databasePath = path.resolve(dbPath);
+  const databaseMetadata = fs.lstatSync(databasePath);
+  const databaseOwner = typeof process.getuid === 'function'
+    ? process.getuid()
+    : databaseMetadata.uid;
+  if (
+    databasePath !== dbPath
+    || fs.realpathSync(databasePath) !== databasePath
+    || !databaseMetadata.isFile()
+    || databaseMetadata.isSymbolicLink()
+    || databaseMetadata.uid !== databaseOwner
+    || (databaseMetadata.mode & 0o022) !== 0
+  ) {
+    throw new Error(
+      'controlled evaluation database must be an owner-controlled regular file',
+    );
+  }
+  const recoverySidecar = ['-journal', '-wal', '-shm'].find(
+    (suffix) => fs.existsSync(`${databasePath}${suffix}`),
+  );
+  if (recoverySidecar) {
+    throw new Error(
+      `controlled evaluation refuses database recovery sidecar ${recoverySidecar}`,
+    );
+  }
+} else {
+  fs.mkdirSync(path.dirname(dbPath), {recursive: true});
+}
+const db = controlledEvaluationMode
+  ? new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE)
+  : new sqlite3.Database(dbPath);
 const sqliteBusyTimeoutMs = Number(process.env.ALERT_STORE_SQLITE_BUSY_TIMEOUT_MS || 30000);
 db.configure('busyTimeout', sqliteBusyTimeoutMs);
 const sqliteJournalMode = String(process.env.ALERT_STORE_SQLITE_JOURNAL_MODE || 'DELETE').toUpperCase();
@@ -1849,6 +1974,7 @@ function all(sql, params = []) {
 }
 
 let sqliteWriteGate = Promise.resolve();
+let activeSqliteWrites = 0;
 const enrichmentScheduler = createProviderScheduler({
   failureThreshold: enrichmentCircuitFailureThreshold,
   resetMs: enrichmentCircuitResetMs,
@@ -1874,7 +2000,14 @@ function withSqliteWriteGate(task) {
   // interleave multi-statement workflows. Queue alert-ingest write workflows so
   // suppression state, raw alert rows, and group summaries stay coherent during
   // bursts from n8n.
-  const next = sqliteWriteGate.catch(() => undefined).then(task);
+  const next = sqliteWriteGate.catch(() => undefined).then(async () => {
+    activeSqliteWrites += 1;
+    try {
+      return await task();
+    } finally {
+      activeSqliteWrites -= 1;
+    }
+  });
   sqliteWriteGate = next.catch(() => undefined);
   return next;
 }
@@ -1908,9 +2041,317 @@ const enrichmentCache = createEnrichmentCache({
   vulnerabilityStaleIfErrorSeconds: enrichmentVulnerabilityStaleIfErrorSeconds,
 });
 
+function initializeDurableJobs() {
+  durableJobs = createDurableJobQueue({
+    run,
+    get,
+    all,
+    now: nowUtc,
+    transitionLeaseSeconds: aiAnalysisLeaseSeconds,
+  });
+}
+
+function initializePipelineMetrics() {
+  pipelineMetrics = createPipelineMetrics({
+    run,
+    all,
+    now: nowUtc,
+    diskSnapshot: diskCapacitySnapshot,
+    retentionHours: pipelineEventRetentionHours,
+  });
+}
+
+async function assertControlledEvaluationSchema() {
+  const journalRow = await get('PRAGMA journal_mode');
+  if (String(journalRow?.journal_mode || '').toLowerCase() !== 'delete') {
+    throw new Error(
+      'controlled evaluation requires SQLite DELETE journal mode',
+    );
+  }
+  const requiredColumns = Object.freeze({
+    alerts: [
+      'alert_id',
+      'first_seen',
+      'last_seen',
+      'seen_count',
+      'timestamp',
+      'rule_name',
+      'event_dataset',
+      'severity',
+      'severity_label',
+      'source_ip',
+      'source_port',
+      'destination_ip',
+      'destination_port',
+      'network_protocol',
+      'transport_protocol',
+      'traffic_direction',
+      'triage_score',
+      'triage_level',
+      'routing',
+      'filter_status',
+      'filter_reason',
+      'suppression_key',
+      'raw_event_json',
+      'enrichment_json',
+      'alert_json',
+      'rule_id',
+      'stable_group_id',
+      'stable_group_key',
+    ],
+    alert_group_summary: [
+      'group_id',
+      'group_key',
+      'representative_alert_id',
+      'first_seen',
+      'last_seen',
+      'raw_alert_count',
+      'total_seen_count',
+      'timestamp',
+      'rule_name',
+      'event_dataset',
+      'severity',
+      'severity_label',
+      'source_ip',
+      'source_port',
+      'destination_ip',
+      'destination_port',
+      'network_protocol',
+      'transport_protocol',
+      'traffic_direction',
+      'triage_score',
+      'triage_level',
+      'routing',
+      'filter_status',
+      'filter_reason',
+      'suppression_key',
+      'updated_at',
+    ],
+    alert_group_alias: [
+      'legacy_group_id',
+      'stable_group_id',
+      'stable_group_key',
+      'updated_at',
+    ],
+    ai_analysis_runs: [
+      'analysis_id',
+      'group_id',
+      'alert_id',
+      'agent_role',
+      'generated_at',
+      'model',
+      'model_path',
+      'detection_outcome',
+      'bluf',
+      'summary',
+      'confidence',
+      'artifact_path',
+      'evidence_hash',
+      'response_json',
+      'created_at',
+    ],
+    ai_second_opinion_runs: [
+      'analysis_id',
+      'group_id',
+      'alert_id',
+      'agent_role',
+      'trigger',
+      'status',
+      'reviewer_error',
+      'primary_model',
+      'primary_model_path',
+      'primary_outcome',
+      'primary_confidence',
+      'reviewer_model',
+      'reviewer_model_path',
+      'reviewer_outcome',
+      'reviewer_confidence',
+      'agreement',
+      'material_disagreement',
+      'disputed_fields_json',
+      'comparison_json',
+      'reviewer_runtime_seconds',
+      'memory_candidates_promoted',
+      'generated_at',
+      'created_at',
+      'updated_at',
+    ],
+    alert_correlations: [
+      'source_group_id',
+      'related_group_id',
+      'analysis_id',
+      'correlation_score',
+      'reasons_json',
+      'shared_observables_json',
+      'model_status',
+      'model_confidence',
+      'model_hypothesis',
+      'created_at',
+      'updated_at',
+    ],
+    durable_jobs: [
+      'id',
+      'job_type',
+      'dedupe_key',
+      'payload_json',
+      'status',
+      'priority',
+      'attempt_count',
+      'max_attempts',
+      'next_attempt_at',
+      'lease_expires_at',
+      'lease_token',
+      'last_error',
+      'created_at',
+      'updated_at',
+      'completed_at',
+      'last_completed_at',
+      'processing_started_at',
+      'rerun_requested',
+      'requested_at',
+    ],
+    incident_response_cases: [
+      'case_id',
+      'group_id',
+      'dashboard_group_id',
+      'representative_alert_id',
+      'status',
+      'agent_status',
+      'escalated_at',
+      'updated_at',
+      'escalated_by',
+      'reason',
+      'latest_analysis_id',
+      'latest_model',
+      'latest_generated_at',
+      'latest_error',
+    ],
+    incident_response_events: [
+      'id',
+      'case_id',
+      'event_type',
+      'actor',
+      'detail_json',
+      'created_at',
+    ],
+    incident_reanalysis_runs: [
+      'run_id',
+      'release_id',
+      'scope',
+      'status',
+      'requested_by',
+      'reason',
+      'total_count',
+      'created_at',
+      'updated_at',
+      'completed_at',
+      'controlled_dispatch_id',
+      'controlled_receipt_json',
+    ],
+    incident_reanalysis_run_cases: [
+      'run_id',
+      'case_id',
+      'group_id',
+      'dashboard_group_id',
+      'representative_alert_id',
+      'status',
+      'skip_reason',
+      'latest_error',
+      'queued_at',
+      'started_at',
+      'completed_at',
+      'latest_attempt_id',
+      'analysis_id',
+      'executed_model',
+      'executed_provider',
+      'executed_model_path',
+      'result_generated_at',
+      'updated_at',
+    ],
+    incident_reanalysis_attempts: [
+      'attempt_id',
+      'run_id',
+      'case_id',
+      'group_id',
+      'durable_attempt_count',
+      'status',
+      'latest_error',
+      'analysis_id',
+      'executed_model',
+      'executed_provider',
+      'executed_model_path',
+      'result_generated_at',
+      'started_at',
+      'completed_at',
+      'updated_at',
+    ],
+    pipeline_stage_events: [
+      'id',
+      'event_key',
+      'stage',
+      'event_type',
+      'item_key',
+      'size_bytes',
+      'occurred_at',
+    ],
+  });
+  for (const [tableName, columns] of Object.entries(requiredColumns)) {
+    const present = new Set(
+      (await all(`PRAGMA table_info(${tableName})`))
+        .map((row) => String(row.name || '')),
+    );
+    const missing = columns.filter((column) => !present.has(column));
+    if (missing.length) {
+      throw new Error(
+        `controlled evaluation schema is missing ${tableName} columns`,
+      );
+    }
+  }
+  const dispatchIndexName = 'idx_incident_reanalysis_runs_controlled_dispatch';
+  const dispatchIndex = (await all(
+    'PRAGMA index_list(incident_reanalysis_runs)',
+  )).find((row) => String(row.name || '') === dispatchIndexName);
+  const dispatchIndexColumns = dispatchIndex
+    ? (await all(`PRAGMA index_info(${dispatchIndexName})`))
+      .map((row) => String(row.name || ''))
+    : [];
+  const dispatchIndexDefinition = dispatchIndex
+    ? await get(
+      `SELECT sql FROM sqlite_master
+       WHERE type = 'index' AND tbl_name = 'incident_reanalysis_runs'
+         AND name = ?`,
+      [dispatchIndexName],
+    )
+    : null;
+  const normalizedDispatchIndexSql = String(
+    dispatchIndexDefinition?.sql || '',
+  ).replace(/\s+/g, ' ').trim().toLowerCase();
+  if (
+    !dispatchIndex
+    || Number(dispatchIndex.unique || 0) !== 1
+    || Number(dispatchIndex.partial || 0) !== 1
+    || dispatchIndexColumns.length !== 1
+    || dispatchIndexColumns[0] !== 'controlled_dispatch_id'
+    || !/^create unique index(?: if not exists)? idx_incident_reanalysis_runs_controlled_dispatch on incident_reanalysis_runs\s*\(\s*controlled_dispatch_id\s*\)\s*where controlled_dispatch_id is not null;?$/.test(
+      normalizedDispatchIndexSql,
+    )
+  ) {
+    throw new Error(
+      'controlled evaluation schema is missing incident reanalysis dispatch uniqueness',
+    );
+  }
+  initializeDurableJobs();
+  initializePipelineMetrics();
+}
+
 async function initDb() {
   // Schema upgrades are additive. ensureColumn keeps existing SQLite DBs usable
   // after new triage fields are introduced.
+  if (controlledEvaluationMode) {
+    await run(`PRAGMA busy_timeout = ${sqliteBusyTimeoutMs}`);
+    await assertControlledEvaluationSchema();
+    return;
+  }
   const journalMode = allowedJournalModes.has(sqliteJournalMode) ? sqliteJournalMode : 'DELETE';
   const synchronousMode = allowedSynchronousModes.has(sqliteSynchronous) ? sqliteSynchronous : 'FULL';
   const tempStoreMode = allowedTempStoreModes.has(sqliteTempStore) ? sqliteTempStore : 'DEFAULT';
@@ -2136,6 +2577,22 @@ async function initDb() {
     )
   `);
   await run('CREATE INDEX IF NOT EXISTS idx_incident_reanalysis_runs_created ON incident_reanalysis_runs(created_at DESC)');
+  await ensureColumn(
+    'incident_reanalysis_runs',
+    'controlled_dispatch_id',
+    'TEXT',
+  );
+  await ensureColumn(
+    'incident_reanalysis_runs',
+    'controlled_receipt_json',
+    'TEXT',
+  );
+  await run(
+    `CREATE UNIQUE INDEX IF NOT EXISTS
+       idx_incident_reanalysis_runs_controlled_dispatch
+     ON incident_reanalysis_runs(controlled_dispatch_id)
+     WHERE controlled_dispatch_id IS NOT NULL`,
+  );
   await run(`
     CREATE TABLE IF NOT EXISTS incident_reanalysis_run_cases (
       run_id TEXT NOT NULL,
@@ -2404,25 +2861,13 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_completed_at ON pcap_requests(completed_at)');
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_alert_id ON pcap_requests(alert_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_group_id ON pcap_requests(group_id)');
-  durableJobs = createDurableJobQueue({
-    run,
-    get,
-    all,
-    now: nowUtc,
-    transitionLeaseSeconds: aiAnalysisLeaseSeconds,
-  });
+  initializeDurableJobs();
   await durableJobs.install();
   // durableJobs.install() performs startup lease recovery before the periodic
   // alert-store watchdog runs. Reconcile the immutable IR attempt ledger in
   // the same startup pass so recovered jobs cannot leave runs stuck running.
   await reconcileRecoveredIncidentReanalysisAttempts();
-  pipelineMetrics = createPipelineMetrics({
-    run,
-    all,
-    now: nowUtc,
-    diskSnapshot: diskCapacitySnapshot,
-    retentionHours: pipelineEventRetentionHours,
-  });
+  initializePipelineMetrics();
   await pipelineMetrics.install();
   await backfillStableGroupIdentity();
   await backfillAlertObservables();
@@ -3860,6 +4305,475 @@ function controlledJobClaimIdentity(value) {
   return {jobId, representativeAlertId, dispatchId, stableGroupKey};
 }
 
+const controlledEvaluationLeases = new Map();
+
+function controlledEvaluationLeaseKey(jobType, dedupeKey) {
+  return `${jobType}\0${dedupeKey}`;
+}
+
+async function controlledJobTransitionAdmission(payload) {
+  if (!controlledEvaluationMode) return null;
+  const jobType = safeString(payload?.job_type, 64);
+  const dedupeKey = safeString(payload?.dedupe_key, 256);
+  const status = safeString(payload?.status, 32).toLowerCase();
+  const leaseToken = safeString(payload?.lease_token, 128);
+  if (
+    typeof payload?.job_type !== 'string'
+    || payload.job_type !== jobType
+    || typeof payload?.dedupe_key !== 'string'
+    || payload.dedupe_key !== dedupeKey
+    || typeof payload?.status !== 'string'
+    || payload.status !== status
+    || typeof payload?.lease_token !== 'string'
+    || payload.lease_token !== leaseToken
+    || !['ai_analysis', 'incident_response_analysis'].includes(jobType)
+    || !stableGroupIdPattern.test(dedupeKey)
+    || !['processing', 'completed', 'failed'].includes(status)
+  ) {
+    throw incidentIdentityConflict(
+      'controlled evaluation job transition is not allowed',
+    );
+  }
+  const key = controlledEvaluationLeaseKey(jobType, dedupeKey);
+  const exactClaim = controlledJobClaimIdentity(payload);
+  if (status === 'processing' && !leaseToken) {
+    if (!exactClaim) {
+      throw incidentIdentityConflict(
+        'controlled evaluation requires one exact unowned job claim',
+      );
+    }
+    const processing = await all(
+      `SELECT id, job_type, dedupe_key
+       FROM durable_jobs
+       WHERE status = 'processing'
+         AND job_type IN ('ai_analysis', 'incident_response_analysis')
+       ORDER BY id ASC LIMIT 2`,
+    );
+    if (
+      processing.length > 1
+      || processing.some((job) => (
+        Number(job.id || 0) !== exactClaim.jobId
+        || job.job_type !== jobType
+        || job.dedupe_key !== dedupeKey
+      ))
+    ) {
+      throw incidentIdentityConflict(
+        'controlled evaluation requires one exact unowned job claim',
+      );
+    }
+    return {action: 'claim', key, exactClaim};
+  }
+  if (exactClaim) {
+    throw incidentIdentityConflict(
+      'controlled evaluation lease transition cannot repeat claim identity',
+    );
+  }
+  if (!leaseToken) {
+    throw incidentIdentityConflict(
+      'controlled evaluation transition does not own the active lease',
+    );
+  }
+  const current = await get(
+    `SELECT id, status, lease_token, lease_expires_at, rerun_requested,
+            payload_json
+     FROM durable_jobs WHERE job_type = ? AND dedupe_key = ?`,
+    [jobType, dedupeKey],
+  );
+  const currentLeaseExpiry = Date.parse(
+    String(current?.lease_expires_at || '').replace('  ', 'T'),
+  );
+  const currentPayload = incidentReanalysisJobPayload(current);
+  const expectedRole = (
+    jobType === 'incident_response_analysis'
+      ? 'incident-responder'
+      : 'soc-analyst'
+  );
+  if (
+    !Number.isSafeInteger(Number(current?.id))
+    || Number(current.id) < 1
+    || current?.status !== 'processing'
+    || current?.lease_token !== leaseToken
+    || Number(current?.rerun_requested || 0) !== 0
+    || !Number.isFinite(currentLeaseExpiry)
+    || currentPayload.alert_id !== currentPayload.representative_alert_id
+    || currentPayload.group_id !== dedupeKey
+    || currentPayload.stable_group_id !== dedupeKey
+    || !validPinnedStableGroupKey(currentPayload.stable_group_key)
+    || !cohortIdPattern.test(String(currentPayload.cohort_id || ''))
+    || !dispatchIdPattern.test(String(currentPayload.dispatch_id || ''))
+    || !representativeAlertIdPattern.test(
+      String(currentPayload.representative_alert_id || ''),
+    )
+    || currentPayload.release_id !== controlledRuntimeReleaseId()
+    || safeString(currentPayload.agent_role, 64).toLowerCase()
+      !== expectedRole
+  ) {
+    throw incidentIdentityConflict(
+      'controlled evaluation lease is no longer active',
+    );
+  }
+  const currentRepresentative = await get(
+    `SELECT stable_group_id, stable_group_key
+     FROM alerts WHERE alert_id = ? LIMIT 1`,
+    [currentPayload.representative_alert_id],
+  );
+  if (
+    currentRepresentative?.stable_group_id !== dedupeKey
+    || currentRepresentative?.stable_group_key
+      !== currentPayload.stable_group_key
+  ) {
+    throw incidentIdentityConflict(
+      'controlled evaluation lease representative changed',
+    );
+  }
+  let reanalysisAttemptId = '';
+  if (jobType === 'incident_response_analysis') {
+    reanalysisAttemptId = incidentReanalysisAttemptId(leaseToken);
+    const attempt = await get(
+      `SELECT attempt_id, run_id, case_id, group_id, status
+       FROM incident_reanalysis_attempts WHERE attempt_id = ?`,
+      [reanalysisAttemptId],
+    );
+    if (
+      attempt?.status !== 'running'
+      || attempt?.group_id !== dedupeKey
+      || attempt?.run_id !== currentPayload.reanalysis_run_id
+      || attempt?.case_id !== currentPayload.case_id
+    ) {
+      throw incidentIdentityConflict(
+        'controlled evaluation incident attempt does not own the lease',
+      );
+    }
+  }
+  if (status === 'completed') {
+    throw incidentIdentityConflict(
+      'controlled evaluation job cannot complete before its bound result',
+    );
+  }
+  const owned = {
+    jobId: Number(current.id),
+    jobType,
+    dedupeKey,
+    leaseToken,
+    cohortId: String(currentPayload.cohort_id || ''),
+    dispatchId: String(currentPayload.dispatch_id || ''),
+    releaseId: String(currentPayload.release_id || ''),
+    representativeAlertId: String(
+      currentPayload.representative_alert_id || '',
+    ),
+    stableGroupId: String(currentPayload.stable_group_id || ''),
+    stableGroupKey: currentPayload.stable_group_key,
+    agentRole: expectedRole,
+    reanalysisAttemptId,
+    resultCommitted: false,
+    analysisId: '',
+  };
+  return {action: status, key, owned};
+}
+
+function applyControlledJobTransition(admission, transition) {
+  if (!controlledEvaluationMode || !admission || !transition?.updated) return;
+  if (admission.action === 'claim') {
+    const claim = transition.claim;
+    const payload = claim?.payload;
+    if (
+      !claim
+      || !payload
+      || !transition.leaseToken
+      || Number(claim.job_id || 0) !== admission.exactClaim.jobId
+    ) {
+      throw incidentIdentityConflict(
+        'controlled evaluation claim receipt is incomplete',
+      );
+    }
+    // SQLite is the authority for the global lease. Replace any stale
+    // process-local reconstruction only after the claim transaction commits.
+    controlledEvaluationLeases.clear();
+    controlledEvaluationLeases.set(admission.key, {
+      jobId: Number(claim.job_id),
+      jobType: String(claim.job_type || ''),
+      dedupeKey: String(claim.dedupe_key || ''),
+      leaseToken: String(transition.leaseToken),
+      cohortId: String(payload.cohort_id || ''),
+      dispatchId: String(payload.dispatch_id || ''),
+      releaseId: String(payload.release_id || ''),
+      representativeAlertId: String(
+        payload.representative_alert_id || '',
+      ),
+      stableGroupId: String(payload.stable_group_id || ''),
+      stableGroupKey: String(payload.stable_group_key || ''),
+      agentRole: String(
+        payload.agent_role
+        || (
+          claim.job_type === 'incident_response_analysis'
+            ? 'incident-responder'
+            : 'soc-analyst'
+        ),
+      ),
+      reanalysisAttemptId: String(
+        claim.reanalysis_attempt_id || '',
+      ),
+      resultCommitted: false,
+      analysisId: '',
+    });
+    return;
+  }
+  if (admission.action === 'processing') {
+    // Reconstruct the diagnostic mirror from SQLite after a successful
+    // heartbeat. SQLite, not process memory, remains the lease authority.
+    controlledEvaluationLeases.clear();
+    controlledEvaluationLeases.set(admission.key, admission.owned);
+    return;
+  }
+  if (['completed', 'failed'].includes(admission.action)) {
+    controlledEvaluationLeases.delete(admission.key);
+  }
+}
+
+function controlledEvaluationClaimDigest(identity) {
+  const canonical = Object.fromEntries(
+    Object.keys(identity).sort().map((key) => [key, identity[key]]),
+  );
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify(canonical), 'utf8')
+    .digest('hex');
+}
+
+async function controlledEvaluationResultAdmission(payload) {
+  if (!controlledEvaluationMode) return null;
+  const identity = payload?.controlled_job;
+  const expectedFields = [
+    'job_id',
+    'job_type',
+    'lease_token',
+    'cohort_id',
+    'dispatch_id',
+    'representative_alert_id',
+    'stable_group_id',
+    'stable_group_key',
+    'agent_role',
+    'reanalysis_attempt_id',
+    'release_id',
+  ];
+  if (
+    !identity
+    || typeof identity !== 'object'
+    || Array.isArray(identity)
+    || Object.keys(identity).sort().join('\0')
+      !== [...expectedFields].sort().join('\0')
+  ) {
+    throw incidentIdentityConflict(
+      'controlled evaluation result identity is incomplete',
+    );
+  }
+  const jobId = Number(identity.job_id);
+  const jobType = safeString(identity.job_type, 64);
+  const leaseToken = safeString(identity.lease_token, 128);
+  const cohortId = safeString(identity.cohort_id, 64);
+  const dispatchId = safeString(identity.dispatch_id, 64);
+  const representativeAlertId = safeString(
+    identity.representative_alert_id,
+    256,
+  );
+  const stableGroupId = safeString(identity.stable_group_id, 64);
+  const stableGroupKey = identity.stable_group_key;
+  const agentRole = safeString(identity.agent_role, 64).toLowerCase();
+  const reanalysisAttemptId = safeString(
+    identity.reanalysis_attempt_id,
+    80,
+  ).toLowerCase();
+  const releaseId = safeString(identity.release_id, 40).toLowerCase();
+  const analysisId = safeString(payload?.analysis_id, 128).toLowerCase();
+  const claimDigest = controlledEvaluationClaimDigest(identity);
+  const expectedRole = {
+    ai_analysis: 'soc-analyst',
+    incident_response_analysis: 'incident-responder',
+  }[jobType];
+  if (
+    typeof identity.job_id !== 'number'
+    || !Number.isSafeInteger(jobId)
+    || jobId < 1
+    || typeof identity.job_type !== 'string'
+    || identity.job_type !== jobType
+    || typeof identity.lease_token !== 'string'
+    || identity.lease_token !== leaseToken
+    || typeof identity.cohort_id !== 'string'
+    || identity.cohort_id !== cohortId
+    || typeof identity.dispatch_id !== 'string'
+    || identity.dispatch_id !== dispatchId
+    || typeof identity.representative_alert_id !== 'string'
+    || identity.representative_alert_id !== representativeAlertId
+    || typeof identity.stable_group_id !== 'string'
+    || identity.stable_group_id !== stableGroupId
+    || typeof identity.agent_role !== 'string'
+    || identity.agent_role !== agentRole
+    || typeof identity.reanalysis_attempt_id !== 'string'
+    || identity.reanalysis_attempt_id !== reanalysisAttemptId
+    || typeof identity.release_id !== 'string'
+    || identity.release_id !== releaseId
+    || typeof payload?.analysis_id !== 'string'
+    || payload.analysis_id !== analysisId
+    || !/^[a-z0-9_-]{8,128}$/.test(analysisId)
+    || !expectedRole
+    || agentRole !== expectedRole
+    || !cohortIdPattern.test(cohortId)
+    || !dispatchIdPattern.test(dispatchId)
+    || !representativeAlertIdPattern.test(representativeAlertId)
+    || !stableGroupIdPattern.test(stableGroupId)
+    || !validPinnedStableGroupKey(stableGroupKey)
+    || !releaseIdPattern.test(releaseId)
+    || releaseId !== runtimeReleaseIdValue
+    || (
+      jobType === 'ai_analysis'
+      && reanalysisAttemptId
+    )
+    || (
+      jobType === 'incident_response_analysis'
+      && !/^ira-[a-f0-9]{40}$/.test(reanalysisAttemptId)
+    )
+    || safeString(payload?.alert_id, 1024) !== representativeAlertId
+    || safeString(payload?.agent_role, 64).toLowerCase() !== agentRole
+    || safeString(payload?.reanalysis_attempt_id, 80).toLowerCase()
+      !== reanalysisAttemptId
+    || payload?.response?._analysis_evaluation_memory_frozen !== true
+    || payload?.response?._analysis_controlled_claim_sha256 !== claimDigest
+  ) {
+    throw incidentIdentityConflict(
+      'controlled evaluation result identity is invalid',
+    );
+  }
+  const key = controlledEvaluationLeaseKey(jobType, stableGroupId);
+  const current = await get(
+    `SELECT id, status, lease_token, lease_expires_at, rerun_requested,
+            payload_json
+     FROM durable_jobs WHERE job_type = ? AND dedupe_key = ?`,
+    [jobType, stableGroupId],
+  );
+  const currentPayload = incidentReanalysisJobPayload(current);
+  if (
+    Number(current?.id || 0) !== jobId
+    || Number(current?.rerun_requested || 0) !== 0
+    || currentPayload.cohort_id !== cohortId
+    || currentPayload.dispatch_id !== dispatchId
+    || currentPayload.release_id !== releaseId
+    || currentPayload.alert_id !== representativeAlertId
+    || currentPayload.representative_alert_id !== representativeAlertId
+    || currentPayload.group_id !== stableGroupId
+    || currentPayload.stable_group_id !== stableGroupId
+    || currentPayload.stable_group_key !== stableGroupKey
+  ) {
+    throw incidentIdentityConflict(
+      'controlled evaluation durable job changed before result commit',
+    );
+  }
+  const acceptedReplay = await get(
+    `SELECT group_id, alert_id, agent_role, response_json
+     FROM ai_analysis_runs WHERE analysis_id = ?`,
+    [analysisId],
+  );
+  if (acceptedReplay) {
+    const acceptedResponse = parseJsonObject(
+      acceptedReplay.response_json,
+    );
+    if (
+      acceptedReplay.group_id !== stableGroupId
+      || acceptedReplay.alert_id !== representativeAlertId
+      || acceptedReplay.agent_role !== agentRole
+      || acceptedResponse._analysis_controlled_claim_sha256 !== claimDigest
+      || canonicalJsonText(acceptedResponse)
+        !== canonicalJsonText(payload?.response || {})
+    ) {
+      throw incidentIdentityConflict(
+        'controlled evaluation committed result replay changed',
+      );
+    }
+    const terminal = (
+      current.status === 'completed'
+      && !current.lease_token
+      && !current.lease_expires_at
+    );
+    const needsCompletion = (
+      current.status === 'processing'
+      && current.lease_token === leaseToken
+    );
+    if (!terminal && !needsCompletion) {
+      throw incidentIdentityConflict(
+        'controlled evaluation result replay does not match its durable job',
+      );
+    }
+    return {
+      key,
+      analysisId,
+      idempotentReplay: true,
+      completeRequired: needsCompletion,
+      jobType,
+      stableGroupId,
+      leaseToken,
+    };
+  }
+  if (
+    current?.status !== 'processing'
+    || current?.lease_token !== leaseToken
+  ) {
+    throw incidentIdentityConflict(
+      'controlled evaluation result does not own its durable lease',
+    );
+  }
+  const currentAlert = await get(
+    `SELECT stable_group_id, stable_group_key
+     FROM alerts WHERE alert_id = ? LIMIT 1`,
+    [representativeAlertId],
+  );
+  if (
+    currentAlert?.stable_group_id !== stableGroupId
+    || currentAlert?.stable_group_key !== stableGroupKey
+  ) {
+    throw incidentIdentityConflict(
+      'controlled evaluation representative alert changed before result commit',
+    );
+  }
+  if (jobType === 'incident_response_analysis') {
+    const expectedAttemptId = `ira-${crypto
+      .createHash('sha256')
+      .update(leaseToken, 'utf8')
+      .digest('hex')
+      .slice(0, 40)}`;
+    const attempt = await get(
+      `SELECT attempt_id, run_id, case_id, group_id, status
+       FROM incident_reanalysis_attempts WHERE attempt_id = ?`,
+      [reanalysisAttemptId],
+    );
+    if (
+      reanalysisAttemptId !== expectedAttemptId
+      || attempt?.status !== 'running'
+      || attempt?.group_id !== stableGroupId
+      || attempt?.run_id !== currentPayload.reanalysis_run_id
+      || attempt?.case_id !== currentPayload.case_id
+    ) {
+      throw incidentIdentityConflict(
+        'controlled evaluation incident attempt does not own the lease',
+      );
+    }
+  }
+  return {
+    key,
+    analysisId,
+    idempotentReplay: false,
+    completeRequired: true,
+    jobType,
+    stableGroupId,
+    leaseToken,
+  };
+}
+
+function applyControlledEvaluationResultAdmission(admission) {
+  if (!controlledEvaluationMode || !admission) return;
+  // A controlled result is terminal in the same transaction. The in-memory
+  // lease is diagnostic state only and is retired after that commit.
+  controlledEvaluationLeases.delete(admission.key);
+}
+
 async function transitionDurableJobStatus(
   jobType,
   dedupeKey,
@@ -3870,7 +4784,9 @@ async function transitionDurableJobStatus(
   requestedClaimIdentity = null,
 ) {
   let resolvedKey = dedupeKey;
-  const exactClaim = controlledJobClaimIdentity(requestedClaimIdentity);
+  const exactClaim = controlledEvaluationMode
+    ? controlledJobClaimIdentity(requestedClaimIdentity)
+    : null;
   let exactCandidate = null;
   if (exactClaim) {
     if (
@@ -3884,14 +4800,16 @@ async function transitionDurableJobStatus(
       );
     }
     exactCandidate = await get(
-      `SELECT id, job_type, dedupe_key, payload_json, status
+      `SELECT id, job_type, dedupe_key, payload_json, status, rerun_requested,
+              attempt_count, lease_token, lease_expires_at
        FROM durable_jobs WHERE job_type = ? AND dedupe_key = ?`,
       [jobType, resolvedKey],
     );
     if (
       !exactCandidate
       || Number(exactCandidate.id || 0) !== exactClaim.jobId
-      || exactCandidate.status !== 'pending'
+      || !['pending', 'processing'].includes(exactCandidate.status)
+      || Number(exactCandidate.rerun_requested || 0) !== 0
     ) {
       throw incidentIdentityConflict(
         'controlled durable job changed before it could be claimed',
@@ -3926,6 +4844,65 @@ async function transitionDurableJobStatus(
       throw incidentIdentityConflict(
         'controlled durable job representative changed before it could be claimed',
       );
+    }
+    if (exactCandidate.status === 'processing') {
+      const replayLeaseToken = safeString(
+        exactCandidate.lease_token,
+        128,
+      );
+      if (!replayLeaseToken) {
+        throw incidentIdentityConflict(
+          'controlled durable job processing lease is incomplete',
+        );
+      }
+      // Reasserting the same frozen claim also revives an expired transport
+      // lease without minting a new bearer token or counting another attempt.
+      // This lets the scheduler resume heartbeats after a lost response or
+      // alert-store restart while preserving the exact raw claim receipt.
+      const replayLeaseExpiry = new Date(
+        Date.now() + aiAnalysisLeaseSeconds * 1000,
+      ).toISOString();
+      const replayed = await run(
+        `UPDATE durable_jobs
+         SET lease_expires_at = ?, updated_at = ?
+         WHERE id = ? AND status = 'processing' AND lease_token = ?
+           AND rerun_requested = 0`,
+        [
+          replayLeaseExpiry,
+          nowUtc(),
+          exactCandidate.id,
+          replayLeaseToken,
+        ],
+      );
+      if (Number(replayed.changes || 0) !== 1) {
+        throw incidentIdentityConflict(
+          'controlled durable job changed before its claim could be replayed',
+        );
+      }
+      const replayClaim = {
+        job_id: Number(exactCandidate.id),
+        job_type: jobType,
+        dedupe_key: resolvedKey,
+        payload: candidatePayload,
+      };
+      if (jobType === 'incident_response_analysis') {
+        const attemptId = incidentReanalysisAttemptId(replayLeaseToken);
+        const attempt = await get(
+          `SELECT attempt_id, run_id, case_id
+           FROM incident_reanalysis_attempts WHERE attempt_id = ?`,
+          [attemptId],
+        );
+        replayClaim.reanalysis_attempt_id = attempt?.attempt_id || null;
+        replayClaim.reanalysis_run_id = attempt?.run_id || null;
+        replayClaim.case_id = attempt?.case_id || null;
+      }
+      return {
+        updated: true,
+        resolvedKey,
+        leaseToken: replayLeaseToken,
+        claim: replayClaim,
+        idempotentClaim: true,
+      };
     }
   }
   if (
@@ -4076,6 +5053,15 @@ async function transitionDurableJobStatus(
       if (status === 'completed' && job?.status === 'pending') {
         void signalAiWorkers('incident-response-rerun-pending');
       }
+    }
+    if (
+      controlledEvaluationMode
+      && status === 'completed'
+      && job?.status !== 'completed'
+    ) {
+      throw incidentIdentityConflict(
+        'controlled evaluation completion unexpectedly queued another run',
+      );
     }
   }
   return {
@@ -4799,6 +5785,9 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
     || identity.stableGroupKeySupplied
     || identity.cohortId,
   );
+  const controlledIncidentDispatch = Boolean(
+    controlledEvaluationMode && identity.cohortId,
+  );
   if (!caseId && controlledIdentitySupplied) {
     const error = new Error(
       'frozen dispatch identity is supported only for single-case reanalysis',
@@ -4815,6 +5804,37 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
     ),
     1000,
   );
+  if (caseId && controlledIncidentDispatch) {
+    const priorDispatch = await get(
+      `SELECT controlled_receipt_json
+       FROM incident_reanalysis_runs
+       WHERE controlled_dispatch_id = ?`,
+      [identity.dispatchId],
+    );
+    if (priorDispatch) {
+      const receipt = parseJsonObject(
+        priorDispatch.controlled_receipt_json,
+      );
+      if (
+        receipt.ok !== true
+        || receipt.case_id !== caseId
+        || receipt.cohort_id !== identity.cohortId
+        || receipt.dispatch_id !== identity.dispatchId
+        || receipt.release_id !== identity.releaseId
+        || receipt.representative_alert_id
+          !== identity.representativeAlertId
+        || receipt.stable_group_id !== identity.stableGroupId
+        || receipt.stable_group_key !== identity.stableGroupKey
+        || receipt.requested_by !== requestedBy
+        || receipt.reason !== reason
+      ) {
+        throw incidentIdentityConflict(
+          'controlled incident dispatch identity was already used',
+        );
+      }
+      return receipt;
+    }
+  }
   // Release lineage is server-owned deployment metadata. Never allow a
   // dashboard/API caller to spoof the code revision attributed to a run.
   const releaseId = incidentReanalysisReleaseId();
@@ -5034,8 +6054,8 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
   await run(
     `INSERT INTO incident_reanalysis_runs (
        run_id, release_id, scope, status, requested_by, reason,
-       total_count, created_at, updated_at
-     ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)`,
+       total_count, created_at, updated_at, controlled_dispatch_id
+     ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)`,
     [
       runId,
       releaseId,
@@ -5045,6 +6065,7 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
       cases.length,
       requestedAt,
       requestedAt,
+      controlledIncidentDispatch ? identity.dispatchId : null,
     ],
   );
   for (const incident of cases) {
@@ -5243,7 +6264,7 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
       eventKey: `incident_response_analysis:reanalysis:${runId}:${storedCaseId}`,
     });
   }
-  return {
+  const receipt = {
     ok: true,
     ...(await refreshIncidentReanalysisRun(runId)),
     ...(identity.representativeAlertIdSupplied ? {
@@ -5256,11 +6277,27 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
       stable_group_key: identity.stableGroupKey,
     } : {}),
     ...(identity.cohortId ? {
+      ...(controlledIncidentDispatch ? {case_id: caseId} : {}),
       cohort_id: identity.cohortId,
       dispatch_id: identity.dispatchId,
       release_id: identity.releaseId,
     } : {}),
   };
+  if (controlledIncidentDispatch) {
+    const storedReceipt = await run(
+      `UPDATE incident_reanalysis_runs
+       SET controlled_receipt_json = ?
+       WHERE run_id = ? AND controlled_dispatch_id = ?
+         AND controlled_receipt_json IS NULL`,
+      [jsonText(receipt), runId, identity.dispatchId],
+    );
+    if (Number(storedReceipt.changes || 0) !== 1) {
+      throw incidentIdentityConflict(
+        'controlled incident dispatch receipt could not be sealed',
+      );
+    }
+  }
+  return receipt;
 }
 
 function incidentReanalysisJobPayload(job) {
@@ -6602,6 +7639,11 @@ function formatTelegramAlert(alert, storedAlert) {
 function postTelegramMessage(text) {
   // alert-store sends Telegram messages directly so n8n can stay a thin
   // validation/routing layer.
+  if (controlledEvaluationMode) {
+    return Promise.reject(
+      new Error('Telegram is disabled in controlled evaluation mode'),
+    );
+  }
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify({
       chat_id: telegramChatId,
@@ -7732,19 +8774,108 @@ async function capturePipelineDiskSample() {
   await withSqliteWriteGate(() => pipelineMetrics.captureDiskSample(sqliteBytes));
 }
 
+const controlledEvaluationRequests = new Set([
+  'GET /health',
+  'POST /ai/request',
+  'POST /analysis/result',
+  'POST /incidents/reanalyze',
+  'POST /jobs/status',
+]);
+
+function controlledEvaluationRequestAuthorized(request) {
+  if (!controlledEvaluationMode) return true;
+  const supplied = request.headers[
+    'x-onion-sentinel-evaluation-token'
+  ];
+  if (
+    typeof supplied !== 'string'
+    || !/^[a-f0-9]{64}$/.test(supplied)
+  ) {
+    return false;
+  }
+  const expectedBytes = Buffer.from(controlledEvaluationToken, 'utf8');
+  const suppliedBytes = Buffer.from(supplied, 'utf8');
+  return (
+    expectedBytes.length === suppliedBytes.length
+    && crypto.timingSafeEqual(expectedBytes, suppliedBytes)
+  );
+}
+
 async function handleRequest(request, response) {
   try {
     const parsedUrl = new URL(request.url, 'http://alert-store.local');
+    if (controlledEvaluationShutdownStarted) {
+      request.resume();
+      sendJson(response, 503, {
+        ok: false,
+        status: 'shutting_down',
+      });
+      return;
+    }
+    if (
+      controlledEvaluationMode
+      && request.method === 'POST'
+      && !controlledEvaluationRequestAuthorized(request)
+    ) {
+      request.resume();
+      sendJson(response, 403, {
+        ok: false,
+        status: 'forbidden',
+        reason: 'controlled evaluation authorization failed',
+      });
+      return;
+    }
+    if (
+      controlledEvaluationMode
+      && !controlledEvaluationRequests.has(
+        `${String(request.method || '').toUpperCase()} ${request.url}`,
+      )
+    ) {
+      request.resume();
+      sendJson(response, 403, {
+        ok: false,
+        status: 'forbidden',
+        reason: 'route is disabled in controlled evaluation mode',
+      });
+      return;
+    }
     if (request.method === 'GET' && request.url === '/health') {
       // Used by the Mac Studio monitor LaunchAgent.
-      sendJson(response, 200, {
+      const health = {
         ok: true,
         status: 'healthy',
-        telegram_outbox: await telegramOutboxSnapshot(),
-        enrichment_scheduler: enrichmentScheduler.snapshot(),
-        enrichment_cache: enrichmentCache.snapshot(),
-        disk_capacity: diskCapacitySnapshot(),
-      });
+        service: 'onion-sentinel-alert-store',
+        controlled_evaluation: controlledEvaluationMode,
+        evaluation_mode: controlledEvaluationMode,
+        runtime_mode: controlledEvaluationMode
+          ? 'controlled-evaluation'
+          : 'production',
+        release_id: runtimeReleaseIdValue || 'unversioned',
+        listen_host: host,
+        listen_port: port,
+        accepting_requests: true,
+        active_writes: activeSqliteWrites,
+        active_controlled_leases: controlledEvaluationMode
+          ? controlledEvaluationLeases.size
+          : 0,
+        controlled_results_pending_completion: controlledEvaluationMode
+          ? [...controlledEvaluationLeases.values()]
+            .filter((lease) => lease.resultCommitted).length
+          : 0,
+        route_allowlist: controlledEvaluationMode
+          ? [...controlledEvaluationRequests].sort()
+          : [],
+        background_jobs_enabled: !controlledEvaluationMode,
+        outbound_network_enabled: !controlledEvaluationMode,
+        worker_wake_signaling_enabled: !controlledEvaluationMode,
+      };
+      if (!controlledEvaluationMode) {
+        health.telegram_outbox = await telegramOutboxSnapshot();
+        health.enrichment_scheduler = enrichmentScheduler.snapshot();
+        health.enrichment_cache = enrichmentCache.snapshot();
+        health.disk_capacity = diskCapacitySnapshot();
+      }
+      sendJson(response, 200, health);
       return;
     }
     if (request.method === 'GET' && parsedUrl.pathname === '/metrics') {
@@ -7817,9 +8948,46 @@ async function handleRequest(request, response) {
       // remains the only SQLite writer. The endpoint is idempotent by
       // analysis_id and never accepts raw PCAP bytes or unbounded artifacts.
       const payload = await readJsonBody(request, true);
-      const result = await withSqliteWriteGate(() => withImmediateTransaction(
-        () => recordAiAnalysisResult(payload),
-      ));
+      if (
+        !controlledEvaluationMode
+        && requestHasOwnField(payload, 'controlled_job')
+      ) {
+        throw incidentIdentityConflict(
+          'controlled result identity requires controlled evaluation mode',
+        );
+      }
+      const result = await withSqliteWriteGate(async () => {
+        let controlledAdmission = null;
+        const indexed = await withImmediateTransaction(async () => {
+          controlledAdmission = await controlledEvaluationResultAdmission(
+            payload,
+          );
+          const recorded = await recordAiAnalysisResult(payload);
+          if (
+            controlledEvaluationMode
+            && controlledAdmission?.completeRequired
+          ) {
+            const completed = await transitionDurableJobStatus(
+              controlledAdmission.jobType,
+              controlledAdmission.stableGroupId,
+              'completed',
+              '',
+              controlledAdmission.leaseToken,
+              true,
+            );
+            if (!completed.updated) {
+              throw incidentIdentityConflict(
+                'controlled evaluation result could not complete its exact job',
+              );
+            }
+          }
+          return recorded;
+        });
+        // Keep process-local diagnostic state ordered with every gated DB
+        // writer, but only mutate it after the SQLite commit succeeds.
+        applyControlledEvaluationResultAdmission(controlledAdmission);
+        return indexed;
+      });
       sendJson(response, 200, {
         ...result,
         submission_sha256: payload.__body_sha256,
@@ -7831,6 +8999,11 @@ async function handleRequest(request, response) {
       // prompt at execution time so every rerun sees current alerts, public
       // enrichment, parsed PCAP evidence, notes, memory, and prior analyses.
       const payload = await readJsonBody(request);
+      if (controlledEvaluationMode && !payload?.cohort_id) {
+        throw incidentIdentityConflict(
+          'controlled evaluation requires a frozen cohort dispatch identity',
+        );
+      }
       const result = await withSqliteWriteGate(() => withImmediateTransaction(
         () => requestAiReanalysis(payload),
       ));
@@ -7851,6 +9024,11 @@ async function handleRequest(request, response) {
     }
     if (request.method === 'POST' && parsedUrl.pathname === '/incidents/reanalyze') {
       const payload = await readJsonBody(request);
+      if (controlledEvaluationMode && !payload?.cohort_id) {
+        throw incidentIdentityConflict(
+          'controlled evaluation requires a frozen cohort dispatch identity',
+        );
+      }
       const result = await withSqliteWriteGate(() => withImmediateTransaction(
         () => requestIncidentReanalysis(payload, payload?.case_id),
       ));
@@ -7894,17 +9072,27 @@ async function handleRequest(request, response) {
       const leaseToken = safeString(payload?.lease_token, 128);
       const retryable = payload?.retryable !== false;
       if (!jobType || !dedupeKey) throw new Error('job_type and dedupe_key are required');
-      const transition = await withSqliteWriteGate(() => withImmediateTransaction(
-        () => transitionDurableJobStatus(
-          jobType,
-          dedupeKey,
-          status,
-          safeString(payload?.error, 1000),
-          leaseToken,
-          retryable,
-          payload,
-        ),
-      ));
+      const transition = await withSqliteWriteGate(async () => {
+        let controlledAdmission = null;
+        const committed = await withImmediateTransaction(async () => {
+          controlledAdmission = await controlledJobTransitionAdmission(
+            payload,
+          );
+          return transitionDurableJobStatus(
+            jobType,
+            dedupeKey,
+            status,
+            safeString(payload?.error, 1000),
+            leaseToken,
+            retryable,
+            payload,
+          );
+        });
+        // Apply the mirror transition while the same write gate is still held,
+        // after the durable transaction has committed.
+        applyControlledJobTransition(controlledAdmission, committed);
+        return committed;
+      });
       sendJson(response, transition.updated ? 200 : 404, {
         ok: transition.updated,
         job_type: jobType,
@@ -8027,6 +9215,40 @@ async function dispatchRequest(request, response) {
   }
 }
 
+let controlledEvaluationShutdownStarted = false;
+
+function installControlledEvaluationShutdown(server) {
+  const shutdown = () => {
+    if (controlledEvaluationShutdownStarted) return;
+    controlledEvaluationShutdownStarted = true;
+    const deadline = setTimeout(() => process.exit(1), 10000);
+    deadline.unref();
+    server.close(async (serverError) => {
+      if (serverError) {
+        console.error(`controlled evaluation server shutdown failed: ${serverError.message}`);
+        process.exit(1);
+        return;
+      }
+      await sqliteWriteGate.catch(() => undefined);
+      if (activeSqliteWrites !== 0) {
+        console.error('controlled evaluation shutdown retained active writes');
+        process.exit(1);
+        return;
+      }
+      db.close((databaseError) => {
+        if (databaseError) {
+          console.error(`controlled evaluation database shutdown failed: ${databaseError.message}`);
+          process.exit(1);
+          return;
+        }
+        process.exit(0);
+      });
+    });
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
+}
+
 initDb().then(() => {
   const server = configureHttpServer(http.createServer((request, response) => {
     void dispatchRequest(request, response).catch((error) => {
@@ -8044,6 +9266,10 @@ initDb().then(() => {
   server.listen(port, host, () => {
     console.log(`alert-store listening on ${host}:${port}, db=${dbPath}`);
   });
+  if (controlledEvaluationMode) {
+    installControlledEvaluationShutdown(server);
+    return;
+  }
   if (telegramOutboxAutostart) {
     setInterval(() => void drainTelegramOutbox(), telegramOutboxIntervalMs).unref();
     void drainTelegramOutbox();
