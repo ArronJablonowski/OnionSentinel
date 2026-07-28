@@ -145,10 +145,22 @@ def parse_suricata_rule(rule_text: object) -> dict[str, Any]:
     state_operations: list[dict[str, str]] = []
     unsupported_match_options: list[dict[str, str]] = []
     current_content: dict[str, Any] | None = None
+    current_buffer = ""
+    current_buffer_modifiers: dict[str, object] = {}
     for raw_option in options:
         key, separator, raw_value = raw_option.partition(":")
         normalized_key = key.strip().lower()
         value = raw_value.strip() if separator else ""
+        if normalized_key in {"dns.query", "dns_query"}:
+            current_buffer = "dns.query"
+            current_buffer_modifiers = {}
+            current_content = None
+            continue
+        if normalized_key == "pkt_data":
+            current_buffer = ""
+            current_buffer_modifiers = {}
+            current_content = None
+            continue
         if normalized_key == "content":
             content_value = value.lstrip()
             negated = content_value.startswith("!")
@@ -161,9 +173,16 @@ def parse_suricata_rule(rule_text: object) -> dict[str, Any]:
                 "printable": _safe_ascii(decoded),
                 "_bytes_hex": decoded.hex(),
                 "negated": negated,
-                "modifiers": {},
+                "modifiers": dict(current_buffer_modifiers),
+                "buffer": current_buffer,
             }
             contents.append(current_content)
+            continue
+        if normalized_key in {"dotprefix", "bsize"}:
+            modifier_value: object = value if separator else True
+            current_buffer_modifiers[normalized_key] = modifier_value
+            if current_content is not None:
+                current_content["modifiers"][normalized_key] = modifier_value
             continue
         if normalized_key in {
             "offset", "depth", "distance", "within", "startswith", "endswith",
@@ -229,6 +248,7 @@ def parse_suricata_rule(rule_text: object) -> dict[str, Any]:
             "hex": item["_bytes_hex"],
             "negated": item["negated"],
             "modifiers": item["modifiers"],
+            "buffer": item["buffer"],
         })
     return {
         "available": True,
@@ -548,6 +568,7 @@ def marker_specs(rule_context: dict[str, Any], playbook: dict[str, Any] | None) 
                 "id": str(item.get("id") or f"deployed-content-{len(specs) + 1}")[:100],
                 "hex": str(item.get("hex") or "")[:512],
                 "modifiers": dict(item.get("modifiers") or {}) if isinstance(item.get("modifiers"), dict) else {},
+                "buffer": str(item.get("buffer") or "")[:80],
                 "negated": bool(item.get("negated")),
                 "source": "deployed_rule",
             })
@@ -601,6 +622,17 @@ def _content_constraint(
     return not present if bool(spec.get("negated")) else present
 
 
+def _raw_payload_content_evaluation_supported(spec: dict[str, Any]) -> bool:
+    """Return whether a deployed content clause can use raw transport payload."""
+    if spec.get("source") != "deployed_rule":
+        return True
+    buffer_name = str(spec.get("buffer") or "").strip().lower()
+    if buffer_name not in {"", "pkt_data"}:
+        return False
+    modifiers = spec.get("modifiers") if isinstance(spec.get("modifiers"), dict) else {}
+    return not any(name in modifiers for name in ("dotprefix", "bsize"))
+
+
 def _content_match_positions(
     payload: bytes,
     marker: bytes,
@@ -609,6 +641,8 @@ def _content_match_positions(
     previous_match_end: int | None = None,
 ) -> list[int] | None:
     """Return bounded matches for one absolute or cursor-relative content clause."""
+    if not _raw_payload_content_evaluation_supported(spec):
+        return None
     modifiers = spec.get("modifiers") if isinstance(spec.get("modifiers"), dict) else {}
     if "rawbytes" in modifiers:
         return None
@@ -673,14 +707,21 @@ def _ordered_deployed_content_constraints(
     """Evaluate deployed content clauses in rule order with bounded cursor paths."""
     results: dict[str, bool | None] = {}
     cursors: set[int | None] = {None}
+    cursor_unknown = False
+    current_buffer: str | None = None
     for spec, marker in marker_values:
         if spec.get("source") != "deployed_rule":
             continue
         marker_id = str(spec["id"])
         modifiers = spec.get("modifiers") if isinstance(spec.get("modifiers"), dict) else {}
         relative = "distance" in modifiers or "within" in modifiers
-        if not cursors:
-            results[marker_id] = False
+        buffer_name = str(spec.get("buffer") or "pkt_data").strip().lower()
+        if buffer_name != current_buffer:
+            current_buffer = buffer_name
+            cursors = {None}
+            cursor_unknown = False
+        if relative and not cursors:
+            results[marker_id] = None if cursor_unknown else False
             continue
         if relative:
             candidate_cursors = sorted(
@@ -719,9 +760,11 @@ def _ordered_deployed_content_constraints(
         if not supported:
             results[marker_id] = None
             cursors = set()
+            cursor_unknown = True
             continue
         results[marker_id] = satisfied
         cursors = next_cursors if satisfied else set()
+        cursor_unknown = False
     return results
 
 
@@ -854,6 +897,8 @@ def extract_group_packet_features(
                     marker_constraint_satisfied[marker_id] += 1
                 else:
                     marker_constraint_violated[marker_id] += 1
+            if not _raw_payload_content_evaluation_supported(spec):
+                continue
             start = 0
             matches = 0
             while matches < MAX_MARKER_MATCHES_PER_PACKET:
@@ -884,7 +929,10 @@ def extract_group_packet_features(
             "expected_offset": expected_offset,
             "expected_offset_observations": int(offset_counts.get(expected_offset, 0)) if expected_offset is not None else None,
             "offsets": _bounded_counter(offset_counts),
-            "constraint_supported": marker_id not in marker_constraint_unsupported,
+            "constraint_supported": (
+                marker_id not in marker_constraint_unsupported
+                and _raw_payload_content_evaluation_supported(spec)
+            ),
             "packets_evaluated_for_constraint": int(marker_constraint_evaluated[marker_id]),
             "packets_satisfying_constraint": int(marker_constraint_satisfied[marker_id]),
             "packets_violating_constraint": int(marker_constraint_violated[marker_id]),
@@ -1294,6 +1342,7 @@ def build_detection_validation(
             marker_id = str(item.get("id") or "")
             observation = marker_lookup.get(marker_id, {})
             modifiers = item.get("modifiers") if isinstance(item.get("modifiers"), dict) else {}
+            buffer_name = str(item.get("buffer") or "").strip().lower()
             expected_offset_raw = modifiers.get("offset")
             try:
                 expected_offset = (
@@ -1329,22 +1378,27 @@ def build_detection_validation(
                 status = "matched"
             else:
                 status = "unknown"
+            if buffer_name:
+                predicate_field = buffer_name
+            elif parsed_rule.get("protocol") == "icmp":
+                predicate_field = "icmp.payload_marker"
+            elif parsed_rule.get("protocol") == "udp":
+                predicate_field = "udp.payload_marker"
+            else:
+                predicate_field = "packet.payload_marker"
             predicate_results.append(
                 {
                     "id": marker_id,
-                    "field": (
-                        "icmp.payload_marker"
-                        if parsed_rule.get("protocol") == "icmp"
-                        else "udp.payload_marker"
-                        if parsed_rule.get("protocol") == "udp"
-                        else "packet.payload_marker"
-                    ),
+                    "field": predicate_field,
                     "operator": "not_contains" if item.get("negated") else "contains",
                     "expected": {
                         "sha256": observation.get("sha256") or item.get("sha256"),
                         "length": observation.get("length") or item.get("length"),
                         "search_offset": expected_offset,
                         "depth": modifiers.get("depth"),
+                        "buffer": buffer_name or None,
+                        "dotprefix": bool(modifiers.get("dotprefix")),
+                        "bsize": modifiers.get("bsize"),
                         "negated": bool(item.get("negated")),
                     },
                     "observed": {
@@ -1359,7 +1413,8 @@ def build_detection_validation(
                     "required": True,
                     "source": "deployed_rule",
                     "reason": (
-                        "unsupported content modifiers require a trusted Suricata rule-engine trace"
+                        "unsupported sticky-buffer, transform, or buffer-size "
+                        "evaluation requires a trusted Suricata rule-engine trace"
                         if not constraint_supported
                         else "deployed rule content predicate"
                     ),

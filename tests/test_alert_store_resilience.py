@@ -119,6 +119,37 @@ class AlertStoreResilienceTest(unittest.TestCase):
         self.assertIn("parsedUrl.pathname === '/adjudications'", self.code)
         self.assertIn("parsedUrl.pathname === '/incidents/status'", self.code)
         self.assertIn("disputed_pending_human", self.code)
+        self.assertIn("review_completed_not_authorized", self.code)
+        self.assertIn(
+            "function reviewerAutomationAuthorization(",
+            self.code,
+        )
+        self.assertIn(
+            "function conservativeReviewerTelemetry(",
+            self.code,
+        )
+        self.assertGreaterEqual(
+            self.code.count(
+                "const reviewer = conservativeReviewerTelemetry("
+            ),
+            2,
+        )
+        self.assertIn(
+            "embedded.comparison",
+            self.code,
+        )
+        self.assertIn(
+            "embedded.response",
+            self.code,
+        )
+        self.assertIn(
+            "corruptRow || corruptEmbedded || statusConflict",
+            self.code,
+        )
+        self.assertIn(
+            "reviewAuthorization.authorized === false",
+            self.code,
+        )
         self.assertIn(
             "required independent review needs explicit analyst adjudication before suppression",
             self.code,

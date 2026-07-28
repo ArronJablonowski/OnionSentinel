@@ -29,6 +29,14 @@ def load_portal():
 
 
 class SocAlertSummaryApiTest(unittest.TestCase):
+    def test_missing_reviewer_confidence_cannot_authorize_automation(self) -> None:
+        authorization = self.portal._soc_reviewer_automation_authorization({
+            "reviewer_confidence": "",
+            "automation_authorization": {},
+        })
+        self.assertFalse(authorization["authorized"])
+        self.assertTrue(authorization["legacy_confidence_fallback"])
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tmp.name) / "alerts.sqlite3"
@@ -643,7 +651,70 @@ class SocAlertSummaryApiTest(unittest.TestCase):
             alert for alert in advisory_payload["alerts"]
             if alert["representative_alert_id"] == "newest-alert"
         )
-        self.assertEqual(advisory["final_review_status"], "reviewer_advisory")
+        self.assertEqual(
+            advisory["final_review_status"],
+            "review_completed_not_authorized",
+        )
+        ok, conflict = self.portal.update_soc_alert_status({
+            "id": group_id,
+            "status": "suppressed",
+            "reason": "medium review cannot authorize suppression",
+        })
+        self.assertFalse(ok)
+        self.assertEqual(conflict["status"], 409)
+
+        self.conn.execute(
+            """
+            UPDATE ai_second_opinion_runs
+            SET reviewer_confidence = 'high'
+            WHERE analysis_id = 'analysis-disputed'
+            """
+        )
+        self.conn.commit()
+        _status, high_payload = self.portal.soc_alerts_query_response(
+            {"limit": ["10"], "analyst_status": ["open"]}
+        )
+        high_advisory = next(
+            alert for alert in high_payload["alerts"]
+            if alert["representative_alert_id"] == "newest-alert"
+        )
+        self.assertEqual(
+            high_advisory["final_review_status"],
+            "reviewer_advisory",
+        )
+
+        self.conn.execute(
+            """
+            UPDATE ai_analysis_runs
+            SET response_json = ?
+            WHERE analysis_id = 'analysis-disputed'
+            """,
+            (
+                json.dumps({
+                    "_second_opinion": {
+                        "automation_authorization": {
+                            "authorized": False,
+                            "reason_code": (
+                                "reviewer_confidence_below_"
+                                "automation_threshold"
+                            ),
+                        },
+                    },
+                }),
+            ),
+        )
+        self.conn.commit()
+        _status, denied_payload = self.portal.soc_alerts_query_response(
+            {"limit": ["10"], "analyst_status": ["open"]}
+        )
+        explicitly_denied = next(
+            alert for alert in denied_payload["alerts"]
+            if alert["representative_alert_id"] == "newest-alert"
+        )
+        self.assertEqual(
+            explicitly_denied["final_review_status"],
+            "review_completed_not_authorized",
+        )
         self.conn.execute(
             """
             UPDATE ai_second_opinion_runs

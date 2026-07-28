@@ -977,6 +977,7 @@ def related_alerts(conn: sqlite3.Connection, selected: sqlite3.Row, limit: int, 
 CORRELATION_WEIGHTS = {
     "hash": 50,
     "url": 45,
+    "community_id": 45,
     "domain": 35,
     "host": 35,
     "user": 35,
@@ -986,6 +987,14 @@ CORRELATION_WEIGHTS = {
     "port": 4,
     "protocol": 3,
 }
+CORRELATION_STRONG_RELATIONSHIP_SECONDS = 300
+CORRELATION_MAX_RAW_JSON_BYTES = 256 * 1024
+# Community ID v1 is a base64 SHA-1 digest. Twenty decoded bytes leave four
+# significant bits in the last character; the final two pad bits must be zero
+# for a canonical encoding.
+COMMUNITY_ID_V1_RE = re.compile(
+    r"^1:[A-Za-z0-9+/]{26}[AEIMQUYcgkosw048]=$"
+)
 
 
 def parse_project_datetime(value: object) -> dt.datetime | None:
@@ -1024,6 +1033,298 @@ def correlation_time_bonus(selected_last_seen: object, related_last_seen: object
     if seconds <= 604800:
         return 5, "detections occurred within seven days"
     return 0, None
+
+
+def _nested_alert_values(alert: dict, dotted_path: str) -> list[object]:
+    """Return bounded values from an explicit path, expanding arrays safely."""
+    current: list[object] = [alert]
+    for part in dotted_path.split("."):
+        expanded: list[object] = []
+        for value in current[:64]:
+            if isinstance(value, dict):
+                child = value.get(part)
+                if isinstance(child, list):
+                    expanded.extend(child[:64])
+                elif child is not None:
+                    expanded.append(child)
+        current = expanded[:64]
+        if not current:
+            break
+    return current[:64]
+
+
+def _normalized_ip_values(values: Iterable[object]) -> list[str]:
+    normalized: list[str] = []
+    for value in values:
+        candidates = value if isinstance(value, list) else [value]
+        for candidate in candidates[:64]:
+            if isinstance(candidate, dict):
+                candidates_from_dict = [
+                    candidate.get("data"),
+                    candidate.get("ip"),
+                    candidate.get("answer"),
+                ]
+            else:
+                candidates_from_dict = [candidate]
+            for raw in candidates_from_dict:
+                try:
+                    text = str(ipaddress.ip_address(str(raw or "").strip()))
+                except ValueError:
+                    continue
+                if text not in normalized:
+                    normalized.append(text)
+                if len(normalized) >= 32:
+                    return normalized
+    return normalized
+
+
+def _correlation_row_facts(row_value: sqlite3.Row | dict) -> dict[str, Any]:
+    """Project only collector-owned alert fields used for deterministic joins."""
+    def bounded_json(key: str) -> dict:
+        value = str(sqlite_value(row_value, key) or "")
+        if (
+            not value
+            or len(value.encode("utf-8", errors="replace"))
+            > CORRELATION_MAX_RAW_JSON_BYTES
+        ):
+            return {}
+        return parse_json_object(value)
+
+    alert = bounded_json("alert_json")
+    raw_event = bounded_json("raw_event_json")
+    event_data = raw_event.get("event_data")
+    documents = [alert]
+    if isinstance(event_data, dict):
+        documents.append(event_data)
+
+    def first_path(*paths: str) -> object:
+        for document in documents:
+            for path in paths:
+                value = _nested_alert_value(document, path)
+                if value not in (None, ""):
+                    return value
+        return None
+
+    def normalized_ip(value: object) -> str:
+        try:
+            return str(ipaddress.ip_address(str(value or "").strip()))
+        except ValueError:
+            return ""
+
+    def normalized_port(value: object) -> int | None:
+        try:
+            port = int(value)
+        except (TypeError, ValueError):
+            return None
+        return port if 0 <= port <= 65535 else None
+
+    dns_values: list[object] = []
+    for document in documents:
+        for path in (
+            "dns.resolved_ip",
+            "dns.answers",
+            "dns.answers.data",
+            "dns.answers.ip",
+            "suricata.eve.dns.answers",
+            "suricata.eve.dns.answers.data",
+        ):
+            dns_values.extend(_nested_alert_values(document, path))
+
+    community_id = str(
+        first_path("network.community_id", "community_id") or ""
+    ).strip()
+    if not COMMUNITY_ID_V1_RE.fullmatch(community_id):
+        community_id = ""
+    timestamp = (
+        parse_project_datetime(sqlite_value(row_value, "last_seen"))
+        or parse_project_datetime(sqlite_value(row_value, "timestamp"))
+        or parse_project_datetime(sqlite_value(row_value, "first_seen"))
+    )
+    return {
+        "source_ip": normalized_ip(
+            sqlite_value(row_value, "source_ip")
+            or first_path("source.ip")
+        ),
+        "destination_ip": normalized_ip(
+            sqlite_value(row_value, "destination_ip")
+            or first_path("destination.ip")
+        ),
+        "source_port": normalized_port(
+            sqlite_value(row_value, "source_port")
+            or first_path("source.port")
+        ),
+        "destination_port": normalized_port(
+            sqlite_value(row_value, "destination_port")
+            or first_path("destination.port")
+        ),
+        "transport": str(
+            sqlite_value(row_value, "transport_protocol")
+            or first_path("network.transport")
+            or ""
+        ).strip().lower(),
+        "protocol": str(
+            sqlite_value(row_value, "network_protocol")
+            or first_path("network.protocol")
+            or ""
+        ).strip().lower(),
+        "community_id": community_id,
+        "dns_answers": _normalized_ip_values(dns_values),
+        "timestamp": timestamp,
+        "timestamp_text": (
+            timestamp.isoformat()
+            if timestamp is not None
+            else None
+        ),
+        "rule_name": str(sqlite_value(row_value, "rule_name") or "").strip(),
+    }
+
+
+def _correlation_relationships(
+    selected_facts: dict[str, Any],
+    related_facts: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Describe exact, bounded relationships without inferring intent."""
+    relationships: list[dict[str, Any]] = []
+    selected_time = selected_facts.get("timestamp")
+    related_time = related_facts.get("timestamp")
+    delta_seconds = (
+        abs((selected_time - related_time).total_seconds())
+        if isinstance(selected_time, dt.datetime)
+        and isinstance(related_time, dt.datetime)
+        else None
+    )
+    common = {
+        "source": "alert_store_trusted_alert_telemetry",
+        "selected_timestamp": selected_facts.get("timestamp_text"),
+        "related_timestamp": related_facts.get("timestamp_text"),
+        "time_delta_seconds": (
+            round(delta_seconds, 3)
+            if delta_seconds is not None
+            else None
+        ),
+    }
+
+    selected_community = selected_facts.get("community_id")
+    related_community = related_facts.get("community_id")
+    strongly_time_bound = bool(
+        delta_seconds is not None
+        and delta_seconds <= CORRELATION_STRONG_RELATIONSHIP_SECONDS
+    )
+    if (
+        strongly_time_bound
+        and selected_community
+        and selected_community == related_community
+    ):
+        relationships.append({
+            **common,
+            "kind": "same_community_id",
+            "confidence": "high",
+            "weight": 75,
+            "facts": {"community_id": selected_community},
+            "interpretation_limit": (
+                "The records carry the same canonical flow identifier within "
+                "five minutes; this is a correlation lead, not proof that they "
+                "are one connection instance, authorized, or malicious."
+            ),
+        })
+
+    selected_transport = str(selected_facts.get("transport") or "")
+    related_transport = str(related_facts.get("transport") or "")
+    reverse_five_tuple = (
+        strongly_time_bound
+        and bool(selected_transport)
+        and selected_transport == related_transport
+        and bool(selected_facts.get("source_ip"))
+        and selected_facts.get("source_ip") == related_facts.get("destination_ip")
+        and selected_facts.get("destination_ip") == related_facts.get("source_ip")
+        and selected_facts.get("source_port") is not None
+        and selected_facts.get("source_port") == related_facts.get("destination_port")
+        and selected_facts.get("destination_port") is not None
+        and selected_facts.get("destination_port") == related_facts.get("source_port")
+    )
+    if reverse_five_tuple:
+        relationships.append({
+            **common,
+            "kind": "reversed_five_tuple",
+            "confidence": "high",
+            "weight": 65,
+            "facts": {
+                "selected_source_ip": selected_facts["source_ip"],
+                "selected_source_port": selected_facts["source_port"],
+                "selected_destination_ip": selected_facts["destination_ip"],
+                "selected_destination_port": selected_facts["destination_port"],
+                "transport": selected_transport,
+            },
+            "interpretation_limit": (
+                "The records carry opposite directions of one exact transport "
+                "tuple within five minutes; this is a correlation lead, while "
+                "connection identity and protocol state still require packet "
+                "or Zeek evidence."
+            ),
+        })
+
+    def append_dns_destination_link(
+        dns_facts: dict[str, Any],
+        network_facts: dict[str, Any],
+        *,
+        direction: str,
+    ) -> None:
+        destination_ip = network_facts.get("destination_ip")
+        same_client = (
+            bool(dns_facts.get("source_ip"))
+            and dns_facts.get("source_ip") == network_facts.get("source_ip")
+        )
+        network_time = network_facts.get("timestamp")
+        dns_time = dns_facts.get("timestamp")
+        chronological_delta = (
+            (network_time - dns_time).total_seconds()
+            if isinstance(network_time, dt.datetime)
+            and isinstance(dns_time, dt.datetime)
+            else None
+        )
+        likely_encrypted_session = (
+            network_facts.get("destination_port") == 443
+            or str(network_facts.get("protocol") or "") in {"tls", "ssl", "https"}
+        )
+        if (
+            destination_ip
+            and destination_ip in set(dns_facts.get("dns_answers") or [])
+            and same_client
+            and likely_encrypted_session
+            and chronological_delta is not None
+            and 0 <= chronological_delta <= 300
+        ):
+            relationships.append({
+                **common,
+                "kind": "dns_answer_to_destination",
+                "confidence": "high",
+                "weight": 70,
+                "direction": direction,
+                "facts": {
+                    "client_ip": dns_facts["source_ip"],
+                    "resolved_ip": destination_ip,
+                    "subsequent_destination_port": network_facts.get(
+                        "destination_port"
+                    ),
+                    "elapsed_seconds": round(chronological_delta, 3),
+                },
+                "interpretation_limit": (
+                    "The same client contacted a DNS answer shortly afterward; "
+                    "the queried name and TLS SNI must be evaluated separately."
+                ),
+            })
+
+    append_dns_destination_link(
+        selected_facts,
+        related_facts,
+        direction="selected_dns_to_related_network",
+    )
+    append_dns_destination_link(
+        related_facts,
+        selected_facts,
+        direction="related_dns_to_selected_network",
+    )
+    return relationships[:6]
 
 
 def correlated_alert_context(
@@ -1128,22 +1429,100 @@ def correlated_alert_context(
         }
 
     placeholders = ",".join("?" for _ in ranked_ids)
+    alert_columns = table_columns(conn, "alerts")
+    optional_columns = (
+        "source_port",
+        "network_protocol",
+    )
+    optional_projection = ", ".join(
+        (
+            name
+            if name in alert_columns
+            else f"NULL AS {name}"
+        )
+        for name in optional_columns
+    )
+    timestamp_projection = (
+        "timestamp"
+        if "timestamp" in alert_columns
+        else "NULL AS timestamp"
+    )
+    time_value_sql = (
+        "COALESCE(last_seen, timestamp, first_seen)"
+        if "timestamp" in alert_columns
+        else "COALESCE(last_seen, first_seen)"
+    )
+    normalized_time_sql = (
+        "julianday(replace(replace("
+        f"{time_value_sql}, '  ', ' '), 'T', ' '))"
+    )
     candidate_rows = rows(
         conn,
         f"""
-        SELECT alert_id, stable_group_id, last_seen, first_seen, rule_name,
-               source_ip, destination_ip, destination_port, transport_protocol,
-               triage_level, triage_score, filter_status, seen_count
-        FROM alerts
-        WHERE stable_group_id IN ({placeholders})
-        ORDER BY replace(replace(COALESCE(last_seen, timestamp, first_seen), 'T', ' '), 'Z', '') DESC,
-                 alert_id DESC
+        WITH ranked_candidates AS (
+          SELECT alert_id, stable_group_id, last_seen, first_seen,
+                 {timestamp_projection}, rule_name, source_ip, destination_ip,
+                 destination_port, transport_protocol, triage_level,
+                 triage_score, filter_status, seen_count,
+                 {optional_projection},
+                 ROW_NUMBER() OVER (
+                   PARTITION BY stable_group_id
+                   ORDER BY {normalized_time_sql} DESC, alert_id DESC
+                 ) AS correlation_rank
+          FROM alerts
+          WHERE stable_group_id IN ({placeholders})
+        )
+        SELECT *
+        FROM ranked_candidates
+        WHERE correlation_rank = 1
+        ORDER BY {normalized_time_sql} DESC, alert_id DESC
+        LIMIT 100
         """,
         ranked_ids,
     )
     representative: dict[str, dict] = {}
     for item in candidate_rows:
         representative.setdefault(str(item["stable_group_id"] or ""), dict(item))
+    # Fetch raw JSON only for the at-most-100 already selected representatives.
+    # Keeping it out of the window query prevents recurring groups from
+    # materializing every historical event body merely to choose one row.
+    representative_ids = [
+        str(item.get("alert_id") or "")
+        for item in representative.values()
+        if item.get("alert_id")
+    ][:100]
+    if representative_ids and {
+        "alert_json",
+        "raw_event_json",
+    }.intersection(alert_columns):
+        raw_placeholders = ",".join("?" for _ in representative_ids)
+        raw_projection = ", ".join(
+            (
+                "CASE WHEN length(CAST("
+                f"{name} AS BLOB)) <= {CORRELATION_MAX_RAW_JSON_BYTES} "
+                f"THEN {name} ELSE NULL END AS {name}"
+            )
+            if name in alert_columns
+            else f"NULL AS {name}"
+            for name in ("alert_json", "raw_event_json")
+        )
+        raw_by_alert_id = {
+            str(item["alert_id"]): dict(item)
+            for item in rows(
+                conn,
+                f"""
+                SELECT alert_id, {raw_projection}
+                FROM alerts
+                WHERE alert_id IN ({raw_placeholders})
+                LIMIT 100
+                """,
+                representative_ids,
+            )
+        }
+        for item in representative.values():
+            raw_item = raw_by_alert_id.get(str(item.get("alert_id") or ""), {})
+            item["alert_json"] = raw_item.get("alert_json")
+            item["raw_event_json"] = raw_item.get("raw_event_json")
 
     analysis_rows = rows(
         conn,
@@ -1161,6 +1540,7 @@ def correlated_alert_context(
         prior_analysis.setdefault(str(item["group_id"] or ""), dict(item))
 
     candidates = []
+    selected_facts = _correlation_row_facts(selected)
     for group_id in ranked_ids:
         item = representative.get(group_id)
         if not item:
@@ -1180,20 +1560,76 @@ def correlated_alert_context(
         time_score, time_reason = correlation_time_bonus(sqlite_value(selected, "last_seen"), item.get("last_seen"))
         persisted_item = data["persisted"] or {}
         persisted_score = int(float(persisted_item.get("correlation_score") or 0))
-        score = min(100, max(evidence_score + time_score, persisted_score))
+        relationships = _correlation_relationships(
+            selected_facts,
+            _correlation_row_facts(item),
+        )
+        relationship_score = max(
+            (
+                safe_int(relationship.get("weight"))
+                + min(time_score, 10)
+                for relationship in relationships
+            ),
+            default=0,
+        )
+        score = min(
+            100,
+            max(
+                evidence_score + time_score,
+                persisted_score,
+                relationship_score,
+            ),
+        )
         if score < min_score:
             continue
         reasons = [f"shared {match['type']}: {match['value']}" for match in shared[:8]]
+        reasons.extend(
+            {
+                "same_community_id": "same collector-observed Community ID",
+                "reversed_five_tuple": "collector-observed reversed five-tuple",
+                "dns_answer_to_destination": (
+                    "same-client DNS answer followed by a connection to that IP"
+                ),
+            }.get(
+                str(relationship.get("kind") or ""),
+                "deterministic alert relationship",
+            )
+            for relationship in relationships
+        )
         if time_reason:
             reasons.append(time_reason)
         if persisted_item:
             reasons.append("previous correlation record exists")
+        public_alert = {
+            key: item.get(key)
+            for key in (
+                "alert_id",
+                "stable_group_id",
+                "last_seen",
+                "first_seen",
+                "rule_name",
+                "source_ip",
+                "source_port",
+                "destination_ip",
+                "destination_port",
+                "network_protocol",
+                "transport_protocol",
+                "triage_level",
+                "triage_score",
+                "filter_status",
+                "seen_count",
+            )
+        }
         candidates.append({
             "group_id": group_id,
             "score": score,
             "correlation_reasons": reasons,
             "shared_observables": shared[:12],
-            "alert": item,
+            "deterministic_relationships": relationships,
+            # The raw JSON columns used for deterministic joins never cross
+            # into the model prompt. Only the existing compact alert projection
+            # and explicit relationship facts are exposed.
+            "alert": public_alert,
             "prior_analysis": prior_analysis.get(group_id),
             "previous_correlation": {
                 "model_status": persisted_item.get("model_status"),
@@ -1212,7 +1648,9 @@ def correlated_alert_context(
         "minimum_score": min_score,
         "usage_guidance": (
             "Treat candidates as correlation leads, not confirmed incidents. Shared observables and timestamps are facts; "
-            "prior_analysis and previous_correlation are earlier hypotheses. Require current evidence before asserting a relationship."
+            "deterministic_relationships are collector-derived joins with explicit interpretation limits; prior_analysis and "
+            "previous_correlation are earlier hypotheses. Require current evidence before asserting incident scope, authorization, "
+            "or maliciousness."
         ),
     }
 

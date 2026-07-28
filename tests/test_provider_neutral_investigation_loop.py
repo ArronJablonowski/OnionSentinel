@@ -703,6 +703,220 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                 position=1,
             )
 
+    def test_normalizer_projects_only_provenance_verified_pack_tuple_fields(
+        self,
+    ) -> None:
+        trusted_tuple = {
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "source_port": 49152,
+            "destination_port": 443,
+            "transport": "tcp",
+            "protocol": "tls",
+            "community_id": "1:trusted-flow=",
+            "rule_id": "2016150",
+        }
+        context = {
+            "permitted_event_tuples": [
+                {
+                    "event_tuple": trusted_tuple,
+                    "role_semantics": "packet_direction",
+                    "source": "trusted_context",
+                    "evidence_ref": "context:event-tuple:flow-1",
+                }
+            ]
+        }
+        request = self.elastic_request("pack-projection")
+        request["parameters"]["pack"] = "zeek_tls"
+        request["parameters"]["observables"]["ips"].append(
+            "198.51.100.20"
+        )
+        request["parameters"]["event_tuple"] = dict(trusted_tuple)
+
+        normalized = self.runner.normalize_investigation_query_request(
+            request,
+            round_number=1,
+            position=1,
+            authorization_context=context,
+        )
+
+        self.assertEqual(
+            normalized["parameters"]["event_tuple"],
+            {
+                key: value
+                for key, value in trusted_tuple.items()
+                if key != "rule_id"
+            },
+        )
+        audit = normalized["normalization"]["event_tuple_projection"]
+        self.assertTrue(audit["provenance_verified"])
+        self.assertTrue(audit["projection_applied"])
+        self.assertEqual(
+            audit["dropped_pack_unavailable_fields"],
+            ["rule_id"],
+        )
+        self.assertEqual(
+            audit["executed_fields"],
+            sorted(set(trusted_tuple).difference({"rule_id"})),
+        )
+        self.assertEqual(
+            audit["match_semantics"],
+            "community_id_cross_sensor",
+        )
+        self.assertRegex(audit["trusted_tuple_digest"], r"^[a-f0-9]{64}$")
+        serialized_audit = json.dumps(audit, sort_keys=True)
+        self.assertNotIn("192.0.2.10", serialized_audit)
+        self.assertNotIn("198.51.100.20", serialized_audit)
+        self.assertNotIn("1:trusted-flow=", serialized_audit)
+
+        request["parameters"]["event_tuple"]["destination_port"] = 8443
+        with self.assertRaisesRegex(
+            self.runner.InvestigationQueryError,
+            "trusted role-aware tuple",
+        ):
+            self.runner.normalize_investigation_query_request(
+                request,
+                round_number=1,
+                position=1,
+                authorization_context=context,
+            )
+
+    def test_system_auth_tuple_projection_drops_unavailable_destination_role(
+        self,
+    ) -> None:
+        trusted_tuple = {
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "source_port": 49152,
+            "destination_port": 22,
+            "transport": "tcp",
+            "protocol": "ssh",
+            "community_id": "1:trusted-ssh=",
+            "rule_id": "ssh-rule",
+        }
+        request = self.elastic_request("system-auth-projection")
+        request["parameters"]["pack"] = "system_auth"
+        request["parameters"]["event_tuple"] = dict(trusted_tuple)
+        normalized = self.runner.normalize_investigation_query_request(
+            request,
+            round_number=1,
+            position=1,
+            authorization_context={
+                "permitted_event_tuples": [
+                    {
+                        "event_tuple": trusted_tuple,
+                        "role_semantics": "packet_direction",
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(
+            normalized["parameters"]["event_tuple"],
+            {
+                "source_ip": "192.0.2.10",
+                "source_port": 49152,
+            },
+        )
+        audit = normalized["normalization"]["event_tuple_projection"]
+        self.assertEqual(
+            audit["dropped_pack_unavailable_fields"],
+            [
+                "community_id",
+                "destination_ip",
+                "destination_port",
+                "protocol",
+                "rule_id",
+                "transport",
+            ],
+        )
+
+    def test_query_loop_executes_only_the_pack_projected_trusted_tuple(
+        self,
+    ) -> None:
+        trusted_tuple = {
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "source_port": 49152,
+            "destination_port": 443,
+            "transport": "tcp",
+            "protocol": "tls",
+            "community_id": "1:loop-trusted-flow=",
+            "rule_id": "2016150",
+        }
+        request = self.elastic_request("loop-pack-projection")
+        request["parameters"]["pack"] = "zeek_tls"
+        request["parameters"]["observables"]["ips"].append(
+            "198.51.100.20"
+        )
+        request["parameters"]["event_tuple"] = dict(trusted_tuple)
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": (
+                        ".ds-logs-suricata.alerts-so-"
+                        "2026.07.24-000001"
+                    ),
+                    "id": "alert-loop-pack-projection",
+                },
+                "permitted_event_tuples": [
+                    {
+                        "event_tuple": trusted_tuple,
+                        "role_semantics": "packet_direction",
+                        "source": "trusted_context",
+                    }
+                ],
+            },
+        }
+        executed: list[dict] = []
+
+        def query_executor(_package, requests, **kwargs):
+            executed.extend(copy.deepcopy(requests))
+            return self.successful_security_onion_round(
+                requests,
+                round_number=kwargs["round_number"],
+            )
+
+        response = self.runner.apply_investigation_query_loop(
+            prompt_package,
+            {"investigation_query_requests": [request]},
+            object(),
+            {
+                "agent_models": {
+                    "soc-analyst": "codex-cli:gpt-5.5:medium"
+                }
+            },
+            "soc-analyst",
+            model_executor=mock.Mock(
+                return_value={"summary": "Projected evidence synthesized."}
+            ),
+            query_executor=query_executor,
+        )
+
+        self.assertEqual(len(executed), 1)
+        self.assertNotIn(
+            "rule_id",
+            executed[0]["parameters"]["event_tuple"],
+        )
+        projection = executed[0]["normalization"][
+            "event_tuple_projection"
+        ]
+        self.assertTrue(projection["provenance_verified"])
+        self.assertEqual(
+            projection["dropped_pack_unavailable_fields"],
+            ["rule_id"],
+        )
+        self.assertEqual(
+            response["_investigation_query_audit"]["rounds"][0][
+                "request_normalizations"
+            ][0]["normalization"]["event_tuple_projection"],
+            projection,
+        )
+
     def test_normalizer_projects_union_parameters_to_selected_backend(self) -> None:
         request = self.elastic_request("project-union")
         request["parameters"].update(
@@ -1356,6 +1570,284 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         )
         execution_position = events.index(("initial_model_executor",))
         self.assertLess(preflight_position, execution_position)
+
+    def test_contract_rejection_gets_one_non_widening_repair_batch(
+        self,
+    ) -> None:
+        route = "codex-cli:gpt-5.5:medium"
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": (
+                        ".ds-logs-suricata.alerts-so-"
+                        "2026.07.24-000001"
+                    ),
+                    "id": "alert-contract-repair",
+                },
+            },
+        }
+        invalid = self.elastic_request("repair-contract")
+        invalid["parameters"]["query_dsl"] = {"match_all": {}}
+        model_calls: list[str] = []
+
+        def model_executor(_route, package, *_args):
+            if "investigation_query_planning_repair" in package:
+                model_calls.append("repair")
+                repair = package["investigation_query_planning_repair"]
+                self.assertEqual(repair["attempt"], 1)
+                self.assertEqual(repair["maximum_attempts"], 1)
+                self.assertEqual(
+                    [item["query_id"] for item in repair["rejected_queries"]],
+                    ["repair-contract"],
+                )
+                return {
+                    "investigation_query_requests": [
+                        self.elastic_request("repair-contract")
+                    ],
+                }
+            model_calls.append("synthesis")
+            return {"summary": "Repair evidence synthesized."}
+
+        query_executor = mock.Mock(
+            side_effect=lambda _package, requests, **kwargs: (
+                self.successful_security_onion_round(
+                    requests,
+                    round_number=kwargs["round_number"],
+                )
+            )
+        )
+        response = self.runner.apply_investigation_query_loop(
+            prompt_package,
+            {"investigation_query_requests": [invalid]},
+            object(),
+            {"agent_models": {"soc-analyst": route}},
+            "soc-analyst",
+            model_executor=model_executor,
+            query_executor=query_executor,
+        )
+
+        query_executor.assert_called_once()
+        self.assertEqual(
+            query_executor.call_args.kwargs["round_number"],
+            2,
+        )
+        self.assertEqual(model_calls, ["repair", "synthesis"])
+        audit = response["_investigation_query_audit"]
+        self.assertTrue(audit["planning_repair_attempted"])
+        self.assertTrue(audit["planning_repair_produced_requests"])
+        self.assertEqual(
+            audit["query_planning_repair"]["attempts"],
+            1,
+        )
+        self.assertEqual(
+            audit["query_planning_repair"]["admitted_repair_requests"],
+            1,
+        )
+        self.assertFalse(
+            audit["query_planning_repair"]["scope_widening_allowed"]
+        )
+        self.assertEqual(
+            audit["query_planning_repair"]["candidates"][0]["trigger"],
+            "contract_rejection",
+        )
+
+    def test_repair_scope_widening_is_rejected_without_second_repair(
+        self,
+    ) -> None:
+        route = "codex-cli:gpt-5.5:medium"
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": (
+                        ".ds-logs-suricata.alerts-so-"
+                        "2026.07.24-000001"
+                    ),
+                    "id": "alert-widening-repair",
+                },
+            },
+        }
+        invalid = self.elastic_request("repair-widening")
+        invalid["parameters"]["query_dsl"] = {"match_all": {}}
+        calls = 0
+
+        def model_executor(_route, package, *_args):
+            nonlocal calls
+            calls += 1
+            if "investigation_query_planning_repair" in package:
+                widened = self.elastic_request("repair-widening")
+                widened["parameters"]["observables"]["ips"].append(
+                    "203.0.113.99"
+                )
+                return {"investigation_query_requests": [widened]}
+            return {"summary": "Widening was blocked."}
+
+        query_executor = mock.Mock()
+        response = self.runner.apply_investigation_query_loop(
+            prompt_package,
+            {"investigation_query_requests": [invalid]},
+            object(),
+            {"agent_models": {"soc-analyst": route}},
+            "soc-analyst",
+            model_executor=model_executor,
+            query_executor=query_executor,
+        )
+
+        query_executor.assert_not_called()
+        self.assertEqual(calls, 2)
+        audit = response["_investigation_query_audit"]
+        self.assertEqual(
+            audit["query_planning_repair"]["attempts"],
+            1,
+        )
+        self.assertEqual(
+            audit["query_planning_repair"]["admitted_repair_requests"],
+            0,
+        )
+        self.assertEqual(
+            audit["query_planning_repair"]["rejected_repair_requests"],
+            1,
+        )
+        repair_result = audit["rounds"][1]["results"][0]
+        self.assertIn("widened", repair_result["error"])
+
+    def test_repair_cannot_drop_original_event_tuple_constraints(
+        self,
+    ) -> None:
+        route = "codex-cli:gpt-5.5:medium"
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": (
+                        ".ds-logs-suricata.alerts-so-"
+                        "2026.07.24-000001"
+                    ),
+                    "id": "alert-tuple-repair",
+                },
+            },
+        }
+        invalid = self.elastic_request("repair-dropped-tuple")
+        invalid["parameters"]["event_tuple"] = {
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "source_port": 49152,
+            "destination_port": 443,
+            "transport": "tcp",
+        }
+        invalid["parameters"]["query_dsl"] = {"match_all": {}}
+
+        def model_executor(_route, package, *_args):
+            if "investigation_query_planning_repair" in package:
+                return {
+                    "investigation_query_requests": [
+                        self.elastic_request("repair-dropped-tuple")
+                    ]
+                }
+            return {"summary": "Tuple widening was blocked."}
+
+        query_executor = mock.Mock()
+        response = self.runner.apply_investigation_query_loop(
+            prompt_package,
+            {"investigation_query_requests": [invalid]},
+            object(),
+            {"agent_models": {"soc-analyst": route}},
+            "soc-analyst",
+            model_executor=model_executor,
+            query_executor=query_executor,
+        )
+
+        query_executor.assert_not_called()
+        audit = response["_investigation_query_audit"]
+        self.assertEqual(
+            audit["query_planning_repair"]["admitted_repair_requests"],
+            0,
+        )
+        self.assertEqual(
+            audit["query_planning_repair"]["rejected_repair_requests"],
+            1,
+        )
+        repair_result = audit["rounds"][1]["results"][0]
+        self.assertIn("event tuple", repair_result["error"])
+
+    def test_invalid_broker_envelope_gets_one_bounded_repair(
+        self,
+    ) -> None:
+        route = "codex-cli:gpt-5.5:medium"
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": (
+                        ".ds-logs-suricata.alerts-so-"
+                        "2026.07.24-000001"
+                    ),
+                    "id": "alert-invalid-broker-response",
+                },
+            },
+        }
+        broker_calls = 0
+
+        def query_executor(_package, requests, **kwargs):
+            nonlocal broker_calls
+            broker_calls += 1
+            if broker_calls == 1:
+                return {"unexpected": "invalid envelope"}
+            return self.successful_security_onion_round(
+                requests,
+                round_number=kwargs["round_number"],
+            )
+
+        def model_executor(_route, package, *_args):
+            if "investigation_query_planning_repair" in package:
+                return {
+                    "investigation_query_requests": [
+                        self.elastic_request("broker-invalid")
+                    ]
+                }
+            return {"summary": "Broker retry synthesized."}
+
+        response = self.runner.apply_investigation_query_loop(
+            prompt_package,
+            {
+                "investigation_query_requests": [
+                    self.elastic_request("broker-invalid")
+                ]
+            },
+            object(),
+            {"agent_models": {"soc-analyst": route}},
+            "soc-analyst",
+            model_executor=model_executor,
+            query_executor=query_executor,
+        )
+
+        self.assertEqual(broker_calls, 2)
+        audit = response["_investigation_query_audit"]
+        self.assertEqual(
+            audit["query_planning_repair"]["attempts"],
+            1,
+        )
+        self.assertEqual(
+            audit["query_planning_repair"]["candidates"][0]["trigger"],
+            "broker_rejection_or_invalid_response",
+        )
+        self.assertEqual(
+            audit["query_planning_repair"]["admitted_repair_requests"],
+            1,
+        )
 
     def test_evaluation_retry_collects_successful_read_only_pivot_and_binds_audit(
         self,

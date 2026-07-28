@@ -111,6 +111,16 @@ def stun_message(message_type: int, *, body: bytes = b"") -> bytes:
     )
 
 
+def dns_query_message(name: str) -> bytes:
+    labels = name.encode("ascii").split(b".")
+    qname = b"".join(bytes([len(label)]) + label for label in labels) + b"\x00"
+    return (
+        struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
+        + qname
+        + struct.pack("!HH", 1, 1)
+    )
+
+
 def alert_row(packet: bytes) -> dict[str, str]:
     raw_rule = (
         'alert icmp $HOME_NET any -> any any '
@@ -226,6 +236,135 @@ class DetectionValidationTests(unittest.TestCase):
         self.assertEqual(parsed["contents"][0]["printable"], "X:")
         self.assertEqual(parsed["contents"][0]["modifiers"]["offset"], "16")
         self.assertEqual(parsed["state_operations"][0]["operation"], "set")
+
+    def test_rule_parser_preserves_dns_sticky_buffer_until_pkt_data(self) -> None:
+        rule = (
+            'alert dns any any -> any 53 (msg:"fixture"; dns.query; dotprefix; '
+            'content:".discord.com"; endswith; bsize:12; pkt_data; '
+            'content:"wire-marker"; sid:999997; rev:1;)'
+        )
+
+        parsed = validation.parse_suricata_rule(rule)
+
+        dns_content, packet_content = parsed["contents"]
+        self.assertEqual(dns_content["buffer"], "dns.query")
+        self.assertTrue(dns_content["modifiers"]["dotprefix"])
+        self.assertEqual(dns_content["modifiers"]["bsize"], "12")
+        self.assertTrue(dns_content["modifiers"]["endswith"])
+        self.assertEqual(packet_content["buffer"], "")
+        self.assertEqual(packet_content["modifiers"], {})
+
+    def test_unsupported_dns_buffer_and_transforms_never_raw_scan(self) -> None:
+        marker = b".discord.com"
+        specs = [
+            {
+                "source": "deployed_rule",
+                "buffer": "dns.query",
+                "modifiers": {},
+            },
+            {
+                "source": "deployed_rule",
+                "buffer": "",
+                "modifiers": {"dotprefix": True},
+            },
+            {
+                "source": "deployed_rule",
+                "buffer": "",
+                "modifiers": {"bsize": "12"},
+            },
+        ]
+
+        for spec in specs:
+            with self.subTest(spec=spec):
+                self.assertIsNone(
+                    validation._content_match_positions(marker, marker, spec)
+                )
+
+    def test_unsupported_dns_buffer_keeps_relative_contents_unknown(self) -> None:
+        marker_values = [
+            (
+                {
+                    "id": "deployed-content-1",
+                    "source": "deployed_rule",
+                    "buffer": "dns.query",
+                    "modifiers": {},
+                },
+                b"discord",
+            ),
+            (
+                {
+                    "id": "deployed-content-2",
+                    "source": "deployed_rule",
+                    "buffer": "dns.query",
+                    "modifiers": {"distance": "0", "within": "4"},
+                },
+                b".com",
+            ),
+        ]
+
+        results = validation._ordered_deployed_content_constraints(
+            b"discord.com",
+            marker_values,
+        )
+
+        self.assertEqual(
+            results,
+            {
+                "deployed-content-1": None,
+                "deployed-content-2": None,
+            },
+        )
+
+    def test_dns_query_wire_name_is_unknown_not_raw_payload_mismatch(self) -> None:
+        rule = (
+            'alert dns any any -> any 53 (msg:"fixture"; dns.query; dotprefix; '
+            'content:".discord.com"; endswith; bsize:12; '
+            'sid:999997; rev:1;)'
+        )
+        payload = dns_query_message("discord.com")
+        self.assertNotIn(b".discord.com", payload)
+        row = stun_alert_row(
+            udp_frame(payload, destination_port=53),
+        )
+        raw = json.loads(row["raw_event_json"])
+        message = json.loads(raw["message"])
+        message["alert"] = {
+            "signature_id": 999997,
+            "rev": 1,
+            "signature": "fixture",
+            "rule": rule,
+        }
+        raw["message"] = json.dumps(message)
+        raw["rule"] = {"rule": rule, "rev": 1, "ruleset": "fixture"}
+        row = {
+            **row,
+            "rule_id": "999997",
+            "raw_event_json": json.dumps(raw),
+            "alert_json": "{}",
+        }
+        context = validation.extract_rule_context({}, raw, "999997")
+
+        features = validation.extract_group_packet_features(
+            [row],
+            validation.marker_specs(context, None),
+        )
+        result = validation.build_detection_validation(context, features, None)
+
+        marker = features["markers"][0]
+        self.assertFalse(marker["constraint_supported"])
+        self.assertEqual(marker["packets_evaluated_for_constraint"], 0)
+        self.assertEqual(marker["packets_violating_constraint"], 0)
+        self.assertEqual(marker["packets_with_marker"], 0)
+        self.assertEqual(marker["observations"], 0)
+        content = next(
+            item
+            for item in result["predicate_results"]
+            if item["id"] == "deployed-content-1"
+        )
+        self.assertEqual(content["field"], "dns.query")
+        self.assertEqual(content["status"], "unknown")
+        self.assertEqual(result["rule_intent_match"], "unknown")
+        self.assertIn("sticky-buffer", content["reason"])
 
     def test_bpfdoor_code_zero_remains_unknown_without_xbit_trace(self) -> None:
         rows = []

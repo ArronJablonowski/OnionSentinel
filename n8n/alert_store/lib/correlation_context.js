@@ -14,9 +14,13 @@ const OBSERVABLE_TYPES = new Set([
   'rule',
   'dataset',
   'protocol',
+  'community_id',
   'host',
   'user',
 ]);
+// A v1 Community ID is a base64 SHA-1 digest. The final base64 character has
+// two zero pad bits and is therefore limited to this canonical alphabet.
+const COMMUNITY_ID_V1_PATTERN = /^1:[A-Za-z0-9+/]{26}[AEIMQUYcgkosw048]=$/;
 
 function nestedField(object, dottedPath) {
   return dottedPath.split('.').reduce((value, key) => value?.[key], object);
@@ -30,6 +34,9 @@ function cleanText(value, maxLength = 512) {
 function normalizedObservableValue(type, value) {
   const text = cleanText(value);
   if (!text) return '';
+  if (type === 'community_id') {
+    return COMMUNITY_ID_V1_PATTERN.test(text) ? text : '';
+  }
   if (['domain', 'hash', 'cve', 'rule', 'dataset', 'protocol', 'host', 'user'].includes(type)) {
     return text.toLowerCase();
   }
@@ -73,6 +80,7 @@ function buildAlertObservables(alert = {}, row = {}, extractIndicators = () => (
   add('rule', row.rule_id ?? alert.rule_id ?? row.rule_name ?? alert.rule_name, 'detection');
   add('dataset', row.event_dataset ?? alert.event_dataset, 'event');
   add('protocol', row.transport_protocol ?? row.network_protocol ?? nestedField(alert, 'network.transport'), 'network');
+  add('community_id', nestedField(alert, 'network.community_id') ?? alert.community_id, 'flow');
   add('host', nestedField(alert, 'host.name'), 'host');
   add('host', nestedField(alert, 'observer.name'), 'sensor');
   add('user', nestedField(alert, 'user.name'), 'user');

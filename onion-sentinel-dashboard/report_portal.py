@@ -6930,6 +6930,7 @@ def update_soc_alert_status(payload: dict) -> tuple[bool, dict]:
             if review.get("final_review_status") in {
                 "disputed_pending_human",
                 "review_required_failed",
+                "review_completed_not_authorized",
             }:
                 return False, {
                     "ok": False,
@@ -7525,6 +7526,7 @@ def _soc_review_defaults() -> dict[str, object]:
         "reviewer_outcome": "",
         "reviewer_confidence": "",
         "reviewer_agreement": "",
+        "automation_authorization": {},
         "material_disagreement": False,
         "disputed_fields": [],
         "final_review_status": "unreviewed",
@@ -7556,6 +7558,12 @@ def _soc_embedded_reviewer(
     reviewer_response = (
         reviewer_response if isinstance(reviewer_response, dict) else {}
     )
+    automation_authorization = embedded.get("automation_authorization")
+    automation_authorization = (
+        automation_authorization
+        if isinstance(automation_authorization, dict)
+        else {}
+    )
     return {
         "status": embedded.get("status") or "not_requested",
         "reviewer_error": str(embedded.get("error") or "")[:1000],
@@ -7564,10 +7572,39 @@ def _soc_embedded_reviewer(
         "reviewer_outcome": reviewer_response.get("detection_outcome") or "",
         "reviewer_confidence": reviewer_response.get("confidence") or "",
         "agreement": comparison.get("agreement") or "",
+        "automation_authorization": automation_authorization,
         "material_disagreement": bool(comparison.get("material_disagreement")),
         "disputed_fields_json": json.dumps(
             comparison.get("disputed_fields") or []
         ),
+    }
+
+
+def _soc_reviewer_automation_authorization(
+    reviewer: dict[str, object],
+) -> dict[str, object]:
+    """Read the explicit decision, with a medium-confidence legacy fallback."""
+    authorization = reviewer.get("automation_authorization")
+    authorization = (
+        authorization if isinstance(authorization, dict) else {}
+    )
+    explicit = isinstance(authorization.get("authorized"), bool)
+    confidence = str(
+        reviewer.get("reviewer_confidence") or ""
+    ).strip().lower()
+    legacy_denied = bool(
+        not explicit
+        and confidence != "high"
+    )
+    return {
+        **authorization,
+        "authorized": (
+            bool(authorization["authorized"])
+            if explicit
+            else not legacy_denied
+        ),
+        "explicitly_recorded": explicit,
+        "legacy_confidence_fallback": legacy_denied,
     }
 
 
@@ -7595,6 +7632,8 @@ def _soc_review_final_status(
         return "review_required_failed"
     if reviewer_status != "completed":
         return "unreviewed"
+    if not _soc_reviewer_automation_authorization(reviewer)["authorized"]:
+        return "review_completed_not_authorized"
     if str(reviewer.get("agreement") or "").strip().lower() == "agreement":
         return "model_consensus"
     return "reviewer_advisory"
@@ -7788,8 +7827,14 @@ def soc_alert_apply_review_metadata(
         embedded_reviewer = _soc_embedded_reviewer(response, analysis)
         if not reviewer:
             reviewer = embedded_reviewer
-        elif not reviewer.get("reviewer_error"):
-            reviewer["reviewer_error"] = embedded_reviewer.get("reviewer_error") or ""
+        else:
+            if not reviewer.get("reviewer_error"):
+                reviewer["reviewer_error"] = (
+                    embedded_reviewer.get("reviewer_error") or ""
+                )
+            reviewer["automation_authorization"] = (
+                embedded_reviewer.get("automation_authorization") or {}
+            )
         adjudication = adjudication_by_analysis_group.get((
             analysis_id,
             stable_by_dashboard.get(dashboard_id) or dashboard_id,
@@ -7859,6 +7904,9 @@ def soc_alert_apply_review_metadata(
             "reviewer_outcome": str(reviewer.get("reviewer_outcome") or ""),
             "reviewer_confidence": str(reviewer.get("reviewer_confidence") or ""),
             "reviewer_agreement": str(reviewer.get("agreement") or ""),
+            "automation_authorization": (
+                _soc_reviewer_automation_authorization(reviewer)
+            ),
             "material_disagreement": material,
             "disputed_fields": disputed_fields[:20],
             "final_review_status": final_status,
@@ -9130,9 +9178,15 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                 embedded_reviewer = _soc_embedded_reviewer(response, analysis)
                 if not reviewer:
                     reviewer = embedded_reviewer
-                elif not reviewer.get("reviewer_error"):
-                    reviewer["reviewer_error"] = (
-                        embedded_reviewer.get("reviewer_error") or ""
+                else:
+                    if not reviewer.get("reviewer_error"):
+                        reviewer["reviewer_error"] = (
+                            embedded_reviewer.get("reviewer_error") or ""
+                        )
+                    reviewer["automation_authorization"] = (
+                        embedded_reviewer.get(
+                            "automation_authorization"
+                        ) or {}
                     )
                 material_disagreement = str(
                     reviewer.get("material_disagreement") or ""
@@ -9241,6 +9295,13 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                         if fallback_review
                         else reviewer.get("agreement")
                     ) or "",
+                    "automation_authorization": (
+                        fallback_review.get("automation_authorization")
+                        if fallback_review
+                        else _soc_reviewer_automation_authorization(
+                            reviewer
+                        )
+                    ) or {},
                     "material_disagreement": material_disagreement,
                     "final_review_status": final_review_status,
                     "adjudication": adjudication,
@@ -9324,8 +9385,14 @@ def soc_incident_review_state(
     embedded_reviewer = _soc_embedded_reviewer(response, analysis)
     if not reviewer:
         reviewer = embedded_reviewer
-    elif not reviewer.get("reviewer_error"):
-        reviewer["reviewer_error"] = embedded_reviewer.get("reviewer_error") or ""
+    else:
+        if not reviewer.get("reviewer_error"):
+            reviewer["reviewer_error"] = (
+                embedded_reviewer.get("reviewer_error") or ""
+            )
+        reviewer["automation_authorization"] = (
+            embedded_reviewer.get("automation_authorization") or {}
+        )
     material = str(reviewer.get("material_disagreement") or "").strip().lower() in {
         "1", "true", "yes",
     }
@@ -9402,6 +9469,9 @@ def soc_incident_review_state(
         "reviewer_outcome": str(reviewer.get("reviewer_outcome") or ""),
         "reviewer_confidence": str(reviewer.get("reviewer_confidence") or ""),
         "reviewer_agreement": str(reviewer.get("agreement") or ""),
+        "automation_authorization": (
+            _soc_reviewer_automation_authorization(reviewer)
+        ),
         "material_disagreement": material,
         "disputed_fields": disputed_fields[:20],
         "final_review_status": final_status,
@@ -9494,6 +9564,9 @@ def render_analyst_review_panel(
     status_labels = {
         "disputed_pending_human": "Disputed — human decision required",
         "review_required_failed": "Independent review failed — human decision required",
+        "review_completed_not_authorized": (
+            "Review completed — automation not authorized; human decision required"
+        ),
         "adjudicated": "Adjudicated",
         "model_consensus": "Primary and reviewer agree",
         "reviewer_advisory": "Reviewer advisory — no material disagreement",
@@ -9535,7 +9608,14 @@ def render_analyst_review_panel(
     disputed_fields = disputed_fields if isinstance(disputed_fields, list) else []
     disputed = final_status == "disputed_pending_human"
     review_failed = final_status == "review_required_failed"
-    role_attr = ' role="alert"' if disputed or review_failed else ""
+    review_not_authorized = (
+        final_status == "review_completed_not_authorized"
+    )
+    role_attr = (
+        ' role="alert"'
+        if disputed or review_failed or review_not_authorized
+        else ""
+    )
     disabled_attr = (
         ' disabled title="Run an analysis before recording an analyst decision"'
         if not analysis_id
@@ -9648,7 +9728,7 @@ def render_analyst_review_panel(
         "</div></div>"
         f"{comparison}{reviewer_error_html}{disputed_fields_html}{adjudication_html}{case_resolution_html}"
         f'<button class="analyst-adjudicate-button" type="button" data-open-adjudication{disabled_attr}>'
-        f'{"Resolve required review" if disputed or review_failed else "Record analyst decision"}'
+        f'{"Resolve required review" if disputed or review_failed or review_not_authorized else "Record analyst decision"}'
         "</button>"
         "</section>"
     )

@@ -540,6 +540,152 @@ const reviewerFailureStatuses = new Set([
   'review_required_failed',
 ]);
 
+function reviewerAutomationAuthorization(responseJson, reviewerConfidence = '') {
+  const response = (
+    responseJson
+    && typeof responseJson === 'object'
+    && !Array.isArray(responseJson)
+  ) ? responseJson : parseJsonObject(responseJson);
+  const secondOpinion = (
+    response._second_opinion
+    && typeof response._second_opinion === 'object'
+    && !Array.isArray(response._second_opinion)
+  ) ? response._second_opinion : {};
+  const authorization = (
+    secondOpinion.automation_authorization
+    && typeof secondOpinion.automation_authorization === 'object'
+    && !Array.isArray(secondOpinion.automation_authorization)
+  ) ? secondOpinion.automation_authorization : {};
+  const hasExplicitDecision = Object.prototype.hasOwnProperty.call(
+    authorization,
+    'authorized',
+  ) && typeof authorization.authorized === 'boolean';
+  const confidence = safeString(reviewerConfidence, 16).toLowerCase();
+  const legacyConfidenceDenial = Boolean(
+    !hasExplicitDecision
+    && confidence !== 'high'
+  );
+  return {
+    authorized: hasExplicitDecision
+      ? authorization.authorized
+      : !legacyConfidenceDenial,
+    explicitly_recorded: hasExplicitDecision,
+    reason: safeString(authorization.reason, 500),
+    reason_code: safeString(authorization.reason_code, 100),
+    legacy_confidence_fallback: legacyConfidenceDenial,
+  };
+}
+
+function conservativeReviewerTelemetry(responseJson, secondOpinionRow = null) {
+  const response = (
+    responseJson
+    && typeof responseJson === 'object'
+    && !Array.isArray(responseJson)
+  ) ? responseJson : parseJsonObject(responseJson);
+  const embedded = (
+    response._second_opinion
+    && typeof response._second_opinion === 'object'
+    && !Array.isArray(response._second_opinion)
+  ) ? response._second_opinion : {};
+  const embeddedPresent = Object.keys(embedded).length > 0;
+  const embeddedReviewer = (
+    embedded.response
+    && typeof embedded.response === 'object'
+    && !Array.isArray(embedded.response)
+  ) ? embedded.response : {};
+  const embeddedComparison = (
+    embedded.comparison
+    && typeof embedded.comparison === 'object'
+    && !Array.isArray(embedded.comparison)
+  ) ? embedded.comparison : {};
+  const rowPresent = Boolean(
+    secondOpinionRow
+    && typeof secondOpinionRow === 'object'
+    && !Array.isArray(secondOpinionRow),
+  );
+  const rowStatus = safeString(secondOpinionRow?.status, 64).toLowerCase();
+  const embeddedStatus = safeString(embedded.status, 64).toLowerCase();
+  const recognizedStatuses = new Set([
+    'completed',
+    ...reviewerFailureStatuses,
+  ]);
+  const corruptRow = Boolean(
+    rowPresent
+    && (!rowStatus || !recognizedStatuses.has(rowStatus)),
+  );
+  const corruptEmbedded = Boolean(
+    embeddedPresent
+    && (!embeddedStatus || !recognizedStatuses.has(embeddedStatus)),
+  );
+  const statusConflict = Boolean(
+    rowStatus
+    && embeddedStatus
+    && rowStatus !== embeddedStatus
+  );
+  const failureStatus = [rowStatus, embeddedStatus].find(
+    (status) => reviewerFailureStatuses.has(status),
+  );
+  const status = (
+    failureStatus
+    || (
+      corruptRow || corruptEmbedded || statusConflict
+        ? 'invalid_response'
+        : (rowStatus || embeddedStatus)
+    )
+  );
+  const rowConfidence = safeString(
+    secondOpinionRow?.reviewer_confidence,
+    16,
+  ).toLowerCase();
+  const embeddedConfidence = safeString(
+    embeddedReviewer.confidence,
+    16,
+  ).toLowerCase();
+  const rowAgreement = safeString(secondOpinionRow?.agreement, 64).toLowerCase();
+  const embeddedAgreement = safeString(
+    embeddedComparison.agreement,
+    64,
+  ).toLowerCase();
+  const rowDisputedFields = parseJsonObject(
+    secondOpinionRow?.disputed_fields_json
+      ? `{"items":${secondOpinionRow.disputed_fields_json}}`
+      : '{"items":[]}',
+  ).items;
+  return {
+    present: rowPresent || embeddedPresent,
+    status,
+    status_conflict: statusConflict,
+    reviewer_confidence: rowConfidence || embeddedConfidence,
+    reviewer_outcome: (
+      safeString(secondOpinionRow?.reviewer_outcome, 100)
+      || safeString(embeddedReviewer.detection_outcome, 100)
+    ),
+    reviewer_error: (
+      safeString(secondOpinionRow?.reviewer_error, 1000)
+      || safeString(embedded.error, 1000)
+      || (
+        corruptRow || corruptEmbedded || statusConflict
+          ? 'reviewer telemetry is missing, corrupt, or conflicts with the immutable analysis response'
+          : ''
+      )
+    ),
+    agreement: rowAgreement || embeddedAgreement,
+    material_disagreement: Boolean(
+      Number(secondOpinionRow?.material_disagreement || 0)
+      || embeddedComparison.material_disagreement
+    ),
+    disputed_fields: (
+      Array.isArray(rowDisputedFields) && rowDisputedFields.length
+        ? rowDisputedFields
+        : (
+          Array.isArray(embeddedComparison.disputed_fields)
+            ? embeddedComparison.disputed_fields
+            : []
+        )
+    ),
+  };
+}
+
 async function signalWorker(wakePath, eventName) {
   if (!wakePath) return false;
   try {
@@ -2956,6 +3102,15 @@ async function backfillAlertObservables() {
     WHERE NOT EXISTS (
       SELECT 1 FROM alert_observables AS observable WHERE observable.alert_id = a.alert_id
     )
+       OR (
+         instr(COALESCE(a.alert_json, ''), '"community_id"') > 0
+         AND NOT EXISTS (
+           SELECT 1
+           FROM alert_observables AS observable
+           WHERE observable.alert_id = a.alert_id
+             AND observable.observable_type = 'community_id'
+         )
+       )
     ORDER BY a.last_seen ASC
   `);
   if (!pending.length) return 0;
@@ -3574,7 +3729,7 @@ async function stableGroupHasPendingHumanReview(stableId) {
   const groupId = safeString(stableId, 64).toLowerCase();
   if (!groupId) return false;
   const analysis = await get(
-    `SELECT analysis_id
+    `SELECT analysis_id, response_json
      FROM ai_analysis_runs
      WHERE (
          group_id = ?
@@ -3590,13 +3745,26 @@ async function stableGroupHasPendingHumanReview(stableId) {
   const analysisId = safeString(analysis?.analysis_id, 160);
   if (!analysisId) return false;
   const secondOpinion = await get(
-    `SELECT status, material_disagreement
+    `SELECT status, material_disagreement, reviewer_confidence
      FROM ai_second_opinion_runs WHERE analysis_id = ?`,
     [analysisId],
   );
+  const reviewer = conservativeReviewerTelemetry(
+    analysis?.response_json,
+    secondOpinion,
+  );
+  const reviewerStatus = reviewer.status;
+  const reviewAuthorization = reviewerAutomationAuthorization(
+    analysis?.response_json,
+    reviewer.reviewer_confidence,
+  );
   const requiresHumanReview = (
-    Boolean(Number(secondOpinion?.material_disagreement || 0))
-    || reviewerFailureStatuses.has(safeString(secondOpinion?.status, 64).toLowerCase())
+    reviewer.material_disagreement
+    || reviewerFailureStatuses.has(reviewerStatus)
+    || (
+      reviewerStatus === 'completed'
+      && reviewAuthorization.authorized === false
+    )
   );
   if (!requiresHumanReview) return false;
   const adjudication = await get(
@@ -3707,21 +3875,34 @@ async function analystReviewState({
       [resolvedCase ? resolvedCase.case_id : stableId, analysisId],
     )
     : null;
-  const materialDisagreement = Boolean(Number(secondOpinion?.material_disagreement || 0));
-  const reviewerAgreement = safeString(secondOpinion?.agreement, 64).toLowerCase();
-  const reviewerStatus = safeString(secondOpinion?.status, 64).toLowerCase();
+  const primaryResponse = parseJsonObject(analysis?.response_json);
+  const reviewer = conservativeReviewerTelemetry(
+    primaryResponse,
+    secondOpinion,
+  );
+  const materialDisagreement = reviewer.material_disagreement;
+  const reviewerAgreement = reviewer.agreement;
+  const reviewerStatus = reviewer.status;
+  const reviewAuthorization = reviewerAutomationAuthorization(
+    primaryResponse,
+    reviewer.reviewer_confidence,
+  );
   let finalStatus = 'unreviewed';
   if (adjudication) finalStatus = 'adjudicated';
   else if (materialDisagreement) finalStatus = 'disputed_pending_human';
   else if (reviewerFailureStatuses.has(reviewerStatus)) finalStatus = 'review_required_failed';
-  else if (reviewerStatus === 'completed' && reviewerAgreement === 'agreement') {
+  else if (
+    reviewerStatus === 'completed'
+    && reviewAuthorization.authorized === false
+  ) {
+    finalStatus = 'review_completed_not_authorized';
+  } else if (reviewerStatus === 'completed' && reviewerAgreement === 'agreement') {
     finalStatus = 'model_consensus';
   } else if (reviewerStatus === 'completed') {
     finalStatus = 'reviewer_advisory';
   }
   const primaryOutcome = secondOpinion?.primary_outcome || analysis?.detection_outcome || '';
   const primaryConfidence = secondOpinion?.primary_confidence || analysis?.confidence || '';
-  const primaryResponse = parseJsonObject(analysis?.response_json);
 
   return {
     dashboard_group_id: dashboardId,
@@ -3739,17 +3920,14 @@ async function analystReviewState({
     primary_activity_disposition: safeString(primaryResponse.activity_disposition, 64),
     primary_handling: safeString(primaryResponse.handling, 64),
     primary_duplicate_of: primaryResponse.duplicate_of ?? null,
-    reviewer_status: secondOpinion?.status || 'not_requested',
-    reviewer_error: secondOpinion?.reviewer_error || '',
-    reviewer_outcome: secondOpinion?.reviewer_outcome || '',
-    reviewer_confidence: secondOpinion?.reviewer_confidence || '',
-    agreement: secondOpinion?.agreement || '',
+    reviewer_status: reviewer.status || 'not_requested',
+    reviewer_error: reviewer.reviewer_error,
+    reviewer_outcome: reviewer.reviewer_outcome,
+    reviewer_confidence: reviewer.reviewer_confidence,
+    automation_authorization: reviewAuthorization,
+    agreement: reviewer.agreement,
     material_disagreement: materialDisagreement,
-    disputed_fields: parseJsonObject(
-      secondOpinion?.disputed_fields_json
-        ? `{"items":${secondOpinion.disputed_fields_json}}`
-        : '{"items":[]}',
-    ).items || [],
+    disputed_fields: reviewer.disputed_fields,
     final_status: finalStatus,
     adjudication: adjudication || null,
   };
@@ -4000,7 +4178,11 @@ async function updateIncidentCaseStatus(payload) {
       dashboardGroupId: incident.dashboard_group_id,
       caseId,
     });
-    if (['disputed_pending_human', 'review_required_failed'].includes(review.final_status)) {
+    if ([
+      'disputed_pending_human',
+      'review_required_failed',
+      'review_completed_not_authorized',
+    ].includes(review.final_status)) {
       const error = new Error('required independent review needs explicit analyst adjudication before resolution');
       error.statusCode = 409;
       throw error;
@@ -4105,7 +4287,11 @@ async function updateAnalystStatus(payload) {
     if (status === 'suppressed' && !reason) throw new Error('suppression reason is required');
     if (status === 'suppressed') {
       const review = await analystReviewState({dashboardGroupId: groupId});
-      if (['disputed_pending_human', 'review_required_failed'].includes(review.final_status)) {
+      if ([
+        'disputed_pending_human',
+        'review_required_failed',
+        'review_completed_not_authorized',
+      ].includes(review.final_status)) {
         const error = new Error('required independent review needs explicit analyst adjudication before suppression');
         error.statusCode = 409;
         throw error;

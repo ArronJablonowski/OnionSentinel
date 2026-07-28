@@ -104,6 +104,232 @@ class AiCorrelationContextTests(unittest.TestCase):
         self.assertEqual(candidate["prior_analysis"]["bluf"], "Prior hypothesis")
         self.assertTrue(any("shared domain" in reason for reason in candidate["correlation_reasons"]))
 
+    def test_correlation_context_promotes_same_community_and_reversed_flow(self) -> None:
+        self.conn.executescript(
+            """
+            ALTER TABLE alerts ADD COLUMN source_port INTEGER;
+            ALTER TABLE alerts ADD COLUMN network_protocol TEXT;
+            ALTER TABLE alerts ADD COLUMN alert_json TEXT;
+            ALTER TABLE alerts ADD COLUMN raw_event_json TEXT;
+            """
+        )
+        community_id = "1:gVOca2cr2eIKwoIKZ8QnLwW2gqU="
+        self.conn.execute(
+            """
+            UPDATE alerts
+            SET source_port = 51000,
+                network_protocol = 'tls',
+                alert_json = ?
+            WHERE alert_id = 'selected'
+            """,
+            [json.dumps({"network": {"community_id": community_id}})],
+        )
+        self.conn.execute(
+            """
+            UPDATE alerts
+            SET source_ip = '198.51.100.20',
+                destination_ip = '10.0.0.10',
+                source_port = 443,
+                destination_port = 51000,
+                network_protocol = 'tls',
+                last_seen = '2026-07-15  09:59:59-06:00',
+                alert_json = ?
+            WHERE alert_id = 'related'
+            """,
+            [json.dumps({"network": {"community_id": community_id}})],
+        )
+        self.conn.commit()
+
+        selected = self.conn.execute(
+            "SELECT * FROM alerts WHERE alert_id = 'selected'"
+        ).fetchone()
+        context = self.builder.correlated_alert_context(
+            self.conn,
+            selected,
+            limit=8,
+            min_score=15,
+        )
+
+        relationships = context["candidates"][0][
+            "deterministic_relationships"
+        ]
+        self.assertEqual(
+            {item["kind"] for item in relationships},
+            {"same_community_id", "reversed_five_tuple"},
+        )
+        self.assertGreaterEqual(context["candidates"][0]["score"], 85)
+        self.assertNotIn("alert_json", context["candidates"][0]["alert"])
+        self.assertNotIn("raw_event_json", context["candidates"][0]["alert"])
+        self.assertTrue(
+            all(
+                "correlation lead" in item["interpretation_limit"]
+                for item in relationships
+            )
+        )
+
+    def test_correlation_context_promotes_bounded_dns_to_tls_link(self) -> None:
+        self.conn.executescript(
+            """
+            ALTER TABLE alerts ADD COLUMN source_port INTEGER;
+            ALTER TABLE alerts ADD COLUMN network_protocol TEXT;
+            ALTER TABLE alerts ADD COLUMN alert_json TEXT;
+            ALTER TABLE alerts ADD COLUMN raw_event_json TEXT;
+            """
+        )
+        self.conn.execute(
+            """
+            UPDATE alerts
+            SET last_seen = '2026-07-15  09:29:58-06:00',
+                network_protocol = 'dns',
+                alert_json = ?
+            WHERE alert_id = 'selected'
+            """,
+            [json.dumps({
+                "dns": {
+                    "answers": [{"data": "203.0.113.30"}],
+                    "question": {"name": "example.test"},
+                }
+            })],
+        )
+        self.conn.execute(
+            """
+            UPDATE alerts
+            SET source_ip = '10.0.0.10',
+                destination_ip = '203.0.113.30',
+                destination_port = 443,
+                source_port = 52000,
+                network_protocol = 'tls',
+                last_seen = '2026-07-15  09:30:00-06:00',
+                alert_json = ?
+            WHERE alert_id = 'related'
+            """,
+            [json.dumps({"tls": {"server": {"name": "example.test"}}})],
+        )
+        self.conn.commit()
+
+        selected = self.conn.execute(
+            "SELECT * FROM alerts WHERE alert_id = 'selected'"
+        ).fetchone()
+        context = self.builder.correlated_alert_context(
+            self.conn,
+            selected,
+            limit=8,
+            min_score=15,
+        )
+
+        relationship = next(
+            item
+            for item in context["candidates"][0][
+                "deterministic_relationships"
+            ]
+            if item["kind"] == "dns_answer_to_destination"
+        )
+        self.assertEqual(relationship["facts"]["resolved_ip"], "203.0.113.30")
+        self.assertEqual(relationship["facts"]["elapsed_seconds"], 2.0)
+        self.assertEqual(
+            relationship["direction"],
+            "selected_dns_to_related_network",
+        )
+
+    def test_correlation_rejects_placeholder_and_stale_flow_joins(self) -> None:
+        self.conn.executescript(
+            """
+            ALTER TABLE alerts ADD COLUMN source_port INTEGER;
+            ALTER TABLE alerts ADD COLUMN network_protocol TEXT;
+            ALTER TABLE alerts ADD COLUMN alert_json TEXT;
+            ALTER TABLE alerts ADD COLUMN raw_event_json TEXT;
+            """
+        )
+        self.conn.execute(
+            """
+            UPDATE alerts
+            SET source_port = 51000,
+                network_protocol = 'tls',
+                last_seen = '2026-01-01  10:00:00-06:00',
+                alert_json = ?
+            WHERE alert_id = 'selected'
+            """,
+            [json.dumps({"network": {"community_id": "-"}})],
+        )
+        self.conn.execute(
+            """
+            UPDATE alerts
+            SET source_ip = '198.51.100.20',
+                destination_ip = '10.0.0.10',
+                source_port = 443,
+                destination_port = 51000,
+                network_protocol = 'tls',
+                last_seen = '2026-07-01  10:00:00-06:00',
+                alert_json = ?
+            WHERE alert_id = 'related'
+            """,
+            [json.dumps({"network": {"community_id": "-"}})],
+        )
+        self.conn.commit()
+
+        selected = self.conn.execute(
+            "SELECT * FROM alerts WHERE alert_id = 'selected'"
+        ).fetchone()
+        context = self.builder.correlated_alert_context(
+            self.conn,
+            selected,
+            limit=8,
+            min_score=15,
+        )
+
+        self.assertEqual(
+            context["candidates"][0]["deterministic_relationships"],
+            [],
+        )
+
+    def test_representative_selection_orders_offsets_chronologically(self) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO alerts
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "related-newer-utc",
+                "b" * 20,
+                "2026-11-01  00:00:00-07:00",
+                "2026-11-01  01:10:00-07:00",
+                "2026-11-01  01:10:00-07:00",
+                "Rule B",
+                "10.0.0.10",
+                "203.0.113.31",
+                443,
+                "tcp",
+                "medium",
+                55,
+                "accepted",
+                1,
+            ),
+        )
+        self.conn.execute(
+            """
+            UPDATE alerts
+            SET last_seen = '2026-11-01  01:50:00-06:00',
+                timestamp = '2026-11-01  01:50:00-06:00'
+            WHERE alert_id = 'related'
+            """
+        )
+        self.conn.commit()
+
+        selected = self.conn.execute(
+            "SELECT * FROM alerts WHERE alert_id = 'selected'"
+        ).fetchone()
+        context = self.builder.correlated_alert_context(
+            self.conn,
+            selected,
+            limit=8,
+            min_score=15,
+        )
+
+        self.assertEqual(
+            context["candidates"][0]["alert"]["alert_id"],
+            "related-newer-utc",
+        )
+
     def test_runner_repairs_missing_correlation_output(self) -> None:
         response = {
             key: value for key, value in self.runner.DEFAULT_RESPONSE_VALUES.items()
@@ -127,13 +353,19 @@ class AiCorrelationContextTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS alert_correlations", source)
         self.assertIn("parsedUrl.pathname === '/analysis/result'", source)
         self.assertIn("withSqliteWriteGate(() => withImmediateTransaction", source)
+        self.assertIn("observable.observable_type = 'community_id'", source)
         self.assertNotIn("sqlite3.connect", runner)
 
     def test_observable_module_normalizes_alert_facts(self) -> None:
         script = f"""
           const m = require({json.dumps(str(CORRELATION_MODULE))});
           const rows = m.buildAlertObservables(
-            {{source: {{ip: '10.0.0.10'}}, destination: {{ip: '198.51.100.2', port: 443}}, rule_name: 'Rule A'}},
+            {{
+              source: {{ip: '10.0.0.10'}},
+              destination: {{ip: '198.51.100.2', port: 443}},
+              network: {{community_id: '1:gVOca2cr2eIKwoIKZ8QnLwW2gqU='}},
+              rule_name: 'Rule A'
+            }},
             {{alert_id: 'a', source_ip: '10.0.0.10', destination_ip: '198.51.100.2', destination_port: 443, rule_name: 'Rule A'}},
             () => ({{domains: ['Example.COM'], public_ips: ['198.51.100.2'], urls: [], hashes: [], cves: []}})
           );
@@ -145,6 +377,92 @@ class AiCorrelationContextTests(unittest.TestCase):
         self.assertIn(("domain", "example.com"), values)
         self.assertIn(("port", "443"), values)
         self.assertIn(("rule", "rule a"), values)
+        self.assertIn(
+            ("community_id", "1:gVOca2cr2eIKwoIKZ8QnLwW2gqU="),
+            values,
+        )
+
+    def test_community_id_observable_can_create_a_candidate(self) -> None:
+        self.conn.execute(
+            "DELETE FROM alert_observables WHERE group_id IN (?, ?)",
+            ("a" * 20, "b" * 20),
+        )
+        community_id = "1:gVOca2cr2eIKwoIKZ8QnLwW2gqU="
+        self.conn.executemany(
+            "INSERT INTO alert_observables VALUES (?, ?, ?, ?, ?)",
+            [
+                (
+                    "a" * 20,
+                    "community_id",
+                    community_id,
+                    "flow",
+                    "alert",
+                ),
+                (
+                    "b" * 20,
+                    "community_id",
+                    community_id,
+                    "flow",
+                    "alert",
+                ),
+            ],
+        )
+        self.conn.commit()
+
+        selected = self.conn.execute(
+            "SELECT * FROM alerts WHERE alert_id = 'selected'"
+        ).fetchone()
+        context = self.builder.correlated_alert_context(
+            self.conn,
+            selected,
+            limit=8,
+            min_score=15,
+        )
+
+        self.assertEqual(
+            [item["group_id"] for item in context["candidates"]],
+            ["b" * 20],
+        )
+        self.assertEqual(
+            context["candidates"][0]["shared_observables"][0]["type"],
+            "community_id",
+        )
+
+    def test_observable_module_rejects_placeholder_community_id(self) -> None:
+        self.assertIsNone(
+            self.builder.COMMUNITY_ID_V1_RE.fullmatch(
+                "1:gVOca2cr2eIKwoIKZ8QnLwW2gqV="
+            )
+        )
+        script = f"""
+          const m = require({json.dumps(str(CORRELATION_MODULE))});
+          process.stdout.write(JSON.stringify({{
+            placeholder: m.normalizedObservableValue('community_id', '-'),
+            malformed: m.normalizedObservableValue('community_id', '1:not-base64'),
+            noncanonical: m.normalizedObservableValue(
+              'community_id',
+              '1:gVOca2cr2eIKwoIKZ8QnLwW2gqV='
+            ),
+            canonical: m.normalizedObservableValue(
+              'community_id',
+              '1:gVOca2cr2eIKwoIKZ8QnLwW2gqU='
+            )
+          }}));
+        """
+        completed = subprocess.run(
+            ["node", "-e", script],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        values = json.loads(completed.stdout)
+        self.assertEqual(values["placeholder"], "")
+        self.assertEqual(values["malformed"], "")
+        self.assertEqual(values["noncanonical"], "")
+        self.assertEqual(
+            values["canonical"],
+            "1:gVOca2cr2eIKwoIKZ8QnLwW2gqU=",
+        )
 
     def test_historical_artifact_payload_is_bounded_and_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

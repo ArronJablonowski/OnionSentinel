@@ -19,6 +19,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -51,7 +52,22 @@ from investigation_query_contract import (  # noqa: E402
     SAFE_DOMAIN_RE as INVESTIGATION_SAFE_DOMAIN_RE,
     InvestigationQueryContractError,
     authorize_investigation_query_request,
+    canonical_digest as investigation_query_canonical_digest,
+    pack_event_tuple_fields,
 )
+try:  # The pinned compatibility-v1 runtime predates role-aware semantics.
+    from investigation_query_contract import tuple_match_semantics  # noqa: E402
+except ImportError:  # pragma: no cover - exercised through the v1 runtime test
+    def tuple_match_semantics(
+        _pack_name: str,
+        event_tuple: dict[str, Any] | None,
+        _role_semantics: str | None,
+    ) -> str:
+        return (
+            "event_native_exact"
+            if event_tuple
+            else "observable_exact_any_field"
+        )
 from live_osquery_client import (  # noqa: E402
     DEFAULT_CONFIG_FILE as DEFAULT_LIVE_OSQUERY_CONFIG_FILE,
     LiveOsqueryClientError,
@@ -773,7 +789,21 @@ def parse_mactop_sample(
     return gpu_temp_value, memory_percent, power_watts, cpu_percent, gpu_percent, cpu_temp_value, soc_temp_value
 
 
-def read_mactop_system_sample() -> tuple[
+class ResourceSamplingCancelled(RuntimeError):
+    """Raised inside a bounded sampler when its owning monitor is stopping."""
+
+
+def _raise_if_resource_sampling_cancelled(
+    cancel_event: threading.Event | None,
+) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise ResourceSamplingCancelled("system resource sampling cancelled")
+
+
+def read_mactop_system_sample(
+    *,
+    cancel_event: threading.Event | None = None,
+) -> tuple[
     float | None,
     float | None,
     float | None,
@@ -786,13 +816,23 @@ def read_mactop_system_sample() -> tuple[
     command = mactop_command()
     if not command:
         return None, None, None, None, None, None, None, "mactop not found"
+    if cancel_event is not None and cancel_event.is_set():
+        return None, None, None, None, None, None, None, "mactop sampling cancelled"
     try:
         proc = run_bounded_command(
             [*command, "--headless", "--format", "json", "--count", "1"],
             timeout_seconds=8,
             max_stdout_bytes=2 * 1024 * 1024,
             max_stderr_bytes=256 * 1024,
+            progress_callback=(
+                lambda: _raise_if_resource_sampling_cancelled(cancel_event)
+                if cancel_event is not None
+                else None
+            ),
+            progress_interval_seconds=0.1,
         )
+    except ResourceSamplingCancelled:
+        return None, None, None, None, None, None, None, "mactop sampling cancelled"
     except FileNotFoundError:
         return None, None, None, None, None, None, None, f"{command[0]} not found"
     except BoundedProcessError as exc:
@@ -808,7 +848,10 @@ def read_mactop_system_sample() -> tuple[
     return None, None, None, None, None, None, None, f"{command[0]} returned no parseable mactop metrics"
 
 
-def read_gpu_temperature_celsius() -> tuple[float | None, str]:
+def read_gpu_temperature_celsius(
+    *,
+    cancel_event: threading.Event | None = None,
+) -> tuple[float | None, str]:
     """Read GPU temperature if the Mac exposes it to an unprivileged command."""
     commands: list[list[str]] = []
     custom = os.environ.get("SOC_GPU_TEMP_COMMAND", "").strip()
@@ -820,13 +863,23 @@ def read_gpu_temperature_celsius() -> tuple[float | None, str]:
     ])
     notes: list[str] = []
     for command in commands:
+        if cancel_event is not None and cancel_event.is_set():
+            return None, "GPU temperature sampling cancelled"
         try:
             proc = run_bounded_command(
                 command,
                 timeout_seconds=4,
                 max_stdout_bytes=2 * 1024 * 1024,
                 max_stderr_bytes=256 * 1024,
+                progress_callback=(
+                    lambda: _raise_if_resource_sampling_cancelled(cancel_event)
+                    if cancel_event is not None
+                    else None
+                ),
+                progress_interval_seconds=0.1,
             )
+        except ResourceSamplingCancelled:
+            return None, "GPU temperature sampling cancelled"
         except FileNotFoundError:
             notes.append(f"{command[0]} not found")
             continue
@@ -862,8 +915,15 @@ class SystemResourceMonitor:
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("system resource monitor was already started")
+        self._stop.clear()
         self._sample_once()
-        self._thread = threading.Thread(target=self._run, name="system-resource-monitor", daemon=True)
+        self._thread = threading.Thread(
+            target=self._run,
+            name="system-resource-monitor",
+            daemon=False,
+        )
         self._thread.start()
 
     def _run(self) -> None:
@@ -873,9 +933,19 @@ class SystemResourceMonitor:
             self._sample_once()
 
     def _sample_once(self) -> None:
-        gpu_value, memory_value, power_value, cpu_value, gpu_percent, cpu_temp, soc_temp, note = read_mactop_system_sample()
+        if self._stop.is_set():
+            return
+        gpu_value, memory_value, power_value, cpu_value, gpu_percent, cpu_temp, soc_temp, note = read_mactop_system_sample(
+            cancel_event=self._stop,
+        )
+        if self._stop.is_set():
+            return
         if gpu_value is None:
-            gpu_value, fallback_note = read_gpu_temperature_celsius()
+            gpu_value, fallback_note = read_gpu_temperature_celsius(
+                cancel_event=self._stop,
+            )
+            if self._stop.is_set():
+                return
             if gpu_value is not None:
                 note = f"{note}; {fallback_note}"
         self.note = note
@@ -896,8 +966,15 @@ class SystemResourceMonitor:
 
     def stop(self) -> None:
         self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=1)
+        thread = self._thread
+        if thread is None:
+            return
+        thread.join(timeout=12)
+        if thread.is_alive():
+            raise RuntimeError(
+                "system resource monitor did not terminate after cancellation"
+            )
+        self._thread = None
 
 
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
@@ -4519,6 +4596,137 @@ def normalize_investigation_event_tuple(value: Any) -> dict[str, Any]:
     return clean
 
 
+def project_investigation_event_tuple(
+    value: Any,
+    *,
+    pack: str,
+    authorization_context: Any = None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Project a trusted model tuple onto fields authenticated by ``pack``.
+
+    The model-visible capability currently exposes complete role-aware tuples.
+    A model may therefore copy an alert-only field such as ``rule_id`` into a
+    Zeek request even though that field is not available in the selected pack.
+    Projection is safe only after every supplied value matches one collector-
+    owned tuple.  Audit metadata contains field names and provenance digests,
+    never the hidden tuple values that established authority.
+
+    ``authorization_context=None`` preserves the standalone normalizer API for
+    callers that perform broker authorization later.  The iterative runner
+    always supplies its trusted local context and therefore always takes the
+    provenance-checked path.
+    """
+    requested = normalize_investigation_event_tuple(value)
+    if authorization_context is None:
+        return requested, None
+    if not isinstance(authorization_context, dict):
+        raise InvestigationQueryError(
+            "trusted investigation authorization context is invalid"
+        )
+    permitted = authorization_context.get("permitted_event_tuples")
+    if not isinstance(permitted, list) or not permitted:
+        raise InvestigationQueryError(
+            "event_tuple projection requires trusted role-aware tuple provenance"
+        )
+
+    candidates: list[
+        tuple[str, str, dict[str, Any], dict[str, Any]]
+    ] = []
+    for entry in permitted:
+        if not isinstance(entry, dict):
+            continue
+        trusted_value = entry.get("event_tuple")
+        try:
+            trusted_tuple = normalize_investigation_event_tuple(trusted_value)
+        except InvestigationQueryError:
+            continue
+        if not all(
+            trusted_tuple.get(field) == supplied
+            for field, supplied in requested.items()
+        ):
+            continue
+        provenance = {
+            "event_tuple": trusted_tuple,
+            "role_semantics": _query_text(
+                entry.get("role_semantics"),
+                80,
+            ),
+            "source": _query_text(entry.get("source"), 80),
+            "evidence_ref": _query_text(entry.get("evidence_ref"), 255),
+        }
+        candidates.append((
+            # Match the broker's deterministic selection over the complete
+            # trusted entry without exposing that entry in model-facing audit.
+            investigation_query_canonical_digest(entry),
+            investigation_query_canonical_digest({
+                "event_tuple": trusted_tuple,
+                "role_semantics": provenance["role_semantics"],
+            }),
+            trusted_tuple,
+            provenance,
+        ))
+    if not candidates:
+        raise InvestigationQueryError(
+            "event_tuple does not match one trusted role-aware tuple"
+        )
+
+    (
+        trusted_provenance_digest,
+        trusted_tuple_digest,
+        trusted_tuple,
+        provenance,
+    ) = min(
+        candidates,
+        key=lambda item: item[0],
+    )
+    allowed_fields = set(pack_event_tuple_fields(pack))
+    projected = {
+        field: supplied
+        for field, supplied in requested.items()
+        if field in allowed_fields
+    }
+    if not projected:
+        raise InvestigationQueryError(
+            f"event_tuple has no fields authenticated by pack {pack}"
+        )
+    if (
+        {"source_ip", "destination_ip"}.intersection(trusted_tuple)
+        and not {"source_ip", "destination_ip"}.intersection(projected)
+    ):
+        raise InvestigationQueryError(
+            f"event_tuple projection for pack {pack} must retain a trusted "
+            "source or destination IP role"
+        )
+
+    requested_fields = sorted(requested)
+    executed_fields = sorted(projected)
+    role_semantics = provenance["role_semantics"]
+    audit: dict[str, Any] = {
+        "schema": "onion-sentinel-event-tuple-projection-v1",
+        "pack": pack,
+        "provenance_verified": True,
+        "projection_applied": requested_fields != executed_fields,
+        "requested_fields": requested_fields,
+        "executed_fields": executed_fields,
+        "dropped_pack_unavailable_fields": sorted(
+            set(requested_fields).difference(executed_fields)
+        ),
+        "trusted_tuple_digest": trusted_tuple_digest,
+        "trusted_provenance_digest": trusted_provenance_digest,
+        "role_semantics": role_semantics,
+        "match_semantics": tuple_match_semantics(
+            pack,
+            projected,
+            role_semantics,
+        ),
+    }
+    if provenance["source"]:
+        audit["trusted_source"] = provenance["source"]
+    if provenance["evidence_ref"]:
+        audit["trusted_evidence_ref"] = provenance["evidence_ref"]
+    return projected, audit
+
+
 def normalize_investigation_query_window(
     value: Any,
     *,
@@ -4639,6 +4847,7 @@ def normalize_investigation_query_request(
     round_number: int,
     position: int,
     time_envelope: Any = None,
+    authorization_context: Any = None,
 ) -> dict[str, Any]:
     """Normalize one request without accepting executable provider syntax."""
     if not isinstance(raw, dict):
@@ -4668,6 +4877,7 @@ def normalize_investigation_query_request(
     )
 
     normalized_parameters: dict[str, Any]
+    event_tuple_projection_audit: dict[str, Any] | None = None
     if backend in {"elastic", "oql"}:
         if purpose not in INVESTIGATION_SECURITY_ONION_PURPOSES:
             raise InvestigationQueryError(
@@ -4719,8 +4929,13 @@ def normalize_investigation_query_request(
             "aggregation": aggregation,
         }
         if "event_tuple" in parameters:
-            normalized_parameters["event_tuple"] = normalize_investigation_event_tuple(
-                parameters["event_tuple"]
+            (
+                normalized_parameters["event_tuple"],
+                event_tuple_projection_audit,
+            ) = project_investigation_event_tuple(
+                parameters["event_tuple"],
+                pack=pack,
+                authorization_context=authorization_context,
             )
     elif backend == "osquery":
         target_alias = _query_text(parameters.get("target_alias"), 64)
@@ -4780,6 +4995,10 @@ def normalize_investigation_query_request(
         normalization["dropped_cross_backend_parameters"] = dropped_parameters
     if backend in {"elastic", "oql"} and window_audit["adjusted"]:
         normalization["window_adjustment"] = window_audit
+    if event_tuple_projection_audit is not None:
+        normalization["event_tuple_projection"] = (
+            event_tuple_projection_audit
+        )
     normalized = {
         "query_id": query_id,
         "backend": backend,
@@ -7161,6 +7380,233 @@ def investigation_request_semantic_digest(request: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def investigation_query_repair_scope(
+    raw: Any,
+    *,
+    round_number: int,
+    position: int,
+    time_envelope: Any = None,
+) -> dict[str, Any] | None:
+    """Recover a non-widenable Security Onion scope from an invalid request.
+
+    Only the declarative scope fields are considered. Unknown syntax and the
+    event tuple remain rejected; this helper merely determines whether one
+    later model response can safely correct the rejected shape without gaining
+    a new backend, pack, purpose, time range, observable, aggregation, or row
+    budget.
+    """
+    if not isinstance(raw, dict):
+        return None
+    backend = _query_text(raw.get("backend"), 32).lower()
+    parameters = raw.get("parameters")
+    if backend not in {"elastic", "oql"} or not isinstance(parameters, dict):
+        return None
+    bounded_raw = {
+        "query_id": raw.get("query_id"),
+        "backend": backend,
+        "purpose": raw.get("purpose"),
+        "parameters": {
+            key: parameters.get(key)
+            for key in (
+                "pack",
+                "window",
+                "observables",
+                "size",
+                "aggregation",
+            )
+            if key in parameters
+        },
+    }
+    try:
+        normalized = normalize_investigation_query_request(
+            bounded_raw,
+            round_number=round_number,
+            position=position,
+            time_envelope=time_envelope,
+        )
+    except InvestigationQueryError:
+        return None
+    scope = {
+        "query_id": normalized["query_id"],
+        "backend": normalized["backend"],
+        "purpose": normalized["purpose"],
+        "pack": normalized["parameters"]["pack"],
+        "window": dict(normalized["parameters"]["window"]),
+        "observables": {
+            kind: list(values)
+            for kind, values in normalized["parameters"]["observables"].items()
+        },
+        "size": normalized["parameters"]["size"],
+        "aggregation": normalized["parameters"]["aggregation"],
+    }
+    if "event_tuple" in parameters:
+        try:
+            scope["event_tuple"] = normalize_investigation_event_tuple(
+                parameters["event_tuple"]
+            )
+        except InvestigationQueryError:
+            # An invalid tuple cannot contribute any authority to its repair.
+            # A later request may omit it but may not invent a replacement.
+            pass
+    return scope
+
+
+def validate_investigation_query_repair_scope(
+    request: dict[str, Any],
+    scope: dict[str, Any],
+) -> None:
+    """Reject a proposed repair that widens any original query dimension."""
+    parameters = request.get("parameters")
+    if not isinstance(parameters, dict):
+        raise InvestigationQueryError("query repair parameters are invalid")
+    exact_pairs = (
+        ("query_id", request.get("query_id"), scope.get("query_id")),
+        ("backend", request.get("backend"), scope.get("backend")),
+        ("purpose", request.get("purpose"), scope.get("purpose")),
+        ("pack", parameters.get("pack"), scope.get("pack")),
+        (
+            "aggregation",
+            parameters.get("aggregation"),
+            scope.get("aggregation"),
+        ),
+    )
+    widened = [
+        label
+        for label, repaired, original in exact_pairs
+        if repaired != original
+    ]
+    if widened:
+        raise InvestigationQueryError(
+            "query repair changed fixed scope field(s): "
+            + ", ".join(widened)
+        )
+
+    repaired_window = parameters.get("window")
+    original_window = scope.get("window")
+    if not isinstance(repaired_window, dict) or not isinstance(original_window, dict):
+        raise InvestigationQueryError("query repair window is invalid")
+    if (
+        _query_utc(repaired_window.get("start"), "query repair window start")
+        < _query_utc(original_window.get("start"), "original query window start")
+        or _query_utc(repaired_window.get("end"), "query repair window end")
+        > _query_utc(original_window.get("end"), "original query window end")
+    ):
+        raise InvestigationQueryError(
+            "query repair widened the rejected request time window"
+        )
+
+    repaired_observables = parameters.get("observables")
+    original_observables = scope.get("observables")
+    if (
+        not isinstance(repaired_observables, dict)
+        or not isinstance(original_observables, dict)
+    ):
+        raise InvestigationQueryError("query repair observables are invalid")
+    for kind in ("ips", "domains", "hosts", "users"):
+        if not set(repaired_observables.get(kind) or []).issubset(
+            set(original_observables.get(kind) or [])
+        ):
+            raise InvestigationQueryError(
+                "query repair widened the rejected request observables"
+            )
+    if int(parameters.get("size") or 0) > int(scope.get("size") or 0):
+        raise InvestigationQueryError(
+            "query repair increased the rejected request row budget"
+        )
+
+    repaired_tuple = parameters.get("event_tuple")
+    original_tuple = scope.get("event_tuple")
+    if repaired_tuple != original_tuple:
+        raise InvestigationQueryError(
+            "query repair widened or changed the rejected event tuple"
+        )
+
+
+def investigation_query_repair_failures(
+    round_result: Any,
+) -> dict[str, str]:
+    """Return broker contract/invalid-response failures by exact query ID."""
+    if not isinstance(round_result, dict):
+        return {}
+    failures: dict[str, str] = {}
+    repairable_statuses = {
+        "rejected",
+        "invalid",
+        "invalid_request",
+        "invalid_response",
+        "contract_error",
+    }
+
+    def record(value: Any, *, fallback: str = "") -> None:
+        if not isinstance(value, dict):
+            return
+        status = _query_text(value.get("status"), 40).lower()
+        query_id = _query_text(value.get("query_id"), 64)
+        if query_id and status in repairable_statuses:
+            failures.setdefault(
+                query_id,
+                _query_text(value.get("error"), 500)
+                or fallback
+                or f"broker returned {status}",
+            )
+
+    for result in (
+        round_result.get("results")
+        if isinstance(round_result.get("results"), list)
+        else []
+    ):
+        if not isinstance(result, dict):
+            continue
+        record(result)
+        for item in (
+            result.get("trusted_query_audit")
+            if isinstance(result.get("trusted_query_audit"), list)
+            else []
+        ):
+            record(item, fallback="broker query audit reported an invalid response")
+        evidence = result.get("evidence")
+        if isinstance(evidence, dict):
+            for item in (
+                evidence.get("results")
+                if isinstance(evidence.get("results"), list)
+                else []
+            ):
+                record(item, fallback="broker returned invalid model evidence")
+    return failures
+
+
+def investigation_query_repair_prompt_entry(
+    scope: dict[str, Any],
+    *,
+    reason: str,
+    trigger: str,
+) -> dict[str, Any]:
+    """Expose only the rejected model scope and value-free tuple guidance."""
+    event_tuple = (
+        scope.get("event_tuple")
+        if isinstance(scope.get("event_tuple"), dict)
+        else {}
+    )
+    entry = {
+        "query_id": scope["query_id"],
+        "backend": scope["backend"],
+        "purpose": scope["purpose"],
+        "pack": scope["pack"],
+        "window": scope["window"],
+        "observables": scope["observables"],
+        "maximum_size": scope["size"],
+        "aggregation": scope["aggregation"],
+        "original_event_tuple_fields": sorted(event_tuple),
+        "pack_event_tuple_fields": sorted(
+            pack_event_tuple_fields(scope["pack"])
+        ),
+        "trigger": trigger,
+        "error": _query_text(reason, 500),
+        "scope_digest": investigation_query_canonical_digest(scope),
+    }
+    return entry
+
+
 def apply_investigation_query_loop(
     prompt_package: dict[str, Any],
     primary_response: dict[str, Any],
@@ -7195,6 +7641,13 @@ def apply_investigation_query_loop(
         and boolean_setting(os.environ.get(EVALUATION_FREEZE_MEMORY_ENV))
     )
     query_planning_retry_attempted = False
+    query_planning_repair_attempted = False
+    query_planning_repair_produced_requests = False
+    query_planning_repair_admitted_requests = 0
+    query_planning_repair_rejected_requests = 0
+    query_planning_repair_candidates: list[dict[str, Any]] = []
+    query_planning_repair_not_attempted_reason = ""
+    pending_repair_scopes: dict[str, dict[str, Any]] = {}
     effective_max_rounds = MAX_INVESTIGATION_QUERY_ROUNDS
     effective_max_queries = MAX_INVESTIGATION_QUERIES_TOTAL
 
@@ -7363,6 +7816,9 @@ def apply_investigation_query_loop(
             if round_number == 1
             else pop_investigation_query_requests(response)
         )
+        repair_round = bool(pending_repair_scopes)
+        if repair_round:
+            query_planning_repair_produced_requests = bool(raw_requests)
         if not raw_requests:
             break
         observe_harness(
@@ -7381,6 +7837,7 @@ def apply_investigation_query_loop(
         total_requests += len(admitted_raw)
         normalized: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
+        round_repair_scopes: dict[str, dict[str, Any]] = {}
         seen_ids: set[str] = set()
         local_context = prompt_package.get("_local_investigation_query_context")
         trusted_time_envelope = (
@@ -7390,14 +7847,36 @@ def apply_investigation_query_loop(
         )
         for position, raw in enumerate(admitted_raw, 1):
             try:
+                if repair_round:
+                    repaired_query_id = (
+                        _query_text(raw.get("query_id"), 64)
+                        if isinstance(raw, dict)
+                        else ""
+                    )
+                    if repaired_query_id not in pending_repair_scopes:
+                        raise InvestigationQueryError(
+                            "query repair emitted an unrequested query_id"
+                        )
                 request = normalize_investigation_query_request(
                     raw,
                     round_number=round_number,
                     position=position,
                     time_envelope=trusted_time_envelope,
+                    authorization_context=local_context,
                 )
+                if repair_round:
+                    validate_investigation_query_repair_scope(
+                        request,
+                        pending_repair_scopes[request["query_id"]],
+                    )
                 if request["query_id"] in seen_ids:
-                    request["query_id"] = f"round-{round_number}-query-{position}"
+                    if repair_round:
+                        raise InvestigationQueryError(
+                            "query repair repeated a rejected query_id"
+                        )
+                    request["query_id"] = (
+                        f"round-{round_number}-query-{position}"
+                    )
                 seen_ids.add(request["query_id"])
                 if not investigation_backend_available(
                     prompt_package,
@@ -7418,7 +7897,10 @@ def apply_investigation_query_loop(
                     )
                     continue
                 semantic_digest = investigation_request_semantic_digest(request)
-                if semantic_digest in seen_semantic_requests:
+                if (
+                    semantic_digest in seen_semantic_requests
+                    and not repair_round
+                ):
                     ignored_requests += 1
                     rejected.append(
                         {
@@ -7488,15 +7970,39 @@ def apply_investigation_query_loop(
                 seen_semantic_requests.add(semantic_digest)
                 normalized.append(request)
             except InvestigationQueryError as exc:
+                rejected_query_id = (
+                    _query_text(raw.get("query_id"), 64)
+                    if isinstance(raw, dict)
+                    else ""
+                )
+                if not INVESTIGATION_QUERY_ID_RE.fullmatch(rejected_query_id):
+                    rejected_query_id = (
+                        f"round-{round_number}-query-{position}"
+                    )
                 rejected.append(
                     {
-                        "query_id": f"round-{round_number}-query-{position}",
+                        "query_id": rejected_query_id,
                         "backend": "contract",
                         "status": "rejected",
                         "read_only": True,
                         "error": str(exc)[:1000],
                     }
                 )
+                if not repair_round:
+                    repair_scope = investigation_query_repair_scope(
+                        raw,
+                        round_number=round_number,
+                        position=position,
+                        time_envelope=trusted_time_envelope,
+                    )
+                    if repair_scope is not None:
+                        round_repair_scopes[
+                            repair_scope["query_id"]
+                        ] = {
+                            "scope": repair_scope,
+                            "reason": str(exc)[:1000],
+                            "trigger": "contract_rejection",
+                        }
         if normalized:
             observe_harness(
                 lambda: harness_runtime.preflight_query_batch(
@@ -7521,6 +8027,31 @@ def apply_investigation_query_loop(
                 round_number=round_number,
                 live_osquery_config=live_osquery_config,
             )
+            if (
+                not isinstance(round_result, dict)
+                or not isinstance(round_result.get("results"), list)
+                or not isinstance(round_result.get("requests"), list)
+            ):
+                round_result = {
+                    "schema": INVESTIGATION_QUERY_RESULT_SCHEMA,
+                    "round": round_number,
+                    "generated_at": project_now(),
+                    "requests": copy.deepcopy(normalized),
+                    "results": [
+                        {
+                            "query_id": request["query_id"],
+                            "backend": request["backend"],
+                            "status": "invalid_response",
+                            "read_only": True,
+                            "error": (
+                                "query broker returned an invalid result "
+                                "envelope"
+                            ),
+                        }
+                        for request in normalized
+                    ],
+                    "audit": [],
+                }
         else:
             round_result = {
                 "schema": INVESTIGATION_QUERY_RESULT_SCHEMA,
@@ -7530,6 +8061,30 @@ def apply_investigation_query_loop(
                 "results": [],
                 "audit": [],
             }
+        broker_repair_failures = investigation_query_repair_failures(
+            round_result
+        )
+        if not repair_round:
+            normalized_by_id = {
+                request["query_id"]: request
+                for request in normalized
+            }
+            for query_id, reason in broker_repair_failures.items():
+                request = normalized_by_id.get(query_id)
+                if request is None:
+                    continue
+                repair_scope = investigation_query_repair_scope(
+                    request,
+                    round_number=round_number,
+                    position=1,
+                    time_envelope=trusted_time_envelope,
+                )
+                if repair_scope is not None:
+                    round_repair_scopes[query_id] = {
+                        "scope": repair_scope,
+                        "reason": reason,
+                        "trigger": "broker_rejection_or_invalid_response",
+                    }
         round_result.setdefault("results", []).extend(rejected)
         rounds.append(round_result)
         observe_harness(
@@ -7537,6 +8092,13 @@ def apply_investigation_query_loop(
             if harness_runtime is not None
             else None
         )
+        if repair_round:
+            query_planning_repair_admitted_requests += len(normalized)
+            query_planning_repair_rejected_requests += len(rejected)
+            query_planning_repair_rejected_requests += len(
+                broker_repair_failures
+            )
+            pending_repair_scopes = {}
 
         local_context = prompt_package.get("_local_investigation_query_context")
         if isinstance(local_context, dict):
@@ -7573,16 +8135,107 @@ def apply_investigation_query_loop(
                     known.add((item["kind"], item["value"]))
             local_context["discovered_observables"] = existing
 
-        remaining_rounds = effective_max_rounds - round_number
+        remaining_rounds = (
+            0
+            if repair_round
+            else effective_max_rounds - round_number
+        )
         remaining_queries = effective_max_queries - total_requests
+        repair_scheduled = False
+        if round_repair_scopes and not query_planning_repair_attempted:
+            bounded_candidate_items = list(
+                round_repair_scopes.values()
+            )[:MAX_INVESTIGATION_QUERIES_PER_ROUND]
+            query_planning_repair_candidates = [
+                {
+                    "query_id": item["scope"]["query_id"],
+                    "backend": item["scope"]["backend"],
+                    "pack": item["scope"]["pack"],
+                    "trigger": item["trigger"],
+                    "scope_digest": (
+                        investigation_query_canonical_digest(
+                            item["scope"]
+                        )
+                    ),
+                    "original_event_tuple_fields": sorted(
+                        (
+                            item["scope"].get("event_tuple")
+                            if isinstance(
+                                item["scope"].get("event_tuple"),
+                                dict,
+                            )
+                            else {}
+                        )
+                    ),
+                    "error_digest": canonical_payload_digest(
+                        item["reason"]
+                    ),
+                }
+                for item in bounded_candidate_items
+            ]
+            candidate_items = bounded_candidate_items[
+                :max(0, remaining_queries)
+            ]
+            if candidate_items and remaining_rounds > 0:
+                query_planning_repair_attempted = True
+                repair_scheduled = True
+                pending_repair_scopes = {
+                    item["scope"]["query_id"]: item["scope"]
+                    for item in candidate_items
+                }
+                prompt_package["investigation_query_planning_repair"] = {
+                    "attempt": 1,
+                    "maximum_attempts": 1,
+                    "remaining_query_rounds": 1,
+                    "remaining_queries": min(
+                        len(candidate_items),
+                        remaining_queries,
+                    ),
+                    "instruction": (
+                        "Repair only the listed rejected query IDs. Preserve "
+                        "each backend, purpose, pack, aggregation, and exact "
+                        "observable set; the repaired time window must be equal "
+                        "or narrower, size must not increase, and any valid "
+                        "event_tuple must be preserved exactly. "
+                        "Do not emit any unrelated query. This is the only "
+                        "planning repair attempt."
+                    ),
+                    "rejected_queries": [
+                        investigation_query_repair_prompt_entry(
+                            item["scope"],
+                            reason=item["reason"],
+                            trigger=item["trigger"],
+                        )
+                        for item in candidate_items
+                    ],
+                }
+            elif remaining_rounds <= 0:
+                query_planning_repair_not_attempted_reason = (
+                    "no query round remained within the configured call "
+                    "budget"
+                )
+            elif remaining_queries <= 0:
+                query_planning_repair_not_attempted_reason = (
+                    "no query request budget remained"
+                )
         prompt_package["investigation_follow_up"] = {
             "round": round_number,
             "remaining_rounds": remaining_rounds,
             "remaining_queries": remaining_queries,
             "instruction": (
-                "Use the newly collected, audited evidence to update hypotheses and the final conclusion. "
-                "Request another narrow investigation_query_requests batch only if a material discriminator "
-                "remains and both budgets are positive."
+                (
+                    "Return corrected investigation_query_requests only for "
+                    "investigation_query_planning_repair.rejected_queries, "
+                    "within every listed non-widening constraint."
+                )
+                if repair_scheduled
+                else (
+                    "Use the newly collected, audited evidence to update "
+                    "hypotheses and the final conclusion. Request another "
+                    "narrow investigation_query_requests batch only if a "
+                    "material discriminator remains and both budgets are "
+                    "positive."
+                )
             ),
         }
         maximum_prompt_bytes = int(
@@ -7609,15 +8262,22 @@ def apply_investigation_query_loop(
             if harness_runtime is not None
             else None
         )
-        model_call_id = f"primary-followup-{round_number}"
+        model_call_id = (
+            "primary-query-planning-repair-1"
+            if repair_scheduled
+            else f"primary-followup-{round_number}"
+        )
+        model_call_purpose = (
+            "primary query-planning repair 1 of 1"
+            if repair_scheduled
+            else f"primary investigation follow-up round {round_number}"
+        )
         observe_harness(
             lambda: harness_runtime.preflight_model_call(
                 call_id=model_call_id,
                 input_value=prompt_package,
                 requested_route=route,
-                purpose=(
-                    f"primary investigation follow-up round {round_number}"
-                ),
+                purpose=model_call_purpose,
             )
             if harness_runtime is not None
             else None
@@ -7629,7 +8289,7 @@ def apply_investigation_query_loop(
             observe_harness(
                 lambda: harness_runtime.model_call(
                     call_id=model_call_id,
-                    purpose=f"primary investigation follow-up round {round_number}",
+                    purpose=model_call_purpose,
                     requested_route=route,
                     response={},
                     input_value=prompt_package,
@@ -7643,7 +8303,7 @@ def apply_investigation_query_loop(
         observe_harness(
             lambda: harness_runtime.model_call(
                 call_id=model_call_id,
-                purpose=f"primary investigation follow-up round {round_number}",
+                purpose=model_call_purpose,
                 requested_route=route,
                 response=response,
                 input_value=prompt_package,
@@ -7652,6 +8312,11 @@ def apply_investigation_query_loop(
             if harness_runtime is not None
             else None
         )
+        if repair_scheduled:
+            prompt_package.pop(
+                "investigation_query_planning_repair",
+                None,
+            )
         if evaluation_query_guarantee and str(
             response.get("_analysis_model_route") or ""
         ).strip() != route:
@@ -7704,6 +8369,39 @@ def apply_investigation_query_loop(
                 "attempts": 1 if query_planning_retry_attempted else 0,
                 "maximum_attempts": 1,
                 "evaluation_only": query_planning_retry_attempted,
+            },
+            "planning_repair_attempted": (
+                query_planning_repair_attempted
+            ),
+            "planning_repair_produced_requests": (
+                query_planning_repair_produced_requests
+            ),
+            "query_planning_repair": {
+                "attempted": query_planning_repair_attempted,
+                "attempts": (
+                    1 if query_planning_repair_attempted else 0
+                ),
+                "maximum_attempts": 1,
+                "used_existing_follow_up_call": (
+                    query_planning_repair_attempted
+                ),
+                "scope_widening_allowed": False,
+                "candidate_count": len(
+                    query_planning_repair_candidates
+                ),
+                "candidates": query_planning_repair_candidates,
+                "produced_requests": (
+                    query_planning_repair_produced_requests
+                ),
+                "admitted_repair_requests": (
+                    query_planning_repair_admitted_requests
+                ),
+                "rejected_repair_requests": (
+                    query_planning_repair_rejected_requests
+                ),
+                "not_attempted_reason": (
+                    query_planning_repair_not_attempted_reason
+                ),
             },
             "limits": {
                 "max_rounds": effective_max_rounds,
@@ -10025,6 +10723,71 @@ def second_opinion_memory_eligibility(second_opinion: Any) -> tuple[bool, str]:
     return True, "high-confidence independent agreement"
 
 
+def reviewer_automation_authorization(
+    primary_response: dict[str, Any],
+    reviewer_response: dict[str, Any],
+    comparison: dict[str, Any],
+) -> dict[str, Any]:
+    """Separate a valid review decision from authorization to automate it."""
+    reviewer_confidence = str(
+        reviewer_response.get("confidence") or ""
+    ).strip().lower()
+    try:
+        reviewer_score = float(
+            reviewer_response.get("confidence_score") or 0.0
+        )
+    except (TypeError, ValueError):
+        reviewer_score = 0.0
+    high_confidence = bool(
+        reviewer_confidence == "high"
+        and reviewer_score >= CONFIDENCE_HIGH_THRESHOLD
+    )
+    material_disagreement = bool(
+        comparison.get("material_disagreement")
+    )
+    authorized = bool(high_confidence and not material_disagreement)
+    full_agreement = comparison.get("agreement") == "agreement"
+    if material_disagreement:
+        reason_code = "material_disagreement"
+        reason = (
+            "Primary and reviewer materially disagree; human adjudication "
+            "is required."
+        )
+    elif not high_confidence:
+        reason_code = "reviewer_confidence_below_automation_threshold"
+        reason = (
+            "The review completed validly but did not reach the grounded "
+            "high-confidence threshold required for automation."
+        )
+    else:
+        reason_code = "high_confidence_nonmaterial_agreement"
+        reason = (
+            "The high-confidence reviewer did not materially disagree with "
+            "the primary disposition."
+        )
+    return {
+        "schema": "onion-sentinel-reviewer-automation-authorization-v1",
+        "authorized": authorized,
+        "reason_code": reason_code,
+        "reason": reason,
+        "reviewer_confidence": reviewer_confidence,
+        "reviewer_confidence_score": round(reviewer_score, 3),
+        "required_confidence": "high",
+        "required_confidence_score": CONFIDENCE_HIGH_THRESHOLD,
+        "agreement": str(comparison.get("agreement") or ""),
+        "material_disagreement": material_disagreement,
+        "consequential_automation_requested": (
+            _consequential_model_conclusion(primary_response)
+        ),
+        "automatic_closure_authorized": authorized,
+        "containment_authorized": authorized,
+        "tuning_authorized": authorized,
+        "memory_writeback_authorized": bool(
+            authorized and full_agreement
+        ),
+    }
+
+
 def memory_writeback_plan(
     candidates: Any,
     *,
@@ -10243,6 +11006,43 @@ def apply_review_required_gate(
     return response
 
 
+def apply_review_completed_automation_gate(
+    response: dict[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """Block controls without mislabeling a valid uncertain review as failed."""
+    response["final_disposition_status"] = (
+        "review_completed_not_authorized"
+    )
+    if str(response.get("handling") or "").strip().lower() == "contain":
+        response["handling"] = "investigate"
+    response["tuning_recommendation"] = "needs_more_data"
+    response["tuning_reason"] = (
+        "Automatic tuning is blocked because the completed independent "
+        f"review did not authorize automation: {reason[:500]}"
+    )
+    response["recommended_tuning_actions"] = []
+    response["memory_candidates"] = []
+    controls = (
+        dict(response.get("_automation_controls"))
+        if isinstance(response.get("_automation_controls"), dict)
+        else {}
+    )
+    controls.update(
+        {
+            "automatic_closure_blocked": True,
+            "containment_blocked": True,
+            "tuning_blocked": True,
+            "memory_writeback_blocked": True,
+            "requires_human_review": True,
+            "reason": reason[:500],
+        }
+    )
+    response["_automation_controls"] = controls
+    return response
+
+
 def apply_saved_response_review_gate(
     prompt_package: dict[str, Any],
     primary_response: dict[str, Any],
@@ -10307,6 +11107,10 @@ def apply_configured_second_opinion(
     response. Its failure is captured in the artifact instead of failing or
     re-queuing an otherwise complete primary analysis.
     """
+    # Reviewer provenance is collector-owned. A primary model must never be
+    # able to smuggle a forged reviewer result through a path on which no
+    # independent review is actually invoked.
+    primary_response.pop("_second_opinion", None)
     trigger = second_opinion_trigger(primary_response, prompt_package)
     if not trigger:
         primary_response["final_disposition_status"] = "primary_not_reviewed"
@@ -10378,6 +11182,10 @@ def apply_configured_second_opinion(
         prompt_package,
         hosted=model_route_is_hosted(route, settings),
     )
+    evaluation_harness_run = bool(
+        harness_runtime is not None
+        and boolean_setting(os.environ.get(EVALUATION_FREEZE_MEMORY_ENV))
+    )
 
     def observe_harness(call: Callable[[], Any]) -> Any:
         if harness_runtime is None:
@@ -10385,7 +11193,10 @@ def apply_configured_second_opinion(
         try:
             return call()
         except Exception as exc:
-            if harness_runtime.policy.mode == "enforce":
+            if (
+                harness_runtime.policy.mode == "enforce"
+                or evaluation_harness_run
+            ):
                 raise
             print(
                 "warning: Onion Sentinel harness shadow reviewer observation "
@@ -10500,6 +11311,11 @@ def apply_configured_second_opinion(
         secondary["second_opinion_recommended"] = False
         secondary["hosted_second_opinion_recommended"] = False
         comparison = compare_analysis_results(primary_response, secondary)
+        automation_authorization = reviewer_automation_authorization(
+            primary_response,
+            secondary,
+            comparison,
+        )
         primary_response["_second_opinion"] = {
             "status": "completed",
             "trigger": trigger,
@@ -10510,6 +11326,7 @@ def apply_configured_second_opinion(
             "validation_failures": validation_failures,
             "comparison": comparison,
             "response": secondary,
+            "automation_authorization": automation_authorization,
         }
         if comparison["material_disagreement"]:
             primary_response["final_disposition_status"] = "disputed_pending_human"
@@ -10529,25 +11346,30 @@ def apply_configured_second_opinion(
                 "requires_human_review": True,
                 "reason": "material second-opinion disagreement",
             }
-        elif (
-            str(secondary.get("confidence") or "").strip().lower() != "high"
-            or float(secondary.get("confidence_score") or 0.0) < CONFIDENCE_HIGH_THRESHOLD
-        ):
-            reason = (
-                "the independent reviewer completed but did not reach grounded "
-                "high confidence, so it cannot authorize consequential automation"
-            )
-            apply_review_required_gate(
+        elif not automation_authorization["authorized"]:
+            apply_review_completed_automation_gate(
                 primary_response,
-                status="review_required_failed",
-                reason=reason,
+                reason=automation_authorization["reason"],
             )
-            primary_response["_second_opinion"]["status"] = "invalid"
-            primary_response["_second_opinion"]["error"] = reason
         elif comparison["agreement"] == "agreement":
             primary_response["final_disposition_status"] = "corroborated"
         else:
             primary_response["final_disposition_status"] = "primary_with_advisory_disagreement"
+        if not automation_authorization["memory_writeback_authorized"]:
+            controls = (
+                dict(primary_response.get("_automation_controls"))
+                if isinstance(primary_response.get("_automation_controls"), dict)
+                else {}
+            )
+            memory_reason = (
+                "Primary memory writeback requires full high-confidence "
+                "agreement from the independent reviewer."
+            )
+            controls["memory_writeback_blocked"] = True
+            controls["memory_writeback_reason"] = memory_reason
+            if not str(controls.get("reason") or "").strip():
+                controls["reason"] = memory_reason
+            primary_response["_automation_controls"] = controls
     except (SystemExit, ReviewerValidationError) as exc:
         apply_review_required_gate(
             primary_response,
@@ -12768,6 +13590,14 @@ def render_markdown(prompt_package: dict[str, Any], response: dict[str, Any], ge
         if isinstance(second_opinion.get("comparison"), dict)
         else {}
     )
+    reviewer_authorization = (
+        second_opinion.get("automation_authorization")
+        if isinstance(
+            second_opinion.get("automation_authorization"),
+            dict,
+        )
+        else {}
+    )
     disputed_fields = [
         (
             f"{item.get('field', 'unknown')}: primary={item.get('primary', 'n/a')!s}; "
@@ -12909,6 +13739,14 @@ def render_markdown(prompt_package: dict[str, Any], response: dict[str, Any], ge
         f"- **Runtime:** {second_opinion.get('runtime_seconds', 'n/a')} second(s)",
         f"- **Agreement:** {comparison.get('agreement', 'n/a')}",
         f"- **Comparison:** {comparison.get('summary', 'n/a')}",
+        (
+            "- **Automation authorized by review:** "
+            f"{reviewer_authorization.get('authorized', 'n/a')}"
+        ),
+        (
+            "- **Automation authorization reason:** "
+            f"{reviewer_authorization.get('reason', 'n/a')}"
+        ),
         f"- **Detection outcome:** {secondary_response.get('detection_outcome', 'n/a')}",
         f"- **Confidence:** {secondary_response.get('confidence', 'n/a')}",
         f"- **BLUF:** {secondary_response.get('bluf', 'n/a')}",
