@@ -5957,6 +5957,70 @@ def _validated_discovered_observables(
     return discovered
 
 
+def investigation_query_prompt_error_category(reason: Any) -> str:
+    """Return a fixed model-visible category for a query failure.
+
+    Broker and validator errors may contain rejected observables, query text,
+    or attacker-controlled log content. The raw text belongs in durable audit
+    telemetry, never in a follow-up model prompt.
+    """
+    message = _query_text(reason, 1000).lower()
+    if any(
+        marker in message
+        for marker in (
+            "unauthorized",
+            "forbidden",
+            "denied",
+            "approval",
+            "not permitted",
+        )
+    ):
+        return "authorization_denied"
+    if "timeout" in message or "timed out" in message:
+        return "execution_timeout"
+    if any(
+        marker in message
+        for marker in (
+            "disabled",
+            "unavailable",
+            "unadvertised",
+            "connection refused",
+        )
+    ):
+        return "backend_unavailable"
+    if "already executed" in message or "duplicate" in message:
+        return "duplicate_request"
+    if any(
+        marker in message
+        for marker in (
+            "invalid response",
+            "invalid result",
+            "invalid envelope",
+            "malformed response",
+        )
+    ):
+        return "invalid_broker_response"
+    if any(
+        marker in message
+        for marker in (
+            "contract",
+            "required",
+            "unsupported",
+            "event tuple",
+            "widen",
+            "scope",
+            "query_dsl",
+        )
+    ):
+        return "request_contract_rejection"
+    return "query_execution_failure"
+
+
+def investigation_query_prompt_error_digest(reason: Any) -> str:
+    """Bind the omitted raw query failure without exposing it to the model."""
+    return canonical_payload_digest(_query_text(reason, 1000))
+
+
 def _prompt_project_investigation_rows(
     value: Any,
     state: dict[str, int | bool],
@@ -5964,8 +6028,24 @@ def _prompt_project_investigation_rows(
     """Copy broker evidence while enforcing one cumulative row budget."""
     if isinstance(value, dict):
         output: dict[str, Any] = {}
+        has_query_error = bool(
+            "error" in value
+            and (
+                "query_id" in value
+                or (
+                    "status" in value
+                    and ("backend" in value or "read_only" in value)
+                )
+            )
+        )
         for raw_key, child in value.items():
             key = str(raw_key)
+            if has_query_error and key.lower() in {
+                "error",
+                "error_digest",
+                "error_sha256",
+            }:
+                continue
             if key.lower() in {"hits", "rows", "records"} and isinstance(child, list):
                 remaining = max(
                     0,
@@ -5983,6 +6063,13 @@ def _prompt_project_investigation_rows(
                     state["truncated"] = True
                 continue
             output[key] = _prompt_project_investigation_rows(child, state)
+        if has_query_error:
+            output["error"] = investigation_query_prompt_error_category(
+                value.get("error")
+            )
+            output["error_sha256"] = investigation_query_prompt_error_digest(
+                value.get("error")
+            )
         return output
     if isinstance(value, list):
         return [
@@ -6049,7 +6136,15 @@ def _compact_prompt_trusted_query_audit(
     }
     for key, limit in text_limits.items():
         if key in value:
-            summary[key] = _query_text(value.get(key), limit)
+            if key == "error":
+                summary[key] = investigation_query_prompt_error_category(
+                    value.get(key)
+                )
+                summary["error_sha256"] = (
+                    investigation_query_prompt_error_digest(value.get(key))
+                )
+            else:
+                summary[key] = _query_text(value.get(key), limit)
 
     for key in (
         "semantic_valid",
@@ -7601,7 +7696,8 @@ def investigation_query_repair_prompt_entry(
             pack_event_tuple_fields(scope["pack"])
         ),
         "trigger": trigger,
-        "error": _query_text(reason, 500),
+        "error": investigation_query_prompt_error_category(reason),
+        "error_sha256": investigation_query_prompt_error_digest(reason),
         "scope_digest": investigation_query_canonical_digest(scope),
     }
     return entry
@@ -9981,11 +10077,15 @@ def reviewer_repair_guidance(validation_message: str) -> list[str]:
     if (
         "foreign observables" in message
         or "omitted from observables_used" in message
+        or "foreign domain or FQDN" in message
+        or "foreign IP address" in message
+        or "foreign community ID" in message
     ):
         guidance.append(
             "Observable correction: enumerate each material IP, domain, FQDN, "
             "or Community ID exactly once using its exact kind and value from "
-            "review_contract.allowed_observables; omit every other value."
+            "review_contract.allowed_observables; omit every other value. Do "
+            "not repeat, quote, negate, or discuss any rejected observable."
         )
     if "outside the current contract" in message or "no current corroborating" in message:
         guidance.append(
@@ -10000,6 +10100,47 @@ def reviewer_repair_guidance(validation_message: str) -> list[str]:
             "response fields."
         )
     return guidance[:4]
+
+
+def reviewer_repair_error_category(validation_message: str) -> str:
+    """Describe a validator failure without echoing rejected observables.
+
+    The deterministic validator message is retained in bounded harness
+    telemetry, but it may contain the exact foreign value. Sending that value
+    back to the model can cause a repair response to quote it and fail again.
+    """
+    message = str(validation_message or "")[:REVIEW_VALIDATION_MESSAGE_MAX]
+    if (
+        "foreign observables" in message
+        or "foreign domain or FQDN" in message
+        or "foreign IP address" in message
+        or "foreign community ID" in message
+    ):
+        return (
+            "The response referenced one or more observables outside "
+            "review_contract.allowed_observables. Use only exact allowlisted "
+            "kind/value pairs and do not quote or discuss rejected values."
+        )
+    if "omitted from observables_used" in message:
+        return (
+            "The response omitted one or more material allowlisted observables "
+            "from observables_used. Rebuild the ledger only from "
+            "review_contract.allowed_observables."
+        )
+    if "outside the current contract" in message or "no current corroborating" in message:
+        return (
+            "The response referenced evidence outside the current "
+            "evidence_reference_contract. Use only exact current evidence refs."
+        )
+    if "review_case_id" in message or "review_evidence_hash" in message:
+        return (
+            "The response identity fields did not exactly match review_contract."
+        )
+    return (
+        "The response failed deterministic validation. Rebuild one complete "
+        "object using only response_schema, review_contract, and "
+        "evidence_reference_contract."
+    )
 
 
 class ControlledEvaluationReviewerGateError(RuntimeError):
@@ -11299,7 +11440,9 @@ def apply_configured_second_opinion(
                         "complete object matching response_schema; do not copy or discuss the "
                         "invalid response."
                     ),
-                    "validation_errors": validation_message,
+                    "validation_errors": reviewer_repair_error_category(
+                        validation_message
+                    ),
                     "field_guidance": reviewer_repair_guidance(
                         validation_message
                     ),

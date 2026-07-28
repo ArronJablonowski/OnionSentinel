@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import ExitStack
 import importlib.util
 import io
 import json
@@ -3248,92 +3249,131 @@ class AiModelRoutingTests(unittest.TestCase):
                     "observables_used": [],
                 }
 
-            with (
-                mock.patch.dict(
-                    self.runner.os.environ,
-                    {self.runner.EVALUATION_FREEZE_MEMORY_ENV: "1"},
-                ),
-                mock.patch.object(
-                    self.runner,
-                    "parse_args",
-                    return_value=args,
-                ),
-                mock.patch.object(
-                    self.runner,
-                    "flush_analysis_index_queue",
-                    return_value=(0, 0, 0),
-                ),
-                mock.patch.object(
-                    self.runner,
-                    "effective_ai_settings",
-                    return_value=settings,
-                ),
-                mock.patch.object(
-                    self.runner,
-                    "prepare_live_osquery_context",
-                    return_value=None,
-                ),
-                mock.patch.object(
-                    self.runner,
-                    "load_investigation_harness_policy",
-                    return_value=policy,
-                ),
-                mock.patch.object(
-                    self.runner,
-                    "should_start_onion_sentinel_harness",
-                    return_value=(True, "synthetic"),
-                ),
-                mock.patch.object(
-                    self.runner,
-                    "start_harness_run",
-                    return_value=harness,
-                ),
-                mock.patch.object(
-                    self.runner,
-                    "SystemResourceMonitor",
-                    return_value=monitor,
-                ),
-                mock.patch.object(
-                    self.runner,
-                    "active_analysis_record_path",
-                    return_value=root / "active.json",
-                ),
-                mock.patch.object(
-                    self.runner,
-                    "build_llm_log_record",
-                    return_value={},
-                ),
-                mock.patch.object(
-                    self.runner,
-                    "publish_current_analysis_phase",
-                    return_value={},
-                ),
-                mock.patch.object(self.runner, "atomic_write_json"),
-                mock.patch.object(self.runner, "append_jsonl"),
-                mock.patch.object(
-                    self.runner,
-                    "analyze_with_config",
-                    return_value=primary,
-                ),
-                mock.patch.object(
-                    self.runner,
-                    "analyze_model_route",
-                    side_effect=invalid_reviewer,
-                ) as analyze,
-                mock.patch.object(self.runner, "write_outputs") as write,
-                mock.patch.object(
-                    self.runner,
-                    "queue_analysis_index",
-                ) as queue,
-                mock.patch.object(
-                    self.runner,
-                    "post_analysis_index",
-                ) as commit,
-                self.assertRaisesRegex(
-                    self.runner.ControlledEvaluationReviewerGateError,
-                    "produced no validated response",
-                ),
-            ):
+            with ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.dict(
+                        self.runner.os.environ,
+                        {self.runner.EVALUATION_FREEZE_MEMORY_ENV: "1"},
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        self.runner,
+                        "parse_args",
+                        return_value=args,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        self.runner,
+                        "flush_analysis_index_queue",
+                        return_value=(0, 0, 0),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        self.runner,
+                        "effective_ai_settings",
+                        return_value=settings,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        self.runner,
+                        "prepare_live_osquery_context",
+                        return_value=None,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        self.runner,
+                        "load_investigation_harness_policy",
+                        return_value=policy,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        self.runner,
+                        "should_start_onion_sentinel_harness",
+                        return_value=(True, "synthetic"),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        self.runner,
+                        "start_harness_run",
+                        return_value=harness,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        self.runner,
+                        "SystemResourceMonitor",
+                        return_value=monitor,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        self.runner,
+                        "active_analysis_record_path",
+                        return_value=root / "active.json",
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        self.runner,
+                        "build_llm_log_record",
+                        return_value={},
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        self.runner,
+                        "publish_current_analysis_phase",
+                        return_value={},
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(self.runner, "atomic_write_json")
+                )
+                stack.enter_context(
+                    mock.patch.object(self.runner, "append_jsonl")
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        self.runner,
+                        "analyze_with_config",
+                        return_value=primary,
+                    )
+                )
+                analyze = stack.enter_context(
+                    mock.patch.object(
+                        self.runner,
+                        "analyze_model_route",
+                        side_effect=invalid_reviewer,
+                    )
+                )
+                write = stack.enter_context(
+                    mock.patch.object(self.runner, "write_outputs")
+                )
+                queue = stack.enter_context(
+                    mock.patch.object(
+                        self.runner,
+                        "queue_analysis_index",
+                    )
+                )
+                commit = stack.enter_context(
+                    mock.patch.object(
+                        self.runner,
+                        "post_analysis_index",
+                    )
+                )
+                stack.enter_context(
+                    self.assertRaisesRegex(
+                        self.runner.ControlledEvaluationReviewerGateError,
+                        "produced no validated response",
+                    )
+                )
                 self.runner.main()
 
             self.assertEqual(analyze.call_count, 2)
@@ -3439,6 +3479,7 @@ class AiModelRoutingTests(unittest.TestCase):
         allowed_community_id = "1:gVOca2cr2eIKwoIKZ8QnLwW2gqU="
         foreign_community_id = "1:Y9R9syXYWvDIRM6pRrzmcXHA1c4="
         repair_packages: list[dict] = []
+        repair_prompt_serializations: list[str] = []
 
         def invalid_response(_route, review_package, *_args, **_kwargs):
             if isinstance(review_package.get("review_contract_repair"), dict):
@@ -3447,6 +3488,14 @@ class AiModelRoutingTests(unittest.TestCase):
                         json.dumps(
                             review_package["review_contract_repair"]
                         )
+                    )
+                )
+                repair_prompt_serializations.append(
+                    json.dumps(
+                        review_package,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
                     )
                 )
             contract = review_package["review_contract"]
@@ -3530,13 +3579,48 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(len(repair_packages), 1)
         repair = repair_packages[0]
         self.assertIn(
-            "foreign community ID",
+            "outside review_contract.allowed_observables",
+            repair["validation_errors"],
+        )
+        self.assertNotIn(
+            foreign_community_id,
             repair["validation_errors"],
         )
         guidance = " ".join(repair["field_guidance"])
         self.assertIn("Elastic index/document identifiers", guidance)
         self.assertIn("not Community IDs", guidance)
         self.assertIn("allowed_observables", guidance)
+        self.assertIn("do not repeat", guidance.lower())
+        self.assertEqual(len(repair_prompt_serializations), 1)
+        self.assertNotIn(
+            foreign_community_id,
+            repair_prompt_serializations[0],
+        )
+
+    def test_reviewer_repair_category_does_not_echo_foreign_domain(self) -> None:
+        rejected = "discord.com"
+        category = self.runner.reviewer_repair_error_category(
+            "reviewer used foreign observables: domain:"
+            + rejected
+            + "; reviewer introduced foreign domain or FQDN value(s): "
+            + rejected
+        )
+
+        self.assertIn(
+            "outside review_contract.allowed_observables",
+            category,
+        )
+        self.assertNotIn(rejected, category)
+        guidance = " ".join(
+            self.runner.reviewer_repair_guidance(
+                "reviewer used foreign observables: domain:"
+                + rejected
+                + "; reviewer introduced foreign domain or FQDN value(s): "
+                + rejected
+            )
+        )
+        self.assertNotIn(rejected, guidance)
+        self.assertIn("do not repeat", guidance.lower())
 
     def test_reviewer_observable_overflow_cannot_hide_foreign_host(self) -> None:
         review_package = self.runner.independent_reviewer_package(
@@ -3637,8 +3721,18 @@ class AiModelRoutingTests(unittest.TestCase):
         primary = self.runner.validate_response(
             self.complete_response(confidence="low", confidence_score=0.3)
         )
+        repair_prompt_serializations: list[str] = []
 
         def invalid_response(_route, review_package, *_args, **_kwargs):
+            if isinstance(review_package.get("review_contract_repair"), dict):
+                repair_prompt_serializations.append(
+                    json.dumps(
+                        review_package,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+                )
             contract = review_package["review_contract"]
             return {
                 **self.complete_response(
@@ -3683,6 +3777,99 @@ class AiModelRoutingTests(unittest.TestCase):
             result["_second_opinion"]["error"],
         )
         self.assertEqual(result["final_disposition_status"], "review_required_failed")
+        self.assertEqual(len(repair_prompt_serializations), 1)
+        self.assertNotIn(
+            "foreign.example",
+            repair_prompt_serializations[0],
+        )
+
+    def test_reviewer_foreign_ip_retry_prompt_is_value_free(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {"second_opinion_prompt_file": Path("/tmp/reviewer.md")},
+        )()
+        settings = self.runner.default_ai_settings()
+        settings["enabled_ollama_models"] = ["primary:latest", "reviewer:latest"]
+        settings["agent_models"]["soc-analyst"] = "ollama:primary:latest"
+        settings["agent_second_opinion_models"][
+            "soc-analyst"
+        ] = "ollama:reviewer:latest"
+        primary = self.runner.validate_response(
+            self.complete_response(confidence="low", confidence_score=0.3)
+        )
+        foreign_ip = "203.0.113.77"
+        repair_prompt_serializations: list[str] = []
+        attempts = 0
+
+        def reviewed_response(_route, review_package, *_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            contract = review_package["review_contract"]
+            if attempts == 2:
+                repair_prompt_serializations.append(
+                    json.dumps(
+                        review_package,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+                )
+            return {
+                **self.complete_response(
+                    confidence="high",
+                    confidence_score=0.9,
+                    evidence_used=["alert", "alert:ip-case"],
+                    summary=(
+                        f"The supplied evidence proves contact with {foreign_ip}."
+                        if attempts == 1
+                        else "The supplied evidence remains suspicious."
+                    ),
+                ),
+                "event_status": "observed",
+                "detection_validity": "matched_intent",
+                "activity_disposition": "suspicious",
+                "handling": "escalate",
+                "duplicate_of": None,
+                "hypotheses": [],
+                "review_case_id": contract["case_id"],
+                "review_evidence_hash": contract["evidence_hash"],
+                "observables_used": [],
+            }
+
+        with mock.patch.object(
+            self.runner,
+            "analyze_model_route",
+            side_effect=reviewed_response,
+        ) as analyze:
+            result = self.runner.apply_configured_second_opinion(
+                {
+                    "alert": {
+                        "alert_id": "ip-case",
+                        "source_ip": "192.0.2.10",
+                    }
+                },
+                primary,
+                args,
+                settings,
+                "soc-analyst",
+            )
+
+        self.assertEqual(analyze.call_count, 2)
+        self.assertEqual(result["_second_opinion"]["status"], "completed")
+        self.assertEqual(len(repair_prompt_serializations), 1)
+        self.assertNotIn(foreign_ip, repair_prompt_serializations[0])
+        repair = json.loads(repair_prompt_serializations[0])[
+            "review_contract_repair"
+        ]
+        self.assertIn(
+            "outside review_contract.allowed_observables",
+            repair["validation_errors"],
+        )
+        self.assertIn(
+            "do not repeat",
+            " ".join(repair["field_guidance"]).lower(),
+        )
 
     def test_grounded_medium_confidence_agreement_cannot_unblock_automation(self) -> None:
         args = type(

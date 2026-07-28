@@ -1849,6 +1849,103 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             1,
         )
 
+    def test_query_repair_prompt_omits_raw_broker_error_values(
+        self,
+    ) -> None:
+        route = "codex-cli:gpt-5.5:medium"
+        rejected_domain = "attacker-controlled.example"
+        rejected_ip = "203.0.113.77"
+        raw_error = (
+            "invalid response contained "
+            f"{rejected_domain} and {rejected_ip}"
+        )
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": (
+                        ".ds-logs-suricata.alerts-so-"
+                        "2026.07.24-000001"
+                    ),
+                    "id": "alert-value-free-query-repair",
+                },
+            },
+        }
+        broker_calls = 0
+
+        def query_executor(_package, requests, **kwargs):
+            nonlocal broker_calls
+            broker_calls += 1
+            result = self.successful_security_onion_round(
+                requests,
+                round_number=kwargs["round_number"],
+            )
+            if broker_calls == 1:
+                evidence_result = result["results"][0]["evidence"][
+                    "results"
+                ][0]
+                evidence_result["status"] = "invalid_response"
+                evidence_result["error"] = raw_error
+                trusted = result["results"][0]["trusted_query_audit"][0]
+                trusted["status"] = "invalid_response"
+                trusted["error"] = raw_error
+            return result
+
+        def model_executor(_route, package, *_args):
+            if "investigation_query_planning_repair" in package:
+                serialized = json.dumps(
+                    package,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                self.assertNotIn(rejected_domain, serialized)
+                self.assertNotIn(rejected_ip, serialized)
+                repair = package["investigation_query_planning_repair"]
+                rejected = repair["rejected_queries"][0]
+                self.assertEqual(
+                    rejected["error"],
+                    "invalid_broker_response",
+                )
+                self.assertRegex(
+                    rejected["error_sha256"],
+                    r"^[a-f0-9]{64}$",
+                )
+                self.assertIn(
+                    "invalid_broker_response",
+                    serialized,
+                )
+                return {
+                    "investigation_query_requests": [
+                        self.elastic_request("value-free-repair")
+                    ]
+                }
+            return {"summary": "Sanitized repair evidence synthesized."}
+
+        response = self.runner.apply_investigation_query_loop(
+            prompt_package,
+            {
+                "investigation_query_requests": [
+                    self.elastic_request("value-free-repair")
+                ]
+            },
+            object(),
+            {"agent_models": {"soc-analyst": route}},
+            "soc-analyst",
+            model_executor=model_executor,
+            query_executor=query_executor,
+        )
+
+        self.assertEqual(broker_calls, 2)
+        self.assertEqual(
+            response["_investigation_query_audit"][
+                "query_planning_repair"
+            ]["admitted_repair_requests"],
+            1,
+        )
+
     def test_evaluation_retry_collects_successful_read_only_pivot_and_binds_audit(
         self,
     ) -> None:
@@ -3642,10 +3739,17 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         query_executor.assert_not_called()
         rejected = prompt_package["investigation_query_results"]["rounds"][0]["results"][0]
         self.assertEqual(rejected["status"], "rejected")
-        self.assertIn("disabled", rejected["error"])
+        self.assertEqual(rejected["error"], "backend_unavailable")
+        self.assertRegex(rejected["error_sha256"], r"^[a-f0-9]{64}$")
         self.assertEqual(
             response["_investigation_query_audit"]["rounds"][0]["results"][0]["status"],
             "rejected",
+        )
+        self.assertIn(
+            "disabled",
+            response["_investigation_query_audit"]["rounds"][0][
+                "results"
+            ][0]["error"],
         )
 
     def test_loop_rejects_semantically_duplicate_query_across_rounds(self) -> None:
@@ -3694,7 +3798,8 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         query_executor.assert_called_once()
         duplicate = prompt_package["investigation_query_results"]["rounds"][1]["results"][0]
         self.assertEqual(duplicate["status"], "rejected")
-        self.assertIn("already executed", duplicate["error"])
+        self.assertEqual(duplicate["error"], "duplicate_request")
+        self.assertRegex(duplicate["error_sha256"], r"^[a-f0-9]{64}$")
         self.assertGreaterEqual(
             response["_investigation_query_audit"]["requests_ignored_or_over_budget"],
             1,
