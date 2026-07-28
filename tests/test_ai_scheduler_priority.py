@@ -525,6 +525,8 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         only_dispatch_id: str = "",
         current_alert_group_key: str | None = None,
         controlled_evaluation: bool | None = None,
+        build_prompt_error: BaseException | None = None,
+        analysis_process: object | None = None,
     ) -> dict[str, object]:
         """Run one indexed job through main() with inference boundaries mocked."""
         if controlled_evaluation is None:
@@ -721,7 +723,16 @@ class AiSchedulerPriorityTest(unittest.TestCase):
 
         prompt_path = root / "prompt.json"
         incident_evidence_path = root / "incident-evidence.json"
-        completed_process = SimpleNamespace(returncode=0, stdout="", stderr="")
+        completed_process = (
+            analysis_process
+            if analysis_process is not None
+            else SimpleNamespace(
+                returncode=0,
+                stdout="",
+                stderr="",
+            )
+        )
+        worker_stderr = io.StringIO()
         worker_environment = {
             "ONION_SENTINEL_EVALUATION_MODE": (
                 "1" if controlled_evaluation else "0"
@@ -759,6 +770,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                 self.scheduler,
                 "build_prompt",
                 return_value=prompt_path,
+                side_effect=build_prompt_error,
             ) as build_prompt,
             mock.patch.object(
                 self.scheduler,
@@ -766,6 +778,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                 return_value=completed_process,
             ) as run_analysis,
             mock.patch.object(self.scheduler, "signal_dashboard_refresh"),
+            mock.patch.object(self.scheduler.sys, "stderr", worker_stderr),
             mock.patch.dict(
                 os.environ,
                 worker_environment,
@@ -780,6 +793,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             "build_prompt": build_prompt,
             "run_analysis": run_analysis,
             "group_id": group_id,
+            "stderr": worker_stderr.getvalue(),
         }
 
     def test_missing_analysis_threshold_preserves_all_severity_behavior(self) -> None:
@@ -1007,6 +1021,94 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             alert_id,
         )
 
+    def test_controlled_prompt_failure_returns_nonzero_and_requeues_owned_job(
+        self,
+    ) -> None:
+        group_id = "1123456789abcdefabcd"
+        alert_id = "ai_analysis-critical-threshold-alert"
+        dispatch_id = "1" * 64
+
+        result = self.run_indexed_worker_once(
+            severity="critical",
+            payload={
+                "manual_reanalysis": True,
+                "dispatch_id": dispatch_id,
+            },
+            only_group_id=group_id,
+            only_alert_id=alert_id,
+            only_dispatch_id=dispatch_id,
+            build_prompt_error=RuntimeError("prompt builder failed rc=1"),
+        )
+
+        self.assertEqual(
+            result["return_code"],
+            self.scheduler.CONTROLLED_SELECTED_JOB_FAILURE_EXIT_CODE,
+        )
+        result["build_prompt"].assert_called_once()
+        result["run_analysis"].assert_not_called()
+        failed = result["report_status"].call_args_list[-1]
+        self.assertEqual(failed.args[2], "failed")
+        self.assertEqual(failed.args[3], "prompt builder failed rc=1")
+        self.assertEqual(failed.args[4], "threshold-test-lease")
+        self.assertIs(failed.kwargs["retryable"], True)
+        self.assertIn('"controlled_evaluation": "selected_job_failed"', result["stderr"])
+        self.assertIn(f'"stable_group_id": "{group_id}"', result["stderr"])
+
+    def test_controlled_analysis_failure_returns_nonzero_after_retry_callback(
+        self,
+    ) -> None:
+        group_id = "2123456789abcdefabcd"
+        alert_id = "ai_analysis-critical-threshold-alert"
+        dispatch_id = "2" * 64
+
+        result = self.run_indexed_worker_once(
+            severity="critical",
+            payload={
+                "manual_reanalysis": True,
+                "dispatch_id": dispatch_id,
+            },
+            only_group_id=group_id,
+            only_alert_id=alert_id,
+            only_dispatch_id=dispatch_id,
+            analysis_process=SimpleNamespace(
+                returncode=7,
+                stdout="",
+                stderr="provider connection closed unexpectedly",
+            ),
+        )
+
+        self.assertEqual(
+            result["return_code"],
+            self.scheduler.CONTROLLED_SELECTED_JOB_FAILURE_EXIT_CODE,
+        )
+        result["run_analysis"].assert_called_once()
+        failed = result["report_status"].call_args_list[-1]
+        self.assertEqual(failed.args[2], "failed")
+        self.assertEqual(
+            failed.args[3],
+            "provider connection closed unexpectedly",
+        )
+        self.assertIs(failed.kwargs["retryable"], True)
+        self.assertIn('"controlled_evaluation": "selected_job_failed"', result["stderr"])
+
+    def test_production_prompt_failure_keeps_retry_and_scheduler_exit_semantics(
+        self,
+    ) -> None:
+        result = self.run_indexed_worker_once(
+            severity="critical",
+            payload={"manual_reanalysis": True},
+            build_prompt_error=RuntimeError("prompt builder failed rc=1"),
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["build_prompt"].assert_called_once()
+        result["run_analysis"].assert_not_called()
+        failed = result["report_status"].call_args_list[-1]
+        self.assertEqual(failed.args[2], "failed")
+        self.assertEqual(failed.args[3], "prompt builder failed rc=1")
+        self.assertIs(failed.kwargs["retryable"], True)
+        self.assertNotIn("selected_job_failed", result["stderr"])
+
     def test_controlled_worker_rejects_replaced_claim_alert_before_prompt(
         self,
     ) -> None:
@@ -1030,7 +1132,10 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             only_dispatch_id=dispatch_id,
         )
 
-        self.assertEqual(result["return_code"], 0)
+        self.assertEqual(
+            result["return_code"],
+            self.scheduler.CONTROLLED_SELECTED_JOB_FAILURE_EXIT_CODE,
+        )
         result["collect_incident_evidence"].assert_not_called()
         result["build_prompt"].assert_not_called()
         result["run_analysis"].assert_not_called()
@@ -1038,6 +1143,10 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         self.assertEqual(released.args[2], "failed")
         self.assertIn("alert identity", released.args[3])
         self.assertIs(released.kwargs["retryable"], True)
+        self.assertIn(
+            '"controlled_evaluation": "selected_job_failed"',
+            result["stderr"],
+        )
 
     def test_controlled_incident_worker_rejects_dispatch_drift_before_evidence(
         self,
@@ -1064,7 +1173,10 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             only_dispatch_id=expected_dispatch_id,
         )
 
-        self.assertEqual(result["return_code"], 0)
+        self.assertEqual(
+            result["return_code"],
+            self.scheduler.CONTROLLED_SELECTED_JOB_FAILURE_EXIT_CODE,
+        )
         result["collect_incident_evidence"].assert_not_called()
         result["build_prompt"].assert_not_called()
         result["run_analysis"].assert_not_called()
@@ -1072,6 +1184,10 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         self.assertEqual(released.args[2], "failed")
         self.assertIn("dispatch identity did not match", released.args[3])
         self.assertIs(released.kwargs["retryable"], True)
+        self.assertIn(
+            '"controlled_evaluation": "selected_job_failed"',
+            result["stderr"],
+        )
 
     def test_controlled_worker_rejects_mismatched_candidate_without_claim(self) -> None:
         group_id = "abcdef0123456789abcd"
@@ -1094,6 +1210,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         result["collect_incident_evidence"].assert_not_called()
         result["build_prompt"].assert_not_called()
         result["run_analysis"].assert_not_called()
+        self.assertNotIn("selected_job_failed", result["stderr"])
 
     def test_controlled_worker_rejects_release_mismatch_before_claim(self) -> None:
         group_id = "abcdef0123456789abcd"
@@ -1116,6 +1233,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         result["collect_incident_evidence"].assert_not_called()
         result["build_prompt"].assert_not_called()
         result["run_analysis"].assert_not_called()
+        self.assertNotIn("selected_job_failed", result["stderr"])
 
     def test_controlled_worker_releases_only_owned_lease_on_release_drift(
         self,
@@ -1139,13 +1257,20 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             only_dispatch_id=dispatch_id,
         )
 
-        self.assertEqual(result["return_code"], 0)
+        self.assertEqual(
+            result["return_code"],
+            self.scheduler.CONTROLLED_SELECTED_JOB_FAILURE_EXIT_CODE,
+        )
         result["build_prompt"].assert_not_called()
         result["run_analysis"].assert_not_called()
         released = result["report_status"].call_args_list[-1]
         self.assertEqual(released.args[2], "failed")
         self.assertIn("release_id did not match", released.args[3])
         self.assertIs(released.kwargs["retryable"], True)
+        self.assertIn(
+            '"controlled_evaluation": "selected_job_failed"',
+            result["stderr"],
+        )
 
     def test_controlled_worker_requeues_owned_lease_when_alert_key_drifts(
         self,
@@ -1162,13 +1287,20 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             current_alert_group_key="key:post-queue-drift",
         )
 
-        self.assertEqual(result["return_code"], 0)
+        self.assertEqual(
+            result["return_code"],
+            self.scheduler.CONTROLLED_SELECTED_JOB_FAILURE_EXIT_CODE,
+        )
         result["build_prompt"].assert_not_called()
         result["run_analysis"].assert_not_called()
         released = result["report_status"].call_args_list[-1]
         self.assertEqual(released.args[2], "failed")
         self.assertIn("stable group key is invalid", released.args[3])
         self.assertIs(released.kwargs["retryable"], True)
+        self.assertIn(
+            '"controlled_evaluation": "selected_job_failed"',
+            result["stderr"],
+        )
 
     def test_worker_rejects_invalid_claimed_and_current_stable_group_key(
         self,

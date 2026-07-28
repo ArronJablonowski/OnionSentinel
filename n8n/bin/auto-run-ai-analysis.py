@@ -75,6 +75,7 @@ CONTROLLED_EXACT_CLAIM_ATTEMPTS = 3
 CONTROLLED_RESULT_SUBMISSION_INDETERMINATE = (
     "controlled analysis result submission remains indeterminate"
 )
+CONTROLLED_SELECTED_JOB_FAILURE_EXIT_CODE = 1
 MAX_AI_SETTINGS_BYTES = 256 * 1024
 CODEX_CLI_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
 CODEX_CLI_MODEL_CATALOG = frozenset({
@@ -3456,6 +3457,9 @@ def main() -> int:
         selected_groups: set[str] = set()
         analyzed_count = 0
         attempted_count = 0
+        controlled_owned_job_failed = False
+        controlled_failure_detail = ""
+        controlled_failure_group_id = ""
         while args.max_per_run == 0 or attempted_count < args.max_per_run:
             allowed_analysis_levels = configured_analysis_levels(
                 args.ai_settings_file,
@@ -3774,6 +3778,11 @@ def main() -> int:
                     if recovered_indeterminate_result:
                         analyzed_count += 1
                         break
+                    if controlled_exact_lease_owned:
+                        controlled_owned_job_failed = True
+                        controlled_failure_detail = detail
+                        controlled_failure_group_id = selected_group_id
+                        break
                     continue
                 if proc.stderr:
                     print(proc.stderr, file=sys.stderr, end="")
@@ -3814,6 +3823,9 @@ def main() -> int:
                             f"{status_error}",
                             file=sys.stderr,
                         )
+                    controlled_owned_job_failed = True
+                    controlled_failure_detail = str(error)
+                    controlled_failure_group_id = selected_group_id
                 print(
                     f"{project_now()} controlled AI claim rejected: {error}",
                     file=sys.stderr,
@@ -3862,6 +3874,11 @@ def main() -> int:
                         except RuntimeError as status_error:
                             print(f"AI failure callback also failed: {status_error}", file=sys.stderr)
                 print(f"{project_now()} AI group {selected_group_id} failed: {error}", file=sys.stderr)
+                if controlled_exact_lease_owned:
+                    controlled_owned_job_failed = True
+                    controlled_failure_detail = str(error)
+                    controlled_failure_group_id = selected_group_id
+                    break
                 continue
 
         if analyzed_count:
@@ -3881,6 +3898,22 @@ def main() -> int:
         )
         if reconciled:
             print(f"{project_now()} reconciled {reconciled} completed durable AI job(s) before exit", flush=True)
+        if controlled_owned_job_failed:
+            print(
+                json.dumps(
+                    {
+                        "controlled_evaluation": "selected_job_failed",
+                        "error": (
+                            controlled_failure_detail[:1000]
+                            or "selected controlled job failed"
+                        ),
+                        "stable_group_id": controlled_failure_group_id,
+                    },
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
+            return CONTROLLED_SELECTED_JOB_FAILURE_EXIT_CODE
         return 0
 
 

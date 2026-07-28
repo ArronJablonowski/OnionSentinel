@@ -5284,6 +5284,58 @@ const stableGroupIdPattern = /^[a-f0-9]{20}$/;
 const dispatchIdPattern = /^[a-f0-9]{64}$/;
 const releaseIdPattern = /^[a-f0-9]{40}$/;
 const representativeAlertIdPattern = /^[A-Za-z0-9._:@=-]{1,256}$/;
+const controlledRetirementSchema =
+  'onion-sentinel-controlled-evaluation-retirement-v1';
+const controlledRetirementReceiptSchema =
+  'onion-sentinel-controlled-evaluation-retirement-receipt-v1';
+const controlledRetirementEventType = 'controlled_evaluation_retired';
+const controlledRetirementReceiptFields = Object.freeze([
+  'case_agent_status',
+  'idempotent',
+  'identity',
+  'job_after_sha256',
+  'job_before_sha256',
+  'lineage_after_sha256',
+  'lineage_before_sha256',
+  'model_invocations',
+  'ok',
+  'receipt_sha256',
+  'retired_at',
+  'retirement_id',
+  'schema',
+  'security_onion_access',
+  'security_onion_writes_allowed',
+  'skip_reason',
+  'status',
+  'target_after',
+  'target_before',
+  'worker_wake_signaled',
+]);
+const controlledRetirementRequestFields = Object.freeze([
+  'absent_dispatch_ids',
+  'case_id',
+  'cohort_id',
+  'cohort_size',
+  'completed_dispatch_ids',
+  'dispatch_id',
+  'expected_attempt_count',
+  'expected_attempt_id',
+  'expected_job_payload_sha256',
+  'expected_prior_analysis_id',
+  'failure_attestation_sha256',
+  'job_id',
+  'manifest_sha256',
+  'member_rank',
+  'reanalysis_run_id',
+  'reason',
+  'replacement_release_id',
+  'representative_alert_id',
+  'retired_release_id',
+  'schema',
+  'stable_group_id',
+  'stable_group_key',
+  'start_sha256',
+]);
 
 function requestHasOwnField(payload, field) {
   return Boolean(
@@ -5305,6 +5357,1462 @@ function controlledRuntimeReleaseId() {
     typeof releaseId === 'string'
     && releaseIdPattern.test(releaseId)
   ) ? releaseId : '';
+}
+
+function controlledRetirementConflict(message, statusCode = 409) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+function controlledRetirementCanonicalJsonText(value) {
+  const canonicalize = (item) => {
+    if (
+      item === null
+      || typeof item === 'string'
+      || typeof item === 'boolean'
+    ) {
+      return item;
+    }
+    if (typeof item === 'number') {
+      if (!Number.isFinite(item)) {
+        throw controlledRetirementConflict(
+          'controlled evaluation retirement JSON is not finite',
+        );
+      }
+      return item;
+    }
+    if (Array.isArray(item)) {
+      return item.map((entry) => canonicalize(entry));
+    }
+    if (item && typeof item === 'object') {
+      return Object.fromEntries(
+        Object.keys(item).sort().map(
+          (key) => [key, canonicalize(item[key])],
+        ),
+      );
+    }
+    throw controlledRetirementConflict(
+      'controlled evaluation retirement JSON contains an unsupported value',
+    );
+  };
+  return JSON.stringify(canonicalize(value));
+}
+
+function controlledRetirementSha256(value) {
+  return crypto
+    .createHash('sha256')
+    .update(controlledRetirementCanonicalJsonText(value), 'utf8')
+    .digest('hex');
+}
+
+function controlledRetirementRawSha256(value) {
+  return crypto
+    .createHash('sha256')
+    .update(String(value), 'utf8')
+    .digest('hex');
+}
+
+function controlledRetirementIdentity(payload) {
+  if (!controlledEvaluationMode) {
+    throw controlledRetirementConflict(
+      'controlled evaluation retirement is unavailable in production mode',
+      403,
+    );
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw controlledRetirementConflict(
+      'controlled evaluation retirement request is invalid',
+    );
+  }
+  const suppliedFields = Object.keys(payload).sort();
+  if (
+    suppliedFields.length !== controlledRetirementRequestFields.length
+    || suppliedFields.some(
+      (field, index) => field !== controlledRetirementRequestFields[index],
+    )
+  ) {
+    throw controlledRetirementConflict(
+      'controlled evaluation retirement request fields are not exact',
+    );
+  }
+  const jobId = payload.job_id;
+  const memberRank = payload.member_rank;
+  const cohortSize = payload.cohort_size;
+  const expectedAttemptCount = payload.expected_attempt_count;
+  const caseId = validIncidentCaseId(payload.case_id);
+  const cohortId = payload.cohort_id;
+  const dispatchId = payload.dispatch_id;
+  const expectedAttemptId = payload.expected_attempt_id;
+  const expectedJobPayloadSha256 = payload.expected_job_payload_sha256;
+  const expectedPriorAnalysisId = payload.expected_prior_analysis_id;
+  const failureAttestationSha256 = payload.failure_attestation_sha256;
+  const manifestSha256 = payload.manifest_sha256;
+  const reanalysisRunId = payload.reanalysis_run_id;
+  const replacementReleaseId = payload.replacement_release_id;
+  const representativeAlertId = payload.representative_alert_id;
+  const retiredReleaseId = payload.retired_release_id;
+  const stableGroupId = payload.stable_group_id;
+  const stableGroupKeyValue = payload.stable_group_key;
+  const startSha256 = payload.start_sha256;
+  const reason = safeString(payload.reason, 500);
+  const analysisIdPattern = /^[A-Za-z0-9._:@=-]{1,160}$/;
+  const completedDispatchIds = Array.isArray(
+    payload.completed_dispatch_ids,
+  ) ? [...payload.completed_dispatch_ids] : null;
+  const absentDispatchIds = Array.isArray(
+    payload.absent_dispatch_ids,
+  ) ? [...payload.absent_dispatch_ids] : null;
+  const orderedDispatchIds = (
+    completedDispatchIds && absentDispatchIds
+  ) ? [
+    ...completedDispatchIds,
+    dispatchId,
+    ...absentDispatchIds,
+  ] : [];
+  const exactStringFields = [
+    cohortId,
+    dispatchId,
+    expectedAttemptId,
+    expectedJobPayloadSha256,
+    expectedPriorAnalysisId,
+    failureAttestationSha256,
+    manifestSha256,
+    reanalysisRunId,
+    replacementReleaseId,
+    representativeAlertId,
+    retiredReleaseId,
+    stableGroupId,
+    stableGroupKeyValue,
+    startSha256,
+  ];
+  if (
+    payload.schema !== controlledRetirementSchema
+    || exactStringFields.some((value) => typeof value !== 'string')
+    || typeof jobId !== 'number'
+    || !Number.isSafeInteger(jobId)
+    || jobId < 1
+    || typeof memberRank !== 'number'
+    || !Number.isSafeInteger(memberRank)
+    || memberRank < 1
+    || typeof cohortSize !== 'number'
+    || !Number.isSafeInteger(cohortSize)
+    || cohortSize < 1
+    || cohortSize > 100
+    || memberRank > cohortSize
+    || !completedDispatchIds
+    || completedDispatchIds.length !== memberRank - 1
+    || !absentDispatchIds
+    || absentDispatchIds.length !== cohortSize - memberRank
+    || orderedDispatchIds.some(
+      (value) => (
+        typeof value !== 'string'
+        || !dispatchIdPattern.test(value)
+      ),
+    )
+    || new Set(orderedDispatchIds).size !== cohortSize
+    || typeof expectedAttemptCount !== 'number'
+    || expectedAttemptCount !== 1
+    || !caseId
+    || payload.case_id !== caseId
+    || !cohortIdPattern.test(cohortId)
+    || !dispatchIdPattern.test(dispatchId)
+    || !/^ira-[a-f0-9]{40}$/.test(expectedAttemptId)
+    || !dispatchIdPattern.test(expectedJobPayloadSha256)
+    || (
+      expectedPriorAnalysisId !== ''
+      && !analysisIdPattern.test(expectedPriorAnalysisId)
+    )
+    || !dispatchIdPattern.test(failureAttestationSha256)
+    || !dispatchIdPattern.test(manifestSha256)
+    || !/^irr-[a-z0-9-]{1,64}$/.test(reanalysisRunId)
+    || !releaseIdPattern.test(replacementReleaseId)
+    || replacementReleaseId !== controlledRuntimeReleaseId()
+    || !representativeAlertIdPattern.test(representativeAlertId)
+    || !releaseIdPattern.test(retiredReleaseId)
+    || !stableGroupIdPattern.test(stableGroupId)
+    || !validPinnedStableGroupKey(stableGroupKeyValue)
+    || !dispatchIdPattern.test(startSha256)
+    || typeof payload.reason !== 'string'
+    || payload.reason !== reason
+    || reason.length < 10
+  ) {
+    throw controlledRetirementConflict(
+      'controlled evaluation retirement identity is invalid',
+    );
+  }
+  return {
+    schema: controlledRetirementSchema,
+    absent_dispatch_ids: absentDispatchIds,
+    case_id: caseId,
+    cohort_id: cohortId,
+    cohort_size: cohortSize,
+    completed_dispatch_ids: completedDispatchIds,
+    dispatch_id: dispatchId,
+    expected_attempt_count: expectedAttemptCount,
+    expected_attempt_id: expectedAttemptId,
+    expected_job_payload_sha256: expectedJobPayloadSha256,
+    expected_prior_analysis_id: expectedPriorAnalysisId,
+    failure_attestation_sha256: failureAttestationSha256,
+    job_id: jobId,
+    manifest_sha256: manifestSha256,
+    member_rank: memberRank,
+    reason,
+    reanalysis_run_id: reanalysisRunId,
+    replacement_release_id: replacementReleaseId,
+    representative_alert_id: representativeAlertId,
+    retired_release_id: retiredReleaseId,
+    stable_group_id: stableGroupId,
+    stable_group_key: stableGroupKeyValue,
+    start_sha256: startSha256,
+  };
+}
+
+function controlledRetirementJobProjection(row) {
+  const payloadJson = String(row?.payload_json || '');
+  return {
+    id: Number(row?.id || 0),
+    job_type: String(row?.job_type || ''),
+    dedupe_key: String(row?.dedupe_key || ''),
+    payload_sha256: controlledRetirementRawSha256(payloadJson),
+    status: String(row?.status || ''),
+    priority: Number(row?.priority || 0),
+    attempt_count: Number(row?.attempt_count || 0),
+    max_attempts: Number(row?.max_attempts || 0),
+    next_attempt_at: row?.next_attempt_at ?? null,
+    lease_expires_at: row?.lease_expires_at ?? null,
+    lease_token_present: Boolean(row?.lease_token),
+    last_error_sha256: row?.last_error
+      ? controlledRetirementRawSha256(row.last_error)
+      : null,
+    created_at: row?.created_at ?? null,
+    updated_at: row?.updated_at ?? null,
+    completed_at: row?.completed_at ?? null,
+    last_completed_at: row?.last_completed_at ?? null,
+    requested_at: row?.requested_at ?? null,
+    processing_started_at: row?.processing_started_at ?? null,
+    rerun_requested: Number(row?.rerun_requested || 0),
+  };
+}
+
+function controlledRetirementOrderedDispatches(identity) {
+  // Historical controlled jobs did not persist member_rank. The
+  // authenticated request therefore binds rank to an exact ordered dispatch
+  // census: earlier entries must be completed, the separately bound target
+  // occupies member_rank, and every later entry must be absent.
+  return [
+    ...identity.completed_dispatch_ids,
+    identity.dispatch_id,
+    ...identity.absent_dispatch_ids,
+  ].map((dispatchId, index) => ({
+    rank: index + 1,
+    dispatch_id: dispatchId,
+    expected_state: index + 1 < identity.member_rank
+      ? 'completed'
+      : (
+        index + 1 === identity.member_rank
+          ? 'target'
+          : 'absent'
+      ),
+  }));
+}
+
+function controlledRetirementErrorProjection(value) {
+  if (value === null || value === undefined) {
+    return {
+      raw_sha256: null,
+      normalized_sha256: null,
+    };
+  }
+  const raw = String(value);
+  const normalized = safeString(raw, 1000);
+  return {
+    raw_sha256: controlledRetirementRawSha256(raw),
+    normalized_sha256: normalized
+      ? controlledRetirementRawSha256(normalized)
+      : null,
+  };
+}
+
+function controlledRetirementRunProjection(row, receipt) {
+  return {
+    run_id: String(row?.run_id || ''),
+    release_id: String(row?.release_id || ''),
+    scope: String(row?.scope || ''),
+    status: String(row?.status || ''),
+    requested_by: row?.requested_by ?? null,
+    reason_sha256: row?.reason === null || row?.reason === undefined
+      ? null
+      : controlledRetirementRawSha256(row.reason),
+    total_count: Number(row?.total_count || 0),
+    created_at: row?.created_at ?? null,
+    updated_at: row?.updated_at ?? null,
+    completed_at: row?.completed_at ?? null,
+    controlled_dispatch_id: row?.controlled_dispatch_id ?? null,
+    controlled_receipt_sha256: controlledRetirementSha256(
+      receipt || {},
+    ),
+  };
+}
+
+function controlledRetirementRunCaseProjection(row) {
+  return {
+    run_id: String(row?.run_id || ''),
+    case_id: String(row?.case_id || ''),
+    group_id: String(row?.group_id || ''),
+    dashboard_group_id: String(row?.dashboard_group_id || ''),
+    representative_alert_id: String(
+      row?.representative_alert_id || '',
+    ),
+    status: String(row?.status || ''),
+    skip_reason_sha256: row?.skip_reason === null
+      || row?.skip_reason === undefined
+      ? null
+      : controlledRetirementRawSha256(row.skip_reason),
+    latest_error: controlledRetirementErrorProjection(
+      row?.latest_error,
+    ),
+    queued_at: row?.queued_at ?? null,
+    started_at: row?.started_at ?? null,
+    completed_at: row?.completed_at ?? null,
+    latest_attempt_id: row?.latest_attempt_id ?? null,
+    analysis_id: row?.analysis_id ?? null,
+    executed_model: row?.executed_model ?? null,
+    executed_provider: row?.executed_provider ?? null,
+    executed_model_path: row?.executed_model_path ?? null,
+    result_generated_at: row?.result_generated_at ?? null,
+    updated_at: row?.updated_at ?? null,
+  };
+}
+
+function controlledRetirementAttemptProjection(row) {
+  return {
+    attempt_id: String(row?.attempt_id || ''),
+    run_id: String(row?.run_id || ''),
+    case_id: String(row?.case_id || ''),
+    group_id: String(row?.group_id || ''),
+    durable_attempt_count: Number(
+      row?.durable_attempt_count || 0,
+    ),
+    status: String(row?.status || ''),
+    latest_error: controlledRetirementErrorProjection(
+      row?.latest_error,
+    ),
+    analysis_id: row?.analysis_id ?? null,
+    executed_model: row?.executed_model ?? null,
+    executed_provider: row?.executed_provider ?? null,
+    executed_model_path: row?.executed_model_path ?? null,
+    result_generated_at: row?.result_generated_at ?? null,
+    started_at: row?.started_at ?? null,
+    completed_at: row?.completed_at ?? null,
+    updated_at: row?.updated_at ?? null,
+  };
+}
+
+function controlledRetirementPrimaryProjection(row) {
+  return {
+    analysis_id: String(row?.analysis_id || ''),
+    group_id: String(row?.group_id || ''),
+    alert_id: String(row?.alert_id || ''),
+    agent_role: String(row?.agent_role || ''),
+    generated_at: row?.generated_at ?? null,
+    model: row?.model ?? null,
+    model_path: row?.model_path ?? null,
+    detection_outcome: row?.detection_outcome ?? null,
+    bluf_sha256: row?.bluf === null || row?.bluf === undefined
+      ? null
+      : controlledRetirementRawSha256(row.bluf),
+    summary_sha256: row?.summary === null
+      || row?.summary === undefined
+      ? null
+      : controlledRetirementRawSha256(row.summary),
+    confidence: row?.confidence ?? null,
+    artifact_path: row?.artifact_path ?? null,
+    evidence_hash: row?.evidence_hash ?? null,
+    response_sha256: controlledRetirementRawSha256(
+      row?.response_json || '',
+    ),
+    created_at: row?.created_at ?? null,
+  };
+}
+
+function controlledRetirementReviewerProjection(row) {
+  return {
+    analysis_id: String(row?.analysis_id || ''),
+    group_id: String(row?.group_id || ''),
+    alert_id: String(row?.alert_id || ''),
+    agent_role: String(row?.agent_role || ''),
+    trigger: row?.trigger ?? null,
+    status: String(row?.status || ''),
+    reviewer_error: controlledRetirementErrorProjection(
+      row?.reviewer_error,
+    ),
+    primary_model: row?.primary_model ?? null,
+    primary_model_path: row?.primary_model_path ?? null,
+    primary_outcome: row?.primary_outcome ?? null,
+    primary_confidence: row?.primary_confidence ?? null,
+    reviewer_model: row?.reviewer_model ?? null,
+    reviewer_model_path: row?.reviewer_model_path ?? null,
+    reviewer_outcome: row?.reviewer_outcome ?? null,
+    reviewer_confidence: row?.reviewer_confidence ?? null,
+    agreement: row?.agreement ?? null,
+    material_disagreement: Number(
+      row?.material_disagreement || 0,
+    ),
+    disputed_fields_sha256: controlledRetirementRawSha256(
+      row?.disputed_fields_json || '',
+    ),
+    comparison_sha256: controlledRetirementRawSha256(
+      row?.comparison_json || '',
+    ),
+    // SQLite REAL values must not enter a cross-language canonical receipt as
+    // JSON numbers: JavaScript and Python can spell equivalent floats
+    // differently (for example 1 vs 1.0 or exponent forms).
+    reviewer_runtime_seconds:
+      row?.reviewer_runtime_seconds === null
+      || row?.reviewer_runtime_seconds === undefined
+        ? null
+        : String(row.reviewer_runtime_seconds),
+    memory_candidates_promoted: Number(
+      row?.memory_candidates_promoted || 0,
+    ),
+    generated_at: row?.generated_at ?? null,
+    created_at: row?.created_at ?? null,
+    updated_at: row?.updated_at ?? null,
+  };
+}
+
+function controlledRetirementCompletedJobLifecycleValid(job) {
+  const requestedAt = parseProjectTimestamp(job?.requested_at);
+  const processingStartedAt = parseProjectTimestamp(
+    job?.processing_started_at,
+  );
+  const completedAt = parseProjectTimestamp(job?.completed_at);
+  const lastCompletedAt = parseProjectTimestamp(
+    job?.last_completed_at,
+  );
+  const updatedAt = parseProjectTimestamp(job?.updated_at);
+  return Boolean(
+    requestedAt
+    && processingStartedAt
+    && completedAt
+    && lastCompletedAt
+    && updatedAt
+    && requestedAt.getTime() <= processingStartedAt.getTime()
+    && processingStartedAt.getTime() <= completedAt.getTime()
+    && completedAt.getTime() <= lastCompletedAt.getTime()
+    && lastCompletedAt.getTime() <= updatedAt.getTime()
+  );
+}
+
+function controlledRetirementCompletedProjection({
+  member,
+  job,
+  jobPayload,
+  runRow,
+  runReceipt,
+  runCase,
+  attempt,
+  analysis,
+  reviewer,
+  incident,
+}) {
+  return {
+    rank: member.rank,
+    dispatch_id: member.dispatch_id,
+    state: 'completed',
+    job: controlledRetirementJobProjection(job),
+    run: controlledRetirementRunProjection(runRow, runReceipt),
+    run_case: controlledRetirementRunCaseProjection(runCase),
+    attempt: controlledRetirementAttemptProjection(attempt),
+    primary: controlledRetirementPrimaryProjection(analysis),
+    reviewer: controlledRetirementReviewerProjection(reviewer),
+    case: {
+      case_id: String(incident.case_id || ''),
+      group_id: String(incident.group_id || ''),
+      dashboard_group_id: String(
+        incident.dashboard_group_id || '',
+      ),
+      representative_alert_id: String(
+        incident.representative_alert_id || '',
+      ),
+      agent_status: String(incident.agent_status || ''),
+      latest_analysis_id: incident.latest_analysis_id ?? null,
+      latest_model: incident.latest_model ?? null,
+      latest_generated_at: incident.latest_generated_at ?? null,
+      latest_error: controlledRetirementErrorProjection(
+        incident.latest_error,
+      ),
+      updated_at: incident.updated_at ?? null,
+    },
+    stable_group_key: String(jobPayload.stable_group_key || ''),
+  };
+}
+
+async function controlledRetirementCompletedMember(
+  identity,
+  member,
+  job,
+  jobPayload,
+  runRow,
+  runReceipt,
+) {
+  const runCases = await all(
+    `SELECT * FROM incident_reanalysis_run_cases
+     WHERE run_id = ? ORDER BY case_id LIMIT 3`,
+    [runRow.run_id],
+  );
+  const attempts = await all(
+    `SELECT * FROM incident_reanalysis_attempts
+     WHERE run_id = ? ORDER BY started_at, attempt_id LIMIT 3`,
+    [runRow.run_id],
+  );
+  const runCase = runCases[0];
+  const attempt = attempts[0];
+  const analysis = runCase?.analysis_id
+    ? await get(
+      'SELECT * FROM ai_analysis_runs WHERE analysis_id = ?',
+      [runCase.analysis_id],
+    )
+    : null;
+  const reviewer = runCase?.analysis_id
+    ? await get(
+      'SELECT * FROM ai_second_opinion_runs WHERE analysis_id = ?',
+      [runCase.analysis_id],
+    )
+    : null;
+  const incident = jobPayload.case_id
+    ? await get(
+      'SELECT * FROM incident_response_cases WHERE case_id = ?',
+      [jobPayload.case_id],
+    )
+    : null;
+  const primaryResponse = parseJsonObject(analysis?.response_json);
+  const primaryProvider = incidentAnalysisProvider(
+    analysis?.model_path,
+    primaryResponse._analysis_provider,
+  );
+  const reviewerRuntimeSeconds = reviewer?.reviewer_runtime_seconds;
+  if (
+    job.status !== 'completed'
+    || Number(job.attempt_count || 0) !== 1
+    || job.lease_token !== null
+    || job.lease_expires_at !== null
+    || job.last_error !== null
+    || Number(job.rerun_requested || 0) !== 0
+    || !controlledRetirementCompletedJobLifecycleValid(job)
+    || !runRow
+    || runRow.release_id !== identity.retired_release_id
+    || runRow.scope !== 'single_case'
+    || runRow.status !== 'completed'
+    || Number(runRow.total_count || 0) !== 1
+    || runRow.controlled_dispatch_id !== member.dispatch_id
+    || !runRow.completed_at
+    || runReceipt.ok !== true
+    || runReceipt.run_id !== runRow.run_id
+    || runReceipt.case_id !== jobPayload.case_id
+    || runReceipt.cohort_id !== identity.cohort_id
+    || runReceipt.dispatch_id !== member.dispatch_id
+    || runReceipt.release_id !== identity.retired_release_id
+    || runReceipt.scope !== 'single_case'
+    || Number(runReceipt.total_count || 0) !== 1
+    || runReceipt.representative_alert_id
+      !== jobPayload.representative_alert_id
+    || runReceipt.stable_group_id !== jobPayload.stable_group_id
+    || runReceipt.stable_group_key !== jobPayload.stable_group_key
+    || runCases.length !== 1
+    || !runCase
+    || runCase.case_id !== jobPayload.case_id
+    || runCase.group_id !== jobPayload.stable_group_id
+    || runCase.dashboard_group_id !== jobPayload.dashboard_group_id
+    || runCase.representative_alert_id
+      !== jobPayload.representative_alert_id
+    || runCase.status !== 'completed'
+    || runCase.skip_reason !== null
+    || runCase.latest_error !== null
+    || !runCase.latest_attempt_id
+    || !runCase.analysis_id
+    || !runCase.completed_at
+    || runCase.executed_model !== analysis?.model
+    || runCase.executed_provider !== primaryProvider
+    || runCase.executed_model_path !== analysis?.model_path
+    || attempts.length !== 1
+    || !attempt
+    || attempt.attempt_id !== runCase.latest_attempt_id
+    || attempt.run_id !== runRow.run_id
+    || attempt.case_id !== jobPayload.case_id
+    || attempt.group_id !== jobPayload.stable_group_id
+    || Number(attempt.durable_attempt_count || 0) !== 1
+    || attempt.status !== 'completed'
+    || attempt.latest_error !== null
+    || attempt.analysis_id !== runCase.analysis_id
+    || !attempt.completed_at
+    || attempt.executed_model !== analysis?.model
+    || attempt.executed_provider !== primaryProvider
+    || attempt.executed_model_path !== analysis?.model_path
+    || !analysis
+    || analysis.group_id !== jobPayload.stable_group_id
+    || analysis.alert_id !== jobPayload.representative_alert_id
+    || analysis.agent_role !== 'incident-responder'
+    || !analysis.generated_at
+    || !analysis.response_json
+    || runCase.result_generated_at !== analysis.generated_at
+    || attempt.result_generated_at !== analysis.generated_at
+    || !reviewer
+    || reviewer.group_id !== jobPayload.stable_group_id
+    || reviewer.alert_id !== jobPayload.representative_alert_id
+    || reviewer.agent_role !== 'incident-responder'
+    || reviewer.status !== 'completed'
+    || Boolean(reviewer.reviewer_error)
+    || reviewer.generated_at !== analysis.generated_at
+    || reviewer.primary_model !== analysis.model
+    || reviewer.primary_model_path !== analysis.model_path
+    || reviewer.primary_outcome !== analysis.detection_outcome
+    || reviewer.primary_confidence !== analysis.confidence
+    || !reviewer.reviewer_model
+    || (
+      reviewerRuntimeSeconds !== null
+      && reviewerRuntimeSeconds !== undefined
+      && (
+        !Number.isFinite(Number(reviewerRuntimeSeconds))
+        || Number(reviewerRuntimeSeconds) < 0
+      )
+    )
+    || !incident
+    || incident.group_id !== jobPayload.stable_group_id
+    || incident.dashboard_group_id !== jobPayload.dashboard_group_id
+    || incident.representative_alert_id
+      !== jobPayload.representative_alert_id
+    || incident.agent_status !== 'analyzed'
+    || incident.latest_analysis_id !== analysis.analysis_id
+    || incident.latest_model !== analysis.model
+    || incident.latest_generated_at !== analysis.generated_at
+  ) {
+    throw controlledRetirementConflict(
+      `controlled evaluation rank ${member.rank} is not one exact `
+      + 'completed primary-and-reviewer lineage',
+    );
+  }
+  return controlledRetirementCompletedProjection({
+    member,
+    job,
+    jobPayload,
+    runRow,
+    runReceipt,
+    runCase,
+    attempt,
+    analysis,
+    reviewer,
+    incident,
+  });
+}
+
+async function controlledRetirementTargetMember(
+  identity,
+  member,
+  targetState,
+  job,
+  jobPayload,
+  runRow,
+  runReceipt,
+) {
+  const runCases = await all(
+    `SELECT * FROM incident_reanalysis_run_cases
+     WHERE run_id = ? ORDER BY case_id LIMIT 3`,
+    [runRow.run_id],
+  );
+  const attempts = await all(
+    `SELECT * FROM incident_reanalysis_attempts
+     WHERE run_id = ? ORDER BY started_at, attempt_id LIMIT 3`,
+    [runRow.run_id],
+  );
+  const runCase = runCases[0];
+  const attempt = attempts[0];
+  const normalizedJobError = safeString(job.last_error, 1000);
+  const normalizedRunCaseError = safeString(
+    runCase?.latest_error,
+    1000,
+  );
+  const normalizedAttemptError = safeString(
+    attempt?.latest_error,
+    1000,
+  );
+  const pending = targetState === 'pending';
+  if (
+    runCases.length !== 1
+    || !runCase
+    || runCase.run_id !== runRow.run_id
+    || runCase.case_id !== identity.case_id
+    || runCase.group_id !== identity.stable_group_id
+    || runCase.dashboard_group_id !== jobPayload.dashboard_group_id
+    || runCase.representative_alert_id
+      !== identity.representative_alert_id
+    || runCase.latest_attempt_id !== identity.expected_attempt_id
+    || runCase.analysis_id !== null
+    || !runCase.started_at
+    || attempts.length !== 1
+    || !attempt
+    || attempt.attempt_id !== identity.expected_attempt_id
+    || attempt.run_id !== identity.reanalysis_run_id
+    || attempt.case_id !== identity.case_id
+    || attempt.group_id !== identity.stable_group_id
+    || Number(attempt.durable_attempt_count || 0)
+      !== identity.expected_attempt_count
+    || attempt.status !== 'failed'
+    || attempt.analysis_id !== null
+    || !attempt.started_at
+    || !attempt.completed_at
+    || !normalizedAttemptError
+    || (
+      pending
+      && (
+        runCase.status !== 'queued'
+        || runCase.completed_at !== null
+        || !job.processing_started_at
+        || !normalizedJobError
+        || !normalizedRunCaseError
+        || normalizedJobError !== normalizedRunCaseError
+        || normalizedJobError !== normalizedAttemptError
+      )
+    )
+    || (
+      !pending
+      && (
+        runCase.status !== 'skipped'
+        || !runCase.completed_at
+        || job.last_error !== null
+        || runCase.latest_error !== null
+      )
+    )
+  ) {
+    throw controlledRetirementConflict(
+      'controlled evaluation target failure lineage is contradictory',
+    );
+  }
+  return {
+    rank: member.rank,
+    dispatch_id: member.dispatch_id,
+    state: targetState,
+    job: controlledRetirementJobProjection(job),
+    run: controlledRetirementRunProjection(runRow, runReceipt),
+    run_case: controlledRetirementRunCaseProjection(runCase),
+    attempt: controlledRetirementAttemptProjection(attempt),
+    failure: {
+      job: controlledRetirementErrorProjection(job.last_error),
+      run_case: controlledRetirementErrorProjection(
+        runCase.latest_error,
+      ),
+      attempt: controlledRetirementErrorProjection(
+        attempt.latest_error,
+      ),
+      normalized_sha256: controlledRetirementRawSha256(
+        normalizedAttemptError,
+      ),
+    },
+    case_id: identity.case_id,
+    stable_group_id: identity.stable_group_id,
+    stable_group_key: identity.stable_group_key,
+    representative_alert_id: identity.representative_alert_id,
+  };
+}
+
+async function controlledRetirementCensus(identity, targetState) {
+  if (!['pending', 'retired'].includes(targetState)) {
+    throw controlledRetirementConflict(
+      'controlled evaluation retirement census state is invalid',
+    );
+  }
+  const members = controlledRetirementOrderedDispatches(identity);
+  const dispatchIds = members.map((member) => member.dispatch_id);
+  const placeholders = dispatchIds.map(() => '?').join(', ');
+  const rowLimit = identity.cohort_size + 2;
+  const jobs = await all(
+    `SELECT * FROM durable_jobs
+     WHERE job_type = 'incident_response_analysis'
+       AND (
+         CASE WHEN json_valid(payload_json)
+           THEN json_extract(payload_json, '$.cohort_id')
+           ELSE NULL
+         END = ?
+         OR CASE WHEN json_valid(payload_json)
+           THEN json_extract(payload_json, '$.dispatch_id')
+           ELSE NULL
+         END IN (${placeholders})
+       )
+     ORDER BY id ASC LIMIT ?`,
+    [identity.cohort_id, ...dispatchIds, rowLimit],
+  );
+  const runRows = await all(
+    `SELECT * FROM incident_reanalysis_runs
+     WHERE controlled_dispatch_id IN (${placeholders})
+        OR (
+          controlled_receipt_json IS NOT NULL
+          AND CASE WHEN json_valid(controlled_receipt_json)
+            THEN json_extract(controlled_receipt_json, '$.cohort_id')
+            ELSE NULL
+          END = ?
+        )
+     ORDER BY created_at, run_id LIMIT ?`,
+    [...dispatchIds, identity.cohort_id, rowLimit],
+  );
+  if (
+    jobs.length !== identity.member_rank
+    || runRows.length !== identity.member_rank
+    || jobs.length >= rowLimit
+    || runRows.length >= rowLimit
+  ) {
+    throw controlledRetirementConflict(
+      'controlled evaluation cohort job/run census is not exact',
+    );
+  }
+
+  const jobsByDispatch = new Map();
+  for (const job of jobs) {
+    const jobPayload = incidentReanalysisJobPayload(job);
+    const dispatchId = jobPayload.dispatch_id;
+    if (
+      job.job_type !== 'incident_response_analysis'
+      || Number(job.priority || 0) !== 1200
+      || Number(job.max_attempts || 0) !== 12
+      || jobPayload.agent_role !== 'incident-responder'
+      || jobPayload.manual_reanalysis !== true
+      || jobPayload.cohort_id !== identity.cohort_id
+      || !dispatchIds.includes(dispatchId)
+      || jobPayload.release_id !== identity.retired_release_id
+      || jobPayload.reanalysis_release_id
+        !== identity.retired_release_id
+      || !/^irr-[a-z0-9-]{1,64}$/.test(
+        String(jobPayload.reanalysis_run_id || ''),
+      )
+      || !validIncidentCaseId(jobPayload.case_id)
+      || validIncidentCaseId(jobPayload.case_id) !== jobPayload.case_id
+      || typeof jobPayload.dashboard_group_id !== 'string'
+      || !jobPayload.dashboard_group_id
+      || !stableGroupIdPattern.test(
+        String(jobPayload.stable_group_id || ''),
+      )
+      || jobPayload.group_id !== jobPayload.stable_group_id
+      || job.dedupe_key !== jobPayload.stable_group_id
+      || !validPinnedStableGroupKey(jobPayload.stable_group_key)
+      || !representativeAlertIdPattern.test(
+        String(jobPayload.representative_alert_id || ''),
+      )
+      || jobPayload.alert_id !== jobPayload.representative_alert_id
+      || jobsByDispatch.has(dispatchId)
+    ) {
+      throw controlledRetirementConflict(
+        'controlled evaluation cohort job census is ambiguous',
+      );
+    }
+    jobsByDispatch.set(dispatchId, {job, jobPayload});
+  }
+
+  const runsByDispatch = new Map();
+  for (const runRow of runRows) {
+    const runReceipt = parseJsonObject(
+      runRow.controlled_receipt_json,
+    );
+    const dispatchId = String(runRow.controlled_dispatch_id || '');
+    if (
+      !dispatchIds.includes(dispatchId)
+      || runRow.release_id !== identity.retired_release_id
+      || runReceipt.ok !== true
+      || runReceipt.cohort_id !== identity.cohort_id
+      || runReceipt.dispatch_id !== dispatchId
+      || runReceipt.release_id !== identity.retired_release_id
+      || runsByDispatch.has(dispatchId)
+    ) {
+      throw controlledRetirementConflict(
+        'controlled evaluation cohort run census is ambiguous',
+      );
+    }
+    runsByDispatch.set(dispatchId, {runRow, runReceipt});
+  }
+
+  const projection = {
+    cohort_id: identity.cohort_id,
+    cohort_size: identity.cohort_size,
+    release_id: identity.retired_release_id,
+    target_rank: identity.member_rank,
+    members: [],
+  };
+  for (const member of members) {
+    const jobBinding = jobsByDispatch.get(member.dispatch_id);
+    const runBinding = runsByDispatch.get(member.dispatch_id);
+    if (member.expected_state === 'absent') {
+      if (jobBinding || runBinding) {
+        throw controlledRetirementConflict(
+          `controlled evaluation rank ${member.rank} is not absent`,
+        );
+      }
+      projection.members.push({
+        rank: member.rank,
+        dispatch_id: member.dispatch_id,
+        state: 'absent',
+      });
+      continue;
+    }
+    if (!jobBinding || !runBinding) {
+      throw controlledRetirementConflict(
+        `controlled evaluation rank ${member.rank} lineage is missing`,
+      );
+    }
+    const {job, jobPayload} = jobBinding;
+    const {runRow, runReceipt} = runBinding;
+    if (
+      jobPayload.reanalysis_run_id !== runRow.run_id
+      || runReceipt.run_id !== runRow.run_id
+      || runReceipt.case_id !== jobPayload.case_id
+      || runReceipt.representative_alert_id
+        !== jobPayload.representative_alert_id
+      || runReceipt.stable_group_id !== jobPayload.stable_group_id
+      || runReceipt.stable_group_key !== jobPayload.stable_group_key
+    ) {
+      throw controlledRetirementConflict(
+        `controlled evaluation rank ${member.rank} job/run binding changed`,
+      );
+    }
+    if (member.expected_state === 'completed') {
+      projection.members.push(
+        await controlledRetirementCompletedMember(
+          identity,
+          member,
+          job,
+          jobPayload,
+          runRow,
+          runReceipt,
+        ),
+      );
+      continue;
+    }
+    const expectedJobStatus = targetState === 'pending'
+      ? 'pending'
+      : 'completed';
+    const expectedRunStatus = targetState === 'pending'
+      ? 'queued'
+      : 'partial';
+    if (
+      member.rank !== identity.member_rank
+      || member.dispatch_id !== identity.dispatch_id
+      || Number(job.id || 0) !== identity.job_id
+      || jobPayload.case_id !== identity.case_id
+      || jobPayload.reanalysis_run_id !== identity.reanalysis_run_id
+      || jobPayload.stable_group_id !== identity.stable_group_id
+      || jobPayload.stable_group_key !== identity.stable_group_key
+      || jobPayload.representative_alert_id
+        !== identity.representative_alert_id
+      || runRow.run_id !== identity.reanalysis_run_id
+      || job.status !== expectedJobStatus
+      || Number(job.attempt_count || 0)
+        !== identity.expected_attempt_count
+      || runRow.status !== expectedRunStatus
+      || Number(runRow.total_count || 0) !== 1
+    ) {
+      throw controlledRetirementConflict(
+        'controlled evaluation target rank census changed',
+      );
+    }
+    projection.members.push(
+      await controlledRetirementTargetMember(
+        identity,
+        member,
+        targetState,
+        job,
+        jobPayload,
+        runRow,
+        runReceipt,
+      ),
+    );
+  }
+  return projection;
+}
+
+function validateControlledRetirementReceipt(receipt, identity, retirementId) {
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) {
+    throw controlledRetirementConflict(
+      'controlled evaluation retirement receipt is malformed',
+    );
+  }
+  const receiptSha256 = receipt.receipt_sha256;
+  const unsigned = {...receipt};
+  delete unsigned.receipt_sha256;
+  const suppliedFields = Object.keys(receipt).sort();
+  if (
+    suppliedFields.length !== controlledRetirementReceiptFields.length
+    || suppliedFields.some(
+      (field, index) => field !== controlledRetirementReceiptFields[index],
+    )
+    || receipt.schema !== controlledRetirementReceiptSchema
+    || receipt.ok !== true
+    || receipt.status !== 'retired'
+    || receipt.idempotent !== true
+    || receipt.retirement_id !== retirementId
+    || !receipt.target_before
+    || typeof receipt.target_before !== 'object'
+    || Array.isArray(receipt.target_before)
+    || !receipt.target_after
+    || typeof receipt.target_after !== 'object'
+    || Array.isArray(receipt.target_after)
+    || controlledRetirementCanonicalJsonText(receipt.identity)
+      !== controlledRetirementCanonicalJsonText(identity)
+    || !dispatchIdPattern.test(
+      String(receipt.lineage_before_sha256 || ''),
+    )
+    || !dispatchIdPattern.test(
+      String(receipt.lineage_after_sha256 || ''),
+    )
+    || !dispatchIdPattern.test(String(receiptSha256 || ''))
+    || controlledRetirementSha256(unsigned) !== receiptSha256
+  ) {
+    throw controlledRetirementConflict(
+      'controlled evaluation retirement receipt identity changed',
+    );
+  }
+  return receipt;
+}
+
+async function controlledRetirementReplay(identity, retirementId) {
+  const rows = await all(
+    `SELECT id, detail_json
+     FROM incident_response_events
+     WHERE case_id = ? AND event_type = ?
+     ORDER BY id ASC LIMIT 101`,
+    [identity.case_id, controlledRetirementEventType],
+  );
+  if (rows.length > 100) {
+    throw controlledRetirementConflict(
+      'controlled evaluation retirement event scan exceeded its bound',
+    );
+  }
+  const lineage = [];
+  for (const row of rows) {
+    const receipt = parseJsonObject(row.detail_json);
+    const receiptIdentity = receipt.identity || {};
+    if (
+      receiptIdentity.cohort_id === identity.cohort_id
+      || receiptIdentity.dispatch_id === identity.dispatch_id
+      || receiptIdentity.reanalysis_run_id === identity.reanalysis_run_id
+      || Number(receiptIdentity.job_id || 0) === identity.job_id
+    ) {
+      if (
+        controlledRetirementCanonicalJsonText(receipt)
+        !== row.detail_json
+      ) {
+        throw controlledRetirementConflict(
+          'controlled evaluation retirement receipt is not canonical',
+        );
+      }
+      lineage.push(receipt);
+    }
+  }
+  if (!lineage.length) return null;
+  if (
+    lineage.length !== 1
+    || lineage[0].retirement_id !== retirementId
+  ) {
+    throw controlledRetirementConflict(
+      'controlled evaluation retirement lineage is ambiguous',
+    );
+  }
+  return validateControlledRetirementReceipt(
+    lineage[0],
+    identity,
+    retirementId,
+  );
+}
+
+async function validateControlledRetirementPostState(
+  identity,
+  receipt,
+) {
+  const job = await get(
+    'SELECT * FROM durable_jobs WHERE id = ?',
+    [identity.job_id],
+  );
+  const runRow = await get(
+    'SELECT * FROM incident_reanalysis_runs WHERE run_id = ?',
+    [identity.reanalysis_run_id],
+  );
+  const runCase = await get(
+    `SELECT * FROM incident_reanalysis_run_cases
+     WHERE run_id = ? AND case_id = ?`,
+    [identity.reanalysis_run_id, identity.case_id],
+  );
+  const attempt = await get(
+    `SELECT * FROM incident_reanalysis_attempts
+     WHERE attempt_id = ?`,
+    [identity.expected_attempt_id],
+  );
+  const incident = await get(
+    'SELECT * FROM incident_response_cases WHERE case_id = ?',
+    [identity.case_id],
+  );
+  const afterProjection = controlledRetirementJobProjection(job);
+  if (
+    !job
+    || job.job_type !== 'incident_response_analysis'
+    || job.dedupe_key !== identity.stable_group_id
+    || afterProjection.payload_sha256
+      !== identity.expected_job_payload_sha256
+    || job.status !== 'completed'
+    || Number(job.attempt_count || 0) !== identity.expected_attempt_count
+    || job.lease_token !== null
+    || job.lease_expires_at !== null
+    || job.last_error !== null
+    || job.processing_started_at !== null
+    || Number(job.rerun_requested || 0) !== 0
+    || job.completed_at !== receipt.retired_at
+    || job.last_completed_at !== receipt.retired_at
+    || job.updated_at !== receipt.retired_at
+    || controlledRetirementSha256(afterProjection)
+      !== receipt.job_after_sha256
+    || !runRow
+    || runRow.release_id !== identity.retired_release_id
+    || runRow.scope !== 'single_case'
+    || runRow.status !== 'partial'
+    || Number(runRow.total_count || 0) !== 1
+    || runRow.controlled_dispatch_id !== identity.dispatch_id
+    || !runRow.completed_at
+    || !runCase
+    || runCase.group_id !== identity.stable_group_id
+    || runCase.representative_alert_id
+      !== identity.representative_alert_id
+    || runCase.status !== 'skipped'
+    || runCase.skip_reason !== receipt.skip_reason
+    || runCase.latest_error !== null
+    || runCase.latest_attempt_id !== identity.expected_attempt_id
+    || runCase.analysis_id !== null
+    || !attempt
+    || attempt.run_id !== identity.reanalysis_run_id
+    || attempt.case_id !== identity.case_id
+    || attempt.group_id !== identity.stable_group_id
+    || Number(attempt.durable_attempt_count || 0)
+      !== identity.expected_attempt_count
+    || attempt.status !== 'failed'
+    || attempt.analysis_id !== null
+    || !attempt.completed_at
+    || !incident
+    || incident.group_id !== identity.stable_group_id
+    || incident.representative_alert_id
+      !== identity.representative_alert_id
+    || String(incident.latest_analysis_id || '')
+      !== identity.expected_prior_analysis_id
+    || incident.agent_status !== receipt.case_agent_status
+    || (
+      receipt.case_agent_status === 'analyzed'
+      && incident.latest_error !== null
+    )
+    || (
+      receipt.case_agent_status === 'failed'
+      && incident.latest_error !== receipt.skip_reason
+    )
+  ) {
+    throw controlledRetirementConflict(
+      'controlled evaluation retirement post-state changed',
+    );
+  }
+  const lineageAfter = await controlledRetirementCensus(
+    identity,
+    'retired',
+  );
+  if (
+    controlledRetirementSha256(lineageAfter)
+    !== receipt.lineage_after_sha256
+    || controlledRetirementCanonicalJsonText(
+      lineageAfter.members[identity.member_rank - 1],
+    ) !== controlledRetirementCanonicalJsonText(
+      receipt.target_after,
+    )
+  ) {
+    throw controlledRetirementConflict(
+      'controlled evaluation retirement post-lineage changed',
+    );
+  }
+}
+
+async function retireControlledEvaluation(payload) {
+  const identity = controlledRetirementIdentity(payload);
+  const retirementId = controlledRetirementSha256(identity);
+  const replay = await controlledRetirementReplay(identity, retirementId);
+  if (replay) {
+    await validateControlledRetirementPostState(
+      identity,
+      replay,
+    );
+    return replay;
+  }
+  const lineageBefore = await controlledRetirementCensus(
+    identity,
+    'pending',
+  );
+  const job = await get(
+    'SELECT * FROM durable_jobs WHERE id = ?',
+    [identity.job_id],
+  );
+  const jobPayload = incidentReanalysisJobPayload(job);
+  const jobBefore = controlledRetirementJobProjection(job);
+  const runRow = await get(
+    'SELECT * FROM incident_reanalysis_runs WHERE run_id = ?',
+    [identity.reanalysis_run_id],
+  );
+  const runReceipt = parseJsonObject(runRow?.controlled_receipt_json);
+  const runCase = await get(
+    `SELECT * FROM incident_reanalysis_run_cases
+     WHERE run_id = ? AND case_id = ?`,
+    [identity.reanalysis_run_id, identity.case_id],
+  );
+  const attempts = await all(
+    `SELECT * FROM incident_reanalysis_attempts
+     WHERE run_id = ? AND case_id = ? ORDER BY started_at, attempt_id`,
+    [identity.reanalysis_run_id, identity.case_id],
+  );
+  const attempt = attempts[0];
+  const incident = await get(
+    'SELECT * FROM incident_response_cases WHERE case_id = ?',
+    [identity.case_id],
+  );
+  const priorAnalysis = identity.expected_prior_analysis_id
+    ? await get(
+      `SELECT analysis_id, group_id, agent_role
+       FROM ai_analysis_runs WHERE analysis_id = ?`,
+      [identity.expected_prior_analysis_id],
+    )
+    : null;
+  const leaseKey = controlledEvaluationLeaseKey(
+    'incident_response_analysis',
+    identity.stable_group_id,
+  );
+  if (
+    !job
+    || job.job_type !== 'incident_response_analysis'
+    || job.dedupe_key !== identity.stable_group_id
+    || jobBefore.payload_sha256 !== identity.expected_job_payload_sha256
+    || job.status !== 'pending'
+    || Number(job.attempt_count || 0) !== identity.expected_attempt_count
+    || job.lease_token !== null
+    || job.lease_expires_at !== null
+    || Number(job.rerun_requested || 0) !== 0
+    || !job.processing_started_at
+    || !job.last_error
+    || jobPayload.agent_role !== 'incident-responder'
+    || jobPayload.manual_reanalysis !== true
+    || jobPayload.cohort_id !== identity.cohort_id
+    || jobPayload.dispatch_id !== identity.dispatch_id
+    || jobPayload.release_id !== identity.retired_release_id
+    || jobPayload.reanalysis_release_id !== identity.retired_release_id
+    || jobPayload.reanalysis_run_id !== identity.reanalysis_run_id
+    || jobPayload.case_id !== identity.case_id
+    || jobPayload.group_id !== identity.stable_group_id
+    || jobPayload.stable_group_id !== identity.stable_group_id
+    || jobPayload.stable_group_key !== identity.stable_group_key
+    || jobPayload.alert_id !== identity.representative_alert_id
+    || jobPayload.representative_alert_id
+      !== identity.representative_alert_id
+    || !runRow
+    || runRow.release_id !== identity.retired_release_id
+    || runRow.scope !== 'single_case'
+    || runRow.status !== 'queued'
+    || Number(runRow.total_count || 0) !== 1
+    || runRow.completed_at !== null
+    || runRow.controlled_dispatch_id !== identity.dispatch_id
+    || runReceipt.ok !== true
+    || runReceipt.case_id !== identity.case_id
+    || runReceipt.cohort_id !== identity.cohort_id
+    || runReceipt.dispatch_id !== identity.dispatch_id
+    || runReceipt.release_id !== identity.retired_release_id
+    || runReceipt.representative_alert_id
+      !== identity.representative_alert_id
+    || runReceipt.stable_group_id !== identity.stable_group_id
+    || runReceipt.stable_group_key !== identity.stable_group_key
+    || !runCase
+    || runCase.group_id !== identity.stable_group_id
+    || runCase.representative_alert_id
+      !== identity.representative_alert_id
+    || runCase.status !== 'queued'
+    || runCase.latest_attempt_id !== identity.expected_attempt_id
+    || runCase.analysis_id !== null
+    || attempts.length !== 1
+    || !attempt
+    || attempt.attempt_id !== identity.expected_attempt_id
+    || attempt.run_id !== identity.reanalysis_run_id
+    || attempt.case_id !== identity.case_id
+    || attempt.group_id !== identity.stable_group_id
+    || Number(attempt.durable_attempt_count || 0)
+      !== identity.expected_attempt_count
+    || attempt.status !== 'failed'
+    || attempt.analysis_id !== null
+    || !attempt.started_at
+    || !attempt.completed_at
+    || !incident
+    || incident.group_id !== identity.stable_group_id
+    || incident.representative_alert_id
+      !== identity.representative_alert_id
+    || incident.agent_status !== 'queued'
+    || String(incident.latest_analysis_id || '')
+      !== identity.expected_prior_analysis_id
+    || (
+      identity.expected_prior_analysis_id
+      && (
+        !priorAnalysis
+        || priorAnalysis.group_id !== identity.stable_group_id
+        || priorAnalysis.agent_role !== 'incident-responder'
+      )
+    )
+    || controlledEvaluationLeases.has(leaseKey)
+  ) {
+    throw controlledRetirementConflict(
+      'controlled evaluation retirement pre-state changed',
+    );
+  }
+
+  const retiredAt = nowUtc();
+  const skipReason = (
+    `Administratively retired controlled evaluation ${identity.cohort_id} `
+    + `rank ${identity.member_rank} after its failed sole attempt; `
+    + `no analysis was credited (${retirementId}).`
+  );
+  const retired = await durableJobs.retirePendingExact({
+    jobId: identity.job_id,
+    jobType: 'incident_response_analysis',
+    dedupeKey: identity.stable_group_id,
+    payloadJson: String(job.payload_json),
+    attemptCount: identity.expected_attempt_count,
+    retiredAt,
+  });
+  if (!retired) {
+    throw controlledRetirementConflict(
+      'controlled evaluation pending job changed during retirement',
+    );
+  }
+  const retiredCase = await run(
+    `UPDATE incident_reanalysis_run_cases
+     SET status = 'skipped', skip_reason = ?, latest_error = NULL,
+         completed_at = ?, updated_at = ?
+     WHERE run_id = ? AND case_id = ? AND group_id = ?
+       AND status = 'queued' AND latest_attempt_id = ?
+       AND analysis_id IS NULL`,
+    [
+      skipReason,
+      retiredAt,
+      retiredAt,
+      identity.reanalysis_run_id,
+      identity.case_id,
+      identity.stable_group_id,
+      identity.expected_attempt_id,
+    ],
+  );
+  if (Number(retiredCase.changes || 0) !== 1) {
+    throw controlledRetirementConflict(
+      'controlled evaluation run case changed during retirement',
+    );
+  }
+  const refreshedRun = await refreshIncidentReanalysisRun(
+    identity.reanalysis_run_id,
+  );
+  if (
+    !refreshedRun
+    || refreshedRun.status !== 'partial'
+    || Number(refreshedRun.total_count || 0) !== 1
+  ) {
+    throw controlledRetirementConflict(
+      'controlled evaluation run did not retire as partial',
+    );
+  }
+  const caseAgentStatus = identity.expected_prior_analysis_id
+    ? 'analyzed'
+    : 'failed';
+  const updatedIncident = await run(
+    `UPDATE incident_response_cases
+     SET agent_status = ?, latest_error = ?, updated_at = ?
+     WHERE case_id = ? AND group_id = ? AND representative_alert_id = ?
+       AND agent_status = 'queued'
+       AND COALESCE(latest_analysis_id, '') = ?`,
+    [
+      caseAgentStatus,
+      caseAgentStatus === 'failed' ? skipReason : null,
+      retiredAt,
+      identity.case_id,
+      identity.stable_group_id,
+      identity.representative_alert_id,
+      identity.expected_prior_analysis_id,
+    ],
+  );
+  if (Number(updatedIncident.changes || 0) !== 1) {
+    throw controlledRetirementConflict(
+      'controlled evaluation incident case changed during retirement',
+    );
+  }
+  const jobAfter = await get(
+    'SELECT * FROM durable_jobs WHERE id = ?',
+    [identity.job_id],
+  );
+  const lineageAfter = await controlledRetirementCensus(
+    identity,
+    'retired',
+  );
+  const receipt = {
+    schema: controlledRetirementReceiptSchema,
+    ok: true,
+    status: 'retired',
+    idempotent: true,
+    retirement_id: retirementId,
+    retired_at: retiredAt,
+    identity,
+    skip_reason: skipReason,
+    case_agent_status: caseAgentStatus,
+    target_before: lineageBefore.members[
+      identity.member_rank - 1
+    ],
+    target_after: lineageAfter.members[
+      identity.member_rank - 1
+    ],
+    lineage_before_sha256: controlledRetirementSha256(
+      lineageBefore,
+    ),
+    lineage_after_sha256: controlledRetirementSha256(
+      lineageAfter,
+    ),
+    job_before_sha256: controlledRetirementSha256(jobBefore),
+    job_after_sha256: controlledRetirementSha256(
+      controlledRetirementJobProjection(jobAfter),
+    ),
+    security_onion_access: 'none',
+    security_onion_writes_allowed: false,
+    model_invocations: 0,
+    worker_wake_signaled: false,
+  };
+  receipt.receipt_sha256 = controlledRetirementSha256(receipt);
+  const sealedReceiptText = controlledRetirementCanonicalJsonText(
+    receipt,
+  );
+  const sealedReceipt = JSON.parse(sealedReceiptText);
+  const inserted = await run(
+    `INSERT INTO incident_response_events (
+       case_id, event_type, actor, detail_json, created_at
+     ) VALUES (?, ?, ?, ?, ?)`,
+    [
+      identity.case_id,
+      controlledRetirementEventType,
+      `controlled-retirement:${identity.replacement_release_id.slice(0, 12)}`,
+      sealedReceiptText,
+      retiredAt,
+    ],
+  );
+  if (Number(inserted.changes || 0) !== 1) {
+    throw controlledRetirementConflict(
+      'controlled evaluation retirement receipt was not recorded',
+    );
+  }
+  validateControlledRetirementReceipt(
+    sealedReceipt,
+    identity,
+    retirementId,
+  );
+  await validateControlledRetirementPostState(
+    identity,
+    sealedReceipt,
+  );
+  return sealedReceipt;
 }
 
 async function rejectProcessingControlledJob(jobType, groupIds) {
@@ -8965,6 +10473,7 @@ const controlledEvaluationRequests = new Set([
   'GET /health',
   'POST /ai/request',
   'POST /analysis/result',
+  'POST /controlled-evaluations/retire',
   'POST /incidents/reanalyze',
   'POST /jobs/status',
 ]);
@@ -9221,6 +10730,19 @@ async function handleRequest(request, response) {
       ));
       void signalAiWorkers('incident-response-case-reanalysis');
       sendJson(response, 202, result);
+      return;
+    }
+    if (
+      request.method === 'POST'
+      && parsedUrl.pathname === '/controlled-evaluations/retire'
+    ) {
+      const payload = await readJsonBody(request);
+      const result = await withSqliteWriteGate(
+        () => withImmediateTransaction(
+          () => retireControlledEvaluation(payload),
+        ),
+      );
+      sendJson(response, 200, result);
       return;
     }
     if (request.method === 'POST' && parsedUrl.pathname === '/incidents/reanalyze-all') {

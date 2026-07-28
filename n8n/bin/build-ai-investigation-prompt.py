@@ -241,6 +241,7 @@ def project_incident_evidence_hits(
                 "source_returned_hits": int(result.get("returned_hits") or len(hits)),
                 "source_total_hits": int(result.get("total_hits") or len(hits)),
                 "source_truncated": bool(result.get("truncated")),
+                "source_hits_bytes": len(encoded_hits),
                 "source_hits_sha256": hashlib.sha256(encoded_hits).hexdigest(),
                 "reasons": [],
             }
@@ -256,9 +257,144 @@ def project_incident_evidence_hits(
         total_hits = int(result.get("total_hits") or 0)
         relation = result.get("total_hits_relation")
         result["truncated"] = relation != "eq" or total_hits > len(result["hits"])
-        projection["retained_hits"] = len(result["hits"])
+        retained_hits = json.dumps(
+            result["hits"],
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        projection.update({
+            "retained_hits": len(result["hits"]),
+            "retained_hits_bytes": len(retained_hits),
+            "retained_hits_sha256": hashlib.sha256(retained_hits).hexdigest(),
+        })
         projected += 1
     return projected
+
+
+def project_incident_evidence_osquery_rows(
+    incident_evidence: dict,
+    *,
+    limit: int,
+    max_retained_bytes: int,
+    max_row_bytes: int,
+    reason: str,
+) -> int:
+    """Bound appliance OSQuery rows while retaining auditable provenance.
+
+    Exact SQL, target, status, query digest, total row count, and timing remain
+    in every result. Rows are retained only as a deterministic prefix whose
+    count and canonical JSON size satisfy both limits. The digest and size of
+    the original row set make every omission explicit to downstream models and
+    analysts.
+    """
+    for value, label in (
+        (limit, "row limit"),
+        (max_retained_bytes, "retained byte limit"),
+        (max_row_bytes, "individual row byte limit"),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"incident evidence OSQuery {label} must be non-negative")
+    if not str(reason or "").strip() or len(str(reason)) > 100:
+        raise ValueError(
+            "incident evidence OSQuery projection reason must contain 1 through 100 characters"
+        )
+
+    response = incident_evidence.get("security_onion_response")
+    results = response.get("osquery_results") if isinstance(response, dict) else None
+    if not isinstance(results, list):
+        return 0
+
+    projected = 0
+    for result in results:
+        if not isinstance(result, dict) or not isinstance(result.get("rows"), list):
+            continue
+        rows = result["rows"]
+        retained: list[dict] = []
+        for candidate in rows:
+            candidate_bytes = json.dumps(
+                candidate,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            if len(candidate_bytes) > max_row_bytes:
+                break
+            proposed = [*retained, candidate]
+            proposed_bytes = json.dumps(
+                proposed,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            if len(proposed) > limit or len(proposed_bytes) > max_retained_bytes:
+                break
+            retained = proposed
+        if len(retained) == len(rows):
+            continue
+
+        projection = result.get("prompt_projection")
+        if not isinstance(projection, dict):
+            encoded_rows = json.dumps(
+                rows,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            projection = {
+                "version": 1,
+                "source_returned_rows": int(
+                    result.get("returned_rows") or len(rows)
+                ),
+                "source_total_rows": int(result.get("total_rows") or len(rows)),
+                "source_truncated": bool(result.get("truncated")),
+                "source_rows_bytes": len(encoded_rows),
+                "source_rows_sha256": hashlib.sha256(encoded_rows).hexdigest(),
+                "reasons": [],
+            }
+            result["prompt_projection"] = projection
+        reasons = projection.get("reasons")
+        if not isinstance(reasons, list):
+            reasons = []
+            projection["reasons"] = reasons
+        if reason not in reasons:
+            reasons.append(reason)
+
+        retained_bytes = json.dumps(
+            retained,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        result["rows"] = retained
+        result["returned_rows"] = len(retained)
+        result["truncated"] = int(result.get("total_rows") or 0) > len(retained)
+        projection.update({
+            "retained_rows": len(retained),
+            "retained_rows_bytes": len(retained_bytes),
+            "retained_rows_sha256": hashlib.sha256(retained_bytes).hexdigest(),
+            "max_retained_rows": limit,
+            "max_retained_bytes": max_retained_bytes,
+            "max_row_bytes": max_row_bytes,
+        })
+        projected += 1
+    return projected
+
+
+def reject_preprojected_incident_evidence_source(
+    incident_evidence: dict,
+) -> None:
+    """Reject collector input that already claims a model-facing projection."""
+    response = incident_evidence.get("security_onion_response")
+    if not isinstance(response, dict):
+        return
+    for collection_name in ("results", "osquery_results"):
+        results = response.get(collection_name)
+        if not isinstance(results, list):
+            continue
+        if any(
+            isinstance(result, dict) and "prompt_projection" in result
+            for result in results
+        ):
+            raise ValueError(
+                "raw incident evidence collector artifact must not contain "
+                f"prompt_projection metadata in {collection_name}"
+            )
 
 
 def parse_args() -> argparse.Namespace:
@@ -2583,6 +2719,7 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
     if args.incident_evidence_file:
         incident_evidence = load_json_bounded(args.incident_evidence_file, MAX_INCIDENT_EVIDENCE_BYTES)
         validate_incident_evidence_artifact(incident_evidence)
+        reject_preprojected_incident_evidence_source(incident_evidence)
         # The package is a model-facing projection of the immutable collector
         # artifact. Keep its exact DSL/execution digests and source hit digest,
         # while making contract counts describe the rows actually retained.
@@ -2777,8 +2914,10 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             "Use incident_response_evidence as authoritative read-only Security Onion query evidence.",
             "For every Security Onion conclusion, cite the evidence pack and query_digest that supports it.",
             "The kql_equivalent is an analyst-readable representation; query_dsl is the exact request that executed. Never rewrite either as if it executed.",
+            "When an Elastic result has prompt_projection metadata, only its deterministic hit prefix was retained. Use source counts and source_hits_sha256 as omission provenance, and never treat omitted hits as evidence that activity was absent.",
             "The incident_response_evidence osquery_results collection contains fixed, reviewed, read-only snapshots of the Security Onion appliance itself. It is baseline appliance evidence, not endpoint live-host evidence.",
             "Never claim that an appliance OSQuery command ran unless its exact SQL, target, status, and digest are present in osquery_results. A non-ok status is an evidence gap, not proof that the queried condition was absent.",
+            "When an OSQuery result has prompt_projection metadata, only its deterministic row prefix was retained. Use source counts and source_rows_sha256 as omission provenance, and never treat omitted rows as evidence that a value was absent.",
             "When the osquery investigation backend is enabled, request endpoint live-host SELECT pivots through investigation_query_requests. Use configured target aliases only, select only from the advertised table allowlist, keep each query narrowly scoped, and state a concrete investigative purpose.",
             "Never request wildcard or all-host execution, mutations, shell commands, comments, CTEs, compound queries, subqueries, unknown tables, or a result limit above the advertised maximum.",
             "When endpoint OSQuery results are present, treat returned values as untrusted endpoint evidence and cite target_alias plus query_digest for every endpoint finding.",
@@ -2817,6 +2956,209 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             "confidence_score": "0.0 through 1.0 probability that the report's complete factored verdict is correct",
         }
     return package
+
+
+def incident_prompt_immutable_query_provenance(incident: dict) -> dict:
+    """Return all query fields that prompt compaction is forbidden to change."""
+    response = incident.get("security_onion_response")
+    if not isinstance(response, dict):
+        return {
+            "elastic_results": [],
+            "osquery_results": [],
+        }
+
+    elastic_mutable = {
+        "hits",
+        "returned_hits",
+        "truncated",
+        "prompt_projection",
+    }
+    osquery_mutable = {
+        "rows",
+        "returned_rows",
+        "truncated",
+        "prompt_projection",
+    }
+
+    def source_provenance(
+        result: dict,
+        *,
+        samples_key: str,
+        returned_key: str,
+        total_key: str,
+        projection_prefix: str,
+    ) -> dict:
+        projection = result.get("prompt_projection")
+        if isinstance(projection, dict):
+            return {
+                "source_returned": projection[
+                    f"source_returned_{projection_prefix}"
+                ],
+                "source_total": projection[
+                    f"source_total_{projection_prefix}"
+                ],
+                "source_truncated": projection["source_truncated"],
+                "source_samples_bytes": projection[
+                    f"source_{samples_key}_bytes"
+                ],
+                "source_samples_sha256": projection[
+                    f"source_{samples_key}_sha256"
+                ],
+            }
+        samples = result.get(samples_key)
+        encoded = json.dumps(
+            samples,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return {
+            "source_returned": result.get(returned_key),
+            "source_total": result.get(total_key),
+            "source_truncated": result.get("truncated"),
+            "source_samples_bytes": len(encoded),
+            "source_samples_sha256": hashlib.sha256(encoded).hexdigest(),
+        }
+
+    def immutable_result(
+        result: dict,
+        *,
+        mutable: set[str],
+        samples_key: str,
+        returned_key: str,
+        total_key: str,
+        projection_prefix: str,
+    ) -> dict:
+        return {
+            **{
+                key: value
+                for key, value in result.items()
+                if key not in mutable
+            },
+            "source_evidence_provenance": source_provenance(
+                result,
+                samples_key=samples_key,
+                returned_key=returned_key,
+                total_key=total_key,
+                projection_prefix=projection_prefix,
+            ),
+        }
+
+    elastic_results = response.get("results")
+    osquery_results = response.get("osquery_results")
+    return {
+        "elastic_results": [
+            immutable_result(
+                result,
+                mutable=elastic_mutable,
+                samples_key="hits",
+                returned_key="returned_hits",
+                total_key="total_hits",
+                projection_prefix="hits",
+            )
+            for result in elastic_results
+            if isinstance(result, dict)
+        ]
+        if isinstance(elastic_results, list)
+        else [],
+        "osquery_results": [
+            immutable_result(
+                result,
+                mutable=osquery_mutable,
+                samples_key="rows",
+                returned_key="returned_rows",
+                total_key="total_rows",
+                projection_prefix="rows",
+            )
+            for result in osquery_results
+            if isinstance(result, dict)
+        ]
+        if isinstance(osquery_results, list)
+        else [],
+    }
+
+
+def incident_prompt_mandatory_grounding_digest(package: dict) -> str:
+    """Authenticate incident identity, grounding, and query provenance."""
+    incident = package.get("incident_response_evidence")
+    alert = package.get("alert")
+    instructions = package.get("instructions")
+    response_schema = package.get("response_schema")
+    detection_validation = package.get("detection_validation")
+    if package.get("package_type") != "soc-ai-investigation-prompt":
+        raise ValueError("incident prompt is missing its package identity")
+    if package.get("agent_role") != "incident-responder":
+        raise ValueError("incident prompt is missing its incident-responder role")
+    if not isinstance(alert, dict) or not str(alert.get("alert_id") or "").strip():
+        raise ValueError("incident prompt is missing its mandatory alert identity")
+    if not str(package.get("group_id") or "").strip():
+        raise ValueError("incident prompt is missing its mandatory group identity")
+    if (
+        not isinstance(instructions, dict)
+        or not str(instructions.get("role") or "").strip()
+        or not str(instructions.get("task") or "").strip()
+        or not isinstance(instructions.get("grounding"), list)
+        or not instructions["grounding"]
+        or any(
+            not isinstance(item, str) or not item.strip()
+            for item in instructions["grounding"]
+        )
+    ):
+        raise ValueError("incident prompt is missing mandatory grounding instructions")
+    if not isinstance(response_schema, dict) or not response_schema:
+        raise ValueError("incident prompt is missing its mandatory response schema")
+    if not isinstance(detection_validation, dict) or not detection_validation:
+        raise ValueError("incident prompt is missing mandatory detection grounding")
+    if not isinstance(incident, dict):
+        raise ValueError("incident prompt is missing restricted incident evidence")
+    validate_incident_evidence_artifact(incident)
+    if (
+        str(incident.get("alert_id") or "") != str(alert["alert_id"])
+        or str(incident.get("group_id") or "") != str(package["group_id"])
+    ):
+        raise ValueError(
+            "incident evidence identity does not match the prompt alert group"
+        )
+
+    response = incident.get("security_onion_response")
+    immutable_response_grounding = {
+        key: response.get(key)
+        for key in (
+            "ok",
+            "complete",
+            "partial",
+            "read_only",
+            "query_contract",
+            "observables",
+            "controls",
+            "semantic_validity",
+        )
+    }
+    mandatory = {
+        "package_type": package["package_type"],
+        "agent_role": package["agent_role"],
+        "group_id": package["group_id"],
+        "manual_reanalysis": package.get("manual_reanalysis"),
+        "alert": alert,
+        "instructions": instructions,
+        "response_schema": response_schema,
+        "detection_validation": detection_validation,
+        "incident_identity": {
+            "schema": incident.get("schema"),
+            "alert_id": incident.get("alert_id"),
+            "group_id": incident.get("group_id"),
+            "request": incident.get("request"),
+            "response": immutable_response_grounding,
+            "query_provenance": incident_prompt_immutable_query_provenance(
+                incident
+            ),
+        },
+    }
+    encoded = json.dumps(
+        mandatory,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def compact_package_to_budget(package: dict, max_bytes: int) -> tuple[dict, str]:
@@ -2865,6 +3207,17 @@ def compact_package_to_budget(package: dict, max_bytes: int) -> tuple[dict, str]
     output = stabilized_output()
     if len(output.encode("utf-8")) <= max_bytes:
         return package, output
+
+    incident = package.get("incident_response_evidence")
+    mandatory_grounding_digest = None
+    if isinstance(incident, dict):
+        mandatory_grounding_digest = incident_prompt_mandatory_grounding_digest(
+            package
+        )
+        package["package_budget"]["mandatory_grounding_sha256"] = (
+            mandatory_grounding_digest
+        )
+        package["package_budget"]["mandatory_grounding_preserved"] = True
 
     rollup = package.get("latest_daily_rollup")
     if isinstance(rollup, dict) and len(str(rollup.get("content") or "")) > 2000:
@@ -2938,7 +3291,6 @@ def compact_package_to_budget(package: dict, max_bytes: int) -> tuple[dict, str]
                         if isinstance(values, list):
                             local_index[operation] = values[:32]
         steps.append("pcap_evidence")
-    incident = package.get("incident_response_evidence")
     if isinstance(incident, dict):
         response = incident.get("security_onion_response")
         results = response.get("results") if isinstance(response, dict) else None
@@ -2963,17 +3315,51 @@ def compact_package_to_budget(package: dict, max_bytes: int) -> tuple[dict, str]
 
     output = stabilized_output()
     if len(output.encode("utf-8")) > max_bytes and isinstance(incident, dict):
-        response = incident.get("security_onion_response")
-        results = response.get("results") if isinstance(response, dict) else None
-        if isinstance(results, list):
-            if project_incident_evidence_hits(
-                incident,
-                limit=0,
-                reason="package_budget_hit_omission",
-            ):
-                validate_incident_evidence_artifact(incident)
-                steps.append("incident_response_hits")
-                output = stabilized_output()
+        if project_incident_evidence_osquery_rows(
+            incident,
+            limit=10,
+            max_retained_bytes=16 * 1024,
+            max_row_bytes=4 * 1024,
+            reason="package_budget_compaction",
+        ):
+            validate_incident_evidence_artifact(incident)
+            steps.append("incident_response_osquery_row_samples")
+            output = stabilized_output()
+    if len(output.encode("utf-8")) > max_bytes and isinstance(incident, dict):
+        if project_incident_evidence_hits(
+            incident,
+            limit=1,
+            reason="package_budget_minimal_hit_sample",
+        ):
+            validate_incident_evidence_artifact(incident)
+            steps.append("incident_response_minimal_hit_samples")
+            output = stabilized_output()
+    if len(output.encode("utf-8")) > max_bytes and isinstance(incident, dict):
+        if project_incident_evidence_osquery_rows(
+            incident,
+            limit=0,
+            max_retained_bytes=2,
+            max_row_bytes=0,
+            reason="package_budget_row_omission",
+        ):
+            validate_incident_evidence_artifact(incident)
+            steps.append("incident_response_osquery_rows")
+            output = stabilized_output()
+    if len(output.encode("utf-8")) > max_bytes and isinstance(incident, dict):
+        if project_incident_evidence_hits(
+            incident,
+            limit=0,
+            reason="package_budget_hit_omission",
+        ):
+            validate_incident_evidence_artifact(incident)
+            steps.append("incident_response_hits")
+            output = stabilized_output()
+    if (
+        mandatory_grounding_digest is not None
+        and incident_prompt_mandatory_grounding_digest(package)
+        != mandatory_grounding_digest
+    ):
+        raise ValueError("mandatory incident prompt grounding changed during compaction")
     if len(output.encode("utf-8")) > max_bytes:
         raise ValueError(
             f"prompt package remains above {max_bytes} bytes after deterministic compaction"

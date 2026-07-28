@@ -225,6 +225,57 @@ function createDurableJobQueue({run, get, all, now, transitionLeaseSeconds = 900
     return completed;
   }
 
+  async function retirePendingExact({
+    jobId,
+    jobType,
+    dedupeKey,
+    payloadJson,
+    attemptCount,
+    retiredAt,
+  }) {
+    const normalizedJobId = jobId;
+    const normalizedAttemptCount = attemptCount;
+    if (
+      typeof normalizedJobId !== 'number'
+      || !Number.isSafeInteger(normalizedJobId)
+      || normalizedJobId < 1
+      || typeof jobType !== 'string'
+      || !jobType
+      || typeof dedupeKey !== 'string'
+      || !dedupeKey
+      || typeof payloadJson !== 'string'
+      || !payloadJson
+      || typeof normalizedAttemptCount !== 'number'
+      || !Number.isSafeInteger(normalizedAttemptCount)
+      || normalizedAttemptCount < 0
+      || typeof retiredAt !== 'string'
+      || !retiredAt
+    ) {
+      throw new Error('invalid exact pending retirement identity');
+    }
+    const result = await run(
+      `UPDATE durable_jobs
+       SET status = 'completed', lease_expires_at = NULL, lease_token = NULL,
+           last_error = NULL, completed_at = ?, last_completed_at = ?,
+           processing_started_at = NULL, rerun_requested = 0, updated_at = ?
+       WHERE id = ? AND job_type = ? AND dedupe_key = ?
+         AND payload_json = ? AND status = 'pending'
+         AND attempt_count = ? AND lease_token IS NULL
+         AND lease_expires_at IS NULL AND rerun_requested = 0`,
+      [
+        retiredAt,
+        retiredAt,
+        retiredAt,
+        normalizedJobId,
+        jobType,
+        dedupeKey,
+        payloadJson,
+        normalizedAttemptCount,
+      ],
+    );
+    return Number(result.changes || 0) === 1;
+  }
+
   async function fail(job, error, baseRetrySeconds = 30, retryable = true) {
     const terminal = retryable === false
       || Number(job.attempt_count || 0) >= Number(job.max_attempts || 8);
@@ -354,7 +405,18 @@ function createDurableJobQueue({run, get, all, now, transitionLeaseSeconds = 900
     return {updated: result.changes === 1, leaseToken: result.changes === 1 ? leaseToken : null};
   }
 
-  return {install, enqueue, claim, complete, completePendingByDedupeKeys, fail, stats, transition, recoverExpired};
+  return {
+    install,
+    enqueue,
+    claim,
+    complete,
+    completePendingByDedupeKeys,
+    retirePendingExact,
+    fail,
+    stats,
+    transition,
+    recoverExpired,
+  };
 }
 
 module.exports = {createDurableJobQueue};

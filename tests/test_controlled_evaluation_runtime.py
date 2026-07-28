@@ -42,6 +42,7 @@ BIN_DIR = ROOT / "n8n" / "bin"
 RUNNER_PATH = BIN_DIR / "run-local-ai-analysis.py"
 SCHEDULER_PATH = BIN_DIR / "auto-run-ai-analysis.py"
 RELEASE_ID = "c" * 40
+REPLACEMENT_RELEASE_ID = "f" * 40
 EVALUATION_TOKEN = "9" * 64
 
 CONTROLLED_CREDENTIAL_KEYS = {
@@ -121,6 +122,33 @@ def request_json(
                 int(error.code),
                 json.loads(raw) if raw else {},
             )
+        finally:
+            error.close()
+
+
+def request_json_bytes(
+    url: str,
+    payload: dict,
+    *,
+    timeout: float = 3,
+    evaluation_token: str = EVALUATION_TOKEN,
+) -> tuple[int, bytes]:
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if evaluation_token:
+        headers["X-Onion-Sentinel-Evaluation-Token"] = evaluation_token
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers=headers,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return int(response.status), response.read()
+    except urllib.error.HTTPError as error:
+        try:
+            return int(error.code), error.read()
         finally:
             error.close()
 
@@ -349,11 +377,16 @@ class ControlledAlertStoreTests(unittest.TestCase):
         self.log_file.close()
         self.temporary.cleanup()
 
-    def controlled_environment(self, *, port: int | None = None) -> dict[str, str]:
+    def controlled_environment(
+        self,
+        *,
+        port: int | None = None,
+        release_id: str = RELEASE_ID,
+    ) -> dict[str, str]:
         return {
             **sanitized_environment(),
             "ONION_SENTINEL_EVALUATION_MODE": "1",
-            "ONION_SENTINEL_RELEASE_ID": RELEASE_ID,
+            "ONION_SENTINEL_RELEASE_ID": release_id,
             "ONION_SENTINEL_EVALUATION_TOKEN": EVALUATION_TOKEN,
             "ALERT_STORE_DB": str(self.db),
             "SCORING_RULES_PATH": str(self.rules),
@@ -392,12 +425,19 @@ class ControlledAlertStoreTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, output)
         self.assertIn(message, output)
 
-    def start_controlled(self) -> tuple[int, dict]:
+    def start_controlled(
+        self,
+        *,
+        release_id: str = RELEASE_ID,
+    ) -> tuple[int, dict]:
         port = available_port()
         self.process = subprocess.Popen(
             ["node", str(ALERT_STORE)],
             cwd=ALERT_STORE_DIR,
-            env=self.controlled_environment(port=port),
+            env=self.controlled_environment(
+                port=port,
+                release_id=release_id,
+            ),
             stdout=self.log_file,
             stderr=subprocess.STDOUT,
             text=True,
@@ -525,6 +565,7 @@ class ControlledAlertStoreTests(unittest.TestCase):
         group_id: str,
         alert_id: str,
         stable_group_key: str,
+        prior_analysis_id: str = "",
     ) -> None:
         timestamp = "2020-01-01 00:00:00+00:00"
         with closing(sqlite3.connect(self.db, timeout=5)) as connection:
@@ -565,7 +606,287 @@ class ControlledAlertStoreTests(unittest.TestCase):
                     timestamp,
                 ),
             )
+            if prior_analysis_id:
+                connection.execute(
+                    """
+                    INSERT INTO ai_analysis_runs (
+                        analysis_id, group_id, alert_id, agent_role,
+                        generated_at, model, model_path, response_json,
+                        created_at
+                    ) VALUES (
+                        ?, ?, ?, 'incident-responder', ?, 'prior-model',
+                        'frontier-codex-cli', '{}', ?
+                    )
+                    """,
+                    (
+                        prior_analysis_id,
+                        group_id,
+                        alert_id,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE incident_response_cases
+                    SET latest_analysis_id = ?, latest_model = 'prior-model',
+                        latest_generated_at = ?
+                    WHERE case_id = ?
+                    """,
+                    (prior_analysis_id, timestamp, case_id),
+                )
             connection.commit()
+
+    def complete_controlled_retirement_member_lifecycle(
+        self,
+        *,
+        rank: int,
+        cohort_id: str,
+        dispatch_id: str,
+    ) -> dict:
+        group_id = f"{rank:02x}" * 10
+        case_id = f"ir-controlled-retirement-completed-{rank}"
+        alert_id = f"controlled-retirement-completed-alert-{rank}"
+        stable_group_key = (
+            f"v2|controlled|retirement-completed-{rank}"
+        )
+        analysis_id = f"controlled-retirement-analysis-{rank}"
+        self.seed_controlled_incident_case(
+            case_id=case_id,
+            group_id=group_id,
+            alert_id=alert_id,
+            stable_group_key=stable_group_key,
+        )
+        status, accepted = request_json(
+            f"{self.base_url}/incidents/reanalyze",
+            "POST",
+            {
+                "case_id": case_id,
+                "representative_alert_id": alert_id,
+                "stable_group_id": group_id,
+                "stable_group_key": stable_group_key,
+                "cohort_id": cohort_id,
+                "dispatch_id": dispatch_id,
+                "release_id": RELEASE_ID,
+                "requested_by": "controlled-retirement-test",
+                "reason": (
+                    "Complete a real controlled claim/result lifecycle."
+                ),
+            },
+        )
+        self.assertEqual(status, 202, accepted)
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            connection.row_factory = sqlite3.Row
+            job = connection.execute(
+                """
+                SELECT * FROM durable_jobs
+                WHERE job_type = 'incident_response_analysis'
+                  AND dedupe_key = ?
+                """,
+                (group_id,),
+            ).fetchone()
+        self.assertIsNotNone(job)
+        status, claim = request_json(
+            f"{self.base_url}/jobs/status",
+            "POST",
+            {
+                "job_type": "incident_response_analysis",
+                "dedupe_key": group_id,
+                "status": "processing",
+                "error": "",
+                "lease_token": "",
+                "retryable": True,
+                "expected_job_id": int(job["id"]),
+                "expected_representative_alert_id": alert_id,
+                "expected_dispatch_id": dispatch_id,
+                "expected_stable_group_key": stable_group_key,
+            },
+        )
+        self.assertEqual(status, 200, claim)
+        result_payload = self.controlled_incident_result_payload(
+            analysis_id=analysis_id,
+            claim=claim,
+        )
+        status, indexed = request_json(
+            f"{self.base_url}/analysis/result",
+            "POST",
+            result_payload,
+        )
+        self.assertEqual(status, 200, indexed)
+        self.assertTrue(indexed["second_opinion_recorded"])
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            connection.row_factory = sqlite3.Row
+            completed = connection.execute(
+                "SELECT * FROM durable_jobs WHERE id = ?",
+                (int(job["id"]),),
+            ).fetchone()
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(int(completed["attempt_count"]), 1)
+        self.assertTrue(completed["processing_started_at"])
+        return {
+            "rank": rank,
+            "dispatch_id": dispatch_id,
+            "job_id": int(job["id"]),
+            "run_id": accepted["run_id"],
+            "analysis_id": analysis_id,
+        }
+
+    def prepare_failed_controlled_retirement(
+        self,
+        *,
+        case_id: str = "ir-controlled-retirement",
+        group_id: str = "81818181818181818181",
+        alert_id: str = "controlled-retirement-alert",
+        stable_group_key: str = "v2|controlled|retirement",
+        cohort_id: str = "controlled-cohort-retirement",
+        dispatch_id: str = "8" * 64,
+        prior_analysis_id: str = "controlled-prior-ir-analysis",
+        member_rank: int = 7,
+        cohort_size: int = 20,
+        retired_release_id: str = RELEASE_ID,
+        replacement_release_id: str = REPLACEMENT_RELEASE_ID,
+        retirement_reason: str = (
+            "Retire the failed controlled evaluation before a fresh cohort."
+        ),
+    ) -> tuple[dict, dict]:
+        self.seed_controlled_incident_case(
+            case_id=case_id,
+            group_id=group_id,
+            alert_id=alert_id,
+            stable_group_key=stable_group_key,
+            prior_analysis_id=prior_analysis_id,
+        )
+        self.start_controlled(release_id=retired_release_id)
+        dispatch = {
+            "case_id": case_id,
+            "representative_alert_id": alert_id,
+            "stable_group_id": group_id,
+            "stable_group_key": stable_group_key,
+            "cohort_id": cohort_id,
+            "dispatch_id": dispatch_id,
+            "release_id": retired_release_id,
+            "requested_by": "controlled-retirement-test",
+            "reason": "Create one exact failed controlled attempt.",
+        }
+        status, accepted = request_json(
+            f"{self.base_url}/incidents/reanalyze",
+            "POST",
+            dispatch,
+        )
+        self.assertEqual(status, 202, accepted)
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            connection.row_factory = sqlite3.Row
+            job = connection.execute(
+                """
+                SELECT * FROM durable_jobs
+                WHERE job_type = 'incident_response_analysis'
+                  AND dedupe_key = ?
+                """,
+                (group_id,),
+            ).fetchone()
+        self.assertIsNotNone(job)
+        status, claim = request_json(
+            f"{self.base_url}/jobs/status",
+            "POST",
+            {
+                "job_type": "incident_response_analysis",
+                "dedupe_key": group_id,
+                "status": "processing",
+                "error": "",
+                "lease_token": "",
+                "retryable": True,
+                "expected_job_id": int(job["id"]),
+                "expected_representative_alert_id": alert_id,
+                "expected_dispatch_id": dispatch_id,
+                "expected_stable_group_key": stable_group_key,
+            },
+        )
+        self.assertEqual(status, 200, claim)
+        self.assertEqual(
+            claim["claim"]["reanalysis_run_id"],
+            accepted["run_id"],
+        )
+        status, failed = request_json(
+            f"{self.base_url}/jobs/status",
+            "POST",
+            {
+                "job_type": "incident_response_analysis",
+                "dedupe_key": group_id,
+                "status": "failed",
+                "error": "Synthetic controlled worker failure.",
+                "lease_token": claim["lease_token"],
+                "retryable": True,
+            },
+        )
+        self.assertEqual(status, 200, failed)
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            connection.row_factory = sqlite3.Row
+            pending = connection.execute(
+                "SELECT * FROM durable_jobs WHERE id = ?",
+                (int(job["id"]),),
+            ).fetchone()
+        self.assertEqual(pending["status"], "pending")
+        self.assertEqual(int(pending["attempt_count"]), 1)
+        completed_members = [
+            self.complete_controlled_retirement_member_lifecycle(
+                rank=rank,
+                cohort_id=cohort_id,
+                dispatch_id=hashlib.sha256(
+                    f"{cohort_id}:completed:{rank}".encode("utf-8")
+                ).hexdigest(),
+            )
+            for rank in range(1, member_rank)
+        ]
+        absent_dispatch_ids = [
+            hashlib.sha256(
+                f"{cohort_id}:absent:{rank}".encode("utf-8")
+            ).hexdigest()
+            for rank in range(member_rank + 1, cohort_size + 1)
+        ]
+        stop_process(self.process)
+        self.process = None
+        self.start_controlled(
+            release_id=replacement_release_id,
+        )
+        request = {
+            "schema": (
+                "onion-sentinel-controlled-evaluation-retirement-v1"
+            ),
+            "absent_dispatch_ids": absent_dispatch_ids,
+            "case_id": case_id,
+            "cohort_id": cohort_id,
+            "cohort_size": cohort_size,
+            "completed_dispatch_ids": [
+                member["dispatch_id"] for member in completed_members
+            ],
+            "dispatch_id": dispatch_id,
+            "expected_attempt_count": 1,
+            "expected_attempt_id": claim["claim"][
+                "reanalysis_attempt_id"
+            ],
+            "expected_job_payload_sha256": hashlib.sha256(
+                str(pending["payload_json"]).encode("utf-8")
+            ).hexdigest(),
+            "expected_prior_analysis_id": prior_analysis_id,
+            "failure_attestation_sha256": "a" * 64,
+            "job_id": int(job["id"]),
+            "manifest_sha256": "b" * 64,
+            "member_rank": member_rank,
+            "reanalysis_run_id": accepted["run_id"],
+            "reason": retirement_reason,
+            "replacement_release_id": replacement_release_id,
+            "representative_alert_id": alert_id,
+            "retired_release_id": retired_release_id,
+            "stable_group_id": group_id,
+            "stable_group_key": stable_group_key,
+            "start_sha256": "d" * 64,
+        }
+        return request, {
+            "accepted": accepted,
+            "claim": claim,
+            "completed_members": completed_members,
+            "pending": dict(pending),
+        }
 
     def claim_controlled_job(
         self,
@@ -639,6 +960,90 @@ class ControlledAlertStoreTests(unittest.TestCase):
             "reanalysis_attempt_id": None,
             "generated_at": "2026-07-27 12:01:00+00:00",
             "model": "synthetic-controlled-model",
+            "model_path": "frontier-codex-cli",
+            "artifact_path": "/controlled/evaluation/result.json",
+            "evidence_hash": "e" * 64,
+            "response": response,
+            "controlled_job": identity,
+        }
+
+    def controlled_incident_result_payload(
+        self,
+        *,
+        analysis_id: str,
+        claim: dict,
+    ) -> dict:
+        claimed_job = claim["claim"]
+        job_payload = claimed_job["payload"]
+        identity = {
+            "job_id": int(claimed_job["job_id"]),
+            "job_type": "incident_response_analysis",
+            "lease_token": claim["lease_token"],
+            "cohort_id": job_payload["cohort_id"],
+            "dispatch_id": job_payload["dispatch_id"],
+            "representative_alert_id": (
+                job_payload["representative_alert_id"]
+            ),
+            "stable_group_id": job_payload["stable_group_id"],
+            "stable_group_key": job_payload["stable_group_key"],
+            "agent_role": "incident-responder",
+            "reanalysis_attempt_id": claimed_job[
+                "reanalysis_attempt_id"
+            ],
+            "release_id": RELEASE_ID,
+        }
+        claim_digest = hashlib.sha256(
+            json.dumps(
+                identity,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        generated_at = dt.datetime.now(
+            dt.timezone.utc
+        ).isoformat()
+        response = {
+            "detection_outcome": "Inconclusive",
+            "bluf": "Controlled incident lifecycle result.",
+            "summary": (
+                "Synthetic content with a real durable lifecycle."
+            ),
+            "confidence": "low",
+            "_analysis_provider": "codex-cli",
+            "_analysis_evaluation_memory_frozen": True,
+            "_analysis_controlled_claim_sha256": claim_digest,
+            "_second_opinion": {
+                "trigger": "required",
+                "status": "completed",
+                "error": "",
+                "runtime_seconds": 0.25,
+                "response": {
+                    "detection_outcome": "Inconclusive",
+                    "confidence": "low",
+                    "_analysis_model": (
+                        "synthetic-controlled-reviewer"
+                    ),
+                    "_analysis_model_path": "frontier-codex-cli",
+                },
+                "comparison": {
+                    "agreement": "agree",
+                    "material_disagreement": False,
+                    "disputed_fields": [],
+                },
+                "memory_writeback": {"accepted": 0},
+            },
+        }
+        return {
+            "analysis_id": analysis_id,
+            "alert_id": identity["representative_alert_id"],
+            "agent_role": "incident-responder",
+            "reanalysis_attempt_id": identity[
+                "reanalysis_attempt_id"
+            ],
+            "generated_at": generated_at,
+            "model": "synthetic-controlled-primary",
+            "provider": "codex-cli",
             "model_path": "frontier-codex-cli",
             "artifact_path": "/controlled/evaluation/result.json",
             "evidence_hash": "e" * 64,
@@ -784,6 +1189,7 @@ class ControlledAlertStoreTests(unittest.TestCase):
                     "GET /health",
                     "POST /ai/request",
                     "POST /analysis/result",
+                    "POST /controlled-evaluations/retire",
                     "POST /incidents/reanalyze",
                     "POST /jobs/status",
                 ]
@@ -922,6 +1328,956 @@ class ControlledAlertStoreTests(unittest.TestCase):
             hashlib.sha256(self.db.read_bytes()).hexdigest(),
             before,
         )
+
+    def test_controlled_retirement_is_exact_atomic_and_idempotent(
+        self,
+    ) -> None:
+        unrelated_group = "91919191919191919191"
+        unrelated_job_id = self.seed_controlled_job(
+            group_id=unrelated_group,
+            alert_id="controlled-retirement-unrelated-alert",
+            stable_group_key="v2|controlled|retirement-unrelated",
+            dispatch_id="9" * 64,
+            cohort_id="controlled-retirement-unrelated",
+        )
+        retirement, context = (
+            self.prepare_failed_controlled_retirement()
+        )
+
+        def logical_snapshot() -> tuple[str, ...]:
+            with closing(
+                sqlite3.connect(self.db, timeout=5)
+            ) as connection:
+                return tuple(connection.iterdump())
+
+        def one(statement: str, values: tuple = ()) -> dict:
+            with closing(
+                sqlite3.connect(self.db, timeout=5)
+            ) as connection:
+                connection.row_factory = sqlite3.Row
+                row = connection.execute(statement, values).fetchone()
+                self.assertIsNotNone(row)
+                return dict(row)
+
+        unrelated_before = one(
+            "SELECT * FROM durable_jobs WHERE id = ?",
+            (unrelated_job_id,),
+        )
+        completed_before = [
+            {
+                "job": one(
+                    "SELECT * FROM durable_jobs WHERE id = ?",
+                    (member["job_id"],),
+                ),
+                "run": one(
+                    """
+                    SELECT * FROM incident_reanalysis_runs
+                    WHERE run_id = ?
+                    """,
+                    (member["run_id"],),
+                ),
+                "analysis": one(
+                    "SELECT * FROM ai_analysis_runs WHERE analysis_id = ?",
+                    (member["analysis_id"],),
+                ),
+                "reviewer": one(
+                    """
+                    SELECT * FROM ai_second_opinion_runs
+                    WHERE analysis_id = ?
+                    """,
+                    (member["analysis_id"],),
+                ),
+            }
+            for member in context["completed_members"]
+        ]
+        before_rejection = logical_snapshot()
+        wrong_identity = dict(retirement)
+        wrong_identity["expected_job_payload_sha256"] = "e" * 64
+        status, rejected = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            wrong_identity,
+        )
+        self.assertEqual(status, 409, rejected)
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertEqual(logical_snapshot(), before_rejection)
+
+        for label, token in (
+            ("missing", ""),
+            ("wrong", "8" * 64),
+        ):
+            with self.subTest(authentication=label):
+                status, rejected = request_json(
+                    (
+                        f"{self.base_url}"
+                        "/controlled-evaluations/retire"
+                    ),
+                    "POST",
+                    retirement,
+                    evaluation_token=token,
+                )
+                self.assertEqual(status, 403, rejected)
+                self.assertEqual(
+                    rejected["reason"],
+                    "controlled evaluation authorization failed",
+                )
+        self.assertEqual(logical_snapshot(), before_rejection)
+
+        status, receipt = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            retirement,
+        )
+        self.assertEqual(status, 200, receipt)
+        self.assertTrue(receipt["ok"])
+        self.assertEqual(receipt["status"], "retired")
+        self.assertTrue(receipt["idempotent"])
+        self.assertEqual(
+            receipt["schema"],
+            (
+                "onion-sentinel-controlled-evaluation-"
+                "retirement-receipt-v1"
+            ),
+        )
+        self.assertEqual(receipt["identity"], retirement)
+        self.assertEqual(receipt["case_agent_status"], "analyzed")
+        self.assertEqual(receipt["security_onion_access"], "none")
+        self.assertFalse(receipt["security_onion_writes_allowed"])
+        self.assertEqual(receipt["model_invocations"], 0)
+        self.assertFalse(receipt["worker_wake_signaled"])
+        self.assertEqual(
+            set(receipt),
+            {
+                "case_agent_status",
+                "idempotent",
+                "identity",
+                "job_after_sha256",
+                "job_before_sha256",
+                "lineage_after_sha256",
+                "lineage_before_sha256",
+                "model_invocations",
+                "ok",
+                "receipt_sha256",
+                "retired_at",
+                "retirement_id",
+                "schema",
+                "security_onion_access",
+                "security_onion_writes_allowed",
+                "skip_reason",
+                "status",
+                "target_after",
+                "target_before",
+                "worker_wake_signaled",
+            },
+        )
+        self.assertRegex(
+            receipt["lineage_before_sha256"],
+            r"^[a-f0-9]{64}$",
+        )
+        self.assertRegex(
+            receipt["lineage_after_sha256"],
+            r"^[a-f0-9]{64}$",
+        )
+        self.assertNotEqual(
+            receipt["lineage_before_sha256"],
+            receipt["lineage_after_sha256"],
+        )
+        target_before = receipt["target_before"]
+        target_after = receipt["target_after"]
+        self.assertEqual(target_before["state"], "pending")
+        self.assertEqual(target_after["state"], "retired")
+        self.assertTrue(
+            target_before["job"]["processing_started_at"]
+        )
+        self.assertTrue(target_before["attempt"]["started_at"])
+        self.assertTrue(target_before["attempt"]["completed_at"])
+        self.assertIsNone(
+            target_after["job"]["processing_started_at"]
+        )
+        self.assertIsNone(
+            target_after["failure"]["job"]["raw_sha256"]
+        )
+        self.assertIsNone(
+            target_after["failure"]["run_case"]["raw_sha256"]
+        )
+        self.assertEqual(
+            target_before["failure"]["attempt"]["raw_sha256"],
+            target_after["failure"]["attempt"]["raw_sha256"],
+        )
+        self.assertEqual(
+            target_before["failure"]["job"]["normalized_sha256"],
+            target_before["failure"]["run_case"][
+                "normalized_sha256"
+            ],
+        )
+        self.assertEqual(
+            target_before["failure"]["job"]["normalized_sha256"],
+            target_before["failure"]["attempt"]["normalized_sha256"],
+        )
+        unsigned = dict(receipt)
+        embedded = unsigned.pop("receipt_sha256")
+        canonical = json.dumps(
+            unsigned,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        self.assertEqual(
+            embedded,
+            hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        )
+
+        job = one(
+            "SELECT * FROM durable_jobs WHERE id = ?",
+            (retirement["job_id"],),
+        )
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(int(job["attempt_count"]), 1)
+        self.assertIsNone(job["lease_token"])
+        self.assertIsNone(job["lease_expires_at"])
+        self.assertIsNone(job["last_error"])
+        self.assertIsNone(job["processing_started_at"])
+        self.assertEqual(int(job["rerun_requested"]), 0)
+        self.assertEqual(job["completed_at"], receipt["retired_at"])
+        self.assertEqual(
+            job["last_completed_at"],
+            receipt["retired_at"],
+        )
+        self.assertEqual(job["updated_at"], receipt["retired_at"])
+
+        run = one(
+            "SELECT * FROM incident_reanalysis_runs WHERE run_id = ?",
+            (retirement["reanalysis_run_id"],),
+        )
+        self.assertEqual(run["status"], "partial")
+        self.assertIsNotNone(run["completed_at"])
+        run_case = one(
+            """
+            SELECT * FROM incident_reanalysis_run_cases
+            WHERE run_id = ? AND case_id = ?
+            """,
+            (
+                retirement["reanalysis_run_id"],
+                retirement["case_id"],
+            ),
+        )
+        self.assertEqual(run_case["status"], "skipped")
+        self.assertEqual(
+            run_case["skip_reason"],
+            receipt["skip_reason"],
+        )
+        self.assertIsNone(run_case["latest_error"])
+        self.assertIsNone(run_case["analysis_id"])
+        attempt = one(
+            """
+            SELECT * FROM incident_reanalysis_attempts
+            WHERE attempt_id = ?
+            """,
+            (retirement["expected_attempt_id"],),
+        )
+        self.assertEqual(attempt["status"], "failed")
+        self.assertEqual(
+            int(attempt["durable_attempt_count"]),
+            retirement["expected_attempt_count"],
+        )
+        self.assertIsNone(attempt["analysis_id"])
+        incident = one(
+            "SELECT * FROM incident_response_cases WHERE case_id = ?",
+            (retirement["case_id"],),
+        )
+        self.assertEqual(incident["agent_status"], "analyzed")
+        self.assertEqual(
+            incident["latest_analysis_id"],
+            retirement["expected_prior_analysis_id"],
+        )
+        self.assertIsNone(incident["latest_error"])
+        event = one(
+            """
+            SELECT COUNT(*) AS count
+            FROM incident_response_events
+            WHERE case_id = ?
+              AND event_type = 'controlled_evaluation_retired'
+            """,
+            (retirement["case_id"],),
+        )
+        self.assertEqual(int(event["count"]), 1)
+        self.assertEqual(
+            one(
+                "SELECT * FROM durable_jobs WHERE id = ?",
+                (unrelated_job_id,),
+            ),
+            unrelated_before,
+        )
+        completed_after = [
+            {
+                "job": one(
+                    "SELECT * FROM durable_jobs WHERE id = ?",
+                    (member["job_id"],),
+                ),
+                "run": one(
+                    """
+                    SELECT * FROM incident_reanalysis_runs
+                    WHERE run_id = ?
+                    """,
+                    (member["run_id"],),
+                ),
+                "analysis": one(
+                    "SELECT * FROM ai_analysis_runs WHERE analysis_id = ?",
+                    (member["analysis_id"],),
+                ),
+                "reviewer": one(
+                    """
+                    SELECT * FROM ai_second_opinion_runs
+                    WHERE analysis_id = ?
+                    """,
+                    (member["analysis_id"],),
+                ),
+            }
+            for member in context["completed_members"]
+        ]
+        self.assertEqual(completed_after, completed_before)
+        after_first = logical_snapshot()
+
+        status, replay = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            retirement,
+        )
+        self.assertEqual(status, 200, replay)
+        self.assertEqual(replay, receipt)
+        self.assertEqual(logical_snapshot(), after_first)
+
+        conflict = dict(retirement)
+        conflict["reason"] = (
+            "A changed reason cannot reuse the retired lineage identity."
+        )
+        status, rejected = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            conflict,
+        )
+        self.assertEqual(status, 409, rejected)
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertEqual(logical_snapshot(), after_first)
+        self.assertEqual(
+            context["claim"]["claim"]["reanalysis_attempt_id"],
+            retirement["expected_attempt_id"],
+        )
+
+    def test_controlled_retirement_rank_one_replays_exact_scalars_and_bytes(
+        self,
+    ) -> None:
+        reason = (
+            "Retire rank one after failure observed at "
+            "2026-07-28T12:34:56Z without rewriting this timestamp."
+        )
+        retirement, _ = self.prepare_failed_controlled_retirement(
+            cohort_id="controlled-retirement-rank-one",
+            dispatch_id=hashlib.sha256(b"retirement-rank-one").hexdigest(),
+            prior_analysis_id="",
+            member_rank=1,
+            cohort_size=20,
+            retirement_reason=reason,
+        )
+        endpoint = (
+            f"{self.base_url}/controlled-evaluations/retire"
+        )
+        status, first_bytes = request_json_bytes(
+            endpoint,
+            retirement,
+        )
+        self.assertEqual(status, 200, first_bytes)
+        first = json.loads(first_bytes)
+        self.assertEqual(
+            first_bytes,
+            json.dumps(
+                first,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8"),
+        )
+        self.assertEqual(
+            first["identity"]["expected_prior_analysis_id"],
+            "",
+        )
+        self.assertEqual(first["identity"]["reason"], reason)
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            after_first = tuple(connection.iterdump())
+            stored = connection.execute(
+                """
+                SELECT detail_json FROM incident_response_events
+                WHERE case_id = ?
+                  AND event_type = 'controlled_evaluation_retired'
+                """,
+                (retirement["case_id"],),
+            ).fetchone()[0]
+        self.assertEqual(stored.encode("utf-8"), first_bytes)
+        stop_process(self.process)
+        self.process = None
+        self.start_controlled(
+            release_id=REPLACEMENT_RELEASE_ID,
+        )
+        endpoint = (
+            f"{self.base_url}/controlled-evaluations/retire"
+        )
+        status, replay_bytes = request_json_bytes(
+            endpoint,
+            retirement,
+        )
+        self.assertEqual(status, 200, replay_bytes)
+        self.assertEqual(replay_bytes, first_bytes)
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            self.assertEqual(tuple(connection.iterdump()), after_first)
+
+    def test_controlled_retirement_supports_same_release_recovery(
+        self,
+    ) -> None:
+        retirement, _ = self.prepare_failed_controlled_retirement(
+            cohort_id="controlled-retirement-same-release",
+            dispatch_id=hashlib.sha256(
+                b"retirement-same-release"
+            ).hexdigest(),
+            prior_analysis_id="",
+            member_rank=1,
+            cohort_size=1,
+            retired_release_id=REPLACEMENT_RELEASE_ID,
+            replacement_release_id=REPLACEMENT_RELEASE_ID,
+        )
+        status, receipt = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            retirement,
+        )
+        self.assertEqual(status, 200, receipt)
+        self.assertEqual(
+            receipt["identity"]["retired_release_id"],
+            REPLACEMENT_RELEASE_ID,
+        )
+        self.assertEqual(
+            receipt["identity"]["replacement_release_id"],
+            REPLACEMENT_RELEASE_ID,
+        )
+        status, replay = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            retirement,
+        )
+        self.assertEqual(status, 200, replay)
+        self.assertEqual(replay, receipt)
+
+    def test_controlled_retirement_rank_twenty_is_generic(
+        self,
+    ) -> None:
+        retirement, context = self.prepare_failed_controlled_retirement(
+            cohort_id="controlled-retirement-rank-twenty",
+            dispatch_id=hashlib.sha256(
+                b"retirement-rank-twenty"
+            ).hexdigest(),
+            member_rank=20,
+            cohort_size=20,
+        )
+        self.assertEqual(len(context["completed_members"]), 19)
+        self.assertEqual(retirement["absent_dispatch_ids"], [])
+        status, receipt = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            retirement,
+        )
+        self.assertEqual(status, 200, receipt)
+        self.assertEqual(receipt["identity"]["member_rank"], 20)
+        self.assertEqual(receipt["target_before"]["state"], "pending")
+        self.assertEqual(receipt["target_after"]["state"], "retired")
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            job = connection.execute(
+                "SELECT status FROM durable_jobs WHERE id = ?",
+                (retirement["job_id"],),
+            ).fetchone()
+        self.assertEqual(job[0], "completed")
+
+    def test_controlled_retirement_replay_rejects_noncanonical_store(
+        self,
+    ) -> None:
+        retirement, _ = self.prepare_failed_controlled_retirement(
+            cohort_id="controlled-retirement-noncanonical-replay",
+            dispatch_id=hashlib.sha256(
+                b"retirement-noncanonical-replay"
+            ).hexdigest(),
+            member_rank=1,
+            cohort_size=1,
+        )
+        status, receipt = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            retirement,
+        )
+        self.assertEqual(status, 200, receipt)
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            connection.execute(
+                """
+                UPDATE incident_response_events
+                SET detail_json = ?
+                WHERE case_id = ?
+                  AND event_type = 'controlled_evaluation_retired'
+                """,
+                (
+                    json.dumps(receipt, ensure_ascii=False),
+                    retirement["case_id"],
+                ),
+            )
+            connection.commit()
+            before = tuple(connection.iterdump())
+        status, rejected = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            retirement,
+        )
+        self.assertEqual(status, 409, rejected)
+        self.assertEqual(
+            rejected["reason"],
+            (
+                "controlled evaluation retirement receipt "
+                "is not canonical"
+            ),
+        )
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            self.assertEqual(tuple(connection.iterdump()), before)
+
+    def test_controlled_retirement_middle_rank_is_generic(
+        self,
+    ) -> None:
+        retirement, context = self.prepare_failed_controlled_retirement(
+            cohort_id="controlled-retirement-rank-ten",
+            dispatch_id=hashlib.sha256(
+                b"retirement-rank-ten"
+            ).hexdigest(),
+            member_rank=10,
+            cohort_size=20,
+        )
+        self.assertEqual(len(context["completed_members"]), 9)
+        self.assertEqual(len(retirement["absent_dispatch_ids"]), 10)
+        status, receipt = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            retirement,
+        )
+        self.assertEqual(status, 200, receipt)
+        self.assertEqual(receipt["identity"]["member_rank"], 10)
+        self.assertEqual(receipt["target_before"]["rank"], 10)
+        self.assertEqual(receipt["target_after"]["rank"], 10)
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            job = connection.execute(
+                "SELECT status FROM durable_jobs WHERE id = ?",
+                (retirement["job_id"],),
+            ).fetchone()
+        self.assertEqual(job[0], "completed")
+
+    def test_controlled_retirement_rejects_coercive_numeric_types(
+        self,
+    ) -> None:
+        retirement, _ = self.prepare_failed_controlled_retirement()
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            before = tuple(connection.iterdump())
+        for field in (
+            "job_id",
+            "member_rank",
+            "cohort_size",
+            "expected_attempt_count",
+        ):
+            for replacement in (str(retirement[field]), True):
+                with self.subTest(
+                    field=field,
+                    replacement_type=type(replacement).__name__,
+                ):
+                    changed = dict(retirement)
+                    changed[field] = replacement
+                    status, rejected = request_json(
+                        (
+                            f"{self.base_url}"
+                            "/controlled-evaluations/retire"
+                        ),
+                        "POST",
+                        changed,
+                    )
+                    self.assertEqual(status, 409, rejected)
+                    self.assertEqual(
+                        rejected["reason"],
+                        (
+                            "controlled evaluation retirement identity "
+                            "is invalid"
+                        ),
+                    )
+                    with closing(
+                        sqlite3.connect(self.db, timeout=5)
+                    ) as connection:
+                        self.assertEqual(
+                            tuple(connection.iterdump()),
+                            before,
+                        )
+        malformed_requests = []
+        missing = dict(retirement)
+        missing.pop("reason")
+        malformed_requests.append(("missing-field", missing))
+        extra = dict(retirement)
+        extra["unexpected"] = "not allowed"
+        malformed_requests.append(("extra-field", extra))
+        for label, changed in malformed_requests:
+            with self.subTest(malformed=label):
+                status, rejected = request_json(
+                    (
+                        f"{self.base_url}"
+                        "/controlled-evaluations/retire"
+                    ),
+                    "POST",
+                    changed,
+                )
+                self.assertEqual(status, 409, rejected)
+                with closing(
+                    sqlite3.connect(self.db, timeout=5)
+                ) as connection:
+                    self.assertEqual(
+                        tuple(connection.iterdump()),
+                        before,
+                    )
+
+    def test_controlled_retirement_rejects_execution_telemetry_drift(
+        self,
+    ) -> None:
+        retirement, context = (
+            self.prepare_failed_controlled_retirement()
+        )
+        member = context["completed_members"][0]
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            connection.execute(
+                """
+                UPDATE incident_reanalysis_run_cases
+                SET executed_model = 'contradictory-model',
+                    executed_provider = 'contradictory-provider',
+                    executed_model_path = 'contradictory-path'
+                WHERE run_id = ?
+                """,
+                (member["run_id"],),
+            )
+            connection.execute(
+                """
+                UPDATE incident_reanalysis_attempts
+                SET executed_model = 'contradictory-model',
+                    executed_provider = 'contradictory-provider',
+                    executed_model_path = 'contradictory-path'
+                WHERE run_id = ?
+                """,
+                (member["run_id"],),
+            )
+            connection.commit()
+            before = tuple(connection.iterdump())
+        status, rejected = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            retirement,
+        )
+        self.assertEqual(status, 409, rejected)
+        self.assertIn(
+            "completed primary-and-reviewer lineage",
+            rejected["reason"],
+        )
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            self.assertEqual(tuple(connection.iterdump()), before)
+
+    def test_controlled_retirement_rejects_reviewer_primary_drift(
+        self,
+    ) -> None:
+        retirement, context = (
+            self.prepare_failed_controlled_retirement()
+        )
+        member = context["completed_members"][0]
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            connection.execute(
+                """
+                UPDATE ai_second_opinion_runs
+                SET primary_model = 'contradictory-model',
+                    primary_model_path = 'contradictory-path',
+                    primary_outcome = 'contradictory-outcome',
+                    primary_confidence = 'contradictory-confidence'
+                WHERE analysis_id = ?
+                """,
+                (member["analysis_id"],),
+            )
+            connection.commit()
+            before = tuple(connection.iterdump())
+        status, rejected = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            retirement,
+        )
+        self.assertEqual(status, 409, rejected)
+        self.assertIn(
+            "completed primary-and-reviewer lineage",
+            rejected["reason"],
+        )
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            self.assertEqual(tuple(connection.iterdump()), before)
+
+    def test_controlled_retirement_rejects_contradictory_failure_records(
+        self,
+    ) -> None:
+        retirement, _ = self.prepare_failed_controlled_retirement()
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            connection.execute(
+                """
+                UPDATE durable_jobs SET last_error = 'job failure'
+                WHERE id = ?
+                """,
+                (retirement["job_id"],),
+            )
+            connection.execute(
+                """
+                UPDATE incident_reanalysis_run_cases
+                SET latest_error = 'run case failure'
+                WHERE run_id = ? AND case_id = ?
+                """,
+                (
+                    retirement["reanalysis_run_id"],
+                    retirement["case_id"],
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE incident_reanalysis_attempts
+                SET latest_error = 'attempt failure'
+                WHERE attempt_id = ?
+                """,
+                (retirement["expected_attempt_id"],),
+            )
+            connection.commit()
+            before = tuple(connection.iterdump())
+        status, rejected = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            retirement,
+        )
+        self.assertEqual(status, 409, rejected)
+        self.assertEqual(
+            rejected["reason"],
+            (
+                "controlled evaluation target failure lineage "
+                "is contradictory"
+            ),
+        )
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            self.assertEqual(tuple(connection.iterdump()), before)
+
+    def test_controlled_retirement_uses_worker_error_normalization(
+        self,
+    ) -> None:
+        retirement, _ = self.prepare_failed_controlled_retirement()
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute(
+                """
+                UPDATE durable_jobs
+                SET last_error = '  Synthetic   controlled worker failure.  '
+                WHERE id = ?
+                """,
+                (retirement["job_id"],),
+            )
+            connection.commit()
+            job_error = connection.execute(
+                "SELECT last_error FROM durable_jobs WHERE id = ?",
+                (retirement["job_id"],),
+            ).fetchone()["last_error"]
+            run_case_error = connection.execute(
+                """
+                SELECT latest_error FROM incident_reanalysis_run_cases
+                WHERE run_id = ? AND case_id = ?
+                """,
+                (
+                    retirement["reanalysis_run_id"],
+                    retirement["case_id"],
+                ),
+            ).fetchone()["latest_error"]
+            attempt_error = connection.execute(
+                """
+                SELECT latest_error FROM incident_reanalysis_attempts
+                WHERE attempt_id = ?
+                """,
+                (retirement["expected_attempt_id"],),
+            ).fetchone()["latest_error"]
+        self.assertNotEqual(job_error, run_case_error)
+        self.assertEqual(run_case_error, attempt_error)
+        normalized_errors = {
+            " ".join(value.strip().split())[:1000]
+            for value in (job_error, run_case_error, attempt_error)
+        }
+        self.assertEqual(
+            normalized_errors,
+            {"Synthetic controlled worker failure."},
+        )
+        status, receipt = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            retirement,
+        )
+        self.assertEqual(status, 200, receipt)
+        failure = receipt["target_before"]["failure"]
+        self.assertNotEqual(
+            failure["job"]["raw_sha256"],
+            failure["run_case"]["raw_sha256"],
+        )
+        self.assertEqual(
+            failure["job"]["normalized_sha256"],
+            failure["run_case"]["normalized_sha256"],
+        )
+        self.assertEqual(
+            failure["job"]["normalized_sha256"],
+            failure["attempt"]["normalized_sha256"],
+        )
+        self.assertNotEqual(
+            receipt["lineage_before_sha256"],
+            receipt["lineage_after_sha256"],
+        )
+
+    def test_controlled_retirement_rolls_back_after_late_failure(
+        self,
+    ) -> None:
+        retirement, _ = self.prepare_failed_controlled_retirement()
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            connection.execute(
+                """
+                CREATE TRIGGER inject_controlled_retirement_failure
+                BEFORE INSERT ON incident_response_events
+                WHEN NEW.event_type = 'controlled_evaluation_retired'
+                BEGIN
+                  SELECT RAISE(ABORT, 'injected late retirement failure');
+                END
+                """
+            )
+            connection.commit()
+            before = tuple(connection.iterdump())
+        status, rejected = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            retirement,
+        )
+        self.assertEqual(status, 400, rejected)
+        self.assertEqual(
+            rejected["reason"],
+            "SQLITE_CONSTRAINT: injected late retirement failure",
+        )
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            self.assertEqual(tuple(connection.iterdump()), before)
+
+    def test_controlled_retirement_rejects_incomplete_completed_lineage(
+        self,
+    ) -> None:
+        retirement, context = (
+            self.prepare_failed_controlled_retirement()
+        )
+        missing = context["completed_members"][2]
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            connection.execute(
+                """
+                DELETE FROM ai_second_opinion_runs
+                WHERE analysis_id = ?
+                """,
+                (missing["analysis_id"],),
+            )
+            connection.commit()
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            before = tuple(connection.iterdump())
+        status, rejected = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            retirement,
+        )
+        self.assertEqual(status, 409, rejected)
+        self.assertIn(
+            "completed primary-and-reviewer lineage",
+            rejected["reason"],
+        )
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            self.assertEqual(tuple(connection.iterdump()), before)
+
+    def test_controlled_retirement_rejects_nonabsent_later_rank(
+        self,
+    ) -> None:
+        retirement, _ = self.prepare_failed_controlled_retirement()
+        timestamp = "2020-01-01T00:01:00Z"
+        group_id = "abababababababababab"
+        alert_id = "unexpected-controlled-rank-eight"
+        job_payload = {
+            "agent_role": "incident-responder",
+            "case_id": "ir-unexpected-controlled-rank-eight",
+            "alert_id": alert_id,
+            "group_id": group_id,
+            "dashboard_group_id": group_id[:12],
+            "representative_alert_id": alert_id,
+            "stable_group_id": group_id,
+            "stable_group_key": "v2|controlled|unexpected-rank-eight",
+            "cohort_id": retirement["cohort_id"],
+            "dispatch_id": retirement["absent_dispatch_ids"][0],
+            "release_id": RELEASE_ID,
+            "reanalysis_run_id": "irr-unexpected-controlled-rank-eight",
+            "reanalysis_release_id": RELEASE_ID,
+            "manual_reanalysis": True,
+        }
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            connection.execute(
+                """
+                INSERT INTO durable_jobs (
+                    job_type, dedupe_key, payload_json, status, priority,
+                    attempt_count, max_attempts, next_attempt_at,
+                    created_at, updated_at, requested_at, rerun_requested
+                ) VALUES (
+                    'incident_response_analysis', ?, ?, 'pending',
+                    1200, 0, 12, ?, ?, ?, ?, 0
+                )
+                """,
+                (
+                    group_id,
+                    json.dumps(job_payload, separators=(",", ":")),
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            connection.commit()
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            before = tuple(connection.iterdump())
+        status, rejected = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            retirement,
+        )
+        self.assertEqual(status, 409, rejected)
+        self.assertEqual(
+            rejected["reason"],
+            "controlled evaluation cohort job/run census is not exact",
+        )
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            self.assertEqual(tuple(connection.iterdump()), before)
+
+    def test_controlled_retirement_route_is_denied_in_production_mode(
+        self,
+    ) -> None:
+        self.start_production()
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            before = tuple(connection.iterdump())
+        status, response = request_json(
+            f"{self.base_url}/controlled-evaluations/retire",
+            "POST",
+            {},
+        )
+        self.assertEqual(status, 403, response)
+        self.assertEqual(
+            response["reason"],
+            (
+                "controlled evaluation retirement is unavailable "
+                "in production mode"
+            ),
+        )
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            self.assertEqual(tuple(connection.iterdump()), before)
 
     def test_controlled_incident_dispatch_is_idempotent_after_lost_response(
         self,

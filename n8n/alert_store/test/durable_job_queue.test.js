@@ -423,3 +423,150 @@ test('a deterministic non-retryable failure becomes terminal on its first attemp
   assert.equal(failed.attempt_count, 1);
   assert.equal(failed.last_error, 'model context window exhausted');
 });
+
+test('exact administrative retirement only terminalizes its unleased pending attempt', async (context) => {
+  const retiredAt = '2026-07-19T12:30:00.000Z';
+  const env = await fixture();
+  context.after(env.close);
+  const payload = {
+    agent_role: 'incident-responder',
+    cohort_id: 'controlled-retirement',
+    dispatch_id: 'd'.repeat(64),
+  };
+  await env.queue.enqueue(
+    'incident_response_analysis',
+    'retirement-group',
+    payload,
+    {priority: 1200, maxAttempts: 12},
+  );
+  const claimed = await env.queue.claim(
+    'incident_response_analysis',
+    60,
+  );
+  assert.equal(
+    await env.queue.fail(claimed, 'controlled worker failed', 30, true),
+    true,
+  );
+  const pending = await env.get(
+    'SELECT * FROM durable_jobs WHERE id = ?',
+    [claimed.id],
+  );
+  assert.equal(pending.status, 'pending');
+  assert.equal(pending.attempt_count, 1);
+  assert.equal(pending.lease_token, null);
+  assert.ok(pending.processing_started_at);
+
+  assert.equal(
+    await env.queue.retirePendingExact({
+      jobId: claimed.id,
+      jobType: 'incident_response_analysis',
+      dedupeKey: 'retirement-group',
+      payloadJson: pending.payload_json,
+      attemptCount: 1,
+      retiredAt,
+    }),
+    true,
+  );
+  const retired = await env.get(
+    'SELECT * FROM durable_jobs WHERE id = ?',
+    [claimed.id],
+  );
+  assert.equal(retired.status, 'completed');
+  assert.equal(retired.attempt_count, 1);
+  assert.equal(retired.completed_at, retiredAt);
+  assert.equal(retired.last_completed_at, retiredAt);
+  assert.equal(retired.updated_at, retiredAt);
+  assert.equal(retired.lease_token, null);
+  assert.equal(retired.lease_expires_at, null);
+  assert.equal(retired.processing_started_at, null);
+  assert.equal(retired.last_error, null);
+  assert.equal(retired.rerun_requested, 0);
+
+  assert.equal(
+    await env.queue.retirePendingExact({
+      jobId: claimed.id,
+      jobType: 'incident_response_analysis',
+      dedupeKey: 'retirement-group',
+      payloadJson: pending.payload_json,
+      attemptCount: 1,
+      retiredAt,
+    }),
+    false,
+  );
+});
+
+test('exact administrative retirement rejects drift without changing a job', async (context) => {
+  const env = await fixture();
+  context.after(env.close);
+  await env.queue.enqueue(
+    'incident_response_analysis',
+    'retirement-drift-group',
+    {version: 1},
+    {priority: 1200, maxAttempts: 12},
+  );
+  const pending = await env.get(
+    "SELECT * FROM durable_jobs WHERE dedupe_key = 'retirement-drift-group'",
+  );
+  const before = JSON.stringify(pending);
+
+  assert.equal(
+    await env.queue.retirePendingExact({
+      jobId: pending.id,
+      jobType: 'incident_response_analysis',
+      dedupeKey: 'retirement-drift-group',
+      payloadJson: JSON.stringify({version: 2}),
+      attemptCount: 0,
+      retiredAt: '2026-07-19T12:30:00.000Z',
+    }),
+    false,
+  );
+  assert.equal(
+    JSON.stringify(await env.get(
+      'SELECT * FROM durable_jobs WHERE id = ?',
+      [pending.id],
+    )),
+    before,
+  );
+});
+
+test('exact administrative retirement rejects coercive numeric identities', async (context) => {
+  const env = await fixture();
+  context.after(env.close);
+  await env.queue.enqueue(
+    'incident_response_analysis',
+    'retirement-type-group',
+    {version: 1},
+    {priority: 1200, maxAttempts: 12},
+  );
+  const pending = await env.get(
+    "SELECT * FROM durable_jobs WHERE dedupe_key = 'retirement-type-group'",
+  );
+  const before = JSON.stringify(pending);
+  const base = {
+    jobId: pending.id,
+    jobType: 'incident_response_analysis',
+    dedupeKey: 'retirement-type-group',
+    payloadJson: pending.payload_json,
+    attemptCount: 0,
+    retiredAt: '2026-07-19T12:30:00.000Z',
+  };
+
+  for (const changed of [
+    {...base, jobId: String(pending.id)},
+    {...base, jobId: true},
+    {...base, attemptCount: '0'},
+    {...base, attemptCount: false},
+  ]) {
+    await assert.rejects(
+      env.queue.retirePendingExact(changed),
+      /invalid exact pending retirement identity/,
+    );
+    assert.equal(
+      JSON.stringify(await env.get(
+        'SELECT * FROM durable_jobs WHERE id = ?',
+        [pending.id],
+      )),
+      before,
+    );
+  }
+});

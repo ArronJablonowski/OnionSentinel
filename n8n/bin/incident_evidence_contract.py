@@ -96,6 +96,33 @@ SAFE_ELASTIC_ID_RE = re.compile(r"^[A-Za-z0-9_.:@+=-]{1,512}$")
 SAFE_ELASTIC_INDEX_RE = re.compile(r"^[A-Za-z0-9._-]{1,255}$")
 MAX_OSQUERY_ROWS = 200
 MAX_ELASTIC_HITS = 200
+ELASTIC_PROMPT_PROJECTION_FIELDS = {
+    "version",
+    "source_returned_hits",
+    "source_total_hits",
+    "source_truncated",
+    "source_hits_bytes",
+    "source_hits_sha256",
+    "retained_hits",
+    "retained_hits_bytes",
+    "retained_hits_sha256",
+    "reasons",
+}
+OSQUERY_PROMPT_PROJECTION_FIELDS = {
+    "version",
+    "source_returned_rows",
+    "source_total_rows",
+    "source_truncated",
+    "source_rows_bytes",
+    "source_rows_sha256",
+    "retained_rows",
+    "retained_rows_bytes",
+    "retained_rows_sha256",
+    "max_retained_rows",
+    "max_retained_bytes",
+    "max_row_bytes",
+    "reasons",
+}
 
 
 class IncidentEvidenceContractError(ValueError):
@@ -267,6 +294,10 @@ def _validate_search_result(
     projection = result.get("prompt_projection")
     if projection is not None:
         projection = _require_mapping(projection, f"{label} prompt projection")
+        if set(projection) != ELASTIC_PROMPT_PROJECTION_FIELDS:
+            raise IncidentEvidenceContractError(
+                f"{label} prompt projection fields are invalid"
+            )
         if projection.get("version") != 1:
             raise IncidentEvidenceContractError(f"{label} prompt projection version is invalid")
         source_returned = _require_nonnegative_int(
@@ -297,13 +328,32 @@ def _validate_search_result(
             raise IncidentEvidenceContractError(
                 f"{label} prompt projection source digest is invalid"
             )
+        source_hits_bytes = _require_nonnegative_int(
+            projection.get("source_hits_bytes"),
+            f"{label} prompt projection source_hits_bytes",
+        )
         retained_hits = _require_nonnegative_int(
             projection.get("retained_hits"),
             f"{label} prompt projection retained_hits",
         )
+        retained_encoded = json.dumps(
+            hits,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        retained_hits_bytes = _require_nonnegative_int(
+            projection.get("retained_hits_bytes"),
+            f"{label} prompt projection retained_hits_bytes",
+        )
+        retained_digest = projection.get("retained_hits_sha256")
         reasons = projection.get("reasons")
         if (
             retained_hits != returned_hits
+            or source_hits_bytes <= retained_hits_bytes
+            or retained_hits_bytes != len(retained_encoded)
+            or not isinstance(retained_digest, str)
+            or not SHA256_RE.fullmatch(retained_digest)
+            or hashlib.sha256(retained_encoded).hexdigest() != retained_digest
             or not isinstance(reasons, list)
             or not reasons
             or any(
@@ -469,6 +519,114 @@ def _validate_osquery_results(
             raise IncidentEvidenceContractError("OSquery total_rows is invalid")
         if result.get("truncated") is not (total_rows > returned_rows):
             raise IncidentEvidenceContractError("OSquery truncated flag does not match its row counts")
+        projection = result.get("prompt_projection")
+        if projection is not None:
+            projection = _require_mapping(
+                projection,
+                "OSquery prompt projection",
+            )
+            if set(projection) != OSQUERY_PROMPT_PROJECTION_FIELDS:
+                raise IncidentEvidenceContractError(
+                    "OSquery prompt projection fields are invalid"
+                )
+            if projection.get("version") != 1:
+                raise IncidentEvidenceContractError(
+                    "OSquery prompt projection version is invalid"
+                )
+            source_returned = _require_nonnegative_int(
+                projection.get("source_returned_rows"),
+                "OSquery prompt projection source_returned_rows",
+            )
+            source_total = _require_nonnegative_int(
+                projection.get("source_total_rows"),
+                "OSquery prompt projection source_total_rows",
+            )
+            if (
+                source_returned <= returned_rows
+                or source_returned > MAX_OSQUERY_ROWS
+                or source_total != total_rows
+                or source_total < source_returned
+            ):
+                raise IncidentEvidenceContractError(
+                    "OSquery prompt projection source counts are inconsistent"
+                )
+            source_truncated = projection.get("source_truncated")
+            if source_truncated is not (source_total > source_returned):
+                raise IncidentEvidenceContractError(
+                    "OSquery prompt projection source truncated flag is inconsistent"
+                )
+            source_digest = projection.get("source_rows_sha256")
+            if not isinstance(source_digest, str) or not SHA256_RE.fullmatch(source_digest):
+                raise IncidentEvidenceContractError(
+                    "OSquery prompt projection source digest is invalid"
+                )
+            source_rows_bytes = _require_nonnegative_int(
+                projection.get("source_rows_bytes"),
+                "OSquery prompt projection source_rows_bytes",
+            )
+            if source_rows_bytes < 2:
+                raise IncidentEvidenceContractError(
+                    "OSquery prompt projection source byte count is invalid"
+                )
+            retained_rows = _require_nonnegative_int(
+                projection.get("retained_rows"),
+                "OSquery prompt projection retained_rows",
+            )
+            retained_encoded = json.dumps(
+                rows,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            retained_rows_bytes = _require_nonnegative_int(
+                projection.get("retained_rows_bytes"),
+                "OSquery prompt projection retained_rows_bytes",
+            )
+            retained_digest = projection.get("retained_rows_sha256")
+            max_retained_rows = _require_nonnegative_int(
+                projection.get("max_retained_rows"),
+                "OSquery prompt projection max_retained_rows",
+            )
+            max_retained_bytes = _require_nonnegative_int(
+                projection.get("max_retained_bytes"),
+                "OSquery prompt projection max_retained_bytes",
+            )
+            max_row_bytes = _require_nonnegative_int(
+                projection.get("max_row_bytes"),
+                "OSquery prompt projection max_row_bytes",
+            )
+            reasons = projection.get("reasons")
+            if (
+                retained_rows != returned_rows
+                or retained_rows > max_retained_rows
+                or source_rows_bytes <= retained_rows_bytes
+                or retained_rows_bytes != len(retained_encoded)
+                or retained_rows_bytes > max_retained_bytes
+                or not isinstance(retained_digest, str)
+                or not SHA256_RE.fullmatch(retained_digest)
+                or hashlib.sha256(retained_encoded).hexdigest() != retained_digest
+                or any(
+                    len(
+                        json.dumps(
+                            row,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ).encode("utf-8")
+                    )
+                    > max_row_bytes
+                    for row in rows
+                )
+                or not isinstance(reasons, list)
+                or not reasons
+                or any(
+                    not isinstance(reason, str)
+                    or not reason.strip()
+                    or len(reason) > 100
+                    for reason in reasons
+                )
+            ):
+                raise IncidentEvidenceContractError(
+                    "OSquery prompt projection metadata is inconsistent"
+                )
         duration_ms = result.get("duration_ms")
         if isinstance(duration_ms, bool) or not isinstance(duration_ms, int) or duration_ms < 0:
             raise IncidentEvidenceContractError("OSquery duration_ms must be a non-negative integer")
