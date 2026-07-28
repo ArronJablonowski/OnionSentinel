@@ -595,7 +595,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         finally:
             disk_conn.close()
 
-        settings_path = root / "ai_model_settings.json"
+        settings_path = worker_root / "ai_model_settings.json"
         settings_path.write_text(
             json.dumps(
                 {
@@ -604,6 +604,13 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        settings_path.chmod(0o600)
+        harness_policy_path = worker_root / "investigation_harness_policy.json"
+        harness_policy_path.write_text("{}\n", encoding="utf-8")
+        harness_policy_path.chmod(0o600)
+        detection_playbooks_path = worker_root / "detection_playbooks.json"
+        detection_playbooks_path.write_text("{}\n", encoding="utf-8")
+        detection_playbooks_path.chmod(0o600)
         args = SimpleNamespace(
             db=db_path,
             prompt_dir=worker_root / "prompts",
@@ -612,6 +619,8 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             incident_evidence_dir=worker_root / "incident-evidence",
             incident_evidence_config=root / "incident-evidence.json",
             ai_settings_file=settings_path,
+            investigation_harness_policy=harness_policy_path,
+            detection_playbooks=detection_playbooks_path,
             provider_lane="any",
             lock_file=worker_root / "worker.lock",
             wake_file=worker_root / "worker.wake",
@@ -795,6 +804,9 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             timeout=240,
             alert_store_url="http://127.0.0.1:8767",
             ai_settings_file=Path(self.tempdir.name) / "ai_model_settings.json",
+            investigation_harness_policy=(
+                Path(self.tempdir.name) / "investigation_harness_policy.json"
+            ),
             model="",
         )
         completed = SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -1482,12 +1494,16 @@ class AiSchedulerPriorityTest(unittest.TestCase):
 
     def test_analysis_child_uses_scheduler_settings_and_prompt_limit(self) -> None:
         settings_path = Path(self.tempdir.name) / "custom-ai-settings.json"
+        harness_policy_path = (
+            Path(self.tempdir.name) / "investigation-harness-policy.json"
+        )
         args = SimpleNamespace(
             analysis_dir=Path(self.tempdir.name) / "analysis",
             timeout=600,
             max_prompt_bytes=1024 * 1024,
             alert_store_url="http://127.0.0.1:8787",
             ai_settings_file=settings_path,
+            investigation_harness_policy=harness_policy_path,
             model=None,
         )
 
@@ -1502,6 +1518,10 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             str(settings_path),
         )
         self.assertEqual(
+            command[command.index("--investigation-harness-policy") + 1],
+            str(harness_policy_path),
+        )
+        self.assertEqual(
             command[command.index("--max-prompt-bytes") + 1],
             str(1024 * 1024),
         )
@@ -1514,6 +1534,9 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         self,
     ) -> None:
         settings_path = Path(self.tempdir.name) / "custom-ai-settings.json"
+        harness_policy_path = (
+            Path(self.tempdir.name) / "investigation-harness-policy.json"
+        )
         settings_path.write_text(
             json.dumps(
                 {
@@ -1542,6 +1565,10 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             max_prompt_bytes=1024 * 1024,
             alert_store_url="http://127.0.0.1:8787",
             ai_settings_file=settings_path,
+            investigation_harness_policy=harness_policy_path,
+            detection_playbooks=(
+                Path(self.tempdir.name) / "detection-playbooks.json"
+            ),
             provider_lane="cli",
             model=None,
         )
@@ -1588,6 +1615,12 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             ],
             str(self.scheduler.CODEX_CLI_INITIAL_PROMPT_PACKAGE_BYTES),
         )
+        self.assertEqual(
+            builder_command[
+                builder_command.index("--detection-playbooks") + 1
+            ],
+            str(args.detection_playbooks),
+        )
         prompt_path.write_bytes(
             b"x"
             * (
@@ -1620,6 +1653,10 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         self.assertEqual(
             command[command.index("--max-prompt-bytes") + 1],
             str(self.scheduler.CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES),
+        )
+        self.assertEqual(
+            command[command.index("--investigation-harness-policy") + 1],
+            str(harness_policy_path),
         )
 
     def test_local_lane_retains_operator_prompt_package_budget(self) -> None:
@@ -1697,6 +1734,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             correlation_min_score=15,
             max_prompt_bytes=1024 * 1024,
             ai_settings_file=settings_path,
+            detection_playbooks=root / "detection-playbooks.json",
             include_tests=False,
         )
         completed = SimpleNamespace(

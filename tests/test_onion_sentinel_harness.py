@@ -523,6 +523,20 @@ class OnionSentinelHarnessTests(unittest.TestCase):
             set(HARNESS.ALL_CAPABILITIES),
         )
 
+    def test_checked_in_policy_uses_runtime_budget_defaults(self) -> None:
+        policy_path = (
+            ROOT
+            / "n8n"
+            / "config"
+            / "investigation_harness_policy.json"
+        )
+        document = json.loads(policy_path.read_text(encoding="utf-8"))
+        self.assertEqual(document["budgets"], HARNESS.DEFAULT_BUDGETS)
+        self.assertEqual(
+            document["budgets"]["max_prompt_evidence_rows"],
+            1_200,
+        )
+
     def test_policy_loader_rejects_group_or_world_writable_file(self) -> None:
         self.write_policy()
         self.policy_path.chmod(0o666)

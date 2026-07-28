@@ -4186,6 +4186,12 @@ def _harness_execution_proof(
                     model_call_contract.get("query_planning_call_count")
                     or 0
                 ),
+                "query_planning_repair_call_count": int(
+                    model_call_contract.get(
+                        "query_planning_repair_call_count"
+                    )
+                    or 0
+                ),
                 "primary_followup_call_count": int(
                     model_call_contract.get("primary_followup_call_count")
                     or 0

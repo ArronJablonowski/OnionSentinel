@@ -992,6 +992,98 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
         self.assertTrue(completion["completion_contract_required"])
         self.assertFalse(completion["completion_contract_satisfied"])
 
+    def test_model_call_contract_treats_planning_repair_as_followup_round(
+        self,
+    ):
+        route = "codex-cli:gpt-5.5:high"
+
+        def model_call(
+            call_id: str,
+            purpose: str,
+            *,
+            second: int,
+            independent_review: int = 0,
+            status: str = "completed",
+        ) -> dict:
+            return {
+                "call_id": call_id,
+                "purpose": purpose,
+                "requested_route": route,
+                "independent_review": independent_review,
+                "status": status,
+                "created_at": f"2026-07-25T00:00:{second:02d}Z",
+            }
+
+        initial = model_call(
+            evaluator.PRIMARY_INITIAL_CALL_ID,
+            evaluator.PRIMARY_INITIAL_PURPOSE,
+            second=1,
+        )
+        repair = model_call(
+            evaluator.QUERY_PLANNING_REPAIR_CALL_ID,
+            evaluator.QUERY_PLANNING_REPAIR_PURPOSE,
+            second=2,
+        )
+        followup_two = model_call(
+            "primary-followup-2",
+            "primary investigation follow-up round 2",
+            second=3,
+        )
+        contract = evaluator.canonical_model_call_contract(
+            [initial, repair, followup_two]
+        )
+        self.assertTrue(contract["valid"])
+        self.assertEqual(contract["query_planning_repair_call_count"], 1)
+        self.assertEqual(contract["primary_followup_call_count"], 1)
+        self.assertEqual(contract["canonical_model_call_count"], 3)
+
+        invalid_sequences = {
+            "missing-repair-slot": [
+                initial,
+                followup_two,
+            ],
+            "reuses-repair-slot": [
+                initial,
+                repair,
+                model_call(
+                    "primary-followup-1",
+                    "primary investigation follow-up round 1",
+                    second=3,
+                ),
+            ],
+            "skips-after-repair": [
+                initial,
+                repair,
+                model_call(
+                    "primary-followup-3",
+                    "primary investigation follow-up round 3",
+                    second=3,
+                ),
+            ],
+            "duplicate-repair": [
+                initial,
+                repair,
+                model_call(
+                    evaluator.QUERY_PLANNING_REPAIR_CALL_ID,
+                    evaluator.QUERY_PLANNING_REPAIR_PURPOSE,
+                    second=3,
+                ),
+            ],
+            "wrong-repair-purpose": [
+                initial,
+                {
+                    **repair,
+                    "purpose": "unbounded query repair",
+                },
+                followup_two,
+            ],
+        }
+        for label, calls in invalid_sequences.items():
+            with self.subTest(label=label):
+                rejected = evaluator.canonical_model_call_contract(calls)
+                self.assertFalse(rejected["valid"])
+                self.assertGreater(rejected["violation_count"], 0)
+
     def test_run_filter_unknown_run_and_private_json_output(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

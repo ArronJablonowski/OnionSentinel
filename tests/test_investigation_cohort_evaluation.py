@@ -745,6 +745,64 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 adjudication_path=self.adjudication_path,
             )
 
+    def test_planning_repair_then_followup_two_is_gradeable(self) -> None:
+        document = self._result_export(
+            "soc-analyst",
+            "soc-planning-repair",
+        )
+        harness = document["members"][0]["execution_proof"]["harness"]
+        primary_route = harness["assigned_route"]
+        reviewer_fact = harness["model_call_contract"]["facts"][1]
+        facts = [
+            harness["model_call_contract"]["facts"][0],
+            {
+                "call_id": "primary-query-planning-repair-1",
+                "purpose": "primary query-planning repair 1 of 1",
+                "requested_route": primary_route,
+                "independent_review": False,
+                "status": "completed",
+            },
+            {
+                "call_id": "primary-followup-2",
+                "purpose": "primary investigation follow-up round 2",
+                "requested_route": primary_route,
+                "independent_review": False,
+                "status": "completed",
+            },
+            reviewer_fact,
+        ]
+        harness.update(
+            {
+                "model_call_count": 4,
+                "successful_model_call_count": 4,
+                "successful_primary_model_call_count": 3,
+                "model_purpose_count": 4,
+                "terminally_successful_model_purpose_count": 4,
+            }
+        )
+        contract = harness["model_call_contract"]
+        contract.update(
+            {
+                "model_call_count": 4,
+                "canonical_model_call_count": 4,
+                "query_planning_repair_call_count": 1,
+                "primary_followup_call_count": 1,
+                "facts": facts,
+                "facts_sha256": evaluator.sha256_value(facts),
+            }
+        )
+        self.assertTrue(evaluator._bounded_model_call_proof_valid(harness))
+
+        contract["facts"][2] = {
+            **contract["facts"][2],
+            "call_id": "primary-followup-1",
+            "purpose": "primary investigation follow-up round 1",
+        }
+        contract["facts_sha256"] = evaluator.sha256_value(
+            contract["facts"]
+        )
+        self.assertFalse(evaluator._bounded_model_call_proof_valid(harness))
+
     def test_offline_gate_recomputes_call_grammar_and_reviewer_facts(
         self,
     ) -> None:

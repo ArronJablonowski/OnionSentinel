@@ -306,7 +306,7 @@ DEFAULT_BUDGETS: dict[str, int] = {
     "max_queries_total": 12,
     "max_queries_per_round": 4,
     "max_prompt_evidence_bytes": 1024 * 1024,
-    "max_prompt_evidence_rows": 600,
+    "max_prompt_evidence_rows": 1_200,
     "max_run_seconds": 3_900,
 }
 MIN_BUDGETS: dict[str, int] = {

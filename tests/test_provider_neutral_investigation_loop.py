@@ -3752,9 +3752,17 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         )
 
     def test_cumulative_prompt_projection_enforces_row_and_byte_caps(self) -> None:
+        self.assertEqual(
+            self.runner.MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS,
+            self.harness.DEFAULT_BUDGETS["max_prompt_evidence_rows"],
+        )
+        self.assertEqual(
+            self.runner.MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS,
+            1_200,
+        )
         rows = [
             {"source": {"ip": "192.0.2.1"}, "padding": "x" * 4096}
-            for _ in range(800)
+            for _ in range(1_500)
         ]
         rounds = [{
             "round": 1,
@@ -3782,6 +3790,14 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         self.assertLessEqual(
             projected["prompt_projection"]["rows_included"],
             self.runner.MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS,
+        )
+        self.assertEqual(
+            projected["prompt_projection"]["max_rows"],
+            1_200,
+        )
+        self.assertEqual(
+            projected["prompt_projection"]["rows_included"],
+            1_200,
         )
         self.assertTrue(projected["prompt_projection"]["truncated"])
 

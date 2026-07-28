@@ -11,6 +11,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -18,8 +19,10 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BIN_DIR = REPO_ROOT / "n8n" / "bin"
+RELAY_APP_DIR = REPO_ROOT / "relay" / "app"
 WRAPPER_PATH = REPO_ROOT / "security-onion" / "bin" / "export-incident-evidence"
 COLLECTOR_PATH = BIN_DIR / "collect-investigation-pivots.py"
+BROKER_PATH = RELAY_APP_DIR / "incident_evidence_broker.py"
 COMPAT_V1_COLLECTOR_PATH = (
     REPO_ROOT
     / "n8n"
@@ -29,6 +32,8 @@ COMPAT_V1_COLLECTOR_PATH = (
 )
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
+if str(RELAY_APP_DIR) not in sys.path:
+    sys.path.insert(0, str(RELAY_APP_DIR))
 
 from investigation_query_contract import (  # noqa: E402
     ALERT_INDEX_SCOPE,
@@ -1217,6 +1222,171 @@ class InvestigationPivotCollectorTests(unittest.TestCase):
                 gap["query_id"] == "broker-controls"
                 for gap in evidence["evidence_gaps"]
             )
+        )
+
+    def test_failed_transport_preserves_bounded_json_error_and_stderr(self) -> None:
+        config = {
+            "host": "relay.invalid",
+            "ssh_user": "forced-user",
+            "ssh_key": "/private/key",
+            "known_hosts": "/private/known-hosts",
+        }
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=4,
+            stdout=json.dumps({
+                "ok": False,
+                "error": "restricted broker failed\npositive control unavailable",
+                "detail": "relay detail",
+                "upstream_error": "Security Onion query timed out",
+                "upstream_detail": "inner detail",
+                "arbitrary_evidence": "MUST-NOT-BE-REFLECTED",
+            }),
+            stderr="Connection reset by peer\n",
+        )
+
+        for collector in (self.collector, self.compat_v1_collector):
+            with self.subTest(contract=collector.INVESTIGATION_QUERY_CONTRACT):
+                with mock.patch.object(
+                    collector,
+                    "run_bounded_command",
+                    return_value=completed,
+                ):
+                    with self.assertRaises(
+                        collector.InvestigationPivotClientError
+                    ) as caught:
+                        collector._transport({}, config)
+
+                message = str(caught.exception)
+                self.assertIn("restricted broker failed positive control unavailable", message)
+                self.assertIn("Security Onion query timed out", message)
+                self.assertIn("Connection reset by peer", message)
+                self.assertNotIn("MUST-NOT-BE-REFLECTED", message)
+                self.assertNotIn("\n", message)
+                self.assertLessEqual(
+                    len(
+                        collector._transport_failure_diagnostic(
+                            completed.stdout,
+                            completed.stderr,
+                        ).encode("utf-8")
+                    ),
+                    collector.MAX_TRANSPORT_DIAGNOSTIC_BYTES,
+                )
+
+    def test_failed_transport_does_not_reflect_non_json_stdout(self) -> None:
+        config = {
+            "host": "relay.invalid",
+            "ssh_user": "forced-user",
+            "ssh_key": "/private/key",
+            "known_hosts": "/private/known-hosts",
+        }
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=255,
+            stdout="arbitrary stdout MUST-NOT-BE-REFLECTED",
+            stderr="\x1bConnection reset\n" + ("x" * 2000),
+        )
+
+        for collector in (self.collector, self.compat_v1_collector):
+            with self.subTest(contract=collector.INVESTIGATION_QUERY_CONTRACT):
+                with mock.patch.object(
+                    collector,
+                    "run_bounded_command",
+                    return_value=completed,
+                ):
+                    with self.assertRaises(
+                        collector.InvestigationPivotClientError
+                    ) as caught:
+                        collector._transport({}, config)
+
+                message = str(caught.exception)
+                self.assertIn("Connection reset", message)
+                self.assertIn("[truncated]", message)
+                self.assertNotIn("MUST-NOT-BE-REFLECTED", message)
+                self.assertNotIn("\x1b", message)
+                self.assertNotIn("\n", message)
+
+
+class IncidentEvidenceBrokerErrorTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.broker = load_source_module(
+            "incident_evidence_broker_test",
+            BROKER_PATH,
+        )
+
+    def test_nonzero_inner_command_preserves_only_bounded_json_error(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=2,
+            stdout=json.dumps({
+                "ok": False,
+                "error": "positive control failed\nfor anchor",
+                "detail": "query endpoint unavailable",
+                "raw_hits": "MUST-NOT-BE-REFLECTED",
+            }).encode("utf-8"),
+            stderr=b"inner ssh warning\n",
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = Path(temporary) / "incident-evidence.json"
+            config_path.write_text(json.dumps({
+                "host": "security-onion.invalid",
+                "ssh_key": "/private/key",
+                "known_hosts": "/private/known-hosts",
+            }), encoding="utf-8")
+            output = io.StringIO()
+            fake_stdin = mock.Mock()
+            fake_stdin.buffer = io.BytesIO(b"{}")
+            with (
+                mock.patch.dict(
+                    self.broker.os.environ,
+                    {
+                        "ONION_SENTINEL_INCIDENT_EVIDENCE_CONFIG": str(config_path),
+                        "SSH_ORIGINAL_COMMAND": "",
+                    },
+                    clear=False,
+                ),
+                mock.patch.object(self.broker.sys, "stdin", fake_stdin),
+                mock.patch.object(
+                    self.broker,
+                    "run_bounded_command",
+                    return_value=completed,
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                returncode = self.broker.main()
+
+        response = json.loads(output.getvalue())
+        self.assertEqual(returncode, 4)
+        self.assertFalse(response["ok"])
+        self.assertEqual(
+            response["upstream_error"],
+            "positive control failed for anchor",
+        )
+        self.assertEqual(response["upstream_detail"], "query endpoint unavailable")
+        self.assertEqual(response["detail"], "inner ssh warning")
+        self.assertNotIn("MUST-NOT-BE-REFLECTED", output.getvalue())
+
+    def test_non_json_inner_stdout_is_not_reflected_and_stderr_is_sanitized(self) -> None:
+        payload = self.broker._failed_command_payload(
+            subprocess.CompletedProcess(
+                args=[],
+                returncode=255,
+                stdout=b"arbitrary stdout MUST-NOT-BE-REFLECTED",
+                stderr=b"\x1bConnection reset\n" + (b"x" * 2000),
+            )
+        )
+
+        encoded = json.dumps(payload)
+        self.assertNotIn("MUST-NOT-BE-REFLECTED", encoded)
+        self.assertNotIn("\x1b", payload["detail"])
+        self.assertNotIn("\n", payload["detail"])
+        self.assertIn("Connection reset", payload["detail"])
+        self.assertIn("[truncated]", payload["detail"])
+        self.assertLessEqual(
+            len(payload["detail"].encode("utf-8")),
+            self.broker.MAX_ERROR_FIELD_BYTES,
         )
 
 

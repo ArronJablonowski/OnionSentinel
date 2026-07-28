@@ -3563,6 +3563,12 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
             runtime.mkdir(parents=True, mode=0o700)
             parent.chmod(0o700)
             runtime.chmod(0o700)
+            settings = runtime / "ai-model-settings.json"
+            harness_policy = runtime / "investigation-harness-policy.json"
+            detection_playbooks = runtime / "detection-playbooks.json"
+            for path in (settings, harness_policy, detection_playbooks):
+                path.write_text("{}\n", encoding="utf-8")
+                path.chmod(0o600)
             args = SimpleNamespace(
                 prompt_dir=runtime / "prompts",
                 analysis_dir=runtime / "analysis",
@@ -3576,6 +3582,9 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
                 only_stable_group_key="v2|synthetic|controlled",
                 only_dispatch_id="a" * 64,
                 max_per_run=1,
+                ai_settings_file=settings,
+                investigation_harness_policy=harness_policy,
+                detection_playbooks=detection_playbooks,
             )
             environment = {
                 "ONION_SENTINEL_EVALUATION_MODE": "1",
@@ -3600,6 +3609,25 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
                     self.scheduler.controlled_evaluation_runtime(args)
 
             args.analysis_dir = runtime / "analysis"
+            args.investigation_harness_policy = (
+                temporary_root / "global-harness-policy.json"
+            )
+            args.investigation_harness_policy.write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+            args.investigation_harness_policy.chmod(0o600)
+            with (
+                mock.patch.object(self.scheduler, "HOME", home),
+                mock.patch.dict(os.environ, environment, clear=False),
+            ):
+                with self.assertRaisesRegex(
+                    SystemExit,
+                    "runtime configuration must stay inside",
+                ):
+                    self.scheduler.controlled_evaluation_runtime(args)
+
+            args.investigation_harness_policy = harness_policy
             environment["ONION_SENTINEL_EVALUATION_FREEZE_MEMORY"] = "0"
             with (
                 mock.patch.object(self.scheduler, "HOME", home),

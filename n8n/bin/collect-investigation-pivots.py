@@ -41,10 +41,87 @@ MAX_INPUT_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_COMPACT_HITS_PER_QUERY = 20
 MAX_COMPACT_SOURCE_BYTES = 12 * 1024
+MAX_ERROR_FIELD_BYTES = 500
+MAX_TRANSPORT_DIAGNOSTIC_BYTES = 1800
 
 
 class InvestigationPivotClientError(RuntimeError):
     """A local policy, transport, or persistence step failed."""
+
+
+def _bounded_diagnostic_text(value: object, maximum_bytes: int) -> str:
+    """Return one printable line from an untrusted diagnostic value."""
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", "replace")
+    elif isinstance(value, str):
+        text = value
+    else:
+        return ""
+    printable = "".join(
+        character if character.isprintable() else " "
+        for character in text
+    )
+    compact = " ".join(printable.split())
+    encoded = compact.encode("utf-8")
+    if len(encoded) <= maximum_bytes:
+        return compact
+    suffix = b"...[truncated]"
+    prefix = encoded[: max(0, maximum_bytes - len(suffix))].decode(
+        "utf-8",
+        "ignore",
+    )
+    return prefix + suffix.decode("ascii")
+
+
+def _json_error_fields(raw: object) -> list[tuple[str, str]]:
+    """Extract only bounded diagnostic fields from a JSON error envelope."""
+    if isinstance(raw, bytes):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return []
+    elif isinstance(raw, str):
+        text = raw
+    else:
+        return []
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(value, dict):
+        return []
+    fields = []
+    for key in (
+        "error",
+        "detail",
+        "upstream_error",
+        "upstream_detail",
+        "transport_detail",
+    ):
+        diagnostic = _bounded_diagnostic_text(
+            value.get(key),
+            MAX_ERROR_FIELD_BYTES,
+        )
+        if diagnostic:
+            fields.append((key, diagnostic))
+    return fields
+
+
+def _transport_failure_diagnostic(stdout: object, stderr: object) -> str:
+    """Summarize a failed SSH hop without echoing arbitrary stdout."""
+    parts = [
+        f"{name}={value}"
+        for name, value in _json_error_fields(stdout)
+    ]
+    stderr_text = _bounded_diagnostic_text(stderr, MAX_ERROR_FIELD_BYTES)
+    if stderr_text:
+        parts.append(f"ssh_stderr={stderr_text}")
+    if not parts:
+        return "no bounded diagnostic was returned"
+    return _bounded_diagnostic_text(
+        "; ".join(parts),
+        MAX_TRANSPORT_DIAGNOSTIC_BYTES,
+    )
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -296,7 +373,8 @@ def _transport(
     if proc.returncode != 0:
         raise InvestigationPivotClientError(
             "restricted investigation query transport failed "
-            f"rc={proc.returncode}: {proc.stderr[:1000]}"
+            f"rc={proc.returncode}: "
+            f"{_transport_failure_diagnostic(proc.stdout, proc.stderr)}"
         )
     try:
         response = json.loads(proc.stdout)

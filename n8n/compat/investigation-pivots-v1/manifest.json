@@ -2,7 +2,7 @@
   "query_contract": "onion-sentinel-investigation-pivots-v1",
   "source": "Exact pre-v2 repository contract and collector",
   "files": {
-    "collect-investigation-pivots.py": "29669c350fb7ed9ba0de44741890b0fe54b621bc28c8be9006a1db8cd3b12889",
+    "collect-investigation-pivots.py": "3caafe863d2c00dea88d02b6f2cb6c91db69239f5a2f9a89faeefc8b5dcc5cd0",
     "investigation_query_contract.py": "29864594edb87030f30d7220ad63c97f477522544958b0fda5b1ba84d6ae6aa7"
   }
 }

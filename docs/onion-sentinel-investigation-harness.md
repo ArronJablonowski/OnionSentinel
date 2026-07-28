@@ -507,6 +507,14 @@ mode should observe violations without changing the production result.
 Enforcement must be enabled only after replay and soak results show the budgets
 are realistic.
 
+The default model-visible evidence limits are 1 MiB and 1,200 rows. The row
+limit provides bounded headroom above observed full-investigation prompts
+(approximately 858 conservatively counted rows), while the independent byte
+limit remains the final guard against large records. The provider-neutral
+prompt projector and harness policy must use the same row limit; tests enforce
+that alignment so changing one limit cannot silently weaken or overconstrain
+the other.
+
 ## Specialist Workflows
 
 The policy and envelope currently recognize all five roles. Full specialist
@@ -1055,6 +1063,13 @@ their analysis IDs and frozen-memory attestations instead of requiring the
 entire journal directory to remain byte-identical. Do not set this variable on
 normal scheduled workers.
 
+The controlled scheduler must receive explicit evaluation-local paths for its
+AI settings, investigation harness policy, and detection playbooks. It forwards
+the policy to `run-local-ai-analysis.py` and the playbooks to the prompt
+builder. Controlled mode rejects missing, symlinked, non-owner-private, or
+out-of-runtime files so a staged-release evaluation cannot silently exercise a
+production configuration from another release.
+
 When that evaluation freeze is active and the custom harness starts, the
 provider-neutral query loop also becomes fail-closed. If the initial primary
 response omits `investigation_query_requests`, the runner makes exactly one
@@ -1071,6 +1086,15 @@ text or returned evidence. Harness initialization, bypass, or trace failures
 that shadow mode normally observes without interruption are fatal during this
 controlled evaluation. Ordinary production shadow runs outside the evaluation
 freeze retain their prior behavior and may conclude without a dynamic pivot.
+
+When a broker-rejected query is eligible for the single non-widening planning
+repair, that repair consumes the current ordinary follow-up round. Its trace
+identity is `primary-query-planning-repair-1` with purpose
+`primary query-planning repair 1 of 1`; the next ordinary synthesis call keeps
+the next round number (for example, repair in round 1 is followed by
+`primary-followup-2`). Both trace evaluation and offline cohort grading
+validate this closed sequence and reject skipped, reused, or duplicate round
+slots.
 
 ## Operator Configuration and Safety
 

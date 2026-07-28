@@ -62,6 +62,8 @@ PRIMARY_INITIAL_CALL_ID = "primary-initial"
 PRIMARY_INITIAL_PURPOSE = "initial primary analysis"
 QUERY_PLANNING_CALL_ID = "primary-query-planning-retry-1"
 QUERY_PLANNING_PURPOSE = "evaluation query-planning retry 1 of 1"
+QUERY_PLANNING_REPAIR_CALL_ID = "primary-query-planning-repair-1"
+QUERY_PLANNING_REPAIR_PURPOSE = "primary query-planning repair 1 of 1"
 FOLLOWUP_CALL_RE = re.compile(r"primary-followup-([1-3])")
 REJECTION_STATUSES = frozenset(
     {"rejected", "denied", "blocked", "unauthorized", "forbidden"}
@@ -634,8 +636,11 @@ def canonical_model_call_contract(
     facts: list[dict[str, Any]] = []
     violations: list[dict[str, Any]] = []
     followup_rounds: list[int] = []
+    query_planning_repair_rounds: list[int] = []
     primary_initial_count = 0
     query_planning_count = 0
+    query_planning_repair_count = 0
+    next_primary_round = 1
     canonical_count = 0
     for ordinal, row in ordered_calls:
         call_id = str(row.get("call_id") or "")
@@ -661,9 +666,25 @@ def canonical_model_call_contract(
                 reasons.append("query-planning-marked-reviewer")
             if status != "completed":
                 reasons.append("query-planning-status-not-completed")
+        elif call_id == QUERY_PLANNING_REPAIR_CALL_ID:
+            query_planning_repair_count += 1
+            # The runtime intentionally spends the current follow-up round on
+            # this bounded repair. Its next ordinary call therefore retains
+            # the following round number (repair-1, then followup-2).
+            query_planning_repair_rounds.append(next_primary_round)
+            next_primary_round += 1
+            if purpose != QUERY_PLANNING_REPAIR_PURPOSE:
+                reasons.append("query-planning-repair-purpose-mismatch")
+            if independent_review:
+                reasons.append("query-planning-repair-marked-reviewer")
+            if status != "completed":
+                reasons.append("query-planning-repair-status-not-completed")
         elif followup_match:
             round_number = int(followup_match.group(1))
             followup_rounds.append(round_number)
+            if round_number != next_primary_round:
+                reasons.append("primary-followup-round-out-of-sequence")
+            next_primary_round += 1
             if purpose != (
                 f"primary investigation follow-up round {round_number}"
             ):
@@ -716,16 +737,24 @@ def canonical_model_call_contract(
         global_reasons.append("primary-initial-count-not-one")
     if query_planning_count not in {0, 1}:
         global_reasons.append("query-planning-count-invalid")
+    if query_planning_repair_count not in {0, 1}:
+        global_reasons.append("query-planning-repair-count-invalid")
     unique_followups = sorted(set(followup_rounds))
     if len(unique_followups) != len(followup_rounds):
         global_reasons.append("duplicate-primary-followup-round")
-    if unique_followups and unique_followups != list(
-        range(1, max(unique_followups) + 1)
+    primary_rounds = sorted(
+        followup_rounds + query_planning_repair_rounds
+    )
+    unique_primary_rounds = sorted(set(primary_rounds))
+    if len(unique_primary_rounds) != len(primary_rounds):
+        global_reasons.append("duplicate-primary-round-slot")
+    if unique_primary_rounds and unique_primary_rounds != list(
+        range(1, max(unique_primary_rounds) + 1)
     ):
-        global_reasons.append("noncontiguous-primary-followup-rounds")
-    maximum_followups = 2 if query_planning_count else 3
-    if len(unique_followups) > maximum_followups:
-        global_reasons.append("too-many-primary-followup-rounds")
+        global_reasons.append("noncontiguous-primary-rounds")
+    maximum_primary_rounds = 2 if query_planning_count else 3
+    if len(unique_primary_rounds) > maximum_primary_rounds:
+        global_reasons.append("too-many-primary-rounds")
     return {
         "schema": MODEL_CALL_CONTRACT_SCHEMA,
         "valid": not violations and not global_reasons,
@@ -734,6 +763,7 @@ def canonical_model_call_contract(
         "noncanonical_model_call_count": len(ordered_calls) - canonical_count,
         "primary_initial_call_count": primary_initial_count,
         "query_planning_call_count": query_planning_count,
+        "query_planning_repair_call_count": query_planning_repair_count,
         "primary_followup_call_count": len(followup_rounds),
         "reviewer_model_call_count": sum(
             int(row.get("independent_review") or 0) == 1

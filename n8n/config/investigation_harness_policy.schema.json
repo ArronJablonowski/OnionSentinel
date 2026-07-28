@@ -74,7 +74,7 @@
         "max_prompt_evidence_rows": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 9600
+          "maximum": 19200
         },
         "max_run_seconds": {
           "type": "integer",

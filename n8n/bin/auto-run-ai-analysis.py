@@ -43,6 +43,12 @@ DEFAULT_PCAP_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "pcap-analysis"
 DEFAULT_INCIDENT_EVIDENCE_DIR = HOME / "n8n-local" / "soc-alerts" / "incident-evidence"
 DEFAULT_INCIDENT_EVIDENCE_CONFIG = HOME / "n8n-local" / "config" / "incident-evidence.json"
 DEFAULT_AI_SETTINGS = HOME / "n8n-local" / "config" / "ai_model_settings.json"
+DEFAULT_INVESTIGATION_HARNESS_POLICY = (
+    HOME / "n8n-local" / "config" / "investigation_harness_policy.json"
+)
+DEFAULT_DETECTION_PLAYBOOKS = (
+    HOME / "n8n-local" / "config" / "detection_playbooks.json"
+)
 DEFAULT_LOCK = HOME / "n8n-local" / "run" / "ai-analysis.lock"
 DEFAULT_WAKE = Path(os.environ.get(
     "AI_ANALYSIS_WAKE_PATH",
@@ -234,6 +240,11 @@ def controlled_evaluation_runtime(
         args.wake_file,
         args.portal_wake_file,
     )
+    runtime_read_paths = (
+        args.ai_settings_file,
+        args.investigation_harness_policy,
+        args.detection_playbooks,
+    )
     try:
         alert_store_origin = urlparse(args.alert_store_url)
         alert_store_port = alert_store_origin.port
@@ -300,6 +311,28 @@ def controlled_evaluation_runtime(
                 "controlled evaluation writable paths must stay inside "
                 "its runtime directory"
             ) from exc
+    for candidate in runtime_read_paths:
+        candidate = candidate.expanduser()
+        try:
+            candidate_metadata = candidate.lstat()
+            resolved_candidate = candidate.resolve(strict=True)
+            resolved_candidate.relative_to(resolved_root)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            raise SystemExit(
+                "controlled evaluation runtime configuration must stay "
+                "inside its runtime directory"
+            ) from exc
+        if (
+            not candidate.is_absolute()
+            or candidate.is_symlink()
+            or not candidate.is_file()
+            or candidate_metadata.st_uid != os.getuid()
+            or stat.S_IMODE(candidate_metadata.st_mode) & 0o077
+        ):
+            raise SystemExit(
+                "controlled evaluation runtime configuration must be "
+                "owner-private regular files"
+            )
     return resolved_root
 
 
@@ -1376,6 +1409,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--incident-evidence-dir", type=Path, default=DEFAULT_INCIDENT_EVIDENCE_DIR, help="Restricted Security Onion incident evidence directory")
     parser.add_argument("--incident-evidence-config", type=Path, default=DEFAULT_INCIDENT_EVIDENCE_CONFIG, help="Restricted relay evidence transport config")
     parser.add_argument("--ai-settings-file", type=Path, default=DEFAULT_AI_SETTINGS, help="AI model routing settings JSON")
+    parser.add_argument(
+        "--investigation-harness-policy",
+        type=Path,
+        default=DEFAULT_INVESTIGATION_HARNESS_POLICY,
+        help="Versioned Onion Sentinel investigation harness policy",
+    )
+    parser.add_argument(
+        "--detection-playbooks",
+        type=Path,
+        default=DEFAULT_DETECTION_PLAYBOOKS,
+        help="Deterministic detection validation playbooks",
+    )
     parser.add_argument(
         "--provider-lane",
         choices=("any", "ollama", "cli"),
@@ -3095,6 +3140,14 @@ def build_prompt(
         str(role_prompt_file(config_dir, agent_role)),
         "--second-opinion-prompt-file",
         str(role_second_opinion_prompt_file(config_dir, agent_role)),
+        "--detection-playbooks",
+        str(
+            getattr(
+                args,
+                "detection_playbooks",
+                DEFAULT_DETECTION_PLAYBOOKS,
+            )
+        ),
     ]
     if incident_evidence_path is not None:
         cmd.extend(["--incident-evidence-file", str(incident_evidence_path)])
@@ -3157,6 +3210,14 @@ def analysis_command(
         args.alert_store_url,
         "--ai-settings-file",
         str(args.ai_settings_file),
+        "--investigation-harness-policy",
+        str(
+            getattr(
+                args,
+                "investigation_harness_policy",
+                DEFAULT_INVESTIGATION_HARNESS_POLICY,
+            )
+        ),
     ]
     if args.model:
         cmd.extend(["--model", args.model])

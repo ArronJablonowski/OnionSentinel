@@ -89,6 +89,8 @@ PRIMARY_MODEL_CALLS = {
         "evaluation query-planning retry 1 of 1"
     ),
 }
+QUERY_PLANNING_REPAIR_CALL_ID = "primary-query-planning-repair-1"
+QUERY_PLANNING_REPAIR_PURPOSE = "primary query-planning repair 1 of 1"
 FOLLOWUP_CALL_RE = re.compile(r"primary-followup-([1-3])")
 REVIEWER_CALL_IDS = ("independent-review-1", "independent-review-2")
 REVIEWER_PURPOSE = "independent second-opinion review"
@@ -296,11 +298,14 @@ def _bounded_model_call_proof_valid(harness: Mapping[str, Any]) -> bool:
     reviewer_route = str(harness.get("assigned_reviewer_route") or "")
     call_ids: list[str] = []
     followup_rounds: list[int] = []
+    query_planning_repair_rounds: list[int] = []
     reviewer_facts: list[Mapping[str, Any]] = []
     purpose_keys: set[tuple[bool, str, str]] = set()
     completed_count = 0
     completed_primary_count = 0
     planning_count = 0
+    planning_repair_count = 0
+    next_primary_round = 1
     for fact in facts:
         if not isinstance(fact, dict) or set(fact) != MODEL_CALL_FACT_KEYS:
             return False
@@ -332,18 +337,32 @@ def _bounded_model_call_proof_valid(harness: Mapping[str, Any]) -> bool:
             if call_id == "primary-query-planning-retry-1":
                 planning_count += 1
             continue
+        if call_id == QUERY_PLANNING_REPAIR_CALL_ID:
+            planning_repair_count += 1
+            query_planning_repair_rounds.append(next_primary_round)
+            next_primary_round += 1
+            if (
+                independent
+                or purpose != QUERY_PLANNING_REPAIR_PURPOSE
+                or status != "completed"
+                or route != primary_route
+            ):
+                return False
+            continue
         followup_match = FOLLOWUP_CALL_RE.fullmatch(call_id)
         if followup_match:
             round_number = int(followup_match.group(1))
             followup_rounds.append(round_number)
             if (
-                independent
+                round_number != next_primary_round
+                or independent
                 or purpose
                 != f"primary investigation follow-up round {round_number}"
                 or status != "completed"
                 or route != primary_route
             ):
                 return False
+            next_primary_round += 1
             continue
         if call_id not in REVIEWER_CALL_IDS:
             return False
@@ -366,16 +385,22 @@ def _bounded_model_call_proof_valid(harness: Mapping[str, Any]) -> bool:
         return False
     primary_initial_count = call_ids.count("primary-initial")
     unique_followups = sorted(set(followup_rounds))
+    primary_rounds = sorted(
+        followup_rounds + query_planning_repair_rounds
+    )
+    unique_primary_rounds = sorted(set(primary_rounds))
     if (
         primary_initial_count != 1
         or planning_count not in {0, 1}
+        or planning_repair_count not in {0, 1}
         or len(unique_followups) != len(followup_rounds)
+        or len(unique_primary_rounds) != len(primary_rounds)
         or (
-            unique_followups
-            and unique_followups
-            != list(range(1, max(unique_followups) + 1))
+            unique_primary_rounds
+            and unique_primary_rounds
+            != list(range(1, max(unique_primary_rounds) + 1))
         )
-        or len(unique_followups) > (2 if planning_count else 3)
+        or len(unique_primary_rounds) > (2 if planning_count else 3)
     ):
         return False
     reviewer_ids = [str(fact["call_id"]) for fact in reviewer_facts]
@@ -398,6 +423,8 @@ def _bounded_model_call_proof_valid(harness: Mapping[str, Any]) -> bool:
         int(contract.get("primary_initial_call_count") or 0) != 1
         or int(contract.get("query_planning_call_count") or 0)
         != planning_count
+        or int(contract.get("query_planning_repair_call_count") or 0)
+        != planning_repair_count
         or int(contract.get("primary_followup_call_count") or 0)
         != len(followup_rounds)
         or int(contract.get("reviewer_model_call_count") or 0)
