@@ -8,6 +8,7 @@ import sqlite3
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,10 @@ class RecoveryOperationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.soak = load_module("soak_report", ROOT / "n8n/bin/report-production-soak.py")
+        cls.backup = load_module(
+            "runtime_backup",
+            ROOT / "n8n/bin/backup-onion-sentinel-runtime.py",
+        )
         cls.restore = load_module("restore_drill", ROOT / "n8n/bin/run-recovery-restore-drill.py")
 
     def sample(self, when: dt.datetime, ok: bool = True):
@@ -154,6 +159,120 @@ class RecoveryOperationTests(unittest.TestCase):
                 "harness manifest",
             ):
                 self.restore.verify_bundle(bundle)
+
+    def test_wal_harness_bundle_round_trips_without_sqlite_sidecars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stack = root / "stack"
+            data = stack / "alert_store_data"
+            data.mkdir(parents=True)
+            (stack / "n8n_data").mkdir()
+            (stack / "n8n_data" / "config").write_text(
+                "{}",
+                encoding="utf-8",
+            )
+            (stack / ".env").write_text(
+                "ONION_SENTINEL_RELEASE_ID=" + ("a" * 40) + "\n",
+                encoding="utf-8",
+            )
+
+            with closing(sqlite3.connect(data / "alerts.sqlite3")) as conn:
+                with conn:
+                    conn.execute("CREATE TABLE alerts (id TEXT)")
+                    conn.execute("CREATE TABLE alert_group_summary (id TEXT)")
+                    conn.execute("INSERT INTO alerts VALUES ('alert-1')")
+
+            harness_tables = (
+                "harness_metadata",
+                "harness_runs",
+                "harness_events",
+                "harness_evidence",
+                "harness_hypotheses",
+                "harness_decisions",
+                "harness_model_calls",
+                "harness_tool_calls",
+                "harness_budget_reservations",
+            )
+            harness_path = data / "investigation-harness.sqlite3"
+            with closing(sqlite3.connect(harness_path)) as writer:
+                self.assertEqual(
+                    writer.execute("PRAGMA journal_mode = WAL").fetchone()[0],
+                    "wal",
+                )
+                with writer:
+                    for table in harness_tables:
+                        if table == "harness_metadata":
+                            writer.execute(
+                                """
+                                CREATE TABLE harness_metadata (
+                                    key TEXT PRIMARY KEY,
+                                    value TEXT
+                                )
+                                """
+                            )
+                        elif table == "harness_runs":
+                            writer.execute(
+                                "CREATE TABLE harness_runs (run_id TEXT)"
+                            )
+                        else:
+                            writer.execute(f"CREATE TABLE {table} (id TEXT)")
+                    writer.execute(
+                        "INSERT INTO harness_metadata VALUES "
+                        "('schema_version', '4')"
+                    )
+                    writer.execute(
+                        "INSERT INTO harness_runs VALUES ('run-1')"
+                    )
+                self.assertTrue(Path(f"{harness_path}-wal").is_file())
+
+                backup_root = root / "backups"
+                backup_root.mkdir()
+                with mock.patch.object(
+                    self.backup,
+                    "require_runtime_capacity",
+                ), mock.patch.object(
+                    self.backup,
+                    "postgres_dump",
+                    side_effect=lambda _docker, destination: (
+                        destination.write_bytes(b"fake-postgres-dump")
+                    ),
+                ):
+                    bundle = self.backup.create_bundle(
+                        stack,
+                        backup_root,
+                        "/fake/docker",
+                    )
+
+            self.assertFalse(
+                (bundle / "investigation-harness.sqlite3-wal").exists()
+            )
+            self.assertFalse(
+                (bundle / "investigation-harness.sqlite3-shm").exists()
+            )
+            manifest = self.restore.verify_bundle(bundle)
+            self.assertEqual(
+                manifest["sqlite"]["investigation_harness"]["journal_mode"],
+                "delete",
+            )
+
+            restore_root = root / "restore"
+            restore_root.mkdir()
+            alert_result = self.restore.validate_sqlite(
+                bundle / "alerts.sqlite3",
+                restore_root,
+            )
+            harness_result = self.restore.validate_harness_sqlite(
+                bundle / "investigation-harness.sqlite3",
+                restore_root,
+            )
+            archive_result = self.restore.validate_runtime_archive(
+                bundle / "runtime-secrets.tar.gz"
+            )
+            self.assertEqual(alert_result["quick_check"], "ok")
+            self.assertEqual(alert_result["alert_rows"], 1)
+            self.assertEqual(harness_result["quick_check"], "ok")
+            self.assertEqual(harness_result["run_rows"], 1)
+            self.assertIn(".env", archive_result["required_paths"])
 
     def test_runtime_archive_requires_n8n_encryption_config(self):
         with tempfile.TemporaryDirectory() as tmp:

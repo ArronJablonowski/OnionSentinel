@@ -1,13 +1,23 @@
 import importlib.util
+import json
 import os
 from pathlib import Path
+import socket
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
+import urllib.error
+import urllib.request
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "n8n" / "bin" / "set-runtime-release-id.py"
 INSTALLER = ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
+DASHBOARD_SERVER = (
+    ROOT / "onion-sentinel-dashboard" / "onion_sentinel_server.py"
+)
 
 
 def load_module():
@@ -17,6 +27,12 @@ def load_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def available_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
 
 
 class RuntimeReleaseIdTests(unittest.TestCase):
@@ -138,6 +154,91 @@ class RuntimeReleaseIdTests(unittest.TestCase):
             "Install failed; alert-store and both AI LaunchAgents remain stopped.",
             source,
         )
+
+    def test_web_launchagent_health_reads_exact_release_from_runtime_env(
+        self,
+    ) -> None:
+        release_id = "d" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            runtime = home / "n8n-local"
+            alert_data = runtime / "alert_store_data"
+            alert_data.mkdir(parents=True)
+            (alert_data / "alerts.sqlite3").write_bytes(b"health-sentinel")
+            env_path = runtime / ".env"
+            env_path.write_text(
+                "TELEGRAM_BOT_TOKEN=must-not-be-evaluated\n"
+                f"ONION_SENTINEL_RELEASE_ID={release_id}\n",
+                encoding="utf-8",
+            )
+            os.chmod(env_path, 0o600)
+            dashboard = root / "dashboard"
+            dashboard.mkdir()
+            (dashboard / "index.html").write_text(
+                "<!doctype html><title>Onion Sentinel</title>",
+                encoding="utf-8",
+            )
+
+            port = available_port()
+            environment = dict(os.environ)
+            environment["HOME"] = str(home)
+            for key in (
+                "ONION_SENTINEL_RELEASE_ID",
+                "ONION_SENTINEL_EVALUATION_MODE",
+                "ONION_SENTINEL_EVALUATION_TOKEN",
+                "ONION_SENTINEL_EVALUATION_RUNTIME_DIR",
+            ):
+                environment.pop(key, None)
+            with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as log:
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(DASHBOARD_SERVER),
+                        "--host",
+                        "127.0.0.1",
+                        "--port",
+                        str(port),
+                        "--dashboard-root",
+                        str(dashboard),
+                    ],
+                    cwd=DASHBOARD_SERVER.parent,
+                    env=environment,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                try:
+                    health = None
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        if process.poll() is not None:
+                            break
+                        try:
+                            with urllib.request.urlopen(
+                                f"http://127.0.0.1:{port}/healthz",
+                                timeout=1,
+                            ) as response:
+                                health = json.load(response)
+                            break
+                        except (OSError, urllib.error.URLError):
+                            time.sleep(0.05)
+                    if health is None:
+                        log.seek(0)
+                        self.fail(
+                            "dedicated web service did not become healthy: "
+                            + log.read()
+                        )
+                    self.assertTrue(health["ok"])
+                    self.assertEqual(health["service"], "onion-sentinel")
+                    self.assertEqual(health["release_id"], release_id)
+                finally:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
 
 
 if __name__ == "__main__":

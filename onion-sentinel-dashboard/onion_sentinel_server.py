@@ -15,6 +15,7 @@ import mimetypes
 import os
 import re
 import shutil
+import stat
 from http import HTTPStatus
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -27,6 +28,76 @@ HOME = Path.home()
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8766
 DEFAULT_DASHBOARD_ROOT = HOME / "SOC Alerts Web"
+RUNTIME_RELEASE_ENV_KEY = "ONION_SENTINEL_RELEASE_ID"
+DEFAULT_RUNTIME_ENV_PATH = HOME / "n8n-local" / ".env"
+RUNTIME_RELEASE_ID_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{6,99}$"
+)
+MAX_RUNTIME_ENV_BYTES = 1024 * 1024
+
+
+def current_runtime_release_id(
+    *,
+    environ: object | None = None,
+    env_path: Path | None = None,
+) -> str:
+    """Read the deployed release without evaluating or exposing runtime secrets.
+
+    The production LaunchAgent starts this server directly and does not source
+    ``n8n-local/.env``. An explicit process value remains authoritative for
+    controlled evaluations; otherwise read only the literal release entry from
+    the bounded, owner-only runtime file written by the installer.
+    """
+
+    source = os.environ if environ is None else environ
+    try:
+        explicitly_supplied = RUNTIME_RELEASE_ENV_KEY in source
+    except TypeError:
+        explicitly_supplied = False
+    if explicitly_supplied:
+        candidate = source.get(RUNTIME_RELEASE_ENV_KEY, "")
+        return (
+            candidate
+            if isinstance(candidate, str)
+            and RUNTIME_RELEASE_ID_RE.fullmatch(candidate)
+            else ""
+        )
+
+    path = DEFAULT_RUNTIME_ENV_PATH if env_path is None else Path(env_path)
+    try:
+        metadata = path.lstat()
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+            or metadata.st_size > MAX_RUNTIME_ENV_BYTES
+        ):
+            return ""
+        raw = path.read_bytes()
+    except OSError:
+        return ""
+    if len(raw) > MAX_RUNTIME_ENV_BYTES:
+        return ""
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return ""
+
+    candidates: list[str] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() == RUNTIME_RELEASE_ENV_KEY:
+            candidates.append(value.strip())
+    if len(candidates) != 1:
+        return ""
+    candidate = candidates[0]
+    return candidate if RUNTIME_RELEASE_ID_RE.fullmatch(candidate) else ""
+
+
 EVALUATION_MODE_VALUE = str(
     os.environ.get("ONION_SENTINEL_EVALUATION_MODE") or ""
 ).strip()
@@ -35,9 +106,7 @@ if EVALUATION_MODE_VALUE not in {"", "0", "1"}:
         "ONION_SENTINEL_EVALUATION_MODE must be unset, 0, or 1"
     )
 CONTROLLED_EVALUATION_MODE = EVALUATION_MODE_VALUE == "1"
-RUNTIME_RELEASE_ID = str(
-    os.environ.get("ONION_SENTINEL_RELEASE_ID") or ""
-).strip()
+RUNTIME_RELEASE_ID = current_runtime_release_id()
 CONTROLLED_EVALUATION_TOKEN = str(
     os.environ.get("ONION_SENTINEL_EVALUATION_TOKEN") or ""
 ).strip()

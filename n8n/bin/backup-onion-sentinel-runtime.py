@@ -64,6 +64,41 @@ def _validate_sqlite_connection(
     return result, rows
 
 
+def _sqlite_sidecar_paths(database: Path) -> tuple[Path, Path]:
+    return (
+        Path(f"{database}-wal"),
+        Path(f"{database}-shm"),
+    )
+
+
+def _canonicalize_sqlite_snapshot(
+    connection: sqlite3.Connection,
+    destination: Path,
+) -> str:
+    """Make a backup self-contained even when its source uses WAL.
+
+    SQLite's online backup API copies the source database's persistent journal
+    mode. Opening that copied database for validation can therefore create
+    ``-wal`` and ``-shm`` files in the recovery bundle. A restore must not need
+    those transient files, so switch the private snapshot to DELETE mode before
+    validating or publishing it.
+    """
+
+    row = connection.execute("PRAGMA journal_mode = DELETE").fetchone()
+    journal_mode = str(row[0] if row else "").strip().lower()
+    if journal_mode != "delete":
+        raise RuntimeError(
+            "SQLite backup could not be canonicalized to DELETE journal mode"
+        )
+    connection.commit()
+    for sidecar in _sqlite_sidecar_paths(destination):
+        try:
+            sidecar.unlink()
+        except FileNotFoundError:
+            pass
+    return journal_mode
+
+
 def backup_sqlite_database(
     source: Path,
     destination: Path,
@@ -84,6 +119,7 @@ def backup_sqlite_database(
     with closing(sqlite3.connect(source)) as src, closing(sqlite3.connect(destination)) as dst:
         with src, dst:
             src.backup(dst)
+            journal_mode = _canonicalize_sqlite_snapshot(dst, destination)
     with closing(sqlite3.connect(destination)) as check:
         quick_check, rows = _validate_sqlite_connection(
             check,
@@ -112,9 +148,20 @@ def backup_sqlite_database(
         )
     if restored_rows != rows:
         raise RuntimeError("SQLite logical restore row count does not match snapshot")
+    unexpected_sidecars = [
+        path.name
+        for path in _sqlite_sidecar_paths(destination)
+        if path.exists() or path.is_symlink()
+    ]
+    if unexpected_sidecars:
+        raise RuntimeError(
+            "canonical SQLite backup retained transient sidecar(s): "
+            + ", ".join(unexpected_sidecars)
+        )
     return {
         "rows": rows,
         "quick_check": quick_check,
+        "journal_mode": journal_mode,
         "foreign_key_check_rows": foreign_key_errors,
         "restore_drill": {
             "quick_check": restore_check,
