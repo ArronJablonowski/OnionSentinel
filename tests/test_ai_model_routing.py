@@ -3486,6 +3486,49 @@ class AiModelRoutingTests(unittest.TestCase):
 
         self.assertTrue(validated["_review_contract_validation"]["valid"])
 
+    def test_reviewed_query_field_paths_are_not_foreign_domains(self) -> None:
+        prompt_package = self.runner.independent_reviewer_package(
+            {"alert": {"alert_id": "reviewed-query-field-paths"}}
+        )
+        contract = prompt_package["review_contract"]
+        response = {
+            **self.complete_response(
+                summary=(
+                    "The dns.query, dns.query.name, tls.server.name, "
+                    "http.virtual_host, and network.community_id fields were "
+                    "checked without asserting new observable values."
+                ),
+                evidence_used=[
+                    "alert",
+                    "alert:reviewed-query-field-paths",
+                ],
+                event_status="unknown",
+                detection_validity="unknown",
+                activity_disposition="unknown",
+                handling="investigate",
+                duplicate_of=None,
+                hypotheses=[],
+            ),
+            "review_case_id": contract["case_id"],
+            "review_evidence_hash": contract["evidence_hash"],
+            "observables_used": [],
+        }
+
+        validated = self.runner.validate_reviewer_response(
+            response,
+            prompt_package,
+        )
+
+        self.assertTrue(validated["_review_contract_validation"]["valid"])
+        for field in (
+            "dns.query",
+            "dns.query.name",
+            "tls.server.name",
+            "http.virtual_host",
+            "network.community_id",
+        ):
+            self.assertIn(field, self.runner.REVIEW_KNOWN_FIELD_PATHS)
+
     def test_foreign_community_retry_records_bounded_attempt_telemetry(
         self,
     ) -> None:

@@ -48,6 +48,7 @@ from incident_evidence_contract import validate_incident_evidence_artifact  # no
 from investigation_query_contract import (  # noqa: E402
     INVESTIGATION_QUERY_CONTRACT,
     MAX_DISCOVERED_OBSERVABLES,
+    PACKS as INVESTIGATION_QUERY_PACK_DEFINITIONS,
     SAFE_ATOM_RE as INVESTIGATION_SAFE_ATOM_RE,
     SAFE_DOMAIN_RE as INVESTIGATION_SAFE_DOMAIN_RE,
     InvestigationQueryContractError,
@@ -3652,9 +3653,9 @@ REVIEW_NON_DOMAIN_SUFFIXES = frozenset(
         "txt", "yaml", "yml",
     }
 )
-REVIEW_KNOWN_FIELD_PATHS = frozenset(
-    {
-        "dns.query",
+def _review_known_field_paths() -> frozenset[str]:
+    """Return reviewed dotted field paths and their non-domain prefixes."""
+    paths = {
         "dns.question.name",
         "event.dataset",
         "event.module",
@@ -3668,7 +3669,15 @@ REVIEW_KNOWN_FIELD_PATHS = frozenset(
         "destination.ip",
         "user.name",
     }
-)
+    for pack in INVESTIGATION_QUERY_PACK_DEFINITIONS.values():
+        for field in pack.get("fields", []):
+            parts = str(field).lower().split(".")
+            for length in range(2, len(parts) + 1):
+                paths.add(".".join(parts[:length]))
+    return frozenset(paths)
+
+
+REVIEW_KNOWN_FIELD_PATHS = _review_known_field_paths()
 REVIEW_TAXONOMY_FIELD_PATHS = frozenset(
     {
         "data_stream_dataset",

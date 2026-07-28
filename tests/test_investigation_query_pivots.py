@@ -883,6 +883,41 @@ class SecurityOnionInvestigationPivotTests(unittest.TestCase):
         self.assertIn("dns.query.name", PACKS["dns_activity"]["fields"])
         self.assertIn("ssl.server_name", OBSERVABLE_FIELDS["domains"])
 
+    def test_baseline_pack_scopes_observable_dsl_and_display_kql(self) -> None:
+        window = {
+            "start": "2026-07-24T00:00:00Z",
+            "end": "2026-07-24T01:00:00Z",
+        }
+        observables = {
+            "ips": ["192.0.2.10"],
+            "domains": [],
+            "hosts": [],
+            "users": [],
+        }
+        observable_terms = self.wrapper.observable_clause(
+            observables,
+            "dns_activity",
+        )["bool"]["should"]
+        rendered = self.wrapper.kql_equivalent(
+            window,
+            "dns_activity",
+            observables,
+        )
+        scoped_fields = self.wrapper.pack_observable_fields("dns_activity")[
+            "ips"
+        ]
+
+        self.assertEqual(
+            observable_terms,
+            [
+                {"term": {field: "192.0.2.10"}}
+                for field in scoped_fields
+            ],
+        )
+        for field in scoped_fields:
+            self.assertIn(f'{field} : "192.0.2.10"', rendered)
+        self.assertNotIn('related.ip : "192.0.2.10"', rendered)
+
     def test_wrapper_independently_validates_exact_authorized_request(self) -> None:
         request = authorize_investigation_query_request(proposal(), context())
         self.assertEqual(self.wrapper.validated_pivot_request(request), request)

@@ -1272,10 +1272,18 @@ def dataset_clause(datasets: list[str]) -> dict:
     }
 
 
-def kql_equivalent(window: dict, datasets: list[str], observables: dict[str, list[str]]) -> str:
-    dataset = " or ".join(f'event.dataset : "{value}"' for value in datasets)
+def kql_equivalent(
+    window: dict,
+    pack_name: str,
+    observables: dict[str, list[str]],
+) -> str:
+    pack = PACKS[pack_name]
+    dataset = " or ".join(
+        f'event.dataset : "{value}"'
+        for value in pack["datasets"]
+    )
     obs = []
-    for kind, fields in OBSERVABLE_FIELDS.items():
+    for kind, fields in pack_observable_fields(pack_name).items():
         for value in observables.get(kind, []):
             obs.append("(" + " or ".join(f'{field} : "{value}"' for field in fields) + ")")
     return f'@timestamp >= "{window["start"]}" and @timestamp <= "{window["end"]}" and ({dataset}) and (' + " or ".join(obs) + ")"
@@ -1590,7 +1598,7 @@ def execute_pack(pack_name: str, window: dict, observables: dict[str, list[str]]
         "query": {"bool": {"filter": [
             {"range": {"@timestamp": {"gte": window["start"], "lte": window["end"]}}},
             dataset_clause(pack["datasets"]),
-            observable_clause(observables),
+            observable_clause(observables, pack_name),
         ]}},
     }
     return {"pack": pack_name, **execute_search(body, pack["indices"])}
@@ -2255,7 +2263,11 @@ def main() -> int:
             result.update({
                 "window_index": window_index,
                 "window": window,
-                "kql_equivalent": kql_equivalent(window, PACKS[pack_name]["datasets"], observables),
+                "kql_equivalent": kql_equivalent(
+                    window,
+                    pack_name,
+                    observables,
+                ),
             })
             results.append(result)
     osquery_results = [
