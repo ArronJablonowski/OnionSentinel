@@ -3654,6 +3654,7 @@ REVIEW_NON_DOMAIN_SUFFIXES = frozenset(
 )
 REVIEW_KNOWN_FIELD_PATHS = frozenset(
     {
+        "dns.query",
         "dns.question.name",
         "event.dataset",
         "event.module",

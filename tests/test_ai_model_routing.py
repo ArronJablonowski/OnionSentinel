@@ -3452,6 +3452,40 @@ class AiModelRoutingTests(unittest.TestCase):
             [],
         )
 
+    def test_dns_query_schema_path_is_not_a_foreign_domain(self) -> None:
+        prompt_package = self.runner.independent_reviewer_package(
+            {"alert": {"alert_id": "dns-query-schema-path"}}
+        )
+        contract = prompt_package["review_contract"]
+        response = {
+            **self.complete_response(
+                summary=(
+                    "The dns.query field was unavailable, so the event "
+                    "remains inconclusive."
+                ),
+                evidence_used=[
+                    "alert",
+                    "alert:dns-query-schema-path",
+                ],
+                event_status="unknown",
+                detection_validity="unknown",
+                activity_disposition="unknown",
+                handling="investigate",
+                duplicate_of=None,
+                hypotheses=[],
+            ),
+            "review_case_id": contract["case_id"],
+            "review_evidence_hash": contract["evidence_hash"],
+            "observables_used": [],
+        }
+
+        validated = self.runner.validate_reviewer_response(
+            response,
+            prompt_package,
+        )
+
+        self.assertTrue(validated["_review_contract_validation"]["valid"])
+
     def test_foreign_community_retry_records_bounded_attempt_telemetry(
         self,
     ) -> None:
