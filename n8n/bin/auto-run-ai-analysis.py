@@ -1496,6 +1496,13 @@ def project_now() -> str:
     return dt.datetime.now().astimezone().replace(microsecond=0).isoformat().replace("T", "  ")
 
 
+def project_now_precise() -> str:
+    """Return a queue clock precise enough for sub-second retry timestamps."""
+    return dt.datetime.now().astimezone().isoformat(
+        timespec="milliseconds"
+    ).replace("T", "  ")
+
+
 def cli_agent_roles(settings_path: Path) -> set[str]:
     """Return roles explicitly assigned to a hosted CLI inference lane.
 
@@ -2522,7 +2529,7 @@ def select_next_alert_indexed(
         LIMIT 1
         """,
         [
-            project_now(),
+            project_now_precise(),
             since,
             *levels,
             *ELIGIBLE_FILTER_STATUSES,

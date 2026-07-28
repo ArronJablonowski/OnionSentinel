@@ -1883,6 +1883,48 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         self.assertEqual(first["alert_id"], "critical-old")
         self.assertEqual(second["alert_id"], "high-new")
 
+    def test_indexed_queue_uses_subsecond_due_clock(self) -> None:
+        self.enable_indexed_scheduler()
+        group_id = "0123456789abcdefabcd"
+        self.insert_alert(
+            "subsecond-alert",
+            "high",
+            "2026-07-28  02:24:29-06:00",
+            90,
+        )
+        self.set_stable_group("subsecond-alert", group_id)
+        self.insert_indexed_job(
+            group_id,
+            payload={"manual_reanalysis": True},
+            next_attempt_at="2026-07-28  02:24:29.438-06:00",
+        )
+        self.conn.commit()
+
+        with mock.patch.object(
+            self.scheduler,
+            "project_now_precise",
+            return_value="2026-07-28  02:24:29.437-06:00",
+        ):
+            self.assertIsNone(
+                self.scheduler.select_next_alert_indexed(
+                    self.conn,
+                    self.args,
+                )
+            )
+
+        with mock.patch.object(
+            self.scheduler,
+            "project_now_precise",
+            return_value="2026-07-28  02:24:29.500-06:00",
+        ):
+            selected = self.scheduler.select_next_alert_indexed(
+                self.conn,
+                self.args,
+            )
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["alert_id"], "subsecond-alert")
+
     def test_indexed_reconciliation_requires_current_run_and_no_rerun(self) -> None:
         self.enable_indexed_scheduler()
         for alert_id, group_id in (
