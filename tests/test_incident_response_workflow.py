@@ -110,6 +110,19 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn('<col class="ir-col-network">', page)
         self.assertIn('.ir-table col.ir-col-network{width:300px}', page)
         self.assertIn('.ir-table td.ir-network-cell{padding-left:6px;padding-right:6px}', page)
+        self.assertIn(
+            '.ir-network-path{display:grid;grid-template-columns:minmax(0,1fr) 14px '
+            'minmax(0,1fr);gap:3px;align-items:start}',
+            page,
+        )
+        self.assertIn(
+            '.ir-network-arrow{margin-top:15px;color:#35d9ec;text-align:center;line-height:1.35}',
+            page,
+        )
+        self.assertNotIn(
+            'grid-template-columns:minmax(0,1fr) 14px minmax(0,1fr);gap:3px;align-items:center',
+            page,
+        )
         self.assertIn('class="ir-network-cell"', page)
         self.assertIn('overflow-wrap:anywhere;white-space:normal', page)
         self.assertNotIn(
