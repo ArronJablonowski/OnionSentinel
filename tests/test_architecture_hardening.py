@@ -6,6 +6,27 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ArchitectureHardeningTest(unittest.TestCase):
+    def test_installer_signals_dashboard_only_after_new_builder_is_installed(self) -> None:
+        installer = (
+            ROOT / "n8n/bin/install-macstudio-stack.zsh"
+        ).read_text(encoding="utf-8")
+        builder_copy = installer.index(
+            'cp "$REPO_DIR/onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py"'
+        )
+        refresh_load = installer.index(
+            'launchctl load "$LAUNCHD_DIR/com.arron.soc.dashboard-refresh.plist"'
+        )
+        dashboard_wake = installer.index(
+            'touch "$STACK_DIR/run/dashboard-refresh.wake"'
+        )
+
+        self.assertLess(builder_copy, refresh_load)
+        self.assertLess(refresh_load, dashboard_wake)
+        self.assertNotIn(
+            '"$STACK_DIR/run/pcap-analysis.wake" "$STACK_DIR/run/dashboard-refresh.wake"',
+            installer[:builder_copy],
+        )
+
     def test_group_identity_excludes_mutable_workflow_state(self):
         code = (ROOT / "n8n/alert_store/lib/group_identity.js").read_text(encoding="utf-8")
         self.assertIn("'v2'", code)
