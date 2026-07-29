@@ -10,18 +10,37 @@ from __future__ import annotations
 import argparse
 import hmac
 import html
+import importlib.util
 import json
 import mimetypes
 import os
 import re
 import shutil
 import stat
+import sys
+import time
+import uuid
 from http import HTTPStatus
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 import report_portal as runtime
 from http_runtime import BoundedThreadingHTTPServer
+
+try:
+    from security_jsonl_log import SecurityJsonlLogger
+except ModuleNotFoundError:
+    _logging_spec = importlib.util.spec_from_file_location(
+        "security_jsonl_log",
+        Path(__file__).resolve().parents[1]
+        / "n8n/bin/security_jsonl_log.py",
+    )
+    if _logging_spec is None or _logging_spec.loader is None:
+        raise
+    _logging_module = importlib.util.module_from_spec(_logging_spec)
+    sys.modules.setdefault("security_jsonl_log", _logging_module)
+    _logging_spec.loader.exec_module(_logging_module)
+    SecurityJsonlLogger = _logging_module.SecurityJsonlLogger
 
 
 HOME = Path.home()
@@ -34,6 +53,15 @@ RUNTIME_RELEASE_ID_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]{6,99}$"
 )
 MAX_RUNTIME_ENV_BYTES = 1024 * 1024
+APPLICATION_LOGGER = SecurityJsonlLogger(
+    Path(
+        os.environ.get(
+            "ONION_SENTINEL_APPLICATION_LOG",
+            HOME / "n8n-local/logs/onion-sentinel-application.jsonl",
+        )
+    ),
+    service="onion-sentinel-web",
+)
 
 
 def current_runtime_release_id(
@@ -363,6 +391,45 @@ def render_admin_status() -> bytes:
 class OnionSentinelHandler(runtime.PortalHandler):
     server_version = "OnionSentinel/1.0"
 
+    def handle(self) -> None:
+        self.application_request_id = uuid.uuid4().hex
+        self.application_request_started = time.monotonic()
+        super().handle()
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        message = fmt % args
+        parsed = urlparse(getattr(self, "path", "") or "")
+        status_code = 0
+        if args:
+            try:
+                status_code = int(args[1])
+            except (IndexError, TypeError, ValueError):
+                status_code = 0
+        APPLICATION_LOGGER.log(
+            "error"
+            if status_code >= 500
+            else "warning"
+            if status_code >= 400
+            else "info",
+            "http.request.completed",
+            request_id=getattr(self, "application_request_id", ""),
+            method=getattr(self, "command", ""),
+            path=parsed.path[:512],
+            status_code=status_code,
+            duration_ms=round(
+                max(
+                    0.0,
+                    time.monotonic()
+                    - getattr(self, "application_request_started", time.monotonic()),
+                )
+                * 1000,
+                3,
+            ),
+            remote_address=self.client_address[0],
+            message=message,
+        )
+        super().log_message(fmt, *args)
+
     def parse_request(self) -> bool:
         """Reject request targets normalized by the standard-library parser.
 
@@ -633,6 +700,18 @@ class OnionSentinelHTTPServer(BoundedThreadingHTTPServer):
             request_timeout_seconds=request_timeout_seconds,
         )
 
+    def handle_error(self, request: object, client_address: object) -> None:
+        APPLICATION_LOGGER.log(
+            "error",
+            "http.request.unhandled_exception",
+            remote_address=(
+                client_address[0]
+                if isinstance(client_address, tuple) and client_address
+                else ""
+            ),
+        )
+        super().handle_error(request, client_address)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Dedicated Onion Sentinel web service")
@@ -693,6 +772,15 @@ def main() -> None:
         args.dashboard_root,
         max_active_requests=args.max_active_requests,
         request_timeout_seconds=args.request_timeout_seconds,
+    )
+    APPLICATION_LOGGER.log(
+        "info",
+        "service.ready",
+        release_id=RUNTIME_RELEASE_ID or "unversioned",
+        listen_host=args.host,
+        listen_port=args.port,
+        dashboard_root=str(args.dashboard_root),
+        controlled_evaluation=CONTROLLED_EVALUATION_MODE,
     )
     print(f"Onion Sentinel listening on http://{runtime.local_ip()}:{args.port}/", flush=True)
     server.serve_forever()

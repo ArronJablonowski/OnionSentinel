@@ -18,6 +18,7 @@ const {createProviderScheduler} = require('./lib/provider_scheduler');
 const {createDurableJobQueue} = require('./lib/durable_job_queue');
 const {createPostgresShadowOutbox} = require('./lib/postgres_shadow_outbox');
 const {createPostgresShadowProjector} = require('./lib/postgres_shadow_projector');
+const {createSecurityLogger} = require('./lib/security_logger');
 const {createPipelineMetrics} = require('./lib/pipeline_metrics');
 const {createSocAnalysisPolicy} = require('./lib/soc_analysis_policy');
 const {
@@ -75,6 +76,28 @@ const controlledEvaluationMode = evaluationModeValue === '1';
 const runtimeReleaseIdValue = String(
   process.env.ONION_SENTINEL_RELEASE_ID || '',
 ).trim();
+const applicationLogPath = process.env.ALERT_STORE_APPLICATION_LOG
+  || path.join(path.dirname(path.dirname(dbPath)), 'logs', 'alert-store-application.jsonl');
+const applicationLogger = createSecurityLogger({
+  file: applicationLogPath,
+  service: 'onion-sentinel-alert-store',
+  releaseId: runtimeReleaseIdValue || 'unversioned',
+  maxBytes: Math.max(
+    1024 * 1024,
+    Number(process.env.ALERT_STORE_APPLICATION_LOG_MAX_BYTES || 10 * 1024 * 1024),
+  ),
+  backups: Math.max(
+    1,
+    Math.min(20, Number(process.env.ALERT_STORE_APPLICATION_LOG_BACKUPS || 5)),
+  ),
+});
+applicationLogger.captureConsole();
+applicationLogger.log('info', 'process.starting', {
+  runtime_mode: controlledEvaluationMode ? 'controlled-evaluation' : 'production',
+  database_path: dbPath,
+  listen_host: host,
+  listen_port: port,
+});
 const controlledEvaluationToken = String(
   process.env.ONION_SENTINEL_EVALUATION_TOKEN || '',
 ).trim();
@@ -10986,12 +11009,43 @@ async function handleRequest(request, response) {
 }
 
 async function dispatchRequest(request, response) {
+  const requestId = crypto.randomUUID();
+  const started = process.hrtime.bigint();
+  const requestPath = (() => {
+    try {
+      return new URL(request.url, 'http://127.0.0.1').pathname;
+    } catch {
+      return String(request.url || '').split('?', 1)[0].slice(0, 512);
+    }
+  })();
+  response.setHeader('X-Request-ID', requestId);
+  response.once('finish', () => {
+    applicationLogger.log(
+      response.statusCode >= 500 ? 'error' : (
+        response.statusCode >= 400 ? 'warning' : 'info'
+      ),
+      'http.request.completed',
+      {
+        request_id: requestId,
+        method: request.method,
+        path: requestPath,
+        status_code: response.statusCode,
+        duration_ms: Number(process.hrtime.bigint() - started) / 1_000_000,
+        remote_address: request.socket?.remoteAddress || null,
+      },
+    );
+  });
   if (request.method !== 'POST') {
     await handleRequest(request, response);
     return;
   }
   const release = postRequestAdmission.tryAcquire();
   if (!release) {
+    applicationLogger.log('warning', 'http.request.rejected_capacity', {
+      request_id: requestId,
+      method: request.method,
+      path: requestPath,
+    });
     request.resume();
     response.setHeader('Retry-After', '1');
     sendJson(response, 503, {ok: false, status: 'busy', reason: 'alert-store POST capacity is busy'});
@@ -11039,6 +11093,10 @@ function installControlledEvaluationShutdown(server) {
 }
 
 initDb().then(() => {
+  applicationLogger.log('info', 'database.initialized', {
+    database_path: dbPath,
+    postgres_shadow_enabled: postgresShadowEnabled,
+  });
   const server = configureHttpServer(http.createServer((request, response) => {
     void dispatchRequest(request, response).catch((error) => {
       console.error(`unhandled HTTP request failure: ${error.message}`);
@@ -11054,6 +11112,11 @@ initDb().then(() => {
   });
   server.listen(port, host, () => {
     console.log(`alert-store listening on ${host}:${port}, db=${dbPath}`);
+    applicationLogger.log('info', 'service.ready', {
+      listen_host: host,
+      listen_port: port,
+      database_path: dbPath,
+    });
   });
   if (controlledEvaluationMode) {
     installControlledEvaluationShutdown(server);
@@ -11094,6 +11157,10 @@ initDb().then(() => {
       .catch((error) => console.error(`pipeline metric retention failed: ${error.message}`));
   }, 60 * 60 * 1000).unref();
 }).catch((error) => {
+  applicationLogger.log('critical', 'service.start_failed', {
+    error_type: error.name,
+    error_message: error.message,
+  });
   console.error(error);
   process.exit(1);
 });

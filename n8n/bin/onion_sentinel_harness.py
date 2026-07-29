@@ -17,13 +17,29 @@ import datetime as dt
 import enum
 import hashlib
 import hmac
+import importlib.util
 import json
 import os
 import re
 import sqlite3
 import stat
+import sys
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
+
+try:
+    from security_jsonl_log import SecurityJsonlLogger
+except ModuleNotFoundError:
+    _logging_spec = importlib.util.spec_from_file_location(
+        "security_jsonl_log",
+        Path(__file__).with_name("security_jsonl_log.py"),
+    )
+    if _logging_spec is None or _logging_spec.loader is None:
+        raise
+    _logging_module = importlib.util.module_from_spec(_logging_spec)
+    sys.modules.setdefault("security_jsonl_log", _logging_module)
+    _logging_spec.loader.exec_module(_logging_module)
+    SecurityJsonlLogger = _logging_module.SecurityJsonlLogger
 
 
 HARNESS_SCHEMA = "onion-sentinel-investigation-harness-v1"
@@ -37,6 +53,9 @@ DEFAULT_POLICY_PATH = (
 )
 DEFAULT_DB_PATH = (
     Path.home() / "n8n-local" / "alert_store_data" / "investigation-harness.sqlite3"
+)
+DEFAULT_HARNESS_LOG_PATH = (
+    Path.home() / "n8n-local" / "logs" / "investigation-harness.jsonl"
 )
 MAX_POLICY_BYTES = 256 * 1024
 MAX_EVENT_PAYLOAD_BYTES = 64 * 1024
@@ -1365,8 +1384,27 @@ def _connect(path: Path) -> Iterable[sqlite3.Connection]:
 class HarnessStore:
     """Owner-only SQLite event store with per-run hash chains."""
 
-    def __init__(self, path: Path = DEFAULT_DB_PATH):
+    def __init__(
+        self,
+        path: Path = DEFAULT_DB_PATH,
+        *,
+        log_path: Path | None = None,
+    ):
         self.path = path.expanduser()
+        resolved_default = DEFAULT_DB_PATH.expanduser()
+        selected_log_path = (
+            log_path.expanduser()
+            if log_path is not None
+            else (
+                DEFAULT_HARNESS_LOG_PATH
+                if self.path == resolved_default
+                else self.path.with_suffix(".events.jsonl")
+            )
+        )
+        self.logger = SecurityJsonlLogger(
+            selected_log_path,
+            service="onion-sentinel-investigation-harness",
+        )
         existing_version = _probe_existing_schema_version(self.path)
         if (
             existing_version is not None
@@ -1376,6 +1414,39 @@ class HarnessStore:
                 "harness database was created by a newer runtime"
             )
         self.initialize()
+
+    def _audit_event(self, event: Mapping[str, Any]) -> None:
+        """Mirror committed event metadata without duplicating evidence."""
+        try:
+            with _connect(self.path) as connection:
+                run = connection.execute(
+                    """
+                    SELECT correlation_id, case_id, alert_id, role, task_kind,
+                           assigned_route, assigned_reviewer_route, status
+                    FROM harness_runs WHERE run_id = ?
+                    """,
+                    (str(event.get("run_id") or ""),),
+                ).fetchone()
+            identity = dict(run) if run is not None else {}
+            self.logger.log(
+                "error"
+                if str(event.get("event_type") or "") == "run.failed"
+                else "info",
+                "harness.event",
+                run_id=str(event.get("run_id") or ""),
+                trace_sequence=int(event.get("sequence") or 0),
+                harness_event_type=str(event.get("event_type") or ""),
+                stage=str(event.get("stage") or ""),
+                event_id=str(event.get("event_id") or ""),
+                event_created_at=str(event.get("created_at") or ""),
+                event_sha256=str(event.get("event_sha256") or ""),
+                payload_sha256=str(event.get("payload_sha256") or ""),
+                **identity,
+            )
+        except Exception:
+            # SQLite remains the authoritative hash-chained audit ledger.
+            # Troubleshooting log failure must not invalidate committed work.
+            return
 
     def initialize(self) -> None:
         with _connect(self.path) as connection:
@@ -1820,7 +1891,7 @@ class HarnessStore:
                     envelope.created_at,
                 ),
             )
-            self._append_event_tx(
+            event = self._append_event_tx(
                 connection,
                 run_id=envelope.run_id,
                 event_type="run.started",
@@ -1848,6 +1919,7 @@ class HarnessStore:
                 created_at=envelope.created_at,
             )
             connection.commit()
+        self._audit_event(event)
         return self.snapshot(envelope.run_id)
 
     def append_event(
@@ -1881,6 +1953,7 @@ class HarnessStore:
                 updated_at=event["created_at"],
             )
             connection.commit()
+        self._audit_event(event)
         return event
 
     def reserve_budget_operation(
@@ -2027,6 +2100,7 @@ class HarnessStore:
                 ),
             )
             connection.commit()
+        self._audit_event(event)
         return event
 
     def register_evidence(
@@ -2321,6 +2395,7 @@ class HarnessStore:
                 updated_at=event["created_at"],
             )
             connection.commit()
+        self._audit_event(event)
         return {"accepted": accepted, "rejected": rejected}
 
     def record_decision(
@@ -2447,6 +2522,7 @@ class HarnessStore:
                 updated_at=event["created_at"],
             )
             connection.commit()
+        self._audit_event(event)
 
     def record_model_call(
         self,
@@ -2547,6 +2623,7 @@ class HarnessStore:
                 active_route=str(requested_route or ""),
             )
             connection.commit()
+        self._audit_event(event)
 
     def record_tool_call(
         self,
@@ -2632,6 +2709,7 @@ class HarnessStore:
                 updated_at=event["created_at"],
             )
             connection.commit()
+        self._audit_event(event)
 
     def finish(
         self,
@@ -2719,6 +2797,7 @@ class HarnessStore:
                 ),
             )
             connection.commit()
+        self._audit_event(event)
 
     def snapshot(self, run_id: str) -> dict[str, Any]:
         with _connect(self.path) as connection:
