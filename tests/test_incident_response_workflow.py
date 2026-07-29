@@ -101,6 +101,14 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn('Incident Response Investigation', page)
         self.assertIn('<col class="ir-col-case">', page)
         self.assertIn('<col class="ir-col-network">', page)
+        self.assertIn('.ir-table col.ir-col-network{width:300px}', page)
+        self.assertIn('.ir-table td.ir-network-cell{padding-left:6px;padding-right:6px}', page)
+        self.assertIn('class="ir-network-cell"', page)
+        self.assertIn('overflow-wrap:anywhere;white-space:normal', page)
+        self.assertNotIn(
+            '.ir-network-value{display:block;overflow:hidden',
+            page,
+        )
         self.assertNotIn('data-ir-sort="destination_port"', page)
         self.assertIn("sort:sortKey,direction:sortDirection", page)
         self.assertIn('.ir-table col.ir-col-escalated{width:150px}', page)
