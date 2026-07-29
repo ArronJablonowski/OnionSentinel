@@ -45,6 +45,13 @@ class PostgresQueueMigrationTest(unittest.TestCase):
         self.assertIn("revision = ?", module)
         self.assertNotIn("postgres://", module)
 
+    def test_shadow_pool_outage_cannot_crash_authoritative_service(self):
+        service = (
+            ROOT / "n8n/alert_store/alert_store.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn("pool.on('error'", service)
+        self.assertIn("Shadow availability must never", service)
+
 
 if __name__ == "__main__":
     unittest.main()

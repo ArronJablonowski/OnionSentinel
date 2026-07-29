@@ -2244,6 +2244,15 @@ function initializePostgresShadowProjector() {
     idleTimeoutMillis: 10000,
     application_name: 'onion-sentinel-shadow-projector',
   });
+  // An idle pg client reports a database restart/outage through the Pool
+  // "error" event. Without a listener Node treats it as an uncaught error and
+  // exits the authoritative SQLite service. Shadow availability must never
+  // control alert-store availability.
+  pool.on('error', (error) => {
+    console.error(
+      `PostgreSQL shadow idle connection failed: ${String(error.message || error).slice(0, 500)}`,
+    );
+  });
   postgresShadowProjector = createPostgresShadowProjector({
     pool,
     outbox: postgresShadowOutbox,
