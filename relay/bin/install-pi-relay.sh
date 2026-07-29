@@ -40,7 +40,6 @@ install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/alert_outbox.py" /opt
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/alert_delivery.py" /opt/so-alert-relay/app/alert_delivery.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/process_io.py" /opt/so-alert-relay/app/process_io.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/incident_evidence_broker.py" /opt/so-alert-relay/app/incident_evidence_broker.py
-install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/dhcp_asset_discovery_broker.py" /opt/so-alert-relay/app/dhcp_asset_discovery_broker.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/live_osquery_broker.py" /opt/so-alert-relay/app/live_osquery_broker.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract.py" /opt/so-alert-relay/app/live_osquery_contract.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay_health_wrapper.py" /opt/so-alert-relay/app/relay_health_wrapper.py
@@ -69,12 +68,6 @@ if [[ ! -f /etc/so-alert-relay/incident-evidence.json ]]; then
   echo "Created /etc/so-alert-relay/incident-evidence.json example." >&2
 fi
 
-if [[ ! -f /etc/so-alert-relay/dhcp-asset-discovery.json ]]; then
-  install -o root -g soalert -m 0640 \
-    "$REPO_DIR/relay/config/dhcp-asset-discovery.example.json" \
-    /etc/so-alert-relay/dhcp-asset-discovery.json
-  echo "Created disabled /etc/so-alert-relay/dhcp-asset-discovery.json example." >&2
-fi
 
 install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-alert-relay.service" /etc/systemd/system/so-alert-relay.service
 install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-alert-relay.timer" /etc/systemd/system/so-alert-relay.timer
@@ -123,8 +116,8 @@ Required manual steps:
 7. Verify /opt/so-alert-relay/app/config.json host/path values, then enable alert_ingest.
 8. Live endpoint OSQuery uses a separate key and remains disabled until
    /etc/so-alert-relay/live-osquery.json contains exact operator aliases.
-9. DHCP discovery uses separate forced-command keys on both hops. Validate its
-   fixed contract, then set enabled=true in dhcp-asset-discovery.json.
+9. DHCP discovery reuses the existing read-only incident-evidence key pair.
+   Install the updated incident broker and validate its exact DHCP contract.
 
 Test:
   sudo -u soalert /usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/so-alert-relay/app/config.json --pull-once

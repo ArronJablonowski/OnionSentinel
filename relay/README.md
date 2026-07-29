@@ -28,9 +28,7 @@ replay a safely committed alert.
 | `systemd/so-pcap-broker.timer` | `/etc/systemd/system/so-pcap-broker.timer` | Runs PCAP work every minute. |
 | `ssh/99-key-only-admin.conf` | `/etc/ssh/sshd_config.d/99-key-only-admin.conf` | Optional SSH hardening after deployment is confirmed. |
 | `app/live_osquery_broker.py` | `/opt/so-alert-relay/app/live_osquery_broker.py` | Disabled-by-default validator and broker for bounded Incident Responder endpoint OSQuery. |
-| `app/dhcp_asset_discovery_broker.py` | `/opt/so-alert-relay/app/dhcp_asset_discovery_broker.py` | Disabled-by-default forced broker for the fixed read-only DHCP discovery contract. |
 | `config/live-osquery.example.json` | `/etc/so-alert-relay/live-osquery.json` | Root-owned exact alias roster and dedicated Security Onion SSH transport settings. |
-| `config/dhcp-asset-discovery.example.json` | `/etc/so-alert-relay/dhcp-asset-discovery.json` | Root-owned dedicated DHCP discovery transport settings. |
 | `sudoers/so-live-osquery` | `/etc/sudoers.d/92-so-alert-relay-live-osquery` | Installer-rendered rule that lets only the relay administrator execute the broker as `soalert`. |
 
 ## Install
@@ -102,18 +100,13 @@ fail-closed response before enabling it. The relay never receives a Fleet
 agent ID or Kibana credential. Full limits are documented in
 `docs/incident-response-query-and-model-routing.md`.
 
-DHCP asset discovery also uses separate keys on both SSH hops:
-
-- Mac Studio to relay:
-  `relay/config/authorized_keys.dhcp-asset-discovery.example`;
-- relay to Security Onion:
-  `security-onion/ssh/authorized_keys.dhcp-asset-discovery.example`.
-
-The relay revalidates the exact contract before forwarding it and cannot
-accept arbitrary Elasticsearch DSL. Keep
-`/etc/so-alert-relay/dhcp-asset-discovery.json` disabled until both dedicated
-keys and pinned host keys have been verified. This lane is independent from
-alert polling, PCAP, incident evidence, and live OSQuery.
+DHCP asset discovery reuses the existing incident-evidence key pair on both
+SSH hops. `incident_evidence_broker.py` revalidates the exact DHCP contract
+before forwarding it through the existing pinned Security Onion host and
+incident-query key. Security Onion's existing `export-incident-evidence`
+forced command routes that exact contract to the fixed read-only DHCP helper.
+It cannot accept arbitrary Elasticsearch DSL. This contract is independent
+from alert polling, PCAP, and live OSQuery.
 
 Install the dedicated public key on the Mac Studio with the repo's backup-first
 helper:

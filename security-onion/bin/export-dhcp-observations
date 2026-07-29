@@ -234,17 +234,9 @@ def normalized_observation(hit: object) -> dict | None:
     }
 
 
-def main() -> int:
-    if os.environ.get("SSH_ORIGINAL_COMMAND", "").strip():
-        return emit({"ok": False, "error": "commands are not accepted by this forced endpoint"}, 2)
-    raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
-    if len(raw) > MAX_REQUEST_BYTES:
-        return emit({"ok": False, "error": "request exceeds the wrapper byte limit"}, 2)
-    try:
-        request = json.loads(raw.decode("utf-8"))
-        start, end, size = validate_request(request)
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        return emit({"ok": False, "error": f"invalid DHCP discovery request: {exc}"}, 2)
+def execute_request(request: object) -> dict:
+    """Execute one already-decoded fixed DHCP request and return its envelope."""
+    start, end, size = validate_request(request)
     body = {
         "_source": SOURCE_FIELDS,
         "query": {
@@ -264,14 +256,14 @@ def main() -> int:
     try:
         proc = run_bounded_command([str(SO_QUERY), endpoint, "-d", encoded])
     except (BoundedCommandError, OSError, subprocess.SubprocessError) as exc:
-        return emit({"ok": False, "error": f"bounded DHCP query failed: {exc}"}, 3)
+        raise RuntimeError(f"bounded DHCP query failed: {exc}") from exc
     if proc.returncode != 0:
         detail = " ".join(proc.stderr.decode("utf-8", "replace").split())[:500]
-        return emit({"ok": False, "error": "Security Onion DHCP query failed", "detail": detail}, 3)
+        raise RuntimeError(f"Security Onion DHCP query failed: {detail}")
     try:
         result = json.loads(proc.stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return emit({"ok": False, "error": f"Security Onion returned invalid JSON: {exc}"}, 3)
+        raise RuntimeError(f"Security Onion returned invalid JSON: {exc}") from exc
     hits_container = result.get("hits") if isinstance(result, dict) else {}
     raw_hits = hits_container.get("hits") if isinstance(hits_container, dict) else []
     if not isinstance(raw_hits, list):
@@ -286,7 +278,7 @@ def main() -> int:
     observations.sort(key=lambda item: (item["observed_at"], item["evidence_id"]))
     shards = result.get("_shards") if isinstance(result, dict) and isinstance(result.get("_shards"), dict) else {}
     partial = bool(result.get("timed_out")) or int(shards.get("failed") or 0) > 0
-    return emit({
+    return {
         "ok": True,
         "contract": CONTRACT,
         "generated_at": format_timestamp(dt.datetime.now(dt.timezone.utc)),
@@ -301,7 +293,23 @@ def main() -> int:
             "query_digest": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
         },
         "observations": observations,
-    })
+    }
+
+
+def main() -> int:
+    if os.environ.get("SSH_ORIGINAL_COMMAND", "").strip():
+        return emit({"ok": False, "error": "commands are not accepted by this forced endpoint"}, 2)
+    raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
+    if len(raw) > MAX_REQUEST_BYTES:
+        return emit({"ok": False, "error": "request exceeds the wrapper byte limit"}, 2)
+    try:
+        request = json.loads(raw.decode("utf-8"))
+        response = execute_request(request)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        return emit({"ok": False, "error": f"invalid DHCP discovery request: {exc}"}, 2)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        return emit({"ok": False, "error": str(exc)[:700]}, 3)
+    return emit(response)
 
 
 if __name__ == "__main__":

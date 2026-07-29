@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import datetime as dt
 from pathlib import Path
 
 from process_io import BoundedProcessError, run_bounded_command
@@ -19,6 +20,32 @@ MAX_REQUEST_BYTES = 16 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_ERROR_FIELD_BYTES = 500
 DEFAULT_CONFIG = Path("/etc/so-alert-relay/incident-evidence.json")
+DHCP_DISCOVERY_CONTRACT = "onion-sentinel-dhcp-asset-discovery-v1"
+DHCP_DISCOVERY_OPERATION = "dhcp_observations"
+
+
+def _parse_dhcp_timestamp(value: object) -> dt.datetime:
+    parsed = dt.datetime.fromisoformat(str(value or "").strip().replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp lacks offset")
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def validate_dhcp_request(request: object) -> None:
+    if not isinstance(request, dict) or set(request) != {"contract", "operation", "window", "size"}:
+        raise ValueError("request fields do not match the DHCP discovery contract")
+    if request["contract"] != DHCP_DISCOVERY_CONTRACT or request["operation"] != DHCP_DISCOVERY_OPERATION:
+        raise ValueError("unsupported DHCP discovery operation")
+    window = request["window"]
+    if not isinstance(window, dict) or set(window) != {"start", "end"}:
+        raise ValueError("invalid DHCP discovery window")
+    start = _parse_dhcp_timestamp(window["start"])
+    end = _parse_dhcp_timestamp(window["end"])
+    if start >= end or end - start > dt.timedelta(hours=24):
+        raise ValueError("DHCP discovery window must be positive and no longer than 24 hours")
+    size = request["size"]
+    if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= 1000:
+        raise ValueError("DHCP discovery size must be from 1 through 1000")
 
 
 def emit(payload: dict, code: int = 0) -> int:
@@ -112,6 +139,15 @@ def main() -> int:
         return emit({"ok": False, "error": f"invalid JSON request: {exc}"}, 2)
     if not isinstance(request, dict):
         return emit({"ok": False, "error": "request root must be an object"}, 2)
+    is_dhcp_request = (
+        request.get("contract") == DHCP_DISCOVERY_CONTRACT
+        or request.get("operation") == DHCP_DISCOVERY_OPERATION
+    )
+    if is_dhcp_request:
+        try:
+            validate_dhcp_request(request)
+        except ValueError as exc:
+            return emit({"ok": False, "error": f"invalid DHCP discovery request: {exc}"}, 2)
     config_path = Path(os.environ.get("ONION_SENTINEL_INCIDENT_EVIDENCE_CONFIG", DEFAULT_CONFIG))
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -129,7 +165,10 @@ def main() -> int:
             command,
             input_bytes=json.dumps(request, separators=(",", ":")).encode(),
             timeout_seconds=float(config.get("timeout_seconds", 400)),
-            max_stdout_bytes=int(config.get("max_response_bytes", MAX_RESPONSE_BYTES)),
+            max_stdout_bytes=min(
+                int(config.get("max_response_bytes", MAX_RESPONSE_BYTES)),
+                4 * 1024 * 1024 if is_dhcp_request else MAX_RESPONSE_BYTES,
+            ),
             max_stderr_bytes=int(config.get("max_stderr_bytes", 256 * 1024)),
         )
     except (BoundedProcessError, OSError, ValueError, KeyError) as exc:
@@ -142,6 +181,8 @@ def main() -> int:
         return emit({"ok": False, "error": f"invalid Security Onion evidence response: {exc}"}, 4)
     if not isinstance(response, dict):
         return emit({"ok": False, "error": "Security Onion evidence response root was not an object"}, 4)
+    if is_dhcp_request and response.get("contract") != DHCP_DISCOVERY_CONTRACT:
+        return emit({"ok": False, "error": "Security Onion DHCP response failed contract validation"}, 4)
     return emit(response, 0 if response.get("ok") else 5)
 
 

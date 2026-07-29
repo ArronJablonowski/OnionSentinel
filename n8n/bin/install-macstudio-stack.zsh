@@ -424,6 +424,49 @@ PY
   chmod 0600 "$STACK_DIR/config/dhcp-asset-discovery.json"
   echo "Created disabled $STACK_DIR/config/dhcp-asset-discovery.json example." >&2
 fi
+# Release 31aa015 initially introduced a dedicated DHCP key. The discovery
+# transport now intentionally inherits the established read-only
+# incident-evidence SSH lane. Preserve DHCP scheduling/retention choices while
+# synchronizing only the four SSH transport identity fields.
+/usr/bin/python3 - \
+  "$STACK_DIR/config/dhcp-asset-discovery.json" \
+  "$STACK_DIR/config/incident-evidence.json" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+destination_name, incident_name = sys.argv[1:3]
+destination = Path(destination_name)
+config = json.loads(destination.read_text(encoding="utf-8"))
+incident = json.loads(Path(incident_name).read_text(encoding="utf-8"))
+transport_fields = ("host", "ssh_user", "ssh_key", "known_hosts")
+if (
+    isinstance(config, dict)
+    and isinstance(incident, dict)
+    and all(isinstance(incident.get(field), str) and incident[field] for field in transport_fields)
+):
+    updated = False
+    for field in transport_fields:
+        if config.get(field) != incident[field]:
+            config[field] = incident[field]
+            updated = True
+    if not updated:
+        raise SystemExit(0)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        delete=False,
+    ) as handle:
+        json.dump(config, handle, indent=2)
+        handle.write("\n")
+        temporary = Path(handle.name)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, destination)
+PY
 # Persist the already validated release marker while preserving every
 # operator-owned secret and comment in the live .env.
 /usr/bin/python3 "$STACK_DIR/bin/set-runtime-release-id.py" \

@@ -16,7 +16,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 COLLECTOR = ROOT / "n8n" / "bin" / "collect-dhcp-asset-discovery.py"
 WRAPPER = ROOT / "security-onion" / "bin" / "export-dhcp-observations"
-BROKER = ROOT / "relay" / "app" / "dhcp_asset_discovery_broker.py"
+BROKER = ROOT / "relay" / "app" / "incident_evidence_broker.py"
 PORTAL = ROOT / "onion-sentinel-dashboard" / "report_portal.py"
 BUILDER = ROOT / "onion-sentinel-dashboard" / "scripts" / "build_soc_alerts_dashboard.py"
 INSTALLER = ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
@@ -99,6 +99,11 @@ class DhcpWrapperTests(unittest.TestCase):
         self.assertNotIn("/_update", source)
         self.assertNotIn("/_delete", source)
         self.assertNotIn("/_bulk", source)
+        incident_source = (
+            ROOT / "security-onion" / "bin" / "export-incident-evidence"
+        ).read_text(encoding="utf-8")
+        self.assertIn("DHCP_DISCOVERY_CONTRACT", incident_source)
+        self.assertIn("execute_dhcp_discovery(request_data)", incident_source)
 
 
 class DhcpRelayTests(unittest.TestCase):
@@ -108,7 +113,7 @@ class DhcpRelayTests(unittest.TestCase):
 
     def test_relay_revalidates_the_fixed_contract(self) -> None:
         request = {
-            "contract": self.broker.CONTRACT,
+            "contract": self.broker.DHCP_DISCOVERY_CONTRACT,
             "operation": "dhcp_observations",
             "window": {
                 "start": "2026-07-29T17:00:00Z",
@@ -116,9 +121,9 @@ class DhcpRelayTests(unittest.TestCase):
             },
             "size": 500,
         }
-        self.broker.validate_request(request)
+        self.broker.validate_dhcp_request(request)
         with self.assertRaises(ValueError):
-            self.broker.validate_request({**request, "index": "*"})
+            self.broker.validate_dhcp_request({**request, "index": "*"})
 
 
 class DhcpCollectorTests(unittest.TestCase):
@@ -303,6 +308,11 @@ class DhcpDiscoveryApiAndPageTests(unittest.TestCase):
         installer = INSTALLER.read_text(encoding="utf-8")
         self.assertIn("collect-dhcp-asset-discovery.py", installer)
         self.assertIn("com.arron.soc.dhcp-asset-discovery.plist", installer)
+        config = (
+            ROOT / "n8n" / "config" / "dhcp-asset-discovery.example.json"
+        ).read_text(encoding="utf-8")
+        self.assertIn("onion-sentinel-incident-evidence_ed25519", config)
+        self.assertNotIn("onion-sentinel-dhcp-discovery_ed25519", config)
         plist = (ROOT / "n8n" / "launchd" / "com.arron.soc.dhcp-asset-discovery.plist").read_text(encoding="utf-8")
         self.assertIn("<integer>900</integer>", plist)
 

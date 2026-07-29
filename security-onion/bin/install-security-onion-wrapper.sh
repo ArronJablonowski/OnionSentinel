@@ -92,9 +92,9 @@ Next manual step:
 6. Endpoint live OSQuery requires a third dedicated key, exact endpoint aliases,
    a root-only authorization file, and explicit enablement. It is not part of
    the default read-only alert and PCAP data plane.
-7. DHCP asset discovery requires its own forced-command key from
-   authorized_keys.dhcp-asset-discovery.example. It accepts only the fixed,
-   bounded zeek.dhcp DSL contract and never accepts caller-supplied DSL.
+7. DHCP asset discovery reuses the incident-query forced-command key. The
+   incident wrapper accepts only the fixed, bounded zeek.dhcp contract and
+   never accepts caller-supplied DSL.
 
 Test:
   sudo -u so-ai-relay sudo -n /usr/local/sbin/export-recent-alerts | jq '.alerts | length'

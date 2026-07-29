@@ -16,6 +16,8 @@ import hashlib
 import ipaddress
 import json
 import glob
+import importlib.machinery
+import importlib.util
 import os
 import re
 import selectors
@@ -39,6 +41,8 @@ SO_QUERY = Path("/usr/sbin/so-elasticsearch-query")
 QUERY_CONTRACT = "onion-sentinel-incident-evidence-v2"
 INVESTIGATION_QUERY_CONTRACT = "onion-sentinel-investigation-pivots-v2"
 INVESTIGATION_QUERY_OPERATION = "investigation_pivots"
+DHCP_DISCOVERY_CONTRACT = "onion-sentinel-dhcp-asset-discovery-v1"
+DHCP_DISCOVERY_OPERATION = "dhcp_observations"
 QUERY_PREFERENCE = "onion-sentinel-incident-evidence"
 MAX_PIVOT_QUERIES = 4
 MAX_PIVOT_HITS = 100
@@ -2243,10 +2247,42 @@ def execute_pivot_batch(data: dict) -> int:
     return 0
 
 
+def execute_dhcp_discovery(data: dict) -> int:
+    """Route the fixed DHCP contract inside the existing read-only SSH lane."""
+    helper_path = Path(__file__).resolve().with_name("export-dhcp-observations")
+    if not helper_path.is_file():
+        fail("DHCP discovery helper is unavailable", 3)
+    loader = importlib.machinery.SourceFileLoader(
+        "_onion_sentinel_dhcp_discovery",
+        str(helper_path),
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        fail("DHCP discovery helper could not be loaded", 3)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    try:
+        response = module.execute_request(data)
+    except ValueError as exc:
+        fail(f"invalid DHCP discovery request: {exc}")
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        fail(f"DHCP discovery query failed: {exc}", 3)
+    output = json.dumps(response, separators=(",", ":"), sort_keys=True).encode()
+    if len(output) > 4 * 1024 * 1024:
+        fail("bounded DHCP discovery response exceeded the output contract", 4)
+    sys.stdout.buffer.write(output + b"\n")
+    return 0
+
+
 def main() -> int:
     if not SO_QUERY.is_file():
         fail("Security Onion query CLI is unavailable", 3)
     request_data = read_request()
+    if (
+        request_data.get("contract") == DHCP_DISCOVERY_CONTRACT
+        or request_data.get("operation") == DHCP_DISCOVERY_OPERATION
+    ):
+        return execute_dhcp_discovery(request_data)
     if (
         request_data.get("query_contract") == INVESTIGATION_QUERY_CONTRACT
         or request_data.get("operation") == INVESTIGATION_QUERY_OPERATION
