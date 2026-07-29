@@ -1414,6 +1414,13 @@ class HarnessStore:
                 "harness database was created by a newer runtime"
             )
         self.initialize()
+        self.logger.log(
+            "info",
+            "harness.store.ready",
+            database_path=str(self.path),
+            schema=HARNESS_SCHEMA,
+            schema_version=SQL_SCHEMA_VERSION,
+        )
 
     def _audit_event(self, event: Mapping[str, Any]) -> None:
         """Mirror committed event metadata without duplicating evidence."""
