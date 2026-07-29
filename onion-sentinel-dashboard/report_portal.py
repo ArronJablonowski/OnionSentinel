@@ -6598,7 +6598,8 @@ def llm_agent_execution_state(record: object) -> dict:
 def decorate_llm_analysis_record(record: object, *, live: bool) -> dict:
     """Add display provenance while retaining the immutable raw audit fields."""
     decorated = dict(record) if isinstance(record, dict) else {}
-    decorated.update(llm_agent_execution_state(decorated))
+    for key, value in llm_agent_execution_state(decorated).items():
+        decorated.setdefault(key, value)
     if live:
         runtime = llm_runtime_model_state(decorated)
         if runtime.get("running"):
@@ -6893,16 +6894,193 @@ def llm_analysis_process_active(
     return any("run-local-ai-analysis.py" in command for command in commands)
 
 
+LLM_ANALYSIS_COMBINED_HISTORY_LIMIT = 5000
+
+
+def _llm_reviewer_started_at(generated_at: object, runtime: object) -> str:
+    """Derive the review start without inventing precision absent from SQLite."""
+    text = str(generated_at or "").strip()
+    try:
+        seconds = max(0.0, float(runtime or 0))
+        parsed = dt.datetime.fromisoformat(text.replace("  ", "T", 1))
+    except (TypeError, ValueError, OverflowError):
+        return text
+    return (parsed - dt.timedelta(seconds=seconds)).isoformat(
+        timespec="seconds",
+    ).replace("T", "  ", 1)
+
+
+def read_llm_second_opinion_logs(
+    primary_logs: list[dict],
+    *,
+    limit: int = LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
+) -> list[dict]:
+    """Return bounded reviewer executions shaped like the primary audit log.
+
+    Second opinions are durable SQLite telemetry, while primary resource
+    telemetry is append-only JSONL. Bind them by the shared analysis/log ID and
+    copy only alert context and observed host metrics from the parent run.
+    Reviewer model, runtime, status, outcome, and error always come from the
+    independent reviewer row.
+    """
+    primary_by_id = {
+        str(item.get("analysis_id") or item.get("log_id") or ""): item
+        for item in primary_logs
+        if isinstance(item, dict)
+    }
+    try:
+        with soc_alert_db_connect() as conn:
+            if not sqlite_table_exists(conn, "ai_second_opinion_runs"):
+                return []
+            columns = sqlite_table_columns(conn, "ai_second_opinion_runs")
+            reviewer_error = (
+                "reviewer_error"
+                if "reviewer_error" in columns
+                else "NULL AS reviewer_error"
+            )
+            rows = conn.execute(
+                f"""
+                SELECT analysis_id, alert_id, agent_role, trigger, status,
+                       {reviewer_error}, reviewer_model, reviewer_model_path,
+                       reviewer_outcome, reviewer_confidence, agreement,
+                       material_disagreement, reviewer_runtime_seconds,
+                       generated_at
+                FROM ai_second_opinion_runs
+                ORDER BY generated_at DESC, analysis_id DESC
+                LIMIT ?
+                """,
+                (max(1, min(LLM_ANALYSIS_COMBINED_HISTORY_LIMIT, int(limit))),),
+            ).fetchall()
+    except (FileNotFoundError, sqlite3.Error, TypeError, ValueError):
+        return []
+
+    reviewer_logs: list[dict] = []
+    for raw in rows:
+        row = dict(raw)
+        analysis_id = str(row.get("analysis_id") or "")
+        parent = dict(primary_by_id.get(analysis_id) or {})
+        status = str(row.get("status") or "unknown").strip().lower()
+        error = str(row.get("reviewer_error") or "").strip()
+        agreement = str(row.get("agreement") or "").strip()
+        outcome = str(row.get("reviewer_outcome") or "").strip()
+        detail_parts = [
+            error,
+            f"Agreement: {agreement.replace('_', ' ')}" if agreement else "",
+            f"Outcome: {outcome.replace('_', ' ')}" if outcome else "",
+        ]
+        reviewer_logs.append({
+            **{
+                key: parent.get(key)
+                for key in (
+                    "alert",
+                    "gpu_temperature_celsius_max",
+                    "gpu_utilization_percent_max",
+                    "gpu_percent_max",
+                    "cpu_temperature_celsius_max",
+                    "soc_temperature_celsius_max",
+                    "memory_used_percent_max",
+                    "power_watts_max",
+                    "cpu_used_percent_max",
+                    "pcap_total_size_bytes",
+                    "alert_context_size_bytes",
+                )
+                if key in parent
+            },
+            "log_id": f"{analysis_id}:second-opinion",
+            "analysis_id": analysis_id,
+            "parent_log_id": analysis_id,
+            "run_kind": "second_opinion",
+            "active_phase": "second_opinion",
+            "phase_label": "Second-opinion review",
+            "agent_role": row.get("agent_role"),
+            "job_label": "Second-opinion review",
+            "status": "success" if status == "completed" else status,
+            "review_status": status,
+            "error": " · ".join(part for part in detail_parts if part),
+            "trigger": row.get("trigger"),
+            "model": row.get("reviewer_model"),
+            "model_path": row.get("reviewer_model_path"),
+            "model_route": "",
+            "mode": (
+                "codex-cli"
+                if row.get("reviewer_model_path") == "frontier-codex-cli"
+                else row.get("reviewer_model_path")
+            ),
+            "runtime_seconds": row.get("reviewer_runtime_seconds"),
+            "started_at": _llm_reviewer_started_at(
+                row.get("generated_at"),
+                row.get("reviewer_runtime_seconds"),
+            ),
+            "finished_at": row.get("generated_at"),
+            "alert": parent.get("alert") or {
+                "primary_alert_id": row.get("alert_id"),
+                "rule_name": "Security Onion alert",
+                "alert_count": 1,
+            },
+            "reviewer_outcome": outcome,
+            "reviewer_confidence": row.get("reviewer_confidence"),
+            "agreement": agreement,
+            "material_disagreement": bool(row.get("material_disagreement")),
+        })
+    return reviewer_logs
+
+
+def _llm_log_sort_timestamp(record: dict) -> float:
+    for key in ("started_at", "finished_at"):
+        text = str(record.get(key) or "").strip()
+        if not text:
+            continue
+        try:
+            parsed = dt.datetime.fromisoformat(text.replace("  ", "T", 1))
+            return parsed.timestamp()
+        except ValueError:
+            continue
+    return 0.0
+
+
 def llm_analysis_logs_response(query: dict[str, list[str]]) -> dict:
-    page = llm_analysis_log_page((query.get("page") or ["1"])[0])
+    requested_page = llm_analysis_log_page((query.get("page") or ["1"])[0])
     limit = llm_analysis_log_limit((query.get("limit") or ["25"])[0])
-    total, page, logs = SOC_ALERT_LLM_ANALYSIS_LOG_INDEX.page(page=page, limit=limit)
+    primary_total, _, _ = SOC_ALERT_LLM_ANALYSIS_LOG_INDEX.page(page=1, limit=1)
+    reviewer_logs = read_llm_second_opinion_logs([])
+    total = primary_total + len(reviewer_logs)
     total_pages = max(1, math.ceil(total / limit)) if total else 1
+    page = min(requested_page, total_pages)
+    # At most `page * limit` primary rows can appear before the requested
+    # combined page. Reading only that prefix keeps the common first-page poll
+    # proportional to the page size instead of reparsing the entire JSONL log.
+    primary_total, _, primary_logs = SOC_ALERT_LLM_ANALYSIS_LOG_INDEX.page(
+        page=1,
+        limit=page * limit,
+    )
+    if primary_logs:
+        parents = {
+            str(record.get("log_id") or ""): record
+            for record in primary_logs
+            if record.get("log_id")
+        }
+        for reviewer in reviewer_logs:
+            parent = parents.get(str(reviewer.get("parent_log_id") or ""))
+            if parent:
+                reviewer["alert"] = parent.get("alert") or reviewer.get("alert")
+    combined = [*primary_logs, *reviewer_logs]
+    combined.sort(
+        key=lambda record: (
+            _llm_log_sort_timestamp(record),
+            str(record.get("log_id") or ""),
+        ),
+        reverse=True,
+    )
+    start = (page - 1) * limit
+    logs = combined[start:start + limit]
     return {
         "ok": True,
         "page": page,
         "limit": limit,
         "total": total,
+        "primary_total": primary_total,
+        "second_opinion_total": len(reviewer_logs),
+        "history_truncated": len(reviewer_logs) >= LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
         "total_pages": total_pages,
         "logs": [
             decorate_llm_analysis_record(record, live=False)

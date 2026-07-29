@@ -1603,6 +1603,84 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(idle["runtime_model_label"], "No model running")
         self.assertEqual(idle["phase_label"], "Idle")
 
+    def test_llm_analysis_log_includes_distinct_second_opinion_runs(self) -> None:
+        log_path = Path(self.tmp.name) / "llm-analysis-log.jsonl"
+        log_path.write_text(json.dumps({
+            "log_id": "analysis-review-unit",
+            "status": "success",
+            "agent_role": "soc-analyst",
+            "started_at": "2026-07-29  10:00:00-06:00",
+            "finished_at": "2026-07-29  10:02:00-06:00",
+            "runtime_seconds": 120,
+            "model": "primary-model",
+            "model_path": "ollama",
+            "alert": {
+                "primary_alert_id": "newest-alert",
+                "rule_name": "Reviewer visibility test",
+                "alert_count": 3,
+                "source_ip": "192.0.2.10",
+                "destination_ip": "198.51.100.10",
+            },
+        }) + "\n", encoding="utf-8")
+        self.portal.SOC_ALERT_LLM_ANALYSIS_LOG_INDEX = (
+            self.portal.JsonlLogIndex(log_path)
+        )
+        self.conn.executescript(
+            """
+            CREATE TABLE ai_second_opinion_runs (
+              analysis_id TEXT PRIMARY KEY,
+              group_id TEXT NOT NULL,
+              alert_id TEXT NOT NULL,
+              agent_role TEXT NOT NULL,
+              trigger TEXT,
+              status TEXT NOT NULL,
+              reviewer_error TEXT,
+              reviewer_model TEXT,
+              reviewer_model_path TEXT,
+              reviewer_outcome TEXT,
+              reviewer_confidence TEXT,
+              agreement TEXT,
+              material_disagreement INTEGER NOT NULL DEFAULT 0,
+              reviewer_runtime_seconds REAL,
+              generated_at TEXT NOT NULL
+            );
+            INSERT INTO ai_second_opinion_runs VALUES (
+              'analysis-review-unit', 'group-unit', 'newest-alert',
+              'soc-analyst', 'Consequential conclusion', 'completed', NULL,
+              'reviewer-model', 'frontier-codex-cli',
+              'true_positive_suspicious', 'high', 'material_disagreement', 1,
+              45.5, '2026-07-29  10:01:45-06:00'
+            );
+            """
+        )
+        self.conn.commit()
+
+        payload = self.portal.llm_analysis_logs_response({
+            "page": ["1"],
+            "limit": ["25"],
+        })
+
+        self.assertEqual(payload["primary_total"], 1)
+        self.assertEqual(payload["second_opinion_total"], 1)
+        self.assertEqual(payload["total"], 2)
+        reviewer = next(
+            item for item in payload["logs"]
+            if item.get("run_kind") == "second_opinion"
+        )
+        self.assertEqual(reviewer["parent_log_id"], "analysis-review-unit")
+        self.assertEqual(reviewer["job_label"], "Second-opinion review")
+        self.assertEqual(reviewer["status"], "success")
+        self.assertEqual(reviewer["runtime_seconds"], 45.5)
+        self.assertEqual(
+            reviewer["runtime_model_label"],
+            "Codex CLI · reviewer-model",
+        )
+        self.assertEqual(
+            reviewer["alert"]["rule_name"],
+            "Reviewer visibility test",
+        )
+        self.assertIn("material disagreement", reviewer["error"])
+
     def test_failed_report_without_observation_does_not_claim_assigned_model(self) -> None:
         historical = self.portal.decorate_llm_analysis_record(
             {

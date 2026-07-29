@@ -3828,8 +3828,13 @@ def llm_log_table_row(log: dict[str, object]) -> str:
     started = normalize_iso_display_text(log.get('started_at') or '')
     error = str(log.get('error') or '').strip()
     detail = compact_text(error, 120) if error else compact_text(str(alert.get('primary_alert_id') or ''), 120)
+    row_class = (
+        ' class="llm-log-second-opinion"'
+        if log.get('run_kind') == 'second_opinion'
+        else ''
+    )
     return f'''
-      <tr>
+      <tr{row_class}>
         <td>{html.escape(started)}</td>
         <td>{html.escape(str(count))}</td>
         <td><strong title="{html.escape(str(alert.get('rule_name') or 'Security Onion Alert'), quote=True)}">{html.escape(str(alert.get('rule_name') or 'Security Onion Alert'))}</strong><code title="{html.escape(route, quote=True)}">{html.escape(route)}</code></td>
@@ -3988,6 +3993,7 @@ REPORTS_PAGE_ASSETS = '''
 .llm-log-detail{width:220px}
 .llm-log-table th{padding:10px 12px;background:#111d29;color:#9fb0c4;text-align:left;font-size:12px;font-weight:950}
 .llm-log-table td{padding:12px;border-top:1px solid rgba(148,163,184,.11);vertical-align:top;color:#d9e4f2;font-size:13px}
+.llm-log-table tr.llm-log-second-opinion td{background:rgba(139,92,246,.055)}.llm-log-table tr.llm-log-second-opinion td:first-child{box-shadow:inset 3px 0 0 #a78bfa}
 .llm-log-table td strong{display:block;color:#f2f7ff;line-height:1.2;overflow-wrap:normal;word-break:normal}
 .llm-log-table td code{display:block;margin-top:4px;color:#aebbd0;background:transparent;font-size:12px;line-height:1.2;white-space:normal;overflow-wrap:normal;word-break:normal}
 .llm-log-table th:nth-child(2),.llm-log-table td:nth-child(2){text-align:center}
@@ -4051,7 +4057,7 @@ REPORTS_PAGE_ASSETS = '''
   };
   const badge = raw => {
     const key = String(raw || 'unknown').toLowerCase();
-    const label = key === 'success' ? 'Success' : key === 'failure' ? 'Failed' : key === 'running' ? 'Running' : key;
+    const label = key === 'success' ? 'Success' : key === 'failure' ? 'Failed' : key === 'running' ? 'Running' : key.replaceAll('_',' ');
     const css = key === 'failure' ? 'failed' : key;
     return `<span class="llm-status-badge ${esc(css)}">${esc(label)}</span>`;
   };
@@ -4122,7 +4128,8 @@ REPORTS_PAGE_ASSETS = '''
     const detail = log.error || alert.primary_alert_id || '';
     const ruleName = alert.rule_name || 'Security Onion Alert';
     const routeText = route || 'n/a';
-    return `<tr><td>${esc(log.started_at || '')}</td><td>${esc(alert.alert_count || 0)}</td><td><strong title="${esc(ruleName)}">${esc(ruleName)}</strong><code title="${esc(routeText)}">${esc(routeText)}</code></td><td>${badge(log.status)}</td><td>${esc(agentLabel(log))}</td><td>${esc(jobLabel(log))}</td><td>${esc(runtime(log.runtime_seconds))}</td><td>${esc(gpu)}</td><td>${esc(gpuUtil)}</td><td>${esc(cpuTemp)}</td><td>${esc(socTemp)}</td><td>${esc(memory)}</td><td>${esc(power)}</td><td>${esc(cpu)}</td><td>${esc(bytes(log.pcap_total_size_bytes))}</td><td>${esc(bytes(log.alert_context_size_bytes))}</td><td><code>${esc(executedModel(log, log.status === 'running'))}</code></td><td>${esc(detail)}</td></tr>`;
+    const rowClass=log.run_kind==='second_opinion'?' class="llm-log-second-opinion"':'';
+    return `<tr${rowClass}><td>${esc(log.started_at || '')}</td><td>${esc(alert.alert_count || 0)}</td><td><strong title="${esc(ruleName)}">${esc(ruleName)}</strong><code title="${esc(routeText)}">${esc(routeText)}</code></td><td>${badge(log.status)}</td><td>${esc(agentLabel(log))}</td><td>${esc(jobLabel(log))}</td><td>${esc(runtime(log.runtime_seconds))}</td><td>${esc(gpu)}</td><td>${esc(gpuUtil)}</td><td>${esc(cpuTemp)}</td><td>${esc(socTemp)}</td><td>${esc(memory)}</td><td>${esc(power)}</td><td>${esc(cpu)}</td><td>${esc(bytes(log.pcap_total_size_bytes))}</td><td>${esc(bytes(log.alert_context_size_bytes))}</td><td><code>${esc(executedModel(log, log.status === 'running'))}</code></td><td>${esc(detail)}</td></tr>`;
   };
   const renderCurrent = current => {
     currentAnalysisState = current || {};
@@ -4175,7 +4182,7 @@ REPORTS_PAGE_ASSETS = '''
       const activeRuns = page === 1 && Array.isArray(data.active_runs) ? data.active_runs : [];
       const rows = [...activeRuns, ...historical];
       if (body) body.innerHTML = rows.length ? rows.map(rowHtml).join('') : '<tr><td colspan="18" class="llm-empty-row">No AI analysis runs found yet.</td></tr>';
-      if (status) status.textContent = `Page ${page} of ${totalPages} · ${data.total || 0} completed${activeRuns.length ? ` · ${activeRuns.length} running` : ''}`;
+      if (status) status.textContent = `Page ${page} of ${totalPages} · ${data.primary_total || 0} primary · ${data.second_opinion_total || 0} second opinion${activeRuns.length ? ` · ${activeRuns.length} running` : ''}`;
       if (totalRuns) totalRuns.textContent = String(data.total || 0);
       if (prev) prev.disabled = page <= 1;
       if (next) next.disabled = page >= totalPages;
