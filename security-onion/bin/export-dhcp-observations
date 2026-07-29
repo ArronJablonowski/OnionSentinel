@@ -34,10 +34,16 @@ SOURCE_FIELDS = [
     "@timestamp",
     "event.dataset",
     "event.action",
+    "dhcp.assigned_ip",
+    "dhcp.requested_address",
+    "dhcp.lease_time",
+    "dhcp.message_types",
     "source.ip",
     "source.mac",
+    "client.address",
     "client.ip",
     "client.mac",
+    "host.mac",
     "host.name",
     "host.hostname",
     "zeek.dhcp.assigned_addr",
@@ -189,9 +195,12 @@ def normalized_observation(hit: object) -> dict | None:
         parsed_address = ipaddress.ip_address(str(first_value(
             source,
             (
+                "dhcp.assigned_ip",
+                "dhcp.requested_address",
                 "zeek.dhcp.assigned_addr",
                 "zeek.dhcp.client_addr",
                 "zeek.dhcp.requested_addr",
+                "client.address",
                 "client.ip",
                 "source.ip",
             ),
@@ -201,7 +210,10 @@ def normalized_observation(hit: object) -> dict | None:
         address = str(parsed_address)
     except (TypeError, ValueError):
         return None
-    mac_raw = str(first_value(source, ("zeek.dhcp.mac", "client.mac", "source.mac")) or "").strip()
+    mac_raw = str(first_value(
+        source,
+        ("host.mac", "zeek.dhcp.mac", "client.mac", "source.mac"),
+    ) or "").strip()
     mac = mac_raw.lower() if MAC_RE.fullmatch(mac_raw) else ""
     hostname_raw = str(first_value(
         source,
@@ -214,9 +226,15 @@ def normalized_observation(hit: object) -> dict | None:
         ),
     ) or "").strip().rstrip(".").lower()
     hostname = hostname_raw if HOSTNAME_RE.fullmatch(hostname_raw) else ""
-    message_type = str(first_value(source, ("zeek.dhcp.msg_type", "zeek.dhcp.msg_types", "event.action")) or "")[:80]
+    message_type = str(first_value(
+        source,
+        ("dhcp.message_types", "zeek.dhcp.msg_type", "zeek.dhcp.msg_types", "event.action"),
+    ) or "")[:80]
     sensor = str(first_value(source, ("observer.name",)) or "")[:160]
-    lease_raw = first_value(source, ("zeek.dhcp.lease_time", "zeek.dhcp.duration"))
+    lease_raw = first_value(
+        source,
+        ("dhcp.lease_time", "zeek.dhcp.lease_time", "zeek.dhcp.duration"),
+    )
     try:
         lease_seconds = max(0, min(int(lease_raw), 31 * 24 * 60 * 60))
     except (TypeError, ValueError):

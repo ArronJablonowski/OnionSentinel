@@ -128,6 +128,27 @@ investigation. A match never proves that observed activity was authorized,
 expected at that time, or benign; conclusions still require corroborating
 telemetry.
 
+DHCP discovery and troubleshooting use the existing forced-command
+Mac-to-Relay-to-Security Onion lane. After the matching restricted-node
+wrappers are deployed, an operator or Codex agent on the Mac can issue one
+reviewed, read-only DHCP query without enabling the scheduled collector:
+
+```bash
+"$HOME/n8n-local/bin/query-security-onion.py" dhcp \
+  --minutes 15 \
+  --size 100
+```
+
+Use `--summary` to omit observation details from stdout. Explicit `--start`
+and `--end` timestamps may replace the lookback, but the client, Relay, and
+Security Onion each enforce a positive window no longer than 24 hours and a
+size no larger than 1,000. The client does not accept an index, dataset,
+field list, Query DSL, KQL, OQL, SSH command, endpoint, or path. Scheduled
+collection may remain disabled while this manual diagnostic command is used.
+Each attempt writes timestamped query metadata and the fixed-query digest—not
+returned observations—to
+`$HOME/n8n-local/logs/security-onion-query.jsonl`.
+
 ## Secret Handling
 
 Never commit these live files:

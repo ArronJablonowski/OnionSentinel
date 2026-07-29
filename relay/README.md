@@ -108,6 +108,13 @@ forced command routes that exact contract to the fixed read-only DHCP helper.
 It cannot accept arbitrary Elasticsearch DSL. This contract is independent
 from alert polling, PCAP, and live OSQuery.
 
+The Mac-side `query-security-onion.py dhcp` command uses this same contract for
+interactive diagnostics. It does not set `SSH_ORIGINAL_COMMAND`, request a
+shell, or bypass the broker. Manual queries can run while the scheduled DHCP
+collector is disabled; both use the same pinned hosts and existing
+incident-evidence key. Query details are returned only after the Mac validates
+the response contract and fixed query audit.
+
 Install the dedicated public key on the Mac Studio with the repo's backup-first
 helper:
 

@@ -47,6 +47,13 @@ shell command. The wrapper executes only Elasticsearch `_search` against
 allowlist of DHCP identity and lease fields. It does not write to Security
 Onion or retain state there.
 
+The fixed projection includes the live Security Onion ECS fields
+`dhcp.assigned_ip`, `dhcp.requested_address`, `dhcp.lease_time`,
+`dhcp.message_types`, `host.mac`, and `client.address`, plus reviewed legacy
+Zeek/ECS fallbacks. `server.address` is deliberately excluded from both the
+projection and asset-address normalization so a DHCP server cannot be recorded
+as the requesting client.
+
 Incident Response evidence collection uses another dedicated key entry based on
 `security-onion/ssh/authorized_keys.incident-query.example`. That key can invoke
 only `export-incident-evidence`; forwarding, PTY allocation, user rc files, and

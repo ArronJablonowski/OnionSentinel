@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import sys
 import tempfile
@@ -15,6 +17,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 COLLECTOR = ROOT / "n8n" / "bin" / "collect-dhcp-asset-discovery.py"
+QUERY_CLIENT = ROOT / "n8n" / "bin" / "query-security-onion.py"
 WRAPPER = ROOT / "security-onion" / "bin" / "export-dhcp-observations"
 BROKER = ROOT / "relay" / "app" / "incident_evidence_broker.py"
 PORTAL = ROOT / "onion-sentinel-dashboard" / "report_portal.py"
@@ -91,6 +94,41 @@ class DhcpWrapperTests(unittest.TestCase):
         self.assertEqual(result["message_type"], "ACK")
         self.assertEqual(len(result["evidence_id"]), 24)
 
+    def test_live_security_onion_ecs_observation_is_normalized(self) -> None:
+        result = self.wrapper.normalized_observation({
+            "_source": {
+                "@timestamp": "2026-07-29T17:05:00Z",
+                "dhcp": {
+                    "assigned_ip": ["10.66.6.210"],
+                    "requested_address": "10.66.6.209",
+                    "lease_time": 7200,
+                    "message_types": ["ACK"],
+                },
+                "client": {"address": "10.66.6.208"},
+                "server": {"address": "10.66.6.1"},
+                "host": {
+                    "mac": ["AA:BB:CC:DD:EE:FF"],
+                    "hostname": "Studio.EXAMPLE.LAN.",
+                },
+                "observer": {"name": "so-sensor-1"},
+            }
+        })
+        self.assertEqual(result["ip_address"], "10.66.6.210")
+        self.assertEqual(result["hostname"], "studio.example.lan")
+        self.assertEqual(result["mac_address"], "aa:bb:cc:dd:ee:ff")
+        self.assertEqual(result["message_type"], "ACK")
+        self.assertEqual(result["lease_seconds"], 7200)
+
+    def test_server_address_is_never_used_as_a_client_asset(self) -> None:
+        result = self.wrapper.normalized_observation({
+            "_source": {
+                "@timestamp": "2026-07-29T17:05:00Z",
+                "server": {"address": "10.66.6.1"},
+                "host": {"mac": ["AA:BB:CC:DD:EE:FF"]},
+            }
+        })
+        self.assertIsNone(result)
+
     def test_source_uses_search_only_and_fixed_dataset(self) -> None:
         source = WRAPPER.read_text(encoding="utf-8")
         self.assertIn('INDEX = "logs-zeek-so"', source)
@@ -99,6 +137,16 @@ class DhcpWrapperTests(unittest.TestCase):
         self.assertNotIn("/_update", source)
         self.assertNotIn("/_delete", source)
         self.assertNotIn("/_bulk", source)
+        for field in (
+            "dhcp.assigned_ip",
+            "dhcp.requested_address",
+            "dhcp.lease_time",
+            "dhcp.message_types",
+            "host.mac",
+            "client.address",
+        ):
+            self.assertIn(field, self.wrapper.SOURCE_FIELDS)
+        self.assertNotIn("server.address", self.wrapper.SOURCE_FIELDS)
         incident_source = (
             ROOT / "security-onion" / "bin" / "export-incident-evidence"
         ).read_text(encoding="utf-8")
@@ -220,6 +268,78 @@ class DhcpCollectorTests(unittest.TestCase):
         self.assertEqual(record["event"], "dhcp_asset_discovery.disabled")
 
 
+class SecurityOnionQueryClientTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.query_client = load_module("security_onion_query_client_test", QUERY_CLIENT)
+
+    def test_manual_query_runs_while_scheduled_collection_is_disabled(self) -> None:
+        fake_client = mock.Mock()
+        now = dt.datetime(2026, 7, 29, 21, tzinfo=dt.timezone.utc)
+        fake_client.utc_now.return_value = now
+        fake_client.load_config.return_value = {
+            "enabled": False,
+            "host": "10.88.8.8",
+        }
+        fake_client.query_dhcp.return_value = {
+            "ok": True,
+            "contract": "onion-sentinel-dhcp-asset-discovery-v1",
+            "generated_at": "2026-07-29T21:00:00.000Z",
+            "status": "ok",
+            "window": {
+                "start": "2026-07-29T20:45:00.000Z",
+                "end": "2026-07-29T21:00:00.000Z",
+            },
+            "hits_total": 2,
+            "returned": 1,
+            "truncated": False,
+            "query_audit": {
+                "index": "logs-zeek-so",
+                "dataset": "zeek.dhcp",
+                "query_digest": "a" * 64,
+            },
+            "observations": [{
+                "ip_address": "10.66.6.210",
+            }],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "query.jsonl"
+            stdout = io.StringIO()
+            with mock.patch.object(
+                self.query_client,
+                "load_dhcp_client",
+                return_value=fake_client,
+            ), mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "query-security-onion",
+                    "--log",
+                    str(log),
+                    "dhcp",
+                    "--minutes",
+                    "15",
+                    "--size",
+                    "25",
+                    "--summary",
+                ],
+            ), contextlib.redirect_stdout(stdout):
+                self.assertEqual(self.query_client.main(), 0)
+            fake_client.query_dhcp.assert_called_once_with(
+                fake_client.load_config.return_value,
+                now - dt.timedelta(minutes=15),
+                now,
+                25,
+            )
+            output = json.loads(stdout.getvalue())
+            self.assertEqual(output["hits_total"], 2)
+            self.assertNotIn("observations", output)
+            record = json.loads(log.read_text(encoding="utf-8"))
+            self.assertTrue(record["timestamp"].endswith("Z"))
+            self.assertEqual(record["event"], "security_onion_query.completed")
+            self.assertNotIn("10.66.6.210", json.dumps(record))
+
+
 class DhcpDiscoveryApiAndPageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -307,6 +427,7 @@ class DhcpDiscoveryApiAndPageTests(unittest.TestCase):
         self.assertIn("Candidates and conflicts require operator review", page)
         installer = INSTALLER.read_text(encoding="utf-8")
         self.assertIn("collect-dhcp-asset-discovery.py", installer)
+        self.assertIn("query-security-onion.py", installer)
         self.assertIn("com.arron.soc.dhcp-asset-discovery.plist", installer)
         config = (
             ROOT / "n8n" / "config" / "dhcp-asset-discovery.example.json"

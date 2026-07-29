@@ -330,13 +330,21 @@ def collection_window(state: dict, now: dt.datetime, default_minutes: int) -> tu
     return start, now
 
 
-def collect(config: dict, state: dict, now: dt.datetime) -> dict:
-    start, end = collection_window(state, now, config["query_window_minutes"])
+def query_dhcp(config: dict, start: dt.datetime, end: dt.datetime, size: int) -> dict:
+    """Run one bounded, read-only DHCP query through the forced Relay lane."""
+    start = start.astimezone(dt.timezone.utc)
+    end = end.astimezone(dt.timezone.utc)
+    if start >= end or end - start > dt.timedelta(hours=24):
+        raise ValueError("DHCP query window must be positive and no longer than 24 hours")
+    if end > utc_now() + dt.timedelta(minutes=5):
+        raise ValueError("DHCP query window ends too far in the future")
+    if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= MAX_RESPONSE_OBSERVATIONS:
+        raise ValueError("DHCP query size must be from 1 through 1000")
     request = {
         "contract": CONTRACT,
         "operation": "dhcp_observations",
         "window": {"start": format_timestamp(start), "end": format_timestamp(end)},
-        "size": config["query_size"],
+        "size": size,
     }
     command = [
         "/usr/bin/ssh", "-T", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
@@ -355,10 +363,15 @@ def collect(config: dict, state: dict, now: dt.datetime) -> dict:
     if proc.returncode != 0:
         detail = " ".join(proc.stderr.decode("utf-8", "replace").split())[:300]
         raise RuntimeError(f"relay returned {proc.returncode}: {detail or 'no diagnostic'}")
-    response = validate_response(
+    return validate_response(
         json.loads(proc.stdout.decode("utf-8")),
         expected_window=request["window"],
     )
+
+
+def collect(config: dict, state: dict, now: dt.datetime) -> dict:
+    start, end = collection_window(state, now, config["query_window_minutes"])
+    response = query_dhcp(config, start, end, config["query_size"])
     observations = merge_observations(state, response["observations"], now, config["retention_days"])
     result = dict(state)
     result.update({
