@@ -16,6 +16,8 @@ const path = require('path');
 const {createEnrichmentCache} = require('./lib/enrichment_cache');
 const {createProviderScheduler} = require('./lib/provider_scheduler');
 const {createDurableJobQueue} = require('./lib/durable_job_queue');
+const {createPostgresShadowOutbox} = require('./lib/postgres_shadow_outbox');
+const {createPostgresShadowProjector} = require('./lib/postgres_shadow_projector');
 const {createPipelineMetrics} = require('./lib/pipeline_metrics');
 const {createSocAnalysisPolicy} = require('./lib/soc_analysis_policy');
 const {
@@ -50,6 +52,17 @@ const beaconHistoryPaths = (process.env.ALERT_STORE_BEACON_HISTORY_PATHS || '')
   .filter(Boolean);
 const host = process.env.ALERT_STORE_HOST || '127.0.0.1';
 const port = Number(process.env.ALERT_STORE_PORT || 8787);
+const postgresShadowEnabled = String(
+  process.env.ALERT_STORE_POSTGRES_SHADOW_ENABLED || '0',
+).trim() === '1';
+const postgresShadowIntervalMs = Math.max(
+  1000,
+  Number(process.env.ALERT_STORE_POSTGRES_SHADOW_INTERVAL_MS || 5000),
+);
+const postgresShadowBatchSize = Math.max(
+  1,
+  Math.min(1000, Number(process.env.ALERT_STORE_POSTGRES_SHADOW_BATCH_SIZE || 50)),
+);
 const evaluationModeValue = String(
   process.env.ONION_SENTINEL_EVALUATION_MODE || '',
 ).trim();
@@ -2131,6 +2144,8 @@ let enrichmentDrainActive = false;
 let n8nPostCommitDrainActive = false;
 let durableJobRecoveryActive = false;
 let durableJobs;
+let postgresShadowOutbox;
+let postgresShadowProjector;
 let pipelineMetrics;
 const serviceMetrics = {
   started_at: nowUtc(),
@@ -2194,6 +2209,47 @@ function initializeDurableJobs() {
     all,
     now: nowUtc,
     transitionLeaseSeconds: aiAnalysisLeaseSeconds,
+  });
+}
+
+function initializePostgresShadowOutbox() {
+  postgresShadowOutbox = createPostgresShadowOutbox({run, get, all});
+}
+
+function initializePostgresShadowProjector() {
+  if (!postgresShadowEnabled || controlledEvaluationMode) return;
+  const requiredKeys = [
+    'ALERT_STORE_POSTGRES_HOST',
+    'ALERT_STORE_POSTGRES_DATABASE',
+    'ALERT_STORE_POSTGRES_USER',
+    'ALERT_STORE_POSTGRES_PASSWORD',
+  ];
+  const missing = requiredKeys.filter(
+    (key) => !String(process.env[key] || '').trim(),
+  );
+  if (missing.length) {
+    throw new Error(
+      `PostgreSQL shadow projection is enabled but missing ${missing.join(', ')}`,
+    );
+  }
+  const {Pool} = require('pg');
+  const pool = new Pool({
+    host: String(process.env.ALERT_STORE_POSTGRES_HOST),
+    port: Number(process.env.ALERT_STORE_POSTGRES_PORT || 5433),
+    database: String(process.env.ALERT_STORE_POSTGRES_DATABASE),
+    user: String(process.env.ALERT_STORE_POSTGRES_USER),
+    password: String(process.env.ALERT_STORE_POSTGRES_PASSWORD),
+    max: 2,
+    connectionTimeoutMillis: 3000,
+    idleTimeoutMillis: 10000,
+    application_name: 'onion-sentinel-shadow-projector',
+  });
+  postgresShadowProjector = createPostgresShadowProjector({
+    pool,
+    outbox: postgresShadowOutbox,
+    withWriteGate: withSqliteWriteGate,
+    now: nowUtc,
+    batchSize: postgresShadowBatchSize,
   });
 }
 
@@ -3009,6 +3065,9 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_pcap_requests_group_id ON pcap_requests(group_id)');
   initializeDurableJobs();
   await durableJobs.install();
+  initializePostgresShadowOutbox();
+  await postgresShadowOutbox.install();
+  initializePostgresShadowProjector();
   // durableJobs.install() performs startup lease recovery before the periodic
   // alert-store watchdog runs. Reconcile the immutable IR attempt ledger in
   // the same startup pass so recovered jobs cannot leave runs stuck running.
@@ -10445,6 +10504,12 @@ async function operationalMetricsSnapshot() {
         ? Math.round(serviceMetrics.ingest_latency_ms_total / serviceMetrics.ingest_requests) : 0,
     },
     durable_jobs: durable,
+    postgres_shadow_outbox: postgresShadowOutbox
+      ? await postgresShadowOutbox.stats()
+      : null,
+    postgres_shadow_projector: postgresShadowProjector
+      ? postgresShadowProjector.snapshot()
+      : {enabled: postgresShadowEnabled, active: false},
     oldest_pending_job_seconds: Number(oldestJob?.seconds || 0),
     oldest_pending_jobs: oldestJobsByType,
     latest_completed_jobs: latestCompletedJobsByType,
@@ -10570,6 +10635,12 @@ async function handleRequest(request, response) {
         health.enrichment_scheduler = enrichmentScheduler.snapshot();
         health.enrichment_cache = enrichmentCache.snapshot();
         health.disk_capacity = diskCapacitySnapshot();
+        health.postgres_shadow_outbox = postgresShadowOutbox
+          ? await postgresShadowOutbox.stats()
+          : null;
+        health.postgres_shadow_projector = postgresShadowProjector
+          ? postgresShadowProjector.snapshot()
+          : {enabled: postgresShadowEnabled, active: false};
       }
       sendJson(response, 200, health);
       return;
@@ -11001,6 +11072,14 @@ initDb().then(() => {
     void capturePipelineDiskSample().catch((error) => console.error(`pipeline disk sample failed: ${error.message}`));
   }, pipelineDiskSampleIntervalMs).unref();
   void capturePipelineDiskSample().catch((error) => console.error(`initial pipeline disk sample failed: ${error.message}`));
+  if (postgresShadowProjector) {
+    setInterval(() => {
+      void postgresShadowProjector.drain()
+        .catch((error) => console.error(`PostgreSQL shadow projection failed: ${error.message}`));
+    }, postgresShadowIntervalMs).unref();
+    void postgresShadowProjector.drain()
+      .catch((error) => console.error(`initial PostgreSQL shadow projection failed: ${error.message}`));
+  }
   setInterval(() => {
     void withSqliteWriteGate(() => pipelineMetrics.prune())
       .catch((error) => console.error(`pipeline metric retention failed: ${error.message}`));

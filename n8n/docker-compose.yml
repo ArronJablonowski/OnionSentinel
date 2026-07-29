@@ -1,4 +1,38 @@
 services:
+  alert-store-postgres:
+    # Opt-in migration shadow only. It is not started by the normal production
+    # compose invocation and must never be used by workers before cutover gates
+    # pass. The host-native projector reaches it through loopback.
+    profiles: ["alert-store-shadow"]
+    image: postgres@sha256:e53683f43dd931aeacaef349422caf1f6259389ca5eab0c11763fcb8d38f26af
+    container_name: onion-sentinel-alert-store-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${ALERT_STORE_POSTGRES_DATABASE:-onion_sentinel}
+      - POSTGRES_USER=${ALERT_STORE_POSTGRES_USER:-onion_sentinel}
+      - POSTGRES_PASSWORD=${ALERT_STORE_POSTGRES_PASSWORD:-replace-with-separate-alert-store-password}
+    ports:
+      - "127.0.0.1:${ALERT_STORE_POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - ./alert_store_postgres_data:/var/lib/postgresql/data
+      - ./postgres/alert-store-queue-schema.sql:/docker-entrypoint-initdb.d/010-alert-store-queue-schema.sql:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${ALERT_STORE_POSTGRES_USER:-onion_sentinel} -d ${ALERT_STORE_POSTGRES_DATABASE:-onion_sentinel}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   postgres:
     # n8n's internal runtime DB needs higher write concurrency than SQLite can
     # reliably provide under relay webhook bursts. This database is for n8n

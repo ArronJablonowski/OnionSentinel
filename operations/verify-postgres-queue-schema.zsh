@@ -51,6 +51,27 @@ done
 
 "$DOCKER" exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U queue_test -d queue_test < "$SCHEMA" >/dev/null
 
+shadow_applied="$("$DOCKER" exec "$CONTAINER" psql -At -U queue_test -d queue_test -c \
+  "SELECT onion_sentinel_queue.apply_shadow_durable_job(
+    101, 2, 'ai_analysis', 'shadow-group', '{\"version\":2}'::jsonb,
+    'pending', 40, 0, 8, clock_timestamp(), NULL, NULL, NULL,
+    clock_timestamp(), clock_timestamp(), NULL, NULL, clock_timestamp(), NULL, FALSE
+  );")"
+[[ "$shadow_applied" == "t" ]] || { echo "new shadow revision was not applied" >&2; exit 1; }
+
+shadow_stale="$("$DOCKER" exec "$CONTAINER" psql -At -U queue_test -d queue_test -c \
+  "SELECT onion_sentinel_queue.apply_shadow_durable_job(
+    101, 1, 'ai_analysis', 'shadow-group', '{\"version\":1}'::jsonb,
+    'failed', 1, 8, 8, clock_timestamp(), NULL, NULL, 'stale',
+    clock_timestamp(), clock_timestamp(), NULL, NULL, clock_timestamp(), NULL, FALSE
+  );")"
+[[ "$shadow_stale" == "f" ]] || { echo "stale shadow revision overwrote newer state" >&2; exit 1; }
+
+shadow_state="$("$DOCKER" exec "$CONTAINER" psql -At -U queue_test -d queue_test -c \
+  "SELECT source_revision || ':' || status || ':' || (payload_json->>'version')
+   FROM onion_sentinel_queue.shadow_durable_jobs WHERE sqlite_id=101;")"
+[[ "$shadow_state" == "2:pending:2" ]] || { echo "shadow state reconciliation failed" >&2; exit 1; }
+
 job_id="$("$DOCKER" exec "$CONTAINER" psql -At -U queue_test -d queue_test -c \
   "SELECT onion_sentinel_queue.enqueue_durable_job('ai_analysis','synthetic-group','{\"source\":\"schema-test\"}'::jsonb,40,8);")"
 [[ "$job_id" == <-> ]] || { echo "enqueue did not return a job id" >&2; exit 1; }

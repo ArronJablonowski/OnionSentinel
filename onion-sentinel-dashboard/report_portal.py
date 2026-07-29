@@ -63,6 +63,10 @@ MACOS_UPDATE_STATUS_FILE = HOME / "report_portal" / ".macos_update_status.json"
 SOC_ALERT_STATUS_FILE = HOME / "report_portal" / ".soc_alert_status.json"
 SOC_ALERT_STORE_DB = HOME / "n8n-local" / "alert_store_data" / "alerts.sqlite3"
 SOC_ALERT_STORE_API_URL = os.environ.get("SOC_ALERT_STORE_API_URL", "http://127.0.0.1:8787").rstrip("/")
+SOC_ALERT_STORE_DIRECT_WRITE_ALLOWED = (
+    str(os.environ.get("SOC_ALERT_STORE_DIRECT_WRITE_ALLOWED") or "").strip()
+    == "1"
+)
 SOC_ALERT_STORE_EVALUATION_TOKEN = str(
     os.environ.get("ONION_SENTINEL_EVALUATION_TOKEN") or ""
 ).strip()
@@ -6960,6 +6964,15 @@ def update_soc_alert_status(payload: dict) -> tuple[bool, dict]:
     if not SOC_ALERT_STORE_API_URL:
         # Offline DR tests can explicitly disable the API. Production uses the
         # alert-store endpoint so only one process owns SQLite writes.
+        if not SOC_ALERT_STORE_DIRECT_WRITE_ALLOWED:
+            return False, {
+                "ok": False,
+                "error": (
+                    "Direct SQLite writes are disabled; configure the "
+                    "alert-store API or explicitly enter offline DR mode."
+                ),
+                "status": int(HTTPStatus.SERVICE_UNAVAILABLE),
+            }
         if raw_status == "suppressed":
             try:
                 with soc_alert_db_connect() as conn:

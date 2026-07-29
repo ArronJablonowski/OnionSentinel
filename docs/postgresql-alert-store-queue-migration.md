@@ -16,6 +16,21 @@ n8n/postgres/alert-store-queue-schema.sql
 operations/verify-postgres-queue-schema.zsh
 ```
 
+The transactional shadow foundation is implemented but disabled by default:
+
+```text
+n8n/alert_store/lib/postgres_shadow_outbox.js
+n8n/alert_store/lib/postgres_shadow_projector.js
+n8n/docker-compose.yml  # alert-store-shadow profile
+```
+
+SQLite triggers create or advance one revisioned outbox marker in the same
+transaction as every `durable_jobs` insert or update. The projector reads the
+current row snapshot, calls PostgreSQL's idempotent
+`apply_shadow_durable_job`, and acknowledges only the exact SQLite revision it
+observed. A concurrent SQLite update therefore remains dirty even if an older
+projection finishes afterward.
+
 The schema uses JSONB payloads, typed timestamps, unique idempotency keys,
 lease recovery, coalesced reruns, and `FOR UPDATE SKIP LOCKED` claims. This
 allows multiple future workers to claim jobs without duplicate processing or a
@@ -53,6 +68,47 @@ global SQLite write gate.
 6. **Qualification:** run burst, worker-crash, lease-expiry, database-restart,
    disk-pressure, backup, and restore drills before PostgreSQL becomes the
    durable authority.
+
+## Enabling the shadow
+
+Do not enable this during a controlled harness evaluation. First:
+
+```bash
+operations/verify-postgres-queue-schema.zsh
+```
+
+Generate a unique alert-store PostgreSQL password and place it only in the Mac
+runtime `.env`. Do not reuse the n8n password. Then start the opt-in database:
+
+```bash
+cd "$HOME/n8n-local"
+docker compose --profile alert-store-shadow up -d alert-store-postgres
+```
+
+Apply the schema explicitly on an existing data volume because PostgreSQL's
+`docker-entrypoint-initdb.d` directory runs only when the data directory is
+first created:
+
+```bash
+docker exec -i onion-sentinel-alert-store-postgres \
+  sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+  < "$HOME/n8n-local/postgres/alert-store-queue-schema.sql"
+```
+
+Verify the schema and take the first PostgreSQL backup before setting:
+
+```text
+ALERT_STORE_POSTGRES_SHADOW_ENABLED=1
+```
+
+Restart only the host-native alert-store after changing that flag. Confirm
+`postgres_shadow_outbox.pending` trends toward zero in `/health` and `/metrics`.
+The shadow table is deliberately separate from the claimable PostgreSQL queue;
+no production worker can consume shadow rows.
+
+To stop projection without affecting SQLite authority, set the flag back to
+`0` and restart alert-store. The outbox retains every newer revision and safely
+resumes later.
 
 ## Go/No-Go Gates
 

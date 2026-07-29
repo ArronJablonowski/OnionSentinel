@@ -44,6 +44,7 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.portal.HOME = Path(self.tmp.name)
         self.portal.SOC_ALERT_STORE_DB = self.db_path
         self.portal.SOC_ALERT_STORE_API_URL = ""
+        self.portal.SOC_ALERT_STORE_DIRECT_WRITE_ALLOWED = True
         self.portal.SOC_ALERT_STATUS_FILE = Path(self.tmp.name) / ".soc_alert_status.json"
         self.portal.SOC_ALERT_STATIC_STATUS_FILE = Path(self.tmp.name) / "soc-alerts-status.json"
         self.portal.SOC_AI_SETTINGS_FILE = Path(self.tmp.name) / "ai-model-settings.json"
@@ -2095,6 +2096,28 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         sent = json.loads(request.data.decode("utf-8"))
         self.assertEqual(sent["id"], group_id)
         self.assertEqual(sent["status"], "acknowledged")
+
+    def test_direct_status_write_requires_explicit_offline_dr_mode(self) -> None:
+        group_id = self.portal.soc_alert_group_id(
+            "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+        )
+        self.portal.SOC_ALERT_STORE_API_URL = ""
+        self.portal.SOC_ALERT_STORE_DIRECT_WRITE_ALLOWED = False
+
+        with mock.patch.object(
+            self.portal,
+            "write_soc_alert_status",
+            side_effect=AssertionError("direct DB write"),
+        ):
+            ok, payload = self.portal.update_soc_alert_status({
+                "id": group_id,
+                "status": "acknowledged",
+                "repeat_count": 5,
+            })
+
+        self.assertFalse(ok)
+        self.assertEqual(payload["status"], 503)
+        self.assertIn("Direct SQLite writes are disabled", payload["error"])
 
 
 if __name__ == "__main__":

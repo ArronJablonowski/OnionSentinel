@@ -14,6 +14,12 @@ ON CONFLICT (component) DO UPDATE
 SET version = EXCLUDED.version,
     installed_at = clock_timestamp();
 
+INSERT INTO onion_sentinel_queue.schema_version (component, version)
+VALUES ('sqlite_shadow_projection', 1)
+ON CONFLICT (component) DO UPDATE
+SET version = EXCLUDED.version,
+    installed_at = clock_timestamp();
+
 CREATE TABLE IF NOT EXISTS onion_sentinel_queue.durable_jobs (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   job_type TEXT NOT NULL CHECK (length(job_type) BETWEEN 1 AND 80),
@@ -48,6 +54,113 @@ CREATE INDEX IF NOT EXISTS idx_osq_durable_jobs_lease
 
 CREATE INDEX IF NOT EXISTS idx_osq_durable_jobs_updated
   ON onion_sentinel_queue.durable_jobs (updated_at DESC);
+
+-- Read-only migration shadow. Production workers must not claim from this
+-- table. SQLite remains authoritative until the documented cutover gates pass.
+CREATE TABLE IF NOT EXISTS onion_sentinel_queue.shadow_durable_jobs (
+  sqlite_id BIGINT PRIMARY KEY CHECK (sqlite_id > 0),
+  source_revision BIGINT NOT NULL CHECK (source_revision > 0),
+  job_type TEXT NOT NULL CHECK (length(job_type) BETWEEN 1 AND 80),
+  dedupe_key TEXT NOT NULL CHECK (length(dedupe_key) BETWEEN 1 AND 256),
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  status TEXT NOT NULL
+    CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+  priority INTEGER NOT NULL DEFAULT 0,
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  max_attempts INTEGER NOT NULL DEFAULT 8 CHECK (max_attempts > 0),
+  next_attempt_at TIMESTAMPTZ NOT NULL,
+  lease_expires_at TIMESTAMPTZ,
+  lease_token TEXT,
+  last_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  completed_at TIMESTAMPTZ,
+  last_completed_at TIMESTAMPTZ,
+  requested_at TIMESTAMPTZ NOT NULL,
+  processing_started_at TIMESTAMPTZ,
+  rerun_requested BOOLEAN NOT NULL DEFAULT FALSE,
+  projected_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  UNIQUE (job_type, dedupe_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_osq_shadow_durable_jobs_status
+  ON onion_sentinel_queue.shadow_durable_jobs
+  (job_type, status, updated_at, sqlite_id);
+
+CREATE OR REPLACE FUNCTION onion_sentinel_queue.apply_shadow_durable_job(
+  p_sqlite_id BIGINT,
+  p_source_revision BIGINT,
+  p_job_type TEXT,
+  p_dedupe_key TEXT,
+  p_payload JSONB,
+  p_status TEXT,
+  p_priority INTEGER,
+  p_attempt_count INTEGER,
+  p_max_attempts INTEGER,
+  p_next_attempt_at TIMESTAMPTZ,
+  p_lease_expires_at TIMESTAMPTZ,
+  p_lease_token TEXT,
+  p_last_error TEXT,
+  p_created_at TIMESTAMPTZ,
+  p_updated_at TIMESTAMPTZ,
+  p_completed_at TIMESTAMPTZ,
+  p_last_completed_at TIMESTAMPTZ,
+  p_requested_at TIMESTAMPTZ,
+  p_processing_started_at TIMESTAMPTZ,
+  p_rerun_requested BOOLEAN
+) RETURNS BOOLEAN
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_rows INTEGER;
+BEGIN
+  INSERT INTO onion_sentinel_queue.shadow_durable_jobs AS current (
+    sqlite_id, source_revision, job_type, dedupe_key, payload_json, status,
+    priority, attempt_count, max_attempts, next_attempt_at, lease_expires_at,
+    lease_token, last_error, created_at, updated_at, completed_at,
+    last_completed_at, requested_at, processing_started_at, rerun_requested,
+    projected_at
+  ) VALUES (
+    p_sqlite_id, p_source_revision, p_job_type, p_dedupe_key,
+    COALESCE(p_payload, '{}'::jsonb), p_status, p_priority, p_attempt_count,
+    p_max_attempts, p_next_attempt_at, p_lease_expires_at, p_lease_token,
+    p_last_error, p_created_at, p_updated_at, p_completed_at,
+    p_last_completed_at, p_requested_at, p_processing_started_at,
+    p_rerun_requested, clock_timestamp()
+  )
+  ON CONFLICT (sqlite_id) DO UPDATE SET
+    source_revision = EXCLUDED.source_revision,
+    job_type = EXCLUDED.job_type,
+    dedupe_key = EXCLUDED.dedupe_key,
+    payload_json = EXCLUDED.payload_json,
+    status = EXCLUDED.status,
+    priority = EXCLUDED.priority,
+    attempt_count = EXCLUDED.attempt_count,
+    max_attempts = EXCLUDED.max_attempts,
+    next_attempt_at = EXCLUDED.next_attempt_at,
+    lease_expires_at = EXCLUDED.lease_expires_at,
+    lease_token = EXCLUDED.lease_token,
+    last_error = EXCLUDED.last_error,
+    created_at = EXCLUDED.created_at,
+    updated_at = EXCLUDED.updated_at,
+    completed_at = EXCLUDED.completed_at,
+    last_completed_at = EXCLUDED.last_completed_at,
+    requested_at = EXCLUDED.requested_at,
+    processing_started_at = EXCLUDED.processing_started_at,
+    rerun_requested = EXCLUDED.rerun_requested,
+    projected_at = clock_timestamp()
+  WHERE current.source_revision < EXCLUDED.source_revision;
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  RETURN v_rows = 1;
+END;
+$$;
+
+CREATE OR REPLACE VIEW onion_sentinel_queue.shadow_reconciliation_counts AS
+SELECT job_type, status, COUNT(*)::BIGINT AS row_count,
+       MAX(source_revision)::BIGINT AS maximum_source_revision,
+       MAX(projected_at) AS latest_projection_at
+FROM onion_sentinel_queue.shadow_durable_jobs
+GROUP BY job_type, status;
 
 CREATE OR REPLACE FUNCTION onion_sentinel_queue.enqueue_durable_job(
   p_job_type TEXT,
