@@ -103,6 +103,8 @@ class ReactiveTablePageTests(unittest.TestCase):
         self.assertNotIn("if(apiPageStatus)apiPageStatus.textContent='Loading alerts from SQLite API...'", alerts_page)
         self.assertIn("if (nextSignature === healthSignature) return false", health_page)
         self.assertIn("key.endsWith('_age_seconds')", health_page)
+        self.assertIn("'start_limit_headroom_bytes'", health_page)
+        self.assertIn("key.includes('eta')", health_page)
         self.assertIn("loadHealth({showBusy: true})", health_page)
 
     def test_report_derived_tables_soft_refresh_and_restore_expansion(self) -> None:

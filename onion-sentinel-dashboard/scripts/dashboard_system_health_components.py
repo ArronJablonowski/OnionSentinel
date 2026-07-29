@@ -166,7 +166,17 @@ SYSTEM_HEALTH_JS = '''
   let pcapPageSize = 25;
   let healthSignature = '';
   const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-  const stableSignature = value => JSON.stringify(value, (key, item) => key === 'generated_at' || key.endsWith('_age_seconds') ? undefined : item);
+  const noisyHealthKeys = new Set([
+    'generated_at', 'free_after_bytes', 'free_bytes', 'hard_limit_headroom_bytes',
+    'start_limit_headroom_bytes', 'used_bytes', 'bytes_per_second'
+  ]);
+  const stableSignature = value => JSON.stringify(value, (key, item) => (
+    noisyHealthKeys.has(key)
+    || key.endsWith('_age_seconds')
+    || key.endsWith('_pending_seconds')
+    || key.endsWith('_processing_seconds')
+    || (key.includes('eta') && key.endsWith('_seconds'))
+  ) ? undefined : item);
   const fmt = value => typeof formatProjectIso === 'function' ? formatProjectIso(value) : String(value || '');
   const bytes = value => typeof formatApiBytes === 'function' ? formatApiBytes(Number(value || 0)) : `${Number(value || 0)} B`;
   const duration = value => {
