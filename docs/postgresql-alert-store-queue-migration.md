@@ -103,6 +103,15 @@ ALERT_STORE_POSTGRES_SHADOW_ENABLED=1
 
 Restart only the host-native alert-store after changing that flag. Confirm
 `postgres_shadow_outbox.pending` trends toward zero in `/health` and `/metrics`.
+
+The five-minute Mac stack monitor also runs an exact read-only reconciliation
+of SQLite job identity, revision, payload, and queue state against PostgreSQL.
+It permits a five-minute grace period for identities currently marked dirty in
+the transactional outbox, preventing ordinary in-flight projection from
+becoming a false alarm. Missing, extra, or mismatched clean rows fail the
+monitor immediately; a dirty projection older than five minutes also fails.
+The latest timestamped, owner-only result is written to
+`$HOME/n8n-local/logs/postgres-shadow-reconciliation.json`.
 The shadow table is deliberately separate from the claimable PostgreSQL queue;
 no production worker can consume shadow rows.
 

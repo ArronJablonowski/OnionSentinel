@@ -90,12 +90,15 @@ async function main() {
     password: env.ALERT_STORE_POSTGRES_PASSWORD,
     max: 1,
     connectionTimeoutMillis: 3000,
+    statement_timeout: 15000,
+    query_timeout: 20000,
     application_name: 'onion-sentinel-shadow-reconciler',
   });
   try {
     const sqliteRows = await sqliteAll(
       database,
-      `SELECT job.*, outbox.revision
+      `SELECT job.*, outbox.revision, outbox.projected_revision,
+              outbox.updated_at AS projection_updated_at
        FROM durable_jobs AS job
        JOIN postgres_shadow_outbox AS outbox
          ON outbox.entity_type = 'durable_job'
@@ -112,15 +115,47 @@ async function main() {
     const postgresMap = new Map(
       postgresResult.rows.map((row) => [Number(row.sqlite_id), signature(row, true)]),
     );
-    const missingIds = [...sqliteMap.keys()].filter((id) => !postgresMap.has(id));
-    const extraIds = [...postgresMap.keys()].filter((id) => !sqliteMap.has(id));
-    const mismatchedIds = [...sqliteMap.keys()].filter(
-      (id) => postgresMap.has(id) && sqliteMap.get(id) !== postgresMap.get(id),
+    // Queue mutations and projection are intentionally separate transactions.
+    // Exclude only currently dirty identities from an exact comparison, then
+    // fail if any such projection has remained dirty beyond the bounded grace.
+    const dirtyRows = sqliteRows.filter(
+      (row) => Number(row.projected_revision) < Number(row.revision),
     );
+    const dirtyIds = new Set(dirtyRows.map((row) => Number(row.id)));
+    const oldestDirtyMs = dirtyRows.reduce((oldest, row) => {
+      const parsed = Date.parse(String(row.projection_updated_at || '').replace('  ', 'T'));
+      return Number.isFinite(parsed) ? Math.min(oldest, parsed) : oldest;
+    }, Number.POSITIVE_INFINITY);
+    const pendingProjectionAgeSeconds = Number.isFinite(oldestDirtyMs)
+      ? Math.max(0, Math.floor((Date.now() - oldestDirtyMs) / 1000))
+      : 0;
+    const missingIds = [...sqliteMap.keys()].filter(
+      (id) => !dirtyIds.has(id) && !postgresMap.has(id),
+    );
+    const extraIds = [...postgresMap.keys()].filter(
+      (id) => !dirtyIds.has(id) && !sqliteMap.has(id),
+    );
+    const mismatchedIds = [...sqliteMap.keys()].filter(
+      (id) => (
+        !dirtyIds.has(id)
+        && postgresMap.has(id)
+        && sqliteMap.get(id) !== postgresMap.get(id)
+      ),
+    );
+    const pendingProjectionStale = pendingProjectionAgeSeconds > 300;
     const result = {
-      ok: missingIds.length === 0 && extraIds.length === 0 && mismatchedIds.length === 0,
+      generated_at: new Date().toISOString(),
+      ok: (
+        missingIds.length === 0
+        && extraIds.length === 0
+        && mismatchedIds.length === 0
+        && !pendingProjectionStale
+      ),
       sqlite_rows: sqliteMap.size,
       postgres_rows: postgresMap.size,
+      pending_projection_count: dirtyIds.size,
+      pending_projection_age_seconds: pendingProjectionAgeSeconds,
+      pending_projection_stale: pendingProjectionStale,
       missing_count: missingIds.length,
       extra_count: extraIds.length,
       mismatch_count: mismatchedIds.length,

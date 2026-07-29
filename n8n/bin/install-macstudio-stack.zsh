@@ -334,6 +334,7 @@ cp "$REPO_DIR/n8n/bin/onion-sentinel-pcap-intake.py" "$STACK_DIR/bin/onion-senti
 cp "$REPO_DIR/n8n/bin/onion-sentinel-alert-intake.py" "$STACK_DIR/bin/onion-sentinel-alert-intake.py"
 cp "$REPO_DIR/n8n/bin/configure-post-commit-env.py" "$STACK_DIR/bin/configure-post-commit-env.py"
 cp "$REPO_DIR/n8n/bin/configure-postgres-shadow-env.py" "$STACK_DIR/bin/configure-postgres-shadow-env.py"
+cp "$REPO_DIR/operations/reconcile-postgres-shadow.js" "$STACK_DIR/bin/reconcile-postgres-shadow.js"
 cp "$REPO_DIR/n8n/bin/install-alert-intake-authorized-key.py" "$STACK_DIR/bin/install-alert-intake-authorized-key.py"
 cp "$REPO_DIR/n8n/bin/pcap_lifecycle.py" "$STACK_DIR/bin/pcap_lifecycle.py"
 cp "$REPO_DIR/n8n/bin/maintain-pcap-evidence.py" "$STACK_DIR/bin/maintain-pcap-evidence.py"
@@ -341,6 +342,7 @@ cp "$REPO_DIR/n8n/bin/refresh-soc-dashboard.py" "$STACK_DIR/bin/refresh-soc-dash
 cp "$REPO_DIR/n8n/bin/write-daily-soc-rollup.py" "$STACK_DIR/bin/write-daily-soc-rollup.py"
 chmod +x "$STACK_DIR/bin/"*.zsh
 chmod +x "$STACK_DIR/bin/"*.py
+chmod 0755 "$STACK_DIR/bin/reconcile-postgres-shadow.js"
 "$STACK_DIR/bin/verify-agent-memory.py" --initialize >/dev/null
 
 if [[ ! -f "$STACK_DIR/config/live-osquery.json" ]]; then

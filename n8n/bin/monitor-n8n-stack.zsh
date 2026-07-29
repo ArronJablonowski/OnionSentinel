@@ -7,8 +7,11 @@ STACK_DIR="$HOME/n8n-local"
 LOG_DIR="$STACK_DIR/logs"
 STATE_FILE="$LOG_DIR/monitor-n8n-stack-state.json"
 DOCKER="/usr/local/bin/docker"
+NODE="/opt/homebrew/bin/node"
 ENV_FILE="$STACK_DIR/.env"
 SLO_EVALUATOR="$STACK_DIR/bin/evaluate-operational-slos.py"
+SHADOW_RECONCILER="$STACK_DIR/bin/reconcile-postgres-shadow.js"
+SHADOW_RECONCILIATION_REPORT="$LOG_DIR/postgres-shadow-reconciliation.json"
 WEB_GUARD="$STACK_DIR/bin/ensure-onion-sentinel-web.py"
 TELEGRAM_SENDER="$STACK_DIR/bin/send-telegram-notification.py"
 
@@ -57,6 +60,54 @@ json.dump(
 PY
 }
 
+env_flag_enabled() {
+  local name="$1"
+  /usr/bin/python3 - "$ENV_FILE" "$name" <<'PY'
+from pathlib import Path
+import sys
+
+path, name = Path(sys.argv[1]), sys.argv[2]
+prefix = name + "="
+try:
+    values = [
+        line[len(prefix):].strip().strip("\"'")
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.startswith(prefix)
+    ]
+except OSError:
+    raise SystemExit(1)
+raise SystemExit(0 if values and values[-1] == "1" else 1)
+PY
+}
+
+check_postgres_shadow_reconciliation() {
+  if ! env_flag_enabled ALERT_STORE_POSTGRES_SHADOW_ENABLED; then
+    return 0
+  fi
+  [[ -f "$SHADOW_RECONCILER" ]] || {
+    echo "PostgreSQL shadow reconciler is missing"
+    return 1
+  }
+  [[ -x "$NODE" ]] || {
+    echo "PostgreSQL shadow reconciler Node runtime is missing"
+    return 1
+  }
+  local output
+  if ! output="$(
+    NODE_PATH="$STACK_DIR/alert_store/node_modules" \
+      "$NODE" "$SHADOW_RECONCILER" \
+      --env "$ENV_FILE" \
+      --sqlite "$STACK_DIR/alert_store_data/alerts.sqlite3" 2>&1
+  )"; then
+    echo "PostgreSQL shadow reconciliation failed: $output"
+    return 1
+  fi
+  local temporary="${SHADOW_RECONCILIATION_REPORT}.tmp.$$"
+  print -r -- "$output" > "$temporary"
+  chmod 0600 "$temporary"
+  mv -f "$temporary" "$SHADOW_RECONCILIATION_REPORT"
+}
+
 check_stack() {
   # Check the layers in dependency order: Docker, containers, n8n HTTP, then
   # alert-store from inside the Docker network.
@@ -70,6 +121,7 @@ check_stack() {
   # before declaring the whole stack failed.
   /usr/bin/python3 "$WEB_GUARD" >/dev/null || { echo "Onion Sentinel web service identity failed"; return 1; }
   "$DOCKER" exec n8n node -e '(async()=>{const r=await fetch("http://alert-store:8787/health"); if(!r.ok) process.exit(1); const j=await r.json(); if(!j.ok) process.exit(1);})().catch(()=>process.exit(1))' || { echo "alert-store proxy health failed"; return 1; }
+  check_postgres_shadow_reconciliation || return 1
   [[ -x "$SLO_EVALUATOR" ]] || { echo "operational SLO evaluator is missing"; return 1; }
   /usr/bin/python3 "$SLO_EVALUATOR" --stack-dir "$STACK_DIR" || return 1
   echo "ok"

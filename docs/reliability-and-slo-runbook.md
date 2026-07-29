@@ -313,6 +313,13 @@ is retained in `operational-slo-history.jsonl`; its `soak.healthy_since` clock
 resets on any failed evaluation and `soak.qualified_48h` becomes true only
 after 48 uninterrupted hours.
 
+When the alert-store PostgreSQL shadow is enabled, the same five-minute
+monitor performs an exact read-only SQLite/PostgreSQL reconciliation before
+evaluating the SLOs. Clean-row drift fails immediately. Transactionally dirty
+outbox rows receive a five-minute projection grace period, after which they
+also fail. The timestamped result is stored owner-only at
+`$HOME/n8n-local/logs/postgres-shadow-reconciliation.json`.
+
 Transient local HTTP probe failures receive one bounded retry before they are
 converted to a concise named probe error; persistent failures still fail the
 same monitor cycle, and tracebacks are never placed in Telegram. Failure and recovery
