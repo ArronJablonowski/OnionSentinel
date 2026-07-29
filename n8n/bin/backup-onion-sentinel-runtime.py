@@ -223,7 +223,13 @@ def env_flag(path: Path, name: str) -> bool:
 
 
 def archive_runtime_secrets(stack_dir: Path, destination: Path) -> list[str]:
-    candidates = [Path(".env"), Path("n8n_data/config"), Path("config"), Path("soc-alerts/agent-memory")]
+    candidates = [
+        Path(".env"),
+        Path("n8n_data/config"),
+        Path("config"),
+        Path("soc-alerts/agent-memory"),
+        Path("asset-discovery"),
+    ]
     included: list[str] = []
     with tarfile.open(destination, "w:gz") as archive:
         for relative in candidates:

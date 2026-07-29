@@ -5913,9 +5913,37 @@ def asset_inventory_page_section() -> str:
           <tbody id="asset-table-body"><tr><td colspan="8" class="ir-loading">Loading known assets…</td></tr></tbody>
         </table>
       </div>
+      <div class="dhcp-section">
+        <div class="dhcp-heading">
+          <div>
+            <h2>DHCP network discovery</h2>
+            <p>Read-only Zeek DHCP observations. Candidates and conflicts require operator review before they become authoritative.</p>
+          </div>
+          <span id="dhcp-collection-badge" class="asset-state">Loading</span>
+        </div>
+        <div class="asset-metrics dhcp-metrics" aria-label="DHCP discovery metrics">
+          <div><span>Observed identities</span><strong id="dhcp-total">0</strong></div>
+          <div><span>Verified matches</span><strong id="dhcp-matches">0</strong></div>
+          <div><span>Review candidates</span><strong id="dhcp-candidates">0</strong></div>
+          <div><span>Conflicts</span><strong id="dhcp-conflicts">0</strong></div>
+          <div><span>Stale</span><strong id="dhcp-stale">0</strong></div>
+        </div>
+        <div id="dhcp-discovery-status" class="asset-status" role="status" aria-live="polite">Loading DHCP discovery state…</div>
+        <div id="dhcp-discovery-error" class="ir-error" role="alert" hidden></div>
+        <div class="asset-table-wrap">
+          <table class="asset-table dhcp-table">
+            <thead><tr>
+              <th>Review state</th><th>Current IP address</th><th>DHCP hostname</th>
+              <th>MAC address</th><th>Authoritative asset</th><th>Lease / last seen</th>
+              <th>Evidence</th>
+            </tr></thead>
+            <tbody id="dhcp-table-body"><tr><td colspan="7" class="ir-loading">Loading DHCP observations…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
     </section>
     <style>
-      .asset-view{display:block;padding:0 0 28px}.asset-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:0 0 16px}.asset-metrics>div{min-height:84px;padding:16px 18px;border:1px solid #223341;border-radius:8px;background:#0d1822}.asset-metrics span{display:block;color:#9caec2;font-size:.76rem;font-weight:800;text-transform:uppercase}.asset-metrics strong{display:block;margin-top:7px;color:#75efff;font-size:1.55rem}.asset-toolbar{display:grid;grid-template-columns:minmax(260px,1fr) 180px 150px;gap:12px;align-items:end;margin-bottom:12px}.asset-toolbar label{color:#9caec2;font-size:.76rem;font-weight:800;text-transform:uppercase}.asset-toolbar input,.asset-toolbar select{display:block;width:100%;min-height:44px;margin-top:5px;padding:0 12px;color:#e9f2ff;background:#0b1620;border:1px solid #07566a;border-radius:8px;font:inherit}.asset-status{margin:0 0 12px;color:#8fa2b8;font-size:.8rem}.asset-table-wrap{overflow-x:auto;border:1px solid #223341;border-radius:8px;background:#09131d}.asset-table{width:100%;min-width:1180px;border-collapse:collapse;table-layout:fixed}.asset-table th,.asset-table td{padding:13px 12px;text-align:left;vertical-align:top;border-bottom:1px solid #1e303d}.asset-table th{color:#9caec2;background:#101e2a;font-size:.72rem;text-transform:uppercase}.asset-table th:nth-child(1){width:150px}.asset-table th:nth-child(2){width:190px}.asset-table th:nth-child(3){width:210px}.asset-table th:nth-child(4){width:210px}.asset-table th:nth-child(5){width:105px}.asset-table th:nth-child(6){width:100px}.asset-table th:nth-child(7){width:160px}.asset-table th:nth-child(8){width:150px}.asset-table tbody tr:hover td{background:#0e202b}.asset-name{display:block;color:#eef5ff;font-weight:900;overflow-wrap:anywhere}.asset-state{display:inline-block;margin-top:6px;padding:3px 7px;border:1px solid #205069;border-radius:999px;color:#75efff;background:#0a1a24;font-size:.62rem;font-weight:900;text-transform:uppercase}.asset-values{display:grid;gap:5px}.asset-values code{display:block;color:#d8e7f8;font:700 12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere;white-space:normal}.asset-hostname{color:#69e89a!important}.asset-muted{display:block;color:#8397ab;font-size:.75rem;line-height:1.4;overflow-wrap:anywhere}.asset-criticality{font-weight:900;text-transform:uppercase}.asset-criticality-critical{color:#ff6681}.asset-criticality-high{color:#ff963e}.asset-criticality-medium{color:#ffca67}.asset-criticality-low{color:#72e99c}.asset-criticality-unknown{color:#9caec2}.asset-empty{color:#8397ab;font-style:italic}.asset-validity{font-variant-numeric:tabular-nums}@media(max-width:900px){.asset-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.asset-toolbar{grid-template-columns:1fr 1fr}.asset-search-label{grid-column:1/-1}}@media(max-width:560px){.asset-metrics,.asset-toolbar{grid-template-columns:1fr}.asset-search-label{grid-column:auto}}
+      .asset-view{display:block;padding:0 0 28px}.asset-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:0 0 16px}.asset-metrics>div{min-height:84px;padding:16px 18px;border:1px solid #223341;border-radius:8px;background:#0d1822}.asset-metrics span{display:block;color:#9caec2;font-size:.76rem;font-weight:800;text-transform:uppercase}.asset-metrics strong{display:block;margin-top:7px;color:#75efff;font-size:1.55rem}.asset-toolbar{display:grid;grid-template-columns:minmax(260px,1fr) 180px 150px;gap:12px;align-items:end;margin-bottom:12px}.asset-toolbar label{color:#9caec2;font-size:.76rem;font-weight:800;text-transform:uppercase}.asset-toolbar input,.asset-toolbar select{display:block;width:100%;min-height:44px;margin-top:5px;padding:0 12px;color:#e9f2ff;background:#0b1620;border:1px solid #07566a;border-radius:8px;font:inherit}.asset-status{margin:0 0 12px;color:#8fa2b8;font-size:.8rem}.asset-table-wrap{overflow-x:auto;border:1px solid #223341;border-radius:8px;background:#09131d}.asset-table{width:100%;min-width:1180px;border-collapse:collapse;table-layout:fixed}.asset-table th,.asset-table td{padding:13px 12px;text-align:left;vertical-align:top;border-bottom:1px solid #1e303d}.asset-table th{color:#9caec2;background:#101e2a;font-size:.72rem;text-transform:uppercase}.asset-table th:nth-child(1){width:150px}.asset-table th:nth-child(2){width:190px}.asset-table th:nth-child(3){width:210px}.asset-table th:nth-child(4){width:210px}.asset-table th:nth-child(5){width:105px}.asset-table th:nth-child(6){width:100px}.asset-table th:nth-child(7){width:160px}.asset-table th:nth-child(8){width:150px}.asset-table tbody tr:hover td{background:#0e202b}.asset-name{display:block;color:#eef5ff;font-weight:900;overflow-wrap:anywhere}.asset-state{display:inline-block;margin-top:6px;padding:3px 7px;border:1px solid #205069;border-radius:999px;color:#75efff;background:#0a1a24;font-size:.62rem;font-weight:900;text-transform:uppercase}.asset-values{display:grid;gap:5px}.asset-values code{display:block;color:#d8e7f8;font:700 12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere;white-space:normal}.asset-hostname{color:#69e89a!important}.asset-muted{display:block;color:#8397ab;font-size:.75rem;line-height:1.4;overflow-wrap:anywhere}.asset-criticality{font-weight:900;text-transform:uppercase}.asset-criticality-critical{color:#ff6681}.asset-criticality-high{color:#ff963e}.asset-criticality-medium{color:#ffca67}.asset-criticality-low{color:#72e99c}.asset-criticality-unknown{color:#9caec2}.asset-empty{color:#8397ab;font-style:italic}.asset-validity{font-variant-numeric:tabular-nums}.dhcp-section{margin-top:32px;padding-top:24px;border-top:1px solid #223341}.dhcp-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:16px}.dhcp-heading h2{margin:0;color:#eef5ff;font-size:1.15rem}.dhcp-heading p{max-width:820px;margin:6px 0 0;color:#8fa2b8;font-size:.82rem}.dhcp-heading .asset-state{margin:0}.dhcp-table{min-width:1260px}.dhcp-table th:nth-child(1){width:160px}.dhcp-table th:nth-child(2){width:180px}.dhcp-table th:nth-child(3){width:210px}.dhcp-table th:nth-child(4){width:180px}.dhcp-table th:nth-child(5){width:220px}.dhcp-table th:nth-child(6){width:210px}.dhcp-table th:nth-child(7){width:150px}.dhcp-reconciliation{display:inline-block;padding:4px 8px;border:1px solid currentColor;border-radius:999px;font-size:.63rem;font-weight:900;text-transform:uppercase}.dhcp-verified_match{color:#69e89a}.dhcp-candidate{color:#ffca67}.dhcp-conflict{color:#ff6681}.dhcp-stale{display:block;margin-top:7px;color:#ffca67;font-size:.68rem;font-weight:900;text-transform:uppercase}.dhcp-ip{white-space:nowrap!important;overflow-wrap:normal!important}@media(max-width:900px){.asset-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.asset-toolbar{grid-template-columns:1fr 1fr}.asset-search-label{grid-column:1/-1}}@media(max-width:560px){.asset-metrics,.asset-toolbar{grid-template-columns:1fr}.asset-search-label{grid-column:auto}.dhcp-heading{display:block}.dhcp-heading .asset-state{margin-top:10px}}
     </style>
     <script>
     (()=> {
@@ -5925,6 +5953,10 @@ def asset_inventory_page_section() -> str:
       const direction=document.getElementById('asset-direction');
       const status=document.getElementById('asset-inventory-status');
       const errorBox=document.getElementById('asset-inventory-error');
+      const dhcpBody=document.getElementById('dhcp-table-body');
+      const dhcpStatus=document.getElementById('dhcp-discovery-status');
+      const dhcpError=document.getElementById('dhcp-discovery-error');
+      const dhcpBadge=document.getElementById('dhcp-collection-badge');
       let assets=[];
       const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
       const values=(items,className='')=>Array.isArray(items)&&items.length?`<span class="asset-values">${items.map(value=>`<code class="${className}">${esc(value)}</code>`).join('')}</span>`:'<span class="asset-empty">Not registered</span>';
@@ -5961,7 +5993,35 @@ def asset_inventory_page_section() -> str:
           status.textContent='Inventory status unavailable.';
         }
       }
-      search.addEventListener('input',render);sort.addEventListener('change',render);direction.addEventListener('change',render);load();
+      const dhcpRow=item=>{const state=String(item.reconciliation||'candidate');const authority=item.authoritative_asset;return `<tr><td><span class="dhcp-reconciliation dhcp-${esc(state)}">${esc(state.replace('_',' '))}</span>${item.stale?'<span class="dhcp-stale">Stale observation</span>':''}<span class="asset-muted">${esc(item.reconciliation_detail||'')}</span></td><td>${values([item.current_ip],'dhcp-ip')}</td><td>${values(item.hostname?[item.hostname]:[],'asset-hostname')}</td><td>${values(item.mac_address?[item.mac_address]:[])}</td><td>${authority?`<strong class="asset-name">${esc(authority.asset_id)}</strong><span class="asset-muted">${esc(authority.hostname||'No authoritative hostname')}</span>`:'<span class="asset-empty">Not registered</span>'}</td><td class="asset-validity"><span class="asset-muted">Lease expires</span>${timestamp(item.lease_expires_at)}<span class="asset-muted">Last seen</span>${timestamp(item.last_seen)}</td><td><strong class="asset-name">${Number(item.observation_count||0)} event(s)</strong><span class="asset-muted">${esc((item.message_types||[]).join(', ')||'Message type unavailable')}</span><span class="asset-muted">${esc((item.sensors||[]).join(', ')||'Sensor unavailable')}</span></td></tr>`};
+      async function loadDhcp(){
+        dhcpError.hidden=true;
+        try{
+          const response=await fetch('/api/dhcp-asset-discovery',{cache:'no-store'});
+          const payload=await response.json();
+          if(!response.ok||payload.ok===false)throw new Error(payload.error||`HTTP ${response.status}`);
+          const items=Array.isArray(payload.observations)?payload.observations:[];
+          const counts=payload.counts||{};
+          document.getElementById('dhcp-total').textContent=Number(counts.total||0);
+          document.getElementById('dhcp-matches').textContent=Number(counts.verified_match||0);
+          document.getElementById('dhcp-candidates').textContent=Number(counts.candidate||0);
+          document.getElementById('dhcp-conflicts').textContent=Number(counts.conflict||0);
+          document.getElementById('dhcp-stale').textContent=Number(counts.stale||0);
+          const collection=payload.collection||{},collectionState=String(collection.status||'unknown');
+          dhcpBadge.textContent=collectionState.replace('_',' ');
+          const last=collection.last_success_at?` Last successful collection: ${collection.last_success_at}.`:' No successful collection has been recorded.';
+          const warning=collection.last_error?` ${collection.last_error}`:'';
+          dhcpStatus.textContent=`Collector status: ${collectionState}.${last}${warning}`;
+          dhcpBody.innerHTML=items.length?items.map(dhcpRow).join(''):'<tr><td colspan="7" class="ir-loading">No DHCP identities have been observed yet. The restricted relay collector may still need to be enabled.</td></tr>';
+        }catch(error){
+          dhcpError.textContent=`DHCP discovery unavailable: ${error.message}`;
+          dhcpError.hidden=false;
+          dhcpBadge.textContent='unavailable';
+          dhcpStatus.textContent='DHCP collection status unavailable.';
+          dhcpBody.innerHTML='<tr><td colspan="7" class="ir-loading">DHCP observations could not be loaded.</td></tr>';
+        }
+      }
+      search.addEventListener('input',render);sort.addEventListener('change',render);direction.addEventListener('change',render);load();loadDhcp();window.setInterval(loadDhcp,60000);
     })();
     </script>'''
 

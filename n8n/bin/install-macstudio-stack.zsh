@@ -30,7 +30,7 @@ fi
   --release-id "$RUNTIME_RELEASE_ID" \
   --validate-only
 
-# These three jobs execute files replaced below. Stop only those code consumers
+# These jobs execute files replaced below. Stop only those code consumers
 # before the first runtime copy; unrelated monitoring, PCAP, dashboard, backup,
 # and Docker services stay up until their normal final reload phase.
 critical_launch_agents_down() {
@@ -39,14 +39,16 @@ critical_launch_agents_down() {
   for plist in \
     com.arron.soc.alert-store.plist \
     com.arron.soc.ai-analysis.plist \
-    com.arron.soc.ai-analysis-cli.plist
+    com.arron.soc.ai-analysis-cli.plist \
+    com.arron.soc.dhcp-asset-discovery.plist
   do
     launchctl unload "$LAUNCHD_DIR/$plist" >/dev/null 2>&1 || true
   done
   for label in \
     com.arron.soc.alert-store \
     com.arron.soc.ai-analysis \
-    com.arron.soc.ai-analysis-cli
+    com.arron.soc.ai-analysis-cli \
+    com.arron.soc.dhcp-asset-discovery
   do
     launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
   done
@@ -57,7 +59,8 @@ critical_launch_agents_are_down() {
   for label in \
     com.arron.soc.alert-store \
     com.arron.soc.ai-analysis \
-    com.arron.soc.ai-analysis-cli
+    com.arron.soc.ai-analysis-cli \
+    com.arron.soc.dhcp-asset-discovery
   do
     if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
       return 1
@@ -71,6 +74,7 @@ keep_critical_agents_down_on_failure() {
   if (( exit_code != 0 )); then
     critical_launch_agents_down
     echo "Install failed; alert-store and both AI LaunchAgents remain stopped." >&2
+    echo "The DHCP asset-discovery LaunchAgent also remains stopped." >&2
   fi
   return $exit_code
 }
@@ -82,8 +86,9 @@ if ! critical_launch_agents_are_down; then
   exit 1
 fi
 
-mkdir -p "$STACK_DIR/alert_store/config" "$STACK_DIR/alert_store/lib" "$STACK_DIR/postgres" "$STACK_DIR/bin" "$STACK_DIR/config" "$STACK_DIR/config/maxmind" "$STACK_DIR/logs" "$STACK_DIR/run" "$STACK_DIR/python" "$STACK_DIR/alert_store_data" "$STACK_DIR/alert_store_postgres_data" "$STACK_DIR/n8n_data" "$STACK_DIR/soc-alerts" "$STACK_DIR/soc-alerts/agent-memory" "$STACK_DIR/soc-alerts/pcap-analysis" "$STACK_DIR/pcap-evidence/artifacts"
+mkdir -p "$STACK_DIR/alert_store/config" "$STACK_DIR/alert_store/lib" "$STACK_DIR/postgres" "$STACK_DIR/bin" "$STACK_DIR/config" "$STACK_DIR/config/maxmind" "$STACK_DIR/logs" "$STACK_DIR/run" "$STACK_DIR/python" "$STACK_DIR/alert_store_data" "$STACK_DIR/alert_store_postgres_data" "$STACK_DIR/n8n_data" "$STACK_DIR/soc-alerts" "$STACK_DIR/soc-alerts/agent-memory" "$STACK_DIR/soc-alerts/pcap-analysis" "$STACK_DIR/pcap-evidence/artifacts" "$STACK_DIR/asset-discovery"
 chmod 0700 "$STACK_DIR/run"
+chmod 0700 "$STACK_DIR/asset-discovery"
 chmod 0750 "$STACK_DIR/config/maxmind"
 touch "$STACK_DIR/run/ai-analysis-ollama.wake" "$STACK_DIR/run/ai-analysis-cli.wake" "$STACK_DIR/run/pcap-analysis.wake"
 chmod 0600 "$STACK_DIR/run/ai-analysis-ollama.wake" "$STACK_DIR/run/ai-analysis-cli.wake" "$STACK_DIR/run/pcap-analysis.wake"
@@ -297,6 +302,7 @@ cp "$REPO_DIR/n8n/bin/run-alert-store-host.zsh" "$STACK_DIR/bin/run-alert-store-
 cp "$REPO_DIR/n8n/bin/maintain-alert-store-sqlite.zsh" "$STACK_DIR/bin/maintain-alert-store-sqlite.zsh"
 cp "$REPO_DIR/n8n/bin/detection_validation.py" "$STACK_DIR/bin/detection_validation.py"
 cp "$REPO_DIR/n8n/bin/asset_inventory.py" "$STACK_DIR/bin/asset_inventory.py"
+cp "$REPO_DIR/n8n/bin/collect-dhcp-asset-discovery.py" "$STACK_DIR/bin/collect-dhcp-asset-discovery.py"
 cp "$REPO_DIR/n8n/bin/incident_evidence_contract.py" "$STACK_DIR/bin/incident_evidence_contract.py"
 cp "$REPO_DIR/n8n/bin/collect-incident-evidence.py" "$STACK_DIR/bin/collect-incident-evidence.py"
 cp "$REPO_DIR/n8n/bin/install-investigation-query-runtime.py" "$STACK_DIR/bin/install-investigation-query-runtime.py"
@@ -404,6 +410,20 @@ PY
   chmod 0600 "$STACK_DIR/.env"
   echo "Created $STACK_DIR/.env from example. Edit it before expecting Telegram notifications." >&2
 fi
+if [[ ! -f "$STACK_DIR/config/dhcp-asset-discovery.json" ]]; then
+  /usr/bin/python3 - "$HOME" "$REPO_DIR/n8n/config/dhcp-asset-discovery.example.json" "$STACK_DIR/config/dhcp-asset-discovery.json" <<'PY'
+from pathlib import Path
+import sys
+
+home, source, destination = sys.argv[1:4]
+Path(destination).write_text(
+    Path(source).read_text(encoding="utf-8").replace("__HOME__", home),
+    encoding="utf-8",
+)
+PY
+  chmod 0600 "$STACK_DIR/config/dhcp-asset-discovery.json"
+  echo "Created disabled $STACK_DIR/config/dhcp-asset-discovery.json example." >&2
+fi
 # Persist the already validated release marker while preserving every
 # operator-owned secret and comment in the live .env.
 /usr/bin/python3 "$STACK_DIR/bin/set-runtime-release-id.py" \
@@ -422,6 +442,7 @@ for plist in \
   com.arron.soc.ai-analysis-cli.plist \
   com.arron.soc.dashboard-refresh.plist \
   com.arron.soc.daily-rollup.plist \
+  com.arron.soc.dhcp-asset-discovery.plist \
   com.arron.onion-sentinel.web.plist \
   com.arron.onion-sentinel.web-guard.plist \
   com.arron.onion-sentinel.harness-maintenance.plist \
@@ -457,6 +478,7 @@ launchctl unload "$LAUNCHD_DIR/com.arron.soc.pcap-analysis.plist" >/dev/null 2>&
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.pcap-retention.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.dashboard-refresh.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist" >/dev/null 2>&1 || true
+launchctl unload "$LAUNCHD_DIR/com.arron.soc.dhcp-asset-discovery.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.web-guard.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.web.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.harness-maintenance.plist" >/dev/null 2>&1 || true
@@ -471,6 +493,7 @@ launchctl load "$LAUNCHD_DIR/com.arron.soc.ai-analysis.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.ai-analysis-cli.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.dashboard-refresh.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist"
+launchctl load "$LAUNCHD_DIR/com.arron.soc.dhcp-asset-discovery.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.web.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.web-guard.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.harness-maintenance.plist"

@@ -1,1 +1,1 @@
-so-ai-relay ALL=(root) NOPASSWD: /usr/local/sbin/export-recent-alerts, /usr/local/sbin/export-pcap-window, /usr/local/sbin/export-incident-evidence, /usr/local/sbin/run-live-osquery
+so-ai-relay ALL=(root) NOPASSWD: /usr/local/sbin/export-recent-alerts, /usr/local/sbin/export-pcap-window, /usr/local/sbin/export-incident-evidence, /usr/local/sbin/export-dhcp-observations, /usr/local/sbin/run-live-osquery

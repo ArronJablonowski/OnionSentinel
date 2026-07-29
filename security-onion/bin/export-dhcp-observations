@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""Forced, read-only export of bounded Zeek DHCP observations."""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import ipaddress
+import json
+import os
+import re
+import selectors
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+CONTRACT = "onion-sentinel-dhcp-asset-discovery-v1"
+SO_QUERY = Path("/usr/sbin/so-elasticsearch-query")
+INDEX = "logs-zeek-so"
+DATASET = "zeek.dhcp"
+MAX_REQUEST_BYTES = 16 * 1024
+MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+MAX_STDERR_BYTES = 128 * 1024
+MAX_HITS = 1000
+MAX_WINDOW = dt.timedelta(hours=24)
+QUERY_TIMEOUT_SECONDS = 45
+HOSTNAME_RE = re.compile(
+    r"(?=.{1,253}\Z)(?:[A-Za-z0-9](?:[A-Za-z0-9_-]{0,62})?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9_-]{0,62})?))*\.?"
+)
+MAC_RE = re.compile(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
+SOURCE_FIELDS = [
+    "@timestamp",
+    "event.dataset",
+    "event.action",
+    "source.ip",
+    "source.mac",
+    "client.ip",
+    "client.mac",
+    "host.name",
+    "host.hostname",
+    "zeek.dhcp.assigned_addr",
+    "zeek.dhcp.client_addr",
+    "zeek.dhcp.requested_addr",
+    "zeek.dhcp.host_name",
+    "zeek.dhcp.client_fqdn",
+    "zeek.dhcp.client_fqdn.fqdn",
+    "zeek.dhcp.mac",
+    "zeek.dhcp.msg_type",
+    "zeek.dhcp.msg_types",
+    "zeek.dhcp.lease_time",
+    "zeek.dhcp.duration",
+    "observer.name",
+]
+
+
+class BoundedCommandError(RuntimeError):
+    pass
+
+
+def emit(payload: dict, code: int = 0) -> int:
+    sys.stdout.write(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
+    return code
+
+
+def parse_timestamp(value: object) -> dt.datetime:
+    text = str(value or "").strip().replace("Z", "+00:00")
+    parsed = dt.datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp lacks an offset")
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def format_timestamp(value: dt.datetime) -> str:
+    return value.astimezone(dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def run_bounded_command(command: list[str]) -> subprocess.CompletedProcess:
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    assert process.stdout is not None and process.stderr is not None
+    selector = selectors.DefaultSelector()
+    streams = {
+        process.stdout: (bytearray(), MAX_OUTPUT_BYTES),
+        process.stderr: (bytearray(), MAX_STDERR_BYTES),
+    }
+    for stream in streams:
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ)
+    deadline = time.monotonic() + QUERY_TIMEOUT_SECONDS
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise BoundedCommandError("query timed out")
+            events = selector.select(timeout=min(0.25, remaining))
+            if not events and process.poll() is not None:
+                events = [(key, selectors.EVENT_READ) for key in selector.get_map().values()]
+            for key, _mask in events:
+                stream = key.fileobj
+                target, limit = streams[stream]
+                try:
+                    chunk = os.read(stream.fileno(), 64 * 1024)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(stream)
+                    continue
+                if len(target) + len(chunk) > limit:
+                    raise BoundedCommandError("query output exceeded its byte limit")
+                target.extend(chunk)
+        return_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            process.kill()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        raise
+    finally:
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
+    return subprocess.CompletedProcess(
+        command,
+        return_code,
+        bytes(streams[process.stdout][0]),
+        bytes(streams[process.stderr][0]),
+    )
+
+
+def validate_request(request: object, now: dt.datetime | None = None) -> tuple[dt.datetime, dt.datetime, int]:
+    if not isinstance(request, dict) or set(request) != {"contract", "operation", "window", "size"}:
+        raise ValueError("request must contain only contract, operation, window, and size")
+    if request["contract"] != CONTRACT or request["operation"] != "dhcp_observations":
+        raise ValueError("unsupported DHCP discovery operation")
+    window = request["window"]
+    if not isinstance(window, dict) or set(window) != {"start", "end"}:
+        raise ValueError("window must contain only start and end")
+    start = parse_timestamp(window["start"])
+    end = parse_timestamp(window["end"])
+    current = (now or dt.datetime.now(dt.timezone.utc)).astimezone(dt.timezone.utc)
+    if start >= end or end - start > MAX_WINDOW:
+        raise ValueError("query window must be positive and no longer than 24 hours")
+    if end > current + dt.timedelta(minutes=5):
+        raise ValueError("query window ends too far in the future")
+    size = request["size"]
+    if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= MAX_HITS:
+        raise ValueError("size must be an integer from 1 through 1000")
+    return start, end, size
+
+
+def nested_value(source: dict, dotted: str) -> object:
+    if dotted in source:
+        return source[dotted]
+    value: object = source
+    for component in dotted.split("."):
+        if not isinstance(value, dict) or component not in value:
+            return None
+        value = value[component]
+    return value
+
+
+def first_value(source: dict, fields: tuple[str, ...]) -> object:
+    for field in fields:
+        value = nested_value(source, field)
+        if isinstance(value, list):
+            value = value[0] if value else None
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def normalized_observation(hit: object) -> dict | None:
+    if not isinstance(hit, dict) or not isinstance(hit.get("_source"), dict):
+        return None
+    source = hit["_source"]
+    try:
+        observed_at = format_timestamp(parse_timestamp(first_value(source, ("@timestamp",))))
+        parsed_address = ipaddress.ip_address(str(first_value(
+            source,
+            (
+                "zeek.dhcp.assigned_addr",
+                "zeek.dhcp.client_addr",
+                "zeek.dhcp.requested_addr",
+                "client.ip",
+                "source.ip",
+            ),
+        ) or "").strip())
+        if parsed_address.is_unspecified or parsed_address.is_multicast or parsed_address.is_loopback:
+            return None
+        address = str(parsed_address)
+    except (TypeError, ValueError):
+        return None
+    mac_raw = str(first_value(source, ("zeek.dhcp.mac", "client.mac", "source.mac")) or "").strip()
+    mac = mac_raw.lower() if MAC_RE.fullmatch(mac_raw) else ""
+    hostname_raw = str(first_value(
+        source,
+        (
+            "zeek.dhcp.host_name",
+            "zeek.dhcp.client_fqdn.fqdn",
+            "zeek.dhcp.client_fqdn",
+            "host.hostname",
+            "host.name",
+        ),
+    ) or "").strip().rstrip(".").lower()
+    hostname = hostname_raw if HOSTNAME_RE.fullmatch(hostname_raw) else ""
+    message_type = str(first_value(source, ("zeek.dhcp.msg_type", "zeek.dhcp.msg_types", "event.action")) or "")[:80]
+    sensor = str(first_value(source, ("observer.name",)) or "")[:160]
+    lease_raw = first_value(source, ("zeek.dhcp.lease_time", "zeek.dhcp.duration"))
+    try:
+        lease_seconds = max(0, min(int(lease_raw), 31 * 24 * 60 * 60))
+    except (TypeError, ValueError):
+        lease_seconds = 0
+    evidence_seed = "\0".join((observed_at, address, mac, hostname, message_type, sensor))
+    return {
+        "observed_at": observed_at,
+        "ip_address": address,
+        "mac_address": mac,
+        "hostname": hostname,
+        "message_type": message_type,
+        "lease_seconds": lease_seconds,
+        "sensor": sensor,
+        "evidence_id": hashlib.sha256(evidence_seed.encode("utf-8")).hexdigest()[:24],
+    }
+
+
+def main() -> int:
+    if os.environ.get("SSH_ORIGINAL_COMMAND", "").strip():
+        return emit({"ok": False, "error": "commands are not accepted by this forced endpoint"}, 2)
+    raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
+    if len(raw) > MAX_REQUEST_BYTES:
+        return emit({"ok": False, "error": "request exceeds the wrapper byte limit"}, 2)
+    try:
+        request = json.loads(raw.decode("utf-8"))
+        start, end, size = validate_request(request)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        return emit({"ok": False, "error": f"invalid DHCP discovery request: {exc}"}, 2)
+    body = {
+        "_source": SOURCE_FIELDS,
+        "query": {
+            "bool": {
+                "filter": [
+                    {"term": {"event.dataset": DATASET}},
+                    {"range": {"@timestamp": {"gte": format_timestamp(start), "lt": format_timestamp(end)}}},
+                ]
+            }
+        },
+        "size": size,
+        "sort": [{"@timestamp": {"order": "asc"}}],
+        "track_total_hits": True,
+    }
+    encoded = json.dumps(body, separators=(",", ":"), sort_keys=True)
+    endpoint = f"{INDEX}/_search"
+    try:
+        proc = run_bounded_command([str(SO_QUERY), endpoint, "-d", encoded])
+    except (BoundedCommandError, OSError, subprocess.SubprocessError) as exc:
+        return emit({"ok": False, "error": f"bounded DHCP query failed: {exc}"}, 3)
+    if proc.returncode != 0:
+        detail = " ".join(proc.stderr.decode("utf-8", "replace").split())[:500]
+        return emit({"ok": False, "error": "Security Onion DHCP query failed", "detail": detail}, 3)
+    try:
+        result = json.loads(proc.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return emit({"ok": False, "error": f"Security Onion returned invalid JSON: {exc}"}, 3)
+    hits_container = result.get("hits") if isinstance(result, dict) else {}
+    raw_hits = hits_container.get("hits") if isinstance(hits_container, dict) else []
+    if not isinstance(raw_hits, list):
+        raw_hits = []
+    total_raw = hits_container.get("total") if isinstance(hits_container, dict) else 0
+    total = total_raw.get("value", 0) if isinstance(total_raw, dict) else total_raw
+    observations = [
+        observation
+        for observation in (normalized_observation(hit) for hit in raw_hits[:size])
+        if observation is not None
+    ]
+    observations.sort(key=lambda item: (item["observed_at"], item["evidence_id"]))
+    shards = result.get("_shards") if isinstance(result, dict) and isinstance(result.get("_shards"), dict) else {}
+    partial = bool(result.get("timed_out")) or int(shards.get("failed") or 0) > 0
+    return emit({
+        "ok": True,
+        "contract": CONTRACT,
+        "generated_at": format_timestamp(dt.datetime.now(dt.timezone.utc)),
+        "status": "partial" if partial else "ok",
+        "window": {"start": format_timestamp(start), "end": format_timestamp(end)},
+        "hits_total": int(total or 0),
+        "returned": len(observations),
+        "truncated": int(total or 0) > size,
+        "query_audit": {
+            "index": INDEX,
+            "dataset": DATASET,
+            "query_digest": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        },
+        "observations": observations,
+    })
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

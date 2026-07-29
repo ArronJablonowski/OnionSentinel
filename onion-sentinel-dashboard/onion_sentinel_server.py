@@ -145,6 +145,7 @@ CONTROLLED_EVALUATION_DISPATCH_ROUTES = (
 
 GET_API_ROUTES = {
     "/api/asset-inventory",
+    "/api/dhcp-asset-discovery",
     "/api/system-health/beacons",
     "/api/llm-analysis/current",
     "/api/llm-analysis/logs",

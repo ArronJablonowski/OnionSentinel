@@ -9,11 +9,13 @@ This directory contains the Security Onion-side pieces for Onion Sentinel.
 | `bin/export-recent-alerts` | `/usr/local/sbin/export-recent-alerts` | Restricted wrapper that exports recent alerts as JSON. |
 | `bin/export-pcap-window` | `/usr/local/sbin/export-pcap-window` | Restricted wrapper that streams one bounded, filtered rotation directly to the relay SSD without Security Onion staging. |
 | `bin/export-incident-evidence` | `/usr/local/sbin/export-incident-evidence` | Restricted baseline evidence and policy-brokered Elastic/OQL pivot wrapper. |
+| `bin/export-dhcp-observations` | `/usr/local/sbin/export-dhcp-observations` | Read-only, fixed-DSL Zeek DHCP observation export for asset discovery. |
 | `bin/run-live-osquery` | `/usr/local/sbin/run-live-osquery` | Disabled-by-default live endpoint OSQuery wrapper with exact alias mapping and bounded Osquery Manager calls. |
 | `sudoers/90-so-ai-relay-export` | `/etc/sudoers.d/90-so-ai-relay-export` | Allows only the wrapper to run passwordless for `so-ai-relay`. |
 | `ssh/authorized_keys.example` | `/home/so-ai-relay/.ssh/authorized_keys` | Forced-command SSH template restricted to the relay source IP. |
 | `ssh/authorized_keys.pcap.example` | `/home/so-ai-relay/.ssh/authorized_keys` | Separate forced-command SSH template for PCAP fulfillment. |
 | `ssh/authorized_keys.incident-query.example` | `/home/so-ai-relay/.ssh/authorized_keys` | Separate forced-command SSH template for bounded incident evidence queries. |
+| `ssh/authorized_keys.dhcp-asset-discovery.example` | `/home/so-ai-relay/.ssh/authorized_keys` | Separate forced-command SSH template for read-only DHCP discovery. |
 | `ssh/authorized_keys.live-osquery.example` | `/home/so-ai-relay/.ssh/authorized_keys` | Separate forced-command SSH template for bounded endpoint OSQuery. |
 | `bin/install-security-onion-wrapper.sh` | run with `sudo` on Security Onion | Installs wrapper, sudoers, and service account scaffolding. |
 
@@ -35,6 +37,15 @@ sudo chmod 0600 /home/so-ai-relay/.ssh/authorized_keys
 ```
 
 Replace `REPLACE_WITH_PUBLIC_KEY` with the Raspberry Pi relay public key. Keep the `from="10.88.8.8"` restriction unless the relay address changes.
+
+DHCP asset discovery uses another dedicated key entry based on
+`security-onion/ssh/authorized_keys.dhcp-asset-discovery.example`. Its forced
+wrapper accepts only a bounded UTC window and result size. The caller cannot
+supply an index, dataset, field, query, KQL, OQL, Query DSL, endpoint, path, or
+shell command. The wrapper executes only Elasticsearch `_search` against
+`logs-zeek-so`, filters exactly `event.dataset: zeek.dhcp`, and returns a fixed
+allowlist of DHCP identity and lease fields. It does not write to Security
+Onion or retain state there.
 
 Incident Response evidence collection uses another dedicated key entry based on
 `security-onion/ssh/authorized_keys.incident-query.example`. That key can invoke

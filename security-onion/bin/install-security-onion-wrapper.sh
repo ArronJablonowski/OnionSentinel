@@ -13,6 +13,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/export-recent-alerts" /usr/local/sbin/export-recent-alerts
 install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/export-pcap-window" /usr/local/sbin/export-pcap-window
 install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/export-incident-evidence" /usr/local/sbin/export-incident-evidence
+install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/export-dhcp-observations" /usr/local/sbin/export-dhcp-observations
 install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/run-live-osquery" /usr/local/sbin/run-live-osquery
 install -o root -g root -m 0755 -d /usr/local/lib/onion-sentinel
 install -o root -g root -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract.py" /usr/local/lib/onion-sentinel/live_osquery_contract.py
@@ -91,6 +92,9 @@ Next manual step:
 6. Endpoint live OSQuery requires a third dedicated key, exact endpoint aliases,
    a root-only authorization file, and explicit enablement. It is not part of
    the default read-only alert and PCAP data plane.
+7. DHCP asset discovery requires its own forced-command key from
+   authorized_keys.dhcp-asset-discovery.example. It accepts only the fixed,
+   bounded zeek.dhcp DSL contract and never accepts caller-supplied DSL.
 
 Test:
   sudo -u so-ai-relay sudo -n /usr/local/sbin/export-recent-alerts | jq '.alerts | length'

@@ -126,6 +126,10 @@ SHARED_AGENT_MEMORY_FILE = AGENT_MEMORY_DIR / "shared-agent-memory.md"
 SOC_AI_SETTINGS_FILE = HOME / "n8n-local" / "config" / "ai_model_settings.json"
 ASSET_INVENTORY_FILE = HOME / "n8n-local" / "config" / "asset_inventory.json"
 ASSET_INVENTORY_MAX_BYTES = 1024 * 1024
+DHCP_ASSET_DISCOVERY_STATE_FILE = (
+    HOME / "n8n-local" / "asset-discovery" / "dhcp-observations.json"
+)
+DHCP_ASSET_DISCOVERY_MAX_BYTES = 8 * 1024 * 1024
 ASSET_INVENTORY_CACHE_LOCK = threading.RLock()
 ASSET_INVENTORY_CACHE: dict[str, object] = {
     "signature": None,
@@ -515,6 +519,189 @@ def resolve_asset_ip(
         "valid_from": str(asset.get("valid_from") or ""),
         "valid_until": str(asset.get("valid_until") or ""),
         "source_type": str(asset.get("source_type") or ""),
+    }
+
+
+def dhcp_asset_discovery_response(
+    *,
+    observed_at: dt.datetime | None = None,
+) -> tuple[int, dict]:
+    """Return DHCP candidates reconciled against authoritative inventory."""
+    now = observed_at or dt.datetime.now(dt.timezone.utc)
+    if now.tzinfo is None:
+        now = now.astimezone()
+    now = now.astimezone(dt.timezone.utc)
+    state_path = Path(DHCP_ASSET_DISCOVERY_STATE_FILE)
+    try:
+        metadata = state_path.stat()
+        if not state_path.is_file() or metadata.st_size > DHCP_ASSET_DISCOVERY_MAX_BYTES:
+            raise ValueError("DHCP observation state is not a bounded regular file")
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(state, dict)
+            or state.get("schema") != "onion-sentinel-dhcp-asset-observations-v1"
+            or not isinstance(state.get("collection"), dict)
+            or not isinstance(state.get("observations"), list)
+            or len(state["observations"]) > 5000
+        ):
+            raise ValueError("DHCP observation state failed schema validation")
+    except FileNotFoundError:
+        state = {
+            "updated_at": "",
+            "collection": {
+                "status": "never_run",
+                "last_attempt_at": "",
+                "last_success_at": "",
+                "last_error": "",
+            },
+            "observations": [],
+        }
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        return HTTPStatus.SERVICE_UNAVAILABLE, {
+            "ok": False,
+            "error": f"DHCP discovery state unavailable: {exc}",
+            "collection": {"status": "invalid"},
+            "counts": {
+                "total": 0,
+                "verified_match": 0,
+                "candidate": 0,
+                "conflict": 0,
+                "stale": 0,
+            },
+            "observations": [],
+        }
+
+    inventory, inventory_error = load_asset_inventory_data()
+    records = []
+    counts = {
+        "total": 0,
+        "verified_match": 0,
+        "candidate": 0,
+        "conflict": 0,
+        "stale": 0,
+    }
+    def nonnegative_int(value: object, maximum: int = 2**63 - 1) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        return max(0, min(parsed, maximum))
+
+    def text_list(value: object, maximum_items: int, maximum_length: int) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [
+            str(item)[:maximum_length]
+            for item in value[:maximum_items]
+            if isinstance(item, (str, int, float))
+        ]
+
+    for raw in state.get("observations", []):
+        if not isinstance(raw, dict):
+            continue
+        try:
+            address = str(ipaddress.ip_address(str(raw.get("current_ip") or "").strip()))
+            last_seen = parse_iso_timestamp(raw.get("last_seen"))
+            if last_seen.tzinfo is None:
+                raise ValueError("last_seen lacks offset")
+            last_seen = last_seen.astimezone(dt.timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        resolution = (
+            resolve_asset_ip(address, last_seen, inventory)
+            if not inventory_error
+            else {"status": "inventory_unavailable", "ip": address}
+        )
+        observed_hostname = str(raw.get("hostname") or "").strip().rstrip(".").lower()
+        authoritative_hostnames = [
+            str(value).strip().rstrip(".").lower()
+            for value in resolution.get("hostnames", [])
+            if str(value).strip()
+        ]
+        if resolution.get("status") in {"resolved", "known_without_hostname"}:
+            if (
+                observed_hostname
+                and authoritative_hostnames
+                and observed_hostname not in authoritative_hostnames
+            ):
+                reconciliation = "conflict"
+                detail = "DHCP hostname differs from the authoritative assignment."
+            else:
+                reconciliation = "verified_match"
+                detail = "DHCP address agrees with the authoritative inventory."
+        elif resolution.get("status") == "ambiguous":
+            reconciliation = "conflict"
+            detail = "More than one authoritative asset claims this address."
+        else:
+            reconciliation = "candidate"
+            detail = "Review before adding this observation to the authoritative inventory."
+        lease_expires = None
+        if raw.get("lease_expires_at"):
+            try:
+                lease_expires = parse_iso_timestamp(raw["lease_expires_at"]).astimezone(dt.timezone.utc)
+            except (TypeError, ValueError):
+                lease_expires = None
+        stale = last_seen < now - dt.timedelta(hours=24) and (
+            lease_expires is None or lease_expires < now
+        )
+        counts[reconciliation] += 1
+        if stale:
+            counts["stale"] += 1
+        counts["total"] += 1
+        records.append({
+            "discovery_id": str(raw.get("discovery_id") or "")[:64],
+            "reconciliation": reconciliation,
+            "reconciliation_detail": detail,
+            "stale": stale,
+            "current_ip": address,
+            "ip_addresses": text_list(raw.get("ip_addresses"), 32, 64),
+            "mac_address": str(raw.get("mac_address") or "")[:32],
+            "hostname": str(raw.get("hostname") or "")[:253],
+            "hostnames": text_list(raw.get("hostnames"), 32, 253),
+            "first_seen": str(raw.get("first_seen") or "")[:64],
+            "last_seen": str(raw.get("last_seen") or "")[:64],
+            "lease_expires_at": str(raw.get("lease_expires_at") or "")[:64],
+            "message_types": text_list(raw.get("message_types"), 16, 80),
+            "sensors": text_list(raw.get("sensors"), 16, 160),
+            "observation_count": nonnegative_int(raw.get("observation_count")),
+            "authoritative_asset": {
+                "asset_id": str(resolution.get("asset_id") or ""),
+                "hostname": str(resolution.get("hostname") or ""),
+                "hostnames": authoritative_hostnames,
+                "role": str(resolution.get("role") or ""),
+                "platform": str(resolution.get("platform") or ""),
+                "criticality": str(resolution.get("criticality") or ""),
+            } if resolution.get("status") in {"resolved", "known_without_hostname"} else None,
+        })
+    rank = {"conflict": 0, "candidate": 1, "verified_match": 2}
+    records.sort(
+        key=lambda item: (
+            rank.get(str(item["reconciliation"]), 9),
+            bool(item["stale"]),
+            str(item["last_seen"]),
+        )
+    )
+    collection = state.get("collection") or {}
+    public_collection = {
+        "status": str(collection.get("status") or "unknown")[:32],
+        "last_attempt_at": str(collection.get("last_attempt_at") or "")[:64],
+        "last_success_at": str(collection.get("last_success_at") or "")[:64],
+        "last_error": str(collection.get("last_error") or "")[:300],
+        "last_window": collection.get("last_window") if isinstance(collection.get("last_window"), dict) else {},
+        "last_returned": nonnegative_int(collection.get("last_returned"), 1000),
+        "last_hits_total": nonnegative_int(collection.get("last_hits_total")),
+        "last_truncated": bool(collection.get("last_truncated")),
+    }
+    return HTTPStatus.OK, {
+        "ok": True,
+        "updated_at": str(state.get("updated_at") or ""),
+        "observed_at": format_iso_timestamp(now, utc_z=True),
+        "authoritative_inventory_status": (
+            "unavailable" if inventory_error else str(inventory.get("inventory_status") or "loaded")
+        ),
+        "collection": public_collection,
+        "counts": counts,
+        "observations": records,
     }
 
 
@@ -11594,7 +11781,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/asset-inventory", "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-incidents", "/api/soc-incidents/reanalysis-runs", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-incidents/") and parsed.path.endswith("/detail")) or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith(("/ack", "/escalate"))):
+        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/asset-inventory", "/api/dhcp-asset-discovery", "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-incidents", "/api/soc-incidents/reanalysis-runs", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-incidents/") and parsed.path.endswith("/detail")) or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith(("/ack", "/escalate"))):
             if parsed.path == "/admin" and not self._admin_authenticated():
                 self.send_response(HTTPStatus.FOUND)
                 self.send_header("Location", "/admin/login")
@@ -11911,6 +12098,9 @@ class PortalHandler(BaseHTTPRequestHandler):
             return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/asset-inventory":
             status, data = asset_inventory_response()
+            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if path == "/api/dhcp-asset-discovery":
+            status, data = dhcp_asset_discovery_response()
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/llm-analysis/current":
             return self._send(HTTPStatus.OK, json.dumps(read_llm_current_analysis(), indent=2).encode(), "application/json; charset=utf-8")
