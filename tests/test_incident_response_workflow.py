@@ -103,9 +103,14 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn('<col class="ir-col-network">', page)
         self.assertNotIn('data-ir-sort="destination_port"', page)
         self.assertIn("sort:sortKey,direction:sortDirection", page)
-        self.assertIn('.ir-table col.ir-col-escalated{width:138px}', page)
+        self.assertIn('.ir-table col.ir-col-escalated{width:150px}', page)
         self.assertIn('class="ir-escalated"', page)
-        self.assertIn('.ir-escalated{display:grid;gap:3px;white-space:normal}', page)
+        self.assertIn('.ir-escalated{white-space:nowrap}', page)
+        self.assertIn(
+            '.ir-escalated-date,.ir-escalated-time{display:block;font-variant-numeric:tabular-nums}',
+            page,
+        )
+        self.assertNotIn('.ir-escalated{display:grid', page)
         self.assertIn('.ir-table th:first-child,.ir-case-row td:first-child', page)
         self.assertNotIn('.ir-table th:first-child,.ir-table td:first-child', page)
         self.assertIn('.ir-detail-shell,.ir-detail-content{text-align:left}', page)
