@@ -144,6 +144,10 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn("reviewBadges(item)", page)
         self.assertIn("disputed_pending_human", page)
         self.assertIn("review_required_failed", page)
+        self.assertIn(
+            "review_completed_not_authorized'?'Review complete · human decision",
+            page,
+        )
         self.assertIn("reviewerError", page)
         self.assertIn("Freshness:", page)
         self.assertIn("Coverage:", page)
