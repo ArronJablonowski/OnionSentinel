@@ -76,28 +76,6 @@ const controlledEvaluationMode = evaluationModeValue === '1';
 const runtimeReleaseIdValue = String(
   process.env.ONION_SENTINEL_RELEASE_ID || '',
 ).trim();
-const applicationLogPath = process.env.ALERT_STORE_APPLICATION_LOG
-  || path.join(path.dirname(path.dirname(dbPath)), 'logs', 'alert-store-application.jsonl');
-const applicationLogger = createSecurityLogger({
-  file: applicationLogPath,
-  service: 'onion-sentinel-alert-store',
-  releaseId: runtimeReleaseIdValue || 'unversioned',
-  maxBytes: Math.max(
-    1024 * 1024,
-    Number(process.env.ALERT_STORE_APPLICATION_LOG_MAX_BYTES || 10 * 1024 * 1024),
-  ),
-  backups: Math.max(
-    1,
-    Math.min(20, Number(process.env.ALERT_STORE_APPLICATION_LOG_BACKUPS || 5)),
-  ),
-});
-applicationLogger.captureConsole();
-applicationLogger.log('info', 'process.starting', {
-  runtime_mode: controlledEvaluationMode ? 'controlled-evaluation' : 'production',
-  database_path: dbPath,
-  listen_host: host,
-  listen_port: port,
-});
 const controlledEvaluationToken = String(
   process.env.ONION_SENTINEL_EVALUATION_TOKEN || '',
 ).trim();
@@ -175,6 +153,31 @@ if (controlledEvaluationMode) {
     );
   }
 }
+// Validate the complete controlled-runtime boundary before creating a log
+// directory or any other external state. A malformed evaluation environment
+// must fail closed without deriving a path such as /logs from a missing DB.
+const applicationLogPath = process.env.ALERT_STORE_APPLICATION_LOG
+  || path.join(path.dirname(path.dirname(dbPath)), 'logs', 'alert-store-application.jsonl');
+const applicationLogger = createSecurityLogger({
+  file: applicationLogPath,
+  service: 'onion-sentinel-alert-store',
+  releaseId: runtimeReleaseIdValue || 'unversioned',
+  maxBytes: Math.max(
+    1024 * 1024,
+    Number(process.env.ALERT_STORE_APPLICATION_LOG_MAX_BYTES || 10 * 1024 * 1024),
+  ),
+  backups: Math.max(
+    1,
+    Math.min(20, Number(process.env.ALERT_STORE_APPLICATION_LOG_BACKUPS || 5)),
+  ),
+});
+applicationLogger.captureConsole();
+applicationLogger.log('info', 'process.starting', {
+  runtime_mode: controlledEvaluationMode ? 'controlled-evaluation' : 'production',
+  database_path: dbPath,
+  listen_host: host,
+  listen_port: port,
+});
 const telegramBotToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const telegramChatId = (process.env.TELEGRAM_CHAT_ID || '').trim();
 const maxRequestBytes = Math.max(1024, Number(process.env.ALERT_STORE_MAX_REQUEST_BYTES || 10 * 1024 * 1024));
@@ -9676,6 +9679,7 @@ function pcapCandidateFromRow(row) {
     alert_id: row.alert_id || row.representative_alert_id || null,
     group_id: row.group_id || null,
     group_key: row.group_key || null,
+    event_timestamp: row.timestamp || null,
     first_seen: row.first_seen || row.timestamp || null,
     last_seen: row.last_seen || row.timestamp || null,
     source_ip: row.source_ip || nestedField(alertJson, 'source.ip') || nestedField(rawEventJson, 'source.ip') || null,
@@ -9731,8 +9735,19 @@ function normalizePcapRequest(payload, candidate = {}) {
   if (!sourceIp || !destinationIp) throw new Error('pcap request requires source_ip and destination_ip');
   const destinationPort = integerField(merged.destination_port);
   const sourcePort = integerField(merged.source_port);
-  const firstSeen = normalizeTimestampValue(merged.first_seen || merged.timestamp || merged.last_seen);
-  const lastSeen = normalizeTimestampValue(merged.last_seen || merged.timestamp || merged.first_seen);
+  // An exact representative alert is anchored to its immutable event
+  // timestamp. first_seen/last_seen are ingestion/rollup metadata and can move
+  // forward when an old document is replayed; using them would request a PCAP
+  // window that does not contain the selected packet.
+  const selectedEventTimestamp = normalizeTimestampValue(
+    candidate.event_timestamp || candidate.timestamp,
+  );
+  const firstSeen = selectedEventTimestamp || normalizeTimestampValue(
+    merged.first_seen || merged.timestamp || merged.last_seen,
+  );
+  const lastSeen = selectedEventTimestamp || normalizeTimestampValue(
+    merged.last_seen || merged.timestamp || merged.first_seen,
+  );
   if (!firstSeen || !lastSeen) throw new Error('pcap request requires first_seen and last_seen timestamps');
   const requestedWindow = Number(merged.max_window_seconds || pcapRequestDefaultWindowSeconds);
   const maxWindowSeconds = Math.min(

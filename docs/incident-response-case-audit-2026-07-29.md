@@ -137,6 +137,16 @@ reducing `authorized_benign` to `benign`/`unknown` and changing `no_action` to
 monitor/investigate. The durable top-level response did not consistently
 become disputed/inconclusive after those material disagreements.
 
+### Exact PCAP requests used mutable rollup timestamps
+
+The representative alert row can retain the immutable original `timestamp`
+while `first_seen`/`last_seen` move forward after replay or rollup. The audit
+requests were tied to the exact alert ID and returned the correct alert
+capture, but their request metadata displayed the later rollup time. The
+parser's Zeek/TShark coverage timestamps and exact alert ID establish the
+completed captures' actual packet times. Future exact-alert PCAP requests now
+bind both window endpoints to the database-owned event `timestamp`.
+
 ### Query-language labels
 
 No reviewed case was found to have truthfully executed KQL while falsely
@@ -175,6 +185,8 @@ calling it OSQuery. The recurring labels were generally correct:
    top-level state for human review.
 8. Prompt instructions now state the exact KQL/OQL/DSL/OSQuery execution
    distinctions.
+9. Exact-alert PCAP requests now use the immutable selected-event timestamp
+   instead of mutable ingestion `first_seen`/`last_seen` rollup values.
 
 ## Remaining blockers
 

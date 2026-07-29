@@ -217,6 +217,61 @@ class AlertStorePcapRetryTest(unittest.TestCase):
             payload,
         )
 
+    def test_exact_alert_pcap_uses_event_time_not_later_ingest_rollup(
+        self,
+    ) -> None:
+        alert_id = "synthetic-replayed-exact-pcap"
+        event_time = "2026-07-16  08:00:00-06:00"
+        replay_time = "2026-07-18  10:30:00-06:00"
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as connection:
+            connection.execute(
+                """
+                INSERT INTO alerts (
+                  alert_id, first_seen, last_seen, timestamp, rule_name,
+                  source_ip, source_port, destination_ip, destination_port,
+                  transport_protocol, triage_level, filter_status, alert_json
+                ) VALUES (?, ?, ?, ?, 'Synthetic replayed alert',
+                          '192.0.2.10', 49152, '198.51.100.20', 443,
+                          'tcp', 'high', 'accepted', ?)
+                """,
+                (
+                    alert_id,
+                    replay_time,
+                    replay_time,
+                    event_time,
+                    json.dumps(
+                        {
+                            "alert_id": alert_id,
+                            "timestamp": event_time,
+                            "network": {
+                                "community_id": "1:replayed-flow=",
+                            },
+                        }
+                    ),
+                ),
+            )
+            connection.commit()
+
+        created = self.post(
+            "/pcap/request",
+            {
+                "alert_id": alert_id,
+                "reason": "Exact representative alert PCAP",
+                "requested_by": "unit-test",
+                # Caller-supplied rollup values cannot move the exact alert
+                # away from its database-bound event timestamp.
+                "first_seen": replay_time,
+                "last_seen": replay_time,
+            },
+        )
+
+        request = created["request"]
+        self.assertEqual(request["first_seen"], event_time)
+        self.assertEqual(request["last_seen"], event_time)
+        self.assertEqual(request["source_port"], 49152)
+        self.assertEqual(request["destination_port"], 443)
+        self.assertEqual(request["community_id"], "1:replayed-flow=")
+
     def test_retry_preserves_progress_honors_backoff_and_exhausts(self) -> None:
         created = self.post(
             "/pcap/request",
