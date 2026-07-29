@@ -65,6 +65,7 @@ from dashboard_system_health_components import (  # noqa: E402
     inject_system_health_assets,
     system_health_page_section,
 )
+from dashboard_reactive_tables import inject_reactive_table_assets  # noqa: E402
 from jsonl_log import JsonlLogIndex  # noqa: E402
 
 HOME = Path.home()
@@ -4197,8 +4198,31 @@ REPORTS_PAGE_ASSETS = '''
   loadCurrent();
   loadLogs(true);
   setInterval(renderCurrentRuntime, 1000);
-  setInterval(loadCurrent, 5000);
-  setInterval(() => loadLogs(false), 15000);
+  const reportsLiveRefresh = () => Promise.all([loadCurrent(), loadLogs(false)]);
+  if (window.OnionSentinelReactiveTables) {
+    window.OnionSentinelReactiveTables.register('llm-analysis-tables', reportsLiveRefresh, {intervalMs: 4000});
+  } else {
+    setInterval(reportsLiveRefresh, 4000);
+  }
+})();
+</script>
+'''
+
+
+ALERTS_REACTIVE_FALLBACK = '''
+<script>
+(() => {
+  const runtime = window.OnionSentinelReactiveTables;
+  const refreshButton = document.querySelector('#alerts-refresh');
+  if (!runtime || !refreshButton) return;
+  runtime.register('soc-alerts-live-stream', () => {
+    if (window.__socEventsConnected) return;
+    const page = document.querySelector('#api-page-select');
+    const modalOpen = document.querySelector('#suppress-modal')?.hidden === false
+      || document.querySelector('#analyst-adjudication-modal')?.hidden === false;
+    if ((page && page.value !== '1') || modalOpen || document.querySelector('tbody.report-row-group.expanded')) return;
+    refreshButton.click();
+  }, {intervalMs: 5000});
 })();
 </script>
 '''
@@ -5599,7 +5623,7 @@ def incident_response_page_section() -> str:
       const errorBox=document.getElementById('ir-error');
       const reanalyzeAll=document.getElementById('ir-reanalyze-all');
       const reanalysisProgress=document.getElementById('ir-reanalysis-progress');
-      let page=1,pages=1,incidents=[],openCase='',sortKey='priority',sortDirection='desc';
+      let page=1,pages=1,incidents=[],openCase='',sortKey='priority',sortDirection='desc',loadPromise=null;
       const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
       const severity=item=>String(item.triage_level||item.severity_label||'informational').toLowerCase().replace(/[^a-z]/g,'')||'informational';
       const label=value=>String(value||'unknown').replaceAll('_',' ');
@@ -5840,6 +5864,7 @@ def incident_response_page_section() -> str:
         await loadDetail(item,targets);
       }
       function render(payload){
+        const expandedCase=openCase;
         incidents=Array.isArray(payload.incidents)?payload.incidents:[];pages=Math.max(1,Number(payload.pages||1));page=Math.min(Math.max(1,Number(payload.page||1)),pages);openCase='';
         sortKey=String(payload.sort||sortKey);sortDirection=String(payload.direction||sortDirection)==='asc'?'asc':'desc';
         document.querySelectorAll('[data-ir-sort]').forEach(button=>{const active=button.dataset.irSort===sortKey;if(active)button.setAttribute('aria-sort',sortDirection==='asc'?'ascending':'descending');else button.removeAttribute('aria-sort')});
@@ -5852,20 +5877,33 @@ def incident_response_page_section() -> str:
         body.innerHTML=incidents.length?incidents.map(rowHtml).join(''):'<tr><td colspan="9" class="ir-loading">No incident cases match this view.</td></tr>';
         mobile.innerHTML=incidents.length?incidents.map(mobileHtml).join(''):'<div class="ir-loading">No incident cases match this view.</div>';
         pageLabel.textContent=`Page ${page} of ${pages} | ${Number(payload.total||0)} case(s)`;previous.disabled=page<=1;next.disabled=page>=pages;
+        if(expandedCase&&incidents.some(item=>item.case_id===expandedCase))void toggleCase(expandedCase);
       }
-      async function load(){
-        errorBox.hidden=true;
-        try{
-          const params=new URLSearchParams({page:String(page),per_page:pageSize.value,status:filter.value,sort:sortKey,direction:sortDirection});
-          const response=await fetch(`/api/soc-incidents?${params}`,{cache:'no-store'});const payload=await response.json();
-          if(!response.ok||payload.ok===false)throw new Error(payload.error||`HTTP ${response.status}`);render(payload);
-        }catch(error){errorBox.textContent=`Incident Response queue unavailable: ${error.message}`;errorBox.hidden=false;body.innerHTML='<tr><td colspan="9" class="ir-loading">Incident cases could not be loaded.</td></tr>';mobile.innerHTML=''}
+      function load(){
+        if(loadPromise)return loadPromise;
+        loadPromise=(async()=>{
+          errorBox.hidden=true;
+          try{
+            const params=new URLSearchParams({page:String(page),per_page:pageSize.value,status:filter.value,sort:sortKey,direction:sortDirection});
+            const response=await fetch(`/api/soc-incidents?${params}`,{cache:'no-store'});const payload=await response.json();
+            if(!response.ok||payload.ok===false)throw new Error(payload.error||`HTTP ${response.status}`);render(payload);
+          }catch(error){errorBox.textContent=`Incident Response queue unavailable: ${error.message}`;errorBox.hidden=false;body.innerHTML='<tr><td colspan="9" class="ir-loading">Incident cases could not be loaded.</td></tr>';mobile.innerHTML=''}
+          finally{loadPromise=null}
+        })();
+        return loadPromise;
       }
       document.getElementById('incident-response-view').addEventListener('click',event=>{const reanalysis=event.target.closest('[data-reanalyze-case]');if(reanalysis){event.preventDefault();event.stopPropagation();queueCaseReanalysis(reanalysis.dataset.reanalyzeCase,reanalysis);return}const row=event.target.closest('.ir-case-row');const card=event.target.closest('.ir-mobile-card');if(row)toggleCase(row.dataset.caseId);else if(card&&event.target.closest('.ir-mobile-toggle'))toggleCase(card.dataset.mobileCase)});
       document.getElementById('incident-response-view').addEventListener('keydown',event=>{const row=event.target.closest('.ir-case-row');if(row&&(event.key==='Enter'||event.key===' ')){event.preventDefault();toggleCase(row.dataset.caseId)}});
       document.addEventListener('onion-sentinel:adjudicated',event=>{if(event.detail?.caseId){document.querySelectorAll('.ir-detail-content').forEach(target=>delete target.dataset.loaded);load()}});
       document.querySelectorAll('[data-ir-sort]').forEach(button=>button.addEventListener('click',()=>{const nextSort=button.dataset.irSort||'updated';if(sortKey===nextSort)sortDirection=sortDirection==='asc'?'desc':'asc';else{sortKey=nextSort;sortDirection=['alert','source','destination','status','agent'].includes(nextSort)?'asc':'desc'}page=1;load()}));
-      filter.addEventListener('change',()=>{page=1;load()});pageSize.addEventListener('change',()=>{page=1;load()});previous.addEventListener('click',()=>{if(page>1){page-=1;load()}});next.addEventListener('click',()=>{if(page<pages){page+=1;load()}});reanalyzeAll?.addEventListener('click',queueAllReanalysis);load();loadReanalysisProgress();window.setInterval(()=>loadReanalysisProgress(),5000);
+      filter.addEventListener('change',()=>{page=1;load()});pageSize.addEventListener('change',()=>{page=1;load()});previous.addEventListener('click',()=>{if(page>1){page-=1;load()}});next.addEventListener('click',()=>{if(page<pages){page+=1;load()}});reanalyzeAll?.addEventListener('click',queueAllReanalysis);load();loadReanalysisProgress();
+      const incidentLiveRefresh=()=>Promise.all([load(),loadReanalysisProgress()]);
+      const incidentCanRefresh=()=>document.getElementById('analyst-adjudication-modal')?.hidden!==false;
+      if(window.OnionSentinelReactiveTables){
+        window.OnionSentinelReactiveTables.register('incident-response-cases',incidentLiveRefresh,{intervalMs:3000,when:incidentCanRefresh});
+      }else{
+        window.setInterval(()=>{if(incidentCanRefresh())incidentLiveRefresh()},3000);
+      }
     })();
     </script>'''
 
@@ -5957,7 +5995,7 @@ def asset_inventory_page_section() -> str:
       const dhcpStatus=document.getElementById('dhcp-discovery-status');
       const dhcpError=document.getElementById('dhcp-discovery-error');
       const dhcpBadge=document.getElementById('dhcp-collection-badge');
-      let assets=[];
+      let assets=[],assetLoadPromise=null,dhcpLoadPromise=null;
       const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
       const values=(items,className='')=>Array.isArray(items)&&items.length?`<span class="asset-values">${items.map(value=>`<code class="${className}">${esc(value)}</code>`).join('')}</span>`:'<span class="asset-empty">Not registered</span>';
       const timestamp=value=>{const text=String(value||'').trim();return text?esc(text.replace('T','  ')):'Open-ended'};
@@ -5971,9 +6009,11 @@ def asset_inventory_page_section() -> str:
         body.innerHTML=filtered.length?filtered.map(row).join(''):'<tr><td colspan="8" class="ir-loading">No current assets match this search.</td></tr>';
         status.textContent=`Showing ${filtered.length} of ${assets.length} current asset(s). Inventory identity is time-scoped and operator supplied.`;
       }
-      async function load(){
-        errorBox.hidden=true;
-        try{
+      function load(){
+        if(assetLoadPromise)return assetLoadPromise;
+        assetLoadPromise=(async()=>{
+          errorBox.hidden=true;
+          try{
           const response=await fetch('/api/asset-inventory',{cache:'no-store'});
           const payload=await response.json();
           if(!response.ok||payload.ok===false)throw new Error(payload.error||`HTTP ${response.status}`);
@@ -5986,17 +6026,21 @@ def asset_inventory_page_section() -> str:
           const requested=new URLSearchParams(location.search).get('asset');
           if(requested)search.value=requested;
           render();
-        }catch(error){
+          }catch(error){
           errorBox.textContent=`Asset inventory unavailable: ${error.message}`;
           errorBox.hidden=false;
           body.innerHTML='<tr><td colspan="8" class="ir-loading">Known assets could not be loaded.</td></tr>';
           status.textContent='Inventory status unavailable.';
-        }
+          }finally{assetLoadPromise=null}
+        })();
+        return assetLoadPromise;
       }
       const dhcpRow=item=>{const state=String(item.reconciliation||'candidate');const authority=item.authoritative_asset;return `<tr><td><span class="dhcp-reconciliation dhcp-${esc(state)}">${esc(state.replace('_',' '))}</span>${item.stale?'<span class="dhcp-stale">Stale observation</span>':''}<span class="asset-muted">${esc(item.reconciliation_detail||'')}</span></td><td>${values([item.current_ip],'dhcp-ip')}</td><td>${values(item.hostname?[item.hostname]:[],'asset-hostname')}</td><td>${values(item.mac_address?[item.mac_address]:[])}</td><td>${authority?`<strong class="asset-name">${esc(authority.asset_id)}</strong><span class="asset-muted">${esc(authority.hostname||'No authoritative hostname')}</span>`:'<span class="asset-empty">Not registered</span>'}</td><td class="asset-validity"><span class="asset-muted">Lease expires</span>${timestamp(item.lease_expires_at)}<span class="asset-muted">Last seen</span>${timestamp(item.last_seen)}</td><td><strong class="asset-name">${Number(item.observation_count||0)} event(s)</strong><span class="asset-muted">${esc((item.message_types||[]).join(', ')||'Message type unavailable')}</span><span class="asset-muted">${esc((item.sensors||[]).join(', ')||'Sensor unavailable')}</span></td></tr>`};
-      async function loadDhcp(){
-        dhcpError.hidden=true;
-        try{
+      function loadDhcp(){
+        if(dhcpLoadPromise)return dhcpLoadPromise;
+        dhcpLoadPromise=(async()=>{
+          dhcpError.hidden=true;
+          try{
           const response=await fetch('/api/dhcp-asset-discovery',{cache:'no-store'});
           const payload=await response.json();
           if(!response.ok||payload.ok===false)throw new Error(payload.error||`HTTP ${response.status}`);
@@ -6013,15 +6057,23 @@ def asset_inventory_page_section() -> str:
           const warning=collection.last_error?` ${collection.last_error}`:'';
           dhcpStatus.textContent=`Collector status: ${collectionState}.${last}${warning}`;
           dhcpBody.innerHTML=items.length?items.map(dhcpRow).join(''):'<tr><td colspan="7" class="ir-loading">No DHCP identities have been observed yet. The restricted relay collector may still need to be enabled.</td></tr>';
-        }catch(error){
+          }catch(error){
           dhcpError.textContent=`DHCP discovery unavailable: ${error.message}`;
           dhcpError.hidden=false;
           dhcpBadge.textContent='unavailable';
           dhcpStatus.textContent='DHCP collection status unavailable.';
           dhcpBody.innerHTML='<tr><td colspan="7" class="ir-loading">DHCP observations could not be loaded.</td></tr>';
-        }
+          }finally{dhcpLoadPromise=null}
+        })();
+        return dhcpLoadPromise;
       }
-      search.addEventListener('input',render);sort.addEventListener('change',render);direction.addEventListener('change',render);load();loadDhcp();window.setInterval(loadDhcp,60000);
+      search.addEventListener('input',render);sort.addEventListener('change',render);direction.addEventListener('change',render);load();loadDhcp();
+      const assetLiveRefresh=()=>Promise.all([load(),loadDhcp()]);
+      if(window.OnionSentinelReactiveTables){
+        window.OnionSentinelReactiveTables.register('asset-inventory-tables',assetLiveRefresh,{intervalMs:5000});
+      }else{
+        window.setInterval(assetLiveRefresh,5000);
+      }
     })();
     </script>'''
 
@@ -6378,7 +6430,7 @@ def threat_hunt_row(report: AlertReport, index: int) -> str:
     hypothesis = ai_summary_for(report)
     priority = 'Immediate' if report.criticality_rank >= 4 else 'Review'
     return f'''
-    <tbody class="threat-hunt-group">
+    <tbody class="threat-hunt-group" data-hunt-key="{html.escape(report.digest)}">
       <tr class="threat-hunt-row" tabindex="0" aria-expanded="false" data-hunt-toggle>
         <td><span class="severity-label severity-text-{html.escape(criticality_class(report.criticality))}">{html.escape(report.criticality)}</span></td>
         <td><strong>{html.escape(report.rule_name or report.title)}</strong><code>{html.escape(route)}</code></td>
@@ -8398,24 +8450,38 @@ SIEM_ENGINEERING_EXPANSION_CSS = '''
 SIEM_ENGINEERING_JS = '''
 <script>
 (() => {
-  document.querySelectorAll('[data-siem-toggle]').forEach(row => {
+  const root = document.querySelector('.siem-engineering-view');
+  if (!root) return;
+  const toggle = row => {
     const detailId = row.getAttribute('aria-controls') || '';
     const detail = detailId ? document.getElementById(detailId) : null;
     if (!detail) return;
-    const setExpanded = expanded => {
-      row.setAttribute('aria-expanded', String(expanded));
-      detail.hidden = !expanded;
-    };
-    row.addEventListener('click', event => {
-      if (event.target.closest('a,button,input,select,textarea,summary')) return;
-      setExpanded(row.getAttribute('aria-expanded') !== 'true');
-    });
-    row.addEventListener('keydown', event => {
-      if (event.key !== 'Enter' && event.key !== ' ') return;
-      event.preventDefault();
-      setExpanded(row.getAttribute('aria-expanded') !== 'true');
-    });
+    const expanded = row.getAttribute('aria-expanded') !== 'true';
+    row.setAttribute('aria-expanded', String(expanded));
+    detail.hidden = !expanded;
+  };
+  root.addEventListener('click', event => {
+    if (event.target.closest('a,button,input,select,textarea,summary')) return;
+    const row = event.target.closest('[data-siem-toggle]');
+    if (row) toggle(row);
   });
+  root.addEventListener('keydown', event => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const row = event.target.closest('[data-siem-toggle]');
+    if (!row) return;
+    event.preventDefault();
+    toggle(row);
+  });
+  window.OnionSentinelReactiveTables?.register('siem-engineering-tables', () =>
+    window.OnionSentinelReactiveTables.refreshFragment('.siem-engineering-view', {
+      capture: current => [...current.querySelectorAll('[data-siem-toggle][aria-expanded="true"]')]
+        .map(row => row.getAttribute('aria-controls')).filter(Boolean),
+      restore: (current, expanded) => (expanded || []).forEach(detailId => {
+        const row = current.querySelector(`[data-siem-toggle][aria-controls="${CSS.escape(detailId)}"]`);
+        const detail = current.querySelector(`#${CSS.escape(detailId)}`);
+        if (row && detail) { row.setAttribute('aria-expanded', 'true'); detail.hidden = false; }
+      })
+    }), {intervalMs: 5000});
 })();
 </script>
 '''
@@ -8443,38 +8509,53 @@ THREAT_HUNTER_CSS = '''
 THREAT_HUNTER_JS = '''
 <script>
 (() => {
-  document.querySelectorAll('[data-hunt-toggle]').forEach(row => {
-    row.addEventListener('click', event => {
-      if (event.target.closest('button')) return;
-      const detail = row.parentElement?.querySelector('.threat-hunt-detail');
-      const expanded = row.getAttribute('aria-expanded') === 'true';
-      row.setAttribute('aria-expanded', String(!expanded));
-      if (detail) detail.hidden = expanded;
-    });
-    row.addEventListener('keydown', event => {
-      if (event.key !== 'Enter' && event.key !== ' ') return;
-      event.preventDefault();
-      row.click();
-    });
-  });
-  document.querySelectorAll('[data-copy-target]').forEach(button => {
-    button.addEventListener('click', async event => {
+  const root = document.querySelector('.threat-hunter-view');
+  if (!root) return;
+  const toggle = row => {
+    const detail = row.parentElement?.querySelector('.threat-hunt-detail');
+    const expanded = row.getAttribute('aria-expanded') === 'true';
+    row.setAttribute('aria-expanded', String(!expanded));
+    if (detail) detail.hidden = expanded;
+  };
+  root.addEventListener('click', async event => {
+    const copyButton = event.target.closest('[data-copy-target]');
+    if (copyButton) {
       event.preventDefault();
       event.stopPropagation();
-      const target = document.getElementById(button.dataset.copyTarget || '');
+      const target = document.getElementById(copyButton.dataset.copyTarget || '');
       const text = target?.textContent || '';
       if (!text) return;
       try {
         await navigator.clipboard.writeText(text);
-        const original = button.textContent;
-        button.textContent = 'Copied';
-        window.setTimeout(() => { button.textContent = original; }, 1200);
+        copyButton.textContent = 'Copied';
       } catch (_) {
-        button.textContent = 'Copy failed';
-        window.setTimeout(() => { button.textContent = 'Copy'; }, 1200);
+        copyButton.textContent = 'Copy failed';
       }
-    });
+      window.setTimeout(() => { copyButton.textContent = 'Copy'; }, 1200);
+      return;
+    }
+    const row = event.target.closest('[data-hunt-toggle]');
+    if (row) toggle(row);
   });
+  root.addEventListener('keydown', event => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const row = event.target.closest('[data-hunt-toggle]');
+    if (!row) return;
+    event.preventDefault();
+    toggle(row);
+  });
+  window.OnionSentinelReactiveTables?.register('threat-hunter-tables', () =>
+    window.OnionSentinelReactiveTables.refreshFragment('.threat-hunter-view', {
+      capture: current => [...current.querySelectorAll('.threat-hunt-group')]
+        .filter(group => group.querySelector('[data-hunt-toggle]')?.getAttribute('aria-expanded') === 'true')
+        .map(group => group.dataset.huntKey).filter(Boolean),
+      restore: (current, expanded) => (expanded || []).forEach(key => {
+        const group = current.querySelector(`.threat-hunt-group[data-hunt-key="${CSS.escape(key)}"]`);
+        const row = group?.querySelector('[data-hunt-toggle]');
+        const detail = group?.querySelector('.threat-hunt-detail');
+        if (row && detail) { row.setAttribute('aria-expanded', 'true'); detail.hidden = false; }
+      })
+    }), {intervalMs: 5000});
 })();
 </script>
 '''
@@ -8671,7 +8752,7 @@ def render_static_page(shell_html: str, page_key: str, reports: list[AlertReport
     active_count = active_alert_count(reports)
     active_severity = active_alert_highest_severity_class(reports)
     data_view = 'alerts' if page_key == 'alerts' else 'overview'
-    rendered = shell_html
+    rendered = inject_reactive_table_assets(shell_html)
     rendered = rendered.replace(
         "dashboard-metrics.css?v=20260712-responsive-qa",
         "dashboard-metrics.css?v=20260717-pre-soak-qa",
@@ -8696,6 +8777,8 @@ def render_static_page(shell_html: str, page_key: str, reports: list[AlertReport
     elif page_key == 'alerts':
         rendered = remove_between_markers(rendered, overview_marker, alerts_marker)
         rendered = rendered.replace(alerts_marker, '<section id="alerts-view" class="view-section alerts-view active" aria-label="SOC alert table">', 1)
+        if ALERTS_REACTIVE_FALLBACK not in rendered:
+            rendered = rendered.replace('</body>', ALERTS_REACTIVE_FALLBACK + '</body>', 1)
         if ALERTS_PAGE_SCROLL_STABILIZER not in rendered:
             rendered = rendered.replace('</body>', ALERTS_PAGE_SCROLL_STABILIZER + '</body>', 1)
         if PINNED_ALERT_ROW_SCROLL_SYNC not in rendered:

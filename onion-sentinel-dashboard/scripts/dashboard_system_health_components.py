@@ -429,7 +429,11 @@ SYSTEM_HEALTH_JS = '''
   });
   refreshButton?.addEventListener('click', loadHealth);
   loadHealth();
-  setInterval(loadHealth, 60000);
+  if (window.OnionSentinelReactiveTables) {
+    window.OnionSentinelReactiveTables.register('system-health-tables', loadHealth, {intervalMs: 5000});
+  } else {
+    setInterval(loadHealth, 5000);
+  }
 })();
 </script>
 '''
