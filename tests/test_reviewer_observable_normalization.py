@@ -209,6 +209,105 @@ class ReviewerObservableNormalizationTests(unittest.TestCase):
                 review_package,
             )
 
+    def test_typed_correlation_community_id_is_allowlisted(self) -> None:
+        community_id = "1:8nfubnGW7A3sCNxytkJZfrhhsE4="
+        review_package = self.review_package(
+            {
+                "alert": {"alert_id": "typed-correlation-community-id"},
+                "correlated_alert_context": {
+                    "candidates": [
+                        {
+                            "shared_observables": [
+                                {
+                                    "type": "community_id",
+                                    "value": community_id,
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "investigation_query_capability": {
+                    "permitted_event_tuples": [
+                        {"community_id": community_id}
+                    ]
+                },
+            }
+        )
+
+        self.assertIn(
+            {"kind": "community_id", "value": community_id},
+            review_package["review_contract"]["allowed_observables"],
+        )
+        validated = self.runner.validate_reviewer_response(
+            self.response(
+                review_package,
+                summary=f"The shared Community ID was {community_id}.",
+                observables_used=[
+                    {"kind": "community_id", "value": community_id}
+                ],
+            ),
+            review_package,
+        )
+        self.assertIn(
+            {"kind": "community_id", "value": community_id},
+            validated["observables_used"],
+        )
+
+    def test_shell_script_filename_is_not_mistaken_for_fqdn(self) -> None:
+        review_package = self.review_package(
+            {
+                "alert": {"alert_id": "shell-script-filename"},
+                "incident_response_evidence": {
+                    "osquery_results": [
+                        {
+                            "rows": [
+                                {
+                                    "command": (
+                                        "/opt/so/saltstack/default/salt/soc/"
+                                        "files/bin/salt-relay.sh &"
+                                    )
+                                }
+                            ]
+                        }
+                    ]
+                },
+            }
+        )
+
+        validated = self.runner.validate_reviewer_response(
+            self.response(
+                review_package,
+                summary=(
+                    "The appliance startup snapshot included salt-relay.sh."
+                ),
+            ),
+            review_package,
+        )
+        self.assertEqual(validated["observables_used"], [])
+        self.assertEqual(
+            review_package["review_contract"][
+                "allowed_non_domain_artifact_tokens"
+            ],
+            ["salt-relay.sh"],
+        )
+
+        for foreign_domain in ("foreign.example", "foreign-relay.sh"):
+            with self.subTest(foreign_domain=foreign_domain):
+                with self.assertRaisesRegex(
+                    self.runner.ReviewerValidationError,
+                    "foreign domain or FQDN",
+                ):
+                    self.runner.validate_reviewer_response(
+                        self.response(
+                            review_package,
+                            summary=(
+                                "The startup snapshot allegedly contacted "
+                                f"{foreign_domain}."
+                            ),
+                        ),
+                        review_package,
+                    )
+
     def test_generic_type_value_pair_cannot_exempt_a_foreign_domain(
         self,
     ) -> None:

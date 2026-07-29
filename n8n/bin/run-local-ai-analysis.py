@@ -3686,6 +3686,18 @@ REVIEW_TAXONOMY_FIELD_PATHS = frozenset(
         "event_module",
     }
 )
+REVIEW_ARTIFACT_FIELD_PATHS = frozenset(
+    {
+        "command",
+        "executable",
+        "path",
+        "process_command_line",
+        "process_executable",
+        "process_path",
+        "script",
+    }
+)
+REVIEW_ARTIFACT_SUFFIXES = frozenset({"sh"})
 
 
 def _bounded_reference(value: Any) -> str:
@@ -4393,12 +4405,14 @@ def reviewer_observable_catalog(prompt_package: dict[str, Any]) -> list[dict[str
     for section in (
         "alert",
         "grouped_alert_context",
+        "correlated_alert_context",
         "public_enrichment",
         "pcap_evidence",
         "detection_validation",
         "asset_context",
         "analyst_state",
         "incident_response_evidence",
+        "investigation_query_capability",
         "investigation_query_results",
         "live_osquery_evidence",
     ):
@@ -4475,6 +4489,59 @@ def reviewer_non_domain_taxonomy_catalog(
         "live_osquery_evidence",
     ):
         visit(prompt_package.get(section), ())
+    return sorted(found)
+
+
+def reviewer_non_domain_artifact_catalog(
+    prompt_package: dict[str, Any],
+) -> list[str]:
+    """Return exact script-like names from collector-owned command/path fields."""
+    found: set[str] = set()
+
+    def field_segment(value: Any) -> str:
+        return re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            str(value or "").strip().lower(),
+        ).strip("_")
+
+    def add(value: Any) -> None:
+        for candidate in REVIEW_DOMAIN_RE.findall(str(value or "")):
+            text = candidate.lower()
+            if text.rsplit(".", 1)[-1] in REVIEW_ARTIFACT_SUFFIXES:
+                found.add(text)
+
+    def visit(value: Any, path: tuple[str, ...] = ()) -> None:
+        if isinstance(value, dict):
+            for raw_key, child in value.items():
+                segment = field_segment(raw_key)
+                child_path = path + ((segment,) if segment else ())
+                semantic_path = "_".join(child_path[-2:])
+                if (
+                    isinstance(child, str)
+                    and (
+                        segment in REVIEW_ARTIFACT_FIELD_PATHS
+                        or semantic_path in REVIEW_ARTIFACT_FIELD_PATHS
+                    )
+                ):
+                    add(child)
+                else:
+                    visit(child, child_path)
+        elif isinstance(value, list):
+            for child in value[:1000]:
+                visit(child, path)
+
+    for section in (
+        "alert",
+        "grouped_alert_context",
+        "correlated_alert_context",
+        "pcap_evidence",
+        "detection_validation",
+        "incident_response_evidence",
+        "investigation_query_results",
+        "live_osquery_evidence",
+    ):
+        visit(prompt_package.get(section))
     return sorted(found)
 
 
@@ -10285,6 +10352,7 @@ def independent_reviewer_package(
     # of its values was accidentally reintroduced through allowed_observables.
     observables = reviewer_observable_catalog(review_package)
     non_domain_taxonomy = reviewer_non_domain_taxonomy_catalog(review_package)
+    non_domain_artifacts = reviewer_non_domain_artifact_catalog(review_package)
     response_schema = (
         dict(review_package.get("response_schema"))
         if isinstance(review_package.get("response_schema"), dict)
@@ -10319,6 +10387,7 @@ def independent_reviewer_package(
         "case_id": case_id,
         "allowed_observables": observables,
         "allowed_non_domain_taxonomy_tokens": non_domain_taxonomy,
+        "allowed_non_domain_artifact_tokens": non_domain_artifacts,
         "requirements": [
             "Echo case_id and evidence_hash exactly in review_case_id and review_evidence_hash.",
             (
@@ -10507,11 +10576,32 @@ def validate_reviewer_response(
             "review contract non-domain taxonomy catalog did not match "
             "collector-owned evidence"
         )
+    contracted_non_domain_artifacts = {
+        str(value).strip().lower()
+        for value in (
+            contract.get("allowed_non_domain_artifact_tokens")
+            if isinstance(
+                contract.get("allowed_non_domain_artifact_tokens"),
+                list,
+            )
+            else []
+        )
+        if str(value).strip()
+    }
+    allowed_non_domain_artifacts = set(
+        reviewer_non_domain_artifact_catalog(review_package)
+    )
+    if contracted_non_domain_artifacts != allowed_non_domain_artifacts:
+        errors.append(
+            "review contract non-domain artifact catalog did not match "
+            "collector-owned evidence"
+        )
     narrative_domains = {
         candidate.lower()
         for candidate in REVIEW_DOMAIN_RE.findall(response_text)
         if candidate.lower() not in REVIEW_KNOWN_FIELD_PATHS
         and candidate.lower() not in allowed_non_domain_taxonomy
+        and candidate.lower() not in allowed_non_domain_artifacts
         and candidate.rsplit(".", 1)[-1].lower() not in REVIEW_NON_DOMAIN_SUFFIXES
     }
     foreign_domains = sorted(narrative_domains.difference(allowed_domains))
@@ -10684,6 +10774,9 @@ def validate_reviewer_response(
             ),
             "allowed_non_domain_taxonomy_count": len(
                 allowed_non_domain_taxonomy
+            ),
+            "allowed_non_domain_artifact_count": len(
+                allowed_non_domain_artifacts
             ),
         },
         "evidence_reference_count": len(cited_evidence),
