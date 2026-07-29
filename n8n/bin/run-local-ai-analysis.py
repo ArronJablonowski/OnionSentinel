@@ -7896,16 +7896,53 @@ def deterministic_incident_pivot_requests(
     else:
         packs = ("network_flow", "alert_context")
 
-    anchor_time = str(
-        local.get("anchor_time")
-        or capability.get("anchor_time")
-        or alert.get("timestamp")
-        or ""
-    ).strip()
-    try:
-        anchor = _query_utc(anchor_time, "authorization anchor_time")
-    except InvestigationQueryError:
-        return []
+    anchor: dt.datetime | None = None
+    for candidate in (
+        local.get("anchor_time"),
+        capability.get("anchor_time"),
+    ):
+        if candidate in (None, ""):
+            continue
+        try:
+            anchor = _query_utc(candidate, "authorization anchor_time")
+            break
+        except InvestigationQueryError:
+            continue
+    if anchor is None:
+        envelope = local.get("time_envelope")
+        if isinstance(envelope, dict):
+            try:
+                envelope_start = _query_utc(
+                    envelope.get("start"),
+                    "authorization envelope start",
+                )
+                envelope_end = _query_utc(
+                    envelope.get("end"),
+                    "authorization envelope end",
+                )
+                if envelope_end > envelope_start:
+                    anchor = envelope_start + (
+                        envelope_end - envelope_start
+                    ) / 2
+            except InvestigationQueryError:
+                anchor = None
+    if anchor is None:
+        # Project timestamps use a human-readable double space between the
+        # date and time. Normalize only whitespace before the strict
+        # offset-aware ISO parser; the trusted authorization envelope remains
+        # the preferred source.
+        alert_timestamp = re.sub(
+            r"\s+",
+            " ",
+            str(alert.get("timestamp") or "").strip(),
+        )
+        try:
+            anchor = _query_utc(
+                alert_timestamp,
+                "selected alert timestamp",
+            )
+        except InvestigationQueryError:
+            return []
     window = {
         "start": _query_utc_text(anchor - dt.timedelta(minutes=5)),
         "end": _query_utc_text(anchor + dt.timedelta(minutes=5)),

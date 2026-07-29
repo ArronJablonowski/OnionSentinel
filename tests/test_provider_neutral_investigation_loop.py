@@ -301,6 +301,59 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             ["192.0.2.10", "198.51.100.20"],
         )
 
+    def test_protocol_plan_derives_v1_anchor_from_authorized_envelope(
+        self,
+    ) -> None:
+        package = {
+            "agent_role": "incident-responder",
+            "alert": {
+                "timestamp": "2026-07-24  12:30:00-06:00",
+                "rule_name": "Synthetic TLS SNI detection",
+                "source_ip": "192.0.2.10",
+                "destination_ip": "198.51.100.20",
+                "rule_context": {
+                    "deployed_rule": {"protocol": "tls"},
+                },
+            },
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {
+                    "elastic": {
+                        "enabled": True,
+                        "packs": ["zeek_tls", "zeek_anomalies"],
+                    },
+                },
+            },
+            "_local_investigation_query_context": {
+                "time_envelope": {
+                    "start": "2026-07-23T18:30:00.000Z",
+                    "end": "2026-07-25T18:30:00.000Z",
+                },
+                "permitted_event_tuples": [
+                    {
+                        "event_tuple": {
+                            "source_ip": "192.0.2.10",
+                            "destination_ip": "198.51.100.20",
+                            "community_id": "1:v1-authorized-flow=",
+                        },
+                        "source": "trusted_context",
+                        "evidence_ref": "context:v1-tuple",
+                    },
+                ],
+            },
+        }
+
+        plan = self.runner.deterministic_incident_pivot_requests(package)
+
+        self.assertEqual(len(plan), 2)
+        self.assertEqual(
+            plan[0]["parameters"]["window"],
+            {
+                "start": "2026-07-24T18:25:00.000Z",
+                "end": "2026-07-24T18:35:00.000Z",
+            },
+        )
+
     @staticmethod
     def elastic_request(query_id: str = "pivot-1") -> dict:
         return {
