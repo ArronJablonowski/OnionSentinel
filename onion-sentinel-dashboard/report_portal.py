@@ -66,6 +66,9 @@ SOC_ALERT_STORE_API_URL = os.environ.get("SOC_ALERT_STORE_API_URL", "http://127.
 SOC_ALERT_STORE_EVALUATION_TOKEN = str(
     os.environ.get("ONION_SENTINEL_EVALUATION_TOKEN") or ""
 ).strip()
+SOC_ALERT_DB_WRITE_LOCK = threading.RLock()
+SOC_ALERT_DB_WRITE_RETRY_ATTEMPTS = 5
+SOC_ALERT_DB_WRITE_RETRY_BASE_SECONDS = 0.02
 SOC_ALERT_DASHBOARD_DIR = HOME / "report_portal" / "library" / "Cybersecurity" / "SOC Alerts"
 SOC_ALERT_DETAIL_DIR = SOC_ALERT_DASHBOARD_DIR / "details"
 SOC_ALERT_STATIC_STATUS_FILE = SOC_ALERT_DASHBOARD_DIR / "soc-alerts-status.json"
@@ -6273,8 +6276,8 @@ def save_soc_alert_statuses_to_db(statuses: dict) -> None:
         return
     try:
         with soc_alert_db_write_connect() as conn:
-            ensure_soc_alert_status_table(conn)
             conn.execute("BEGIN IMMEDIATE")
+            ensure_soc_alert_status_table(conn)
             for alert_id, raw_meta in statuses.items():
                 meta = normalize_soc_alert_status_meta(raw_meta)
                 group_id = str(alert_id)
@@ -6350,38 +6353,74 @@ def write_soc_alert_status(alert_id: str, meta: dict) -> None:
     if not SOC_ALERT_STORE_DB.parent.exists():
         return
     normalized = normalize_soc_alert_status_meta(meta)
-    with soc_alert_db_write_connect() as conn:
-        ensure_soc_alert_status_table(conn)
-        conn.execute("BEGIN IMMEDIATE")
-        if not normalized or normalized["status"] == "open":
-            conn.execute("DELETE FROM analyst_alert_group_state WHERE group_id = ?", (alert_id,))
-        else:
-            group_key = str(meta.get("group_key") or "") if isinstance(meta, dict) else ""
-            updated_by = str(meta.get("updated_by") or "")[:80] if isinstance(meta, dict) else ""
-            conn.execute(
-                """
-                INSERT INTO analyst_alert_group_state (
-                  group_id, group_key, status, repeat_count, reason, updated_at, updated_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(group_id) DO UPDATE SET
-                  group_key = excluded.group_key,
-                  status = excluded.status,
-                  repeat_count = excluded.repeat_count,
-                  reason = excluded.reason,
-                  updated_at = excluded.updated_at,
-                  updated_by = excluded.updated_by
-                """,
-                (
-                    alert_id,
-                    group_key,
-                    normalized["status"],
-                    normalized["repeat_count"],
-                    normalized["reason"],
-                    normalized["updated_at"],
-                    updated_by,
-                ),
-            )
-    write_soc_alert_status_json_snapshot(load_soc_alert_statuses_from_db())
+    # Keep the post-commit read and atomic JSON mirror replacement in the same
+    # in-process critical section as the SQLite transaction. Otherwise another
+    # writer can begin journal/DDL setup while this request is opening its
+    # read-only snapshot connection.
+    with SOC_ALERT_DB_WRITE_LOCK:
+        for attempt in range(1, SOC_ALERT_DB_WRITE_RETRY_ATTEMPTS + 1):
+            try:
+                with soc_alert_db_write_connect() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    ensure_soc_alert_status_table(conn)
+                    if not normalized or normalized["status"] == "open":
+                        conn.execute(
+                            "DELETE FROM analyst_alert_group_state WHERE group_id = ?",
+                            (alert_id,),
+                        )
+                    else:
+                        group_key = (
+                            str(meta.get("group_key") or "")
+                            if isinstance(meta, dict)
+                            else ""
+                        )
+                        updated_by = (
+                            str(meta.get("updated_by") or "")[:80]
+                            if isinstance(meta, dict)
+                            else ""
+                        )
+                        conn.execute(
+                            """
+                            INSERT INTO analyst_alert_group_state (
+                              group_id, group_key, status, repeat_count, reason, updated_at, updated_by
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(group_id) DO UPDATE SET
+                              group_key = excluded.group_key,
+                              status = excluded.status,
+                              repeat_count = excluded.repeat_count,
+                              reason = excluded.reason,
+                              updated_at = excluded.updated_at,
+                              updated_by = excluded.updated_by
+                            """,
+                            (
+                                alert_id,
+                                group_key,
+                                normalized["status"],
+                                normalized["repeat_count"],
+                                normalized["reason"],
+                                normalized["updated_at"],
+                                updated_by,
+                            ),
+                        )
+                break
+            except sqlite3.OperationalError as exc:
+                retryable = any(
+                    marker in str(exc).lower()
+                    for marker in (
+                        "database is busy",
+                        "database is locked",
+                        "disk i/o error",
+                    )
+                )
+                if (
+                    not retryable
+                    or attempt >= SOC_ALERT_DB_WRITE_RETRY_ATTEMPTS
+                ):
+                    raise
+                time.sleep(
+                    SOC_ALERT_DB_WRITE_RETRY_BASE_SECONDS * attempt
+                )
+        write_soc_alert_status_json_snapshot(load_soc_alert_statuses_from_db())
 
 
 def soc_alert_status_response() -> dict:
@@ -6937,8 +6976,9 @@ def update_soc_alert_status(payload: dict) -> tuple[bool, dict]:
                     "error": "Required independent review needs explicit analyst adjudication before suppression.",
                     "status": int(HTTPStatus.CONFLICT),
                 }
-        write_soc_alert_status(alert_id, request_payload)
-        return True, soc_alert_status_response()
+        with SOC_ALERT_DB_WRITE_LOCK:
+            write_soc_alert_status(alert_id, request_payload)
+            return True, soc_alert_status_response()
     try:
         result = alert_store_post_json("/analyst-status", request_payload)
     except AlertStoreRequestError as exc:
@@ -6985,20 +7025,30 @@ def soc_alert_db_connect():
 def soc_alert_db_write_connect():
     if not SOC_ALERT_STORE_DB.exists():
         raise FileNotFoundError(f"SOC alert store DB not found: {SOC_ALERT_STORE_DB}")
-    conn = sqlite3.connect(SOC_ALERT_STORE_DB, timeout=SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS)
-    conn.row_factory = sqlite3.Row
-    conn.execute(f"PRAGMA busy_timeout = {SOC_ALERT_DB_BUSY_TIMEOUT_MS}")
-    conn.execute("PRAGMA journal_mode = DELETE")
-    conn.execute("PRAGMA synchronous = FULL")
-    conn.execute("PRAGMA wal_autocheckpoint = 1000")
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    # Portal-side writes are infrequent administrative fallbacks. Serialize
+    # their complete connection lifetime so concurrent requests cannot race
+    # journal-mode setup, idempotent DDL, or transaction start. SQLite's busy
+    # timeout remains the cross-process contention boundary.
+    with SOC_ALERT_DB_WRITE_LOCK:
+        conn = sqlite3.connect(
+            SOC_ALERT_STORE_DB,
+            timeout=SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA busy_timeout = {SOC_ALERT_DB_BUSY_TIMEOUT_MS}")
+        # Preserve the journal mode selected by the database owner. Changing
+        # it per request requires an exclusive lock and can fail when alert
+        # store readers are already attached.
+        conn.execute("PRAGMA synchronous = FULL")
+        conn.execute("PRAGMA wal_autocheckpoint = 1000")
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 def parse_soc_alert_since(value: str) -> str:
