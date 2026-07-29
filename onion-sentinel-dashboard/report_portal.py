@@ -9189,6 +9189,24 @@ def soc_adjudication_history_response(
     return 200, {"ok": True, "review": review, "history": history}
 
 
+def soc_incident_agent_display_state(
+    agent_status: object,
+    analysis_id: object,
+    reviewer_status: object,
+) -> tuple[str, str]:
+    """Distinguish a failed refresh or review from a missing primary analysis."""
+    status = str(agent_status or "queued").strip().lower()
+    has_analysis = bool(str(analysis_id or "").strip())
+    review = str(reviewer_status or "not_requested").strip().lower()
+    if status != "failed":
+        return status, status.replace("_", " ")
+    if not has_analysis:
+        return "analysis_failed", "Analysis failed"
+    if review in {"failed", "invalid"}:
+        return "review_failed", "Primary ready · review failed"
+    return "refresh_failed", "Analysis ready · refresh failed"
+
+
 def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
     """Return one bounded page of durable Incident Response cases.
 
@@ -9539,6 +9557,18 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                     material_disagreement = bool(
                         fallback_review.get("material_disagreement")
                     )
+                reviewer_status = (
+                    fallback_review.get("reviewer_status")
+                    if fallback_review
+                    else reviewer.get("status")
+                ) or "not_requested"
+                agent_display_status, agent_display_label = (
+                    soc_incident_agent_display_state(
+                        item.get("agent_status"),
+                        analysis_id,
+                        reviewer_status,
+                    )
+                )
                 count = max(int(item.get("raw_alert_count") or 0), int(item.get("total_seen_count") or 0))
                 incidents.append({
                     **item,
@@ -9567,14 +9597,13 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                     "analysis_summary": analysis.get("summary") or "",
                     "analysis_confidence": analysis.get("confidence") or "",
                     "analysis_evidence_hash": analysis.get("evidence_hash") or "",
+                    "analysis_available": bool(analysis_id),
+                    "agent_display_status": agent_display_status,
+                    "agent_display_label": agent_display_label,
                     "freshness_status": freshness_status,
                     "coverage_status": coverage_status,
                     "evidence_gap_count": evidence_gap_count,
-                    "reviewer_status": (
-                        fallback_review.get("reviewer_status")
-                        if fallback_review
-                        else reviewer.get("status")
-                    ) or "not_requested",
+                    "reviewer_status": reviewer_status,
                     "reviewer_error": (
                         fallback_review.get("reviewer_error")
                         if fallback_review

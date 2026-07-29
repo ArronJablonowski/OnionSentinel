@@ -30,6 +30,32 @@ def load_module(name: str, path: Path):
 
 
 class IncidentResponseWorkflowTests(unittest.TestCase):
+    def test_incident_agent_display_state_preserves_partial_success(self) -> None:
+        self.assertEqual(
+            self.portal.soc_incident_agent_display_state(
+                "failed", "analysis-1", "failed"
+            ),
+            ("review_failed", "Primary ready · review failed"),
+        )
+        self.assertEqual(
+            self.portal.soc_incident_agent_display_state(
+                "failed", "analysis-1", "not_requested"
+            ),
+            ("refresh_failed", "Analysis ready · refresh failed"),
+        )
+        self.assertEqual(
+            self.portal.soc_incident_agent_display_state(
+                "failed", "", "not_requested"
+            ),
+            ("analysis_failed", "Analysis failed"),
+        )
+        self.assertEqual(
+            self.portal.soc_incident_agent_display_state(
+                "analyzed", "analysis-1", "completed"
+            ),
+            ("analyzed", "analyzed"),
+        )
+
     def test_incident_list_rejects_unallowlisted_sort_parameters(self) -> None:
         status, payload = self.portal.soc_incidents_query_response(
             {"sort": ["updated_at; DROP TABLE alerts"], "direction": ["desc"]}
@@ -110,7 +136,8 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
             page,
         )
         self.assertIn("@keyframes ai-status-analyzing-pulse", page)
-        self.assertGreaterEqual(page.count("ir-agent-${esc(item.agent_status)}"), 2)
+        self.assertGreaterEqual(page.count("ir-agent-${esc(agentState)}"), 2)
+        self.assertIn("item.agent_display_label||label(item.agent_status)", page)
         self.assertIn('colspan="10"', page)
         self.assertIn('id="analyst-adjudication-modal"', page)
         self.assertIn("data-review-case=", page)
