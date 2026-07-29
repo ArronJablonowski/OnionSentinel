@@ -83,7 +83,14 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         keys = [definition[0] for definition in builder.PAGE_DEFS]
 
         self.assertEqual(keys[keys.index("alerts") + 1], "investigations")
-        self.assertEqual(keys[keys.index("investigations") + 1], "system_health")
+        self.assertEqual(
+            keys[keys.index("investigations") + 1],
+            "asset_inventory",
+        )
+        self.assertEqual(
+            keys[keys.index("asset_inventory") + 1],
+            "system_health",
+        )
 
     def test_generated_incident_page_keeps_table_and_lazy_detail_contract(self) -> None:
         builder = load_module("incident_response_render_test_builder", BUILDER_PATH)
@@ -153,6 +160,10 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn("item.agent_display_label||label(item.agent_status)", page)
         self.assertIn('colspan="9"', page)
         self.assertIn("const networkHtml=item=>", page)
+        self.assertIn("const assetIdentityHtml=asset=>", page)
+        self.assertIn("item.source_asset", page)
+        self.assertIn("item.destination_asset", page)
+        self.assertIn(".ir-network-hostname", page)
         self.assertIn("const escalatedHtml=value=>", page)
         self.assertIn('<col class="ir-col-assessment">', page)
         self.assertIn('<col class="ir-col-actions">', page)

@@ -9,6 +9,8 @@ import heapq
 import hashlib
 import hmac
 import html
+import importlib.util
+import ipaddress
 import json
 import math
 import mimetypes
@@ -122,6 +124,13 @@ CYBER_THREAT_INTEL_MEMORY_FILE = AGENT_MEMORY_DIR / "cyber-threat-intel-memory.m
 THREAT_HUNTER_MEMORY_FILE = AGENT_MEMORY_DIR / "threat-hunter-memory.md"
 SHARED_AGENT_MEMORY_FILE = AGENT_MEMORY_DIR / "shared-agent-memory.md"
 SOC_AI_SETTINGS_FILE = HOME / "n8n-local" / "config" / "ai_model_settings.json"
+ASSET_INVENTORY_FILE = HOME / "n8n-local" / "config" / "asset_inventory.json"
+ASSET_INVENTORY_MAX_BYTES = 1024 * 1024
+ASSET_INVENTORY_CACHE_LOCK = threading.RLock()
+ASSET_INVENTORY_CACHE: dict[str, object] = {
+    "signature": None,
+    "inventory": None,
+}
 DEFAULT_HERMES_AUTH_FILE = (
     HOME / "n8n-local" / "private" / "hermes-agent" / "auth.json"
 )
@@ -291,6 +300,222 @@ def parse_iso_timestamp(value: object) -> dt.datetime:
     cleaned = str(value).strip()
     cleaned = ISO_DATE_TIME_SEPARATOR_RE.sub(r"\1T", cleaned).replace("Z", "+00:00")
     return dt.datetime.fromisoformat(cleaned)
+
+
+def _asset_inventory_module():
+    """Load the shared strict inventory implementation in source and runtime layouts."""
+    existing = sys.modules.get("_onion_sentinel_asset_inventory")
+    if existing is not None:
+        return existing
+    candidates = (
+        PORTAL_SOURCE_DIR / "asset_inventory.py",
+        PORTAL_SOURCE_DIR.parent / "n8n" / "bin" / "asset_inventory.py",
+        HOME / "n8n-local" / "bin" / "asset_inventory.py",
+    )
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location(
+            "_onion_sentinel_asset_inventory",
+            candidate,
+        )
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+    raise RuntimeError("asset inventory validator is unavailable")
+
+
+def load_asset_inventory_data() -> tuple[dict, str]:
+    """Return one validated inventory snapshot with a small mtime cache."""
+    path = Path(ASSET_INVENTORY_FILE)
+    try:
+        metadata = path.stat()
+        if not path.is_file() or metadata.st_size > ASSET_INVENTORY_MAX_BYTES:
+            raise ValueError("asset inventory is not a bounded regular file")
+        signature: object = (
+            str(path.resolve()),
+            metadata.st_mtime_ns,
+            metadata.st_size,
+        )
+    except FileNotFoundError:
+        return {
+            "schema": "onion-sentinel-asset-inventory-v1",
+            "version": 0,
+            "generated_at": "",
+            "assets": [],
+            "inventory_status": "missing",
+        }, ""
+    except (OSError, ValueError) as exc:
+        return {"assets": [], "inventory_status": "invalid"}, str(exc)
+
+    with ASSET_INVENTORY_CACHE_LOCK:
+        if (
+            ASSET_INVENTORY_CACHE.get("signature") == signature
+            and isinstance(ASSET_INVENTORY_CACHE.get("inventory"), dict)
+        ):
+            return dict(ASSET_INVENTORY_CACHE["inventory"]), ""
+        try:
+            inventory = _asset_inventory_module().load_asset_inventory(path)
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+            return {"assets": [], "inventory_status": "invalid"}, str(exc)
+        ASSET_INVENTORY_CACHE["signature"] = signature
+        ASSET_INVENTORY_CACHE["inventory"] = inventory
+        return dict(inventory), ""
+
+
+def _asset_record_state(
+    asset: dict,
+    observed_at: dt.datetime,
+) -> str:
+    try:
+        valid_from = parse_iso_timestamp(asset.get("valid_from"))
+        valid_until = (
+            parse_iso_timestamp(asset.get("valid_until"))
+            if asset.get("valid_until")
+            else None
+        )
+    except (TypeError, ValueError):
+        return "invalid"
+    if valid_from.tzinfo is None:
+        return "invalid"
+    if observed_at < valid_from:
+        return "scheduled"
+    if valid_until is not None and observed_at >= valid_until:
+        return "expired"
+    return "current"
+
+
+def _asset_public_record(asset: dict, state: str) -> dict:
+    """Expose operational identity fields while withholding owner/behavior notes."""
+    identifiers = (
+        asset.get("identifiers")
+        if isinstance(asset.get("identifiers"), dict)
+        else {}
+    )
+    return {
+        "asset_id": str(asset.get("asset_id") or ""),
+        "state": state,
+        "ip_addresses": list(identifiers.get("ip") or []),
+        "hostnames": list(identifiers.get("hostname") or []),
+        "mac_addresses": list(identifiers.get("mac") or []),
+        "role": str(asset.get("role") or ""),
+        "platform": str(asset.get("platform") or ""),
+        "criticality": str(asset.get("criticality") or "unknown"),
+        "confidence": str(asset.get("confidence") or "unknown"),
+        "valid_from": str(asset.get("valid_from") or ""),
+        "valid_until": str(asset.get("valid_until") or ""),
+        "source_type": str(asset.get("source_type") or ""),
+        "source_ref": str(asset.get("source_ref") or ""),
+    }
+
+
+def asset_inventory_response(
+    *,
+    observed_at: dt.datetime | None = None,
+) -> tuple[int, dict]:
+    """Return current authoritative asset-to-address assignments."""
+    now = observed_at or dt.datetime.now(dt.timezone.utc)
+    if now.tzinfo is None:
+        now = now.astimezone()
+    now = now.astimezone(dt.timezone.utc)
+    inventory, error = load_asset_inventory_data()
+    records = []
+    state_counts = {"current": 0, "scheduled": 0, "expired": 0, "invalid": 0}
+    for raw in inventory.get("assets", []):
+        if not isinstance(raw, dict):
+            continue
+        state = _asset_record_state(raw, now)
+        state_counts[state] = state_counts.get(state, 0) + 1
+        if state == "current":
+            records.append(_asset_public_record(raw, state))
+    records.sort(
+        key=lambda item: (
+            str(item.get("asset_id") or "").lower(),
+            str(item.get("valid_from") or ""),
+        )
+    )
+    status = str(inventory.get("inventory_status") or "loaded")
+    payload = {
+        "ok": not error,
+        "inventory_status": status,
+        "generated_at": str(inventory.get("generated_at") or ""),
+        "observed_at": format_iso_timestamp(now, utc_z=True),
+        "records_total": sum(state_counts.values()),
+        "current_asset_count": len(records),
+        "current_ip_count": sum(len(item["ip_addresses"]) for item in records),
+        "current_hostname_count": sum(len(item["hostnames"]) for item in records),
+        "state_counts": state_counts,
+        "assets": records,
+    }
+    if error:
+        payload["error"] = f"Asset inventory unavailable: {error}"
+        return HTTPStatus.SERVICE_UNAVAILABLE, payload
+    return HTTPStatus.OK, payload
+
+
+def resolve_asset_ip(
+    value: object,
+    observed_at: object,
+    inventory: dict | None = None,
+) -> dict:
+    """Resolve an IP only when one active inventory record claims it."""
+    try:
+        address = str(ipaddress.ip_address(str(value or "").strip()))
+    except ValueError:
+        return {"status": "not_applicable", "ip": str(value or "")}
+    try:
+        when = parse_iso_timestamp(observed_at)
+        if when.tzinfo is None:
+            raise ValueError("timestamp lacks offset")
+        when = when.astimezone(dt.timezone.utc)
+    except (TypeError, ValueError):
+        return {"status": "time_invalid", "ip": address}
+    if inventory is None:
+        inventory, error = load_asset_inventory_data()
+        if error:
+            return {"status": "inventory_unavailable", "ip": address}
+
+    matches = []
+    for raw in inventory.get("assets", []):
+        if not isinstance(raw, dict) or _asset_record_state(raw, when) != "current":
+            continue
+        identifiers = (
+            raw.get("identifiers")
+            if isinstance(raw.get("identifiers"), dict)
+            else {}
+        )
+        if address in (identifiers.get("ip") or []):
+            matches.append(raw)
+    if not matches:
+        return {"status": "unmapped", "ip": address}
+    if len(matches) > 1:
+        return {
+            "status": "ambiguous",
+            "ip": address,
+            "asset_ids": sorted(
+                str(item.get("asset_id") or "") for item in matches
+            ),
+        }
+    asset = matches[0]
+    identifiers = asset.get("identifiers") or {}
+    hostnames = list(identifiers.get("hostname") or [])
+    return {
+        "status": "resolved" if hostnames else "known_without_hostname",
+        "ip": address,
+        "asset_id": str(asset.get("asset_id") or ""),
+        "hostname": hostnames[0] if hostnames else "",
+        "hostnames": hostnames,
+        "role": str(asset.get("role") or ""),
+        "platform": str(asset.get("platform") or ""),
+        "criticality": str(asset.get("criticality") or "unknown"),
+        "confidence": str(asset.get("confidence") or "unknown"),
+        "valid_from": str(asset.get("valid_from") or ""),
+        "valid_until": str(asset.get("valid_until") or ""),
+        "source_type": str(asset.get("source_type") or ""),
+    }
 
 
 def pcap_transfer_duration_seconds(
@@ -9441,6 +9666,7 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                     if case_id and analysis_id and key not in adjudications:
                         adjudications[key] = dict(item)
 
+            incident_inventory, incident_inventory_error = load_asset_inventory_data()
             incidents: list[dict[str, object]] = []
             for row in rows:
                 item = dict(row)
@@ -9570,9 +9796,37 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                     )
                 )
                 count = max(int(item.get("raw_alert_count") or 0), int(item.get("total_seen_count") or 0))
+                asset_observed_at = (
+                    item.get("last_seen")
+                    or item.get("escalated_at")
+                    or item.get("updated_at")
+                )
+                if incident_inventory_error:
+                    source_asset = {
+                        "status": "inventory_unavailable",
+                        "ip": str(item.get("source_ip") or ""),
+                    }
+                    destination_asset = {
+                        "status": "inventory_unavailable",
+                        "ip": str(item.get("destination_ip") or ""),
+                    }
+                else:
+                    source_asset = resolve_asset_ip(
+                        item.get("source_ip"),
+                        asset_observed_at,
+                        incident_inventory,
+                    )
+                    destination_asset = resolve_asset_ip(
+                        item.get("destination_ip"),
+                        asset_observed_at,
+                        incident_inventory,
+                    )
                 incidents.append({
                     **item,
                     "seen_count": count,
+                    "asset_observed_at": str(asset_observed_at or ""),
+                    "source_asset": source_asset,
+                    "destination_asset": destination_asset,
                     "analysis_id": analysis_id,
                     "analysis_generated_at": analysis.get("generated_at") or "",
                     "analysis_model": analysis.get("model") or "",
@@ -9649,6 +9903,11 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
         "schema_ready": True,
         "sort": sort_key,
         "direction": sort_direction,
+        "asset_inventory_status": (
+            "invalid"
+            if incident_inventory_error
+            else str(incident_inventory.get("inventory_status") or "loaded")
+        ),
     }
 
 
@@ -11335,7 +11594,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-incidents", "/api/soc-incidents/reanalysis-runs", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-incidents/") and parsed.path.endswith("/detail")) or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith(("/ack", "/escalate"))):
+        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/asset-inventory", "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-incidents", "/api/soc-incidents/reanalysis-runs", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-incidents/") and parsed.path.endswith("/detail")) or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith(("/ack", "/escalate"))):
             if parsed.path == "/admin" and not self._admin_authenticated():
                 self.send_response(HTTPStatus.FOUND)
                 self.send_header("Location", "/admin/login")
@@ -11650,6 +11909,9 @@ class PortalHandler(BaseHTTPRequestHandler):
         if path == "/api/system-health/beacons":
             data = n8n_beacon_history_response(query)
             return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if path == "/api/asset-inventory":
+            status, data = asset_inventory_response()
+            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/llm-analysis/current":
             return self._send(HTTPStatus.OK, json.dumps(read_llm_current_analysis(), indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/llm-analysis/logs":
