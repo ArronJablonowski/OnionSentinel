@@ -335,6 +335,8 @@ bundle under `$HOME/n8n-local/recovery_backups` containing:
 
 - an independently verified SQLite backup;
 - an n8n PostgreSQL custom-format dump validated with `pg_restore --list`;
+- when the alert-store PostgreSQL shadow is enabled, a separate custom-format
+  shadow dump validated with `pg_restore --list`;
 - the local `.env`, n8n encryption configuration, model/prompt configuration,
   and agent memories needed to decrypt and restore the operational runtime;
 - a manifest with byte counts, SHA-256 hashes, and the alert-row count.
@@ -354,7 +356,9 @@ python3 -m json.tool "$HOME/n8n-local/recovery_backups/$(ls -1 "$HOME/n8n-local/
 
 The SQLite SLO is healthy when the newest hourly backup is at most two hours
 old. The PostgreSQL/runtime SLO is healthy when the newest daily bundle is at
-most 26 hours old.
+most 26 hours old. When the alert-store shadow is enabled, its dump is also
+required to be no older than 26 hours; omission fails the SLO instead of
+silently publishing a partial bundle.
 
 ## Production Soak
 
@@ -396,8 +400,10 @@ without extracting it. It then restores the PostgreSQL custom-format dump into
 a disposable container using the exact pinned production image. The container
 has `--network none`, a temporary data filesystem, no production credentials,
 and is forcibly removed on success or failure. The drill passes only when the
-n8n schema and workflow table are present. Its runtime-only result is stored
-under `$HOME/n8n-local/logs/restore-drills`.
+n8n schema and workflow table are present. If the bundle contains the
+alert-store shadow, the drill independently restores that dump and requires
+the `onion_sentinel_queue` schema-version and durable-job tables. Its
+runtime-only result is stored under `$HOME/n8n-local/logs/restore-drills`.
 
 ## Verification Baseline
 

@@ -25,6 +25,7 @@ ALLOWED_BUNDLE_FILES = frozenset(
         "alerts.sqlite3",
         "investigation-harness.sqlite3",
         "n8n-postgres.dump",
+        "alert-store-postgres.dump",
         "runtime-secrets.tar.gz",
     }
 )
@@ -103,6 +104,21 @@ def verify_bundle(bundle: Path) -> dict[str, object]:
     ):
         raise RuntimeError(
             "recovery bundle harness manifest does not match its files"
+        )
+    shadow = dict(
+        dict(manifest.get("postgres") or {}).get("alert_store_shadow") or {}
+    )
+    shadow_file = bundle / "alert-store-postgres.dump"
+    shadow_listed = "alert-store-postgres.dump" in set(
+        dict(manifest.get("files") or {})
+    )
+    if (
+        bool(shadow.get("present")) != shadow_file.is_file()
+        or bool(shadow.get("present")) != shadow_listed
+    ):
+        raise RuntimeError(
+            "recovery bundle alert-store PostgreSQL manifest does not match "
+            "its files"
         )
     return manifest
 
@@ -202,8 +218,17 @@ def docker_output(docker: str, args: list[str], **kwargs) -> str:
     return result.stdout.strip()
 
 
-def restore_postgres(docker: str, dump: Path) -> dict[str, object]:
-    image = docker_output(docker, ["inspect", "-f", "{{.Config.Image}}", "n8n-postgres"])
+def restore_postgres(
+    docker: str,
+    dump: Path,
+    *,
+    source_container: str = "n8n-postgres",
+    schema_kind: str = "n8n",
+) -> dict[str, object]:
+    image = docker_output(
+        docker,
+        ["inspect", "-f", "{{.Config.Image}}", source_container],
+    )
     name = f"onion-sentinel-restore-drill-{secrets.token_hex(5)}"
     docker_output(docker, [
         "run", "--detach", "--rm", "--name", name, "--network", "none",
@@ -225,6 +250,29 @@ def restore_postgres(docker: str, dump: Path) -> dict[str, object]:
                 [docker, "exec", "-i", name, "pg_restore", "-U", "postgres", "--no-owner", "--no-privileges", "-d", "n8n_restore_drill"],
                 stdin=stream, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True, timeout=1800,
             )
+        if schema_kind == "alert-store-shadow":
+            schema_versions = int(docker_output(
+                docker,
+                ["exec", name, "psql", "-U", "postgres", "-d",
+                 "n8n_restore_drill", "-Atc",
+                 "SELECT CASE WHEN to_regclass('onion_sentinel_queue.schema_version') IS NULL THEN -1 ELSE (SELECT COUNT(*) FROM onion_sentinel_queue.schema_version) END;"],
+            ))
+            durable_jobs = int(docker_output(
+                docker,
+                ["exec", name, "psql", "-U", "postgres", "-d",
+                 "n8n_restore_drill", "-Atc",
+                 "SELECT CASE WHEN to_regclass('onion_sentinel_queue.shadow_durable_jobs') IS NULL THEN -1 ELSE (SELECT COUNT(*) FROM onion_sentinel_queue.shadow_durable_jobs) END;"],
+            ))
+            if schema_versions < 1 or durable_jobs < 0:
+                raise RuntimeError(
+                    "restored PostgreSQL is missing alert-store shadow schema"
+                )
+            return {
+                "image": image,
+                "schema_version_rows": schema_versions,
+                "durable_job_rows": durable_jobs,
+                "network": "none",
+            }
         table_count = int(docker_output(docker, ["exec", name, "psql", "-U", "postgres", "-d", "n8n_restore_drill", "-Atc", "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';"]))
         workflow_count = int(docker_output(docker, ["exec", name, "psql", "-U", "postgres", "-d", "n8n_restore_drill", "-Atc", "SELECT CASE WHEN to_regclass('public.workflow_entity') IS NULL THEN -1 ELSE (SELECT COUNT(*) FROM workflow_entity) END;"]))
         if table_count <= 0 or workflow_count < 0:
@@ -278,6 +326,19 @@ def main() -> int:
             report["investigation_harness"]["present"] = True
         report["runtime_archive"] = validate_runtime_archive(bundle / "runtime-secrets.tar.gz")
         report["postgres"] = restore_postgres(args.docker, bundle / "n8n-postgres.dump")
+        shadow_dump = bundle / "alert-store-postgres.dump"
+        report["alert_store_postgres_shadow"] = (
+            restore_postgres(
+                args.docker,
+                shadow_dump,
+                source_container="onion-sentinel-alert-store-postgres",
+                schema_kind="alert-store-shadow",
+            )
+            if shadow_dump.is_file()
+            else {"present": False}
+        )
+        if shadow_dump.is_file():
+            report["alert_store_postgres_shadow"]["present"] = True
         report["manifest_alert_rows"] = int(manifest.get("alert_rows") or 0)
         report["status"] = "passed"
         return_code = 0

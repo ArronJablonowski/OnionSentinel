@@ -160,6 +160,59 @@ class RecoveryOperationTests(unittest.TestCase):
             ):
                 self.restore.verify_bundle(bundle)
 
+    def test_bundle_shadow_postgres_manifest_must_match_optional_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            os.chmod(bundle, 0o700)
+            names = (
+                "alerts.sqlite3",
+                "n8n-postgres.dump",
+                "runtime-secrets.tar.gz",
+            )
+            for name in names:
+                (bundle / name).write_bytes(b"fixture")
+                os.chmod(bundle / name, 0o600)
+            files = {
+                name: {"sha256": self.restore.sha256_file(bundle / name)}
+                for name in names
+            }
+            manifest_path = bundle / "manifest.json"
+            manifest_path.write_text(json.dumps({
+                "files": files,
+                "sqlite": {
+                    "investigation_harness": {"present": False},
+                },
+                "postgres": {
+                    "alert_store_shadow": {"present": True},
+                },
+            }))
+            os.chmod(manifest_path, 0o600)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "alert-store PostgreSQL manifest",
+            ):
+                self.restore.verify_bundle(bundle)
+
+    def test_shadow_postgres_flag_is_exact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = Path(tmp) / ".env"
+            env.write_text(
+                "ALERT_STORE_POSTGRES_SHADOW_ENABLED=10\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(self.backup.env_flag(
+                env,
+                "ALERT_STORE_POSTGRES_SHADOW_ENABLED",
+            ))
+            env.write_text(
+                "ALERT_STORE_POSTGRES_SHADOW_ENABLED=1\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(self.backup.env_flag(
+                env,
+                "ALERT_STORE_POSTGRES_SHADOW_ENABLED",
+            ))
+
     def test_wal_harness_bundle_round_trips_without_sqlite_sidecars(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

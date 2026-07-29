@@ -30,6 +30,19 @@ def load_module(name: str, path: Path):
 
 
 class IncidentResponseWorkflowTests(unittest.TestCase):
+    def test_incident_list_rejects_unallowlisted_sort_parameters(self) -> None:
+        status, payload = self.portal.soc_incidents_query_response(
+            {"sort": ["updated_at; DROP TABLE alerts"], "direction": ["desc"]}
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("sort field", payload["error"])
+
+        status, payload = self.portal.soc_incidents_query_response(
+            {"sort": ["severity"], "direction": ["sideways"]}
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("sort direction", payload["error"])
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tmp.name) / "alerts.sqlite3"
@@ -62,7 +75,8 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertIn('Incident Response Investigation', page)
         self.assertIn('<col class="ir-col-severity">', page)
         self.assertIn('<col class="ir-col-destination-port">', page)
-        self.assertIn('<th>Destination Port</th>', page)
+        self.assertIn('data-ir-sort="destination_port"', page)
+        self.assertIn("sort:sortKey,direction:sortDirection", page)
         self.assertIn('.ir-table col.ir-col-escalated{width:264px}', page)
         self.assertIn('class="ir-escalated"', page)
         self.assertIn('.ir-escalated{white-space:nowrap', page)

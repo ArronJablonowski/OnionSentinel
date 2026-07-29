@@ -35,6 +35,35 @@ class OperationalSloTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertTrue(snapshot["ok"])
 
+    def test_enabled_shadow_requires_fresh_recovery_dump(self):
+        now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
+        metrics = {"metrics": {"process": {"ingest_errors": 0},
+                               "oldest_pending_job_seconds": 0,
+                               "oldest_pending_jobs": [],
+                               "oldest_pending_pcap_seconds": 0}}
+        health = {"summary": {"latest": {
+            "timestamp_utc": "2026-07-14T17:55:00Z"
+        }}, "pcap": {"warning_count": 0}}
+        failures, snapshot = self.slo.evaluate(
+            metrics,
+            health,
+            now=now,
+            disk_used_percent=55,
+            sqlite_backup_age=60,
+            postgres_backup_age=60,
+            previous_ingest_errors=0,
+            alert_store_postgres_shadow_enabled=True,
+            alert_store_postgres_backup_age=None,
+        )
+        self.assertIn(
+            "verified alert-store PostgreSQL shadow backup is missing or "
+            "older than 26 hours",
+            failures,
+        )
+        self.assertTrue(
+            snapshot["signals"]["alert_store_postgres_shadow_enabled"]
+        )
+
     def test_probe_timeout_is_bounded_without_traceback(self):
         with mock.patch.object(
             self.slo.urllib.request,

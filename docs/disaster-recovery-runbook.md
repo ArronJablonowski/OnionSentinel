@@ -707,8 +707,10 @@ Each atomic bundle contains the quick-checked alert-store SQLite database and,
 when it exists, the owner-only investigation-harness SQLite database. Both
 snapshots are restored through SQLite's backup API, rechecked, and compared to
 their manifest row counts before the bundle is published. The bundle also
-contains a PostgreSQL custom-format dump validated by `pg_restore --list`, a
-SHA-256 manifest, and the runtime `.env`, n8n encryption config,
+contains the n8n PostgreSQL custom-format dump and, when the alert-store shadow
+is enabled, a distinct alert-store PostgreSQL dump. Both are validated by
+`pg_restore --list`. The bundle also contains a SHA-256 manifest and the
+runtime `.env`, n8n encryption config,
 prompts/settings, and agent memories needed for recovery. A missing harness
 database remains a valid pre-harness recovery state. The bundle is mode `0700`
 with files mode `0600`, retained for seven days, and must never enter Git.
@@ -724,7 +726,8 @@ ssh <mac_user>@<mac_studio_ip> 'python3 "$HOME/n8n-local/bin/run-recovery-restor
 
 This uses a disposable PostgreSQL container with networking disabled and a
 temporary data filesystem. It validates the restored n8n schema and workflow
-records; verifies the alert-store and optional investigation-harness SQLite
+records; restores and validates the optional alert-store PostgreSQL shadow
+schema and durable-job rows; verifies the alert-store and optional investigation-harness SQLite
 copies, foreign keys, schema version, and manifest row counts; checks all
 bundle hashes; and confirms the archive contains the n8n encryption
 configuration. The production containers, databases, keys, and workflows are

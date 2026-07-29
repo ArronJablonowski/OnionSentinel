@@ -182,9 +182,13 @@ def backup_sqlite(source: Path, destination: Path) -> int:
     return int(result["rows"])
 
 
-def postgres_dump(docker: str, destination: Path) -> None:
+def postgres_dump_container(
+    docker: str,
+    destination: Path,
+    container: str,
+) -> None:
     command = [
-        docker, "exec", "n8n-postgres", "sh", "-ec",
+        docker, "exec", container, "sh", "-ec",
         'PGPASSWORD="$POSTGRES_PASSWORD" exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc',
     ]
     with destination.open("wb") as stream:
@@ -193,12 +197,29 @@ def postgres_dump(docker: str, destination: Path) -> None:
         raise RuntimeError("PostgreSQL dump is empty")
     with destination.open("rb") as stream:
         subprocess.run(
-            [docker, "exec", "-i", "n8n-postgres", "pg_restore", "--list"],
+            [docker, "exec", "-i", container, "pg_restore", "--list"],
             stdin=stream,
             stdout=subprocess.DEVNULL,
             check=True,
             timeout=300,
         )
+
+
+def postgres_dump(docker: str, destination: Path) -> None:
+    """Backward-compatible n8n PostgreSQL dump helper."""
+    postgres_dump_container(docker, destination, "n8n-postgres")
+
+
+def env_flag(path: Path, name: str) -> bool:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    prefix = f"{name}="
+    for line in lines:
+        if line.startswith(prefix):
+            return line[len(prefix):].strip().strip("\"'") == "1"
+    return False
 
 
 def archive_runtime_secrets(stack_dir: Path, destination: Path) -> list[str]:
@@ -268,6 +289,20 @@ def create_bundle(stack_dir: Path, backup_root: Path, docker: str) -> Path:
             )
             harness_sqlite = {"present": True, **harness_result}
         postgres_dump(docker, staging / "n8n-postgres.dump")
+        alert_store_postgres: dict[str, object] = {"present": False}
+        if env_flag(
+            stack_dir / ".env",
+            "ALERT_STORE_POSTGRES_SHADOW_ENABLED",
+        ):
+            postgres_dump_container(
+                docker,
+                staging / "alert-store-postgres.dump",
+                "onion-sentinel-alert-store-postgres",
+            )
+            alert_store_postgres = {
+                "present": True,
+                "container": "onion-sentinel-alert-store-postgres",
+            }
         included = archive_runtime_secrets(stack_dir, staging / "runtime-secrets.tar.gz")
         files = {}
         for path in sorted(staging.iterdir()):
@@ -285,6 +320,10 @@ def create_bundle(stack_dir: Path, backup_root: Path, docker: str) -> Path:
             "sqlite": {
                 "alerts": {"present": True, **alert_sqlite},
                 "investigation_harness": harness_sqlite,
+            },
+            "postgres": {
+                "n8n": {"present": True, "container": "n8n-postgres"},
+                "alert_store_shadow": alert_store_postgres,
             },
             "runtime_paths": included,
             "files": files,

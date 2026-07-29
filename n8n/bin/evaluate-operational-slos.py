@@ -90,6 +90,19 @@ def read_json_object(path: Path) -> dict[str, object] | None:
     return value if isinstance(value, dict) else None
 
 
+def env_flag(path: Path, name: str) -> bool:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    prefix = f"{name}="
+    return any(
+        line.startswith(prefix)
+        and line[len(prefix):].strip().strip("\"'") == "1"
+        for line in lines
+    )
+
+
 def evaluate(
     metrics_payload: dict[str, object],
     health_payload: dict[str, object],
@@ -101,6 +114,8 @@ def evaluate(
     previous_ingest_errors: int | None,
     harness_database_present: bool = False,
     harness_maintenance: dict[str, object] | None = None,
+    alert_store_postgres_shadow_enabled: bool = False,
+    alert_store_postgres_backup_age: int | None = None,
 ) -> tuple[list[str], dict[str, object]]:
     metrics = dict(metrics_payload.get("metrics") or {})
     process = dict(metrics.get("process") or {})
@@ -199,6 +214,17 @@ def evaluate(
         failures.append("verified SQLite backup is missing or older than 2 hours")
     if postgres_backup_age is None or postgres_backup_age > 26 * 60 * 60:
         failures.append("verified PostgreSQL recovery bundle is missing or older than 26 hours")
+    if (
+        alert_store_postgres_shadow_enabled
+        and (
+            alert_store_postgres_backup_age is None
+            or alert_store_postgres_backup_age > 26 * 60 * 60
+        )
+    ):
+        failures.append(
+            "verified alert-store PostgreSQL shadow backup is missing or "
+            "older than 26 hours"
+        )
 
     harness_signal: dict[str, object] = {
         "database_present": harness_database_present,
@@ -307,6 +333,12 @@ def evaluate(
             "pipeline_disk_growth_1h": dict(pipeline_disk.get("net_growth") or {}).get("1h", {}),
             "sqlite_backup_age_seconds": sqlite_backup_age,
             "postgres_backup_age_seconds": postgres_backup_age,
+            "alert_store_postgres_shadow_enabled": (
+                alert_store_postgres_shadow_enabled
+            ),
+            "alert_store_postgres_backup_age_seconds": (
+                alert_store_postgres_backup_age
+            ),
             "investigation_harness": harness_signal,
         },
     }
@@ -363,6 +395,10 @@ def main() -> int:
         pass
 
     now = dt.datetime.now(dt.timezone.utc)
+    shadow_enabled = env_flag(
+        args.stack_dir / ".env",
+        "ALERT_STORE_POSTGRES_SHADOW_ENABLED",
+    )
     usage = shutil.disk_usage(args.stack_dir)
     disk_percent = (usage.used / usage.total * 100) if usage.total else 100.0
     try:
@@ -386,6 +422,12 @@ def main() -> int:
         harness_maintenance=read_json_object(
             args.stack_dir
             / "logs/investigation-harness-maintenance.json"
+        ),
+        alert_store_postgres_shadow_enabled=shadow_enabled,
+        alert_store_postgres_backup_age=newest_file_age(
+            args.stack_dir / "recovery_backups",
+            "*/alert-store-postgres.dump",
+            now,
         ),
     )
     # A deliberate capture-protection hold is not a stack failure, but it also
