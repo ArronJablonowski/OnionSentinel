@@ -166,6 +166,141 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         ]
         self.assertEqual(incompatible_calls, [])
 
+    def test_incident_responder_protocol_plan_is_repeatable_and_truthful(
+        self,
+    ) -> None:
+        trusted_tuple = {
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "source_port": 49152,
+            "destination_port": 80,
+            "transport": "tcp",
+            "community_id": "1:repeatable-http-flow=",
+            "rule_id": "2013504",
+        }
+        package = {
+            "agent_role": "incident-responder",
+            "alert": {
+                "timestamp": "2026-07-24T18:30:00Z",
+                "rule_name": "Synthetic HTTP user-agent detection",
+                "source_ip": "192.0.2.10",
+                "source_port": 49152,
+                "destination_ip": "198.51.100.20",
+                "destination_port": 80,
+                "transport_protocol": "tcp",
+                "rule_id": "2013504",
+                "rule_context": {
+                    "deployed_rule": {"protocol": "http"},
+                },
+            },
+            "investigation_query_capability": {
+                "enabled": True,
+                "anchor_time": "2026-07-24T18:30:00Z",
+                "backends": {
+                    "elastic": {
+                        "enabled": True,
+                        "packs": ["zeek_http", "zeek_files"],
+                    },
+                },
+            },
+            "_local_investigation_query_context": {
+                "anchor_time": "2026-07-24T18:30:00Z",
+                "permitted_event_tuples": [
+                    {
+                        "event_tuple": {
+                            "source_ip": "192.0.2.99",
+                            "destination_ip": "198.51.100.99",
+                            "source_port": 40000,
+                            "destination_port": 80,
+                            "transport": "tcp",
+                            "community_id": "1:historical-decoy-flow=",
+                            "rule_id": "2013504",
+                        },
+                        "role_semantics": "packet_direction",
+                        "source": "trusted_context",
+                    },
+                    {
+                        "event_tuple": trusted_tuple,
+                        "role_semantics": "packet_direction",
+                        "source": "trusted_context",
+                    },
+                ],
+            },
+        }
+
+        first = self.runner.deterministic_incident_pivot_requests(package)
+        second = self.runner.deterministic_incident_pivot_requests(
+            copy.deepcopy(package)
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            [item["query_id"] for item in first],
+            ["deterministic-zeek_http", "deterministic-zeek_files"],
+        )
+        self.assertEqual(
+            first[0]["parameters"]["window"],
+            {
+                "start": "2026-07-24T18:25:00.000Z",
+                "end": "2026-07-24T18:35:00.000Z",
+            },
+        )
+        self.assertEqual(
+            first[0]["parameters"]["event_tuple"]["community_id"],
+            trusted_tuple["community_id"],
+        )
+        serialized = json.dumps(first, sort_keys=True)
+        self.assertNotIn("query_dsl", serialized)
+        self.assertNotIn("kql", serialized.lower())
+        self.assertNotIn("oql", serialized.lower())
+
+    def test_protocol_plan_omits_unsafe_cross_sensor_tuple_without_join_key(
+        self,
+    ) -> None:
+        package = {
+            "agent_role": "incident-responder",
+            "alert": {
+                "rule_name": "Synthetic STUN request",
+                "rule_context": {
+                    "deployed_rule": {"protocol": "udp"},
+                },
+            },
+            "investigation_query_capability": {
+                "enabled": True,
+                "anchor_time": "2026-07-24T18:30:00Z",
+                "backends": {
+                    "elastic": {
+                        "enabled": True,
+                        "packs": ["zeek_stun", "network_flow"],
+                    },
+                },
+            },
+            "_local_investigation_query_context": {
+                "permitted_event_tuples": [
+                    {
+                        "event_tuple": {
+                            "source_ip": "192.0.2.10",
+                            "destination_ip": "198.51.100.20",
+                            "source_port": 50000,
+                            "destination_port": 3478,
+                            "transport": "udp",
+                        },
+                        "role_semantics": "packet_direction",
+                    },
+                ],
+            },
+        }
+
+        plan = self.runner.deterministic_incident_pivot_requests(package)
+
+        self.assertEqual(len(plan), 2)
+        self.assertNotIn("event_tuple", plan[0]["parameters"])
+        self.assertNotIn("event_tuple", plan[1]["parameters"])
+        self.assertEqual(
+            plan[0]["parameters"]["observables"]["ips"],
+            ["192.0.2.10", "198.51.100.20"],
+        )
+
     @staticmethod
     def elastic_request(query_id: str = "pivot-1") -> dict:
         return {

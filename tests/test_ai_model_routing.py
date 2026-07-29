@@ -2913,6 +2913,13 @@ class AiModelRoutingTests(unittest.TestCase):
         )
         self.assertEqual(result["final_disposition_status"], "disputed_pending_human")
         self.assertTrue(result["escalation_needed"])
+        self.assertEqual(result["detection_outcome"], "inconclusive")
+        self.assertEqual(result["activity_disposition"], "unknown")
+        self.assertEqual(result["handling"], "investigate")
+        self.assertEqual(result["confidence"], "low")
+        self.assertLessEqual(result["confidence_score"], 0.39)
+        self.assertTrue(result["bluf"].startswith("DISPUTED"))
+        self.assertTrue(result["_material_disagreement_gate"]["applied"])
         self.assertEqual(result["tuning_recommendation"], "needs_more_data")
         self.assertEqual(result["recommended_tuning_actions"], [])
         self.assertEqual(result["memory_candidates"], [])
@@ -5232,6 +5239,69 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(
             self.runner.second_opinion_trigger(response),
             "Deterministic evidence could not establish rule intent for a consequential conclusion.",
+        )
+
+    def test_incident_responder_authorized_benign_requires_structured_authorization(self) -> None:
+        response = self.runner.apply_authorized_benign_evidence_guard(
+            self.complete_response(
+                detection_outcome="true_positive_authorized_benign",
+                event_status="observed",
+                detection_validity="matched_intent",
+                activity_disposition="authorized_benign",
+                handling="no_action",
+                tuning_recommendation="suppress",
+                recommended_tuning_actions=["Suppress this alert."],
+            ),
+            {"agent_role": "incident-responder"},
+        )
+
+        self.assertEqual(response["detection_outcome"], "inconclusive")
+        self.assertEqual(response["activity_disposition"], "benign")
+        self.assertEqual(response["handling"], "monitor")
+        self.assertEqual(response["tuning_recommendation"], "needs_more_data")
+        self.assertEqual(response["recommended_tuning_actions"], [])
+        self.assertTrue(
+            response["_authorization_evidence_guard"]["override_applied"]
+        )
+        self.assertIn(
+            "No structured operator authorization evidence",
+            response["evidence_gaps"][-1],
+        )
+
+    def test_incident_responder_accepts_explicit_structured_authorization(self) -> None:
+        response = self.runner.apply_authorized_benign_evidence_guard(
+            self.complete_response(
+                detection_outcome="true_positive_authorized_benign",
+                event_status="observed",
+                detection_validity="matched_intent",
+                activity_disposition="authorized_benign",
+                handling="no_action",
+            ),
+            {
+                "agent_role": "incident-responder",
+                "authorization_evidence": {
+                    "entries": [
+                        {
+                            "authorized": True,
+                            "source": "approved_change",
+                            "evidence_ref": "change:CHG-1234",
+                        }
+                    ]
+                },
+            },
+        )
+
+        self.assertEqual(
+            response["detection_outcome"],
+            "true_positive_authorized_benign",
+        )
+        self.assertEqual(
+            response["activity_disposition"],
+            "authorized_benign",
+        )
+        self.assertEqual(response["handling"], "no_action")
+        self.assertFalse(
+            response["_authorization_evidence_guard"]["override_applied"]
         )
 
     def test_same_codex_model_with_different_effort_is_not_an_independent_reviewer(self) -> None:

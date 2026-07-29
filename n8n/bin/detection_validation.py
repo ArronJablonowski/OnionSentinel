@@ -32,6 +32,15 @@ MAX_MARKER_MATCHES_PER_PACKET = 16
 MAX_COUNTER_VALUES = 64
 SID_RE = re.compile(r"(?:^|;)\s*sid\s*:\s*(\d+)\s*(?:;|$)", re.IGNORECASE)
 REV_RE = re.compile(r"(?:^|;)\s*rev\s*:\s*(\d+)\s*(?:;|$)", re.IGNORECASE)
+APPLICATION_STICKY_BUFFERS = {
+    "dns.query",
+    "http.host",
+    "http.method",
+    "http.server",
+    "http.uri",
+    "http.user_agent",
+    "tls.sni",
+}
 
 
 def _json_object(value: object) -> dict[str, Any]:
@@ -151,8 +160,13 @@ def parse_suricata_rule(rule_text: object) -> dict[str, Any]:
         key, separator, raw_value = raw_option.partition(":")
         normalized_key = key.strip().lower()
         value = raw_value.strip() if separator else ""
-        if normalized_key in {"dns.query", "dns_query"}:
-            current_buffer = "dns.query"
+        normalized_buffer = (
+            "dns.query"
+            if normalized_key == "dns_query"
+            else normalized_key
+        )
+        if normalized_buffer in APPLICATION_STICKY_BUFFERS:
+            current_buffer = normalized_buffer
             current_buffer_modifiers = {}
             current_content = None
             continue
@@ -190,6 +204,10 @@ def parse_suricata_rule(rule_text: object) -> dict[str, Any]:
         } and current_content is not None:
             current_content["modifiers"][normalized_key] = value if separator else True
             continue
+        if normalized_key == "fast_pattern":
+            # Performance-only selection does not change rule semantics and
+            # must not detach later distance/within modifiers from content.
+            continue
         current_content = None
         if normalized_key in {"xbits", "flowbits"}:
             parts = [part.strip() for part in value.split(",")]
@@ -204,7 +222,7 @@ def parse_suricata_rule(rule_text: object) -> dict[str, Any]:
         if normalized_key not in {
             "msg", "sid", "rev", "gid", "reference", "url", "classtype",
             "metadata", "target", "tag", "noalert", "priority", "itype",
-            "icode", "icmp_id", "icmp_seq",
+            "icode", "icmp_id", "icmp_seq", "flow", "threshold",
         }:
             unsupported_match_options.append(
                 {"option": normalized_key[:80], "value_sha256": hashlib.sha256(value.encode()).hexdigest()}
@@ -622,15 +640,34 @@ def _content_constraint(
     return not present if bool(spec.get("negated")) else present
 
 
-def _raw_payload_content_evaluation_supported(spec: dict[str, Any]) -> bool:
-    """Return whether a deployed content clause can use raw transport payload."""
+def _content_evaluation_supported(
+    spec: dict[str, Any],
+    *,
+    application_buffer: str | None = None,
+) -> bool:
+    """Return whether a content clause can use the supplied bounded buffer."""
     if spec.get("source") != "deployed_rule":
         return True
     buffer_name = str(spec.get("buffer") or "").strip().lower()
-    if buffer_name not in {"", "pkt_data"}:
+    modifiers = (
+        spec.get("modifiers")
+        if isinstance(spec.get("modifiers"), dict)
+        else {}
+    )
+    if application_buffer is None:
+        if buffer_name not in {"", "pkt_data"}:
+            return False
+        if any(name in modifiers for name in ("dotprefix", "bsize")):
+            return False
+    elif buffer_name != application_buffer:
         return False
-    modifiers = spec.get("modifiers") if isinstance(spec.get("modifiers"), dict) else {}
-    return not any(name in modifiers for name in ("dotprefix", "bsize"))
+    if "rawbytes" in modifiers:
+        return False
+    if "bsize" in modifiers and _nonnegative_modifier(
+        modifiers.get("bsize")
+    ) is None:
+        return False
+    return True
 
 
 def _content_match_positions(
@@ -639,13 +676,25 @@ def _content_match_positions(
     spec: dict[str, Any],
     *,
     previous_match_end: int | None = None,
+    application_buffer: str | None = None,
 ) -> list[int] | None:
     """Return bounded matches for one absolute or cursor-relative content clause."""
-    if not _raw_payload_content_evaluation_supported(spec):
+    if not _content_evaluation_supported(
+        spec,
+        application_buffer=application_buffer,
+    ):
         return None
     modifiers = spec.get("modifiers") if isinstance(spec.get("modifiers"), dict) else {}
-    if "rawbytes" in modifiers:
-        return None
+    if "bsize" in modifiers:
+        expected_size = _nonnegative_modifier(modifiers.get("bsize"))
+        if expected_size is None:
+            return None
+        if len(payload) != expected_size:
+            return []
+    if application_buffer is not None and "dotprefix" in modifiers:
+        # Suricata's dotprefix transform gives a domain buffer one virtual
+        # leading dot so `.example.com` also matches the apex `example.com`.
+        payload = b"." + payload.lstrip(b".")
     relative = "distance" in modifiers or "within" in modifiers
     if relative and any(key in modifiers for key in ("offset", "depth")):
         return None
@@ -703,6 +752,8 @@ def _content_match_positions(
 def _ordered_deployed_content_constraints(
     payload: bytes,
     marker_values: list[tuple[dict[str, Any], bytes]],
+    *,
+    application_buffer: str | None = None,
 ) -> dict[str, bool | None]:
     """Evaluate deployed content clauses in rule order with bounded cursor paths."""
     results: dict[str, bool | None] = {}
@@ -739,6 +790,7 @@ def _ordered_deployed_content_constraints(
                 marker,
                 spec,
                 previous_match_end=previous_end,
+                application_buffer=application_buffer,
             )
             if positions is None:
                 supported = False
@@ -766,6 +818,110 @@ def _ordered_deployed_content_constraints(
         cursors = next_cursors if satisfied else set()
         cursor_unknown = False
     return results
+
+
+def _bounded_application_buffers(
+    raw: dict[str, Any],
+    message: dict[str, Any],
+    alert: dict[str, Any],
+    marker_values: list[tuple[dict[str, Any], bytes]] | None = None,
+) -> dict[str, bytes]:
+    """Project Suricata application evidence without retaining raw payloads."""
+    decoded_value = (
+        _nested(raw, "network.data.decoded")
+        or message.get("payload_printable")
+        or ""
+    )
+    decoded = (
+        str(decoded_value)
+        if isinstance(decoded_value, str)
+        and len(decoded_value.encode("utf-8", "replace")) <= MAX_PACKET_BYTES
+        else ""
+    )
+    buffers: dict[str, bytes] = {}
+    if decoded:
+        lines = re.split(r"\r?\n", decoded)
+        if lines:
+            request = lines[0].split()
+            if len(request) >= 2 and re.fullmatch(
+                r"[A-Z]{2,16}",
+                request[0],
+            ):
+                buffers["http.method"] = request[0].encode(
+                    "latin-1",
+                    "replace",
+                )
+                buffers["http.uri"] = request[1].encode(
+                    "latin-1",
+                    "replace",
+                )
+        for line in lines[1:256]:
+            name, separator, value = line.partition(":")
+            if not separator:
+                continue
+            key = {
+                "host": "http.host",
+                "server": "http.server",
+                "user-agent": "http.user_agent",
+            }.get(name.strip().lower())
+            if key and value.strip():
+                buffers[key] = value.strip().encode(
+                    "latin-1",
+                    "replace",
+                )[:MAX_PACKET_BYTES]
+
+    dns_name = str(
+        _nested(raw, "dns.query.name")
+        or _nested(raw, "dns.question.name")
+        or _nested(raw, "dns.query_name")
+        or _nested(alert, "dns.query_name")
+        or _nested(message, "dns.rrname")
+        or ""
+    ).strip().rstrip(".")
+    if dns_name and len(dns_name.encode("utf-8", "replace")) <= 253:
+        buffers["dns.query"] = dns_name.encode("utf-8", "replace")
+
+    tls_name = str(
+        _nested(raw, "tls.server.name")
+        or _nested(raw, "tls.sni")
+        or _nested(alert, "tls.server.name")
+        or _nested(alert, "tls.sni")
+        or _nested(message, "tls.sni")
+        or ""
+    ).strip().rstrip(".")
+    if not tls_name and decoded:
+        # Suricata's decoded ClientHello projection contains the SNI as a
+        # bounded printable hostname. Select only a single canonical domain
+        # token; ambiguity remains unsupported instead of guessing.
+        candidates = {
+            value.rstrip(".").lower()
+            for value in re.findall(
+                r"(?i)(?<![A-Za-z0-9-])"
+                r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+                r"[A-Za-z]{2,63}(?![A-Za-z0-9-])",
+                decoded,
+            )
+            if len(value) <= 253
+        }
+        tls_markers = {
+            marker.decode("latin-1", "ignore").lower().lstrip(".")
+            for spec, marker in marker_values or []
+            if str(spec.get("buffer") or "").strip().lower() == "tls.sni"
+        }
+        matching = {
+            candidate
+            for candidate in candidates
+            if any(
+                candidate == marker or candidate.endswith(f".{marker}")
+                for marker in tls_markers
+                if marker
+            )
+        }
+        if len(matching) == 1:
+            tls_name = next(iter(matching))
+    if tls_name and len(tls_name.encode("utf-8", "replace")) <= 253:
+        buffers["tls.sni"] = tls_name.encode("utf-8", "replace")
+    return buffers
 
 
 def extract_group_packet_features(
@@ -808,6 +964,59 @@ def extract_group_packet_features(
     candidate_count = 0
     parse_errors = 0
     truncated = False
+
+    def observe_content(
+        payload: bytes,
+        selected_markers: list[tuple[dict[str, Any], bytes]],
+        *,
+        application_buffer: str | None = None,
+    ) -> bool:
+        if not selected_markers:
+            return False
+        ordered_constraints = _ordered_deployed_content_constraints(
+            payload,
+            selected_markers,
+            application_buffer=application_buffer,
+        )
+        for spec, marker in selected_markers:
+            marker_id = str(spec["id"])
+            if spec.get("source") == "deployed_rule":
+                constraint = ordered_constraints.get(marker_id)
+            else:
+                constraint = _content_constraint(payload, marker, spec)
+            if constraint is None:
+                marker_constraint_unsupported.add(marker_id)
+            else:
+                marker_constraint_evaluated[marker_id] += 1
+                if constraint:
+                    marker_constraint_satisfied[marker_id] += 1
+                else:
+                    marker_constraint_violated[marker_id] += 1
+            if not _content_evaluation_supported(
+                spec,
+                application_buffer=application_buffer,
+            ):
+                continue
+            modifiers = (
+                spec.get("modifiers")
+                if isinstance(spec.get("modifiers"), dict)
+                else {}
+            )
+            haystack = payload.lower() if "nocase" in modifiers else payload
+            needle = marker.lower() if "nocase" in modifiers else marker
+            start = 0
+            matches = 0
+            while matches < MAX_MARKER_MATCHES_PER_PACKET:
+                position = haystack.find(needle, start)
+                if position < 0:
+                    break
+                marker_offsets[marker_id][position] += 1
+                matches += 1
+                start = position + 1
+            if matches:
+                marker_packets[marker_id] += 1
+        return True
+
     for row in grouped_rows:
         if candidate_count >= MAX_GROUP_PACKETS:
             truncated = True
@@ -817,6 +1026,12 @@ def extract_group_packet_features(
         if not raw:
             raw = _json_object(_nested(alert, "security_onion.raw_event"))
         message = _json_object(raw.get("message"))
+        application_buffers = _bounded_application_buffers(
+            raw,
+            message,
+            alert,
+            marker_values,
+        )
         packet_text = str(message.get("packet") or "").strip()
         if not packet_text:
             continue
@@ -845,6 +1060,22 @@ def extract_group_packet_features(
             58: "icmpv6",
         }.get(protocol_number, f"ip_protocol_{protocol_number}")
         protocol_counts[protocol_name] += 1
+        row_has_content = False
+        for buffer_name, buffer_payload in application_buffers.items():
+            selected = [
+                (spec, marker)
+                for spec, marker in marker_values
+                if str(spec.get("buffer") or "").strip().lower()
+                == buffer_name
+            ]
+            row_has_content = (
+                observe_content(
+                    buffer_payload,
+                    selected,
+                    application_buffer=buffer_name,
+                )
+                or row_has_content
+            )
         if protocol_number in {1, 58}:
             parsed = _icmp_from_packet(packet, linktype)
             if not parsed:
@@ -877,39 +1108,18 @@ def extract_group_packet_features(
             # A valid, currently unsupported transport is not a parse error.
             parsed_packet_count += 1
             unsupported_protocol_packets += 1
+            if row_has_content:
+                content_packet_count += 1
             continue
-        content_packet_count += 1
-        ordered_constraints = _ordered_deployed_content_constraints(
-            payload,
-            marker_values,
-        )
-        for spec, marker in marker_values:
-            marker_id = str(spec["id"])
-            if spec.get("source") == "deployed_rule":
-                constraint = ordered_constraints.get(marker_id)
-            else:
-                constraint = _content_constraint(payload, marker, spec)
-            if constraint is None:
-                marker_constraint_unsupported.add(marker_id)
-            else:
-                marker_constraint_evaluated[marker_id] += 1
-                if constraint:
-                    marker_constraint_satisfied[marker_id] += 1
-                else:
-                    marker_constraint_violated[marker_id] += 1
-            if not _raw_payload_content_evaluation_supported(spec):
-                continue
-            start = 0
-            matches = 0
-            while matches < MAX_MARKER_MATCHES_PER_PACKET:
-                position = payload.find(marker, start)
-                if position < 0:
-                    break
-                marker_offsets[marker_id][position] += 1
-                matches += 1
-                start = position + 1
-            if matches:
-                marker_packets[marker_id] += 1
+        raw_markers = [
+            (spec, marker)
+            for spec, marker in marker_values
+            if str(spec.get("buffer") or "").strip().lower()
+            in {"", "pkt_data"}
+        ]
+        row_has_content = observe_content(payload, raw_markers) or row_has_content
+        if row_has_content:
+            content_packet_count += 1
     marker_results = []
     for spec, marker in marker_values:
         marker_id = str(spec["id"])
@@ -931,7 +1141,13 @@ def extract_group_packet_features(
             "offsets": _bounded_counter(offset_counts),
             "constraint_supported": (
                 marker_id not in marker_constraint_unsupported
-                and _raw_payload_content_evaluation_supported(spec)
+                and _content_evaluation_supported(
+                    spec,
+                    application_buffer=(
+                        str(spec.get("buffer") or "").strip().lower()
+                        or None
+                    ),
+                )
             ),
             "packets_evaluated_for_constraint": int(marker_constraint_evaluated[marker_id]),
             "packets_satisfying_constraint": int(marker_constraint_satisfied[marker_id]),
@@ -939,6 +1155,9 @@ def extract_group_packet_features(
         })
     return {
         "source": "stored-security-onion-alert-packet-copies",
+        "application_evidence_source": (
+            "stored-security-onion-suricata-application-projection"
+        ),
         "raw_payloads_included": False,
         "candidate_packets": candidate_count,
         "packets_parsed": parsed_packet_count,
@@ -1236,6 +1455,46 @@ def _infer_stun_response_xbits_state(
     )
 
 
+def _validated_stun_rule_semantics(
+    rule_context: dict[str, Any],
+    packet_features: dict[str, Any],
+) -> bool:
+    """Validate the bounded STUN SID family with the RFC 5389 parser."""
+    expected = {
+        ("2016149", 4): "binding_request",
+        ("2016150", 4): "binding_success_response",
+        ("2033078", 5): "binding_request",
+    }.get(
+        (
+            str(rule_context.get("sid") or ""),
+            rule_context.get("revision"),
+        )
+    )
+    if not expected:
+        return False
+    conflicts = rule_context.get("identity_conflicts")
+    if isinstance(conflicts, dict) and any(
+        conflicts.get(key) for key in ("sid", "revision")
+    ):
+        return False
+    candidate_packets = int(packet_features.get("candidate_packets") or 0)
+    stun = packet_features.get("stun")
+    if not isinstance(stun, dict):
+        return False
+    message_types = {
+        str(item.get("value") or ""): int(item.get("count") or 0)
+        for item in stun.get("message_types", [])
+        if isinstance(item, dict)
+    }
+    return bool(
+        candidate_packets > 0
+        and int(stun.get("packets_parsed") or 0) == candidate_packets
+        and message_types.get(expected) == candidate_packets
+        and not int(packet_features.get("parse_errors") or 0)
+        and packet_features.get("truncated") is not True
+    )
+
+
 def build_detection_validation(
     rule_context: dict[str, Any],
     packet_features: dict[str, Any],
@@ -1416,7 +1675,12 @@ def build_detection_validation(
                         "unsupported sticky-buffer, transform, or buffer-size "
                         "evaluation requires a trusted Suricata rule-engine trace"
                         if not constraint_supported
-                        else "deployed rule content predicate"
+                        else (
+                            "supported application sticky-buffer evidence was "
+                            "not present in the supplied alert projection"
+                            if buffer_name and not evaluated
+                            else "deployed rule content predicate"
+                        )
                     ),
                 }
             )
@@ -1503,7 +1767,20 @@ def build_detection_validation(
         intent_match = "unknown"
     elif any(item.get("status") == "mismatched" for item in required):
         intent_match = "mismatch"
-    elif required and all(item.get("status") == "matched" for item in required):
+    elif required and (
+        all(item.get("status") == "matched" for item in required)
+        or (
+            _validated_stun_rule_semantics(
+                rule_context,
+                packet_features,
+            )
+            and all(
+                item.get("status") == "matched"
+                or str(item.get("field") or "") == "udp.payload_marker"
+                for item in required
+            )
+        )
+    ):
         intent_match = "match"
     else:
         intent_match = "unknown"
@@ -1521,6 +1798,14 @@ def build_detection_validation(
         "event_status": event_status,
         "event_observed": True if event_status == "observed" else None,
         "rule_intent_match": intent_match,
+        "rule_intent_basis": (
+            "validated_rfc5389_stun_semantics"
+            if _validated_stun_rule_semantics(
+                rule_context,
+                packet_features,
+            )
+            else "deployed_rule_predicates"
+        ),
         "rule": {
             "sid": rule_context.get("sid"),
             "revision": rule_context.get("revision"),

@@ -100,6 +100,38 @@ def udp_frame(
     return ethernet + ipv4 + udp + payload
 
 
+def tcp_frame(*, source_port: int = 55000, destination_port: int = 80) -> bytes:
+    destination_mac = bytes.fromhex("969eaec0fe6b")
+    source_mac = bytes.fromhex("90ec77890954")
+    ethernet = destination_mac + source_mac + struct.pack("!H", 0x0800)
+    total_length = 20 + 20
+    ipv4 = struct.pack(
+        "!BBHHHBBH4s4s",
+        0x45,
+        0,
+        total_length,
+        1,
+        0,
+        64,
+        6,
+        0,
+        socket.inet_aton("192.0.2.41"),
+        socket.inet_aton("192.0.2.42"),
+    )
+    tcp = struct.pack(
+        "!HHIIHHHH",
+        source_port,
+        destination_port,
+        1,
+        1,
+        0x5010,
+        65535,
+        0,
+        0,
+    )
+    return ethernet + ipv4 + tcp
+
+
 def stun_message(message_type: int, *, body: bytes = b"") -> bytes:
     if len(body) % 4:
         raise ValueError("STUN fixture body must use 32-bit alignment")
@@ -351,7 +383,11 @@ class DetectionValidationTests(unittest.TestCase):
         result = validation.build_detection_validation(context, features, None)
 
         marker = features["markers"][0]
-        self.assertFalse(marker["constraint_supported"])
+        # The DNS sticky-buffer predicate is supported when Suricata supplies
+        # a normalized application value, but this raw wire-only fixture does
+        # not provide one and therefore remains unevaluated/unknown.
+        self.assertTrue(marker["constraint_supported"])
+        self.assertEqual(marker["packets_evaluated_for_constraint"], 0)
         self.assertEqual(marker["packets_evaluated_for_constraint"], 0)
         self.assertEqual(marker["packets_violating_constraint"], 0)
         self.assertEqual(marker["packets_with_marker"], 0)
@@ -365,6 +401,98 @@ class DetectionValidationTests(unittest.TestCase):
         self.assertEqual(content["status"], "unknown")
         self.assertEqual(result["rule_intent_match"], "unknown")
         self.assertIn("sticky-buffer", content["reason"])
+
+    def test_http_application_projection_validates_sticky_buffers(self) -> None:
+        rule = (
+            'alert http any any -> any any (msg:"fixture"; '
+            'http.method; content:"GET"; http.uri; bsize:16; '
+            'content:"/connecttest.txt"; http.host; bsize:23; '
+            'content:"www.msftconnecttest.com"; fast_pattern; '
+            'sid:999996; rev:1;)'
+        )
+        message = {
+            "alert": {
+                "signature_id": 999996,
+                "rev": 1,
+                "signature": "fixture",
+                "rule": rule,
+            },
+            "packet": base64.b64encode(tcp_frame()).decode("ascii"),
+            "packet_info": {"linktype": 1},
+        }
+        decoded = (
+            "GET /connecttest.txt HTTP/1.1\r\n"
+            "Host: www.msftconnecttest.com\r\n"
+            "User-Agent: fixture\r\n\r\n"
+        )
+        raw = {
+            "message": json.dumps(message),
+            "network": {"data": {"decoded": decoded}},
+            "rule": {"rule": rule, "rev": 1, "ruleset": "fixture"},
+        }
+        row = {
+            "rule_id": "999996",
+            "raw_event_json": json.dumps(raw),
+            "alert_json": "{}",
+        }
+        context = validation.extract_rule_context({}, raw, "999996")
+        features = validation.extract_group_packet_features(
+            [row],
+            validation.marker_specs(context, None),
+        )
+        result = validation.build_detection_validation(context, features)
+
+        self.assertEqual(result["rule_intent_match"], "match")
+        self.assertEqual(
+            [item["status"] for item in result["predicate_results"]],
+            ["matched", "matched", "matched"],
+        )
+        self.assertFalse(features["raw_payloads_included"])
+
+    def test_tls_dotprefix_projection_validates_apex_sni(self) -> None:
+        rule = (
+            'alert tls any any -> any any (msg:"fixture"; tls.sni; '
+            'dotprefix; content:".dns.google"; endswith; '
+            'sid:999995; rev:1;)'
+        )
+        message = {
+            "alert": {
+                "signature_id": 999995,
+                "rev": 1,
+                "signature": "fixture",
+                "rule": rule,
+            },
+            "packet": base64.b64encode(
+                tcp_frame(destination_port=443)
+            ).decode("ascii"),
+            "packet_info": {"linktype": 1},
+            "payload_printable": "binary prefix dns.google binary suffix",
+        }
+        raw = {
+            "message": json.dumps(message),
+            "rule": {"rule": rule, "rev": 1, "ruleset": "fixture"},
+        }
+        row = {
+            "rule_id": "999995",
+            "raw_event_json": json.dumps(raw),
+            "alert_json": "{}",
+        }
+        context = validation.extract_rule_context({}, raw, "999995")
+        features = validation.extract_group_packet_features(
+            [row],
+            validation.marker_specs(context, None),
+        )
+        result = validation.build_detection_validation(context, features)
+
+        self.assertEqual(result["rule_intent_match"], "match")
+        self.assertEqual(
+            result["predicate_results"][0]["field"],
+            "tls.sni",
+        )
+        self.assertEqual(
+            result["predicate_results"][0]["status"],
+            "matched",
+        )
 
     def test_bpfdoor_code_zero_remains_unknown_without_xbit_trace(self) -> None:
         rows = []

@@ -280,6 +280,12 @@ class PcapAnalysisWorkflowTest(unittest.TestCase):
               artifact_size_bytes INTEGER,
               error TEXT
             );
+            CREATE TABLE alert_group_alias (
+              legacy_group_id TEXT PRIMARY KEY,
+              stable_group_id TEXT NOT NULL,
+              stable_group_key TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
             INSERT INTO pcap_requests VALUES (
               'pcap-unit-test', 'alert-1', 'group-1', 'fulfilled',
               '2026-07-07  09:59:00-06:00', NULL, '2026-07-07  10:00:00-06:00',
@@ -287,16 +293,98 @@ class PcapAnalysisWorkflowTest(unittest.TestCase):
             );
             """
         )
-        selected = {"alert_id": "alert-1"}
+        selected = {"alert_id": "alert-1", "stable_group_id": "stable-group-1"}
 
         context = self.prompt_builder.pcap_evidence_context(conn, selected, analysis_dir, 3)
         conn.close()
 
         self.assertEqual(len(context["pcap_requests"]), 1)
         self.assertEqual(len(context["parsed_evidence"]), 1)
+        self.assertEqual(context["exact_alert_evidence_count"], 1)
+        self.assertEqual(context["stable_group_related_evidence_count"], 0)
         evidence = context["parsed_evidence"][0]
+        self.assertEqual(evidence["evidence_relationship"], "exact_alert")
         self.assertEqual(evidence["zeek"]["record_counts"]["conn"], 1)
         self.assertEqual(evidence["tshark"]["samples"][0]["conversations"], "TCP Conversations")
+
+    def test_prompt_package_includes_stable_group_pcap_as_historical_context(self) -> None:
+        analysis_dir = self.root / "pcap-analysis-related"
+        analysis_dir.mkdir()
+        (analysis_dir / "pcap-related-pcap-analysis.json").write_text(
+            json.dumps(
+                {
+                    "generated_at": "2026-07-07  10:00:00-06:00",
+                    "artifact_state": "copied-artifact",
+                    "request": {
+                        "request_id": "pcap-related",
+                        "alert_id": "older-alert",
+                        "group_id": "legacy-group",
+                    },
+                    "pcap_files": [
+                        {
+                            "name": "capture.pcap",
+                            "size_bytes": 12,
+                            "sha256": "a" * 64,
+                        }
+                    ],
+                    "zeek": {"available": True, "record_counts": {"conn": 1}},
+                    "tshark": {"available": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE pcap_requests (
+              request_id TEXT,
+              alert_id TEXT,
+              group_id TEXT,
+              status TEXT,
+              created_at TEXT,
+              claimed_at TEXT,
+              completed_at TEXT,
+              artifact_path TEXT,
+              artifact_sha256 TEXT,
+              artifact_size_bytes INTEGER,
+              error TEXT
+            );
+            CREATE TABLE alert_group_alias (
+              legacy_group_id TEXT PRIMARY KEY,
+              stable_group_id TEXT NOT NULL,
+              stable_group_key TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            INSERT INTO alert_group_alias VALUES (
+              'legacy-group', 'stable-group-1', 'stable-key',
+              '2026-07-07  10:00:00-06:00'
+            );
+            INSERT INTO pcap_requests VALUES (
+              'pcap-related', 'older-alert', 'legacy-group', 'fulfilled',
+              '2026-07-07  09:59:00-06:00', NULL,
+              '2026-07-07  10:00:00-06:00',
+              '/nsm/pcapout/pcap-related.tar', 'bbbb', 99, NULL
+            );
+            """
+        )
+
+        context = self.prompt_builder.pcap_evidence_context(
+            conn,
+            {"alert_id": "selected-alert", "stable_group_id": "stable-group-1"},
+            analysis_dir,
+            3,
+        )
+        conn.close()
+
+        self.assertEqual(len(context["pcap_requests"]), 1)
+        self.assertEqual(len(context["parsed_evidence"]), 1)
+        self.assertEqual(context["exact_alert_evidence_count"], 0)
+        self.assertEqual(context["stable_group_related_evidence_count"], 1)
+        self.assertEqual(
+            context["parsed_evidence"][0]["evidence_relationship"],
+            "stable_group_related",
+        )
 
     def test_prompt_package_includes_compact_public_enrichment(self) -> None:
         conn = sqlite3.connect(":memory:")

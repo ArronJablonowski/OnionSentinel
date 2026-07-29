@@ -57,8 +57,24 @@ from investigation_query_contract import (  # noqa: E402
     pack_event_tuple_fields,
 )
 try:  # The pinned compatibility-v1 runtime predates role-aware semantics.
-    from investigation_query_contract import tuple_match_semantics  # noqa: E402
+    from investigation_query_contract import (  # noqa: E402
+        PACK_ROLE_MODE,
+        tuple_match_semantics,
+    )
 except ImportError:  # pragma: no cover - exercised through the v1 runtime test
+    PACK_ROLE_MODE = {
+        "network_flow": "cross_sensor",
+        "dns_activity": "cross_sensor",
+        "cross_sensor_timeline": "cross_sensor",
+        "zeek_tls": "zeek_originator_responder",
+        "zeek_http": "zeek_originator_responder",
+        "zeek_files": "zeek_originator_responder",
+        "zeek_ssh": "zeek_originator_responder",
+        "zeek_stun": "zeek_originator_responder",
+        "zeek_quic": "zeek_originator_responder",
+        "zeek_anomalies": "zeek_originator_responder",
+    }
+
     def tuple_match_semantics(
         _pack_name: str,
         event_tuple: dict[str, Any] | None,
@@ -7780,6 +7796,199 @@ def investigation_query_repair_prompt_entry(
     return entry
 
 
+def deterministic_incident_pivot_requests(
+    prompt_package: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Compile a repeatable protocol-first pivot plan from trusted context.
+
+    This planner never consumes model-supplied observables or executable query
+    text. It uses the locally authorized event tuple and emits the same fixed
+    packs, window, and parameters for the same evidence package.
+    """
+    if not _is_incident_responder_package(prompt_package):
+        return []
+    capability = prompt_package.get("investigation_query_capability")
+    local = prompt_package.get("_local_investigation_query_context")
+    if not isinstance(capability, dict) or not capability.get("enabled"):
+        return []
+    if not isinstance(local, dict):
+        return []
+    tuples = local.get("permitted_event_tuples")
+    if not isinstance(tuples, list) or not tuples:
+        return []
+    alert = (
+        prompt_package.get("alert")
+        if isinstance(prompt_package.get("alert"), dict)
+        else {}
+    )
+    trusted_entries = [
+        item
+        for item in tuples
+        if isinstance(item, dict)
+        and isinstance(item.get("event_tuple"), dict)
+    ]
+    if not trusted_entries:
+        return []
+    anchor_tuple = {
+        key: value
+        for key, value in {
+            "source_ip": alert.get("source_ip"),
+            "destination_ip": alert.get("destination_ip"),
+            "source_port": alert.get("source_port"),
+            "destination_port": alert.get("destination_port"),
+            "transport": alert.get("transport_protocol"),
+            "protocol": alert.get("network_protocol"),
+            "rule_id": alert.get("rule_id"),
+        }.items()
+        if value not in (None, "")
+    }
+
+    def trusted_entry_rank(entry: dict[str, Any]) -> tuple[int, int, str]:
+        candidate = entry["event_tuple"]
+        mismatches = sum(
+            1
+            for key, value in anchor_tuple.items()
+            if key in candidate
+            and str(candidate[key]).lower() != str(value).lower()
+        )
+        matches = sum(
+            1
+            for key, value in anchor_tuple.items()
+            if key in candidate
+            and str(candidate[key]).lower() == str(value).lower()
+        )
+        return (
+            mismatches,
+            -matches,
+            investigation_query_canonical_digest(entry),
+        )
+
+    trusted_entry = min(trusted_entries, key=trusted_entry_rank)
+    trusted_tuple = trusted_entry["event_tuple"]
+    rule_context = (
+        alert.get("rule_context")
+        if isinstance(alert.get("rule_context"), dict)
+        else {}
+    )
+    deployed_rule = (
+        rule_context.get("deployed_rule")
+        if isinstance(rule_context.get("deployed_rule"), dict)
+        else {}
+    )
+    protocol = str(
+        deployed_rule.get("protocol")
+        or _nested_value(alert, "network.protocol")
+        or ""
+    ).strip().lower()
+    rule_name = str(alert.get("rule_name") or "").lower()
+    if protocol == "http":
+        packs = ("zeek_http", "zeek_files")
+    elif protocol in {"tls", "ssl"}:
+        packs = ("zeek_tls", "zeek_anomalies")
+    elif protocol == "dns":
+        packs = ("dns_activity", "zeek_tls")
+    elif protocol == "ssh":
+        packs = ("zeek_ssh", "system_auth")
+    elif protocol == "quic":
+        packs = ("zeek_quic", "network_flow")
+    elif protocol == "udp" and "stun" in rule_name:
+        packs = ("zeek_stun", "network_flow")
+    else:
+        packs = ("network_flow", "alert_context")
+
+    anchor_time = str(
+        local.get("anchor_time")
+        or capability.get("anchor_time")
+        or alert.get("timestamp")
+        or ""
+    ).strip()
+    try:
+        anchor = _query_utc(anchor_time, "authorization anchor_time")
+    except InvestigationQueryError:
+        return []
+    window = {
+        "start": _query_utc_text(anchor - dt.timedelta(minutes=5)),
+        "end": _query_utc_text(anchor + dt.timedelta(minutes=5)),
+    }
+    ips = [
+        str(value)
+        for value in (
+            trusted_tuple.get("source_ip"),
+            trusted_tuple.get("destination_ip"),
+        )
+        if str(value or "").strip()
+    ]
+    observables = {
+        "ips": list(dict.fromkeys(ips)),
+        "domains": [],
+        "hosts": [],
+        "users": [],
+    }
+    output: list[dict[str, Any]] = []
+    elastic_capability = (
+        capability.get("backends", {}).get("elastic", {})
+        if isinstance(capability.get("backends"), dict)
+        else {}
+    )
+    advertised_packs = set(
+        elastic_capability.get("packs", [])
+        if isinstance(elastic_capability, dict)
+        and isinstance(elastic_capability.get("packs"), list)
+        else []
+    )
+    for pack in packs:
+        if pack not in advertised_packs:
+            continue
+        allowed_tuple_fields = pack_event_tuple_fields(pack)
+        event_tuple = {
+            key: value
+            for key, value in trusted_tuple.items()
+            if key in allowed_tuple_fields and value not in (None, "")
+        }
+        role_mode = PACK_ROLE_MODE.get(pack)
+        role_semantics = str(
+            trusted_entry.get("role_semantics") or ""
+        ).strip()
+        if (
+            role_mode == "cross_sensor"
+            or (
+                role_mode == "zeek_originator_responder"
+                and role_semantics != "zeek_originator_responder"
+            )
+        ) and "community_id" not in event_tuple:
+            # Exact IP roles in a Suricata packet are not interchangeable with
+            # Zeek originator/responder roles. In the absence of the reviewed
+            # cross-sensor join key, retain the bounded exact-IP observable
+            # query and omit the semantically unsafe directional tuple.
+            event_tuple = {}
+        output.append(
+            {
+                "query_id": f"deterministic-{pack}",
+                "backend": "elastic",
+                "purpose": (
+                    "validate_detection"
+                    if not output
+                    else "establish_timeline"
+                ),
+                "parameters": {
+                    "pack": pack,
+                    "window": dict(window),
+                    "observables": copy.deepcopy(observables),
+                    **(
+                        {"event_tuple": event_tuple}
+                        if event_tuple
+                        else {}
+                    ),
+                    "size": 100,
+                    "aggregation": (
+                        "events" if not output else "timeline"
+                    ),
+                },
+            }
+        )
+    return output
+
+
 def apply_investigation_query_loop(
     prompt_package: dict[str, Any],
     primary_response: dict[str, Any],
@@ -7842,7 +8051,11 @@ def apply_investigation_query_loop(
             )
             return None
 
-    initial_requests = pop_investigation_query_requests(response)
+    model_initial_requests = pop_investigation_query_requests(response)
+    deterministic_requests = deterministic_incident_pivot_requests(
+        prompt_package
+    )
+    initial_requests = deterministic_requests + model_initial_requests
     if evaluation_query_guarantee and not initial_requests:
         query_planning_retry_attempted = True
         # Consume one of the ordinary model-call slots for planning while
@@ -8542,6 +8755,24 @@ def apply_investigation_query_loop(
                 "attempts": 1 if query_planning_retry_attempted else 0,
                 "maximum_attempts": 1,
                 "evaluation_only": query_planning_retry_attempted,
+            },
+            "deterministic_protocol_plan": {
+                "enabled": bool(deterministic_requests),
+                "requests": len(deterministic_requests),
+                "query_ids": [
+                    item["query_id"]
+                    for item in deterministic_requests
+                ],
+                "plan_digest": (
+                    investigation_query_canonical_digest(
+                        deterministic_requests
+                    )
+                    if deterministic_requests
+                    else ""
+                ),
+                "model_initial_requests": len(model_initial_requests),
+                "read_only_fixed_packs_only": True,
+                "query_text_model_supplied": False,
             },
             "planning_repair_attempted": (
                 query_planning_repair_attempted
@@ -11032,6 +11263,122 @@ def reviewer_automation_authorization(
     }
 
 
+def apply_material_disagreement_gate(
+    primary_response: dict[str, Any],
+    reviewer_response: dict[str, Any],
+    comparison: dict[str, Any],
+) -> dict[str, Any]:
+    """Publish a conservative disputed state instead of a contested verdict.
+
+    The primary and reviewer artifacts remain immutable inside the second-
+    opinion ledger. The top-level projection is what the dashboard and
+    downstream automation consume, so it must not continue to say no_action,
+    authorized_benign, or suppress while the independent reviewer materially
+    disputes those claims.
+    """
+    primary_handling = str(
+        primary_response.get("handling") or ""
+    ).strip().lower()
+    reviewer_handling = str(
+        reviewer_response.get("handling") or ""
+    ).strip().lower()
+    if {primary_handling, reviewer_handling}.intersection(
+        {"contain", "escalate", "investigate"}
+    ):
+        guarded_handling = "investigate"
+    else:
+        guarded_handling = "monitor"
+
+    primary_response["detection_outcome"] = "inconclusive"
+    primary_response["activity_disposition"] = "unknown"
+    primary_response["handling"] = guarded_handling
+    primary_response["duplicate_of"] = None
+    primary_response["escalation_needed"] = True
+    primary_response["confidence"] = "low"
+    try:
+        score = float(primary_response.get("confidence_score") or 0.39)
+    except (TypeError, ValueError, OverflowError):
+        score = 0.39
+    primary_response["confidence_score"] = round(
+        min(max(score, 0.0), 0.39),
+        3,
+    )
+
+    notice = (
+        "DISPUTED — the primary and independent reviewer materially disagree; "
+        "human adjudication is required before closure, containment, or tuning."
+    )
+    bluf = str(primary_response.get("bluf") or "").strip()
+    summary = str(primary_response.get("summary") or "").strip()
+    if not bluf.startswith("DISPUTED"):
+        primary_response["bluf"] = f"{notice} {bluf}".strip()
+    if not summary.startswith("DISPUTED"):
+        primary_response["summary"] = f"{notice} {summary}".strip()
+    evidence_gaps = (
+        list(primary_response.get("evidence_gaps"))
+        if isinstance(primary_response.get("evidence_gaps"), list)
+        else []
+    )
+    if notice not in evidence_gaps:
+        evidence_gaps.append(notice)
+    primary_response["evidence_gaps"] = evidence_gaps
+
+    report = primary_response.get("incident_response_report")
+    if isinstance(report, dict):
+        executive = str(report.get("executive_bluf") or "").strip()
+        conclusion = str(report.get("conclusion") or "").strip()
+        if not executive.startswith("DISPUTED"):
+            report["executive_bluf"] = f"{notice} {executive}".strip()
+        if not conclusion.startswith("DISPUTED"):
+            report["conclusion"] = f"{notice} {conclusion}".strip()
+        constraints = (
+            list(report.get("constraints"))
+            if isinstance(report.get("constraints"), list)
+            else []
+        )
+        if notice not in constraints:
+            constraints.append(notice)
+        report["constraints"] = constraints
+
+    calibration = (
+        dict(primary_response.get("_confidence_calibration"))
+        if isinstance(primary_response.get("_confidence_calibration"), dict)
+        else {}
+    )
+    limiters = (
+        list(calibration.get("limiters"))
+        if isinstance(calibration.get("limiters"), list)
+        else []
+    )
+    if "material_second_opinion_disagreement" not in limiters:
+        limiters.append("material_second_opinion_disagreement")
+    calibration.update(
+        {
+            "calibrated_confidence": "low",
+            "calibrated_confidence_score": primary_response[
+                "confidence_score"
+            ],
+            "maximum_confidence_score": min(
+                float(
+                    calibration.get("maximum_confidence_score", 1.0)
+                    or 1.0
+                ),
+                0.39,
+            ),
+            "limiters": limiters,
+        }
+    )
+    primary_response["_confidence_calibration"] = calibration
+    primary_response["_material_disagreement_gate"] = {
+        "version": 1,
+        "applied": True,
+        "agreement": comparison.get("agreement"),
+        "disputed_fields": comparison.get("disputed_fields"),
+        "guarded_handling": guarded_handling,
+    }
+    return primary_response
+
+
 def memory_writeback_plan(
     candidates: Any,
     *,
@@ -11575,8 +11922,12 @@ def apply_configured_second_opinion(
             "automation_authorization": automation_authorization,
         }
         if comparison["material_disagreement"]:
+            apply_material_disagreement_gate(
+                primary_response,
+                secondary,
+                comparison,
+            )
             primary_response["final_disposition_status"] = "disputed_pending_human"
-            primary_response["escalation_needed"] = True
             primary_response["tuning_recommendation"] = "needs_more_data"
             primary_response["tuning_reason"] = (
                 "Automatic tuning is blocked because the primary and independent reviewer "
@@ -12626,6 +12977,150 @@ def _is_incident_responder_package(prompt_package: dict[str, Any] | None) -> boo
     return role == "incident-responder"
 
 
+def _has_structured_authorization_evidence(
+    prompt_package: dict[str, Any] | None,
+) -> bool:
+    """Require a trusted, explicit authorization assertion for that label.
+
+    Asset expectations, vendor ownership, recurrence, and model prose can
+    support a benign hypothesis, but none proves that an operator authorized
+    the selected activity. The input is deliberately a separate structured
+    lane so a model cannot promote contextual evidence into authorization.
+    """
+    if not isinstance(prompt_package, dict):
+        return False
+    raw = prompt_package.get("authorization_evidence")
+    if isinstance(raw, dict):
+        entries = raw.get("entries")
+        if not isinstance(entries, list):
+            entries = [raw]
+    elif isinstance(raw, list):
+        entries = raw
+    else:
+        return False
+    trusted_sources = {
+        "approved_change",
+        "human_adjudication",
+        "operator_assertion",
+        "policy_exception",
+    }
+    for entry in entries[:50]:
+        if not isinstance(entry, dict) or entry.get("authorized") is not True:
+            continue
+        source = str(entry.get("source") or "").strip().lower()
+        evidence_ref = str(entry.get("evidence_ref") or "").strip()
+        if source in trusted_sources and evidence_ref:
+            return True
+    return False
+
+
+def apply_authorized_benign_evidence_guard(
+    response: dict[str, Any],
+    prompt_package: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Remove unsupported authorization and no-action claims from IR cases."""
+    if (
+        not _is_incident_responder_package(prompt_package)
+        or str(response.get("activity_disposition") or "").strip().lower()
+        != "authorized_benign"
+    ):
+        return response
+    supported = _has_structured_authorization_evidence(prompt_package)
+    audit = {
+        "version": 1,
+        "authorization_supported": supported,
+        "override_applied": False,
+        "required_sources": [
+            "approved_change",
+            "human_adjudication",
+            "operator_assertion",
+            "policy_exception",
+        ],
+    }
+    if supported:
+        response["_authorization_evidence_guard"] = audit
+        return response
+
+    original = {
+        key: response.get(key)
+        for key in (
+            "detection_outcome",
+            "activity_disposition",
+            "handling",
+            "tuning_recommendation",
+        )
+    }
+    response["activity_disposition"] = "benign"
+    if str(response.get("handling") or "").strip().lower() == "no_action":
+        response["handling"] = "monitor"
+    if (
+        str(response.get("tuning_recommendation") or "").strip().lower()
+        in CONTROL_TUNING_VALUES
+    ):
+        response["tuning_recommendation"] = "needs_more_data"
+        response["recommended_tuning_actions"] = []
+        response["tuning_reason"] = (
+            "Suppress/drop tuning is blocked because no structured operator "
+            "authorization evidence covers the selected activity."
+        )
+    response["detection_outcome"] = derive_legacy_detection_outcome(
+        {
+            key: response.get(key)
+            for key in FACTORED_VERDICT_KEYS
+        }
+    )
+    evidence_gaps = (
+        list(response.get("evidence_gaps"))
+        if isinstance(response.get("evidence_gaps"), list)
+        else []
+    )
+    gap = (
+        "No structured operator authorization evidence covers the selected "
+        "activity; benign context cannot establish authorized_benign."
+    )
+    if gap not in evidence_gaps:
+        evidence_gaps.append(gap)
+    response["evidence_gaps"] = evidence_gaps
+    verdict_validation = (
+        dict(response.get("_verdict_validation"))
+        if isinstance(response.get("_verdict_validation"), dict)
+        else {}
+    )
+    warnings = (
+        list(verdict_validation.get("warnings"))
+        if isinstance(verdict_validation.get("warnings"), list)
+        else []
+    )
+    warning = "unsupported authorized_benign claim was downgraded to benign/monitor"
+    if warning not in warnings:
+        warnings.append(warning)
+    verdict_validation["warnings"] = warnings
+    verdict_validation["canonical_legacy_outcome"] = response[
+        "detection_outcome"
+    ]
+    verdict_validation["derived_legacy_outcome"] = response[
+        "detection_outcome"
+    ]
+    response["_verdict_validation"] = verdict_validation
+    audit.update(
+        {
+            "override_applied": True,
+            "original_verdict": original,
+            "guarded_verdict": {
+                key: response.get(key)
+                for key in (
+                    "detection_outcome",
+                    "activity_disposition",
+                    "handling",
+                    "tuning_recommendation",
+                )
+            },
+        }
+    )
+    response["_authorization_evidence_guard"] = audit
+    return response
+
+
 def validate_incident_response_report_shape(value: Any) -> dict[str, Any]:
     """Describe missing or malformed responder fields without trusting prose.
 
@@ -13568,6 +14063,10 @@ def validate_response(
         normalized["_invalid_detection_outcome"] = normalized["detection_outcome"]
     normalized = normalize_factored_verdict(normalized)
     normalized = apply_deterministic_evidence_guard(
+        normalized,
+        prompt_package,
+    )
+    normalized = apply_authorized_benign_evidence_guard(
         normalized,
         prompt_package,
     )
