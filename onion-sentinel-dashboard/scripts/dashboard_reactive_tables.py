@@ -21,8 +21,13 @@ REACTIVE_TABLES_JS = r'''
 (() => {
   if (window.OnionSentinelReactiveTables) return;
   const jobs = new Map();
+  const revisionSubscribers = new Map();
+  const lastRevisions = new Map();
   let statusElement = null;
   let statusTimer = 0;
+  let eventsSource = null;
+  let eventsRetryTimer = 0;
+  let eventsConnected = false;
   const now = () => Date.now();
   const normalizeInterval = value => Math.max(1000, Number(value || 5000));
   const statusCopy = {
@@ -96,6 +101,77 @@ REACTIVE_TABLES_JS = r'''
     }
     return succeeded;
   }
+  function scheduleEventsReconnect() {
+    if (eventsRetryTimer || revisionSubscribers.size === 0) return;
+    eventsRetryTimer = window.setTimeout(() => {
+      eventsRetryTimer = 0;
+      connectEvents();
+    }, 5000);
+  }
+  function publishRevisions(payload) {
+    const revisions = payload?.revisions;
+    if (!revisions || typeof revisions !== 'object') return;
+    Object.entries(revisions).forEach(([key, value]) => {
+      if (typeof value !== 'string' || !value) return;
+      const previous = lastRevisions.get(key);
+      lastRevisions.set(key, value);
+      if (previous === value) return;
+      (revisionSubscribers.get(key) || []).forEach(listener => {
+        try {
+          listener({key, value, previous: previous || '', initial: previous === undefined});
+        } catch (_) {}
+      });
+    });
+    document.dispatchEvent(new CustomEvent('onion-sentinel:revisions', {
+      detail: {revisions, receivedAt: now()}
+    }));
+  }
+  function connectEvents() {
+    if (!window.EventSource || eventsSource || revisionSubscribers.size === 0) return false;
+    try {
+      const source = new EventSource('/api/soc-alerts/events');
+      eventsSource = source;
+      source.addEventListener('open', () => {
+        if (eventsSource !== source) return;
+        eventsConnected = true;
+        updateAggregateStatus();
+      });
+      source.addEventListener('soc-alerts', event => {
+        if (eventsSource !== source) return;
+        eventsConnected = true;
+        try { publishRevisions(JSON.parse(event.data)); } catch (_) {}
+      });
+      source.onerror = () => {
+        if (eventsSource !== source) return;
+        eventsConnected = false;
+        eventsSource.close();
+        eventsSource = null;
+        updateAggregateStatus();
+        scheduleEventsReconnect();
+      };
+      return true;
+    } catch (_) {
+      eventsConnected = false;
+      scheduleEventsReconnect();
+      return false;
+    }
+  }
+  function subscribeRevision(key, listener) {
+    if (!key || typeof listener !== 'function') throw new TypeError('A revision subscription requires a key and listener.');
+    const subscribers = revisionSubscribers.get(key) || new Set();
+    subscribers.add(listener);
+    revisionSubscribers.set(key, subscribers);
+    connectEvents();
+    return () => {
+      subscribers.delete(listener);
+      if (subscribers.size === 0) revisionSubscribers.delete(key);
+      if (revisionSubscribers.size === 0 && eventsSource) {
+        eventsSource.close();
+        eventsSource = null;
+        eventsConnected = false;
+      }
+    };
+  }
   function register(name, refresh, options = {}) {
     if (!name || typeof refresh !== 'function') throw new TypeError('A live table job requires a name and refresh function.');
     const intervalMs = normalizeInterval(options.intervalMs);
@@ -105,13 +181,21 @@ REACTIVE_TABLES_JS = r'''
       refresh,
       intervalMs,
       when: typeof options.when === 'function' ? options.when : null,
+      revisionKey: String(options.revisionKey || ''),
       nextAt: now() + (options.immediate ? 0 : intervalMs)
     });
+    if (job.unsubscribeRevision) job.unsubscribeRevision();
+    job.unsubscribeRevision = job.revisionKey
+      ? subscribeRevision(job.revisionKey, () => void run(job, 'event'))
+      : null;
     jobs.set(name, job);
     ensureStatus();
     updateAggregateStatus();
     if (options.immediate) void run(job, 'register');
-    return () => jobs.delete(name);
+    return () => {
+      job.unsubscribeRevision?.();
+      jobs.delete(name);
+    };
   }
   function refreshAll(reason = 'manual') {
     if (document.hidden) return Promise.resolve([]);
@@ -162,9 +246,15 @@ REACTIVE_TABLES_JS = r'''
       name: job.name,
       running: job.running,
       intervalMs: job.intervalMs,
+      revisionKey: job.revisionKey,
       lastSuccessAt: job.lastSuccessAt,
       lastError: job.lastError
-    }))
+    })),
+    events: () => ({
+      connected: eventsConnected,
+      supported: Boolean(window.EventSource),
+      subscribedKeys: [...revisionSubscribers.keys()]
+    })
   });
 })();
 </script>

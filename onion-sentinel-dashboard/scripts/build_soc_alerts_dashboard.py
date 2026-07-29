@@ -5982,9 +5982,9 @@ def incident_response_page_section() -> str:
       const incidentLiveRefresh=async()=>{const results=await Promise.all([load(),loadReanalysisProgress()]);return results.some(Boolean)};
       const incidentCanRefresh=()=>document.getElementById('analyst-adjudication-modal')?.hidden!==false;
       if(window.OnionSentinelReactiveTables){
-        window.OnionSentinelReactiveTables.register('incident-response-cases',incidentLiveRefresh,{intervalMs:5000,when:incidentCanRefresh});
+        window.OnionSentinelReactiveTables.register('incident-response-cases',incidentLiveRefresh,{intervalMs:60000,when:incidentCanRefresh,revisionKey:'incidents'});
       }else{
-        window.setInterval(()=>{if(incidentCanRefresh())incidentLiveRefresh()},5000);
+        window.setInterval(()=>{if(incidentCanRefresh())incidentLiveRefresh()},60000);
       }
     })();
     </script>'''
@@ -6163,9 +6163,10 @@ def asset_inventory_page_section() -> str:
       search.addEventListener('input',render);sort.addEventListener('change',render);direction.addEventListener('change',render);load();loadDhcp();
       const assetLiveRefresh=async()=>{const results=await Promise.all([load(),loadDhcp()]);return results.some(Boolean)};
       if(window.OnionSentinelReactiveTables){
-        window.OnionSentinelReactiveTables.register('asset-inventory-tables',assetLiveRefresh,{intervalMs:10000});
+        window.OnionSentinelReactiveTables.register('asset-inventory-tables',assetLiveRefresh,{intervalMs:60000,revisionKey:'asset_inventory'});
+        window.OnionSentinelReactiveTables.register('dhcp-asset-discovery',loadDhcp,{intervalMs:60000,revisionKey:'dhcp_asset_discovery'});
       }else{
-        window.setInterval(assetLiveRefresh,10000);
+        window.setInterval(assetLiveRefresh,60000);
       }
     })();
     </script>'''

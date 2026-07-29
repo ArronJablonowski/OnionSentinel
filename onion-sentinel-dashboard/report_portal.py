@@ -11635,6 +11635,7 @@ def soc_alert_events_snapshot() -> dict:
         "ok": True,
         "event": "soc-alerts",
         "time": now_iso_utc(),
+        "revisions": dashboard_live_revisions(),
         "counts": analyst_status.get("counts", {}),
         "statuses": analyst_status.get("statuses", {}),
         "ai": merge_live_llm_activity(static_status.get("ai", {}), current_analysis),
@@ -11642,6 +11643,213 @@ def soc_alert_events_snapshot() -> dict:
         "status_updated_at": static_status.get("updated_at"),
         "metrics": metrics,
         "beacon": beacon,
+    }
+
+
+def _revision_digest(value: object) -> str:
+    """Return an opaque, deterministic live-update token."""
+    raw = json.dumps(value, separators=(",", ":"), sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _bounded_file_revision(path: Path, maximum_bytes: int) -> str:
+    """Fingerprint file identity without exposing its path or contents."""
+    try:
+        metadata = path.stat()
+        if not path.is_file() or metadata.st_size > maximum_bytes:
+            return _revision_digest(("invalid",))
+        return _revision_digest((metadata.st_mtime_ns, metadata.st_size))
+    except FileNotFoundError:
+        return _revision_digest(("missing",))
+    except OSError:
+        return _revision_digest(("unavailable",))
+
+
+def asset_inventory_live_revision() -> str:
+    """Track the public inventory view, including time-scoped assignments."""
+    _status, payload = asset_inventory_response()
+    stable = dict(payload)
+    stable.pop("observed_at", None)
+    return _revision_digest(stable)
+
+
+def dhcp_asset_discovery_live_revision(asset_revision: str) -> str:
+    """Track collector output and inventory-driven reconciliation changes."""
+    state_revision = _bounded_file_revision(
+        Path(DHCP_ASSET_DISCOVERY_STATE_FILE),
+        DHCP_ASSET_DISCOVERY_MAX_BYTES,
+    )
+    return _revision_digest((state_revision, asset_revision))
+
+
+def _revision_rows(
+    conn: sqlite3.Connection,
+    table: str,
+    columns: tuple[str, ...],
+    *,
+    where_sql: str = "",
+    arguments: tuple[object, ...] = (),
+    order_sql: str = "",
+    limit: int | None = None,
+) -> list[dict[str, object]]:
+    """Read a schema-tolerant, bounded table slice for revision hashing."""
+    if not sqlite_table_exists(conn, table):
+        return []
+    available = sqlite_table_columns(conn, table)
+    selected = [column for column in columns if column in available]
+    if not selected:
+        return []
+    query = f"SELECT {', '.join(selected)} FROM {table}"
+    if where_sql:
+        query += f" WHERE {where_sql}"
+    if order_sql:
+        query += f" ORDER BY {order_sql}"
+    query_arguments = list(arguments)
+    if limit is not None:
+        query += " LIMIT ?"
+        query_arguments.append(limit)
+    return [dict(row) for row in conn.execute(query, query_arguments).fetchall()]
+
+
+def incident_response_live_revision() -> str:
+    """Fingerprint only records capable of changing the Incident Responder UI."""
+    try:
+        with soc_alert_db_connect() as conn:
+            cases = _revision_rows(
+                conn,
+                "incident_response_cases",
+                (
+                    "case_id", "group_id", "dashboard_group_id",
+                    "representative_alert_id", "status", "agent_status",
+                    "escalated_at", "updated_at", "latest_analysis_id",
+                    "latest_model", "latest_generated_at", "latest_error",
+                    "resolution_reason", "resolved_at", "resolved_by",
+                ),
+                order_sql="case_id",
+            )
+            dashboard_group_ids = tuple(
+                str(row["dashboard_group_id"])
+                for row in cases
+                if row.get("dashboard_group_id")
+            )
+            representative_alert_ids = tuple(
+                str(row["representative_alert_id"])
+                for row in cases
+                if row.get("representative_alert_id")
+            )
+            analysis_ids = tuple(
+                str(row["latest_analysis_id"])
+                for row in cases
+                if row.get("latest_analysis_id")
+            )
+            case_ids = tuple(
+                str(row["case_id"]) for row in cases if row.get("case_id")
+            )
+
+            def related_rows(
+                table: str,
+                columns: tuple[str, ...],
+                key: str,
+                values: tuple[str, ...],
+            ) -> list[dict[str, object]]:
+                if not values:
+                    return []
+                placeholders = ",".join("?" for _ in values)
+                return _revision_rows(
+                    conn,
+                    table,
+                    columns,
+                    where_sql=f"{key} IN ({placeholders})",
+                    arguments=values,
+                    order_sql=key,
+                )
+
+            state: dict[str, object] = {"cases": cases}
+            state["groups"] = related_rows(
+                "alert_group_summary",
+                (
+                    "group_id", "rule_name", "severity", "severity_label",
+                    "triage_level", "source_ip", "destination_ip",
+                    "destination_port", "raw_alert_count", "total_seen_count",
+                    "first_seen", "last_seen",
+                ),
+                "group_id",
+                dashboard_group_ids,
+            )
+            state["alerts"] = related_rows(
+                "alerts",
+                (
+                    "alert_id", "rule_name", "severity", "severity_label",
+                    "triage_level", "source_ip", "destination_ip",
+                    "destination_port", "seen_count", "first_seen", "last_seen",
+                ),
+                "alert_id",
+                representative_alert_ids,
+            )
+            state["analyses"] = related_rows(
+                "ai_analysis_runs",
+                (
+                    "analysis_id", "generated_at", "model", "detection_outcome",
+                    "confidence", "evidence_hash", "response_json",
+                ),
+                "analysis_id",
+                analysis_ids,
+            )
+            state["reviews"] = related_rows(
+                "ai_second_opinion_runs",
+                (
+                    "analysis_id", "status", "reviewer_outcome",
+                    "reviewer_confidence", "agreement", "material_disagreement",
+                    "disputed_fields_json", "generated_at",
+                ),
+                "analysis_id",
+                analysis_ids,
+            )
+            state["adjudications"] = related_rows(
+                "analyst_adjudications",
+                (
+                    "case_id", "analysis_id", "outcome_override", "confidence",
+                    "event_status", "detection_validity", "activity_disposition",
+                    "handling", "case_resolution_reason", "created_at",
+                ),
+                "case_id",
+                case_ids,
+            )
+            latest_runs = _revision_rows(
+                conn,
+                "incident_reanalysis_runs",
+                (
+                    "run_id", "release_id", "scope", "status", "total_count",
+                    "created_at", "updated_at", "completed_at",
+                ),
+                order_sql="created_at DESC",
+                limit=1,
+            )
+            state["reanalysis_runs"] = latest_runs
+            if latest_runs:
+                run_id = str(latest_runs[0].get("run_id") or "")
+                state["reanalysis_cases"] = related_rows(
+                    "incident_reanalysis_run_cases",
+                    (
+                        "run_id", "case_id", "status", "skip_reason",
+                        "latest_error", "analysis_id", "result_generated_at",
+                        "updated_at",
+                    ),
+                    "run_id",
+                    (run_id,),
+                )
+            return _revision_digest(state)
+    except (FileNotFoundError, sqlite3.Error):
+        return _revision_digest(("unavailable",))
+
+
+def dashboard_live_revisions() -> dict[str, str]:
+    """Return revision-only signals; never include incident or asset records."""
+    asset_revision = asset_inventory_live_revision()
+    return {
+        "incidents": incident_response_live_revision(),
+        "asset_inventory": asset_revision,
+        "dhcp_asset_discovery": dhcp_asset_discovery_live_revision(asset_revision),
     }
 
 
@@ -11722,7 +11930,9 @@ class PortalHandler(BaseHTTPRequestHandler):
             try:
                 payload = cached_soc_alert_events_snapshot()
                 raw = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-                digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()
+                stable_payload = dict(payload)
+                stable_payload.pop("time", None)
+                digest = _revision_digest(stable_payload)
                 if digest != last_digest:
                     event_id = str(int(time.time()))
                     self.wfile.write(f"id: {event_id}\nevent: soc-alerts\ndata: {raw}\n\n".encode("utf-8"))

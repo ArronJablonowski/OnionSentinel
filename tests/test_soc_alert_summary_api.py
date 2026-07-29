@@ -47,6 +47,11 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.portal.SOC_ALERT_STORE_DIRECT_WRITE_ALLOWED = True
         self.portal.SOC_ALERT_STATUS_FILE = Path(self.tmp.name) / ".soc_alert_status.json"
         self.portal.SOC_ALERT_STATIC_STATUS_FILE = Path(self.tmp.name) / "soc-alerts-status.json"
+        self.portal.ASSET_INVENTORY_FILE = Path(self.tmp.name) / "asset-inventory.json"
+        self.portal.DHCP_ASSET_DISCOVERY_STATE_FILE = (
+            Path(self.tmp.name) / "dhcp-observations.json"
+        )
+        self.portal.ASSET_INVENTORY_CACHE = {"signature": None, "inventory": None}
         self.portal.SOC_AI_SETTINGS_FILE = Path(self.tmp.name) / "ai-model-settings.json"
         self.portal.SOC_AI_SETTINGS_FILE.write_text(
             json.dumps(self.portal.default_soc_ai_settings()),
@@ -1537,6 +1542,72 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["metrics"]["by_analyst_status"]["open"], 2)
         self.assertEqual(payload["metrics"]["by_analyst_status"]["suppressed"], 1)
         self.assertEqual(payload["metrics"]["by_analyst_status"]["total"], payload["counts"]["total"])
+        self.assertEqual(
+            set(payload["revisions"]),
+            {"incidents", "asset_inventory", "dhcp_asset_discovery"},
+        )
+        self.assertTrue(all(len(value) == 64 for value in payload["revisions"].values()))
+
+    def test_live_revisions_do_not_expose_incident_or_asset_records(self) -> None:
+        revisions = self.portal.dashboard_live_revisions()
+        encoded = json.dumps(revisions)
+
+        self.assertEqual(
+            set(revisions),
+            {"incidents", "asset_inventory", "dhcp_asset_discovery"},
+        )
+        self.assertNotIn("Newest detection", encoded)
+        self.assertNotIn("192.0.2.10", encoded)
+        for value in revisions.values():
+            self.assertRegex(value, r"^[0-9a-f]{64}$")
+
+    def test_incident_revision_changes_when_a_case_is_added(self) -> None:
+        initial = self.portal.incident_response_live_revision()
+        self.conn.execute(
+            """
+            CREATE TABLE incident_response_cases (
+              case_id TEXT PRIMARY KEY,
+              group_id TEXT NOT NULL UNIQUE,
+              dashboard_group_id TEXT NOT NULL,
+              representative_alert_id TEXT NOT NULL,
+              status TEXT NOT NULL,
+              agent_status TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO incident_response_cases (
+              case_id, group_id, dashboard_group_id,
+              representative_alert_id, status, agent_status, updated_at
+            ) VALUES (?, ?, ?, ?, 'open', 'queued', ?)
+            """,
+            (
+                "ir-revision-unit",
+                "stable-revision-unit",
+                self.portal.soc_alert_group_id(
+                    "critical|Newest detection|192.0.2.10|198.51.100.10|accepted"
+                ),
+                "newest-alert",
+                "2026-07-29 12:00:00Z",
+            ),
+        )
+        self.conn.commit()
+
+        changed = self.portal.incident_response_live_revision()
+
+        self.assertNotEqual(changed, initial)
+
+    def test_file_revision_changes_without_exposing_file_contents(self) -> None:
+        path = Path(self.tmp.name) / "revision-state.json"
+        initial = self.portal._bounded_file_revision(path, 1024)
+        path.write_text('{"hostname":"sensitive-host.local"}', encoding="utf-8")
+
+        changed = self.portal._bounded_file_revision(path, 1024)
+
+        self.assertNotEqual(changed, initial)
+        self.assertNotIn("sensitive-host", changed)
 
     def test_live_ai_activity_shows_primary_codex_model_with_effort(self) -> None:
         merged = self.portal.merge_live_llm_activity(

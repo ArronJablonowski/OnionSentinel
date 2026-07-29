@@ -42,6 +42,9 @@ class ReactiveTablePageTests(unittest.TestCase):
         self.assertIn("job.nextAt = now() + job.intervalMs", source)
         self.assertIn("onion-sentinel:reactive-update", source)
         self.assertIn("onion-sentinel:reactive-error", source)
+        self.assertIn("onion-sentinel:revisions", source)
+        self.assertIn("new EventSource('/api/soc-alerts/events')", source)
+        self.assertIn("subscribeRevision(job.revisionKey", source)
         self.assertIn("id = 'onion-sentinel-live-status'", source)
         self.assertIn("changed = Boolean(await Promise.resolve(job.refresh", source)
         self.assertNotIn("setStatus('updating')", source)
@@ -78,6 +81,8 @@ class ReactiveTablePageTests(unittest.TestCase):
         self.assertIn("body.dataset.liveRenderVersion", page)
         self.assertIn("window.scrollBy(0,restored.getBoundingClientRect().top-anchor.top)", page)
         self.assertIn("target.dataset.loaded='true'", page)
+        self.assertIn("revisionKey:'incidents'", page)
+        self.assertIn("intervalMs:60000", page)
 
     def test_asset_and_report_refreshes_keep_existing_controls(self) -> None:
         asset_page = self.render("asset_inventory")
@@ -89,6 +94,8 @@ class ReactiveTablePageTests(unittest.TestCase):
         self.assertIn("Promise.all([load(),loadDhcp()])", asset_page)
         self.assertIn("if(nextSignature===assetSignature)return false", asset_page)
         self.assertIn("if(nextSignature===dhcpSignature)return false", asset_page)
+        self.assertIn("revisionKey:'asset_inventory'", asset_page)
+        self.assertIn("revisionKey:'dhcp_asset_discovery'", asset_page)
         self.assertIn("loadLogs(false)", report_page)
         self.assertIn("Promise.all([loadCurrent(), loadLogs(false)])", report_page)
         self.assertIn("if (nextSignature === currentSignature) return false", report_page)
