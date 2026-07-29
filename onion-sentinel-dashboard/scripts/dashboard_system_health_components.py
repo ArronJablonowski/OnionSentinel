@@ -164,7 +164,9 @@ SYSTEM_HEALTH_JS = '''
   let pcapRecentRequests = [];
   let pcapPage = 1;
   let pcapPageSize = 25;
+  let healthSignature = '';
   const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+  const stableSignature = value => JSON.stringify(value, (key, item) => key === 'generated_at' || key.endsWith('_age_seconds') ? undefined : item);
   const fmt = value => typeof formatProjectIso === 'function' ? formatProjectIso(value) : String(value || '');
   const bytes = value => typeof formatApiBytes === 'function' ? formatApiBytes(Number(value || 0)) : `${Number(value || 0)} B`;
   const duration = value => {
@@ -363,13 +365,19 @@ SYSTEM_HEALTH_JS = '''
         <tbody>${rows || '<tr><td colspan="8">No pipeline stages reported.</td></tr>'}</tbody>
       </table></div>`;
   }
-  async function loadHealth() {
-    refreshButton?.setAttribute('aria-busy', 'true');
-    refreshButton?.classList.add('refreshing');
+  async function loadHealth(options = {}) {
+    const showBusy = options.showBusy === true;
+    if (showBusy) {
+      refreshButton?.setAttribute('aria-busy', 'true');
+      refreshButton?.classList.add('refreshing');
+    }
     try {
       const response = await fetch('/api/system-health/beacons?hours=24&ts=' + Date.now(), {cache: 'no-store'});
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
+      const nextSignature = stableSignature(data);
+      if (nextSignature === healthSignature) return false;
+      healthSignature = nextSignature;
       const summary = data.summary || {};
       if (latest) latest.textContent = summary.latest ? fmt(summary.latest.timestamp) : 'No beacons';
       if (latestDetail) latestDetail.textContent = summary.latest ? detailText(summary.latest) : 'No beacon history found.';
@@ -384,13 +392,17 @@ SYSTEM_HEALTH_JS = '''
       renderPipelineHealth(data.pipeline || {});
       renderGaps(data.gaps || []);
       renderRows();
+      if (rows) rows.dataset.liveRenderVersion = String(Number(rows.dataset.liveRenderVersion || 0) + 1);
+      return true;
     } catch (error) {
       if (latest) latest.textContent = 'Unavailable';
       if (latestDetail) latestDetail.textContent = String(error.message || error);
       if (rows) rows.innerHTML = `<tr><td colspan="7">System Health API failed: ${esc(error.message || error)}</td></tr>`;
     } finally {
-      refreshButton?.setAttribute('aria-busy', 'false');
-      refreshButton?.classList.remove('refreshing');
+      if (showBusy) {
+        refreshButton?.setAttribute('aria-busy', 'false');
+        refreshButton?.classList.remove('refreshing');
+      }
     }
   }
   beaconPageSizeSelect?.addEventListener('change', () => {
@@ -427,12 +439,12 @@ SYSTEM_HEALTH_JS = '''
       renderPcapHealth(null);
     }
   });
-  refreshButton?.addEventListener('click', loadHealth);
+  refreshButton?.addEventListener('click', () => loadHealth({showBusy: true}));
   loadHealth();
   if (window.OnionSentinelReactiveTables) {
-    window.OnionSentinelReactiveTables.register('system-health-tables', loadHealth, {intervalMs: 5000});
+    window.OnionSentinelReactiveTables.register('system-health-tables', loadHealth, {intervalMs: 10000});
   } else {
-    setInterval(loadHealth, 5000);
+    setInterval(loadHealth, 10000);
   }
 })();
 </script>

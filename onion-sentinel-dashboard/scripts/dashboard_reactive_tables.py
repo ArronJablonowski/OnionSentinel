@@ -7,14 +7,11 @@ REACTIVE_TABLES_CSS = r'''
 <style>
 .os-live-status{display:inline-flex;align-items:center;gap:6px;width:max-content;margin-left:10px;border:1px solid rgba(34,211,238,.24);border-radius:999px;padding:4px 8px;color:#8ff4ff;background:rgba(34,211,238,.055);font-size:9.5px;font-weight:950;letter-spacing:.08em;text-transform:uppercase;white-space:nowrap}
 .os-live-status-dot{width:7px;height:7px;border-radius:999px;background:#46e58b;box-shadow:0 0 0 3px rgba(70,229,139,.10),0 0 10px rgba(70,229,139,.45)}
-.os-live-status[data-state="updating"] .os-live-status-dot{background:#8ff4ff;box-shadow:0 0 0 3px rgba(143,244,255,.10),0 0 12px rgba(143,244,255,.55);animation:os-live-pulse 1s ease-in-out infinite}
 .os-live-status[data-state="paused"]{color:#91a4ba;border-color:rgba(148,163,184,.20);background:rgba(148,163,184,.045)}
 .os-live-status[data-state="paused"] .os-live-status-dot{background:#91a4ba;box-shadow:none}
 .os-live-status[data-state="retrying"]{color:#ffcb67;border-color:rgba(255,203,103,.28);background:rgba(255,203,103,.055)}
 .os-live-status[data-state="retrying"] .os-live-status-dot{background:#ffcb67;box-shadow:0 0 10px rgba(255,203,103,.38)}
-@keyframes os-live-pulse{50%{opacity:.35;transform:scale(.72)}}
 @media(max-width:700px){.os-live-status{margin-left:7px;padding:3px 7px;font-size:8.5px}.os-live-status-dot{width:6px;height:6px}}
-@media(prefers-reduced-motion:reduce){.os-live-status[data-state="updating"] .os-live-status-dot{animation:none}}
 </style>
 '''
 
@@ -30,7 +27,6 @@ REACTIVE_TABLES_JS = r'''
   const normalizeInterval = value => Math.max(1000, Number(value || 5000));
   const statusCopy = {
     live: ['Live', 'Tables update automatically while this page is visible.'],
-    updating: ['Updating', 'Refreshing live table data.'],
     paused: ['Paused', 'Live table updates pause while this page is hidden.'],
     retrying: ['Retrying', 'A live update failed. Onion Sentinel will retry automatically.']
   };
@@ -62,10 +58,6 @@ REACTIVE_TABLES_JS = r'''
       setStatus('paused');
       return;
     }
-    if ([...jobs.values()].some(job => job.running)) {
-      setStatus('updating');
-      return;
-    }
     if ([...jobs.values()].some(job => job.lastError && now() - job.lastErrorAt < job.intervalMs * 2)) {
       setStatus('retrying');
       return;
@@ -81,13 +73,14 @@ REACTIVE_TABLES_JS = r'''
     job.running = true;
     updateAggregateStatus();
     let succeeded = false;
+    let changed = false;
     try {
-      await Promise.resolve(job.refresh({reason, name: job.name}));
+      changed = Boolean(await Promise.resolve(job.refresh({reason, name: job.name})));
       job.lastSuccessAt = now();
       job.lastError = '';
       succeeded = true;
       document.dispatchEvent(new CustomEvent('onion-sentinel:reactive-update', {
-        detail: {name: job.name, reason, updatedAt: job.lastSuccessAt}
+        detail: {name: job.name, reason, changed, updatedAt: job.lastSuccessAt}
       }));
     } catch (error) {
       job.lastError = String(error?.message || error || 'Live update failed');

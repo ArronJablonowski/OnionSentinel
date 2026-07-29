@@ -43,6 +43,8 @@ class ReactiveTablePageTests(unittest.TestCase):
         self.assertIn("onion-sentinel:reactive-update", source)
         self.assertIn("onion-sentinel:reactive-error", source)
         self.assertIn("id = 'onion-sentinel-live-status'", source)
+        self.assertIn("changed = Boolean(await Promise.resolve(job.refresh", source)
+        self.assertNotIn("setStatus('updating')", source)
 
     def test_every_page_with_a_table_registers_a_live_data_job(self) -> None:
         expected_jobs = {
@@ -72,6 +74,10 @@ class ReactiveTablePageTests(unittest.TestCase):
         self.assertIn("sort:sortKey,direction:sortDirection", page)
         self.assertIn("incidentCanRefresh", page)
         self.assertIn("analyst-adjudication-modal", page)
+        self.assertIn("if(nextSignature===incidentSignature)return false", page)
+        self.assertIn("body.dataset.liveRenderVersion", page)
+        self.assertIn("window.scrollBy(0,restored.getBoundingClientRect().top-anchor.top)", page)
+        self.assertIn("target.dataset.loaded='true'", page)
 
     def test_asset_and_report_refreshes_keep_existing_controls(self) -> None:
         asset_page = self.render("asset_inventory")
@@ -81,8 +87,23 @@ class ReactiveTablePageTests(unittest.TestCase):
         self.assertIn("if(dhcpLoadPromise)return dhcpLoadPromise", asset_page)
         self.assertIn("search.addEventListener('input',render)", asset_page)
         self.assertIn("Promise.all([load(),loadDhcp()])", asset_page)
+        self.assertIn("if(nextSignature===assetSignature)return false", asset_page)
+        self.assertIn("if(nextSignature===dhcpSignature)return false", asset_page)
         self.assertIn("loadLogs(false)", report_page)
         self.assertIn("Promise.all([loadCurrent(), loadLogs(false)])", report_page)
+        self.assertIn("if (nextSignature === currentSignature) return false", report_page)
+        self.assertIn("if (nextSignature === logSignature) return false", report_page)
+
+    def test_alert_and_health_refreshes_skip_unchanged_payloads(self) -> None:
+        alerts_page = self.render("alerts")
+        health_page = self.render("system_health")
+
+        self.assertIn("if(nextSignature===apiAlertsSignature)", alerts_page)
+        self.assertIn("table.dataset.liveRenderVersion", alerts_page)
+        self.assertNotIn("if(apiPageStatus)apiPageStatus.textContent='Loading alerts from SQLite API...'", alerts_page)
+        self.assertIn("if (nextSignature === healthSignature) return false", health_page)
+        self.assertIn("key.endsWith('_age_seconds')", health_page)
+        self.assertIn("loadHealth({showBusy: true})", health_page)
 
     def test_report_derived_tables_soft_refresh_and_restore_expansion(self) -> None:
         siem_page = self.render("siem_engineering")
