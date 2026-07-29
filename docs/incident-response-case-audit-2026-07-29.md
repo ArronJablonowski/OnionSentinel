@@ -4,6 +4,12 @@ Date: 2026-07-29
 Scope: the 15 most recently escalated Incident Responder cases at audit start  
 Investigation path: Mac Studio → forced-command SSH → Relay → read-only Security Onion
 
+Mac release containing the audit fixes:
+`1204630f3edee701514f0058244290608e289768`.
+The Mac remains intentionally pinned to compatibility-v1 until the restricted
+Security Onion wrapper is upgraded and verified; case reanalysis must wait for
+the coordinated v2 cutover.
+
 ## Executive result
 
 The current reports are appropriately cautious about the absence of endpoint
