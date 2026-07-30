@@ -8,6 +8,7 @@ IDs, credentials, wildcard targets, or mutating SQL from upstream callers.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import ssl
@@ -89,10 +90,28 @@ def _load_config(path: Path) -> dict[str, Any]:
     if value.get("enabled") is not True:
         raise LiveQueryError("live-host OSQuery is disabled on Security Onion")
     kibana_url = str(value.get("kibana_url") or "").strip().rstrip("/")
-    if not kibana_url.startswith("https://"):
-        raise LiveQueryError("Kibana URL must use HTTPS")
-    if value.get("verify_tls") is not True:
-        raise LiveQueryError("Kibana TLS verification must remain enabled")
+    parsed_url = urllib.parse.urlsplit(kibana_url)
+    if (
+        parsed_url.username
+        or parsed_url.password
+        or parsed_url.query
+        or parsed_url.fragment
+        or parsed_url.path not in {"", "/"}
+    ):
+        raise LiveQueryError("Kibana URL must not contain credentials, a path, or a query")
+    if parsed_url.scheme == "https":
+        if value.get("verify_tls") is not True:
+            raise LiveQueryError("Kibana TLS verification must remain enabled")
+    elif parsed_url.scheme == "http":
+        if (
+            value.get("allow_loopback_http") is not True
+            or parsed_url.hostname not in {"127.0.0.1", "::1", "localhost"}
+        ):
+            raise LiveQueryError(
+                "HTTP Kibana is allowed only through an explicit loopback-only exception"
+            )
+    else:
+        raise LiveQueryError("Kibana URL must use HTTPS or explicitly allowed loopback HTTP")
     aliases = value.get("target_aliases")
     if not isinstance(aliases, dict) or not aliases:
         raise LiveQueryError("at least one exact endpoint alias must be configured")
@@ -119,7 +138,9 @@ def _load_authorization(path: Path) -> str:
     return value
 
 
-def _ssl_context(config: dict[str, Any]) -> ssl.SSLContext:
+def _ssl_context(config: dict[str, Any]) -> ssl.SSLContext | None:
+    if urllib.parse.urlsplit(config["kibana_url"]).scheme == "http":
+        return None
     ca_value = str(config.get("ca_file") or "").strip()
     if ca_value:
         ca_path = Path(ca_value)
@@ -142,7 +163,7 @@ def _http_json(
     method: str,
     url: str,
     authorization: str,
-    context: ssl.SSLContext,
+    context: ssl.SSLContext | None,
     timeout_seconds: float,
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -167,7 +188,9 @@ def _http_json(
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
         raise LiveQueryError(f"Kibana live-query API returned HTTP {exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError, ssl.SSLError) as exc:
+    except TimeoutError:
+        raise
+    except (urllib.error.URLError, ssl.SSLError) as exc:
         raise LiveQueryError(
             f"Kibana live-query transport failed ({type(exc).__name__})"
         ) from exc
@@ -263,24 +286,31 @@ def _run_query(
     purpose: str,
     config: dict[str, Any],
     authorization: str,
-    context: ssl.SSLContext,
+    context: ssl.SSLContext | None,
+    deadline: float,
 ) -> dict[str, Any]:
     started = time.monotonic()
     api_root = _api_root(config)
     request_timeout = min(max(int(config.get("query_timeout_seconds", 60)), 10), 300)
-    overall_timeout = min(max(int(config.get("timeout_seconds", 120)), 20), 600)
     poll_seconds = min(max(float(config.get("poll_seconds", 2)), 0.5), 10.0)
     status = "error"
     rows: list[dict[str, Any]] = []
     total_rows = 0
     error = ""
+
+    def remaining_timeout() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("live OSQuery batch deadline expired")
+        return min(float(request_timeout), remaining)
+
     try:
         submitted = _http_json(
             method="POST",
             url=f"{api_root}/osquery/live_queries",
             authorization=authorization,
             context=context,
-            timeout_seconds=request_timeout,
+            timeout_seconds=remaining_timeout(),
             payload={
                 "agent_ids": [agent_id],
                 "query": query,
@@ -288,7 +318,6 @@ def _run_query(
             },
         )
         action_id, query_action_id = _extract_action_ids(submitted)
-        deadline = time.monotonic() + overall_timeout
         state = "pending"
         successful = failed = pending = responded = 0
         details_url = (
@@ -301,12 +330,12 @@ def _run_query(
                 url=details_url,
                 authorization=authorization,
                 context=context,
-                timeout_seconds=request_timeout,
+                timeout_seconds=remaining_timeout(),
             )
             state, successful, failed, pending, responded = _query_state(details)
             if state not in _PENDING_STATES and pending == 0:
                 break
-            time.sleep(poll_seconds)
+            time.sleep(min(poll_seconds, max(0.0, deadline - time.monotonic())))
         else:
             status = "timeout"
             error = "endpoint live query exceeded its bounded execution window"
@@ -321,7 +350,7 @@ def _run_query(
             url=result_url,
             authorization=authorization,
             context=context,
-            timeout_seconds=request_timeout,
+            timeout_seconds=remaining_timeout(),
         )
         rows, total_rows = _result_rows(result_response)
         if failed > 0:
@@ -333,7 +362,8 @@ def _run_query(
             status = "error"
             error = "endpoint did not report a successful live-query response"
     except TimeoutError:
-        pass
+        status = "timeout"
+        error = "endpoint live query exceeded the global batch deadline"
     except LiveQueryError as exc:
         status = "error"
         error = str(exc)
@@ -379,18 +409,37 @@ def main() -> int:
             raise LiveQueryError("Kibana authorization file path must be absolute")
         authorization = _load_authorization(auth_path)
         context = _ssl_context(config)
-        results = [
-            _run_query(
-                target_alias=item["target_alias"],
-                agent_id=alias_map[item["target_alias"]],
-                query=item["query"],
-                purpose=item["purpose"],
-                config=config,
-                authorization=authorization,
-                context=context,
-            )
-            for item in normalized["requests"]
-        ]
+        batch_timeout = min(
+            max(int(config.get("batch_timeout_seconds", 150)), 20),
+            170,
+        )
+        max_workers = min(
+            max(int(config.get("max_concurrent_queries", 4)), 1),
+            4,
+            len(normalized["requests"]),
+        )
+        deadline = time.monotonic() + batch_timeout
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="live-osquery",
+        ) as executor:
+            futures = [
+                executor.submit(
+                    _run_query,
+                    target_alias=item["target_alias"],
+                    agent_id=alias_map[item["target_alias"]],
+                    query=item["query"],
+                    purpose=item["purpose"],
+                    config=config,
+                    authorization=authorization,
+                    context=context,
+                    deadline=deadline,
+                )
+                for item in normalized["requests"]
+            ]
+            # _run_query applies the same absolute deadline to every transport
+            # operation, including work that waited in the bounded pool.
+            results = [future.result() for future in futures]
         artifact = {
             "schema": normalized["schema"],
             "case_id": normalized["case_id"],

@@ -45,9 +45,14 @@ def _load_config(path: Path) -> dict[str, Any]:
         raise BrokerError("live OSQuery broker configuration is unavailable") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise BrokerError("live OSQuery broker configuration must be a regular file")
-    if info.st_uid != 0 or info.st_mode & 0o007:
+    if (
+        info.st_uid != 0
+        or info.st_gid != os.getegid()
+        or stat.S_IMODE(info.st_mode) != 0o640
+    ):
         raise BrokerError(
-            "live OSQuery broker configuration must be root-owned and not world-accessible"
+            "live OSQuery broker configuration must be root-owned, grouped to "
+            "the broker service account, and mode 0640"
         )
     if info.st_size > MAX_REQUEST_BYTES:
         raise BrokerError("live OSQuery broker configuration exceeds its byte limit")

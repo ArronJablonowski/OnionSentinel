@@ -90,6 +90,7 @@ from live_osquery_client import (  # noqa: E402
     LiveOsqueryClientError,
     capability_descriptor as live_osquery_capability_descriptor,
     collect_live_osquery,
+    harness_operator_approved as live_osquery_harness_operator_approved,
     load_live_osquery_config,
 )
 from live_osquery_contract import (  # noqa: E402
@@ -5648,39 +5649,86 @@ def execute_investigation_query_batch(
                 persist=True,
             )
             returned = evidence.get("results") if isinstance(evidence, dict) else []
-            for index, request in enumerate(osquery_requests):
-                item = returned[index] if isinstance(returned, list) and index < len(returned) else {}
-                trusted_query_audit = []
-                if isinstance(item, dict):
-                    trusted_query_audit = _bounded_trusted_query_audit(
-                        [
-                            {
-                                "query_id": request["query_id"],
-                                "backend": "osquery",
-                                "purpose": item.get("purpose"),
-                                "target_alias": item.get("target_alias"),
-                                "query": item.get("query"),
-                                "query_digest": item.get("query_digest"),
-                                "status": item.get("status"),
-                                "total_rows": item.get("total_rows"),
-                                "returned_rows": item.get("returned_rows"),
-                                "truncated": item.get("truncated"),
-                                "duration_ms": item.get("duration_ms"),
-                                "error": item.get("error"),
-                            }
-                        ]
+            if not isinstance(returned, list):
+                raise LiveOsqueryClientError(
+                    "live OSQuery evidence did not contain a result list"
+                )
+            returned_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+            for item in returned:
+                if not isinstance(item, dict):
+                    raise LiveOsqueryClientError(
+                        "live OSQuery evidence contained a non-object result"
                     )
+                identity = (
+                    _query_text(item.get("target_alias"), 64).lower(),
+                    _query_text(item.get("query_digest"), 64).lower(),
+                )
+                if not all(identity) or identity in returned_by_identity:
+                    raise LiveOsqueryClientError(
+                        "live OSQuery evidence contained a missing or duplicate result identity"
+                    )
+                returned_by_identity[identity] = item
+            expected_requests_by_identity: dict[
+                tuple[str, str],
+                dict[str, Any],
+            ] = {}
+            for request in osquery_requests:
+                normalized_query = normalize_live_osquery_query(
+                    request["parameters"]["query"]
+                )
+                identity = (
+                    _query_text(
+                        request["parameters"].get("target_alias"),
+                        64,
+                    ).lower(),
+                    hashlib.sha256(
+                        normalized_query.encode("utf-8")
+                    ).hexdigest(),
+                )
+                if identity in expected_requests_by_identity:
+                    raise LiveOsqueryClientError(
+                        "live OSQuery submission contained a duplicate query identity"
+                    )
+                expected_requests_by_identity[identity] = request
+            if set(returned_by_identity) != set(expected_requests_by_identity):
+                raise LiveOsqueryClientError(
+                    "live OSQuery evidence coverage did not match submitted query digests"
+                )
+            for identity, request in expected_requests_by_identity.items():
+                item = returned_by_identity.get(identity)
+                if item is None or str(item.get("purpose") or "") != request["purpose"]:
+                    raise LiveOsqueryClientError(
+                        "live OSQuery evidence did not bind to the submitted query digest"
+                    )
+                trusted_query_audit = _bounded_trusted_query_audit(
+                    [
+                        {
+                            "query_id": request["query_id"],
+                            "backend": "osquery",
+                            "purpose": item.get("purpose"),
+                            "target_alias": item.get("target_alias"),
+                            "query": item.get("query"),
+                            "query_digest": item.get("query_digest"),
+                            "status": item.get("status"),
+                            "total_rows": item.get("total_rows"),
+                            "returned_rows": item.get("returned_rows"),
+                            "truncated": item.get("truncated"),
+                            "duration_ms": item.get("duration_ms"),
+                            "error": item.get("error"),
+                        }
+                    ]
+                )
                 results.append(
                     {
                         "query_id": request["query_id"],
                         "backend": "osquery",
                         "status": _query_text(
-                            item.get("status") if isinstance(item, dict) else "",
+                            item.get("status"),
                             40,
                         )
                         or "error",
                         "read_only": True,
-                        "evidence": item if isinstance(item, dict) else {},
+                        "evidence": item,
                         "trusted_query_audit": trusted_query_audit,
                     }
                 )
@@ -8616,6 +8664,13 @@ def apply_investigation_query_loop(
                         round_number=round_number,
                         query_id=request["query_id"],
                         backend=request["backend"],
+                        approved=(
+                            request["backend"] == "osquery"
+                            and live_osquery_harness_operator_approved(
+                                live_osquery_config,
+                                request["parameters"].get("target_alias"),
+                            )
+                        ),
                     )
                     if harness_runtime is not None
                     else None

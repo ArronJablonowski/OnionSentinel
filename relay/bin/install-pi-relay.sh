@@ -29,6 +29,7 @@ fi
 # are intentionally not world-readable.
 install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay
 install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay/app
+install -o root -g root -m 0755 -d /opt/so-alert-relay/bin
 install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay/keys
 install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay/state
 install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay/state/batches
@@ -42,6 +43,7 @@ install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/app/process_io.py" /opt/s
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/incident_evidence_broker.py" /opt/so-alert-relay/app/incident_evidence_broker.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/live_osquery_broker.py" /opt/so-alert-relay/app/live_osquery_broker.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract.py" /opt/so-alert-relay/app/live_osquery_contract.py
+install -o root -g root -m 0755 "$REPO_DIR/relay/bin/run-live-osquery-broker" /opt/so-alert-relay/bin/run-live-osquery-broker
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay_health_wrapper.py" /opt/so-alert-relay/app/relay_health_wrapper.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/storage_health.py" /opt/so-alert-relay/app/storage_health.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/config/config.example.json" /opt/so-alert-relay/app/config.json

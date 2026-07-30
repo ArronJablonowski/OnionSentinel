@@ -11,6 +11,11 @@
   "allowed_agent_roles": [
     "incident-responder"
   ],
+  "harness_operator_approval": {
+    "approved": false,
+    "expires_at": "",
+    "target_aliases": []
+  },
   "connect_timeout_seconds": 10,
   "timeout_seconds": 180,
   "artifact_dir": "~/n8n-local/soc-alerts/incident-evidence/live-osquery"

@@ -12,6 +12,7 @@ import datetime as dt
 import json
 import os
 import re
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -75,10 +76,19 @@ def _bounded_int(
 
 def _read_json(path: Path, maximum: int = MAX_CONFIG_BYTES) -> dict[str, Any]:
     try:
-        size = path.stat().st_size
+        info = path.lstat()
     except FileNotFoundError as exc:
         raise LiveOsqueryClientError(f"live OSQuery config not found: {path}") from exc
-    if size > maximum:
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
+        raise LiveOsqueryClientError(
+            "live OSQuery config must be an owner-controlled regular file with mode 0600"
+        )
+    if info.st_size > maximum:
         raise LiveOsqueryClientError(
             f"live OSQuery config exceeds the {maximum}-byte limit"
         )
@@ -137,6 +147,53 @@ def load_live_osquery_config(path: Path = DEFAULT_CONFIG_FILE) -> dict[str, Any]
             str(source.get("artifact_dir") or DEFAULT_ARTIFACT_DIR)
         ).expanduser(),
     }
+    approval_source = source.get("harness_operator_approval") or {}
+    if not isinstance(approval_source, dict):
+        raise LiveOsqueryClientError("harness_operator_approval must be an object")
+    approval_enabled = approval_source.get("approved", False)
+    if not isinstance(approval_enabled, bool):
+        raise LiveOsqueryClientError(
+            "harness_operator_approval.approved must be boolean"
+        )
+    approval_aliases = normalize_target_aliases(
+        approval_source.get("target_aliases") or []
+    )
+    if any(alias not in aliases for alias in approval_aliases):
+        raise LiveOsqueryClientError(
+            "harness operator approval contains an unconfigured target alias"
+        )
+    expires_at = str(approval_source.get("expires_at") or "").strip()
+    parsed_expiration: dt.datetime | None = None
+    if expires_at:
+        candidate = (
+            expires_at[:-1] + "+00:00"
+            if expires_at.endswith("Z")
+            else expires_at
+        )
+        try:
+            parsed_expiration = dt.datetime.fromisoformat(candidate)
+        except ValueError as exc:
+            raise LiveOsqueryClientError(
+                "harness_operator_approval.expires_at must be an ISO-8601 timestamp"
+            ) from exc
+        if parsed_expiration.tzinfo is None:
+            raise LiveOsqueryClientError(
+                "harness_operator_approval.expires_at must include a timezone"
+            )
+        parsed_expiration = parsed_expiration.astimezone(dt.timezone.utc)
+    if approval_enabled and (not approval_aliases or parsed_expiration is None):
+        raise LiveOsqueryClientError(
+            "approved harness OSQuery requires target aliases and an expiration"
+        )
+    config["harness_operator_approval"] = {
+        "approved": approval_enabled,
+        "target_aliases": approval_aliases,
+        "expires_at": (
+            parsed_expiration.isoformat().replace("+00:00", "Z")
+            if parsed_expiration is not None
+            else ""
+        ),
+    }
     if not enabled:
         return config
     host = str(source.get("relay_host") or "").strip()
@@ -166,6 +223,43 @@ def load_live_osquery_config(path: Path = DEFAULT_CONFIG_FILE) -> dict[str, Any]
         }
     )
     return config
+
+
+def harness_operator_approved(
+    config: dict[str, Any] | None,
+    target_alias: Any,
+    *,
+    now: dt.datetime | None = None,
+) -> bool:
+    """Return a fail-closed, time-bounded operator approval decision."""
+    if not isinstance(config, dict) or config.get("enabled") is not True:
+        return False
+    approval = config.get("harness_operator_approval")
+    if not isinstance(approval, dict) or approval.get("approved") is not True:
+        return False
+    alias = str(target_alias or "").strip().lower()
+    if alias not in (approval.get("target_aliases") or []):
+        return False
+    expires_at = str(approval.get("expires_at") or "").strip()
+    if not expires_at:
+        return False
+    candidate = (
+        expires_at[:-1] + "+00:00"
+        if expires_at.endswith("Z")
+        else expires_at
+    )
+    try:
+        expiration = dt.datetime.fromisoformat(candidate)
+    except ValueError:
+        return False
+    if expiration.tzinfo is None:
+        return False
+    current = now or dt.datetime.now(dt.timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=dt.timezone.utc)
+    return current.astimezone(dt.timezone.utc) < expiration.astimezone(
+        dt.timezone.utc
+    )
 
 
 def capability_descriptor(config: dict[str, Any]) -> dict[str, Any]:

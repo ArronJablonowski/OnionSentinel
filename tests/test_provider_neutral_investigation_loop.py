@@ -73,14 +73,17 @@ class RecordingHarness:
         round_number: int,
         query_id: str,
         backend: str,
+        approved: bool = False,
     ) -> _Decision:
         self.events.append(
-            ("authorize_tool", round_number, query_id, backend)
+            ("authorize_tool", round_number, query_id, backend, approved)
         )
         if self.fail_authorization:
             raise RuntimeError("synthetic shadow observation failure")
         return self._Decision(
-            self.tool_allowed,
+            self.tool_allowed and (
+                not self.tool_requires_approval or approved
+            ),
             backend,
             requires_approval=self.tool_requires_approval,
         )
@@ -3538,6 +3541,144 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         result = response["_investigation_query_audit"]["rounds"][0]["results"][0]
         self.assertEqual(result["status"], "rejected")
         self.assertIn("harness denied capability", result["error"].lower())
+
+    def test_time_bounded_operator_approval_reaches_harness(self) -> None:
+        events: list[tuple] = []
+        harness = RecordingHarness(
+            events,
+            mode="enforce",
+            tool_allowed=True,
+            tool_requires_approval=True,
+        )
+        request = {
+            "query_id": "live-endpoint-approved",
+            "backend": "osquery",
+            "purpose": "Inspect a bounded endpoint process fact.",
+            "parameters": {
+                "target_alias": "endpoint-a",
+                "query": "SELECT pid FROM processes LIMIT 1",
+            },
+        }
+        query_executor = mock.Mock(
+            return_value={
+                "schema": self.runner.INVESTIGATION_QUERY_RESULT_SCHEMA,
+                "round": 1,
+                "requests": [request],
+                "results": [
+                    {
+                        "query_id": "live-endpoint-approved",
+                        "backend": "osquery",
+                        "status": "ok",
+                        "read_only": True,
+                        "query_digest": "a" * 64,
+                        "result_digest": "b" * 64,
+                    }
+                ],
+                "audit": [],
+            }
+        )
+
+        self.runner.apply_investigation_query_loop(
+            {
+                "investigation_query_capability": {
+                    "enabled": True,
+                    "backends": {"osquery": {"enabled": True}},
+                },
+            },
+            {"investigation_query_requests": [request]},
+            object(),
+            {"agent_models": {"incident-responder": "codex-cli:gpt-5.5:medium"}},
+            "incident-responder",
+            live_osquery_config={
+                "enabled": True,
+                "allowed_target_aliases": ["endpoint-a"],
+                "harness_operator_approval": {
+                    "approved": True,
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "target_aliases": ["endpoint-a"],
+                },
+            },
+            harness_runtime=harness,
+            model_executor=mock.Mock(return_value={"summary": "approved"}),
+            query_executor=query_executor,
+        )
+
+        query_executor.assert_called_once()
+        authorization = next(
+            event for event in events if event[0] == "authorize_tool"
+        )
+        self.assertTrue(authorization[4])
+
+    def test_live_osquery_results_bind_by_digest_not_array_position(self) -> None:
+        raw_requests = [
+            {
+                "query_id": "process-query",
+                "backend": "osquery",
+                "purpose": "Inspect processes.",
+                "parameters": {
+                    "target_alias": "endpoint-a",
+                    "query": "SELECT pid, name FROM processes LIMIT 2",
+                },
+            },
+            {
+                "query_id": "system-query",
+                "backend": "osquery",
+                "purpose": "Inspect system identity.",
+                "parameters": {
+                    "target_alias": "endpoint-a",
+                    "query": "SELECT hostname FROM system_info LIMIT 1",
+                },
+            },
+        ]
+        requests = [
+            self.runner.normalize_investigation_query_request(
+                raw,
+                round_number=1,
+                position=index,
+            )
+            for index, raw in enumerate(raw_requests, 1)
+        ]
+
+        def evidence_for(request: dict, marker: str) -> dict:
+            query = self.runner.normalize_live_osquery_query(
+                request["parameters"]["query"]
+            )
+            return {
+                "target_alias": request["parameters"]["target_alias"],
+                "query": query,
+                "purpose": request["purpose"],
+                "query_digest": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+                "status": "ok",
+                "rows": [{"marker": marker}],
+                "total_rows": 1,
+                "truncated": False,
+                "duration_ms": 1,
+                "error": "",
+            }
+
+        process_evidence = evidence_for(requests[0], "process")
+        system_evidence = evidence_for(requests[1], "system")
+        result = self.runner.execute_investigation_query_batch(
+            {},
+            requests,
+            round_number=1,
+            live_osquery_config={"enabled": True},
+            osquery_executor=mock.Mock(
+                return_value={
+                    "complete": True,
+                    "read_only": True,
+                    # Deliberately reverse the trusted response order.
+                    "results": [system_evidence, process_evidence],
+                }
+            ),
+        )
+
+        by_id = {
+            item["query_id"]: item["evidence"]["rows"][0]["marker"]
+            for item in result["results"]
+        }
+        self.assertEqual(by_id["process-query"], "process")
+        self.assertEqual(by_id["system-query"], "system")
 
     def test_real_shadow_harness_never_dispatches_unapproved_live_osquery(
         self,

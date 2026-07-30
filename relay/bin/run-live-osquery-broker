@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+# This launcher is the SSH forced command and therefore runs before sudo can
+# discard SSH_ORIGINAL_COMMAND. It must never accept caller-supplied commands
+# or arguments.
+if [ "$#" -ne 0 ] || [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
+  printf '%s\n' 'commands are not accepted by this forced endpoint' >&2
+  exit 2
+fi
+
+exec /usr/bin/sudo -n -u soalert \
+  /usr/bin/python3 /opt/so-alert-relay/app/live_osquery_broker.py

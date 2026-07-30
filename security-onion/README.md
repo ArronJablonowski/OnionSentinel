@@ -59,6 +59,15 @@ Incident Response evidence collection uses another dedicated key entry based on
 only `export-incident-evidence`; forwarding, PTY allocation, user rc files, and
 arbitrary commands remain disabled.
 
+Live endpoint OSQuery may use either a TLS-verified Kibana URL or an explicit
+loopback-only HTTP URL on Security Onion. Plain HTTP is rejected unless
+`allow_loopback_http` is true and the parsed host is exactly `127.0.0.1`,
+`::1`, or `localhost`; remote HTTP, embedded credentials, URL paths, query
+strings, and fragments remain forbidden. Both transports still require the
+root-only dedicated Kibana authorization file. All queries in one request
+share one absolute batch deadline and run in a maximum four-worker pool so
+eight sequential per-query timeouts cannot exceed the Relay transport bound.
+
 The incident wrapper accepts validated observables and bounded UTC windows,
 then executes five built-in Elastic packs and seven built-in OSquery packs.
 Elastic covers alert context, network flow, DNS activity, host telemetry, and a
