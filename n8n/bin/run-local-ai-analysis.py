@@ -7818,12 +7818,17 @@ def investigation_query_repair_scope(
     }
     if recovered_observables is not None:
         bounded_raw["parameters"]["observables"] = recovered_observables
+    if isinstance(parameters.get("event_tuple"), dict):
+        bounded_raw["parameters"]["event_tuple"] = copy.deepcopy(
+            parameters["event_tuple"]
+        )
     try:
         normalized = normalize_investigation_query_request(
             bounded_raw,
             round_number=round_number,
             position=position,
             time_envelope=time_envelope,
+            authorization_context=authorization_context,
         )
     except InvestigationQueryError:
         return None
@@ -7841,15 +7846,9 @@ def investigation_query_repair_scope(
         "aggregation": normalized["parameters"]["aggregation"],
         "observable_scope_source": observable_scope_source,
     }
-    if "event_tuple" in parameters:
-        try:
-            scope["event_tuple"] = normalize_investigation_event_tuple(
-                parameters["event_tuple"]
-            )
-        except InvestigationQueryError:
-            # An invalid tuple cannot contribute any authority to its repair.
-            # A later request may omit it but may not invent a replacement.
-            pass
+    normalized_event_tuple = normalized["parameters"].get("event_tuple")
+    if isinstance(normalized_event_tuple, dict):
+        scope["event_tuple"] = copy.deepcopy(normalized_event_tuple)
     return scope
 
 

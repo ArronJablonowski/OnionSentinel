@@ -241,6 +241,16 @@ the original failed attempt and records deterministic scope execution. If the
 same query ID later succeeds, the failed attempt is marked as a resolved retry
 rather than an unresolved evidence gap.
 
+The first deterministic production proof then exposed a canonicalization
+mismatch in both APT and SimpleHTTP cases. Scope recovery retained the complete
+trusted Suricata tuple, including `rule_id`, while the fixed Zeek pack
+correctly projected that tuple to its supported correlation fields. Comparing
+the projected execution request with the unprojected scope caused a
+fail-closed `event tuple changed` rejection. The corrected scope is now built
+through the same authorization-aware pack projector used at execution. The
+stored scope, reconstructed request, and executed request therefore share one
+canonical tuple, while unsupported fields remain excluded.
+
 Concurrent validation workers also exposed a scheduler observability defect.
 When two workers selected the same pending job, the compare-and-set lease
 correctly allowed only one owner, but the losing worker logged the group as
@@ -370,6 +380,9 @@ calling it OSQuery. The recurring labels were generally correct:
 17. A lost durable-job compare-and-set claim is classified as normal worker
     contention, not an analysis failure, and does not consume the losing
     worker's bounded analysis allowance.
+18. Repair-scope event tuples are canonicalized through the fixed pack's
+    authorization-aware projector before storage. Reconstructed and executed
+    tuples must normalize to that identical projected form.
 
 ## Remaining blockers
 

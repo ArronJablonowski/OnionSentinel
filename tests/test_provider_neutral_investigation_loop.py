@@ -2021,6 +2021,15 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                     "hosts": [],
                     "users": [],
                 },
+                "permitted_event_tuples": [
+                    {
+                        "event_tuple": dict(
+                            invalid["parameters"]["event_tuple"]
+                        ),
+                        "role_semantics": "packet_direction",
+                        "source": "trusted_context",
+                    }
+                ],
             },
         )
 
@@ -2066,6 +2075,15 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                     "hosts": [],
                     "users": [],
                 },
+                "permitted_event_tuples": [
+                    {
+                        "event_tuple": dict(
+                            invalid["parameters"]["event_tuple"]
+                        ),
+                        "role_semantics": "packet_direction",
+                        "source": "trusted_context",
+                    }
+                ],
             },
         )
 
@@ -2097,9 +2115,87 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                     "hosts": [],
                     "users": [],
                 },
+                "permitted_event_tuples": [
+                    {
+                        "event_tuple": {
+                            "source_ip": "192.0.2.10",
+                            "destination_ip": "198.51.100.20",
+                            "source_port": 49152,
+                            "destination_port": 3478,
+                            "transport": "udp",
+                        },
+                        "role_semantics": "packet_direction",
+                        "source": "trusted_context",
+                    }
+                ],
             },
         )
         self.assertIsNone(rejected_scope)
+
+    def test_repair_scope_uses_authorized_pack_tuple_projection(
+        self,
+    ) -> None:
+        invalid = self.elastic_request("repair-projected-tuple")
+        invalid["parameters"]["pack"] = "zeek_http"
+        invalid["parameters"]["observables"] = []
+        invalid["parameters"]["event_tuple"] = {
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "source_port": 49152,
+            "destination_port": 80,
+            "transport": "tcp",
+            "community_id": "1:trusted-flow=",
+            "rule_id": "2013504",
+        }
+        authorization_context = {
+            "permitted_observables": {
+                "ips": ["192.0.2.10", "198.51.100.20"],
+                "domains": [],
+                "hosts": [],
+                "users": [],
+            },
+            "permitted_event_tuples": [
+                {
+                    "event_tuple": dict(
+                        invalid["parameters"]["event_tuple"]
+                    ),
+                    "role_semantics": "packet_direction",
+                    "source": "trusted_context",
+                }
+            ],
+        }
+        scope = self.runner.investigation_query_repair_scope(
+            invalid,
+            round_number=1,
+            position=1,
+            authorization_context=authorization_context,
+        )
+
+        self.assertIsNotNone(scope)
+        self.assertNotIn("rule_id", scope["event_tuple"])
+        self.assertEqual(
+            scope["event_tuple"]["community_id"],
+            "1:trusted-flow=",
+        )
+        repaired = (
+            self.runner.investigation_query_request_from_repair_scope(
+                scope
+            )
+        )
+        normalized = self.runner.normalize_investigation_query_request(
+            repaired,
+            round_number=2,
+            position=1,
+            authorization_context=authorization_context,
+        )
+        self.runner.validate_investigation_query_repair_scope(
+            normalized,
+            scope,
+        )
+        self.assertEqual(
+            normalized["parameters"]["event_tuple"],
+            scope["event_tuple"],
+        )
 
     def test_deterministic_repair_does_not_ask_model_to_widen_scope(
         self,
