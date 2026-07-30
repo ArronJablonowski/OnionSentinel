@@ -41,6 +41,147 @@ Security Onion data with the corrected deterministic validator produced:
 logic. It does not mean the activity is malicious. The activity disposition
 and response decision must remain separate.
 
+## 2026-07-30 final deterministic and 15-case validation
+
+The final deployed Mac Studio release is:
+
+```text
+15ec230203b207d11436b13281594b1bc99ea507
+```
+
+This release contains both the exact selected-alert tuple correction and the
+policy-sensitive activity guard described below. Security Onion remained
+read-only and reachable only through the existing forced-command SSH Relay
+path.
+
+### Corrected deterministic replay
+
+The same selected APT alert was compiled and executed twice after the tuple
+correction. Both repetitions used the exact immutable selected-alert tuple:
+
+```text
+source=10.66.6.210:52460
+destination=91.189.91.82:80
+transport=tcp
+network.community_id=1:dBJgG9piiddgTCbCMwpRSQ7u+DM=
+```
+
+Both repetitions produced identical digests:
+
+| Artifact | First execution | Second execution |
+|---|---|---|
+| Deterministic plan | `88f17471e9ebdb5c35237d9ecd3513a649b47337ac3b89b0ca1d6cd0c21894ad` | `88f17471e9ebdb5c35237d9ecd3513a649b47337ac3b89b0ca1d6cd0c21894ad` |
+| Authorized request | `ca793da8238f4d3bbd79e470bcad6f963b025ec7670b55706333a5a227aea95c` | `ca793da8238f4d3bbd79e470bcad6f963b025ec7670b55706333a5a227aea95c` |
+| `zeek_http` query | `a5ee4f93c060e988036e889edf0595e3e6bc6234b4762e39cd6f09c7eef5f6a8` | `a5ee4f93c060e988036e889edf0595e3e6bc6234b4762e39cd6f09c7eef5f6a8` |
+| `zeek_files` query | `94032476a9c0a14bd99d037b17004dc5d715cbe205bc305f845ce2f242465c4d` | `94032476a9c0a14bd99d037b17004dc5d715cbe205bc305f845ce2f242465c4d` |
+
+Both responses were complete, passed the positive/negative semantic controls,
+returned status `ok`, and reported the same exact hit counts: four HTTP events
+and three file events.
+
+### Exact-PCAP queue completion
+
+All 15 exact-alert requests submitted by `codex-independent-audit` are
+terminal:
+
+- seven are `fulfilled` with `analysis_status=completed`;
+- eight failed closed with `no matching packets found` and
+  `analysis_status=not_ready`;
+- none are pending, queued, claimed, or transferring.
+
+A failed exact capture remains an evidence gap. It is not negative evidence
+about the alert or the flow.
+
+### Corrected rerun lineage
+
+The full frozen cohort first completed on release
+`187702c21b7d2cb59b599f8bf645679ad44dcf87`. Comparison against the immutable
+representative alerts then found that eight deterministic plans could select a
+peer event from the grouped alert when the normalized top-level record omitted
+ports and Community ID. Canonical tie-breaking was repeatable, but it was
+repeatably anchored to the wrong group member.
+
+Release `bc5862b3f991bc1ddc4d613f49ce26ebc4c663f3` corrected the planner to
+rank the collector-owned `raw_alert_subset` tuple. All eight affected cases
+were rerun:
+
+- eight completed and zero failed or skipped;
+- all eight executed tuples matched the representative alert's Community ID
+  and source port exactly;
+- 25 read-only pivots succeeded;
+- three proposals failed closed, two were repaired deterministically, and one
+  remained an explicit gap in that intermediate run;
+- all eight independent second opinions completed.
+
+The comparison also found that DoH and Discord reports could publish
+`benign/no_action` while simultaneously stating that endpoint process
+attribution and local policy were unknown. Release
+`15ec230203b207d11436b13281594b1bc99ea507` added a narrow policy-sensitive
+guard and matching primary/reviewer instructions. The three affected cases
+were rerun. They now publish `inconclusive`, `unknown`, and `monitor`;
+all three second opinions completed.
+
+The authoritative 15-case result uses the newest applicable corrected run for
+each case. In aggregate it contains:
+
+- 15 completed cases and 15 completed independent second opinions;
+- 46 successful, read-only investigation queries;
+- three fail-closed proposal rejections, all followed by successful
+  deterministic execution of the normalized authorized scope;
+- zero unresolved non-success attempts;
+- zero query errors, timeouts, partial results, or unreported queries;
+- one reviewer agreement, nine partial disagreements, and five material
+  disagreements. Two material disagreements are tuning-only; the other three
+  publish a conservative disputed case state.
+
+### Comparison with the independent grades
+
+| Case | Independent finding / final canonical result | Baseline | Final | Change |
+|---|---|---:|---:|---:|
+| `ir-56ae78c97f626d68` | Normal APT activity; `benign/no_action`, not authorized | 44 | 98 | +54 |
+| `ir-7cf7aea2cc183d57` | Normal APT activity; `benign/no_action`, not authorized | 58 | 98 | +40 |
+| `ir-7f9c63d2a41f212f` | Cloudflare DoH is process/policy dependent; `unknown/monitor`, disputed | 50 | 96 | +46 |
+| `ir-8ce3879de8bec697` | Cloudflare DoH is process/policy dependent; `unknown/investigate`, disputed | 50 | 96 | +46 |
+| `ir-ae2675dbfbc0136a` | Google DoH is process/policy dependent; `unknown/monitor` | 46 | 98 | +52 |
+| `ir-b193e7b4ea0dbccc` | Valid STUN, likely NAT traversal; `benign/no_action`, process unknown | 48 | 97 | +49 |
+| `ir-b1ffcf0e28f21268` | Likely VSCode update traffic; `benign/no_action`, tuning blocked | 52 | 96 | +44 |
+| `ir-c207dc9a18306e51` | Google DoH is process/policy dependent; `unknown/monitor` | 50 | 98 | +48 |
+| `ir-c7844a5653322a04` | Valid STUN response; `benign/no_action`, process unknown | 47 | 94 | +47 |
+| `ir-c7aa2cc288e3f4cf` | Discord use is process/policy dependent; `unknown/monitor` | 47 | 97 | +50 |
+| `ir-cbbc240155dd8c00` | Expected Onion Sentinel web access; `benign/no_action` | 54 | 95 | +41 |
+| `ir-e3c6ea1c603ab983` | Likely VSCode lookup/update traffic; `benign/no_action` | 53 | 98 | +45 |
+| `ir-e3e00a86d1652a15` | Likely connectivity test; conservative `unknown/monitor`, disputed | 47 | 94 | +47 |
+| `ir-fc8db3aa9902402a` | Normal APT security-repository activity; `benign/no_action`, tuning blocked | 51 | 97 | +46 |
+| `ir-fe8fdea2b7eac6f4` | Valid STUN request/response; `benign/no_action`, process unknown | 54 | 96 | +42 |
+
+The mean grade improved from `50.1` to `96.5`. No case contains evidence of
+confirmed compromise.
+
+The remaining report-quality deductions are explicit rather than hidden:
+
+- `ir-c7844a5653322a04` and `ir-cbbc240155dd8c00` each supplied one evidence
+  reference that did not resolve to the collector-owned catalog; the runtime
+  rejected the reference and capped confidence.
+- `ir-e3e00a86d1652a15` is more conservative than the independent likely-benign
+  finding because its primary and reviewer disagreed on no-action versus
+  monitor. The published disputed state is safe and truthful.
+- `ir-7f9c63d2a41f212f` and `ir-8ce3879de8bec697` retain genuine disposition
+  disputes. The runtime correctly blocks closure, containment, tuning, and
+  memory writeback pending human adjudication.
+
+### Query-language truthfulness
+
+The authoritative cohort records 45 successful Elastic pivots with
+`execution_backend=so-elasticsearch-query` and one successful derived
+PCAP/Zeek query. The exact `query_dsl` is the executed Security Onion request.
+KQL and OQL are readable equivalents only. No report falsely labels an
+executed KQL query as OSQuery.
+
+Fixed OSQuery results are read-only snapshots of
+`security-onion-local-host`. Live endpoint OSQuery remained disabled, and no
+report claims that an appliance snapshot establishes endpoint process or user
+state.
+
 ## Final canonical-runtime validation
 
 Release `39d57e2c53188dd308a61ef8b89dddb4bff195fd` completed a final
@@ -426,16 +567,23 @@ calling it OSQuery. The recurring labels were generally correct:
 18. Repair-scope event tuples are canonicalized through the fixed pack's
     authorization-aware projector before storage. Reconstructed and executed
     tuples must normalize to that identical projected form.
+19. Deterministic protocol plans now rank permitted event tuples against the
+    collector-owned selected `raw_alert_subset`, including ports, transport,
+    protocol, rule ID, and Community ID. Group peers cannot win a sparse
+    top-level tie.
+20. DoH, Discord, and equivalent policy-sensitive detections cannot publish
+    `benign/no_action` without trusted endpoint attribution or structured local
+    authorization evidence. Unattributed cases become `unknown` with at least
+    `monitor`, and suppression remains blocked.
 
 ## Remaining blockers
 
 1. **Endpoint attribution:** live endpoint OSQuery remains intentionally
    disabled. Do not claim process, user, or authorization findings until an
    approved endpoint telemetry path exists.
-2. **PCAP queue latency:** 15 exact PCAP requests were submitted. At the final
-   audit checkpoint, six were fulfilled, seven had failed closed with
-   `no matching packets found`, and two remained pending. A failed, pending,
-   or in-transfer capture is an evidence gap, not negative evidence.
+2. **Exact PCAP availability:** all 15 exact requests are terminal. Seven were
+   fulfilled and eight failed closed with `no matching packets found`. A
+   failed capture is an evidence gap, not negative evidence.
 3. **Asset authorization:** inventory relationships help name systems but are
    not authorization records. Add a separate structured, time-bounded
    authorization source if the operator wants `authorized_benign` outcomes.
