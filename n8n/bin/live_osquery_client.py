@@ -104,7 +104,10 @@ def _read_json(path: Path, maximum: int = MAX_CONFIG_BYTES) -> dict[str, Any]:
 def load_live_osquery_config(path: Path = DEFAULT_CONFIG_FILE) -> dict[str, Any]:
     """Load a capability-only client config; credentials never belong here."""
     source = _read_json(path.expanduser())
-    enabled = bool(source.get("enabled"))
+    enabled_value = source.get("enabled", False)
+    if not isinstance(enabled_value, bool):
+        raise LiveOsqueryClientError("enabled must be boolean")
+    enabled = enabled_value
     aliases = normalize_target_aliases(source.get("allowed_target_aliases") or [])
     raw_roles = source.get("allowed_agent_roles", list(DEFAULT_ALLOWED_AGENT_ROLES))
     if not isinstance(raw_roles, list):
@@ -264,7 +267,7 @@ def harness_operator_approved(
 
 def capability_descriptor(config: dict[str, Any]) -> dict[str, Any]:
     """Expose only the model-safe portion of the live-query capability."""
-    enabled = bool(config.get("enabled"))
+    enabled = config.get("enabled") is True
     return {
         "enabled": enabled,
         "target_aliases": list(config.get("allowed_target_aliases") or [])
@@ -309,7 +312,7 @@ def collect_live_osquery(
     persist: bool = True,
 ) -> dict[str, Any]:
     """Submit and validate one bounded live-query batch through the relay."""
-    if not config.get("enabled"):
+    if config.get("enabled") is not True:
         raise LiveOsqueryClientError("live-host OSQuery is disabled")
     normalized = normalize_requests(
         requests,

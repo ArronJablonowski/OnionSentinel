@@ -1,6 +1,7 @@
 import importlib.machinery
 import importlib.util
 import datetime as dt
+import io
 import json
 import os
 import stat
@@ -561,6 +562,17 @@ class LiveOsqueryClientConfigTests(unittest.TestCase):
             ):
                 load_live_osquery_config(link)
 
+    def test_config_rejects_string_false_enabled_value(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            path = Path(temp_name) / "live-osquery.json"
+            path.write_text('{"enabled":"false"}', encoding="utf-8")
+            path.chmod(0o600)
+            with self.assertRaisesRegex(
+                LiveOsqueryClientError,
+                "enabled must be boolean",
+            ):
+                load_live_osquery_config(path)
+
     def test_collector_enforces_approval_before_transport(self):
         config = {
             "enabled": True,
@@ -596,9 +608,10 @@ class LiveOsqueryDeploymentContractTests(unittest.TestCase):
     def test_mac_forced_key_runs_only_broker_as_service_account(self):
         authorized_key = RELAY_AUTHORIZED_KEY.read_text(encoding="utf-8")
         self.assertIn(
-            'command="/opt/so-alert-relay/bin/run-live-osquery-broker"',
+            'command="/usr/local/sbin/run-live-osquery-broker"',
             authorized_key,
         )
+        self.assertNotIn("/opt/so-alert-relay/bin", authorized_key)
         for restriction in (
             "no-agent-forwarding",
             "no-X11-forwarding",
@@ -618,6 +631,30 @@ class LiveOsqueryDeploymentContractTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 2)
         self.assertIn("commands are not accepted", completed.stderr)
+
+    def test_response_newline_is_inside_four_mib_ceiling(self):
+        for module in (load_relay_broker(), load_security_onion_wrapper()):
+            with self.subTest(module=module.__name__):
+                sink = SimpleNamespace(buffer=io.BytesIO())
+                encoded = b"x" * (module.MAX_RESPONSE_BYTES - 1)
+                with (
+                    mock.patch.object(module.sys, "stdout", sink),
+                    mock.patch.object(
+                        module,
+                        "bounded_json_bytes",
+                        return_value=encoded,
+                    ) as serializer,
+                ):
+                    self.assertEqual(module._emit({"ok": True}), 0)
+                serializer.assert_called_once_with(
+                    {"ok": True},
+                    maximum=module.MAX_RESPONSE_BYTES - 1,
+                )
+                self.assertEqual(
+                    len(sink.buffer.getvalue()),
+                    module.MAX_RESPONSE_BYTES,
+                )
+                self.assertTrue(sink.buffer.getvalue().endswith(b"\n"))
 
     def test_security_onion_forced_key_uses_pre_sudo_launcher(self):
         authorized_key = SO_AUTHORIZED_KEY.read_text(encoding="utf-8")
@@ -706,7 +743,11 @@ class LiveOsqueryDeploymentContractTests(unittest.TestCase):
         self.assertIn(
             'install -o root -g root -m 0755 '
             '"$REPO_DIR/relay/bin/run-live-osquery-broker" '
-            "/opt/so-alert-relay/bin/run-live-osquery-broker",
+            "/usr/local/sbin/run-live-osquery-broker",
+            installer,
+        )
+        self.assertIn(
+            "install -o soalert -g soalert -m 0700 -d /opt/so-alert-relay",
             installer,
         )
 

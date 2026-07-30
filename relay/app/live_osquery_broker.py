@@ -34,7 +34,9 @@ class BrokerError(RuntimeError):
 
 
 def _emit(payload: dict[str, Any], code: int = 0) -> int:
-    sys.stdout.buffer.write(bounded_json_bytes(payload) + b"\n")
+    sys.stdout.buffer.write(
+        bounded_json_bytes(payload, maximum=MAX_RESPONSE_BYTES - 1) + b"\n"
+    )
     return code
 
 

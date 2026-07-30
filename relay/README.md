@@ -28,7 +28,7 @@ replay a safely committed alert.
 | `systemd/so-pcap-broker.timer` | `/etc/systemd/system/so-pcap-broker.timer` | Runs PCAP work every minute. |
 | `ssh/99-key-only-admin.conf` | `/etc/ssh/sshd_config.d/99-key-only-admin.conf` | Optional SSH hardening after deployment is confirmed. |
 | `app/live_osquery_broker.py` | `/opt/so-alert-relay/app/live_osquery_broker.py` | Disabled-by-default validator and broker for bounded Incident Responder endpoint OSQuery. |
-| `bin/run-live-osquery-broker` | `/opt/so-alert-relay/bin/run-live-osquery-broker` | Pre-sudo forced-command guard that rejects caller-supplied SSH commands. |
+| `bin/run-live-osquery-broker` | `/usr/local/sbin/run-live-osquery-broker` | Root-owned, SSH-traversable pre-sudo forced-command guard that rejects caller-supplied SSH commands. |
 | `config/live-osquery.example.json` | `/etc/so-alert-relay/live-osquery.json` | Exact alias roster and dedicated Security Onion SSH transport settings; must be `root:soalert 0640`. |
 | `sudoers/so-live-osquery` | `/etc/sudoers.d/92-so-alert-relay-live-osquery` | Installer-rendered rule that lets only the relay administrator execute the broker as `soalert`. |
 
@@ -94,8 +94,12 @@ already trusted Mac admin session before installing it. Never use
 
 Live endpoint OSQuery uses its own Mac-to-relay key and the forced command in
 `relay/config/authorized_keys.live-osquery.example`. The root-owned launcher
-rejects `SSH_ORIGINAL_COMMAND` before `sudo` can discard it, then uses the
-narrow sudoers rule to run only `live_osquery_broker.py` as `soalert`.
+is installed at `/usr/local/sbin/run-live-osquery-broker`, outside the
+intentionally private `/opt/so-alert-relay` tree so the SSH account can execute
+it before sudo. It rejects `SSH_ORIGINAL_COMMAND` before `sudo` can discard it,
+then uses the narrow sudoers rule to run only `live_osquery_broker.py` as
+`soalert`. Keep `/opt/so-alert-relay` exactly `soalert:soalert 0700`; do not
+make the private runtime tree traversable to solve forced-command execution.
 Configure exact endpoint aliases in `/etc/so-alert-relay/live-osquery.json`,
 keep that file exactly `root:soalert 0640`,
 install a separate relay-to-Security Onion key, and prove the disabled
