@@ -11061,6 +11061,16 @@ def second_opinion_trigger(
     explicit_reason = str(response.get("second_opinion_reason") or "").strip()[:1000]
     if bool(response.get("second_opinion_recommended")) or bool(response.get("hosted_second_opinion_recommended")):
         return explicit_reason or "The primary model explicitly requested another opinion."
+    if (
+        isinstance(prompt_package, dict)
+        and prompt_package.get("manual_reanalysis") is True
+        and str(prompt_package.get("agent_role") or "").strip()
+        == "incident-responder"
+    ):
+        return (
+            "Manual Incident Responder reanalysis requires an independent "
+            "second opinion."
+        )
     verdict_validation = (
         response.get("_verdict_validation")
         if isinstance(response.get("_verdict_validation"), dict)

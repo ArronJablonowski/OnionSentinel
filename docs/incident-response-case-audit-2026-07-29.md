@@ -6,9 +6,15 @@ Investigation path: Mac Studio → forced-command SSH → Relay → read-only Se
 
 Mac release containing the audit and PCAP-provenance fixes:
 `63b8d526760f2aa42fb6405dafd4410e1522b183`.
-The Mac remains intentionally pinned to compatibility-v1 until the restricted
-Security Onion wrapper is upgraded and verified; case reanalysis must wait for
-the coordinated v2 cutover.
+
+Cutover update at 2026-07-29 18:23 MDT: the restricted Security Onion wrapper
+now accepts `onion-sentinel-investigation-pivots-v2`. A production
+Mac → Relay → Security Onion probe returned a complete, semantically valid
+`zeek_http` event with valid positive/negative controls. Two identical probes
+produced the same executed-query digest
+`00ec985db7eb8c9cb50fa72002be1e4cbab5d551bb63d9bb53609aba9eaa6d48`.
+The Mac was explicitly cut over to v2, and blind reanalysis of the 15 audited
+cases was queued on release `63b8d526760f2aa42fb6405dafd4410e1522b183`.
 
 ## Executive result
 
@@ -78,7 +84,7 @@ Suricata rule.
 | Case | Detection validity | Independent activity finding | Stored-case discrepancy | Grade |
 |---|---|---|---|---:|
 | `ir-7cf7aea2cc183d57` | `matched_intent` | Debian APT HTTP activity to Ubuntu/Canonical infrastructure is strongly consistent with package management; authorization not established | Stored `unknown` detection validity missed the exact `Debian APT-HTTP/1.3 (2.4.14)` User-Agent and Ubuntu `InRelease` request. Dynamic pivots: 0 successful | 58 |
-| `ir-e3e00a86d1652a15` | `matched_intent` | Likely benign connectivity testing; exact HTTP data identifies `/connecttest.txt`, `www.msftconnecttest.com`, and GlobalProtect 6.1.1 on Linux. Authorization not established | Primary `authorized_benign` is unsupported. Stored report said exact HTTP metadata was absent even though it existed in the selected Suricata event | 47 |
+| `ir-e3e00a86d1652a15` | `matched_intent` | Likely benign connectivity testing; exact HTTP data identifies `/connecttest.txt`, `www.msftconnecttest.com`, and GlobalProtect 6.1.1 on Linux. An exact-flow PCAP now independently corroborates the HTTP 200 transaction. Authorization not established | Primary `authorized_benign` is unsupported. Stored report said exact HTTP metadata was absent even though it existed in the selected Suricata event | 47 |
 | `ir-56ae78c97f626d68` | `matched_intent` | Strongly consistent with normal Ubuntu APT traffic; authorization not established | Primary `authorized_benign` is unsupported; exact APT User-Agent/host/request evidence was missed; 0 successful pivots | 44 |
 | `ir-fc8db3aa9902402a` | `matched_intent` | Exact PCAP shows `Debian APT-HTTP/1.3 (2.4.14)` requesting `/ubuntu/dists/jammy-security/InRelease` from `security.ubuntu.com`, receiving HTTP 200 and a text response. This is normal Ubuntu APT traffic; formal authorization is still not established | Primary `authorized_benign` is unsupported; exact application evidence was missed; reviewer correctly reduced authorization certainty | 51 |
 | `ir-cbbc240155dd8c00` | `matched_intent` | Exact PCAP shows Firefox on `192.168.100.14` requested `GET /reports.html` from `10.77.7.225:8766`; Python SimpleHTTP returned HTTP 404 and a 469-byte HTML body. Likely expected Onion Sentinel UI access, but formal authorization is not present | Stored report said banner/HTTP/PCAP evidence was missing. The selected Suricata event already contained `Server: SimpleHTTP/0.6 Python/3.9.6`; exact PCAP later independently corroborated the flow | 54 |
@@ -187,23 +193,26 @@ calling it OSQuery. The recurring labels were generally correct:
    distinctions.
 9. Exact-alert PCAP requests now use the immutable selected-event timestamp
    instead of mutable ingestion `first_seen`/`last_seen` rollup values.
+10. Manual Incident Responder reanalysis now deterministically requires the
+    configured independent second-opinion route, even when a confident primary
+    would not otherwise request review.
+11. The Mac installer now stops exact orphaned AI scheduler/runner processes
+    after unloading their LaunchAgents, preventing a pre-cutover process from
+    finishing with stale in-memory query-contract code.
 
 ## Remaining blockers
 
-1. **Restricted wrapper contract mismatch:** the installed Security Onion
-   companion rejects `onion-sentinel-investigation-pivots-v2`. Install and
-   verify the reviewed v2 Security Onion wrapper and matching Relay broker
-   documented in the Desktop restricted-node handoff.
-2. **Endpoint attribution:** live endpoint OSQuery remains intentionally
+1. **Endpoint attribution:** live endpoint OSQuery remains intentionally
    disabled. Do not claim process, user, or authorization findings until an
    approved endpoint telemetry path exists.
-3. **PCAP queue latency:** 15 exact PCAP requests were submitted. Two completed
-   during the audit and 13 remained pending/claimed. Final case grades should
-   be amended when those exact captures complete.
-4. **Asset authorization:** inventory relationships help name systems but are
+2. **PCAP queue latency:** 15 exact PCAP requests were submitted. At the v2
+   cutover checkpoint, three were fulfilled, two had failed closed with
+   `no matching packets found`, one was claimed, and nine remained pending.
+   A failed or pending capture is an evidence gap, not negative evidence.
+3. **Asset authorization:** inventory relationships help name systems but are
    not authorization records. Add a separate structured, time-bounded
    authorization source if the operator wants `authorized_benign` outcomes.
-5. **Capture coverage:** preserve Zeek capture-loss telemetry in every evidence
+4. **Capture coverage:** preserve Zeek capture-loss telemetry in every evidence
    handoff so missing Zeek metadata is not interpreted as traffic absence.
 
 ## Independent disposition summary

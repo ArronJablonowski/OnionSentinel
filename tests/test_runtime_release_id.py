@@ -154,6 +154,22 @@ class RuntimeReleaseIdTests(unittest.TestCase):
             "Install failed; alert-store and both AI LaunchAgents remain stopped.",
             source,
         )
+        self.assertIn(
+            '-v scheduler="$STACK_DIR/bin/auto-run-ai-analysis.py"',
+            source,
+        )
+        self.assertIn(
+            '-v runner="$STACK_DIR/bin/run-local-ai-analysis.py"',
+            source,
+        )
+        self.assertIn(
+            'kill -TERM "$pid"',
+            source,
+        )
+        self.assertLess(
+            source.index('launchctl bootout "gui/$(id -u)/$label"'),
+            source.index('kill -TERM "$pid"'),
+        )
 
     def test_web_launchagent_health_reads_exact_release_from_runtime_env(
         self,

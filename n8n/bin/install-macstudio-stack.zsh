@@ -52,6 +52,36 @@ critical_launch_agents_down() {
   do
     launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
   done
+  # A worker can be inside a model subprocess when launchd is unloaded. On
+  # macOS that subprocess may be reparented to PID 1 and keep the old Python
+  # modules mapped while the installer replaces them. Stop only the two exact
+  # AI runtime entry points after their owning LaunchAgents are gone. Durable
+  # leases recover interrupted work; allowing old code to finish after a wire
+  # contract cutover would produce an incorrectly attributed analysis.
+  local runtime_ai_pids
+  runtime_ai_pids="$(
+    /bin/ps -axo pid=,command= \
+      | /usr/bin/awk \
+        -v scheduler="$STACK_DIR/bin/auto-run-ai-analysis.py" \
+        -v runner="$STACK_DIR/bin/run-local-ai-analysis.py" \
+        'index($0, scheduler) || index($0, runner) {print $1}'
+  )"
+  if [[ -n "$runtime_ai_pids" ]]; then
+    for pid in ${(f)runtime_ai_pids}; do
+      kill -TERM "$pid" >/dev/null 2>&1 || true
+    done
+    for attempt in {1..10}; do
+      runtime_ai_pids="$(
+        /bin/ps -axo pid=,command= \
+          | /usr/bin/awk \
+            -v scheduler="$STACK_DIR/bin/auto-run-ai-analysis.py" \
+            -v runner="$STACK_DIR/bin/run-local-ai-analysis.py" \
+            'index($0, scheduler) || index($0, runner) {print $1}'
+      )"
+      [[ -z "$runtime_ai_pids" ]] && break
+      /bin/sleep 1
+    done
+  fi
 }
 
 critical_launch_agents_are_down() {
@@ -66,6 +96,14 @@ critical_launch_agents_are_down() {
       return 1
     fi
   done
+  if /bin/ps -axo command= \
+    | /usr/bin/awk \
+      -v scheduler="$STACK_DIR/bin/auto-run-ai-analysis.py" \
+      -v runner="$STACK_DIR/bin/run-local-ai-analysis.py" \
+      'index($0, scheduler) || index($0, runner) {found=1} END {exit !found}'
+  then
+    return 1
+  fi
   return 0
 }
 

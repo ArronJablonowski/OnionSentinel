@@ -4463,6 +4463,39 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertFalse(response["hosted_second_opinion_recommended"])
         self.assertEqual(self.runner.second_opinion_trigger(response), "")
 
+    def test_manual_incident_reanalysis_requires_independent_review(self) -> None:
+        response = self.runner.validate_response(self.complete_response(
+            confidence="high",
+            confidence_score=0.9,
+            detection_outcome="informational_no_action",
+            second_opinion_recommended=False,
+            hosted_second_opinion_recommended=False,
+        ))
+
+        self.assertEqual(
+            self.runner.second_opinion_trigger(
+                response,
+                {
+                    "agent_role": "incident-responder",
+                    "manual_reanalysis": True,
+                },
+            ),
+            (
+                "Manual Incident Responder reanalysis requires an independent "
+                "second opinion."
+            ),
+        )
+        self.assertEqual(
+            self.runner.second_opinion_trigger(
+                response,
+                {
+                    "agent_role": "soc-analyst",
+                    "manual_reanalysis": True,
+                },
+            ),
+            "",
+        )
+
     def test_legacy_outcome_derives_canonical_factored_verdict(self) -> None:
         response = self.runner.validate_response(self.complete_response(
             confidence="high",
