@@ -9,6 +9,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import stat
 import sys
 import tempfile
 import unittest
@@ -20,6 +21,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 COLLECTOR = ROOT / "n8n" / "bin" / "collect-dhcp-asset-discovery.py"
 QUERY_CLIENT = ROOT / "n8n" / "bin" / "query-security-onion.py"
+PROMOTER = ROOT / "n8n" / "bin" / "promote-dhcp-asset.py"
 WRAPPER = ROOT / "security-onion" / "bin" / "export-dhcp-observations"
 BROKER = ROOT / "relay" / "app" / "incident_evidence_broker.py"
 PORTAL = ROOT / "onion-sentinel-dashboard" / "report_portal.py"
@@ -428,6 +430,90 @@ class DhcpCollectorTests(unittest.TestCase):
             self.collector.MAX_QUERY_SEGMENTS,
         )
 
+    def test_backfill_merges_daily_windows_without_moving_live_checkpoint(self) -> None:
+        now = dt.datetime(2026, 7, 30, 18, tzinfo=dt.timezone.utc)
+        state = self.collector.empty_state()
+        state["collection"]["last_success_at"] = "2026-07-30T17:45:00.000Z"
+        config = {"query_size": 1000, "retention_days": 30}
+        calls = []
+
+        def query(
+            _config: dict,
+            start: dt.datetime,
+            end: dt.datetime,
+            _size: int,
+            *,
+            max_segments: int,
+        ) -> dict:
+            calls.append((start, end, max_segments))
+            identifier = hashlib.sha256(
+                self.collector.format_timestamp(start).encode("utf-8")
+            ).hexdigest()[:24]
+            return {
+                "status": "ok",
+                "window": {
+                    "start": self.collector.format_timestamp(start),
+                    "end": self.collector.format_timestamp(end),
+                },
+                "hits_total": 1,
+                "observations": [self.observation(
+                    observed_at=self.collector.format_timestamp(
+                        start + dt.timedelta(seconds=1)
+                    ),
+                    address=f"10.66.6.{100 + len(calls)}",
+                    mac=f"aa:bb:cc:dd:ee:{len(calls):02x}",
+                    hostname=f"host-{len(calls)}",
+                    evidence_id=identifier,
+                )],
+                "truncated": False,
+                "query_segments": 1,
+            }
+
+        with mock.patch.object(
+            self.collector,
+            "query_complete_window",
+            side_effect=query,
+        ):
+            result = self.collector.backfill(config, state, now, 3)
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(result["backfill"]["status"], "ok")
+        self.assertEqual(result["backfill"]["last_query_segments"], 3)
+        self.assertEqual(len(result["observations"]), 3)
+        self.assertEqual(
+            result["collection"]["last_success_at"],
+            "2026-07-30T17:45:00.000Z",
+        )
+
+    def test_backfill_stops_on_incomplete_window(self) -> None:
+        now = dt.datetime(2026, 7, 30, 18, tzinfo=dt.timezone.utc)
+        response = {
+            "status": "partial",
+            "window": {
+                "start": "2026-07-28T18:00:00.000Z",
+                "end": "2026-07-29T18:00:00.000Z",
+            },
+            "hits_total": 1001,
+            "observations": [],
+            "truncated": True,
+            "query_segments": 16,
+        }
+        with mock.patch.object(
+            self.collector,
+            "query_complete_window",
+            return_value=response,
+        ):
+            result = self.collector.backfill(
+                {"query_size": 1000, "retention_days": 30},
+                self.collector.empty_state(),
+                now,
+                2,
+            )
+
+        self.assertEqual(result["backfill"]["status"], "partial")
+        self.assertFalse(result["backfill"]["last_success_at"])
+        self.assertIn("incomplete", result["backfill"]["last_error"])
+
 
 class SecurityOnionQueryClientTests(unittest.TestCase):
     @classmethod
@@ -499,6 +585,91 @@ class SecurityOnionQueryClientTests(unittest.TestCase):
             self.assertTrue(record["timestamp"].endswith("Z"))
             self.assertEqual(record["event"], "security_onion_query.completed")
             self.assertNotIn("10.66.6.210", json.dumps(record))
+
+
+class DhcpAssetPromotionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.promoter = load_module("dhcp_asset_promoter_test", PROMOTER)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.inventory = self.root / "asset_inventory.json"
+        self.state = self.root / "dhcp-observations.json"
+        self.inventory.write_text(json.dumps({
+            "schema": "onion-sentinel-asset-inventory-v1",
+            "version": 1,
+            "generated_at": "2026-07-29T00:00:00Z",
+            "assets": [],
+        }), encoding="utf-8")
+        self.state.write_text(json.dumps({
+            "schema": "onion-sentinel-dhcp-asset-observations-v1",
+            "version": 1,
+            "updated_at": "2026-07-30T18:00:00Z",
+            "collection": {"status": "ok"},
+            "observations": [{
+                "discovery_id": "a" * 20,
+                "current_ip": "10.66.6.210",
+                "mac_address": "00:11:22:33:44:55",
+                "hostname": "reserved-client",
+                "last_seen": "2026-07-30T17:55:00Z",
+                "lease_expires_at": "2026-07-31T17:55:00Z",
+                "observation_count": 12,
+            }],
+        }), encoding="utf-8")
+        self.inventory.chmod(0o600)
+        self.state.chmod(0o600)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def args(self, **overrides):
+        values = {
+            "inventory": self.inventory,
+            "state": self.state,
+            "discovery_id": "a" * 20,
+            "expected_ip": "10.66.6.210",
+            "expected_mac": "00:11:22:33:44:55",
+            "expected_hostname": "reserved-client",
+            "asset_id": "reserved-client",
+            "hostname": "",
+            "role": "Reviewed LAN client",
+            "platform": "",
+            "owner_ref": "operator-reviewed",
+            "criticality": "unknown",
+            "accept_locally_administered_mac": False,
+            "confirm": f"PROMOTE:{'a' * 20}",
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def test_explicit_promotion_is_validated_backed_up_and_atomic(self) -> None:
+        now = dt.datetime(2026, 7, 30, 18, tzinfo=dt.timezone.utc)
+        result, backup = self.promoter.promote(self.args(), now)
+        payload = json.loads(self.inventory.read_text(encoding="utf-8"))
+        self.assertEqual(result["asset_id"], "reserved-client")
+        self.assertEqual(result["mac_address_scope"], "globally_administered")
+        self.assertTrue(backup.is_file())
+        self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
+        self.assertEqual(payload["assets"][0]["identifiers"]["ip_addresses"], ["10.66.6.210"])
+        self.assertEqual(payload["assets"][0]["identifiers"]["mac_addresses"], ["00:11:22:33:44:55"])
+        self.assertEqual(payload["assets"][0]["source_type"], "operator-approved-dhcp")
+        self.assertFalse(payload["assets"][0]["share_with_hosted_models"])
+
+    def test_promotion_rejects_changed_identity_and_private_mac_without_override(self) -> None:
+        now = dt.datetime(2026, 7, 30, 18, tzinfo=dt.timezone.utc)
+        with self.assertRaisesRegex(ValueError, "changed after operator review"):
+            self.promoter.promote(
+                self.args(expected_ip="10.66.6.211"),
+                now,
+            )
+        payload = json.loads(self.state.read_text(encoding="utf-8"))
+        payload["observations"][0]["mac_address"] = "02:11:22:33:44:55"
+        self.state.write_text(json.dumps(payload), encoding="utf-8")
+        self.state.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, "locally administered"):
+            self.promoter.promote(
+                self.args(expected_mac="02:11:22:33:44:55"),
+                now,
+            )
 
 
 class DhcpDiscoveryApiAndPageTests(unittest.TestCase):
@@ -584,6 +755,7 @@ class DhcpDiscoveryApiAndPageTests(unittest.TestCase):
         )
         self.assertEqual(moved["reconciliation"], "verified_match")
         self.assertIn("new current address", moved["reconciliation_detail"])
+        self.assertEqual(payload["backfill"]["status"], "never_run")
         self.assertEqual(
             moved["authoritative_asset"]["configured_ip_addresses"],
             ["10.66.6.210"],
@@ -604,6 +776,7 @@ class DhcpDiscoveryApiAndPageTests(unittest.TestCase):
         installer = INSTALLER.read_text(encoding="utf-8")
         self.assertIn("collect-dhcp-asset-discovery.py", installer)
         self.assertIn("query-security-onion.py", installer)
+        self.assertIn("promote-dhcp-asset.py", installer)
         self.assertIn("com.arron.soc.dhcp-asset-discovery.plist", installer)
         config = (
             ROOT / "n8n" / "config" / "dhcp-asset-discovery.example.json"

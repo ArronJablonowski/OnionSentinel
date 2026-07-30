@@ -212,6 +212,10 @@ class AssetInventoryPageTests(unittest.TestCase):
             candidate["source_type"],
             "zeek-dhcp-observation",
         )
+        self.assertEqual(
+            candidate["mac_address_scope"],
+            "locally_administered",
+        )
 
     def test_ip_resolution_uses_event_time_and_refuses_ambiguity(self) -> None:
         old = self.asset(
@@ -288,6 +292,8 @@ class AssetInventoryPageTests(unittest.TestCase):
         self.assertIn("Current IP address", page)
         self.assertIn("Current address from passive DHCP", page)
         self.assertIn("provisional DHCP observation", page)
+        self.assertIn("Historical backfill has not run", page)
+        self.assertIn("mac_address_scope", page)
         self.assertIn("asset-inventory.html", page)
         self.assertIn("const assetIdentityHtml=asset=>", incident_page)
         self.assertIn("item.source_asset", incident_page)

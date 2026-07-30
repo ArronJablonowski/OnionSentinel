@@ -24,6 +24,8 @@ MAX_OBSERVATIONS = 5000
 MAX_RESPONSE_OBSERVATIONS = 1000
 MAX_QUERY_SEGMENTS = 16
 MIN_QUERY_SEGMENT = dt.timedelta(minutes=1)
+MAX_BACKFILL_DAYS = 30
+MAX_BACKFILL_QUERY_SEGMENTS = 64
 HOME = Path.home()
 DEFAULT_CONFIG = HOME / "n8n-local" / "config" / "dhcp-asset-discovery.json"
 DEFAULT_STATE = HOME / "n8n-local" / "asset-discovery" / "dhcp-observations.json"
@@ -401,8 +403,21 @@ def relay_failure_diagnostic(stdout: object, stderr: object) -> str:
     return "; ".join(fields)[:700]
 
 
-def query_complete_window(config: dict, start: dt.datetime, end: dt.datetime, size: int) -> dict:
+def query_complete_window(
+    config: dict,
+    start: dt.datetime,
+    end: dt.datetime,
+    size: int,
+    *,
+    max_segments: int = MAX_QUERY_SEGMENTS,
+) -> dict:
     """Split truncated time ranges without permitting an unbounded query loop."""
+    if (
+        isinstance(max_segments, bool)
+        or not isinstance(max_segments, int)
+        or not 1 <= max_segments <= MAX_BACKFILL_QUERY_SEGMENTS
+    ):
+        raise ValueError("DHCP query segment budget is invalid")
     pending = [(start, end)]
     completed: list[dict] = []
     queries = 0
@@ -415,7 +430,7 @@ def query_complete_window(config: dict, start: dt.datetime, end: dt.datetime, si
         can_split = (
             response.get("truncated") is True
             and segment_length > MIN_QUERY_SEGMENT
-            and queries + len(pending) + 2 <= MAX_QUERY_SEGMENTS
+            and queries + len(pending) + 2 <= max_segments
         )
         if can_split:
             midpoint = segment_start + segment_length / 2
@@ -452,6 +467,78 @@ def query_complete_window(config: dict, start: dt.datetime, end: dt.datetime, si
     }
 
 
+def backfill(config: dict, state: dict, now: dt.datetime, days: int) -> dict:
+    """Merge bounded historical day windows without moving the live checkpoint."""
+    if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= MAX_BACKFILL_DAYS:
+        raise ValueError(f"DHCP backfill days must be from 1 through {MAX_BACKFILL_DAYS}")
+    requested_start = now - dt.timedelta(days=days)
+    cursor = requested_start
+    covered_through = requested_start
+    incoming: list[dict] = []
+    total_hits = 0
+    total_segments = 0
+    incomplete = False
+    error = ""
+    while cursor < now:
+        remaining_budget = MAX_BACKFILL_QUERY_SEGMENTS - total_segments
+        if remaining_budget <= 0:
+            incomplete = True
+            error = "DHCP backfill stopped at its global query-segment limit"
+            break
+        window_end = min(cursor + dt.timedelta(hours=24), now)
+        response = query_complete_window(
+            config,
+            cursor,
+            window_end,
+            config["query_size"],
+            max_segments=min(MAX_QUERY_SEGMENTS, remaining_budget),
+        )
+        total_segments += int(response.get("query_segments") or 0)
+        total_hits += int(response.get("hits_total") or 0)
+        incoming.extend(response["observations"])
+        covered_through = window_end
+        if response.get("status") != "ok" or response.get("truncated"):
+            incomplete = True
+            error = "DHCP backfill coverage was incomplete"
+            break
+        cursor = window_end
+
+    result = dict(state)
+    result.update({
+        "schema": STATE_SCHEMA,
+        "version": 1,
+        "updated_at": format_timestamp(now),
+        "observations": merge_observations(
+            state,
+            incoming,
+            now,
+            config["retention_days"],
+        ),
+    })
+    previous = state.get("backfill") if isinstance(state.get("backfill"), dict) else {}
+    complete = not incomplete and covered_through >= now
+    result["backfill"] = {
+        "status": "ok" if complete else "partial",
+        "last_attempt_at": format_timestamp(now),
+        "last_success_at": (
+            format_timestamp(now)
+            if complete
+            else str(previous.get("last_success_at") or "")
+        ),
+        "last_error": error,
+        "requested_start": format_timestamp(requested_start),
+        "requested_end": format_timestamp(now),
+        "covered_through": format_timestamp(covered_through),
+        "last_returned": len({
+            item["evidence_id"]: item
+            for item in incoming
+        }),
+        "last_hits_total": total_hits,
+        "last_query_segments": total_segments,
+    }
+    return result
+
+
 def collect(config: dict, state: dict, now: dt.datetime) -> dict:
     start, end = collection_window(state, now, config["query_window_minutes"])
     response = query_complete_window(config, start, end, config["query_size"])
@@ -484,6 +571,12 @@ def main() -> int:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
+    parser.add_argument(
+        "--backfill-days",
+        type=int,
+        default=0,
+        help="merge 1-30 historical 24-hour windows without moving the live checkpoint",
+    )
     args = parser.parse_args()
     logger = SecurityJsonlLogger(args.log, service="dhcp-asset-discovery")
     attempted_at = utc_now()
@@ -501,15 +594,31 @@ def main() -> int:
             atomic_write_json(args.state, state)
             logger.log("info", "dhcp_asset_discovery.disabled", state_file=str(args.state))
             return 0
-        updated = collect(config, state, attempted_at)
+        if args.backfill_days:
+            updated = backfill(
+                config,
+                state,
+                attempted_at,
+                args.backfill_days,
+            )
+            event = "dhcp_asset_discovery.backfill_completed"
+            status = updated["backfill"]["status"]
+            returned = updated["backfill"]["last_returned"]
+            truncated = status != "ok"
+        else:
+            updated = collect(config, state, attempted_at)
+            event = "dhcp_asset_discovery.completed"
+            status = updated["collection"]["status"]
+            returned = updated["collection"]["last_returned"]
+            truncated = updated["collection"]["last_truncated"]
         atomic_write_json(args.state, updated)
         logger.log(
             "info",
-            "dhcp_asset_discovery.completed",
-            status=updated["collection"]["status"],
-            returned=updated["collection"]["last_returned"],
+            event,
+            status=status,
+            returned=returned,
             retained=len(updated["observations"]),
-            truncated=updated["collection"]["last_truncated"],
+            truncated=truncated,
         )
         return 0
     except (BoundedProcessError, OSError, UnicodeError, ValueError, RuntimeError, json.JSONDecodeError) as exc:

@@ -457,6 +457,19 @@ def load_dhcp_asset_discovery_state_data() -> tuple[dict, str]:
         }, str(exc)
 
 
+def _mac_address_scope(value: object) -> str:
+    """Classify a normalized MAC without claiming a vendor identity."""
+    text = str(value or "").strip().lower()
+    if not re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", text):
+        return "unknown"
+    first_octet = int(text[:2], 16)
+    if first_octet & 1:
+        return "multicast"
+    if first_octet & 2:
+        return "locally_administered"
+    return "globally_administered"
+
+
 def _dhcp_asset_inventory_overlay(
     inventory: dict,
     observed_at: dt.datetime,
@@ -591,6 +604,7 @@ def _dhcp_asset_inventory_overlay(
             "configured_ip_addresses": [],
             "hostnames": [hostname] if hostname else [],
             "mac_addresses": [mac] if mac else [],
+            "mac_address_scope": _mac_address_scope(mac),
             "role": "DHCP-discovered LAN client",
             "platform": "",
             "criticality": "unknown",
@@ -935,6 +949,7 @@ def dhcp_asset_discovery_response(
             "current_ip": address,
             "ip_addresses": text_list(raw.get("ip_addresses"), 32, 64),
             "mac_address": str(raw.get("mac_address") or "")[:32],
+            "mac_address_scope": _mac_address_scope(raw.get("mac_address")),
             "hostname": str(raw.get("hostname") or "")[:253],
             "hostnames": text_list(raw.get("hostnames"), 32, 253),
             "first_seen": str(raw.get("first_seen") or "")[:64],
@@ -973,6 +988,26 @@ def dhcp_asset_discovery_response(
         "last_returned": nonnegative_int(collection.get("last_returned"), 1000),
         "last_hits_total": nonnegative_int(collection.get("last_hits_total")),
         "last_truncated": bool(collection.get("last_truncated")),
+        "last_query_segments": nonnegative_int(
+            collection.get("last_query_segments"),
+            64,
+        ),
+    }
+    backfill = state.get("backfill") if isinstance(state.get("backfill"), dict) else {}
+    public_backfill = {
+        "status": str(backfill.get("status") or "never_run")[:32],
+        "last_attempt_at": str(backfill.get("last_attempt_at") or "")[:64],
+        "last_success_at": str(backfill.get("last_success_at") or "")[:64],
+        "last_error": str(backfill.get("last_error") or "")[:300],
+        "requested_start": str(backfill.get("requested_start") or "")[:64],
+        "requested_end": str(backfill.get("requested_end") or "")[:64],
+        "covered_through": str(backfill.get("covered_through") or "")[:64],
+        "last_returned": nonnegative_int(backfill.get("last_returned"), 1_000_000),
+        "last_hits_total": nonnegative_int(backfill.get("last_hits_total")),
+        "last_query_segments": nonnegative_int(
+            backfill.get("last_query_segments"),
+            64,
+        ),
     }
     return HTTPStatus.OK, {
         "ok": True,
@@ -982,6 +1017,7 @@ def dhcp_asset_discovery_response(
             "unavailable" if inventory_error else str(inventory.get("inventory_status") or "loaded")
         ),
         "collection": public_collection,
+        "backfill": public_backfill,
         "counts": counts,
         "observations": records,
     }

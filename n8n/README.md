@@ -33,6 +33,8 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `bin/backfill-ai-correlation-context.py` | Idempotently indexes historical AI artifacts through alert-store without writing SQLite directly. |
 | `bin/detection_validation.py` | Deterministic deployed-rule and packet-predicate validator; emits bounded semantics and never exposes raw payloads. |
 | `bin/asset_inventory.py` | Strict time-aware asset inventory loader and exact identifier resolver. |
+| `bin/collect-dhcp-asset-discovery.py` | Scheduled fixed-query DHCP identity collector with bounded truncation splitting and optional 1–30 day historical backfill. |
+| `bin/promote-dhcp-asset.py` | Explicit fingerprint-bound operator promotion of one DHCP identity with collision checks, rollback copy, validation, and atomic inventory update. |
 | `bin/export-adjudicated-analysis-replays.py` | Exports append-only human adjudications into a private mode-0600 replay suite. |
 | `bin/agent_memory.py` | Shared role-aware Markdown memory library with relevance retrieval, validation, locking, deduplication, and expiry. |
 | `bin/manage-agent-memory.py` | Query/writeback CLI adapter for SOC Analyst, Incident Responder, SIEM Engineer, Cyber Threat Intel, and Threat Hunter workflows. |

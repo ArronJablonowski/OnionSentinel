@@ -149,6 +149,37 @@ Each attempt writes timestamped query metadata and the fixed-query digest—not
 returned observations—to
 `$HOME/n8n-local/logs/security-onion-query.jsonl`.
 
+After scheduled collection is healthy, an operator may merge up to 30 days of
+historical DHCP data. The collector queries one day at a time, splits truncated
+days, enforces a 64-segment global cap, and never moves the live collection
+checkpoint:
+
+```bash
+"$HOME/n8n-local/bin/collect-dhcp-asset-discovery.py" --backfill-days 7
+```
+
+DHCP identities remain provisional. Promote one only after reviewing the exact
+discovery ID, current IP, MAC, hostname, and MAC address scope. The promotion
+tool rejects stale or changed observations, refuses identifier collisions,
+requires a second override for locally administered/private MAC addresses,
+validates the complete resulting inventory, and creates a mode-0600 rollback
+copy before its atomic write:
+
+```bash
+"$HOME/n8n-local/bin/promote-dhcp-asset.py" \
+  --discovery-id 0123456789abcdef0123 \
+  --expected-ip 192.0.2.25 \
+  --expected-mac 00:11:22:33:44:55 \
+  --expected-hostname reviewed-client \
+  --asset-id reviewed-client \
+  --role "Reviewed LAN client" \
+  --confirm PROMOTE:0123456789abcdef0123
+```
+
+Do not promote a private/randomized MAC merely to remove a dashboard conflict.
+Corroborate it with the DHCP reservation, endpoint OSQuery (when that exact
+target is authorized), or another operator-controlled source first.
+
 ## Secret Handling
 
 Never commit these live files:

@@ -6124,7 +6124,7 @@ def asset_inventory_page_section() -> str:
         })();
         return assetLoadPromise;
       }
-      const dhcpRow=item=>{const state=String(item.reconciliation||'candidate');const authority=item.authoritative_asset;return `<tr><td><span class="dhcp-reconciliation dhcp-${esc(state)}">${esc(state.replace('_',' '))}</span>${item.stale?'<span class="dhcp-stale">Stale observation</span>':''}<span class="asset-muted">${esc(item.reconciliation_detail||'')}</span></td><td>${values([item.current_ip],'dhcp-ip')}</td><td>${values(item.hostname?[item.hostname]:[],'asset-hostname')}</td><td>${values(item.mac_address?[item.mac_address]:[])}</td><td>${authority?`<strong class="asset-name">${esc(authority.asset_id)}</strong><span class="asset-muted">${esc(authority.hostname||'No authoritative hostname')}</span>`:'<span class="asset-empty">Not registered</span>'}</td><td class="asset-validity"><span class="asset-muted">Lease expires</span>${timestamp(item.lease_expires_at)}<span class="asset-muted">Last seen</span>${timestamp(item.last_seen)}</td><td><strong class="asset-name">${Number(item.observation_count||0)} event(s)</strong><span class="asset-muted">${esc((item.message_types||[]).join(', ')||'Message type unavailable')}</span><span class="asset-muted">${esc((item.sensors||[]).join(', ')||'Sensor unavailable')}</span></td></tr>`};
+      const dhcpRow=item=>{const state=String(item.reconciliation||'candidate');const authority=item.authoritative_asset;const macScope=String(item.mac_address_scope||'unknown').replaceAll('_',' ');return `<tr><td><span class="dhcp-reconciliation dhcp-${esc(state)}">${esc(state.replace('_',' '))}</span>${item.stale?'<span class="dhcp-stale">Stale observation</span>':''}<span class="asset-muted">${esc(item.reconciliation_detail||'')}</span></td><td>${values([item.current_ip],'dhcp-ip')}</td><td>${values(item.hostname?[item.hostname]:[],'asset-hostname')}</td><td>${values(item.mac_address?[item.mac_address]:[])}<span class="asset-muted">${esc(macScope)}</span></td><td>${authority?`<strong class="asset-name">${esc(authority.asset_id)}</strong><span class="asset-muted">${esc(authority.hostname||'No authoritative hostname')}</span>`:'<span class="asset-empty">Not registered</span>'}</td><td class="asset-validity"><span class="asset-muted">Lease expires</span>${timestamp(item.lease_expires_at)}<span class="asset-muted">Last seen</span>${timestamp(item.last_seen)}</td><td><strong class="asset-name">${Number(item.observation_count||0)} event(s)</strong><span class="asset-muted">${esc((item.message_types||[]).join(', ')||'Message type unavailable')}</span><span class="asset-muted">${esc((item.sensors||[]).join(', ')||'Sensor unavailable')}</span></td></tr>`};
       function loadDhcp(){
         if(dhcpLoadPromise)return dhcpLoadPromise;
         dhcpLoadPromise=(async()=>{
@@ -6143,11 +6143,12 @@ def asset_inventory_page_section() -> str:
           document.getElementById('dhcp-candidates').textContent=Number(counts.candidate||0);
           document.getElementById('dhcp-conflicts').textContent=Number(counts.conflict||0);
           document.getElementById('dhcp-stale').textContent=Number(counts.stale||0);
-          const collection=payload.collection||{},collectionState=String(collection.status||'unknown');
+          const collection=payload.collection||{},collectionState=String(collection.status||'unknown'),backfill=payload.backfill||{};
           dhcpBadge.textContent=collectionState.replace('_',' ');
           const last=collection.last_success_at?` Last successful collection: ${collection.last_success_at}.`:' No successful collection has been recorded.';
           const warning=collection.last_error?` ${collection.last_error}`:'';
-          dhcpStatus.textContent=`Collector status: ${collectionState}.${last}${warning}`;
+          const history=backfill.last_success_at?` Historical backfill: ${backfill.status||'ok'}, through ${backfill.covered_through||backfill.requested_end}.`:' Historical backfill has not run.';
+          dhcpStatus.textContent=`Collector status: ${collectionState}.${last}${history}${warning}`;
           dhcpBody.innerHTML=items.length?items.map(dhcpRow).join(''):'<tr><td colspan="7" class="ir-loading">No DHCP identities have been observed yet. The restricted relay collector may still need to be enabled.</td></tr>';
           dhcpBody.dataset.liveRenderVersion=String(Number(dhcpBody.dataset.liveRenderVersion||0)+1);
           await load();
