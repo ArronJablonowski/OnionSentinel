@@ -13,5 +13,6 @@
   "query_timeout_seconds": 60,
   "batch_timeout_seconds": 120,
   "max_concurrent_queries": 4,
+  "result_visibility_seconds": 10,
   "poll_seconds": 2
 }

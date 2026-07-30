@@ -265,7 +265,7 @@ def _extract_action_ids(
     return action_id, query_action_id
 
 
-def _query_state(details: dict[str, Any]) -> tuple[str, int, int, int, int]:
+def _query_state(details: dict[str, Any]) -> tuple[str, int, int, int, int, int]:
     data = _response_data(details)
     state = str(data.get("status") or "").strip().lower()
     queries = data.get("queries")
@@ -286,6 +286,7 @@ def _query_state(details: dict[str, Any]) -> tuple[str, int, int, int, int]:
         number("failed"),
         number("pending"),
         number("responded"),
+        number("docs"),
     )
 
 
@@ -352,6 +353,10 @@ def _run_query(
     api_root = _api_root(config)
     request_timeout = min(max(int(config.get("query_timeout_seconds", 60)), 10), 300)
     poll_seconds = min(max(float(config.get("poll_seconds", 2)), 0.5), 10.0)
+    result_visibility_seconds = min(
+        max(float(config.get("result_visibility_seconds", 10)), 0.0),
+        30.0,
+    )
     status = "error"
     rows: list[dict[str, Any]] = []
     total_rows = 0
@@ -382,7 +387,7 @@ def _run_query(
             expected_query=query,
         )
         state = "pending"
-        successful = failed = pending = responded = 0
+        successful = failed = pending = responded = expected_docs = 0
         details_url = (
             f"{api_root}/osquery/live_queries/"
             f"{urllib.parse.quote(action_id, safe='')}"
@@ -395,7 +400,14 @@ def _run_query(
                 context=context,
                 timeout_seconds=remaining_timeout(),
             )
-            state, successful, failed, pending, responded = _query_state(details)
+            (
+                state,
+                successful,
+                failed,
+                pending,
+                responded,
+                expected_docs,
+            ) = _query_state(details)
             if state not in _PENDING_STATES and pending == 0:
                 break
             time.sleep(min(poll_seconds, max(0.0, deadline - time.monotonic())))
@@ -408,18 +420,56 @@ def _run_query(
             f"{details_url}/results/"
             f"{urllib.parse.quote(query_action_id, safe='')}?page=1&pageSize=200"
         )
-        result_response = _http_json(
-            method="GET",
-            url=result_url,
-            authorization=authorization,
-            context=context,
-            timeout_seconds=remaining_timeout(),
+        visibility_deadline = min(
+            deadline,
+            time.monotonic() + result_visibility_seconds,
         )
-        rows, total_rows = _result_rows(
-            result_response,
-            expected_agent_id=agent_id,
-            expected_action_id=query_action_id,
-        )
+        while True:
+            result_response = _http_json(
+                method="GET",
+                url=result_url,
+                authorization=authorization,
+                context=context,
+                timeout_seconds=remaining_timeout(),
+            )
+            rows, total_rows = _result_rows(
+                result_response,
+                expected_agent_id=agent_id,
+                expected_action_id=query_action_id,
+            )
+            if failed > 0:
+                break
+            if expected_docs > 0 and total_rows >= expected_docs:
+                break
+            if expected_docs == 0 and total_rows > 0:
+                break
+            if time.monotonic() >= visibility_deadline:
+                break
+            time.sleep(
+                min(
+                    poll_seconds,
+                    max(0.0, visibility_deadline - time.monotonic()),
+                )
+            )
+            details = _http_json(
+                method="GET",
+                url=details_url,
+                authorization=authorization,
+                context=context,
+                timeout_seconds=remaining_timeout(),
+            )
+            (
+                state,
+                successful,
+                failed,
+                pending,
+                responded,
+                expected_docs,
+            ) = _query_state(details)
+        if expected_docs > total_rows:
+            raise LiveQueryError(
+                "Kibana reported live-query result documents that were not readable"
+            )
         if failed > 0:
             status = "error"
             error = "endpoint reported a live-query execution failure"

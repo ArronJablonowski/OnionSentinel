@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -205,12 +206,141 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
                             "failed": 0,
                             "pending": 0,
                             "responded": 1,
+                            "docs": 1,
                         }
                     ],
                 }
             }
         )
-        self.assertEqual(state, ("completed", 1, 0, 0, 1))
+        self.assertEqual(state, ("completed", 1, 0, 0, 1, 1))
+
+    def test_waits_for_reported_result_documents_to_become_visible(self):
+        submitted = {
+            "data": {
+                "action_id": "action-id",
+                "agents": ["agent-id"],
+                "queries": [
+                    {
+                        "action_id": "query-action-id",
+                        "agents": ["agent-id"],
+                        "query": "SELECT hostname FROM system_info LIMIT 1;",
+                    }
+                ],
+            }
+        }
+        details = {
+            "data": {
+                "status": "completed",
+                "queries": [
+                    {
+                        "status": "completed",
+                        "successful": 1,
+                        "failed": 0,
+                        "pending": 0,
+                        "responded": 1,
+                        "docs": 1,
+                    }
+                ],
+            }
+        }
+        empty_results = {"data": {"edges": [], "total": 0}}
+        visible_results = {
+            "data": {
+                "edges": [
+                    {
+                        "_source": {
+                            "agent": {"id": "agent-id"},
+                            "action_id": "query-action-id",
+                            "osquery": {"hostname": "endpoint-a"},
+                        }
+                    }
+                ],
+                "total": 1,
+            }
+        }
+        with (
+            mock.patch.object(
+                self.wrapper,
+                "_http_json",
+                side_effect=[
+                    submitted,
+                    details,
+                    empty_results,
+                    details,
+                    visible_results,
+                ],
+            ),
+            mock.patch.object(self.wrapper.time, "sleep"),
+        ):
+            result = self.wrapper._run_query(
+                target_alias="endpoint-a",
+                agent_id="agent-id",
+                query="SELECT hostname FROM system_info LIMIT 1;",
+                purpose="result visibility test",
+                config={
+                    "kibana_url": "http://127.0.0.1:5601",
+                    "query_timeout_seconds": 60,
+                    "poll_seconds": 0.5,
+                    "result_visibility_seconds": 10,
+                },
+                authorization="ApiKey redacted",
+                context=None,
+                deadline=time.monotonic() + 60,
+            )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["rows"], [{"hostname": "endpoint-a"}])
+
+    def test_missing_reported_result_documents_fails_closed(self):
+        submitted = {
+            "data": {
+                "action_id": "action-id",
+                "agents": ["agent-id"],
+                "queries": [
+                    {
+                        "action_id": "query-action-id",
+                        "agents": ["agent-id"],
+                        "query": "SELECT hostname FROM system_info LIMIT 1;",
+                    }
+                ],
+            }
+        }
+        details = {
+            "data": {
+                "status": "completed",
+                "queries": [
+                    {
+                        "status": "completed",
+                        "successful": 1,
+                        "failed": 0,
+                        "pending": 0,
+                        "responded": 1,
+                        "docs": 1,
+                    }
+                ],
+            }
+        }
+        with mock.patch.object(
+            self.wrapper,
+            "_http_json",
+            side_effect=[submitted, details, {"data": {"edges": [], "total": 0}}],
+        ):
+            result = self.wrapper._run_query(
+                target_alias="endpoint-a",
+                agent_id="agent-id",
+                query="SELECT hostname FROM system_info LIMIT 1;",
+                purpose="missing result test",
+                config={
+                    "kibana_url": "http://127.0.0.1:5601",
+                    "query_timeout_seconds": 60,
+                    "poll_seconds": 0.5,
+                    "result_visibility_seconds": 0,
+                },
+                authorization="ApiKey redacted",
+                context=None,
+                deadline=time.monotonic() + 60,
+            )
+        self.assertEqual(result["status"], "error")
+        self.assertIn("not readable", result["error"])
 
     def test_reads_current_elastic_result_shape(self):
         rows, total = self.wrapper._result_rows(
