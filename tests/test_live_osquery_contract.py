@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -16,6 +18,11 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "n8n" / "bin"
 SO_WRAPPER = ROOT / "security-onion" / "bin" / "run-live-osquery"
+SO_LAUNCHER = ROOT / "security-onion" / "bin" / "run-live-osquery-forced"
+SO_AUTHORIZED_KEY = (
+    ROOT / "security-onion" / "ssh" / "authorized_keys.live-osquery.example"
+)
+SO_INSTALLER = ROOT / "security-onion" / "bin" / "install-security-onion-wrapper.sh"
 RELAY_AUTHORIZED_KEY = (
     ROOT / "relay" / "config" / "authorized_keys.live-osquery.example"
 )
@@ -34,6 +41,7 @@ from live_osquery_contract import (  # noqa: E402
 )
 from live_osquery_client import (  # noqa: E402
     LiveOsqueryClientError,
+    collect_live_osquery,
     harness_operator_approved,
     load_live_osquery_config,
 )
@@ -210,15 +218,17 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
                     "edges": [
                         {
                             "_source": {
-                                "agent": {"id": "must-not-leak"},
-                                "action_id": "must-not-leak",
+                                "agent": {"id": "agent-id"},
+                                "action_id": "query-action-id",
                                 "osquery": {"pid": "42", "name": "launchd"},
                             }
                         }
                     ],
                     "total": 1,
                 }
-            }
+            },
+            expected_agent_id="agent-id",
+            expected_action_id="query-action-id",
         )
         self.assertEqual(rows, [{"pid": "42", "name": "launchd"}])
         self.assertEqual(total, 1)
@@ -228,14 +238,83 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
             {
                 "data": {
                     "edges": [
-                        {"_source": {"osquery": {"columns": {"uid": "501"}}}}
+                        {
+                            "_source": {
+                                "agent": {"id": "agent-id"},
+                                "action_id": "query-action-id",
+                                "osquery": {"columns": {"uid": "501"}},
+                            }
+                        }
                     ],
                     "total": {"value": 1},
                 }
-            }
+            },
+            expected_agent_id="agent-id",
+            expected_action_id="query-action-id",
         )
         self.assertEqual(rows, [{"uid": "501"}])
         self.assertEqual(total, 1)
+
+    def test_rejects_result_rows_from_a_different_agent_or_action(self):
+        response = {
+            "data": {
+                "edges": [
+                    {
+                        "_source": {
+                            "agent": {"id": "other-agent"},
+                            "action_id": "query-action-id",
+                            "osquery": {"pid": "42"},
+                        }
+                    }
+                ],
+                "total": 1,
+            }
+        }
+        with self.assertRaisesRegex(self.wrapper.LiveQueryError, "target agent"):
+            self.wrapper._result_rows(
+                response,
+                expected_agent_id="agent-id",
+                expected_action_id="query-action-id",
+            )
+
+        response["data"]["edges"][0]["_source"]["agent"]["id"] = "agent-id"
+        response["data"]["edges"][0]["_source"]["action_id"] = "other-action"
+        with self.assertRaisesRegex(self.wrapper.LiveQueryError, "query action"):
+            self.wrapper._result_rows(
+                response,
+                expected_agent_id="agent-id",
+                expected_action_id="query-action-id",
+            )
+
+    def test_submission_identity_is_exact(self):
+        response = {
+            "data": {
+                "action_id": "action-id",
+                "agents": ["agent-id"],
+                "queries": [
+                    {
+                        "action_id": "query-action-id",
+                        "agents": ["agent-id"],
+                        "query": "SELECT hostname FROM system_info LIMIT 1;",
+                    }
+                ],
+            }
+        }
+        self.assertEqual(
+            self.wrapper._extract_action_ids(
+                response,
+                expected_agent_id="agent-id",
+                expected_query="SELECT hostname FROM system_info LIMIT 1;",
+            ),
+            ("action-id", "query-action-id"),
+        )
+        response["data"]["agents"] = ["other-agent"]
+        with self.assertRaisesRegex(self.wrapper.LiveQueryError, "exact target"):
+            self.wrapper._extract_action_ids(
+                response,
+                expected_agent_id="agent-id",
+                expected_query="SELECT hostname FROM system_info LIMIT 1;",
+            )
 
     def test_allows_only_explicit_loopback_http_or_verified_https(self):
         base = {
@@ -297,6 +376,116 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "timeout")
         self.assertIn("global batch deadline", result["error"])
+
+    def test_http_transport_disables_proxies_and_redirects(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return b'{"data":{}}'
+
+        opener = mock.Mock()
+        opener.open.return_value = FakeResponse()
+        with mock.patch.object(
+            self.wrapper.urllib.request,
+            "build_opener",
+            return_value=opener,
+        ) as build_opener:
+            self.assertEqual(
+                self.wrapper._http_json(
+                    method="GET",
+                    url="http://127.0.0.1:5601/api/osquery/live_queries/id",
+                    authorization="ApiKey redacted",
+                    context=None,
+                    timeout_seconds=5,
+                ),
+                {"data": {}},
+            )
+        handlers = build_opener.call_args.args
+        proxy_handlers = [
+            handler
+            for handler in handlers
+            if isinstance(handler, urllib.request.ProxyHandler)
+        ]
+        self.assertEqual(len(proxy_handlers), 1)
+        self.assertEqual(proxy_handlers[0].proxies, {})
+        self.assertTrue(
+            any(isinstance(handler, self.wrapper._RejectRedirects) for handler in handlers)
+        )
+
+        redirect = urllib.error.HTTPError(
+            "http://127.0.0.1:5601/api",
+            302,
+            "Found",
+            {},
+            None,
+        )
+        opener.open.side_effect = redirect
+        with (
+            mock.patch.object(
+                self.wrapper.urllib.request,
+                "build_opener",
+                return_value=opener,
+            ),
+            self.assertRaisesRegex(
+                self.wrapper.LiveQueryError,
+                "redirects are forbidden",
+            ),
+        ):
+            self.wrapper._http_json(
+                method="GET",
+                url="http://127.0.0.1:5601/api",
+                authorization="ApiKey redacted",
+                context=None,
+                timeout_seconds=5,
+            )
+        redirect.close()
+
+    def test_eight_query_batch_shares_one_capped_deadline(self):
+        requests = [
+            {
+                "target_alias": "endpoint-a",
+                "query": f"SELECT hostname FROM system_info LIMIT {index + 1};",
+                "purpose": f"deadline test {index}",
+            }
+            for index in range(8)
+        ]
+        deadlines: list[float] = []
+
+        def fake_run_query(**kwargs):
+            deadlines.append(kwargs["deadline"])
+            return {
+                "target_alias": kwargs["target_alias"],
+                "query": kwargs["query"],
+                "purpose": kwargs["purpose"],
+                "status": "timeout",
+                "rows": [],
+                "total_rows": 0,
+                "truncated": False,
+                "duration_ms": 0,
+                "error": "test",
+            }
+
+        with (
+            mock.patch.object(self.wrapper.time, "monotonic", return_value=1000.0),
+            mock.patch.object(self.wrapper, "_run_query", side_effect=fake_run_query),
+        ):
+            results = self.wrapper._run_batch(
+                requests=requests,
+                alias_map={"endpoint-a": "agent-id"},
+                config={
+                    "batch_timeout_seconds": 999,
+                    "max_concurrent_queries": 4,
+                },
+                authorization="ApiKey redacted",
+                context=None,
+            )
+        self.assertEqual(len(results), 8)
+        self.assertEqual(set(deadlines), {1130.0})
 
 
 class LiveOsqueryClientConfigTests(unittest.TestCase):
@@ -372,6 +561,36 @@ class LiveOsqueryClientConfigTests(unittest.TestCase):
             ):
                 load_live_osquery_config(link)
 
+    def test_collector_enforces_approval_before_transport(self):
+        config = {
+            "enabled": True,
+            "allowed_target_aliases": ["endpoint-a"],
+            "harness_operator_approval": {
+                "approved": True,
+                "target_aliases": ["endpoint-a"],
+                "expires_at": "2000-01-01T00:00:00Z",
+            },
+        }
+        with (
+            mock.patch(
+                "live_osquery_client.run_bounded_command",
+                side_effect=AssertionError("transport must not run"),
+            ),
+            self.assertRaisesRegex(LiveOsqueryClientError, "approval"),
+        ):
+            collect_live_osquery(
+                case_id="case-1",
+                requests=[
+                    {
+                        "target_alias": "endpoint-a",
+                        "query": "SELECT hostname FROM system_info LIMIT 1;",
+                        "purpose": "verify endpoint",
+                    }
+                ],
+                config=config,
+                persist=False,
+            )
+
 
 class LiveOsqueryDeploymentContractTests(unittest.TestCase):
     def test_mac_forced_key_runs_only_broker_as_service_account(self):
@@ -399,6 +618,36 @@ class LiveOsqueryDeploymentContractTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 2)
         self.assertIn("commands are not accepted", completed.stderr)
+
+    def test_security_onion_forced_key_uses_pre_sudo_launcher(self):
+        authorized_key = SO_AUTHORIZED_KEY.read_text(encoding="utf-8")
+        self.assertIn(
+            'command="/usr/local/sbin/run-live-osquery-forced"',
+            authorized_key,
+        )
+        self.assertNotIn('command="sudo ', authorized_key)
+        for restriction in (
+            "no-agent-forwarding",
+            "no-X11-forwarding",
+            "no-port-forwarding",
+            "no-pty",
+            "no-user-rc",
+        ):
+            self.assertIn(restriction, authorized_key)
+
+        completed = subprocess.run(
+            [str(SO_LAUNCHER)],
+            env={**os.environ, "SSH_ORIGINAL_COMMAND": "id"},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("commands are not accepted", completed.stderr)
+        self.assertIn(
+            "security-onion/bin/run-live-osquery-forced",
+            SO_INSTALLER.read_text(encoding="utf-8"),
+        )
 
     def test_relay_config_requires_root_service_group_mode_0640(self):
         broker = load_relay_broker()

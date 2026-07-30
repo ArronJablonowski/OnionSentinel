@@ -112,8 +112,9 @@ Every hop enforces:
   joins, mutations, pragmas, or extension loading;
 - a row limit from 1 through 200, with 100 added when omitted;
 - at most a 4 MiB response and 10 minutes of reported execution time;
-- one absolute batch deadline of at most 170 seconds and at most four
-  concurrent endpoint queries;
+- one absolute batch deadline of at most 130 seconds and at most four
+  concurrent endpoint queries, preserving at least 50 seconds of the Relay's
+  180-second transport budget;
 - only these tables: `arp_cache`, `crontab`, `deb_packages`, `groups`,
   `homebrew_packages`, `interface_addresses`, `kernel_info`,
   `listening_ports`, `logged_in_users`, `process_open_sockets`, `processes`,
@@ -132,16 +133,15 @@ Configuration remains disabled by default:
 - Relay: `/etc/so-alert-relay/live-osquery.json`
 - Security Onion: `/etc/onion-sentinel/live-osquery.json`
 
-The three-node configuration is the operator enablement boundary for the
-legacy provider-neutral workflow when the custom Onion Sentinel harness is not
-active. When that harness is active, live endpoint OSQuery is additionally an
-explicit approval-gated operational capability. A missing, denied, or failed
-approval decision blocks dispatch in both shadow and enforce modes; enabling
-the transport configuration alone does not manufacture per-run approval. The
-Mac's owner-only mode-0600 configuration can carry a time-bounded
-`harness_operator_approval` scoped to exact configured aliases. The harness
-passes that decision into its immutable tool-authorization event; an expired,
-missing, malformed, disabled, or differently scoped approval fails closed.
+The three-node configuration and a current operator approval are the
+enablement boundary for every provider path. The Mac's lowest-level collector
+enforces the owner-only mode-0600, time-bounded
+`harness_operator_approval` against every requested alias immediately before
+transport, even when the custom harness is not active. The harness additionally
+records the same decision in its immutable tool-authorization event. An
+expired, missing, malformed, disabled, or differently scoped approval fails
+closed in ordinary, shadow, enforce, Hermes, and OpenClaw paths; enabling the
+transport configuration alone never manufactures approval.
 
 Enable it only after configuring exact operator aliases on all three nodes,
 mapping each alias to one exact Fleet agent ID on Security Onion, pinning both
@@ -150,7 +150,10 @@ Kibana TLS or the wrapper's strict loopback-HTTP exception, and provisioning
 least-privilege Osquery Manager authorization. Never use an `all`, wildcard,
 or shared administrative target. Returned evidence is associated with the
 submitted request by target alias and normalized SQL digest, never by array
-position.
+position. The Security Onion HTTP client disables environment proxies and
+redirects, and validates the exact configured Fleet agent and query action on
+the submission and every result row before stripping those identifiers from
+returned evidence.
 
 ## Model Concurrency
 

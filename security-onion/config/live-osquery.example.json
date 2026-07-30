@@ -10,7 +10,7 @@
     "REPLACE_WITH_OPERATOR_ENDPOINT_ALIAS": "REPLACE_WITH_EXACT_FLEET_AGENT_ID"
   },
   "query_timeout_seconds": 60,
-  "batch_timeout_seconds": 150,
+  "batch_timeout_seconds": 120,
   "max_concurrent_queries": 4,
   "poll_seconds": 2
 }

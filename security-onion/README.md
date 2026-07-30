@@ -11,6 +11,7 @@ This directory contains the Security Onion-side pieces for Onion Sentinel.
 | `bin/export-incident-evidence` | `/usr/local/sbin/export-incident-evidence` | Restricted baseline evidence and policy-brokered Elastic/OQL pivot wrapper. |
 | `bin/export-dhcp-observations` | `/usr/local/sbin/export-dhcp-observations` | Read-only, fixed-DSL Zeek DHCP helper routed by the incident-evidence wrapper. |
 | `bin/run-live-osquery` | `/usr/local/sbin/run-live-osquery` | Disabled-by-default live endpoint OSQuery wrapper with exact alias mapping and bounded Osquery Manager calls. |
+| `bin/run-live-osquery-forced` | `/usr/local/sbin/run-live-osquery-forced` | Pre-sudo forced-command guard that rejects caller-supplied SSH commands and arguments. |
 | `sudoers/90-so-ai-relay-export` | `/etc/sudoers.d/90-so-ai-relay-export` | Allows only the wrapper to run passwordless for `so-ai-relay`. |
 | `ssh/authorized_keys.example` | `/home/so-ai-relay/.ssh/authorized_keys` | Forced-command SSH template restricted to the relay source IP. |
 | `ssh/authorized_keys.pcap.example` | `/home/so-ai-relay/.ssh/authorized_keys` | Separate forced-command SSH template for PCAP fulfillment. |
@@ -64,9 +65,12 @@ loopback-only HTTP URL on Security Onion. Plain HTTP is rejected unless
 `allow_loopback_http` is true and the parsed host is exactly `127.0.0.1`,
 `::1`, or `localhost`; remote HTTP, embedded credentials, URL paths, query
 strings, and fragments remain forbidden. Both transports still require the
-root-only dedicated Kibana authorization file. All queries in one request
-share one absolute batch deadline and run in a maximum four-worker pool so
-eight sequential per-query timeouts cannot exceed the Relay transport bound.
+root-only dedicated Kibana authorization file. The HTTP client disables
+environment proxies and refuses redirects so that authorization cannot leave
+the reviewed loopback or TLS origin. All queries in one request share one
+absolute batch deadline, capped at 130 seconds, and run in a maximum
+four-worker pool so the Relay retains at least 50 seconds of its 180-second
+transport budget for both SSH hops, validation, and teardown.
 
 The incident wrapper accepts validated observables and bounded UTC windows,
 then executes five built-in Elastic packs and seven built-in OSquery packs.

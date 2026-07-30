@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+# This launcher is the SSH forced command and therefore runs before sudo can
+# discard SSH_ORIGINAL_COMMAND. It accepts neither caller-supplied commands nor
+# arguments, then invokes only the reviewed root wrapper.
+if [ "$#" -ne 0 ] || [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
+  printf '%s\n' 'commands are not accepted by this forced endpoint' >&2
+  exit 2
+fi
+
+exec /usr/bin/sudo -n /usr/local/sbin/run-live-osquery

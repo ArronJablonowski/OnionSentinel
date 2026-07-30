@@ -317,6 +317,18 @@ def collect_live_osquery(
     )
     if not normalized:
         raise LiveOsqueryClientError("no valid live-host OSQuery requests were supplied")
+    unapproved_aliases = sorted(
+        {
+            item["target_alias"]
+            for item in normalized
+            if not harness_operator_approved(config, item["target_alias"])
+        }
+    )
+    if unapproved_aliases:
+        raise LiveOsqueryClientError(
+            "live-host OSQuery operator approval is missing, expired, or "
+            "not scoped to every requested target"
+        )
     payload = {
         "schema": "onion-sentinel-live-osquery-v1",
         "case_id": str(case_id or "").strip(),

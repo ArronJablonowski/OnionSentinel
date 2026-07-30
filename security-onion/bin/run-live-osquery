@@ -51,6 +51,21 @@ class LiveQueryError(RuntimeError):
     """A live-query request failed without exposing sensitive server details."""
 
 
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    """Prevent authorization from being replayed to a redirected origin."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
+
 def _emit(payload: dict[str, Any], code: int = 0) -> int:
     sys.stdout.buffer.write(bounded_json_bytes(payload) + b"\n")
     return code
@@ -179,14 +194,21 @@ def _http_json(
             "kbn-xsrf": "onion-sentinel",
         },
     )
+    handlers: list[Any] = [
+        urllib.request.ProxyHandler({}),
+        _RejectRedirects(),
+    ]
+    if urllib.parse.urlsplit(url).scheme == "https":
+        handlers.append(urllib.request.HTTPSHandler(context=context))
+    else:
+        handlers.append(urllib.request.HTTPHandler())
+    opener = urllib.request.build_opener(*handlers)
     try:
-        with urllib.request.urlopen(
-            request,
-            context=context,
-            timeout=timeout_seconds,
-        ) as response:
+        with opener.open(request, timeout=timeout_seconds) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise LiveQueryError("Kibana live-query API redirects are forbidden") from exc
         raise LiveQueryError(f"Kibana live-query API returned HTTP {exc.code}") from exc
     except TimeoutError:
         raise
@@ -212,9 +234,16 @@ def _response_data(value: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-def _extract_action_ids(response: dict[str, Any]) -> tuple[str, str]:
+def _extract_action_ids(
+    response: dict[str, Any],
+    *,
+    expected_agent_id: str,
+    expected_query: str,
+) -> tuple[str, str]:
     data = _response_data(response)
     action_id = str(data.get("action_id") or "").strip()
+    if data.get("agents") != [expected_agent_id]:
+        raise LiveQueryError("Kibana live query did not resolve to the exact target agent")
     queries = data.get("queries")
     if not action_id or not isinstance(queries, list) or len(queries) != 1:
         raise LiveQueryError("Kibana did not return one live-query action")
@@ -222,6 +251,10 @@ def _extract_action_ids(response: dict[str, Any]) -> tuple[str, str]:
     query_action_id = str(query.get("action_id") or "").strip()
     if not query_action_id:
         raise LiveQueryError("Kibana did not return the query action identifier")
+    if query.get("agents") != [expected_agent_id]:
+        raise LiveQueryError("Kibana query action did not retain the exact target agent")
+    if str(query.get("query") or "").strip() != expected_query:
+        raise LiveQueryError("Kibana query action did not retain the exact submitted SQL")
     return action_id, query_action_id
 
 
@@ -249,7 +282,12 @@ def _query_state(details: dict[str, Any]) -> tuple[str, int, int, int, int]:
     )
 
 
-def _result_rows(response: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
+def _result_rows(
+    response: dict[str, Any],
+    *,
+    expected_agent_id: str,
+    expected_action_id: str,
+) -> tuple[list[dict[str, Any]], int]:
     data = _response_data(response)
     edges = data.get("edges")
     if not isinstance(edges, list):
@@ -257,7 +295,21 @@ def _result_rows(response: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
     rows: list[dict[str, Any]] = []
     for edge in edges:
         source = edge.get("_source") if isinstance(edge, dict) else None
-        osquery = source.get("osquery") if isinstance(source, dict) else None
+        if not isinstance(source, dict):
+            raise LiveQueryError("Kibana live-query result row had an invalid source")
+        agent = source.get("agent")
+        if (
+            not isinstance(agent, dict)
+            or str(agent.get("id") or "").strip() != expected_agent_id
+        ):
+            raise LiveQueryError(
+                "Kibana live-query result row did not match the target agent"
+            )
+        if str(source.get("action_id") or "").strip() != expected_action_id:
+            raise LiveQueryError(
+                "Kibana live-query result row did not match the query action"
+            )
+        osquery = source.get("osquery")
         if not isinstance(osquery, dict):
             raise LiveQueryError("Kibana live-query result row had an invalid shape")
         # Current Kibana responses place the row columns directly under
@@ -317,7 +369,11 @@ def _run_query(
                 "timeout": request_timeout,
             },
         )
-        action_id, query_action_id = _extract_action_ids(submitted)
+        action_id, query_action_id = _extract_action_ids(
+            submitted,
+            expected_agent_id=agent_id,
+            expected_query=query,
+        )
         state = "pending"
         successful = failed = pending = responded = 0
         details_url = (
@@ -352,7 +408,11 @@ def _run_query(
             context=context,
             timeout_seconds=remaining_timeout(),
         )
-        rows, total_rows = _result_rows(result_response)
+        rows, total_rows = _result_rows(
+            result_response,
+            expected_agent_id=agent_id,
+            expected_action_id=query_action_id,
+        )
         if failed > 0:
             status = "error"
             error = "endpoint reported a live-query execution failure"
@@ -379,6 +439,48 @@ def _run_query(
         "duration_ms": duration_ms,
         "error": error,
     }
+
+
+def _run_batch(
+    *,
+    requests: list[dict[str, Any]],
+    alias_map: dict[str, str],
+    config: dict[str, Any],
+    authorization: str,
+    context: ssl.SSLContext | None,
+) -> list[dict[str, Any]]:
+    """Execute every request under one deadline with a bounded worker pool."""
+    batch_timeout = min(
+        max(int(config.get("batch_timeout_seconds", 120)), 20),
+        130,
+    )
+    max_workers = min(
+        max(int(config.get("max_concurrent_queries", 4)), 1),
+        4,
+        len(requests),
+    )
+    deadline = time.monotonic() + batch_timeout
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=max_workers,
+        thread_name_prefix="live-osquery",
+    ) as executor:
+        futures = [
+            executor.submit(
+                _run_query,
+                target_alias=item["target_alias"],
+                agent_id=alias_map[item["target_alias"]],
+                query=item["query"],
+                purpose=item["purpose"],
+                config=config,
+                authorization=authorization,
+                context=context,
+                deadline=deadline,
+            )
+            for item in requests
+        ]
+        # _run_query applies the same absolute deadline to every transport
+        # operation, including work that waited in the bounded pool.
+        return [future.result() for future in futures]
 
 
 def main() -> int:
@@ -409,37 +511,13 @@ def main() -> int:
             raise LiveQueryError("Kibana authorization file path must be absolute")
         authorization = _load_authorization(auth_path)
         context = _ssl_context(config)
-        batch_timeout = min(
-            max(int(config.get("batch_timeout_seconds", 150)), 20),
-            170,
+        results = _run_batch(
+            requests=normalized["requests"],
+            alias_map=alias_map,
+            config=config,
+            authorization=authorization,
+            context=context,
         )
-        max_workers = min(
-            max(int(config.get("max_concurrent_queries", 4)), 1),
-            4,
-            len(normalized["requests"]),
-        )
-        deadline = time.monotonic() + batch_timeout
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=max_workers,
-            thread_name_prefix="live-osquery",
-        ) as executor:
-            futures = [
-                executor.submit(
-                    _run_query,
-                    target_alias=item["target_alias"],
-                    agent_id=alias_map[item["target_alias"]],
-                    query=item["query"],
-                    purpose=item["purpose"],
-                    config=config,
-                    authorization=authorization,
-                    context=context,
-                    deadline=deadline,
-                )
-                for item in normalized["requests"]
-            ]
-            # _run_query applies the same absolute deadline to every transport
-            # operation, including work that waited in the bounded pool.
-            results = [future.result() for future in futures]
         artifact = {
             "schema": normalized["schema"],
             "case_id": normalized["case_id"],

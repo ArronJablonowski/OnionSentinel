@@ -903,9 +903,11 @@ an auditable request/status record. See
 `docs/incident-response-query-and-model-routing.md` for the exact baseline
 queries, live allowlist, and enablement gates.
 
-When the custom Onion Sentinel harness is active, live endpoint OSQuery also
-requires an explicit per-run approval decision. Missing approval or a failed
-authorization audit blocks dispatch in both shadow and enforce modes.
+The lowest-level Mac collector requires a current, alias-scoped operator
+approval before every live endpoint OSQuery transport, independent of the
+selected provider or whether the custom harness is active. The harness also
+records that decision when active. Missing, expired, or wrongly scoped approval
+blocks dispatch in ordinary, shadow, enforce, Hermes, and OpenClaw paths.
 
 The production Incident Responder route is `gpt-cli`, resolved to the local
 Codex CLI with model `gpt-5.5` and `medium` reasoning. The runner searches the
