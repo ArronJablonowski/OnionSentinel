@@ -154,6 +154,69 @@ Both defects are corrected in the next reviewed Mac release. A smaller
 post-deployment validation cohort will rerun every malformed-proposal case and
 every case with a fulfilled exact PCAP.
 
+## Release 494 targeted validation
+
+Release `494b75eeb72aea695b4bbb6b1fb2b10ebc935351` was validated with
+nine blind Incident Responder reruns: the union of the four cases that had
+previously emitted malformed observable containers and the six cases with
+fulfilled exact-alert PCAP. The cohort completed with:
+
+- nine completed cases, zero failed or skipped;
+- nine durable independent second-opinion runs;
+- 23 successful, read-only Security Onion queries;
+- zero query execution errors, timeouts, or partial results;
+- four fail-closed proposal rejections in three cases;
+- three reviewer agreements, three partial disagreements, and three material
+  disagreements.
+
+| Case | Post-fix canonical result | Successful / rejected pivots | Reviewer | Post-fix grade |
+|---|---|---:|---|---:|
+| `ir-7cf7aea2cc183d57` | `matched_intent`; benign APT activity; no action; not authorized | 3 / 1 | partial disagreement | 92 |
+| `ir-7f9c63d2a41f212f` | `matched_intent`; suspicious DoH; investigate; not authorized | 4 / 0 | partial disagreement | 96 |
+| `ir-b193e7b4ea0dbccc` | `matched_intent`; benign STUN; no action; not authorized | 2 / 0 | agreement | 96 |
+| `ir-c7844a5653322a04` | `matched_intent`; benign STUN; no action; not authorized | 2 / 0 | agreement | 96 |
+| `ir-c7aa2cc288e3f4cf` | `matched_intent`; unknown Discord policy disposition; disputed | 4 / 0 | material disagreement | 94 |
+| `ir-cbbc240155dd8c00` | `matched_intent`; benign SimpleHTTP access; no action; not authorized | 2 / 2 | material disagreement limited to tuning | 88 |
+| `ir-e3e00a86d1652a15` | `matched_intent`; benign connectivity test; no action; not authorized | 2 / 0 | agreement | 97 |
+| `ir-fc8db3aa9902402a` | `matched_intent`; benign APT activity; no action; not authorized | 2 / 0 | partial disagreement | 97 |
+| `ir-fe8fdea2b7eac6f4` | `matched_intent`; benign STUN; no action; not authorized | 2 / 1 | material disagreement limited to tuning | 91 |
+
+The exact-alert PCAP ordering correction materially changed the truthfulness of
+four reports:
+
+- `ir-c7844a5653322a04` and `ir-b193e7b4ea0dbccc` now cite exact,
+  bidirectional STUN framing instead of remaining unknown;
+- `ir-e3e00a86d1652a15` now cites the exact
+  `www.msftconnecttest.com/connecttest.txt` HTTP 200 transaction and the
+  GlobalProtect User-Agent;
+- `ir-fc8db3aa9902402a` now cites the exact Ubuntu security `InRelease`
+  request, Debian APT User-Agent, HTTP 200 response, and returned metadata
+  file;
+- `ir-cbbc240155dd8c00` now cites the exact Firefox `GET /reports.html`
+  request and Python SimpleHTTP 404 response.
+
+The reviewer-disagreement gate also behaved as intended. A real case
+disposition dispute (`ir-c7aa2cc288e3f4cf`) remained conservative and pending
+human adjudication. Disputes limited to tuning
+(`ir-cbbc240155dd8c00` and `ir-fe8fdea2b7eac6f4`) preserved the agreed benign
+case verdict while blocking tuning, memory writeback, and consequential
+automation.
+
+The remaining four rejections revealed one narrower repair defect:
+
+- two list-shaped `observables` proposals could not be repaired when the list
+  contained no recoverable scalar, even though a valid alert event tuple was
+  present;
+- two proposals supplied a contract-shaped `observables` object whose four
+  lists were all empty, so the deployed repair path did not treat the object
+  as malformed.
+
+The follow-up Mac-only correction treats empty observable objects as invalid
+and can derive a repair scope from the alert event tuple only when every
+non-empty tuple IP maps uniquely to the collector-owned permitted IP catalog.
+A partly trusted tuple, unknown value, ambiguous value, new query text, or
+wider window remains rejected.
+
 ## Cross-case truthfulness findings
 
 ### Decisive application evidence was present but not used
@@ -265,17 +328,20 @@ calling it OSQuery. The recurring labels were generally correct:
     the primary/reviewer-agreed case verdict while blocking tuning and
     automation. A material disagreement in the case disposition still
     publishes the conservative `unknown`/monitor-or-investigate state.
+15. Empty or non-object observable containers can use the single bounded
+    planning-repair round only when all non-empty alert event-tuple IPs map
+    uniquely to the trusted permitted-observable catalog. Partly trusted
+    tuples fail closed.
 
 ## Remaining blockers
 
 1. **Endpoint attribution:** live endpoint OSQuery remains intentionally
    disabled. Do not claim process, user, or authorization findings until an
    approved endpoint telemetry path exists.
-2. **PCAP queue latency:** 15 exact PCAP requests were submitted. At the v2
-   cohort checkpoint, six were fulfilled, five had failed closed with
-   `no matching packets found`, one was claimed, and three remained pending.
-   A failed, pending, or in-transfer capture is an evidence gap, not negative
-   evidence.
+2. **PCAP queue latency:** 15 exact PCAP requests were submitted. At the final
+   audit checkpoint, six were fulfilled, seven had failed closed with
+   `no matching packets found`, and two remained pending. A failed, pending,
+   or in-transfer capture is an evidence gap, not negative evidence.
 3. **Asset authorization:** inventory relationships help name systems but are
    not authorization records. Add a separate structured, time-bounded
    authorization source if the operator wants `authorized_benign` outcomes.

@@ -1953,6 +1953,109 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
 
         self.assertIsNone(scope)
 
+    def test_empty_observables_recover_only_trusted_event_tuple_ips(
+        self,
+    ) -> None:
+        invalid = self.elastic_request("repair-tuple-observables")
+        invalid["parameters"]["observables"] = []
+        invalid["parameters"]["event_tuple"] = {
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "source_port": 49152,
+            "destination_port": 3478,
+            "transport": "udp",
+        }
+        scope = self.runner.investigation_query_repair_scope(
+            invalid,
+            round_number=1,
+            position=1,
+            authorization_context={
+                "permitted_observables": {
+                    "ips": ["192.0.2.10", "198.51.100.20"],
+                    "domains": [],
+                    "hosts": [],
+                    "users": [],
+                },
+            },
+        )
+
+        self.assertIsNotNone(scope)
+        self.assertEqual(
+            scope["observable_scope_source"],
+            "trusted_event_tuple_intersection",
+        )
+        self.assertEqual(
+            scope["observables"]["ips"],
+            ["192.0.2.10", "198.51.100.20"],
+        )
+        self.assertEqual(
+            scope["event_tuple"],
+            invalid["parameters"]["event_tuple"],
+        )
+
+    def test_empty_observable_object_recovers_trusted_event_tuple_ips(
+        self,
+    ) -> None:
+        invalid = self.elastic_request("repair-empty-object-observables")
+        invalid["parameters"]["observables"] = {
+            "ips": [],
+            "domains": [],
+            "hosts": [],
+            "users": [],
+        }
+        invalid["parameters"]["event_tuple"] = {
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "source_port": 49152,
+            "destination_port": 3478,
+            "transport": "udp",
+        }
+        scope = self.runner.investigation_query_repair_scope(
+            invalid,
+            round_number=1,
+            position=1,
+            authorization_context={
+                "permitted_observables": {
+                    "ips": ["192.0.2.10", "198.51.100.20"],
+                    "domains": [],
+                    "hosts": [],
+                    "users": [],
+                },
+            },
+        )
+
+        self.assertIsNotNone(scope)
+        self.assertEqual(
+            scope["observable_scope_source"],
+            "trusted_event_tuple_intersection",
+        )
+        self.assertEqual(
+            scope["observables"]["ips"],
+            ["192.0.2.10", "198.51.100.20"],
+        )
+        self.assertEqual(
+            scope["event_tuple"],
+            invalid["parameters"]["event_tuple"],
+        )
+
+        invalid["parameters"]["event_tuple"]["destination_ip"] = (
+            "203.0.113.99"
+        )
+        rejected_scope = self.runner.investigation_query_repair_scope(
+            invalid,
+            round_number=1,
+            position=1,
+            authorization_context={
+                "permitted_observables": {
+                    "ips": ["192.0.2.10", "198.51.100.20"],
+                    "domains": [],
+                    "hosts": [],
+                    "users": [],
+                },
+            },
+        )
+        self.assertIsNone(rejected_scope)
+
     def test_repair_scope_widening_is_rejected_without_second_repair(
         self,
     ) -> None:

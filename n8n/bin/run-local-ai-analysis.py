@@ -7673,11 +7673,68 @@ def investigation_query_repair_scope(
         return None
     raw_observables = parameters.get("observables")
     recovered_observables = None
-    if not isinstance(raw_observables, dict):
+    observable_scope_source = "original_valid_scope"
+    observable_categories = {"ips", "domains", "hosts", "users"}
+    observables_shape_valid = bool(
+        isinstance(raw_observables, dict)
+        and not set(raw_observables).difference(observable_categories)
+        and all(
+            isinstance(raw_observables.get(kind, []), list)
+            and len(raw_observables.get(kind, [])) <= 8
+            for kind in observable_categories
+        )
+        and 1
+        <= sum(
+            len(raw_observables.get(kind, []))
+            for kind in observable_categories
+        )
+        <= 8
+    )
+    if not observables_shape_valid:
         recovered_observables = recover_repair_observables_from_trusted_catalog(
             raw_observables,
             authorization_context,
         )
+        if recovered_observables is not None:
+            observable_scope_source = "trusted_catalog_intersection"
+        elif isinstance(parameters.get("event_tuple"), dict):
+            event_tuple = parameters["event_tuple"]
+            try:
+                normalized_event_tuple = (
+                    normalize_investigation_event_tuple(event_tuple)
+                )
+            except InvestigationQueryError:
+                normalized_event_tuple = {}
+            tuple_ips = {
+                value
+                for value in (
+                    normalized_event_tuple.get("source_ip"),
+                    normalized_event_tuple.get("destination_ip"),
+                )
+                if isinstance(value, str) and value
+            }
+            recovered_observables = (
+                recover_repair_observables_from_trusted_catalog(
+                    sorted(tuple_ips),
+                    authorization_context,
+                )
+                if tuple_ips
+                else None
+            )
+            if (
+                recovered_observables is not None
+                and not tuple_ips.issubset(
+                    set(recovered_observables.get("ips") or [])
+                )
+            ):
+                # A partly trusted tuple cannot contribute any repair
+                # authority. Every non-empty tuple IP must independently map
+                # to the permitted collector-owned IP catalog.
+                recovered_observables = None
+            if recovered_observables is not None:
+                observable_scope_source = (
+                    "trusted_event_tuple_intersection"
+                )
         if recovered_observables is None:
             return None
     bounded_raw = {
@@ -7719,11 +7776,7 @@ def investigation_query_repair_scope(
         },
         "size": normalized["parameters"]["size"],
         "aggregation": normalized["parameters"]["aggregation"],
-        "observable_scope_source": (
-            "trusted_catalog_intersection"
-            if recovered_observables is not None
-            else "original_valid_scope"
-        ),
+        "observable_scope_source": observable_scope_source,
     }
     if "event_tuple" in parameters:
         try:
