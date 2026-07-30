@@ -320,6 +320,7 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
     def test_allows_only_explicit_loopback_http_or_verified_https(self):
         base = {
             "enabled": True,
+            "authorization_profile": self.wrapper.AUTHORIZATION_PROFILE,
             "kibana_url": "http://127.0.0.1:5601",
             "allow_loopback_http": True,
             "verify_tls": False,
@@ -340,6 +341,15 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     self.wrapper.LiveQueryError,
                     "loopback-only",
+                ):
+                    self.wrapper._load_config(path)
+
+                missing_profile = dict(base)
+                missing_profile.pop("authorization_profile")
+                path.write_text(json.dumps(missing_profile), encoding="utf-8")
+                with self.assertRaisesRegex(
+                    self.wrapper.LiveQueryError,
+                    "authorization profile",
                 ):
                     self.wrapper._load_config(path)
 

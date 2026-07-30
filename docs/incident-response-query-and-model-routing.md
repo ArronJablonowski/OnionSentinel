@@ -147,7 +147,14 @@ Enable it only after configuring exact operator aliases on all three nodes,
 mapping each alias to one exact Fleet agent ID on Security Onion, pinning both
 SSH host keys, installing the two dedicated keys, configuring either verified
 Kibana TLS or the wrapper's strict loopback-HTTP exception, and provisioning
-least-privilege Osquery Manager authorization. Never use an `all`, wildcard,
+the narrowest Osquery Manager authorization registered by the deployed Kibana
+runtime. When the licensed sub-feature privilege for **Run live queries** is
+registered, use it. If the runtime exposes only `feature_osquery.all`, use the
+explicit `kibana-feature-osquery-all-brokered-v1` compensation profile: an
+expiring root-only credential usable only by the fixed-route Security Onion
+wrapper. The wrapper exposes create, status, and result retrieval for bounded
+live queries and has no route for saved queries, packs, schedules, arbitrary
+Kibana APIs, or caller-supplied paths. Never use an `all`, wildcard,
 or shared administrative target. Returned evidence is associated with the
 submitted request by target alias and normalized SQL digest, never by array
 position. The Security Onion HTTP client disables environment proxies and

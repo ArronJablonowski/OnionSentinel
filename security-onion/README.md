@@ -65,7 +65,14 @@ loopback-only HTTP URL on Security Onion. Plain HTTP is rejected unless
 `allow_loopback_http` is true and the parsed host is exactly `127.0.0.1`,
 `::1`, or `localhost`; remote HTTP, embedded credentials, URL paths, query
 strings, and fragments remain forbidden. Both transports still require the
-root-only dedicated Kibana authorization file. The HTTP client disables
+root-only dedicated Kibana authorization file. If the deployed Kibana runtime
+does not register the licensed `Run live queries` sub-feature privilege, the
+configuration must select
+`kibana-feature-osquery-all-brokered-v1`. That compensation profile permits the
+runtime-supported `feature_osquery.all` credential only because it is
+expiring, root-only, and confined behind this fixed-route wrapper. The wrapper
+has no saved-query, pack, schedule, Fleet-administration, or arbitrary Kibana
+API route. The HTTP client disables
 environment proxies and refuses redirects so that authorization cannot leave
 the reviewed loopback or TLS origin. All queries in one request share one
 absolute batch deadline, capped at 130 seconds, and run in a maximum

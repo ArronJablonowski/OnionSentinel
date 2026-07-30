@@ -45,6 +45,7 @@ MAX_CONFIG_BYTES = 64 * 1024
 MAX_AUTH_BYTES = 4096
 DEFAULT_CONFIG = Path("/etc/onion-sentinel/live-osquery.json")
 _PENDING_STATES = frozenset({"pending", "running"})
+AUTHORIZATION_PROFILE = "kibana-feature-osquery-all-brokered-v1"
 
 
 class LiveQueryError(RuntimeError):
@@ -106,6 +107,10 @@ def _load_config(path: Path) -> dict[str, Any]:
         raise LiveQueryError("live OSQuery configuration root must be an object")
     if value.get("enabled") is not True:
         raise LiveQueryError("live-host OSQuery is disabled on Security Onion")
+    if value.get("authorization_profile") != AUTHORIZATION_PROFILE:
+        raise LiveQueryError(
+            "live OSQuery authorization profile is missing or unsupported"
+        )
     kibana_url = str(value.get("kibana_url") or "").strip().rstrip("/")
     parsed_url = urllib.parse.urlsplit(kibana_url)
     if (

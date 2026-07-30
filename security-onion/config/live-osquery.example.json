@@ -2,6 +2,7 @@
   "enabled": false,
   "kibana_url": "http://127.0.0.1:5601",
   "space": "default",
+  "authorization_profile": "kibana-feature-osquery-all-brokered-v1",
   "authorization_file": "/etc/onion-sentinel/live-osquery.authorization",
   "ca_file": "",
   "verify_tls": false,
