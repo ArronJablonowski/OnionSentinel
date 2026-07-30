@@ -1646,6 +1646,12 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                     "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
                     "id": "alert-1",
                 },
+                "permitted_observables": {
+                    "ips": ["192.0.2.10"],
+                    "domains": [],
+                    "hosts": [],
+                    "users": [],
+                },
             },
             "pcap_evidence": {
                 "parsed_evidence": [
@@ -1722,15 +1728,33 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                 },
             }
         )
+        live_query = "SELECT name, path FROM processes LIMIT 20;"
+        live_purpose = (
+            "Check the endpoint process inventory for the suspected binary."
+        )
         osquery = mock.Mock(
             return_value={
+                "schema": self.runner.LIVE_OSQUERY_SCHEMA,
+                "case_id": self.runner.live_osquery_case_id(prompt_package),
+                "generated_at": "2026-07-24T18:31:00Z",
+                "read_only": True,
                 "complete": True,
                 "results": [
                     {
                         "status": "ok",
                         "target_alias": "endpoint-a",
-                        "query_digest": "a" * 64,
-                        "rows": [],
+                        "query": live_query,
+                        "purpose": live_purpose,
+                        "rows": [
+                            {
+                                "name": "synthetic",
+                                "path": "/tmp/synthetic",
+                            }
+                        ],
+                        "total_rows": 1,
+                        "truncated": False,
+                        "duration_ms": 12,
+                        "error": "",
                     }
                 ],
             }
@@ -1778,7 +1802,15 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             prompt_package,
             requests,
             round_number=1,
-            live_osquery_config={"enabled": True},
+            live_osquery_config={
+                "enabled": True,
+                "target_bindings": {
+                    "endpoint-a": {
+                        "ips": ["192.0.2.10"],
+                        "hosts": [],
+                    }
+                },
+            },
             security_onion_executor=security,
             osquery_executor=osquery,
             derived_executor=derived,
@@ -1805,6 +1837,33 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             "b" * 64,
         )
         self.assertEqual(security_result["status"], "ok")
+        osquery_result = next(
+            item for item in result["results"] if item["backend"] == "osquery"
+        )
+        self.assertEqual(osquery_result["status"], "ok")
+        self.assertEqual(
+            osquery_result["trusted_query_audit"][0]["returned_rows"],
+            1,
+        )
+        accumulator = prompt_package["_live_osquery_evidence_accumulator"]
+        self.assertTrue(accumulator["complete"])
+        self.assertEqual(len(accumulator["batches"]), 1)
+        self.assertEqual(len(accumulator["results"]), 1)
+        self.assertNotIn(
+            "_live_osquery_evidence_accumulator",
+            self.runner.model_safe_copy(prompt_package),
+        )
+        live_audit = self.runner.incident_live_osquery_audit(prompt_package)
+        self.assertEqual(
+            live_audit["query_contract"],
+            self.runner.LIVE_OSQUERY_SCHEMA,
+        )
+        self.assertEqual(live_audit["batches"], 1)
+        self.assertEqual(live_audit["queries"][0]["returned_rows"], 1)
+        self.assertEqual(
+            live_audit["control_plane_write_status"],
+            "confirmed",
+        )
         security_audit = next(
             item for item in result["audit"] if item["backend"] == "security_onion"
         )
@@ -1821,6 +1880,153 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             derived_result["trusted_query_audit"][0]["evidence_ref"],
             derived_result["evidence"]["evidence_ref"],
         )
+
+    def test_live_osquery_support_requires_target_and_row_observable_binding(
+        self,
+    ) -> None:
+        prompt_package = {
+            "_local_investigation_query_context": {
+                "permitted_observables": {
+                    "ips": ["192.0.2.10", "198.51.100.20"],
+                    "domains": [],
+                    "hosts": [],
+                    "users": [],
+                },
+                "permitted_event_tuples": [
+                    {
+                        "event_tuple": {
+                            "source_ip": "192.0.2.10",
+                            "destination_ip": "198.51.100.20",
+                            "destination_port": 443,
+                        }
+                    }
+                ],
+            }
+        }
+        raw = {
+            "query_id": "socket-binding",
+            "backend": "osquery",
+            "purpose": "Bind an endpoint socket to the alert destination.",
+            "parameters": {
+                "target_alias": "endpoint-a",
+                "query": (
+                    "SELECT pid, remote_address, remote_port "
+                    "FROM process_open_sockets LIMIT 5"
+                ),
+            },
+        }
+        request = self.runner.normalize_investigation_query_request(
+            raw,
+            round_number=1,
+            position=1,
+        )
+        normalized_query = self.runner.normalize_live_osquery_query(
+            raw["parameters"]["query"]
+        )
+        evidence = {
+            "schema": self.runner.LIVE_OSQUERY_SCHEMA,
+            "case_id": self.runner.live_osquery_case_id(prompt_package),
+            "generated_at": "2026-07-24T18:31:00Z",
+            "read_only": True,
+            "complete": True,
+            "results": [
+                {
+                    "target_alias": "endpoint-a",
+                    "query": normalized_query,
+                    "purpose": raw["purpose"],
+                    "status": "ok",
+                    "rows": [
+                        {
+                            "pid": "42",
+                            "remote_address": "198.51.100.20",
+                            "remote_port": "443",
+                        }
+                    ],
+                    "total_rows": 1,
+                    "truncated": False,
+                    "duration_ms": 5,
+                    "error": "",
+                }
+            ],
+        }
+        config = {
+            "enabled": True,
+            "target_bindings": {
+                "endpoint-a": {
+                    "ips": ["192.0.2.10"],
+                    "hosts": [],
+                }
+            },
+        }
+
+        self.runner.execute_investigation_query_batch(
+            prompt_package,
+            [request],
+            round_number=1,
+            live_osquery_config=config,
+            osquery_executor=mock.Mock(return_value=evidence),
+        )
+
+        accumulator = prompt_package["_live_osquery_evidence_accumulator"]
+        supports = accumulator["results"][0]["support_bindings"]
+        self.assertGreaterEqual(len(supports), 1)
+        self.assertTrue(
+            self.runner._has_trusted_endpoint_evidence(prompt_package)
+        )
+
+        accumulator["results"][0]["rows"][0]["remote_address"] = "203.0.113.9"
+        accumulator["results"][0]["rows"][0]["remote_port"] = "8443"
+        self.assertFalse(
+            self.runner._has_trusted_endpoint_evidence(prompt_package)
+        )
+
+    def test_unbound_live_osquery_target_is_rejected_before_dispatch(self) -> None:
+        raw = {
+            "query_id": "unbound-target",
+            "backend": "osquery",
+            "purpose": "Inspect the wrong endpoint.",
+            "parameters": {
+                "target_alias": "endpoint-a",
+                "query": "SELECT pid FROM processes LIMIT 1",
+            },
+        }
+        request = self.runner.normalize_investigation_query_request(
+            raw,
+            round_number=1,
+            position=1,
+        )
+        executor = mock.Mock()
+        prompt_package = {
+            "_local_investigation_query_context": {
+                "permitted_observables": {
+                    "ips": ["198.51.100.20"],
+                    "domains": [],
+                    "hosts": [],
+                    "users": [],
+                }
+            }
+        }
+        result = self.runner.execute_investigation_query_batch(
+            prompt_package,
+            [request],
+            round_number=1,
+            live_osquery_config={
+                "enabled": True,
+                "target_bindings": {
+                    "endpoint-a": {
+                        "ips": ["192.0.2.10"],
+                        "hosts": [],
+                    }
+                },
+            },
+            osquery_executor=executor,
+        )
+
+        executor.assert_not_called()
+        self.assertEqual(result["results"][0]["status"], "error")
+        audit = self.runner.incident_live_osquery_audit(prompt_package)
+        self.assertEqual(audit["control_plane_write_status"], "none")
+        self.assertIn("not bound", audit["error"])
 
     def test_derived_evidence_reference_is_bound_to_capture_identity(self) -> None:
         def context(digest: str) -> dict:
@@ -3610,6 +3816,16 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         self.assertTrue(authorization[4])
 
     def test_live_osquery_results_bind_by_digest_not_array_position(self) -> None:
+        prompt_package = {
+            "_local_investigation_query_context": {
+                "permitted_observables": {
+                    "ips": ["192.0.2.10"],
+                    "domains": [],
+                    "hosts": [],
+                    "users": [],
+                }
+            }
+        }
         raw_requests = [
             {
                 "query_id": "process-query",
@@ -3639,7 +3855,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             for index, raw in enumerate(raw_requests, 1)
         ]
 
-        def evidence_for(request: dict, marker: str) -> dict:
+        def evidence_for(request: dict, row: dict[str, str]) -> dict:
             query = self.runner.normalize_live_osquery_query(
                 request["parameters"]["query"]
             )
@@ -3649,22 +3865,39 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                 "purpose": request["purpose"],
                 "query_digest": hashlib.sha256(query.encode("utf-8")).hexdigest(),
                 "status": "ok",
-                "rows": [{"marker": marker}],
+                "rows": [row],
                 "total_rows": 1,
                 "truncated": False,
                 "duration_ms": 1,
                 "error": "",
             }
 
-        process_evidence = evidence_for(requests[0], "process")
-        system_evidence = evidence_for(requests[1], "system")
+        process_evidence = evidence_for(
+            requests[0],
+            {"pid": "1", "name": "process"},
+        )
+        system_evidence = evidence_for(
+            requests[1],
+            {"hostname": "system"},
+        )
         result = self.runner.execute_investigation_query_batch(
-            {},
+            prompt_package,
             requests,
             round_number=1,
-            live_osquery_config={"enabled": True},
+            live_osquery_config={
+                "enabled": True,
+                "target_bindings": {
+                    "endpoint-a": {
+                        "ips": ["192.0.2.10"],
+                        "hosts": [],
+                    }
+                },
+            },
             osquery_executor=mock.Mock(
                 return_value={
+                    "schema": self.runner.LIVE_OSQUERY_SCHEMA,
+                    "case_id": self.runner.live_osquery_case_id(prompt_package),
+                    "generated_at": "2026-07-24T18:31:00Z",
                     "complete": True,
                     "read_only": True,
                     # Deliberately reverse the trusted response order.
@@ -3674,11 +3907,69 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         )
 
         by_id = {
-            item["query_id"]: item["evidence"]["rows"][0]["marker"]
+            item["query_id"]: item["evidence"]["rows"][0]
             for item in result["results"]
         }
-        self.assertEqual(by_id["process-query"], "process")
-        self.assertEqual(by_id["system-query"], "system")
+        self.assertEqual(
+            by_id["process-query"],
+            {"pid": "1", "name": "process"},
+        )
+        self.assertEqual(by_id["system-query"], {"hostname": "system"})
+
+    def test_live_osquery_transport_failure_is_preserved_in_final_audit(self) -> None:
+        raw = {
+            "query_id": "endpoint-failure",
+            "backend": "osquery",
+            "purpose": "Inspect a bounded endpoint process fact.",
+            "parameters": {
+                "target_alias": "endpoint-a",
+                "query": "SELECT pid, name FROM processes LIMIT 2",
+            },
+        }
+        request = self.runner.normalize_investigation_query_request(
+            raw,
+            round_number=1,
+            position=1,
+        )
+        prompt_package: dict = {
+            "_local_investigation_query_context": {
+                "permitted_observables": {
+                    "ips": ["192.0.2.10"],
+                    "domains": [],
+                    "hosts": [],
+                    "users": [],
+                }
+            }
+        }
+        result = self.runner.execute_investigation_query_batch(
+            prompt_package,
+            [request],
+            round_number=1,
+            live_osquery_config={
+                "enabled": True,
+                "target_bindings": {
+                    "endpoint-a": {
+                        "ips": ["192.0.2.10"],
+                        "hosts": [],
+                    }
+                },
+            },
+            osquery_executor=mock.Mock(
+                side_effect=self.runner.LiveOsqueryClientError("transport down")
+            ),
+        )
+
+        self.assertEqual(result["results"][0]["status"], "error")
+        accumulator = prompt_package["_live_osquery_evidence_accumulator"]
+        self.assertFalse(accumulator["complete"])
+        self.assertFalse(accumulator["batches"][0]["validated"])
+        audit = self.runner.incident_live_osquery_audit(prompt_package)
+        self.assertEqual(audit["batches"], 1)
+        self.assertEqual(audit["validated_batches"], 0)
+        self.assertEqual(audit["failed_batches"], 1)
+        self.assertEqual(audit["control_plane_write_status"], "possible")
+        self.assertEqual(audit["queries"][0]["status"], "error")
+        self.assertIn("transport down", audit["error"])
 
     def test_real_shadow_harness_never_dispatches_unapproved_live_osquery(
         self,
@@ -6736,6 +7027,13 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                         "enabled": True,
                         "allowed_target_aliases": ["endpoint-a"],
                         "allowed_agent_roles": ["soc-analyst"],
+                        "target_bindings": {
+                            "endpoint-a": {
+                                "ips": ["192.0.2.10"],
+                            }
+                        },
+                        "relay_host": "relay.internal",
+                        "identity_file": "/private/identity",
                     },
                 ),
             ):
@@ -6749,6 +7047,28 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         self.assertTrue(
             prompt_package["investigation_query_capability"]["backends"]["osquery"]["enabled"]
         )
+        top_level = prompt_package["live_osquery_capability"]
+        nested = prompt_package["investigation_query_capability"]["backends"]["osquery"]
+        for descriptor in (top_level, nested):
+            self.assertEqual(descriptor["target_platform"], "darwin")
+            self.assertEqual(descriptor["osquery_version"], "5.15.0")
+            self.assertIn("system_info", descriptor["table_schemas"])
+            self.assertIn("hostname", descriptor["table_schemas"]["system_info"])
+            self.assertNotIn("deb_packages", descriptor["allowed_tables"])
+            self.assertNotIn("suid_bin", descriptor["allowed_tables"])
+        transported = self.runner.model_safe_copy(prompt_package, hosted=True)
+        self.assertEqual(
+            transported["live_osquery_capability"]["table_schemas"],
+            top_level["table_schemas"],
+        )
+        encoded = json.dumps(transported, sort_keys=True)
+        for forbidden in (
+            "target_bindings",
+            "relay.internal",
+            "/private/identity",
+            "192.0.2.10",
+        ):
+            self.assertNotIn(forbidden, encoded)
 
     def test_osquery_defaults_to_incident_responder_and_soc_requires_opt_in(self) -> None:
         def prepare(role: str, configured: dict) -> tuple[dict, dict]:
@@ -6786,6 +7106,9 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         self.assertFalse(
             soc_package["investigation_query_capability"]["backends"]["osquery"]["enabled"]
         )
+        self.assertEqual(soc_package["live_osquery_capability"]["target_platform"], "")
+        self.assertEqual(soc_package["live_osquery_capability"]["osquery_version"], "")
+        self.assertEqual(soc_package["live_osquery_capability"]["table_schemas"], {})
         ir_package, ir_config = prepare("incident-responder", base)
         self.assertTrue(ir_config["enabled"])
         self.assertTrue(

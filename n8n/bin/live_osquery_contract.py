@@ -25,27 +25,172 @@ MAX_TARGET_ALIASES = 64
 MAX_RESULT_DURATION_MS = 10 * 60 * 1000
 MAX_REPORTED_ROWS = 1_000_000
 
-ALLOWED_TABLES = frozenset(
-    {
-        "arp_cache",
-        "crontab",
-        "deb_packages",
-        "groups",
-        "homebrew_packages",
-        "interface_addresses",
-        "kernel_info",
-        "listening_ports",
-        "logged_in_users",
-        "process_open_sockets",
-        "processes",
-        "routes",
-        "rpm_packages",
-        "startup_items",
-        "suid_bin",
-        "system_info",
-        "users",
-    }
-)
+TARGET_PLATFORM = "darwin"
+TARGET_OSQUERY_VERSION = "5.15.0"
+ALLOWED_TABLE_COLUMNS = {
+    "arp_cache": frozenset({"address", "mac", "interface", "permanent"}),
+    "crontab": frozenset(
+        {
+            "event",
+            "minute",
+            "hour",
+            "day_of_month",
+            "month",
+            "day_of_week",
+            "command",
+            "path",
+        }
+    ),
+    "groups": frozenset({"gid", "gid_signed", "groupname", "is_hidden"}),
+    "homebrew_packages": frozenset(
+        {"name", "path", "version", "type", "prefix"}
+    ),
+    "interface_addresses": frozenset(
+        {"interface", "address", "mask", "broadcast", "point_to_point", "type"}
+    ),
+    "kernel_info": frozenset({"version", "arguments", "path", "device"}),
+    "listening_ports": frozenset(
+        {"pid", "port", "protocol", "family", "address", "fd", "socket", "path"}
+    ),
+    "logged_in_users": frozenset({"type", "user", "tty", "host", "time", "pid"}),
+    "os_version": frozenset(
+        {
+            "name",
+            "version",
+            "major",
+            "minor",
+            "patch",
+            "build",
+            "platform",
+            "platform_like",
+            "codename",
+            "arch",
+            "extra",
+        }
+    ),
+    "osquery_info": frozenset(
+        {
+            "pid",
+            "uuid",
+            "instance_id",
+            "version",
+            "config_hash",
+            "config_valid",
+            "extensions",
+            "build_platform",
+            "build_distro",
+            "start_time",
+            "watcher",
+            "platform_mask",
+        }
+    ),
+    "process_open_sockets": frozenset(
+        {
+            "pid",
+            "fd",
+            "socket",
+            "family",
+            "protocol",
+            "local_address",
+            "remote_address",
+            "local_port",
+            "remote_port",
+            "path",
+            "state",
+        }
+    ),
+    "processes": frozenset(
+        {
+            "pid",
+            "name",
+            "path",
+            "cmdline",
+            "state",
+            "cwd",
+            "root",
+            "uid",
+            "gid",
+            "euid",
+            "egid",
+            "suid",
+            "sgid",
+            "on_disk",
+            "wired_size",
+            "resident_size",
+            "total_size",
+            "user_time",
+            "system_time",
+            "disk_bytes_read",
+            "disk_bytes_written",
+            "start_time",
+            "parent",
+            "pgroup",
+            "threads",
+            "nice",
+            "upid",
+            "uppid",
+            "cpu_type",
+            "cpu_subtype",
+            "translated",
+        }
+    ),
+    "routes": frozenset(
+        {
+            "destination",
+            "netmask",
+            "gateway",
+            "source",
+            "flags",
+            "interface",
+            "mtu",
+            "metric",
+            "type",
+            "hopcount",
+        }
+    ),
+    "startup_items": frozenset(
+        {"name", "path", "args", "type", "source", "status", "username"}
+    ),
+    "system_info": frozenset(
+        {
+            "hostname",
+            "uuid",
+            "cpu_type",
+            "cpu_subtype",
+            "cpu_brand",
+            "cpu_physical_cores",
+            "cpu_logical_cores",
+            "cpu_sockets",
+            "cpu_microcode",
+            "physical_memory",
+            "hardware_vendor",
+            "hardware_model",
+            "hardware_version",
+            "hardware_serial",
+            "board_vendor",
+            "board_model",
+            "board_version",
+            "board_serial",
+            "computer_name",
+            "local_hostname",
+        }
+    ),
+    "users": frozenset(
+        {
+            "uid",
+            "gid",
+            "uid_signed",
+            "gid_signed",
+            "username",
+            "description",
+            "directory",
+            "shell",
+            "uuid",
+            "is_hidden",
+        }
+    ),
+}
+ALLOWED_TABLES = frozenset(ALLOWED_TABLE_COLUMNS)
 
 _FORBIDDEN_TARGETS = frozenset({"*", "all", "agent_all", "all_agents", "_all"})
 _FORBIDDEN_SQL = re.compile(
@@ -60,7 +205,36 @@ _FORBIDDEN_QUERY_SHAPES = re.compile(
     re.IGNORECASE,
 )
 _SQL_STRING_LITERAL = re.compile(r"'(?:''|[^'])*'")
-_FUNCTION_CALL = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\s*\(")
+_FUNCTION_CALL = re.compile(
+    r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\("
+)
+_SQL_IDENTIFIER = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+_SQL_KEYWORDS = frozenset(
+    {
+        "and",
+        "asc",
+        "between",
+        "by",
+        "desc",
+        "escape",
+        "false",
+        "from",
+        "glob",
+        "in",
+        "is",
+        "like",
+        "limit",
+        "match",
+        "not",
+        "null",
+        "or",
+        "order",
+        "regexp",
+        "select",
+        "true",
+        "where",
+    }
+)
 _SELECT_PROJECTION = re.compile(
     r"^\s*select\s+(?P<body>.*?)\s+from\b",
     re.IGNORECASE | re.DOTALL,
@@ -150,7 +324,12 @@ def normalize_query(value: Any) -> str:
         )
     if re.search(r"\bjoin\b", structural, flags=re.IGNORECASE):
         raise LiveOsqueryContractError("JOIN queries are forbidden")
-    if _FUNCTION_CALL.search(structural):
+    function_calls = [
+        match.group("name").lower()
+        for match in _FUNCTION_CALL.finditer(structural)
+        if match.group("name").lower() != "in"
+    ]
+    if function_calls:
         raise LiveOsqueryContractError("SQL function calls are forbidden")
     projection = _SELECT_PROJECTION.search(structural)
     if projection is None:
@@ -164,7 +343,7 @@ def normalize_query(value: Any) -> str:
         or any(not _SAFE_PROJECTION_ITEM.fullmatch(item) for item in projection_items)
     ):
         raise LiveOsqueryContractError(
-            "SELECT projection must contain only native column identifiers or *"
+            "SELECT projection must contain only native column identifiers"
         )
     from_clause = _FROM_CLAUSE.search(structural)
     if from_clause and "," in from_clause.group("body"):
@@ -184,6 +363,38 @@ def normalize_query(value: Any) -> str:
         raise LiveOsqueryContractError(
             "query references a table outside the allowlist: " + ", ".join(unknown)
         )
+    table = table_references[0]
+    projected_columns = [
+        item.rsplit(".", 1)[-1].lower()
+        for item in projection_items
+    ]
+    if "*" in projected_columns:
+        raise LiveOsqueryContractError(
+            "SELECT * is forbidden; choose explicit platform-valid columns"
+        )
+    unknown_columns = sorted(
+        set(projected_columns).difference(ALLOWED_TABLE_COLUMNS[table])
+    )
+    if unknown_columns:
+        raise LiveOsqueryContractError(
+            f"query projects columns unavailable for {table} on "
+            f"{TARGET_PLATFORM}: " + ", ".join(unknown_columns)
+        )
+    invalid_identifiers = sorted(
+        {
+            match.group(0).lower()
+            for match in _SQL_IDENTIFIER.finditer(structural)
+        }.difference(
+            _SQL_KEYWORDS,
+            {"__string_literal__", table},
+            ALLOWED_TABLE_COLUMNS[table],
+        )
+    )
+    if invalid_identifiers:
+        raise LiveOsqueryContractError(
+            f"query references identifiers unavailable for {table} on "
+            f"{TARGET_PLATFORM}: " + ", ".join(invalid_identifiers)
+        )
 
     terminal_limit = _TERMINAL_LIMIT.search(structural)
     if re.search(r"\boffset\b", structural, flags=re.IGNORECASE):
@@ -202,6 +413,29 @@ def normalize_query(value: Any) -> str:
     if limit_value is None:
         query = f"{query} LIMIT {DEFAULT_ROWS}"
     return f"{query};"
+
+
+def projected_columns(value: Any) -> tuple[str, ...]:
+    """Return the canonical columns from an already restricted query."""
+    query = normalize_query(value)
+    structural = _SQL_STRING_LITERAL.sub("__string_literal__", query)
+    projection = _SELECT_PROJECTION.search(structural)
+    if projection is None:  # normalize_query already guarantees this
+        raise LiveOsqueryContractError("query must have a bounded column projection")
+    return tuple(
+        item.strip().rsplit(".", 1)[-1].lower()
+        for item in projection.group("body").split(",")
+    )
+
+
+def query_row_limit(value: Any) -> int:
+    """Return the enforced terminal row limit from a restricted query."""
+    query = normalize_query(value)
+    structural = _SQL_STRING_LITERAL.sub("__string_literal__", query.rstrip(";"))
+    terminal_limit = _TERMINAL_LIMIT.search(structural)
+    if terminal_limit is None:  # normalize_query always appends a limit
+        raise LiveOsqueryContractError("query is missing its enforced row limit")
+    return int(terminal_limit.group(1))
 
 
 def normalize_request(
@@ -356,6 +590,8 @@ def validate_result_artifact(
             maximum=64,
         ).lower()
         query = normalize_query(raw.get("query"))
+        expected_columns = set(projected_columns(query))
+        expected_row_limit = query_row_limit(query)
         query_digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
         purpose = _bounded_text(
             raw.get("purpose"),
@@ -385,17 +621,28 @@ def validate_result_artifact(
         for raw_row in rows_value:
             if not isinstance(raw_row, dict) or len(raw_row) > 64:
                 raise LiveOsqueryContractError("result row has an invalid shape")
-            rows.append(
-                {
-                    _bounded_text(key, label="result column", maximum=128): _bounded_text(
-                        cell,
-                        label="result value",
-                        maximum=2000,
-                        required=False,
+            row: dict[str, str] = {}
+            for key, cell in raw_row.items():
+                column = _bounded_text(
+                    key,
+                    label="result column",
+                    maximum=128,
+                ).lower()
+                if column in row:
+                    raise LiveOsqueryContractError(
+                        "result row contains duplicate column identities"
                     )
-                    for key, cell in raw_row.items()
-                }
-            )
+                row[column] = _bounded_text(
+                    cell,
+                    label="result value",
+                    maximum=2000,
+                    required=False,
+                )
+            if set(row) != expected_columns:
+                raise LiveOsqueryContractError(
+                    "result row columns do not match the submitted query projection"
+                )
+            rows.append(row)
         status = _bounded_text(
             raw.get("status") or "invalid_response",
             label="result status",
@@ -412,6 +659,10 @@ def validate_result_artifact(
             ) from exc
         if total_rows < len(rows) or total_rows > MAX_REPORTED_ROWS:
             raise LiveOsqueryContractError("result total_rows is outside its bound")
+        if total_rows > expected_row_limit:
+            raise LiveOsqueryContractError(
+                "result total_rows exceeds the submitted query LIMIT"
+            )
         if duration_ms < 0 or duration_ms > MAX_RESULT_DURATION_MS:
             raise LiveOsqueryContractError("result duration exceeds its bound")
         truncated = bool(raw.get("truncated"))

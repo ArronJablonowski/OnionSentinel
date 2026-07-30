@@ -4944,6 +4944,14 @@ class AiModelRoutingTests(unittest.TestCase):
         )
 
     def test_trusted_endpoint_collection_avoids_unsupported_malicious_low_cap(self) -> None:
+        live_query = self.runner.normalize_live_osquery_query(
+            "SELECT pid, remote_address, remote_port "
+            "FROM process_open_sockets LIMIT 1"
+        )
+        query_digest = self.runner.hashlib.sha256(
+            live_query.encode("utf-8")
+        ).hexdigest()
+        remote_address = "198.51.100.20"
         response = self.runner.validate_response(
             self.complete_response(
                 confidence="high",
@@ -4956,12 +4964,41 @@ class AiModelRoutingTests(unittest.TestCase):
                     "event_status": "observed",
                     "rule_intent_match": "mismatch",
                 },
-                "live_osquery_evidence": {
+                "_live_osquery_evidence_accumulator": {
+                    "schema": self.runner.LIVE_OSQUERY_SCHEMA,
+                    "case_id": "case-bound-endpoint",
+                    "read_only": True,
+                    "complete": True,
+                    "batches": [{"validated": True}],
                     "results": [
                         {
-                            "status": "completed",
-                            "rows": [],
-                            "query_digest": "trusted-endpoint-query",
+                            "status": "ok",
+                            "target_alias": "endpoint-a",
+                            "query": live_query,
+                            "rows": [
+                                {
+                                    "pid": "1",
+                                    "remote_address": remote_address,
+                                    "remote_port": "443",
+                                }
+                            ],
+                            "query_digest": query_digest,
+                            "support_bindings": [
+                                {
+                                    "schema": "onion-sentinel-live-osquery-support-v1",
+                                    "target_alias": "endpoint-a",
+                                    "query_digest": query_digest,
+                                    "table": "process_open_sockets",
+                                    "row_index": 0,
+                                    "column": "remote_address",
+                                    "observable_kind": "ip",
+                                    "observable_digest": self.runner.hashlib.sha256(
+                                        f"ips\0{remote_address}".encode("utf-8")
+                                    ).hexdigest(),
+                                    "source": "trusted-investigation-context",
+                                    "temporal_scope": "collection_snapshot",
+                                }
+                            ],
                         },
                     ],
                 },
@@ -4974,6 +5011,89 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertNotIn(
             "malicious_attribution_without_trusted_endpoint_evidence",
             response["_confidence_calibration"]["limiters"],
+        )
+
+    def test_identity_only_live_osquery_is_not_attribution_evidence(self) -> None:
+        live_query = self.runner.normalize_live_osquery_query(
+            "SELECT hostname, uuid FROM system_info LIMIT 1"
+        )
+        self.assertFalse(
+            self.runner._has_trusted_endpoint_evidence(
+                {
+                    "_live_osquery_evidence_accumulator": {
+                        "schema": self.runner.LIVE_OSQUERY_SCHEMA,
+                        "case_id": "case-identity-only",
+                        "read_only": True,
+                        "complete": True,
+                        "batches": [{"validated": True}],
+                        "results": [
+                            {
+                                "status": "ok",
+                                "query": live_query,
+                                "rows": [
+                                    {
+                                        "hostname": "endpoint-a",
+                                        "uuid": "synthetic",
+                                    }
+                                ],
+                                "query_digest": self.runner.hashlib.sha256(
+                                    live_query.encode("utf-8")
+                                ).hexdigest(),
+                            }
+                        ],
+                    }
+                }
+            )
+        )
+
+    def test_complete_zero_row_live_osquery_is_not_trusted_endpoint_evidence(
+        self,
+    ) -> None:
+        self.assertFalse(
+            self.runner._has_trusted_endpoint_evidence(
+                {
+                    "live_osquery_evidence": {
+                        "complete": True,
+                        "results": [
+                            {
+                                "status": "ok",
+                                "rows": [],
+                                "query_digest": "zero-row-endpoint-query",
+                            }
+                        ],
+                    }
+                }
+            )
+        )
+
+    def test_incomplete_or_failed_live_osquery_is_not_trusted_endpoint_evidence(
+        self,
+    ) -> None:
+        for evidence in (
+            {
+                "complete": False,
+                "results": [{"status": "ok", "rows": [{"pid": "1"}]}],
+            },
+            {
+                "complete": True,
+                "results": [{"status": "error", "rows": [{"pid": "1"}]}],
+            },
+        ):
+            with self.subTest(evidence=evidence):
+                self.assertFalse(
+                    self.runner._has_trusted_endpoint_evidence(
+                        {"live_osquery_evidence": evidence}
+                    )
+                )
+        self.assertFalse(
+            self.runner._has_trusted_endpoint_evidence(
+                {
+                    "endpoint_evidence": {
+                        "status": "error",
+                        "rows": [{"pid": "1", "name": "untrusted"}],
+                    }
+                }
+            )
         )
 
     def test_appliance_osquery_is_not_trusted_endpoint_evidence(self) -> None:

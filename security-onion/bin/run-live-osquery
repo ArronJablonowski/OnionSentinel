@@ -33,6 +33,7 @@ sys.path.insert(0, str(LIB_DIR))
 
 from live_osquery_contract import (  # noqa: E402
     MAX_RESPONSE_BYTES,
+    MAX_ROWS,
     LiveOsqueryContractError,
     bounded_json_bytes,
     validate_result_artifact,
@@ -44,7 +45,7 @@ MAX_REQUEST_BYTES = 64 * 1024
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_AUTH_BYTES = 4096
 DEFAULT_CONFIG = Path("/etc/onion-sentinel/live-osquery.json")
-_PENDING_STATES = frozenset({"pending", "running"})
+_QUERY_STATES = frozenset({"running", "completed"})
 AUTHORIZATION_PROFILE = "kibana-feature-osquery-all-brokered-v1"
 
 
@@ -153,9 +154,9 @@ def _load_authorization(path: Path) -> str:
         raise LiveQueryError("Kibana authorization file could not be read") from exc
     if "\n" in value or "\r" in value:
         raise LiveQueryError("Kibana authorization file must contain one header value")
-    if not (value.startswith("ApiKey ") or value.startswith("Bearer ")):
+    if not value.startswith("ApiKey "):
         raise LiveQueryError(
-            "Kibana authorization must use an ApiKey or Bearer header value"
+            "Kibana authorization must use the dedicated ApiKey identity"
         )
     return value
 
@@ -265,28 +266,98 @@ def _extract_action_ids(
     return action_id, query_action_id
 
 
-def _query_state(details: dict[str, Any]) -> tuple[str, int, int, int, int, int]:
+def _query_state(
+    details: dict[str, Any],
+    *,
+    expected_parent_action_id: str,
+    expected_query_action_id: str,
+    expected_agent_id: str,
+    expected_query: str,
+) -> tuple[str, int, int, int, int, int]:
     data = _response_data(details)
-    state = str(data.get("status") or "").strip().lower()
+    if str(data.get("action_id") or "").strip() != expected_parent_action_id:
+        raise LiveQueryError(
+            "Kibana live-query details did not match the submitted action"
+        )
+    if data.get("agents") != [expected_agent_id]:
+        raise LiveQueryError(
+            "Kibana live-query details did not retain the exact target agent"
+        )
     queries = data.get("queries")
-    query = queries[0] if isinstance(queries, list) and queries else {}
-    if isinstance(query, dict):
-        state = str(query.get("status") or state).strip().lower()
+    if not isinstance(queries, list) or len(queries) != 1:
+        raise LiveQueryError(
+            "Kibana live-query details did not contain exactly one query"
+        )
+    query = queries[0]
+    if not isinstance(query, dict):
+        raise LiveQueryError("Kibana live-query details query was invalid")
+    if str(query.get("action_id") or "").strip() != expected_query_action_id:
+        raise LiveQueryError(
+            "Kibana live-query details did not match the submitted query action"
+        )
+    if query.get("agents") != [expected_agent_id]:
+        raise LiveQueryError(
+            "Kibana live-query details query did not retain the exact target agent"
+        )
+    if str(query.get("query") or "").strip() != expected_query:
+        raise LiveQueryError(
+            "Kibana live-query details did not retain the exact submitted SQL"
+        )
 
-    def number(name: str) -> int:
-        try:
-            source = query if isinstance(query, dict) and name in query else data
-            return max(0, int(source.get(name) or 0))
-        except (TypeError, ValueError):
-            return 0
+    parent_state = str(data.get("status") or "").strip().lower()
+    query_state = str(query.get("status") or "").strip().lower()
+    if parent_state not in _QUERY_STATES or query_state not in _QUERY_STATES:
+        raise LiveQueryError("Kibana live-query details contained an invalid state")
+    if parent_state != query_state:
+        raise LiveQueryError("Kibana live-query completion state was inconsistent")
+    state = parent_state
+
+    def number(name: str, *, maximum: int) -> int:
+        if name not in query:
+            raise LiveQueryError(
+                f"Kibana live-query details omitted the {name} counter"
+            )
+        value = query.get(name)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            or value > maximum
+        ):
+            raise LiveQueryError(
+                f"Kibana live-query details contained an invalid {name} counter"
+            )
+        return value
+
+    successful = number("successful", maximum=1)
+    failed = number("failed", maximum=1)
+    pending = number("pending", maximum=1)
+    responded = number("responded", maximum=1)
+    docs = number("docs", maximum=MAX_ROWS)
+    if (
+        {"successful", "failed", "responded"}.issubset(query)
+        and successful + failed > responded
+    ) or (
+        {"responded", "pending"}.issubset(query)
+        and responded + pending > 1
+    ):
+        raise LiveQueryError("Kibana live-query execution counters were inconsistent")
+    if state == "completed" and (
+        pending != 0
+        or responded != 1
+        or successful + failed != 1
+    ):
+        raise LiveQueryError(
+            "Kibana live-query terminal counters were incomplete or inconsistent"
+        )
 
     return (
         state,
-        number("successful"),
-        number("failed"),
-        number("pending"),
-        number("responded"),
-        number("docs"),
+        successful,
+        failed,
+        pending,
+        responded,
+        docs,
     )
 
 
@@ -300,8 +371,22 @@ def _result_rows(
     edges = data.get("edges")
     if not isinstance(edges, list):
         raise LiveQueryError("Kibana live-query result edges were missing")
+    if len(edges) > MAX_ROWS:
+        raise LiveQueryError("Kibana live-query result exceeded its row limit")
     rows: list[dict[str, Any]] = []
+    edge_ids: set[str] = set()
     for edge in edges:
+        edge_id = edge.get("_id") if isinstance(edge, dict) else None
+        if (
+            not isinstance(edge_id, str)
+            or not edge_id.strip()
+            or len(edge_id) > 512
+            or edge_id in edge_ids
+        ):
+            raise LiveQueryError(
+                "Kibana live-query result row had an invalid or duplicate identity"
+            )
+        edge_ids.add(edge_id)
         source = edge.get("_source") if isinstance(edge, dict) else None
         if not isinstance(source, dict):
             raise LiveQueryError("Kibana live-query result row had an invalid source")
@@ -330,12 +415,22 @@ def _result_rows(
         rows.append(row)
     total_value = data.get("total")
     if isinstance(total_value, dict):
+        relation = total_value.get("relation")
+        if relation != "eq":
+            raise LiveQueryError("Kibana live-query result total was inexact")
         total_value = total_value.get("value")
-    try:
-        total = int(total_value if total_value is not None else len(rows))
-    except (TypeError, ValueError) as exc:
-        raise LiveQueryError("Kibana live-query result total was invalid") from exc
-    return rows, max(total, len(rows))
+    if (
+        isinstance(total_value, bool)
+        or not isinstance(total_value, int)
+        or total_value < 0
+        or total_value > MAX_ROWS
+    ):
+        raise LiveQueryError("Kibana live-query result total was invalid")
+    if total_value < len(rows):
+        raise LiveQueryError(
+            "Kibana live-query result total was smaller than its readable rows"
+        )
+    return rows, total_value
 
 
 def _run_query(
@@ -351,11 +446,11 @@ def _run_query(
 ) -> dict[str, Any]:
     started = time.monotonic()
     api_root = _api_root(config)
-    request_timeout = min(max(int(config.get("query_timeout_seconds", 60)), 10), 300)
+    request_timeout = min(max(int(config.get("query_timeout_seconds", 60)), 60), 300)
     poll_seconds = min(max(float(config.get("poll_seconds", 2)), 0.5), 10.0)
     result_visibility_seconds = min(
-        max(float(config.get("result_visibility_seconds", 10)), 0.0),
-        30.0,
+        max(float(config.get("result_visibility_seconds", 60)), 0.0),
+        60.0,
     )
     status = "error"
     rows: list[dict[str, Any]] = []
@@ -407,8 +502,14 @@ def _run_query(
                 pending,
                 responded,
                 expected_docs,
-            ) = _query_state(details)
-            if state not in _PENDING_STATES and pending == 0:
+            ) = _query_state(
+                details,
+                expected_parent_action_id=action_id,
+                expected_query_action_id=query_action_id,
+                expected_agent_id=agent_id,
+                expected_query=query,
+            )
+            if state == "completed":
                 break
             time.sleep(min(poll_seconds, max(0.0, deadline - time.monotonic())))
         else:
@@ -418,7 +519,7 @@ def _run_query(
 
         result_url = (
             f"{details_url}/results/"
-            f"{urllib.parse.quote(query_action_id, safe='')}?page=1&pageSize=200"
+            f"{urllib.parse.quote(query_action_id, safe='')}?page=0&pageSize=200"
         )
         visibility_deadline = min(
             deadline,
@@ -437,11 +538,18 @@ def _run_query(
                 expected_agent_id=agent_id,
                 expected_action_id=query_action_id,
             )
+            readable_rows = len(rows)
             if failed > 0:
                 break
-            if expected_docs > 0 and total_rows >= expected_docs:
-                break
-            if expected_docs == 0 and total_rows > 0:
+            # Kibana can expose the Elasticsearch hit total even when the
+            # caller is not authorized to read any result edges. Only exact
+            # equality among query details, result metadata, and rows that
+            # passed the agent/action binding proves a complete readable set.
+            counts_match = expected_docs == total_rows == readable_rows
+            if counts_match and (
+                readable_rows > 0
+                or time.monotonic() >= visibility_deadline
+            ):
                 break
             if time.monotonic() >= visibility_deadline:
                 break
@@ -465,15 +573,27 @@ def _run_query(
                 pending,
                 responded,
                 expected_docs,
-            ) = _query_state(details)
-        if expected_docs > total_rows:
+            ) = _query_state(
+                details,
+                expected_parent_action_id=action_id,
+                expected_query_action_id=query_action_id,
+                expected_agent_id=agent_id,
+                expected_query=query,
+            )
+        if expected_docs != total_rows or total_rows != len(rows):
             raise LiveQueryError(
-                "Kibana reported live-query result documents that were not readable"
+                "Kibana live-query result counts did not match readable rows"
             )
         if failed > 0:
             status = "error"
             error = "endpoint reported a live-query execution failure"
-        elif successful > 0 or responded > 0:
+        elif (
+            state == "completed"
+            and successful == 1
+            and failed == 0
+            and pending == 0
+            and responded == 1
+        ):
             status = "ok"
         else:
             status = "error"
@@ -484,6 +604,9 @@ def _run_query(
     except LiveQueryError as exc:
         status = "error"
         error = str(exc)
+    if status != "ok":
+        # Partial, unauthenticated, or count-inconsistent rows are not evidence.
+        rows = []
     duration_ms = min(int((time.monotonic() - started) * 1000), 10 * 60 * 1000)
     return {
         "target_alias": target_alias,

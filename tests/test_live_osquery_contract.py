@@ -12,6 +12,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -20,6 +21,9 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "n8n" / "bin"
 SO_WRAPPER = ROOT / "security-onion" / "bin" / "run-live-osquery"
+SO_CONFIG_EXAMPLE = (
+    ROOT / "security-onion" / "config" / "live-osquery.example.json"
+)
 SO_LAUNCHER = ROOT / "security-onion" / "bin" / "run-live-osquery-forced"
 SO_AUTHORIZED_KEY = (
     ROOT / "security-onion" / "ssh" / "authorized_keys.live-osquery.example"
@@ -43,6 +47,8 @@ from live_osquery_contract import (  # noqa: E402
 )
 from live_osquery_client import (  # noqa: E402
     LiveOsqueryClientError,
+    _persist_live_osquery_artifact,
+    capability_descriptor,
     collect_live_osquery,
     harness_operator_approved,
     load_live_osquery_config,
@@ -127,6 +133,43 @@ class LiveOsqueryContractTests(unittest.TestCase):
             "WHERE name = 'launchd' LIMIT 20;",
         )
 
+    def test_rejects_wildcard_and_nonexistent_darwin_columns(self):
+        for query in (
+            "SELECT * FROM processes LIMIT 1;",
+            "SELECT package_arch FROM homebrew_packages LIMIT 1;",
+            "SELECT auto_updates FROM homebrew_packages LIMIT 1;",
+            "SELECT app_name FROM homebrew_packages LIMIT 1;",
+            "SELECT definitely_not_a_column FROM system_info LIMIT 1;",
+            "SELECT pid FROM processes "
+            "WHERE definitely_not_a_column = 'x' LIMIT 1;",
+            "SELECT pid FROM processes "
+            "ORDER BY definitely_not_a_column LIMIT 1;",
+            "SELECT system_info.pid FROM processes LIMIT 1;",
+        ):
+            with self.subTest(query=query):
+                with self.assertRaises(LiveOsqueryContractError):
+                    normalize_query(query)
+
+    def test_allows_mac_osquery_identity_and_version_probes(self):
+        self.assertEqual(
+            normalize_query(
+                "SELECT version, build_platform FROM osquery_info LIMIT 1;"
+            ),
+            "SELECT version, build_platform FROM osquery_info LIMIT 1;",
+        )
+        self.assertEqual(
+            normalize_query("SELECT version, build, arch FROM os_version LIMIT 1;"),
+            "SELECT version, build, arch FROM os_version LIMIT 1;",
+        )
+        self.assertEqual(
+            normalize_query(
+                "SELECT name, path, version, type, prefix "
+                "FROM homebrew_packages LIMIT 5;"
+            ),
+            "SELECT name, path, version, type, prefix "
+            "FROM homebrew_packages LIMIT 5;",
+        )
+
     def test_rejects_wildcard_or_unconfigured_endpoint_targets(self):
         for alias in ("*", "all", "unknown-endpoint"):
             with self.subTest(alias=alias):
@@ -188,6 +231,53 @@ class LiveOsqueryContractTests(unittest.TestCase):
         with self.assertRaises(LiveOsqueryContractError):
             validate_result_artifact(missing, expected_requests=requests)
 
+        unexpected_column = json.loads(json.dumps(artifact))
+        unexpected_column["results"][0]["rows"][0]["unexpected_secret"] = "value"
+        with self.assertRaisesRegex(
+            LiveOsqueryContractError,
+            "query projection",
+        ):
+            validate_result_artifact(
+                unexpected_column,
+                expected_requests=requests,
+            )
+
+        missing_column = json.loads(json.dumps(artifact))
+        missing_column["results"][0]["rows"][0].pop("name")
+        with self.assertRaisesRegex(
+            LiveOsqueryContractError,
+            "query projection",
+        ):
+            validate_result_artifact(
+                missing_column,
+                expected_requests=requests,
+            )
+
+        impossible_count = json.loads(json.dumps(artifact))
+        impossible_count["results"][0]["query"] = (
+            "SELECT pid, name FROM processes LIMIT 1;"
+        )
+        impossible_count["results"][0]["total_rows"] = 2
+        impossible_count["results"][0]["truncated"] = True
+        requests_with_one_row_limit = normalize_requests(
+            [
+                {
+                    "target_alias": "workstation-01",
+                    "query": "SELECT pid, name FROM processes LIMIT 1;",
+                    "purpose": "correlate running processes",
+                }
+            ],
+            allowed_aliases=["workstation-01"],
+        )
+        with self.assertRaisesRegex(
+            LiveOsqueryContractError,
+            "query LIMIT",
+        ):
+            validate_result_artifact(
+                impossible_count,
+                expected_requests=requests_with_one_row_limit,
+            )
+
 
 class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
     @classmethod
@@ -198,9 +288,14 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
         state = self.wrapper._query_state(
             {
                 "data": {
+                    "action_id": "action-id",
+                    "agents": ["agent-id"],
                     "status": "completed",
                     "queries": [
                         {
+                            "action_id": "query-action-id",
+                            "agents": ["agent-id"],
+                            "query": "SELECT hostname FROM system_info LIMIT 1;",
                             "status": "completed",
                             "successful": 1,
                             "failed": 0,
@@ -210,9 +305,145 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
                         }
                     ],
                 }
-            }
+            },
+            expected_parent_action_id="action-id",
+            expected_query_action_id="query-action-id",
+            expected_agent_id="agent-id",
+            expected_query="SELECT hostname FROM system_info LIMIT 1;",
         )
         self.assertEqual(state, ("completed", 1, 0, 0, 1, 1))
+
+    def test_rejects_unbound_or_inconsistent_query_details(self):
+        details = {
+            "data": {
+                "action_id": "action-id",
+                "agents": ["agent-id"],
+                "status": "completed",
+                "queries": [
+                    {
+                        "action_id": "query-action-id",
+                        "agents": ["agent-id"],
+                        "query": "SELECT hostname FROM system_info LIMIT 1;",
+                        "status": "completed",
+                        "successful": 1,
+                        "failed": 0,
+                        "pending": 0,
+                        "responded": 1,
+                        "docs": 1,
+                    }
+                ],
+            }
+        }
+        mutations = {
+            "parent action": lambda value: value["data"].update(
+                action_id="other-action"
+            ),
+            "parent agent": lambda value: value["data"].update(
+                agents=["other-agent"]
+            ),
+            "multiple queries": lambda value: value["data"]["queries"].append(
+                dict(value["data"]["queries"][0])
+            ),
+            "child action": lambda value: value["data"]["queries"][0].update(
+                action_id="other-query-action"
+            ),
+            "child agent": lambda value: value["data"]["queries"][0].update(
+                agents=["other-agent"]
+            ),
+            "sql": lambda value: value["data"]["queries"][0].update(
+                query="SELECT * FROM processes LIMIT 1;"
+            ),
+            "unknown state": lambda value: value["data"]["queries"][0].update(
+                status="expired"
+            ),
+            "boolean counter": lambda value: value["data"]["queries"][0].update(
+                successful=True
+            ),
+            "negative counter": lambda value: value["data"]["queries"][0].update(
+                docs=-1
+            ),
+            "counter mismatch": lambda value: value["data"]["queries"][0].update(
+                responded=0
+            ),
+            "terminal pending": lambda value: value["data"]["queries"][0].update(
+                pending=1
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                candidate = json.loads(json.dumps(details))
+                mutate(candidate)
+                with self.assertRaises(self.wrapper.LiveQueryError):
+                    self.wrapper._query_state(
+                        candidate,
+                        expected_parent_action_id="action-id",
+                        expected_query_action_id="query-action-id",
+                        expected_agent_id="agent-id",
+                        expected_query=(
+                            "SELECT hostname FROM system_info LIMIT 1;"
+                        ),
+                    )
+
+    def test_rejects_parent_and_child_state_mismatch(self):
+        details = {
+            "data": {
+                "action_id": "action-id",
+                "agents": ["agent-id"],
+                "status": "running",
+                "queries": [
+                    {
+                        "action_id": "query-action-id",
+                        "agents": ["agent-id"],
+                        "query": "SELECT hostname FROM system_info LIMIT 1;",
+                        "status": "completed",
+                        "successful": 1,
+                        "failed": 0,
+                        "pending": 0,
+                        "responded": 1,
+                        "docs": 1,
+                    }
+                ],
+            }
+        }
+        with self.assertRaisesRegex(
+            self.wrapper.LiveQueryError,
+            "completion state was inconsistent",
+        ):
+            self.wrapper._query_state(
+                details,
+                expected_parent_action_id="action-id",
+                expected_query_action_id="query-action-id",
+                expected_agent_id="agent-id",
+                expected_query="SELECT hostname FROM system_info LIMIT 1;",
+            )
+
+    def test_rejects_inflight_details_with_missing_counters(self):
+        details = {
+            "data": {
+                "action_id": "action-id",
+                "agents": ["agent-id"],
+                "status": "running",
+                "queries": [
+                    {
+                        "action_id": "query-action-id",
+                        "agents": ["agent-id"],
+                        "query": "SELECT hostname FROM system_info LIMIT 1;",
+                        "status": "running",
+                    }
+                ],
+            }
+        }
+        with self.assertRaisesRegex(
+            self.wrapper.LiveQueryError,
+            "omitted the successful counter",
+        ):
+            self.wrapper._query_state(
+                details,
+                expected_parent_action_id="action-id",
+                expected_query_action_id="query-action-id",
+                expected_agent_id="agent-id",
+                expected_query="SELECT hostname FROM system_info LIMIT 1;",
+            )
 
     def test_waits_for_reported_result_documents_to_become_visible(self):
         submitted = {
@@ -230,9 +461,14 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
         }
         details = {
             "data": {
+                "action_id": "action-id",
+                "agents": ["agent-id"],
                 "status": "completed",
                 "queries": [
                     {
+                        "action_id": "query-action-id",
+                        "agents": ["agent-id"],
+                        "query": "SELECT hostname FROM system_info LIMIT 1;",
                         "status": "completed",
                         "successful": 1,
                         "failed": 0,
@@ -243,11 +479,15 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
                 ],
             }
         }
-        empty_results = {"data": {"edges": [], "total": 0}}
+        # Pagination, index refresh, or authorization can expose a positive
+        # hit total before any usable edge is returned. Total metadata alone
+        # must not satisfy the result-visibility gate.
+        empty_results = {"data": {"edges": [], "total": 1}}
         visible_results = {
             "data": {
                 "edges": [
                     {
+                        "_id": "result-1",
                         "_source": {
                             "agent": {"id": "agent-id"},
                             "action_id": "query-action-id",
@@ -269,7 +509,7 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
                     details,
                     visible_results,
                 ],
-            ),
+            ) as http_json,
             mock.patch.object(self.wrapper.time, "sleep"),
         ):
             result = self.wrapper._run_query(
@@ -277,6 +517,99 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
                 agent_id="agent-id",
                 query="SELECT hostname FROM system_info LIMIT 1;",
                 purpose="result visibility test",
+                config={
+                    "kibana_url": "http://127.0.0.1:5601",
+                    "query_timeout_seconds": 60,
+                    "poll_seconds": 0.5,
+                    "result_visibility_seconds": 10,
+                },
+                authorization="ApiKey redacted",
+                context=None,
+                deadline=time.monotonic() + 60,
+            )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["rows"], [{"hostname": "endpoint-a"}])
+        result_urls = [
+            call.kwargs["url"]
+            for call in http_json.call_args_list
+            if "/results/" in call.kwargs["url"]
+        ]
+        self.assertTrue(result_urls)
+        self.assertTrue(all("?page=0&pageSize=200" in url for url in result_urls))
+        self.assertTrue(all("?page=1" not in url for url in result_urls))
+
+    def test_waits_before_accepting_an_initial_zero_row_snapshot(self):
+        query = "SELECT hostname FROM system_info LIMIT 1;"
+        submitted = {
+            "data": {
+                "action_id": "action-id",
+                "agents": ["agent-id"],
+                "queries": [
+                    {
+                        "action_id": "query-action-id",
+                        "agents": ["agent-id"],
+                        "query": query,
+                    }
+                ],
+            }
+        }
+
+        def details(docs):
+            return {
+                "data": {
+                    "action_id": "action-id",
+                    "agents": ["agent-id"],
+                    "status": "completed",
+                    "queries": [
+                        {
+                            "action_id": "query-action-id",
+                            "agents": ["agent-id"],
+                            "query": query,
+                            "status": "completed",
+                            "successful": 1,
+                            "failed": 0,
+                            "pending": 0,
+                            "responded": 1,
+                            "docs": docs,
+                        }
+                    ],
+                }
+            }
+
+        visible_results = {
+            "data": {
+                "edges": [
+                    {
+                        "_id": "result-1",
+                        "_source": {
+                            "agent": {"id": "agent-id"},
+                            "action_id": "query-action-id",
+                            "osquery": {"hostname": "endpoint-a"},
+                        }
+                    }
+                ],
+                "total": 1,
+            }
+        }
+        with (
+            mock.patch.object(
+                self.wrapper,
+                "_http_json",
+                side_effect=[
+                    submitted,
+                    details(0),
+                    {"data": {"edges": [], "total": 0}},
+                    details(1),
+                    visible_results,
+                ],
+            ),
+            mock.patch.object(self.wrapper.time, "sleep"),
+        ):
+            result = self.wrapper._run_query(
+                target_alias="endpoint-a",
+                agent_id="agent-id",
+                query=query,
+                purpose="zero snapshot visibility test",
                 config={
                     "kibana_url": "http://127.0.0.1:5601",
                     "query_timeout_seconds": 60,
@@ -306,9 +639,14 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
         }
         details = {
             "data": {
+                "action_id": "action-id",
+                "agents": ["agent-id"],
                 "status": "completed",
                 "queries": [
                     {
+                        "action_id": "query-action-id",
+                        "agents": ["agent-id"],
+                        "query": "SELECT hostname FROM system_info LIMIT 1;",
                         "status": "completed",
                         "successful": 1,
                         "failed": 0,
@@ -322,7 +660,7 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
         with mock.patch.object(
             self.wrapper,
             "_http_json",
-            side_effect=[submitted, details, {"data": {"edges": [], "total": 0}}],
+            side_effect=[submitted, details, {"data": {"edges": [], "total": 1}}],
         ):
             result = self.wrapper._run_query(
                 target_alias="endpoint-a",
@@ -340,7 +678,141 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
                 deadline=time.monotonic() + 60,
             )
         self.assertEqual(result["status"], "error")
-        self.assertIn("not readable", result["error"])
+        self.assertIn("did not match readable rows", result["error"])
+
+    def test_partial_reported_result_documents_fail_closed(self):
+        submitted = {
+            "data": {
+                "action_id": "action-id",
+                "agents": ["agent-id"],
+                "queries": [
+                    {
+                        "action_id": "query-action-id",
+                        "agents": ["agent-id"],
+                        "query": "SELECT hostname FROM system_info LIMIT 2;",
+                    }
+                ],
+            }
+        }
+        details = {
+            "data": {
+                "action_id": "action-id",
+                "agents": ["agent-id"],
+                "status": "completed",
+                "queries": [
+                    {
+                        "action_id": "query-action-id",
+                        "agents": ["agent-id"],
+                        "query": "SELECT hostname FROM system_info LIMIT 2;",
+                        "status": "completed",
+                        "successful": 1,
+                        "failed": 0,
+                        "pending": 0,
+                        "responded": 1,
+                        "docs": 2,
+                    }
+                ],
+            }
+        }
+        partial_results = {
+            "data": {
+                "edges": [
+                    {
+                        "_id": "result-1",
+                        "_source": {
+                            "agent": {"id": "agent-id"},
+                            "action_id": "query-action-id",
+                            "osquery": {"hostname": "endpoint-a"},
+                        }
+                    }
+                ],
+                "total": 2,
+            }
+        }
+        with mock.patch.object(
+            self.wrapper,
+            "_http_json",
+            side_effect=[submitted, details, partial_results],
+        ):
+            result = self.wrapper._run_query(
+                target_alias="endpoint-a",
+                agent_id="agent-id",
+                query="SELECT hostname FROM system_info LIMIT 2;",
+                purpose="partial result test",
+                config={
+                    "kibana_url": "http://127.0.0.1:5601",
+                    "query_timeout_seconds": 60,
+                    "poll_seconds": 0.5,
+                    "result_visibility_seconds": 0,
+                },
+                authorization="ApiKey redacted",
+                context=None,
+                deadline=time.monotonic() + 60,
+            )
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["rows"], [])
+        self.assertEqual(result["total_rows"], 2)
+        self.assertIn("did not match readable rows", result["error"])
+
+    def test_successful_zero_row_query_is_complete_evidence(self):
+        query = "SELECT hostname FROM system_info WHERE hostname = 'absent' LIMIT 1;"
+        submitted = {
+            "data": {
+                "action_id": "action-id",
+                "agents": ["agent-id"],
+                "queries": [
+                    {
+                        "action_id": "query-action-id",
+                        "agents": ["agent-id"],
+                        "query": query,
+                    }
+                ],
+            }
+        }
+        details = {
+            "data": {
+                "action_id": "action-id",
+                "agents": ["agent-id"],
+                "status": "completed",
+                "queries": [
+                    {
+                        "action_id": "query-action-id",
+                        "agents": ["agent-id"],
+                        "query": query,
+                        "status": "completed",
+                        "successful": 1,
+                        "failed": 0,
+                        "pending": 0,
+                        "responded": 1,
+                        "docs": 0,
+                    }
+                ],
+            }
+        }
+        with mock.patch.object(
+            self.wrapper,
+            "_http_json",
+            side_effect=[submitted, details, {"data": {"edges": [], "total": 0}}],
+        ):
+            result = self.wrapper._run_query(
+                target_alias="endpoint-a",
+                agent_id="agent-id",
+                query=query,
+                purpose="zero result test",
+                config={
+                    "kibana_url": "http://127.0.0.1:5601",
+                    "query_timeout_seconds": 60,
+                    "poll_seconds": 0.5,
+                    "result_visibility_seconds": 0,
+                },
+                authorization="ApiKey redacted",
+                context=None,
+                deadline=time.monotonic() + 60,
+            )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["rows"], [])
+        self.assertEqual(result["total_rows"], 0)
+        self.assertFalse(result["truncated"])
 
     def test_reads_current_elastic_result_shape(self):
         rows, total = self.wrapper._result_rows(
@@ -348,6 +820,7 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
                 "data": {
                     "edges": [
                         {
+                            "_id": "result-1",
                             "_source": {
                                 "agent": {"id": "agent-id"},
                                 "action_id": "query-action-id",
@@ -370,6 +843,7 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
                 "data": {
                     "edges": [
                         {
+                            "_id": "result-1",
                             "_source": {
                                 "agent": {"id": "agent-id"},
                                 "action_id": "query-action-id",
@@ -377,7 +851,7 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
                             }
                         }
                     ],
-                    "total": {"value": 1},
+                    "total": {"value": 1, "relation": "eq"},
                 }
             },
             expected_agent_id="agent-id",
@@ -386,11 +860,96 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
         self.assertEqual(rows, [{"uid": "501"}])
         self.assertEqual(total, 1)
 
+    def test_rejects_invalid_or_impossible_result_totals(self):
+        edge = {
+            "_id": "result-1",
+            "_source": {
+                "agent": {"id": "agent-id"},
+                "action_id": "query-action-id",
+                "osquery": {"pid": "42"},
+            }
+        }
+        invalid_totals = (None, True, "1", -1, 201)
+        for total in invalid_totals:
+            with (
+                self.subTest(total=total),
+                self.assertRaisesRegex(
+                    self.wrapper.LiveQueryError,
+                    "total was invalid",
+                ),
+            ):
+                self.wrapper._result_rows(
+                    {"data": {"edges": [edge], "total": total}},
+                    expected_agent_id="agent-id",
+                    expected_action_id="query-action-id",
+                )
+        with self.assertRaisesRegex(
+            self.wrapper.LiveQueryError,
+            "smaller than its readable rows",
+        ):
+            self.wrapper._result_rows(
+                {"data": {"edges": [edge], "total": 0}},
+                expected_agent_id="agent-id",
+                expected_action_id="query-action-id",
+            )
+        with self.assertRaisesRegex(
+            self.wrapper.LiveQueryError,
+            "total was inexact",
+        ):
+            self.wrapper._result_rows(
+                {
+                    "data": {
+                        "edges": [edge],
+                        "total": {"value": 1, "relation": "gte"},
+                    }
+                },
+                expected_agent_id="agent-id",
+                expected_action_id="query-action-id",
+            )
+        with self.assertRaisesRegex(
+            self.wrapper.LiveQueryError,
+            "total was inexact",
+        ):
+            self.wrapper._result_rows(
+                {
+                    "data": {
+                        "edges": [edge],
+                        "total": {"value": 1},
+                    }
+                },
+                expected_agent_id="agent-id",
+                expected_action_id="query-action-id",
+            )
+
+    def test_rejects_missing_or_duplicate_result_edge_identities(self):
+        edge = {
+            "_id": "result-1",
+            "_source": {
+                "agent": {"id": "agent-id"},
+                "action_id": "query-action-id",
+                "osquery": {"pid": "42"},
+            },
+        }
+        for edges in (
+            [{key: value for key, value in edge.items() if key != "_id"}],
+            [edge, dict(edge)],
+        ):
+            with self.assertRaisesRegex(
+                self.wrapper.LiveQueryError,
+                "invalid or duplicate identity",
+            ):
+                self.wrapper._result_rows(
+                    {"data": {"edges": edges, "total": len(edges)}},
+                    expected_agent_id="agent-id",
+                    expected_action_id="query-action-id",
+                )
+
     def test_rejects_result_rows_from_a_different_agent_or_action(self):
         response = {
             "data": {
                 "edges": [
                     {
+                        "_id": "result-1",
                         "_source": {
                             "agent": {"id": "other-agent"},
                             "action_id": "query-action-id",
@@ -495,6 +1054,25 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
                 ):
                     self.wrapper._load_config(path)
 
+    def test_authorization_requires_the_dedicated_api_key_scheme(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            path = Path(temp_name) / "authorization"
+            with mock.patch.object(
+                self.wrapper,
+                "_require_secure_regular_file",
+            ):
+                path.write_text("ApiKey opaque-value\n", encoding="utf-8")
+                self.assertEqual(
+                    self.wrapper._load_authorization(path),
+                    "ApiKey opaque-value",
+                )
+                path.write_text("Bearer opaque-value\n", encoding="utf-8")
+                with self.assertRaisesRegex(
+                    self.wrapper.LiveQueryError,
+                    "dedicated ApiKey",
+                ):
+                    self.wrapper._load_authorization(path)
+
     def test_expired_global_deadline_never_dispatches_http(self):
         with mock.patch.object(
             self.wrapper,
@@ -563,7 +1141,7 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
             302,
             "Found",
             {},
-            None,
+            io.BytesIO(),
         )
         opener.open.side_effect = redirect
         with (
@@ -630,6 +1208,25 @@ class SecurityOnionLiveOsqueryResponseTests(unittest.TestCase):
 
 
 class LiveOsqueryClientConfigTests(unittest.TestCase):
+    def test_capability_exposes_only_explicit_darwin_schemas(self):
+        descriptor = capability_descriptor(
+            {
+                "enabled": True,
+                "allowed_target_aliases": ["endpoint-a"],
+            }
+        )
+        self.assertEqual(descriptor["target_platform"], "darwin")
+        self.assertEqual(descriptor["osquery_version"], "5.15.0")
+        self.assertEqual(
+            descriptor["table_schemas"]["system_info"][:2],
+            ["board_model", "board_serial"],
+        )
+        self.assertIn("osquery_info", descriptor["allowed_tables"])
+        self.assertIn("os_version", descriptor["allowed_tables"])
+        for unsafe_or_non_darwin in ("deb_packages", "rpm_packages", "suid_bin"):
+            self.assertNotIn(unsafe_or_non_darwin, descriptor["allowed_tables"])
+        self.assertIn("SELECT * is forbidden", descriptor["restrictions"])
+
     def test_time_bounded_operator_approval_is_alias_scoped(self):
         with tempfile.TemporaryDirectory() as temp_name:
             root = Path(temp_name)
@@ -647,6 +1244,12 @@ class LiveOsqueryClientConfigTests(unittest.TestCase):
                         "identity_file": str(identity),
                         "known_hosts": str(known_hosts),
                         "allowed_target_aliases": ["endpoint-a"],
+                        "target_bindings": {
+                            "endpoint-a": {
+                                "ips": ["192.0.2.10"],
+                                "hosts": ["endpoint-a.example"],
+                            }
+                        },
                         "allowed_agent_roles": ["incident-responder"],
                         "harness_operator_approval": {
                             "approved": True,
@@ -674,6 +1277,10 @@ class LiveOsqueryClientConfigTests(unittest.TestCase):
                 now=dt.datetime(2098, 1, 1, tzinfo=dt.timezone.utc),
             )
         )
+        self.assertEqual(
+            config["target_bindings"]["endpoint-a"]["ips"],
+            ["192.0.2.10"],
+        )
         self.assertFalse(
             harness_operator_approved(
                 config,
@@ -681,6 +1288,45 @@ class LiveOsqueryClientConfigTests(unittest.TestCase):
                 now=dt.datetime(2100, 1, 1, tzinfo=dt.timezone.utc),
             )
         )
+
+    def test_enabled_config_requires_safe_target_asset_bindings(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            identity = root / "identity"
+            known_hosts = root / "known_hosts"
+            identity.write_text("private-key-placeholder", encoding="utf-8")
+            known_hosts.write_text("host-key-placeholder", encoding="utf-8")
+            base = {
+                "enabled": True,
+                "relay_host": "10.88.8.8",
+                "relay_user": "aj",
+                "identity_file": str(identity),
+                "known_hosts": str(known_hosts),
+                "allowed_target_aliases": ["endpoint-a"],
+            }
+            for binding, message in (
+                ({}, "trusted asset binding"),
+                (
+                    {"endpoint-a": {"ips": ["not-an-ip"]}},
+                    "invalid IP",
+                ),
+                (
+                    {"endpoint-b": {"ips": ["192.0.2.10"]}},
+                    "unconfigured aliases",
+                ),
+            ):
+                config_path = root / "live-osquery.json"
+                config_path.write_text(
+                    json.dumps({**base, "target_bindings": binding}),
+                    encoding="utf-8",
+                )
+                config_path.chmod(0o600)
+                with self.subTest(binding=binding):
+                    with self.assertRaisesRegex(
+                        LiveOsqueryClientError,
+                        message,
+                    ):
+                        load_live_osquery_config(config_path)
 
     def test_config_rejects_insecure_mode_and_symlink(self):
         with tempfile.TemporaryDirectory() as temp_name:
@@ -743,8 +1389,265 @@ class LiveOsqueryClientConfigTests(unittest.TestCase):
                 persist=False,
             )
 
+    def test_collector_persists_immutable_batches_with_bounded_manifest(self):
+        query = "SELECT hostname FROM system_info LIMIT 1;"
+        purpose = "verify endpoint identity"
+        raw_artifact = {
+            "schema": "onion-sentinel-live-osquery-v1",
+            "case_id": "case-immutable",
+            "generated_at": "2026-07-30T19:00:00Z",
+            "read_only": True,
+            "complete": True,
+            "results": [
+                {
+                    "target_alias": "endpoint-a",
+                    "query": query,
+                    "purpose": purpose,
+                    "status": "ok",
+                    "rows": [{"hostname": "endpoint-a"}],
+                    "total_rows": 1,
+                    "truncated": False,
+                    "duration_ms": 10,
+                    "error": "",
+                }
+            ],
+        }
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(raw_artifact),
+            stderr="",
+        )
+        with tempfile.TemporaryDirectory() as temp_name:
+            artifact_dir = Path(temp_name) / "artifacts"
+            config = {
+                "enabled": True,
+                "allowed_target_aliases": ["endpoint-a"],
+                "harness_operator_approval": {
+                    "approved": True,
+                    "target_aliases": ["endpoint-a"],
+                    "expires_at": "2099-01-01T00:00:00Z",
+                },
+                "relay_host": "relay.invalid",
+                "relay_user": "broker",
+                "identity_file": Path(temp_name) / "identity",
+                "known_hosts": Path(temp_name) / "known_hosts",
+                "connect_timeout_seconds": 5,
+                "timeout_seconds": 30,
+                "port": 22,
+                "artifact_dir": artifact_dir,
+                "max_saved_batches_per_case": 2,
+            }
+            with mock.patch(
+                "live_osquery_client.run_bounded_command",
+                return_value=completed,
+            ):
+                for _ in range(3):
+                    collect_live_osquery(
+                        case_id="case-immutable",
+                        requests=[
+                            {
+                                "target_alias": "endpoint-a",
+                                "query": query,
+                                "purpose": purpose,
+                            }
+                        ],
+                        config=config,
+                        persist=True,
+                    )
+            case_dir = artifact_dir / "case-immutable"
+            manifest = json.loads(
+                (case_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                manifest["schema"],
+                "onion-sentinel-live-osquery-manifest-v1",
+            )
+            self.assertEqual(manifest["retention_limit"], 2)
+            self.assertEqual(len(manifest["entries"]), 2)
+            artifact_files = sorted(
+                path
+                for path in case_dir.glob("*.json")
+                if path.name != "manifest.json"
+            )
+            self.assertEqual(len(artifact_files), 2)
+            self.assertTrue((case_dir / manifest["current"]).is_file())
+            self.assertTrue(
+                all(
+                    stat.S_IMODE(path.stat().st_mode) == 0o600
+                    for path in [*artifact_files, case_dir / "manifest.json"]
+                )
+            )
+
+    def test_concurrent_collectors_preserve_manifest_and_retention(self):
+        query = "SELECT hostname FROM system_info LIMIT 1;"
+        purpose = "verify endpoint identity"
+        raw_artifact = {
+            "schema": "onion-sentinel-live-osquery-v1",
+            "case_id": "case-concurrent",
+            "generated_at": "2026-07-30T19:00:00Z",
+            "read_only": True,
+            "complete": True,
+            "results": [
+                {
+                    "target_alias": "endpoint-a",
+                    "query": query,
+                    "purpose": purpose,
+                    "status": "ok",
+                    "rows": [{"hostname": "endpoint-a"}],
+                    "total_rows": 1,
+                    "truncated": False,
+                    "duration_ms": 10,
+                    "error": "",
+                }
+            ],
+        }
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(raw_artifact),
+            stderr="",
+        )
+        with tempfile.TemporaryDirectory() as temp_name:
+            artifact_dir = Path(temp_name) / "artifacts"
+            config = {
+                "enabled": True,
+                "allowed_target_aliases": ["endpoint-a"],
+                "harness_operator_approval": {
+                    "approved": True,
+                    "target_aliases": ["endpoint-a"],
+                    "expires_at": "2099-01-01T00:00:00Z",
+                },
+                "relay_host": "relay.invalid",
+                "relay_user": "broker",
+                "identity_file": Path(temp_name) / "identity",
+                "known_hosts": Path(temp_name) / "known_hosts",
+                "connect_timeout_seconds": 5,
+                "timeout_seconds": 30,
+                "port": 22,
+                "artifact_dir": artifact_dir,
+                "max_saved_batches_per_case": 8,
+            }
+
+            def collect_one(_: int) -> dict[str, object]:
+                return collect_live_osquery(
+                    case_id="case-concurrent",
+                    requests=[
+                        {
+                            "target_alias": "endpoint-a",
+                            "query": query,
+                            "purpose": purpose,
+                        }
+                    ],
+                    config=config,
+                    persist=True,
+                )
+
+            with mock.patch(
+                "live_osquery_client.run_bounded_command",
+                return_value=completed,
+            ):
+                with ThreadPoolExecutor(max_workers=12) as executor:
+                    results = list(executor.map(collect_one, range(24)))
+
+            self.assertEqual(len(results), 24)
+            case_dir = artifact_dir / "case-concurrent"
+            manifest = json.loads(
+                (case_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            entries = manifest["entries"]
+            self.assertEqual(len(entries), 8)
+            self.assertEqual(
+                len({entry["artifact"] for entry in entries}),
+                len(entries),
+            )
+            artifact_files = {
+                path.name
+                for path in case_dir.glob("*.json")
+                if path.name != "manifest.json"
+            }
+            self.assertEqual(
+                artifact_files,
+                {entry["artifact"] for entry in entries},
+            )
+            self.assertIn(manifest["current"], artifact_files)
+            lock_path = case_dir / ".manifest.lock"
+            lock_info = lock_path.lstat()
+            self.assertTrue(stat.S_ISREG(lock_info.st_mode))
+            self.assertEqual(lock_info.st_uid, os.geteuid())
+            self.assertEqual(stat.S_IMODE(lock_info.st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(case_dir.stat().st_mode), 0o700)
+
+    def test_persistence_rejects_unsafe_case_directory_and_lock(self):
+        request_payload = {
+            "schema": "onion-sentinel-live-osquery-v1",
+            "case_id": "case-lock",
+            "requests": [],
+        }
+        artifact = {
+            "schema": "onion-sentinel-live-osquery-v1",
+            "case_id": "case-lock",
+            "generated_at": "2026-07-30T19:00:00Z",
+            "read_only": True,
+            "complete": True,
+            "results": [],
+        }
+        with tempfile.TemporaryDirectory() as temp_name:
+            artifact_dir = Path(temp_name) / "artifacts"
+            case_dir = artifact_dir / "case-lock"
+            case_dir.mkdir(parents=True, mode=0o700)
+
+            case_dir.chmod(0o755)
+            with self.assertRaisesRegex(
+                LiveOsqueryClientError,
+                "case directory.*0700",
+            ):
+                _persist_live_osquery_artifact(
+                    artifact_dir=artifact_dir,
+                    case_id="case-lock",
+                    request_payload=request_payload,
+                    artifact=artifact,
+                    maximum_batches=2,
+                )
+
+            case_dir.chmod(0o700)
+            lock_path = case_dir / ".manifest.lock"
+            lock_path.write_text("", encoding="utf-8")
+            lock_path.chmod(0o644)
+            with self.assertRaisesRegex(
+                LiveOsqueryClientError,
+                "manifest lock.*0600",
+            ):
+                _persist_live_osquery_artifact(
+                    artifact_dir=artifact_dir,
+                    case_id="case-lock",
+                    request_payload=request_payload,
+                    artifact=artifact,
+                    maximum_batches=2,
+                )
+
+            lock_path.unlink()
+            target = case_dir / "not-a-lock"
+            target.write_text("", encoding="utf-8")
+            target.chmod(0o600)
+            lock_path.symlink_to(target)
+            with self.assertRaisesRegex(
+                LiveOsqueryClientError,
+                "manifest lock",
+            ):
+                _persist_live_osquery_artifact(
+                    artifact_dir=artifact_dir,
+                    case_id="case-lock",
+                    request_payload=request_payload,
+                    artifact=artifact,
+                    maximum_batches=2,
+                )
+            self.assertFalse((case_dir / "manifest.json").exists())
+
 
 class LiveOsqueryDeploymentContractTests(unittest.TestCase):
+    def test_security_onion_example_allows_observed_index_visibility_lag(self):
+        config = json.loads(SO_CONFIG_EXAMPLE.read_text(encoding="utf-8"))
+        self.assertEqual(config["result_visibility_seconds"], 60)
+
     def test_mac_forced_key_runs_only_broker_as_service_account(self):
         authorized_key = RELAY_AUTHORIZED_KEY.read_text(encoding="utf-8")
         self.assertIn(

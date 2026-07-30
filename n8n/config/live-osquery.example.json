@@ -8,6 +8,16 @@
   "allowed_target_aliases": [
     "REPLACE_WITH_OPERATOR_ENDPOINT_ALIAS"
   ],
+  "target_bindings": {
+    "REPLACE_WITH_OPERATOR_ENDPOINT_ALIAS": {
+      "ips": [
+        "192.0.2.10"
+      ],
+      "hosts": [
+        "replace-with-endpoint-hostname.example"
+      ]
+    }
+  },
   "allowed_agent_roles": [
     "incident-responder"
   ],
@@ -17,6 +27,7 @@
     "target_aliases": []
   },
   "connect_timeout_seconds": 10,
-  "timeout_seconds": 180,
-  "artifact_dir": "~/n8n-local/soc-alerts/incident-evidence/live-osquery"
+  "timeout_seconds": 240,
+  "artifact_dir": "~/n8n-local/soc-alerts/incident-evidence/live-osquery",
+  "max_saved_batches_per_case": 8
 }
