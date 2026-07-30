@@ -4,7 +4,7 @@ Date: 2026-07-29
 Scope: the 15 most recently escalated Incident Responder cases at audit start  
 Investigation path: Mac Studio → forced-command SSH → Relay → read-only Security Onion
 
-Mac release containing the audit and PCAP-provenance fixes:
+Pre-v2 Mac release containing the original audit and PCAP-provenance fixes:
 `63b8d526760f2aa42fb6405dafd4410e1522b183`.
 
 Cutover update at 2026-07-29 18:23 MDT: the restricted Security Onion wrapper
@@ -13,25 +13,29 @@ Mac → Relay → Security Onion probe returned a complete, semantically valid
 `zeek_http` event with valid positive/negative controls. Two identical probes
 produced the same executed-query digest
 `00ec985db7eb8c9cb50fa72002be1e4cbab5d551bb63d9bb53609aba9eaa6d48`.
-The Mac was explicitly cut over to v2, and blind reanalysis of the 15 audited
-cases was queued on release `63b8d526760f2aa42fb6405dafd4410e1522b183`.
+The Mac was explicitly cut over to v2. Blind reanalysis of the 15 audited
+cases was then restarted on release
+`79a1a8ac16837dbbf1f242f1c0a870349cdbbeb7`, which requires an independent
+second opinion for every manual Incident Responder rerun.
 
 ## Executive result
 
-The current reports are appropriately cautious about the absence of endpoint
-process attribution, but their factored detection verdicts are materially
-understated. Replaying the deployed Suricata rule predicates against the stored
-Security Onion event data with the corrected deterministic validator produced:
+The original stored reports were appropriately cautious about missing endpoint
+process attribution, but their factored detection verdicts were materially
+understated. Replaying the deployed Suricata rule predicates against stored
+Security Onion data with the corrected deterministic validator produced:
 
 - 15 of 15 selected events observed;
 - 15 of 15 deployed rule intents matched;
-- 14 cases with audited model-requested pivots, but zero successful dynamic
-  pivot results;
-- five primary reports that used `authorized_benign` without a structured
-  operator authorization record;
-- two exact-flow PCAPs completed during the audit, for one APT case and the
-  Python SimpleHTTP case, and 13 exact-flow PCAP requests were still awaiting
-  Relay fulfillment at the time this report was written.
+- 42 successful read-only v2 Security Onion queries in the blind rerun;
+- zero broker/query errors, timeouts, or partial results;
+- four fail-closed model-proposal rejections, all caused by the same malformed
+  `observables` container;
+- 15 completed independent second opinions: two full agreements, five partial
+  disagreements, and eight material disagreements;
+- six fulfilled exact-flow PCAP requests, five failed closed with
+  `no matching packets found`, one claimed, and three pending at the cohort
+  checkpoint.
 
 `matched_intent` means the observed event satisfies the deployed detection
 logic. It does not mean the activity is malicious. The activity disposition
@@ -81,6 +85,10 @@ Suricata rule.
 
 ## Case-by-case findings
 
+The grades below are for the pre-v2 stored reports that triggered this audit.
+They are retained as the baseline against which the corrected blind rerun is
+measured.
+
 | Case | Detection validity | Independent activity finding | Stored-case discrepancy | Grade |
 |---|---|---|---|---:|
 | `ir-7cf7aea2cc183d57` | `matched_intent` | Debian APT HTTP activity to Ubuntu/Canonical infrastructure is strongly consistent with package management; authorization not established | Stored `unknown` detection validity missed the exact `Debian APT-HTTP/1.3 (2.4.14)` User-Agent and Ubuntu `InRelease` request. Dynamic pivots: 0 successful | 58 |
@@ -98,6 +106,53 @@ Suricata rule.
 | `ir-b1ffcf0e28f21268` | `matched_intent` | Exact TLS ClientHello contains `vscode.download.prss.microsoft.com`; likely normal VSCode download/update traffic | Stored report claimed trusted exact SNI was unavailable. It was present in the selected Suricata application projection | 52 |
 | `ir-e3c6ea1c603ab983` | `matched_intent` | Exact DNS message queries `vscode.download.prss.microsoft.com`; paired TLS detection makes normal VSCode traffic likely | Stored report said the exact Zeek body/answer was missing, which is a fair Zeek limitation, but it incorrectly left deployed rule intent unknown despite the selected Suricata DNS evidence | 53 |
 | `ir-c7844a5653322a04` | `matched_intent` | Valid paired STUN binding response from Google to the same workstation/flow; likely NAT traversal, but process and authorization remain unknown | Primary `authorized_benign` and suppression implication are unsupported. Reviewer correctly required more data; stored validity still missed exact STUN semantics | 47 |
+
+## Blind v2 rerun checkpoint
+
+All 15 cases completed on release
+`79a1a8ac16837dbbf1f242f1c0a870349cdbbeb7` using
+`onion-sentinel-investigation-pivots-v2`. Every case used the primary
+`codex-cli:gpt-5.5:high` route and the independent
+`codex-cli:gpt-5.6-sol:xhigh` reviewer route.
+
+| Case | Canonical v2 result | Successful / rejected pivots | Reviewer |
+|---|---|---:|---|
+| `ir-56ae78c97f626d68` | `matched_intent`; benign; no action; not authorized | 3 / 0 | partial disagreement |
+| `ir-7cf7aea2cc183d57` | `matched_intent`; benign; no action; not authorized | 2 / 1 | partial disagreement |
+| `ir-7f9c63d2a41f212f` | `matched_intent`; unknown; monitor; disputed | 3 / 1 | material disagreement |
+| `ir-8ce3879de8bec697` | `matched_intent`; unknown; monitor; disputed | 2 / 0 | material disagreement |
+| `ir-ae2675dbfbc0136a` | `matched_intent`; benign; no action; not authorized | 4 / 0 | partial disagreement |
+| `ir-b193e7b4ea0dbccc` | `matched_intent`; unknown; monitor; disputed | 3 / 1 | material disagreement |
+| `ir-b1ffcf0e28f21268` | `matched_intent`; benign; no action; not authorized | 4 / 0 | partial disagreement |
+| `ir-c207dc9a18306e51` | `matched_intent`; unknown; monitor; disputed | 4 / 0 | material disagreement |
+| `ir-c7844a5653322a04` | `matched_intent`; unknown; monitor; disputed | 2 / 0 | material disagreement |
+| `ir-c7aa2cc288e3f4cf` | `matched_intent`; benign; no action; not authorized | 3 / 1 | partial disagreement |
+| `ir-cbbc240155dd8c00` | `matched_intent`; benign; no action; not authorized | 2 / 0 | agreement |
+| `ir-e3c6ea1c603ab983` | `matched_intent`; unknown; monitor; disputed | 4 / 0 | material disagreement |
+| `ir-e3e00a86d1652a15` | `matched_intent`; unknown; monitor; disputed | 2 / 0 | material disagreement |
+| `ir-fc8db3aa9902402a` | `matched_intent`; unknown; monitor; disputed | 2 / 0 | material disagreement |
+| `ir-fe8fdea2b7eac6f4` | `matched_intent`; benign; no action; not authorized | 2 / 0 | agreement |
+
+The execution ledger identifies every trusted dynamic query as dialect
+`elastic` with execution backend `so-elasticsearch-query`. KQL and OQL are
+retained only as readable equivalents. The fixed OSQuery snapshots target
+`security-onion-local-host`; live endpoint OSQuery remained disabled and no
+endpoint command was executed.
+
+This checkpoint exposed two repeatable harness defects:
+
+1. Four otherwise bounded model proposals encoded `observables` as a list.
+   The harness correctly rejected the non-contract shape, but could not
+   schedule its one bounded planning-repair round.
+2. In five cases an exact selected-alert PCAP was available, but prompt-budget
+   compaction could retain an older stable-group capture because direct PCAP
+   artifacts were not deterministically ordered. The count still reported
+   exact evidence, creating a contradiction between metadata and the one
+   retained parsed capture.
+
+Both defects are corrected in the next reviewed Mac release. A smaller
+post-deployment validation cohort will rerun every malformed-proposal case and
+every case with a fulfilled exact PCAP.
 
 ## Cross-case truthfulness findings
 
@@ -199,6 +254,17 @@ calling it OSQuery. The recurring labels were generally correct:
 11. The Mac installer now stops exact orphaned AI scheduler/runner processes
     after unloading their LaunchAgents, preventing a pre-cutover process from
     finishing with stale in-memory query-contract code.
+12. A malformed observable container can enter the single planning-repair
+    round only when its scalar values map unambiguously to the collector-owned
+    permitted-observable catalog. Unknown or ambiguous values still fail
+    closed; model-provided syntax never gains authority.
+13. Parsed PCAP evidence is now ordered with exact selected-alert captures
+    before stable-group historical context, and package-budget counts are
+    recomputed after truncation.
+14. A material disagreement limited to suppression/drop tuning now preserves
+    the primary/reviewer-agreed case verdict while blocking tuning and
+    automation. A material disagreement in the case disposition still
+    publishes the conservative `unknown`/monitor-or-investigate state.
 
 ## Remaining blockers
 
@@ -206,9 +272,10 @@ calling it OSQuery. The recurring labels were generally correct:
    disabled. Do not claim process, user, or authorization findings until an
    approved endpoint telemetry path exists.
 2. **PCAP queue latency:** 15 exact PCAP requests were submitted. At the v2
-   cutover checkpoint, three were fulfilled, two had failed closed with
-   `no matching packets found`, one was claimed, and nine remained pending.
-   A failed or pending capture is an evidence gap, not negative evidence.
+   cohort checkpoint, six were fulfilled, five had failed closed with
+   `no matching packets found`, one was claimed, and three remained pending.
+   A failed, pending, or in-transfer capture is an evidence gap, not negative
+   evidence.
 3. **Asset authorization:** inventory relationships help name systems but are
    not authorization records. Add a separate structured, time-bounded
    authorization source if the operator wants `authorized_benign` outcomes.

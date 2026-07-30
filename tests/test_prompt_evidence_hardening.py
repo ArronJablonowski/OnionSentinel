@@ -426,6 +426,56 @@ class PromptEvidenceHardeningTests(unittest.TestCase):
             len(first_output.encode("utf-8")),
         )
 
+    def test_prompt_budget_preserves_exact_alert_pcap_before_related_history(
+        self,
+    ):
+        package = {
+            "pcap_evidence": {
+                "parsed_evidence": [
+                    {
+                        "request_id": "related-newer",
+                        "evidence_relationship": "stable_group_related",
+                        "generated_at": "2026-07-29T19:00:00Z",
+                        "tshark": {"samples": [{"field_sample_tsv": "x" * 20_000}]},
+                    },
+                    {
+                        "request_id": "exact-selected-alert",
+                        "evidence_relationship": "exact_alert",
+                        "generated_at": "2026-07-29T18:00:00Z",
+                        "zeek": {
+                            "http_hosts": [
+                                {
+                                    "host": "www.msftconnecttest.com",
+                                    "method": "GET",
+                                    "uri": "/connecttest.txt",
+                                    "status_code": "200",
+                                }
+                            ]
+                        },
+                    },
+                ],
+                "exact_alert_evidence_count": 1,
+                "stable_group_related_evidence_count": 1,
+            },
+        }
+
+        compacted, output = builder.compact_package_to_budget(
+            package,
+            5_000,
+        )
+
+        self.assertLessEqual(len(output.encode("utf-8")), 5_000)
+        pcap = compacted["pcap_evidence"]
+        self.assertEqual(
+            pcap["parsed_evidence"][0]["request_id"],
+            "exact-selected-alert",
+        )
+        self.assertEqual(pcap["exact_alert_evidence_count"], 1)
+        self.assertEqual(pcap["stable_group_related_evidence_count"], 0)
+        self.assertTrue(
+            pcap["parsed_evidence_truncated_for_package_budget"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7568,12 +7568,94 @@ def investigation_request_semantic_digest(request: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def recover_repair_observables_from_trusted_catalog(
+    value: Any,
+    authorization_context: Any,
+) -> dict[str, list[str]] | None:
+    """Recover only model values already present in the trusted catalog.
+
+    A malformed observables container has no executable meaning, so it cannot
+    be normalized directly.  It may still contain exact scalar values that the
+    collector independently authorized.  Recovering the intersection lets the
+    single bounded planning-repair round correct the container shape without
+    granting the model a new value or observable category.  Ambiguous catalog
+    values fail closed.
+    """
+    if not isinstance(authorization_context, dict):
+        return None
+    permitted = authorization_context.get("permitted_observables")
+    if not isinstance(permitted, dict):
+        return None
+
+    raw_values: set[str] = set()
+
+    def visit(item: Any, depth: int = 0) -> None:
+        if depth > 4 or len(raw_values) > 32:
+            return
+        if isinstance(item, str):
+            text = _query_text(item, 255)
+            if text:
+                raw_values.add(text)
+        elif isinstance(item, list):
+            for child in item[:32]:
+                visit(child, depth + 1)
+        elif isinstance(item, dict):
+            for child in list(item.values())[:32]:
+                visit(child, depth + 1)
+
+    visit(value)
+    if not raw_values or len(raw_values) > 32:
+        return None
+
+    catalog: dict[str, list[tuple[str, str]]] = {}
+    for kind in ("ips", "domains", "hosts", "users"):
+        values = permitted.get(kind)
+        if not isinstance(values, list):
+            continue
+        for raw_permitted in values[:100]:
+            permitted_text = _query_text(raw_permitted, 255)
+            if not permitted_text:
+                continue
+            comparison = (
+                permitted_text.lower().rstrip(".")
+                if kind == "domains"
+                else permitted_text
+            )
+            catalog.setdefault(comparison, []).append(
+                (kind, permitted_text)
+            )
+
+    recovered = {
+        "ips": [],
+        "domains": [],
+        "hosts": [],
+        "users": [],
+    }
+    for raw_value in sorted(raw_values):
+        candidates = catalog.get(raw_value, [])
+        if not candidates:
+            candidates = catalog.get(raw_value.lower().rstrip("."), [])
+        unique_candidates = sorted(set(candidates))
+        if len(unique_candidates) != 1:
+            continue
+        kind, trusted_value = unique_candidates[0]
+        recovered[kind].append(trusted_value)
+
+    for kind in recovered:
+        recovered[kind] = sorted(set(recovered[kind]))
+    total = sum(len(values) for values in recovered.values())
+    if total < 1 or total > 8:
+        return None
+    return recovered
+
+
 def investigation_query_repair_scope(
     raw: Any,
     *,
     round_number: int,
     position: int,
     time_envelope: Any = None,
+    authorization_context: Any = None,
 ) -> dict[str, Any] | None:
     """Recover a non-widenable Security Onion scope from an invalid request.
 
@@ -7589,6 +7671,15 @@ def investigation_query_repair_scope(
     parameters = raw.get("parameters")
     if backend not in {"elastic", "oql"} or not isinstance(parameters, dict):
         return None
+    raw_observables = parameters.get("observables")
+    recovered_observables = None
+    if not isinstance(raw_observables, dict):
+        recovered_observables = recover_repair_observables_from_trusted_catalog(
+            raw_observables,
+            authorization_context,
+        )
+        if recovered_observables is None:
+            return None
     bounded_raw = {
         "query_id": raw.get("query_id"),
         "backend": backend,
@@ -7605,6 +7696,8 @@ def investigation_query_repair_scope(
             if key in parameters
         },
     }
+    if recovered_observables is not None:
+        bounded_raw["parameters"]["observables"] = recovered_observables
     try:
         normalized = normalize_investigation_query_request(
             bounded_raw,
@@ -7626,6 +7719,11 @@ def investigation_query_repair_scope(
         },
         "size": normalized["parameters"]["size"],
         "aggregation": normalized["parameters"]["aggregation"],
+        "observable_scope_source": (
+            "trusted_catalog_intersection"
+            if recovered_observables is not None
+            else "original_valid_scope"
+        ),
     }
     if "event_tuple" in parameters:
         try:
@@ -7784,6 +7882,10 @@ def investigation_query_repair_prompt_entry(
         "observables": scope["observables"],
         "maximum_size": scope["size"],
         "aggregation": scope["aggregation"],
+        "observable_scope_source": scope.get(
+            "observable_scope_source",
+            "original_valid_scope",
+        ),
         "original_event_tuple_fields": sorted(event_tuple),
         "pack_event_tuple_fields": sorted(
             pack_event_tuple_fields(scope["pack"])
@@ -8417,6 +8519,7 @@ def apply_investigation_query_loop(
                         round_number=round_number,
                         position=position,
                         time_envelope=trusted_time_envelope,
+                        authorization_context=local_context,
                     )
                     if repair_scope is not None:
                         round_repair_scopes[
@@ -8501,6 +8604,7 @@ def apply_investigation_query_loop(
                     round_number=round_number,
                     position=1,
                     time_envelope=trusted_time_envelope,
+                    authorization_context=local_context,
                 )
                 if repair_scope is not None:
                     round_repair_scopes[query_id] = {
@@ -8589,6 +8693,10 @@ def apply_investigation_query_loop(
                             )
                             else {}
                         )
+                    ),
+                    "observable_scope_source": item["scope"].get(
+                        "observable_scope_source",
+                        "original_valid_scope",
                     ),
                     "error_digest": canonical_payload_digest(
                         item["reason"]
@@ -11323,6 +11431,90 @@ def apply_material_disagreement_gate(
     authorized_benign, or suppress while the independent reviewer materially
     disputes those claims.
     """
+    disputed_fields = (
+        comparison.get("disputed_fields")
+        if isinstance(comparison.get("disputed_fields"), list)
+        else []
+    )
+    material_fields = {
+        str(item.get("field") or "")
+        for item in disputed_fields
+        if isinstance(item, dict) and item.get("material") is True
+    }
+    verdict_material_fields = {
+        "detection_outcome",
+        "event_status",
+        "detection_validity",
+        "activity_disposition",
+        "handling",
+        "duplicate_of",
+        "escalation_needed",
+    }
+    verdict_disputed = bool(
+        material_fields.intersection(verdict_material_fields)
+    )
+    if not verdict_disputed:
+        notice = (
+            "DISPUTED TUNING — the primary and independent reviewer agree "
+            "on the case disposition but materially disagree on a detection "
+            "control; human adjudication is required before tuning."
+        )
+        bluf = str(primary_response.get("bluf") or "").strip()
+        summary = str(primary_response.get("summary") or "").strip()
+        if not bluf.startswith("DISPUTED TUNING"):
+            primary_response["bluf"] = f"{notice} {bluf}".strip()
+        if not summary.startswith("DISPUTED TUNING"):
+            primary_response["summary"] = f"{notice} {summary}".strip()
+        evidence_gaps = (
+            list(primary_response.get("evidence_gaps"))
+            if isinstance(primary_response.get("evidence_gaps"), list)
+            else []
+        )
+        if notice not in evidence_gaps:
+            evidence_gaps.append(notice)
+        primary_response["evidence_gaps"] = evidence_gaps
+
+        report = primary_response.get("incident_response_report")
+        if isinstance(report, dict):
+            constraints = (
+                list(report.get("constraints"))
+                if isinstance(report.get("constraints"), list)
+                else []
+            )
+            if notice not in constraints:
+                constraints.append(notice)
+            report["constraints"] = constraints
+
+        calibration = (
+            dict(primary_response.get("_confidence_calibration"))
+            if isinstance(
+                primary_response.get("_confidence_calibration"),
+                dict,
+            )
+            else {}
+        )
+        limiters = (
+            list(calibration.get("limiters"))
+            if isinstance(calibration.get("limiters"), list)
+            else []
+        )
+        if "material_second_opinion_tuning_disagreement" not in limiters:
+            limiters.append(
+                "material_second_opinion_tuning_disagreement"
+            )
+        calibration["limiters"] = limiters
+        primary_response["_confidence_calibration"] = calibration
+        primary_response["_material_disagreement_gate"] = {
+            "version": 2,
+            "applied": True,
+            "scope": "control_only",
+            "agreement": comparison.get("agreement"),
+            "disputed_fields": disputed_fields,
+            "guarded_handling": primary_response.get("handling"),
+            "verdict_preserved": True,
+        }
+        return primary_response
+
     primary_handling = str(
         primary_response.get("handling") or ""
     ).strip().lower()
@@ -11417,11 +11609,13 @@ def apply_material_disagreement_gate(
     )
     primary_response["_confidence_calibration"] = calibration
     primary_response["_material_disagreement_gate"] = {
-        "version": 1,
+        "version": 2,
         "applied": True,
+        "scope": "case_disposition",
         "agreement": comparison.get("agreement"),
-        "disputed_fields": comparison.get("disputed_fields"),
+        "disputed_fields": disputed_fields,
         "guarded_handling": guarded_handling,
+        "verdict_preserved": False,
     }
     return primary_response
 

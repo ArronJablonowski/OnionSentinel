@@ -4301,6 +4301,52 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertTrue(material["material_disagreement"])
         self.assertIn("escalation_needed", {item["field"] for item in material["disputed_fields"]})
 
+    def test_tuning_only_material_disagreement_preserves_agreed_verdict(
+        self,
+    ) -> None:
+        primary = self.complete_response(
+            confidence="medium",
+            confidence_score=0.68,
+            detection_outcome="informational_no_action",
+            event_status="observed",
+            detection_validity="matched_intent",
+            activity_disposition="benign",
+            handling="no_action",
+            escalation_needed=False,
+            tuning_recommendation="suppress",
+            bluf="Informational package-management activity.",
+            summary="The activity is benign but not formally authorized.",
+        )
+        reviewer = {
+            **primary,
+            "tuning_recommendation": "none",
+        }
+        comparison = self.runner.compare_analysis_results(
+            primary,
+            reviewer,
+        )
+
+        self.assertTrue(comparison["material_disagreement"])
+        result = self.runner.apply_material_disagreement_gate(
+            primary,
+            reviewer,
+            comparison,
+        )
+
+        self.assertEqual(result["detection_outcome"], "informational_no_action")
+        self.assertEqual(result["activity_disposition"], "benign")
+        self.assertEqual(result["handling"], "no_action")
+        self.assertEqual(result["confidence"], "medium")
+        self.assertFalse(result["escalation_needed"])
+        self.assertTrue(result["bluf"].startswith("DISPUTED TUNING"))
+        self.assertEqual(
+            result["_material_disagreement_gate"]["scope"],
+            "control_only",
+        )
+        self.assertTrue(
+            result["_material_disagreement_gate"]["verdict_preserved"]
+        )
+
     def test_reviewer_memory_requires_high_confidence_full_agreement(self) -> None:
         completed = {
             "status": "completed",

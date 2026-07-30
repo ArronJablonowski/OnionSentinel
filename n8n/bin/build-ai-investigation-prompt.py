@@ -1010,7 +1010,16 @@ def pcap_request_context(conn: sqlite3.Connection, selected: sqlite3.Row) -> lis
 
 def pcap_evidence_context(conn: sqlite3.Connection, selected: sqlite3.Row, analysis_dir: Path, limit: int) -> dict:
     requests = pcap_request_context(conn, selected)
-    request_ids = {str(item.get("request_id") or "") for item in requests}
+    request_ids = [
+        str(item.get("request_id") or "")
+        for item in requests
+        if str(item.get("request_id") or "")
+    ]
+    request_id_set = set(request_ids)
+    request_order = {
+        request_id: position
+        for position, request_id in enumerate(request_ids)
+    }
     request_relationships = {
         str(item.get("request_id") or ""): str(
             item.get("evidence_relationship") or "exact_alert"
@@ -1053,7 +1062,7 @@ def pcap_evidence_context(conn: sqlite3.Connection, selected: sqlite3.Row, analy
             if not isinstance(record, dict):
                 continue
             request = record.get("request") if isinstance(record.get("request"), dict) else {}
-            if request.get("alert_id") != alert_id and request.get("request_id") not in request_ids:
+            if request.get("alert_id") != alert_id and request.get("request_id") not in request_id_set:
                 continue
             record["_analysis_path"] = str(path)
             record["_evidence_relationship"] = request_relationships.get(
@@ -1063,6 +1072,20 @@ def pcap_evidence_context(conn: sqlite3.Connection, selected: sqlite3.Row, analy
             evidence.append(compact_pcap_analysis(record))
             if len(evidence) >= limit:
                 break
+    # Exact selected-alert packet evidence must survive later package-budget
+    # truncation ahead of merely related historical captures.  The secondary
+    # key preserves the database's newest-request-first order.
+    evidence.sort(
+        key=lambda item: (
+            0
+            if item.get("evidence_relationship") == "exact_alert"
+            else 1,
+            request_order.get(
+                str(item.get("request_id") or ""),
+                len(request_order),
+            ),
+        )
+    )
     return {
         "pcap_requests": requests,
         "parsed_evidence": evidence,
@@ -3330,7 +3353,31 @@ def compact_package_to_budget(package: dict, max_bytes: int) -> tuple[dict, str]
         if isinstance(pcap.get("pcap_requests"), list):
             pcap["pcap_requests"] = pcap["pcap_requests"][:3]
         if isinstance(pcap.get("parsed_evidence"), list):
+            pcap["parsed_evidence"].sort(
+                key=lambda evidence: (
+                    0
+                    if isinstance(evidence, dict)
+                    and evidence.get("evidence_relationship") == "exact_alert"
+                    else 1,
+                )
+            )
+            original_evidence_count = len(pcap["parsed_evidence"])
             pcap["parsed_evidence"] = pcap["parsed_evidence"][:1]
+            if original_evidence_count > len(pcap["parsed_evidence"]):
+                pcap["parsed_evidence_truncated_for_package_budget"] = True
+            pcap["exact_alert_evidence_count"] = sum(
+                1
+                for evidence in pcap["parsed_evidence"]
+                if isinstance(evidence, dict)
+                and evidence.get("evidence_relationship") == "exact_alert"
+            )
+            pcap["stable_group_related_evidence_count"] = sum(
+                1
+                for evidence in pcap["parsed_evidence"]
+                if isinstance(evidence, dict)
+                and evidence.get("evidence_relationship")
+                == "stable_group_related"
+            )
             for evidence in pcap["parsed_evidence"]:
                 tshark = evidence.get("tshark") if isinstance(evidence, dict) else None
                 if isinstance(tshark, dict) and isinstance(tshark.get("samples"), list):

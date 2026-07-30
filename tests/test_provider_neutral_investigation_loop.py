@@ -1843,6 +1843,116 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             "contract_rejection",
         )
 
+    def test_malformed_observables_get_trusted_non_widening_repair(
+        self,
+    ) -> None:
+        route = "codex-cli:gpt-5.5:medium"
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "anchor": {
+                    "index": (
+                        ".ds-logs-suricata.alerts-so-"
+                        "2026.07.24-000001"
+                    ),
+                    "id": "alert-observable-repair",
+                },
+                "permitted_observables": {
+                    "ips": ["192.0.2.10"],
+                    "domains": [],
+                    "hosts": [],
+                    "users": [],
+                },
+            },
+        }
+        invalid = self.elastic_request("repair-observables")
+        invalid["parameters"]["observables"] = [
+            {"kind": "ip", "value": "192.0.2.10"},
+            {"kind": "ip", "value": "untrusted.example"},
+        ]
+
+        def model_executor(_route, package, *_args):
+            if "investigation_query_planning_repair" in package:
+                rejected = package[
+                    "investigation_query_planning_repair"
+                ]["rejected_queries"][0]
+                self.assertEqual(
+                    rejected["observables"],
+                    {
+                        "ips": ["192.0.2.10"],
+                        "domains": [],
+                        "hosts": [],
+                        "users": [],
+                    },
+                )
+                self.assertEqual(
+                    rejected["observable_scope_source"],
+                    "trusted_catalog_intersection",
+                )
+                return {
+                    "investigation_query_requests": [
+                        self.elastic_request("repair-observables")
+                    ],
+                }
+            return {"summary": "Trusted observable repair synthesized."}
+
+        query_executor = mock.Mock(
+            side_effect=lambda _package, requests, **kwargs: (
+                self.successful_security_onion_round(
+                    requests,
+                    round_number=kwargs["round_number"],
+                )
+            )
+        )
+        response = self.runner.apply_investigation_query_loop(
+            prompt_package,
+            {"investigation_query_requests": [invalid]},
+            object(),
+            {"agent_models": {"soc-analyst": route}},
+            "soc-analyst",
+            model_executor=model_executor,
+            query_executor=query_executor,
+        )
+
+        query_executor.assert_called_once()
+        audit = response["_investigation_query_audit"]
+        self.assertEqual(
+            audit["query_planning_repair"]["admitted_repair_requests"],
+            1,
+        )
+        self.assertEqual(
+            audit["query_planning_repair"]["candidates"][0][
+                "observable_scope_source"
+            ],
+            "trusted_catalog_intersection",
+        )
+
+    def test_malformed_untrusted_observables_remain_rejected(
+        self,
+    ) -> None:
+        invalid = self.elastic_request("reject-untrusted-observables")
+        invalid["parameters"]["observables"] = [
+            {"kind": "ip", "value": "203.0.113.99"},
+        ]
+        scope = self.runner.investigation_query_repair_scope(
+            invalid,
+            round_number=1,
+            position=1,
+            authorization_context={
+                "permitted_observables": {
+                    "ips": ["192.0.2.10"],
+                    "domains": [],
+                    "hosts": [],
+                    "users": [],
+                },
+            },
+        )
+
+        self.assertIsNone(scope)
+
     def test_repair_scope_widening_is_rejected_without_second_repair(
         self,
     ) -> None:
