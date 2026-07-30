@@ -64,7 +64,7 @@ critical_launch_agents_down() {
       | /usr/bin/awk \
         -v scheduler="$STACK_DIR/bin/auto-run-ai-analysis.py" \
         -v runner="$STACK_DIR/bin/run-local-ai-analysis.py" \
-        'index($0, scheduler) || index($0, runner) {print $1}'
+        '$2 ~ /[Pp]ython/ && (index($0, scheduler) || index($0, runner)) {print $1}'
   )"
   if [[ -n "$runtime_ai_pids" ]]; then
     for pid in ${(f)runtime_ai_pids}; do
@@ -76,7 +76,7 @@ critical_launch_agents_down() {
           | /usr/bin/awk \
             -v scheduler="$STACK_DIR/bin/auto-run-ai-analysis.py" \
             -v runner="$STACK_DIR/bin/run-local-ai-analysis.py" \
-            'index($0, scheduler) || index($0, runner) {print $1}'
+            '$2 ~ /[Pp]ython/ && (index($0, scheduler) || index($0, runner)) {print $1}'
       )"
       [[ -z "$runtime_ai_pids" ]] && break
       /bin/sleep 1
@@ -96,11 +96,11 @@ critical_launch_agents_are_down() {
       return 1
     fi
   done
-  if /bin/ps -axo command= \
+  if /bin/ps -axo pid=,command= \
     | /usr/bin/awk \
       -v scheduler="$STACK_DIR/bin/auto-run-ai-analysis.py" \
       -v runner="$STACK_DIR/bin/run-local-ai-analysis.py" \
-      'index($0, scheduler) || index($0, runner) {found=1} END {exit !found}'
+      '$2 ~ /[Pp]ython/ && (index($0, scheduler) || index($0, runner)) {found=1} END {exit !found}'
   then
     return 1
   fi
