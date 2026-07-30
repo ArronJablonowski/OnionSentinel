@@ -254,6 +254,87 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         self.assertNotIn("kql", serialized.lower())
         self.assertNotIn("oql", serialized.lower())
 
+    def test_protocol_plan_prefers_selected_raw_alert_over_group_peer(
+        self,
+    ) -> None:
+        selected_tuple = {
+            "source_ip": "192.0.2.10",
+            "destination_ip": "198.51.100.20",
+            "source_port": 49152,
+            "destination_port": 443,
+            "transport": "tcp",
+            "protocol": "tls",
+            "community_id": "1:selected-alert-flow=",
+            "rule_id": "2026001",
+        }
+        peer_tuple = {
+            **selected_tuple,
+            "source_port": 40000,
+            "community_id": "1:group-peer-flow=",
+        }
+        package = {
+            "agent_role": "incident-responder",
+            "alert": {
+                "rule_name": "Synthetic TLS detection",
+                # The normalized case summary can be sparse. The collector-owned
+                # raw subset still identifies the exact selected alert.
+                "source_ip": "192.0.2.10",
+                "destination_ip": "198.51.100.20",
+                "raw_alert_subset": {
+                    "source": {"ip": "192.0.2.10", "port": 49152},
+                    "destination": {
+                        "ip": "198.51.100.20",
+                        "port": 443,
+                    },
+                    "network": {
+                        "transport": "tcp",
+                        "protocol": "tls",
+                        "community_id": "1:selected-alert-flow=",
+                    },
+                },
+                "rule_context": {
+                    "record_rule_id": "2026001",
+                    "deployed_rule": {"protocol": "tls"},
+                },
+            },
+            "investigation_query_capability": {
+                "enabled": True,
+                "anchor_time": "2026-07-24T18:30:00Z",
+                "backends": {
+                    "elastic": {
+                        "enabled": True,
+                        "packs": ["zeek_tls", "zeek_anomalies"],
+                    },
+                },
+            },
+            "_local_investigation_query_context": {
+                "anchor_time": "2026-07-24T18:30:00Z",
+                "permitted_event_tuples": [
+                    {
+                        "event_tuple": peer_tuple,
+                        "role_semantics": "packet_direction",
+                    },
+                    {
+                        "event_tuple": selected_tuple,
+                        "role_semantics": "packet_direction",
+                    },
+                ],
+            },
+        }
+
+        plan = self.runner.deterministic_incident_pivot_requests(package)
+
+        self.assertEqual(len(plan), 2)
+        for request in plan:
+            self.assertEqual(
+                request["parameters"]["event_tuple"]["community_id"],
+                selected_tuple["community_id"],
+            )
+            self.assertEqual(
+                request["parameters"]["event_tuple"]["source_port"],
+                selected_tuple["source_port"],
+            )
+
     def test_protocol_plan_omits_unsafe_cross_sensor_tuple_without_join_key(
         self,
     ) -> None:

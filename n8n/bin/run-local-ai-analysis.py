@@ -8069,16 +8069,56 @@ def deterministic_incident_pivot_requests(
     ]
     if not trusted_entries:
         return []
+    raw_alert_subset = (
+        alert.get("raw_alert_subset")
+        if isinstance(alert.get("raw_alert_subset"), dict)
+        else {}
+    )
+    raw_source = (
+        raw_alert_subset.get("source")
+        if isinstance(raw_alert_subset.get("source"), dict)
+        else {}
+    )
+    raw_destination = (
+        raw_alert_subset.get("destination")
+        if isinstance(raw_alert_subset.get("destination"), dict)
+        else {}
+    )
+    raw_network = (
+        raw_alert_subset.get("network")
+        if isinstance(raw_alert_subset.get("network"), dict)
+        else {}
+    )
+    rule_context = (
+        alert.get("rule_context")
+        if isinstance(alert.get("rule_context"), dict)
+        else {}
+    )
     anchor_tuple = {
         key: value
         for key, value in {
-            "source_ip": alert.get("source_ip"),
-            "destination_ip": alert.get("destination_ip"),
-            "source_port": alert.get("source_port"),
-            "destination_port": alert.get("destination_port"),
-            "transport": alert.get("transport_protocol"),
-            "protocol": alert.get("network_protocol"),
-            "rule_id": alert.get("rule_id"),
+            "source_ip": alert.get("source_ip") or raw_source.get("ip"),
+            "destination_ip": (
+                alert.get("destination_ip") or raw_destination.get("ip")
+            ),
+            "source_port": alert.get("source_port") or raw_source.get("port"),
+            "destination_port": (
+                alert.get("destination_port") or raw_destination.get("port")
+            ),
+            "transport": (
+                alert.get("transport_protocol") or raw_network.get("transport")
+            ),
+            "protocol": (
+                alert.get("network_protocol") or raw_network.get("protocol")
+            ),
+            "community_id": (
+                alert.get("community_id") or raw_network.get("community_id")
+            ),
+            "rule_id": (
+                alert.get("rule_id")
+                or rule_context.get("record_rule_id")
+                or rule_context.get("sid")
+            ),
         }.items()
         if value not in (None, "")
     }
@@ -8105,11 +8145,6 @@ def deterministic_incident_pivot_requests(
 
     trusted_entry = min(trusted_entries, key=trusted_entry_rank)
     trusted_tuple = trusted_entry["event_tuple"]
-    rule_context = (
-        alert.get("rule_context")
-        if isinstance(alert.get("rule_context"), dict)
-        else {}
-    )
     deployed_rule = (
         rule_context.get("deployed_rule")
         if isinstance(rule_context.get("deployed_rule"), dict)
