@@ -41,6 +41,49 @@ Security Onion data with the corrected deterministic validator produced:
 logic. It does not mean the activity is malicious. The activity disposition
 and response decision must remain separate.
 
+## Final canonical-runtime validation
+
+Release `39d57e2c53188dd308a61ef8b89dddb4bff195fd` completed a final
+blind production validation of the APT and SimpleHTTP cases after canonical
+repair-scope projection and durable worker-claim handling were corrected.
+Both jobs completed, both required independent second opinions, and neither
+reported a Relay error, timeout, partial result, or unaccounted query.
+
+| Case | Outcome | Exact Relay pivots | Reviewer | Final grade |
+|---|---|---:|---|---:|
+| `ir-7cf7aea2cc183d57` | `informational_no_action`; benign; medium confidence | `zeek_http`: 1 complete event; `zeek_files`: exact zero | partial disagreement limited to confidence score, 0.69 vs 0.64 | 97 |
+| `ir-cbbc240155dd8c00` | `informational_no_action`; benign; medium confidence | `zeek_http`: 1 complete event; `zeek_files`: 1 complete event | agreement | 98 |
+
+The four trusted executions used `execution_backend=so-elasticsearch-query`
+and fixed `elastic` Query DSL through the read-only Relay path. KQL and OQL
+were recorded only as equivalents. No OSQuery command was claimed or run.
+Every query was constrained by the collector-authorized exact tuple and
+`network.community_id`, with complete hit accounting and no truncation.
+
+The APT result truthfully reported that exact PCAP was unavailable, live
+endpoint OSQuery was disabled, and host ownership was unknown. Its exact Zeek
+HTTP result corroborated the Debian APT flow; the exact Zeek file query
+returned zero and was treated only as absence inside that complete authorized
+query scope. The reviewer agreed with the outcome, activity, handling, and
+confidence band and differed only on the numeric confidence score.
+
+The SimpleHTTP result corroborated one internal browser GET and one
+HTTP-derived 469-byte `text/html` object for the exact Community ID. It did
+not infer authorization from asset inventory. The reviewer fully agreed and
+kept the later SSH-scan alerts separate because no deterministic linkage was
+present.
+
+Both live models emitted valid requests directly, so the repair branch was
+correctly not entered: zero rejected requests, zero resolved retries, and zero
+unresolved non-success attempts. The canonical repair branch is covered by
+`test_repair_scope_uses_authorized_pack_tuple_projection`, which proves that a
+trusted Suricata tuple containing `rule_id` is projected to the fixed Zeek
+pack's authorized fields, reconstructed identically, and accepted without
+widening. The concurrent-worker correction is covered by
+`test_lost_durable_claim_is_logged_as_contention_not_failure`. Both focused
+tests passed after the live validation; the complete release suite contains
+1,302 passing tests.
+
 ## Method and repeatability
 
 For each case, the audit:
