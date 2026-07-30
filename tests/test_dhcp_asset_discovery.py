@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import contextlib
+import hashlib
 import importlib.machinery
 import importlib.util
 import io
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -267,6 +269,165 @@ class DhcpCollectorTests(unittest.TestCase):
         self.assertTrue(record["timestamp"].endswith("Z"))
         self.assertEqual(record["event"], "dhcp_asset_discovery.disabled")
 
+    def test_query_uses_current_bounded_process_text_contract(self) -> None:
+        start = dt.datetime(2026, 7, 29, 17, tzinfo=dt.timezone.utc)
+        end = start + dt.timedelta(minutes=30)
+        response = {
+            "ok": True,
+            "contract": self.collector.CONTRACT,
+            "generated_at": "2026-07-29T17:30:01.000Z",
+            "status": "ok",
+            "window": {
+                "start": "2026-07-29T17:00:00.000Z",
+                "end": "2026-07-29T17:30:00.000Z",
+            },
+            "hits_total": 0,
+            "returned": 0,
+            "truncated": False,
+            "query_audit": {
+                "index": "logs-zeek-so",
+                "dataset": "zeek.dhcp",
+                "query_digest": "a" * 64,
+            },
+            "observations": [],
+        }
+        config = {
+            "host": "10.88.8.8",
+            "ssh_user": "aj",
+            "ssh_key": str(self.root / "key"),
+            "known_hosts": str(self.root / "known_hosts"),
+            "connect_timeout_seconds": 20,
+            "timeout_seconds": 120,
+            "max_response_bytes": 4 * 1024 * 1024,
+            "max_stderr_bytes": 128 * 1024,
+        }
+        runner = mock.Mock(
+            return_value=SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(response),
+                stderr="",
+            )
+        )
+        with mock.patch.object(
+            self.collector,
+            "run_bounded_command",
+            runner,
+        ), mock.patch.object(
+            self.collector,
+            "utc_now",
+            return_value=end,
+        ):
+            result = self.collector.query_dhcp(config, start, end, 1000)
+
+        self.assertEqual(result["returned"], 0)
+        kwargs = runner.call_args.kwargs
+        self.assertIsInstance(kwargs["stdin_text"], str)
+        self.assertNotIn("input_bytes", kwargs)
+        request = json.loads(kwargs["stdin_text"])
+        self.assertEqual(request["operation"], "dhcp_observations")
+        self.assertEqual(
+            request["window"],
+            response["window"],
+        )
+
+    def test_relay_failure_uses_only_bounded_envelope_diagnostics(self) -> None:
+        diagnostic = self.collector.relay_failure_diagnostic(
+            json.dumps({
+                "ok": False,
+                "error": "restricted command failed",
+                "upstream_error": "DHCP helper unavailable",
+                "ignored": "10.66.6.210",
+            }),
+            "",
+        )
+        self.assertIn("restricted command failed", diagnostic)
+        self.assertIn("DHCP helper unavailable", diagnostic)
+        self.assertNotIn("10.66.6.210", diagnostic)
+
+    def test_truncated_bootstrap_splits_windows_and_advances_only_when_complete(self) -> None:
+        start = dt.datetime(2026, 7, 29, 0, tzinfo=dt.timezone.utc)
+        end = start + dt.timedelta(hours=24)
+
+        def response(segment_start: dt.datetime, segment_end: dt.datetime, truncated: bool) -> dict:
+            identifier = hashlib.sha256(
+                self.collector.format_timestamp(segment_start).encode("utf-8")
+            ).hexdigest()[:24]
+            return {
+                "status": "ok",
+                "window": {
+                    "start": self.collector.format_timestamp(segment_start),
+                    "end": self.collector.format_timestamp(segment_end),
+                },
+                "hits_total": 1001 if truncated else 1,
+                "observations": [self.observation(
+                    observed_at=self.collector.format_timestamp(
+                        segment_start + dt.timedelta(seconds=1)
+                    ),
+                    address="10.66.6.210",
+                    mac="aa:bb:cc:dd:ee:ff",
+                    hostname="studio.example.lan",
+                    evidence_id=identifier,
+                )],
+                "truncated": truncated,
+            }
+
+        calls = []
+
+        def query(_config: dict, segment_start: dt.datetime, segment_end: dt.datetime, _size: int) -> dict:
+            calls.append((segment_start, segment_end))
+            return response(
+                segment_start,
+                segment_end,
+                truncated=(segment_end - segment_start) > dt.timedelta(hours=12),
+            )
+
+        with mock.patch.object(self.collector, "query_dhcp", side_effect=query):
+            result = self.collector.query_complete_window({}, start, end, 1000)
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(result["status"], "ok")
+        self.assertFalse(result["truncated"])
+        self.assertEqual(result["query_segments"], 3)
+        self.assertEqual(len(result["observations"]), 2)
+
+    def test_incomplete_coverage_does_not_advance_success_checkpoint(self) -> None:
+        now = dt.datetime(2026, 7, 30, 0, tzinfo=dt.timezone.utc)
+        state = self.collector.empty_state()
+        state["collection"]["last_success_at"] = "2026-07-29T23:30:00.000Z"
+        incomplete = {
+            "status": "partial",
+            "window": {
+                "start": "2026-07-29T23:25:00.000Z",
+                "end": "2026-07-30T00:00:00.000Z",
+            },
+            "hits_total": 1001,
+            "observations": [],
+            "truncated": True,
+            "query_segments": self.collector.MAX_QUERY_SEGMENTS,
+        }
+        config = {
+            "query_window_minutes": 1440,
+            "query_size": 1000,
+            "retention_days": 30,
+        }
+        with mock.patch.object(
+            self.collector,
+            "query_complete_window",
+            return_value=incomplete,
+        ):
+            result = self.collector.collect(config, state, now)
+
+        self.assertEqual(result["collection"]["status"], "partial")
+        self.assertEqual(
+            result["collection"]["last_success_at"],
+            "2026-07-29T23:30:00.000Z",
+        )
+        self.assertIn("checkpoint was not advanced", result["collection"]["last_error"])
+        self.assertEqual(
+            result["collection"]["last_query_segments"],
+            self.collector.MAX_QUERY_SEGMENTS,
+        )
+
 
 class SecurityOnionQueryClientTests(unittest.TestCase):
     @classmethod
@@ -405,16 +566,28 @@ class DhcpDiscoveryApiAndPageTests(unittest.TestCase):
                 record("match", "10.66.6.210", "studio.example.lan"),
                 record("conflict", "10.66.6.210", "other.example.lan"),
                 record("candidate", "10.66.6.220", "new.example.lan"),
+                record("moved", "10.66.6.211", "studio.example.lan"),
             ],
         }), encoding="utf-8")
         status, payload = self.portal.dhcp_asset_discovery_response(
             observed_at=dt.datetime(2026, 7, 29, 18, tzinfo=dt.timezone.utc)
         )
         self.assertEqual(status, 200)
-        self.assertEqual(payload["counts"]["verified_match"], 1)
+        self.assertEqual(payload["counts"]["verified_match"], 2)
         self.assertEqual(payload["counts"]["conflict"], 1)
         self.assertEqual(payload["counts"]["candidate"], 1)
         self.assertEqual(payload["observations"][0]["reconciliation"], "conflict")
+        moved = next(
+            item
+            for item in payload["observations"]
+            if item["discovery_id"] == "moved"
+        )
+        self.assertEqual(moved["reconciliation"], "verified_match")
+        self.assertIn("new current address", moved["reconciliation_detail"])
+        self.assertEqual(
+            moved["authoritative_asset"]["configured_ip_addresses"],
+            ["10.66.6.210"],
+        )
         self.assertNotIn("owner_ref", json.dumps(payload))
 
     def test_page_route_scheduler_and_installers_are_wired(self) -> None:
@@ -424,7 +597,10 @@ class DhcpDiscoveryApiAndPageTests(unittest.TestCase):
         page = builder.render_static_page(builder.build_html([]), "asset_inventory", [])
         self.assertIn("DHCP network discovery", page)
         self.assertIn("fetch('/api/dhcp-asset-discovery'", page)
-        self.assertIn("Candidates and conflicts require operator review", page)
+        self.assertIn(
+            "Candidates and conflicts remain non-authoritative",
+            page,
+        )
         installer = INSTALLER.read_text(encoding="utf-8")
         self.assertIn("collect-dhcp-asset-discovery.py", installer)
         self.assertIn("query-security-onion.py", installer)
@@ -434,6 +610,7 @@ class DhcpDiscoveryApiAndPageTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("onion-sentinel-incident-evidence_ed25519", config)
         self.assertNotIn("onion-sentinel-dhcp-discovery_ed25519", config)
+        self.assertIn('"query_window_minutes": 1440', config)
         plist = (ROOT / "n8n" / "launchd" / "com.arron.soc.dhcp-asset-discovery.plist").read_text(encoding="utf-8")
         self.assertIn("<integer>900</integer>", plist)
 

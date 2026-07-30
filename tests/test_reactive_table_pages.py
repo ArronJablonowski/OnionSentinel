@@ -94,6 +94,7 @@ class ReactiveTablePageTests(unittest.TestCase):
         self.assertIn("Promise.all([load(),loadDhcp()])", asset_page)
         self.assertIn("if(nextSignature===assetSignature)return false", asset_page)
         self.assertIn("if(nextSignature===dhcpSignature)return false", asset_page)
+        self.assertIn("await load();", asset_page)
         self.assertIn("revisionKey:'asset_inventory'", asset_page)
         self.assertIn("revisionKey:'dhcp_asset_discovery'", asset_page)
         self.assertIn("loadLogs(false)", report_page)

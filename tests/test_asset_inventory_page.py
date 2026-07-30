@@ -35,8 +35,12 @@ class AssetInventoryPageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.inventory_path = Path(self.tmp.name) / "asset_inventory.json"
+        self.dhcp_state_path = (
+            Path(self.tmp.name) / "dhcp-observations.json"
+        )
         self.portal = load_module("asset_inventory_page_portal", PORTAL_PATH)
         self.portal.ASSET_INVENTORY_FILE = self.inventory_path
+        self.portal.DHCP_ASSET_DISCOVERY_STATE_FILE = self.dhcp_state_path
         self.portal.ASSET_INVENTORY_CACHE = {
             "signature": None,
             "inventory": None,
@@ -130,6 +134,85 @@ class AssetInventoryPageTests(unittest.TestCase):
         self.assertNotIn("owner_ref", payload["assets"][0])
         self.assertNotIn("expected_behaviors", payload["assets"][0])
 
+    def test_api_overlays_moved_known_asset_and_adds_provisional_client(
+        self,
+    ) -> None:
+        self.write_inventory(
+            [
+                self.asset(
+                    "current-mac",
+                    "10.66.6.210",
+                    "current-mac.example.lan",
+                    "2026-07-01T00:00:00-06:00",
+                )
+            ]
+        )
+        self.dhcp_state_path.write_text(
+            json.dumps(
+                {
+                    "schema": "onion-sentinel-dhcp-asset-observations-v1",
+                    "version": 1,
+                    "updated_at": "2026-07-29T17:30:00Z",
+                    "collection": {
+                        "status": "ok",
+                        "last_success_at": "2026-07-29T17:30:00Z",
+                    },
+                    "observations": [
+                        {
+                            "discovery_id": "known",
+                            "current_ip": "10.66.6.220",
+                            "mac_address": "",
+                            "hostname": "current-mac.example.lan",
+                            "first_seen": "2026-07-29T17:00:00Z",
+                            "last_seen": "2026-07-29T17:30:00Z",
+                            "lease_expires_at": "2026-07-29T18:30:00Z",
+                        },
+                        {
+                            "discovery_id": "candidate",
+                            "current_ip": "10.66.6.230",
+                            "mac_address": "aa:bb:cc:dd:ee:ff",
+                            "hostname": "new-client.example.lan",
+                            "first_seen": "2026-07-29T17:05:00Z",
+                            "last_seen": "2026-07-29T17:25:00Z",
+                            "lease_expires_at": "2026-07-29T18:25:00Z",
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        status, payload = self.portal.asset_inventory_response(
+            observed_at=dt.datetime(
+                2026,
+                7,
+                29,
+                18,
+                0,
+                tzinfo=dt.timezone.utc,
+            )
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["authoritative_asset_count"], 1)
+        self.assertEqual(payload["discovered_asset_count"], 1)
+        self.assertEqual(payload["current_asset_count"], 2)
+        by_id = {item["asset_id"]: item for item in payload["assets"]}
+        known = by_id["current-mac"]
+        self.assertEqual(known["ip_addresses"], ["10.66.6.220"])
+        self.assertEqual(
+            known["configured_ip_addresses"],
+            ["10.66.6.210"],
+        )
+        self.assertEqual(known["current_ip_source"], "zeek-dhcp")
+        candidate = by_id["dhcp-candidate"]
+        self.assertEqual(candidate["state"], "observed")
+        self.assertEqual(candidate["ip_addresses"], ["10.66.6.230"])
+        self.assertEqual(
+            candidate["source_type"],
+            "zeek-dhcp-observation",
+        )
+
     def test_ip_resolution_uses_event_time_and_refuses_ambiguity(self) -> None:
         old = self.asset(
             "old-owner",
@@ -203,6 +286,8 @@ class AssetInventoryPageTests(unittest.TestCase):
         self.assertIn('id="asset-inventory-view"', page)
         self.assertIn("fetch('/api/asset-inventory'", page)
         self.assertIn("Current IP address", page)
+        self.assertIn("Current address from passive DHCP", page)
+        self.assertIn("provisional DHCP observation", page)
         self.assertIn("asset-inventory.html", page)
         self.assertIn("const assetIdentityHtml=asset=>", incident_page)
         self.assertIn("item.source_asset", incident_page)

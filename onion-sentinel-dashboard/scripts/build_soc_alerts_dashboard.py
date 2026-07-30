@@ -6021,7 +6021,7 @@ def asset_inventory_page_section() -> str:
           </select>
         </label>
       </div>
-      <div id="asset-inventory-status" class="asset-status" role="status" aria-live="polite">Loading authoritative inventory…</div>
+      <div id="asset-inventory-status" class="asset-status" role="status" aria-live="polite">Loading authoritative and dynamically observed inventory…</div>
       <div id="asset-inventory-error" class="ir-error" role="alert" hidden></div>
       <div class="asset-table-wrap">
         <table class="asset-table">
@@ -6037,7 +6037,7 @@ def asset_inventory_page_section() -> str:
         <div class="dhcp-heading">
           <div>
             <h2>DHCP network discovery</h2>
-            <p>Read-only Zeek DHCP observations. Candidates and conflicts require operator review before they become authoritative.</p>
+            <p>Read-only Zeek DHCP observations update current-address display and surface provisional LAN clients. Candidates and conflicts remain non-authoritative until operator review.</p>
           </div>
           <span id="dhcp-collection-badge" class="asset-state">Loading</span>
         </div>
@@ -6083,7 +6083,7 @@ def asset_inventory_page_section() -> str:
       const values=(items,className='')=>Array.isArray(items)&&items.length?`<span class="asset-values">${items.map(value=>`<code class="${className}">${esc(value)}</code>`).join('')}</span>`:'<span class="asset-empty">Not registered</span>';
       const timestamp=value=>{const text=String(value||'').trim();return text?esc(text.replace('T','  ')):'Open-ended'};
       const sortValue=(item,key)=>key==='ip'?String(item.ip_addresses?.[0]||''):key==='hostname'?String(item.hostnames?.[0]||''):String(item[key]||'');
-      const row=item=>{const criticality=String(item.criticality||'unknown').toLowerCase().replace(/[^a-z]/g,'')||'unknown';return `<tr data-asset-id="${esc(item.asset_id)}"><td><strong class="asset-name">${esc(item.asset_id)}</strong><span class="asset-state">${esc(item.state||'current')}</span></td><td>${values(item.ip_addresses)}</td><td>${values(item.hostnames,'asset-hostname')}</td><td><strong class="asset-name">${esc(item.role||'Unspecified role')}</strong><span class="asset-muted">${esc(item.platform||'Platform not registered')}</span></td><td><span class="asset-criticality asset-criticality-${esc(criticality)}">${esc(item.criticality||'unknown')}</span></td><td>${esc(item.confidence||'unknown')}</td><td class="asset-validity"><span class="asset-muted">From</span>${timestamp(item.valid_from)}<span class="asset-muted">Until</span>${timestamp(item.valid_until)}</td><td><strong class="asset-name">${esc(item.source_type||'Operator inventory')}</strong><span class="asset-muted">${esc(item.source_ref||'No source reference')}</span></td></tr>`};
+      const row=item=>{const criticality=String(item.criticality||'unknown').toLowerCase().replace(/[^a-z]/g,'')||'unknown';const dynamic=item.current_ip_source==='zeek-dhcp';const configured=Array.isArray(item.configured_ip_addresses)&&item.configured_ip_addresses.length&&JSON.stringify(item.configured_ip_addresses)!==JSON.stringify(item.ip_addresses)?`<span class="asset-muted">Configured: ${esc(item.configured_ip_addresses.join(', '))}</span>`:'';return `<tr data-asset-id="${esc(item.asset_id)}"><td><strong class="asset-name">${esc(item.asset_id)}</strong><span class="asset-state">${esc(item.state||'current')}</span></td><td>${values(item.ip_addresses)}${dynamic?'<span class="asset-muted">Current address from passive DHCP</span>':''}${configured}</td><td>${values(item.hostnames,'asset-hostname')}</td><td><strong class="asset-name">${esc(item.role||'Unspecified role')}</strong><span class="asset-muted">${esc(item.platform||'Platform not registered')}</span></td><td><span class="asset-criticality asset-criticality-${esc(criticality)}">${esc(item.criticality||'unknown')}</span></td><td>${esc(item.confidence||'unknown')}</td><td class="asset-validity"><span class="asset-muted">From</span>${timestamp(item.valid_from)}<span class="asset-muted">Until</span>${timestamp(item.valid_until)}${item.dhcp_last_seen?`<span class="asset-muted">DHCP last seen ${timestamp(item.dhcp_last_seen)}</span>`:''}</td><td><strong class="asset-name">${esc(item.source_type||'Operator inventory')}</strong><span class="asset-muted">${esc(item.source_ref||'No source reference')}</span></td></tr>`};
       function render(){
         const needle=search.value.trim().toLowerCase();
         const selected=sort.value,sign=direction.value==='desc'?-1:1;
@@ -6091,7 +6091,8 @@ def asset_inventory_page_section() -> str:
         filtered.sort((left,right)=>sortValue(left,selected).localeCompare(sortValue(right,selected),undefined,{numeric:true,sensitivity:'base'})*sign);
         body.innerHTML=filtered.length?filtered.map(row).join(''):'<tr><td colspan="8" class="ir-loading">No current assets match this search.</td></tr>';
         body.dataset.liveRenderVersion=String(Number(body.dataset.liveRenderVersion||0)+1);
-        status.textContent=`Showing ${filtered.length} of ${assets.length} current asset(s). Inventory identity is time-scoped and operator supplied.`;
+        const observed=assets.filter(item=>item.state==='observed').length;
+        status.textContent=`Showing ${filtered.length} of ${assets.length} current asset(s), including ${observed} provisional DHCP observation(s). Operator inventory remains authoritative for investigation identity.`;
       }
       function load(){
         if(assetLoadPromise)return assetLoadPromise;
@@ -6149,6 +6150,7 @@ def asset_inventory_page_section() -> str:
           dhcpStatus.textContent=`Collector status: ${collectionState}.${last}${warning}`;
           dhcpBody.innerHTML=items.length?items.map(dhcpRow).join(''):'<tr><td colspan="7" class="ir-loading">No DHCP identities have been observed yet. The restricted relay collector may still need to be enabled.</td></tr>';
           dhcpBody.dataset.liveRenderVersion=String(Number(dhcpBody.dataset.liveRenderVersion||0)+1);
+          await load();
           return true;
           }catch(error){
           dhcpError.textContent=`DHCP discovery unavailable: ${error.message}`;

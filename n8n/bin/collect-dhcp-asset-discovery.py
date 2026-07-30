@@ -22,6 +22,8 @@ MAX_CONFIG_BYTES = 64 * 1024
 MAX_STATE_BYTES = 8 * 1024 * 1024
 MAX_OBSERVATIONS = 5000
 MAX_RESPONSE_OBSERVATIONS = 1000
+MAX_QUERY_SEGMENTS = 16
+MIN_QUERY_SEGMENT = dt.timedelta(minutes=1)
 HOME = Path.home()
 DEFAULT_CONFIG = HOME / "n8n-local" / "config" / "dhcp-asset-discovery.json"
 DEFAULT_STATE = HOME / "n8n-local" / "asset-discovery" / "dhcp-observations.json"
@@ -109,6 +111,7 @@ def empty_state(status: str = "never_run") -> dict:
             "last_returned": 0,
             "last_hits_total": 0,
             "last_truncated": False,
+            "last_query_segments": 0,
         },
         "observations": [],
     }
@@ -355,23 +358,103 @@ def query_dhcp(config: dict, start: dt.datetime, end: dt.datetime, size: int) ->
     ]
     proc = run_bounded_command(
         command,
-        input_bytes=json.dumps(request, separators=(",", ":")).encode("utf-8"),
+        stdin_text=json.dumps(request, separators=(",", ":"), sort_keys=True),
         timeout_seconds=config["timeout_seconds"],
         max_stdout_bytes=config["max_response_bytes"],
         max_stderr_bytes=config["max_stderr_bytes"],
     )
     if proc.returncode != 0:
-        detail = " ".join(proc.stderr.decode("utf-8", "replace").split())[:300]
+        detail = relay_failure_diagnostic(proc.stdout, proc.stderr)
         raise RuntimeError(f"relay returned {proc.returncode}: {detail or 'no diagnostic'}")
     return validate_response(
-        json.loads(proc.stdout.decode("utf-8")),
+        json.loads(proc.stdout),
         expected_window=request["window"],
     )
 
 
+def relay_failure_diagnostic(stdout: object, stderr: object) -> str:
+    """Return bounded, allowlisted diagnostics from the forced relay envelope."""
+    fields: list[str] = []
+    try:
+        payload = json.loads(str(stdout or ""))
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        for key in ("error", "upstream_error", "upstream_detail"):
+            value = payload.get(key)
+            if not isinstance(value, str):
+                continue
+            text = "".join(
+                character if character.isprintable() else " "
+                for character in value
+            )
+            text = " ".join(text.split())
+            if text:
+                fields.append(text[:300])
+    stderr_text = "".join(
+        character if character.isprintable() else " "
+        for character in str(stderr or "")
+    )
+    stderr_text = " ".join(stderr_text.split())
+    if stderr_text:
+        fields.append(stderr_text[:300])
+    return "; ".join(fields)[:700]
+
+
+def query_complete_window(config: dict, start: dt.datetime, end: dt.datetime, size: int) -> dict:
+    """Split truncated time ranges without permitting an unbounded query loop."""
+    pending = [(start, end)]
+    completed: list[dict] = []
+    queries = 0
+    incomplete = False
+    while pending:
+        segment_start, segment_end = pending.pop(0)
+        response = query_dhcp(config, segment_start, segment_end, size)
+        queries += 1
+        segment_length = segment_end - segment_start
+        can_split = (
+            response.get("truncated") is True
+            and segment_length > MIN_QUERY_SEGMENT
+            and queries + len(pending) + 2 <= MAX_QUERY_SEGMENTS
+        )
+        if can_split:
+            midpoint = segment_start + segment_length / 2
+            pending[0:0] = [
+                (segment_start, midpoint),
+                (midpoint, segment_end),
+            ]
+            continue
+        completed.append(response)
+        if (
+            response.get("truncated") is True
+            or response.get("status") == "partial"
+        ):
+            incomplete = True
+
+    unique: dict[str, dict] = {}
+    for response in completed:
+        for observation in response["observations"]:
+            unique[observation["evidence_id"]] = observation
+    observations = sorted(
+        unique.values(),
+        key=lambda item: (item["observed_at"], item["evidence_id"]),
+    )
+    return {
+        "status": "partial" if incomplete else "ok",
+        "window": {
+            "start": format_timestamp(start),
+            "end": format_timestamp(end),
+        },
+        "hits_total": sum(int(response.get("hits_total") or 0) for response in completed),
+        "observations": observations,
+        "truncated": incomplete,
+        "query_segments": queries,
+    }
+
+
 def collect(config: dict, state: dict, now: dt.datetime) -> dict:
     start, end = collection_window(state, now, config["query_window_minutes"])
-    response = query_dhcp(config, start, end, config["query_size"])
+    response = query_complete_window(config, start, end, config["query_size"])
     observations = merge_observations(state, response["observations"], now, config["retention_days"])
     result = dict(state)
     result.update({
@@ -380,15 +463,18 @@ def collect(config: dict, state: dict, now: dt.datetime) -> dict:
         "updated_at": format_timestamp(now),
         "observations": observations,
     })
+    complete = response.get("status") == "ok" and not response.get("truncated")
+    previous_success = str(state.get("collection", {}).get("last_success_at") or "")
     result["collection"] = {
         "status": "partial" if response.get("status") == "partial" or response.get("truncated") else "ok",
         "last_attempt_at": format_timestamp(now),
-        "last_success_at": format_timestamp(now),
-        "last_error": "",
-        "last_window": response.get("window") if isinstance(response.get("window"), dict) else request["window"],
+        "last_success_at": format_timestamp(now) if complete else previous_success,
+        "last_error": "" if complete else "DHCP query coverage was incomplete; checkpoint was not advanced",
+        "last_window": response["window"],
         "last_returned": len(response["observations"]),
         "last_hits_total": int(response.get("hits_total") or 0),
         "last_truncated": bool(response.get("truncated")),
+        "last_query_segments": int(response.get("query_segments") or 0),
     }
     return result
 
