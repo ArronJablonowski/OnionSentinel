@@ -514,6 +514,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         payload: dict | None = None,
         claimed_payload: dict | None = None,
         claimed_payload_available: bool = True,
+        claim_available: bool = True,
         claimed_job_type: str | None = None,
         claimed_resolved_key: str | None = None,
         register_claimed_alert: bool = True,
@@ -668,6 +669,22 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             del lease_token, retryable
             if status != "processing":
                 return True
+            if not claim_available:
+                contention_conn = sqlite3.connect(db_path)
+                try:
+                    contention_conn.execute(
+                        """
+                        UPDATE durable_jobs
+                        SET status = 'processing',
+                            processing_started_at = ?
+                        WHERE dedupe_key = ?
+                        """,
+                        ("2026-07-24  12:00:02Z", group_id),
+                    )
+                    contention_conn.commit()
+                finally:
+                    contention_conn.close()
+                return False
             authoritative_payload = dict(
                 claimed_payload
                 if claimed_payload is not None
@@ -733,6 +750,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             )
         )
         worker_stderr = io.StringIO()
+        worker_stdout = io.StringIO()
         worker_environment = {
             "ONION_SENTINEL_EVALUATION_MODE": (
                 "1" if controlled_evaluation else "0"
@@ -779,6 +797,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             ) as run_analysis,
             mock.patch.object(self.scheduler, "signal_dashboard_refresh"),
             mock.patch.object(self.scheduler.sys, "stderr", worker_stderr),
+            mock.patch.object(self.scheduler.sys, "stdout", worker_stdout),
             mock.patch.dict(
                 os.environ,
                 worker_environment,
@@ -794,6 +813,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             "run_analysis": run_analysis,
             "group_id": group_id,
             "stderr": worker_stderr.getvalue(),
+            "stdout": worker_stdout.getvalue(),
         }
 
     def test_missing_analysis_threshold_preserves_all_severity_behavior(self) -> None:
@@ -873,6 +893,24 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             result["run_analysis"].call_args.kwargs["reanalysis_attempt_id"],
             "",
         )
+
+    def test_lost_durable_claim_is_logged_as_contention_not_failure(
+        self,
+    ) -> None:
+        result = self.run_indexed_worker_once(
+            severity="medium",
+            claim_available=False,
+        )
+
+        self.assertEqual(result["return_code"], 0)
+        result["build_prompt"].assert_not_called()
+        result["run_analysis"].assert_not_called()
+        self.assertEqual(
+            [call.args[2] for call in result["report_status"].call_args_list],
+            ["processing"],
+        )
+        self.assertIn("claim contention", result["stdout"])
+        self.assertNotIn("failed", result["stderr"])
 
     def test_manual_analyze_low_job_bypasses_medium_threshold(self) -> None:
         result = self.run_indexed_worker_once(

@@ -3575,10 +3575,19 @@ def main() -> int:
                             "controlled durable AI job disappeared before "
                             "its processing lease was recorded"
                         )
-                    raise RuntimeError(
-                        "durable AI job disappeared before its processing "
-                        "lease was recorded"
+                    # Another worker won the compare-and-set claim after this
+                    # worker selected the same pending row. This is normal
+                    # queue contention, not an analysis failure. The group is
+                    # already excluded from this worker's next selection, and
+                    # a lost claim must not consume its bounded work budget.
+                    attempted_count = max(0, attempted_count - 1)
+                    print(
+                        f"{project_now()} AI group {selected_group_id} "
+                        "claim contention: another worker acquired the "
+                        "durable processing lease",
+                        flush=True,
                     )
+                    continue
                 claimed_triage_level = str(
                     selected["triage_level"] or ""
                 ).strip().lower()

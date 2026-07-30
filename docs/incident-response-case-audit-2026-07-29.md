@@ -241,6 +241,13 @@ the original failed attempt and records deterministic scope execution. If the
 same query ID later succeeds, the failed attempt is marked as a resolved retry
 rather than an unresolved evidence gap.
 
+Concurrent validation workers also exposed a scheduler observability defect.
+When two workers selected the same pending job, the compare-and-set lease
+correctly allowed only one owner, but the losing worker logged the group as
+failed and consumed its bounded work allowance. The corrected scheduler logs
+normal `claim contention`, performs no failure transition, does not invoke
+analysis, and continues to another eligible group.
+
 ## Cross-case truthfulness findings
 
 ### Decisive application evidence was present but not used
@@ -360,6 +367,9 @@ calling it OSQuery. The recurring labels were generally correct:
     second model call. The original failed attempt remains visible, while a
     later successful execution of the same query ID is recorded as a resolved
     retry and no longer creates a false evidence-completeness gap.
+17. A lost durable-job compare-and-set claim is classified as normal worker
+    contention, not an analysis failure, and does not consume the losing
+    worker's bounded analysis allowance.
 
 ## Remaining blockers
 
