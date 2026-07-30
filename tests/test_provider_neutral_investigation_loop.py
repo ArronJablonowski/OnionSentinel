@@ -1517,6 +1517,43 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             summary["evidence_gaps"][0],
         )
 
+    def test_outcome_summary_marks_successful_repair_as_resolved(self) -> None:
+        summary = self.runner.investigation_query_outcome_summary(
+            [
+                {
+                    "requests": [],
+                    "results": [
+                        {
+                            "query_id": "repaired-query",
+                            "backend": "contract",
+                            "status": "rejected",
+                        },
+                    ],
+                },
+                {
+                    "requests": [],
+                    "results": [
+                        {
+                            "query_id": "repaired-query",
+                            "backend": "security_onion",
+                            "status": "ok",
+                        },
+                    ],
+                },
+            ],
+            queries_admitted=2,
+        )
+
+        self.assertEqual(summary["successful_queries"], 1)
+        self.assertEqual(summary["rejected_queries"], 1)
+        self.assertEqual(
+            summary["resolved_retry_query_ids"],
+            ["repaired-query"],
+        )
+        self.assertEqual(summary["resolved_non_success_attempts"], 1)
+        self.assertEqual(summary["unresolved_non_success_attempts"], 0)
+        self.assertEqual(summary["evidence_gaps"], [])
+
     def test_mixed_batch_uses_injected_read_only_brokers(self) -> None:
         prompt_package = {
             "_local_investigation_query_context": {
@@ -1823,7 +1860,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             query_executor.call_args.kwargs["round_number"],
             2,
         )
-        self.assertEqual(model_calls, ["repair", "synthesis"])
+        self.assertEqual(model_calls, ["synthesis"])
         audit = response["_investigation_query_audit"]
         self.assertTrue(audit["planning_repair_attempted"])
         self.assertTrue(audit["planning_repair_produced_requests"])
@@ -1837,6 +1874,14 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         )
         self.assertFalse(
             audit["query_planning_repair"]["scope_widening_allowed"]
+        )
+        self.assertTrue(
+            audit["query_planning_repair"][
+                "deterministic_scope_execution"
+            ]
+        )
+        self.assertFalse(
+            audit["query_planning_repair"]["used_existing_follow_up_call"]
         )
         self.assertEqual(
             audit["query_planning_repair"]["candidates"][0]["trigger"],
@@ -2056,7 +2101,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         )
         self.assertIsNone(rejected_scope)
 
-    def test_repair_scope_widening_is_rejected_without_second_repair(
+    def test_deterministic_repair_does_not_ask_model_to_widen_scope(
         self,
     ) -> None:
         route = "codex-cli:gpt-5.5:medium"
@@ -2090,7 +2135,14 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                 return {"investigation_query_requests": [widened]}
             return {"summary": "Widening was blocked."}
 
-        query_executor = mock.Mock()
+        query_executor = mock.Mock(
+            side_effect=lambda _package, requests, **kwargs: (
+                self.successful_security_onion_round(
+                    requests,
+                    round_number=kwargs["round_number"],
+                )
+            )
+        )
         response = self.runner.apply_investigation_query_loop(
             prompt_package,
             {"investigation_query_requests": [invalid]},
@@ -2101,8 +2153,13 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             query_executor=query_executor,
         )
 
-        query_executor.assert_not_called()
-        self.assertEqual(calls, 2)
+        query_executor.assert_called_once()
+        repaired_request = query_executor.call_args.args[1][0]
+        self.assertEqual(
+            repaired_request["parameters"]["observables"]["ips"],
+            ["192.0.2.10"],
+        )
+        self.assertEqual(calls, 1)
         audit = response["_investigation_query_audit"]
         self.assertEqual(
             audit["query_planning_repair"]["attempts"],
@@ -2110,14 +2167,17 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         )
         self.assertEqual(
             audit["query_planning_repair"]["admitted_repair_requests"],
-            0,
+            1,
         )
         self.assertEqual(
             audit["query_planning_repair"]["rejected_repair_requests"],
-            1,
+            0,
         )
-        repair_result = audit["rounds"][1]["results"][0]
-        self.assertIn("widened", repair_result["error"])
+        self.assertTrue(
+            audit["query_planning_repair"][
+                "deterministic_scope_execution"
+            ]
+        )
 
     def test_repair_cannot_drop_original_event_tuple_constraints(
         self,
@@ -2136,6 +2196,19 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                     ),
                     "id": "alert-tuple-repair",
                 },
+                "permitted_event_tuples": [
+                    {
+                        "event_tuple": {
+                            "source_ip": "192.0.2.10",
+                            "destination_ip": "198.51.100.20",
+                            "source_port": 49152,
+                            "destination_port": 443,
+                            "transport": "tcp",
+                        },
+                        "role_semantics": "packet_direction",
+                        "source": "trusted_context",
+                    }
+                ],
             },
         }
         invalid = self.elastic_request("repair-dropped-tuple")
@@ -2157,7 +2230,14 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                 }
             return {"summary": "Tuple widening was blocked."}
 
-        query_executor = mock.Mock()
+        query_executor = mock.Mock(
+            side_effect=lambda _package, requests, **kwargs: (
+                self.successful_security_onion_round(
+                    requests,
+                    round_number=kwargs["round_number"],
+                )
+            )
+        )
         response = self.runner.apply_investigation_query_loop(
             prompt_package,
             {"investigation_query_requests": [invalid]},
@@ -2168,18 +2248,26 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             query_executor=query_executor,
         )
 
-        query_executor.assert_not_called()
+        query_executor.assert_called_once()
+        repaired_request = query_executor.call_args.args[1][0]
+        self.assertEqual(
+            repaired_request["parameters"]["event_tuple"],
+            invalid["parameters"]["event_tuple"],
+        )
         audit = response["_investigation_query_audit"]
         self.assertEqual(
             audit["query_planning_repair"]["admitted_repair_requests"],
-            0,
+            1,
         )
         self.assertEqual(
             audit["query_planning_repair"]["rejected_repair_requests"],
-            1,
+            0,
         )
-        repair_result = audit["rounds"][1]["results"][0]
-        self.assertIn("event tuple", repair_result["error"])
+        self.assertTrue(
+            audit["query_planning_repair"][
+                "deterministic_scope_execution"
+            ]
+        )
 
     def test_invalid_broker_envelope_gets_one_bounded_repair(
         self,
@@ -2734,7 +2822,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             )
 
         audit = response["_investigation_query_audit"]
-        self.assertEqual(audit["successful_read_only_queries"], 1)
+        self.assertEqual(audit["successful_read_only_queries"], 2)
         self.assertTrue(audit["evaluation_requirement_satisfied"])
         self.assertTrue(audit["all_tool_call_bindings_read_only"])
         self.assertFalse(audit["complete"])

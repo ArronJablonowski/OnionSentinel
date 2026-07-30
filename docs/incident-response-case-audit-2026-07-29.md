@@ -217,6 +217,30 @@ non-empty tuple IP maps uniquely to the collector-owned permitted IP catalog.
 A partly trusted tuple, unknown value, ambiguous value, new query text, or
 wider window remains rejected.
 
+### Release f596 repair validation
+
+Release `f596c6485aeb8e43a6c5aa37685b02d80777a0b9` reran the three
+cases that retained proposal rejections. All three completed with independent
+second opinions:
+
+- `ir-fe8fdea2b7eac6f4` emitted a valid request directly and completed with two
+  successful pivots and no rejection;
+- `ir-cbbc240155dd8c00` produced a valid
+  `trusted_event_tuple_intersection` repair candidate, but the model returned
+  final synthesis instead of the requested repaired query;
+- `ir-7cf7aea2cc183d57` produced the same trusted repair candidate, but the
+  model restated it with a changed event tuple and the non-widening validator
+  correctly rejected it.
+
+This proved that repair-scope derivation was correct but still depended on a
+second model response. The final correction removes that dependency. Once a
+repair scope is normalized against collector-owned authorization, the harness
+reconstructs and executes that exact scope in the single repair round. It
+does not ask a model to restate, narrow, or modify the query. The audit retains
+the original failed attempt and records deterministic scope execution. If the
+same query ID later succeeds, the failed attempt is marked as a resolved retry
+rather than an unresolved evidence gap.
+
 ## Cross-case truthfulness findings
 
 ### Decisive application evidence was present but not used
@@ -332,6 +356,10 @@ calling it OSQuery. The recurring labels were generally correct:
     planning-repair round only when all non-empty alert event-tuple IPs map
     uniquely to the trusted permitted-observable catalog. Partly trusted
     tuples fail closed.
+16. A valid non-widenable repair scope is executed deterministically without a
+    second model call. The original failed attempt remains visible, while a
+    later successful execution of the same query ID is recorded as a resolved
+    retry and no longer creates a false evidence-completeness gap.
 
 ## Remaining blockers
 

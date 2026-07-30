@@ -7330,9 +7330,17 @@ def investigation_query_outcome_summary(
         "error_queries": 0,
         "timeout_queries": 0,
     }
+    query_status_history: dict[str, list[str]] = {}
 
-    def count_status(status: Any, logical_queries: int = 1) -> None:
+    def count_status(
+        status: Any,
+        logical_queries: int = 1,
+        *,
+        query_id: str = "",
+    ) -> None:
         normalized = str(status or "").strip().lower()
+        if query_id:
+            query_status_history.setdefault(query_id, []).append(normalized)
         if normalized in INVESTIGATION_QUERY_SUCCESS_STATUSES:
             counts["successful_queries"] += logical_queries
         elif normalized == "partial":
@@ -7407,7 +7415,10 @@ def investigation_query_outcome_summary(
                         )
                     ):
                         nested_status = "partial"
-                    count_status(nested_status)
+                    count_status(
+                        nested_status,
+                        query_id=query_id,
+                    )
                     counted_ids.add(query_id)
             remaining = (
                 len(logical_query_ids) - len(counted_ids)
@@ -7415,7 +7426,25 @@ def investigation_query_outcome_summary(
                 else 1
             )
             if remaining:
-                count_status(result.get("status"), remaining)
+                remaining_ids = [
+                    query_id
+                    for query_id in logical_query_ids
+                    if query_id not in counted_ids
+                ]
+                if remaining_ids:
+                    for query_id in remaining_ids:
+                        count_status(
+                            result.get("status"),
+                            query_id=query_id,
+                        )
+                else:
+                    count_status(
+                        result.get("status"),
+                        remaining,
+                        query_id=str(
+                            result.get("query_id") or ""
+                        ).strip(),
+                    )
 
     accounted = sum(counts.values())
     unreported = max(0, int(queries_admitted) - accounted)
@@ -7424,13 +7453,47 @@ def investigation_query_outcome_summary(
     counts["queries_accounted"] = accounted
     counts["adjusted_windows"] = adjusted_windows
     counts["zero_success"] = bool(queries_admitted and not counts["successful_queries"])
+    resolved_retry_query_ids = sorted(
+        query_id
+        for query_id, statuses in query_status_history.items()
+        if statuses
+        and statuses[-1] in INVESTIGATION_QUERY_SUCCESS_STATUSES
+        and any(
+            status not in INVESTIGATION_QUERY_SUCCESS_STATUSES
+            for status in statuses[:-1]
+        )
+    )
+    resolved_non_success_attempts = sum(
+        sum(
+            status not in INVESTIGATION_QUERY_SUCCESS_STATUSES
+            for status in query_status_history[query_id][:-1]
+        )
+        for query_id in resolved_retry_query_ids
+    )
+    non_success_attempts = (
+        counts["partial_queries"]
+        + counts["rejected_queries"]
+        + counts["error_queries"]
+        + counts["timeout_queries"]
+    )
+    unresolved_non_success_attempts = max(
+        0,
+        non_success_attempts - resolved_non_success_attempts,
+    )
+    counts["resolved_retry_query_ids"] = resolved_retry_query_ids
+    counts["resolved_non_success_attempts"] = (
+        resolved_non_success_attempts
+    )
+    counts["unresolved_non_success_attempts"] = (
+        unresolved_non_success_attempts
+    )
     evidence_gaps: list[str] = []
     if counts["zero_success"]:
         evidence_gaps.append(
             "All requested iterative investigation pivots failed, timed out, "
             "or were rejected; no follow-up query evidence was collected."
         )
-    elif accounted - counts["successful_queries"] or unreported:
+    elif unresolved_non_success_attempts or unreported:
         evidence_gaps.append(
             "One or more requested iterative investigation pivots did not "
             "return complete successful evidence."
@@ -7859,6 +7922,29 @@ def validate_investigation_query_repair_scope(
         raise InvestigationQueryError(
             "query repair widened or changed the rejected event tuple"
         )
+
+
+def investigation_query_request_from_repair_scope(
+    scope: dict[str, Any],
+) -> dict[str, Any]:
+    """Reconstruct the exact normalized request authorized by a repair scope."""
+    request = {
+        "query_id": scope["query_id"],
+        "backend": scope["backend"],
+        "purpose": scope["purpose"],
+        "parameters": {
+            "pack": scope["pack"],
+            "window": copy.deepcopy(scope["window"]),
+            "observables": copy.deepcopy(scope["observables"]),
+            "size": scope["size"],
+            "aggregation": scope["aggregation"],
+        },
+    }
+    if isinstance(scope.get("event_tuple"), dict):
+        request["parameters"]["event_tuple"] = copy.deepcopy(
+            scope["event_tuple"]
+        )
+    return request
 
 
 def investigation_query_repair_failures(
@@ -8802,6 +8888,25 @@ def apply_investigation_query_loop(
                 query_planning_repair_not_attempted_reason = (
                     "no query request budget remained"
                 )
+        if repair_scheduled:
+            # The scope is already normalized, bounded, and derived only from
+            # collector-owned authorization context. Execute that exact scope
+            # in the one allowed repair round instead of asking a model to
+            # restate it. This removes a non-deterministic failure mode without
+            # granting any new query authority.
+            response = {
+                "investigation_query_requests": [
+                    investigation_query_request_from_repair_scope(
+                        item["scope"]
+                    )
+                    for item in candidate_items
+                ],
+            }
+            prompt_package.pop(
+                "investigation_query_planning_repair",
+                None,
+            )
+            continue
         prompt_package["investigation_follow_up"] = {
             "round": round_number,
             "remaining_rounds": remaining_rounds,
@@ -8985,6 +9090,9 @@ def apply_investigation_query_loop(
                 ),
                 "maximum_attempts": 1,
                 "used_existing_follow_up_call": (
+                    False
+                ),
+                "deterministic_scope_execution": (
                     query_planning_repair_attempted
                 ),
                 "scope_widening_allowed": False,
@@ -13647,16 +13755,27 @@ def apply_incident_evidence_completeness_guard(
     if isinstance(iterative, dict):
         outcomes = iterative.get("outcomes")
         if isinstance(outcomes, dict):
+            unresolved_attempts = (
+                safe_nonnegative_int(
+                    outcomes.get("unresolved_non_success_attempts")
+                )
+                if "unresolved_non_success_attempts" in outcomes
+                else sum(
+                    safe_nonnegative_int(outcomes.get(key))
+                    for key in (
+                        "partial_queries",
+                        "rejected_queries",
+                        "error_queries",
+                        "timeout_queries",
+                    )
+                )
+            )
             if outcomes.get("zero_success") is True:
                 cap(0.69, "investigation_pivots_zero_success")
-            elif any(
-                safe_nonnegative_int(outcomes.get(key))
-                for key in (
-                    "partial_queries",
-                    "rejected_queries",
-                    "error_queries",
-                    "timeout_queries",
-                    "unreported_queries",
+            elif (
+                unresolved_attempts
+                or safe_nonnegative_int(
+                    outcomes.get("unreported_queries")
                 )
             ):
                 cap(0.79, "investigation_pivots_incomplete")
@@ -13664,6 +13783,24 @@ def apply_incident_evidence_completeness_guard(
         if isinstance(projection, dict) and projection.get("truncated") is True:
             cap(0.79, "investigation_pivot_prompt_projection_truncated")
         rounds = iterative.get("rounds") if isinstance(iterative.get("rounds"), list) else []
+        resolved_retry_query_ids = {
+            str(item).strip()
+            for item in (
+                outcomes.get("resolved_retry_query_ids")
+                if isinstance(outcomes, dict)
+                and isinstance(
+                    outcomes.get("resolved_retry_query_ids"),
+                    list,
+                )
+                else []
+            )
+            if str(item).strip()
+        }
+        unresolved_non_success_attempts = (
+            unresolved_attempts
+            if isinstance(outcomes, dict)
+            else 0
+        )
         for round_item in rounds:
             if not isinstance(round_item, dict):
                 continue
@@ -13675,10 +13812,30 @@ def apply_incident_evidence_completeness_guard(
                 if not isinstance(result, dict):
                     continue
                 status = str(result.get("status") or "").strip().lower()
+                result_query_id = str(
+                    result.get("query_id") or ""
+                ).strip()
+                resolved_failure = bool(
+                    result_query_id
+                    and result_query_id in resolved_retry_query_ids
+                    and status
+                    not in INVESTIGATION_QUERY_SUCCESS_STATUSES
+                )
                 if status in {"partial", "error", "timeout", "output_limit"}:
-                    cap(0.69, "investigation_pivot_failed_or_partial")
+                    if (
+                        not resolved_failure
+                        and unresolved_non_success_attempts
+                    ):
+                        cap(
+                            0.69,
+                            "investigation_pivot_failed_or_partial",
+                        )
                 elif status in {"rejected", "invalid_response"}:
-                    cap(0.79, "investigation_pivot_rejected")
+                    if (
+                        not resolved_failure
+                        and unresolved_non_success_attempts
+                    ):
+                        cap(0.79, "investigation_pivot_rejected")
                 model_evidence = result.get("evidence")
                 if isinstance(model_evidence, dict):
                     if model_evidence.get("controls_valid") is False:
