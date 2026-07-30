@@ -5383,6 +5383,70 @@ class AiModelRoutingTests(unittest.TestCase):
             response["_authorization_evidence_guard"]["override_applied"]
         )
 
+    def test_policy_sensitive_doh_without_endpoint_or_policy_stays_unknown(
+        self,
+    ) -> None:
+        response = self.runner.apply_policy_sensitive_activity_guard(
+            self.complete_response(
+                detection_outcome="informational_no_action",
+                event_status="observed",
+                detection_validity="matched_intent",
+                activity_disposition="benign",
+                handling="no_action",
+                tuning_recommendation="suppress",
+                recommended_tuning_actions=["Suppress this alert."],
+            ),
+            {
+                "agent_role": "incident-responder",
+                "alert": {
+                    "rule_name": (
+                        "ET INFO Observed Google DNS over HTTPS Domain "
+                        "(dns .google in TLS SNI)"
+                    ),
+                },
+            },
+        )
+
+        self.assertEqual(response["detection_outcome"], "inconclusive")
+        self.assertEqual(response["activity_disposition"], "unknown")
+        self.assertEqual(response["handling"], "monitor")
+        self.assertEqual(response["tuning_recommendation"], "needs_more_data")
+        self.assertEqual(response["recommended_tuning_actions"], [])
+        self.assertTrue(
+            response["_policy_sensitive_activity_guard"]["override_applied"]
+        )
+        self.assertIn(
+            "Policy-sensitive application activity",
+            response["evidence_gaps"][-1],
+        )
+
+    def test_policy_sensitive_guard_does_not_change_apt_activity(
+        self,
+    ) -> None:
+        response = self.runner.apply_policy_sensitive_activity_guard(
+            self.complete_response(
+                detection_outcome="informational_no_action",
+                event_status="observed",
+                detection_validity="matched_intent",
+                activity_disposition="benign",
+                handling="no_action",
+            ),
+            {
+                "agent_role": "incident-responder",
+                "alert": {
+                    "rule_name": (
+                        "ET INFO GNU/Linux APT User-Agent Outbound likely "
+                        "related to package management"
+                    ),
+                },
+            },
+        )
+
+        self.assertEqual(response["detection_outcome"], "informational_no_action")
+        self.assertEqual(response["activity_disposition"], "benign")
+        self.assertEqual(response["handling"], "no_action")
+        self.assertNotIn("_policy_sensitive_activity_guard", response)
+
     def test_same_codex_model_with_different_effort_is_not_an_independent_reviewer(self) -> None:
         args = type("Args", (), {})()
         settings = self.runner.default_ai_settings()

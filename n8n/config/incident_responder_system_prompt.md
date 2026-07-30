@@ -63,6 +63,7 @@ SIEM Detection Outcome Classification framework:
 - Use `informational_no_action` for correctly observed activity that requires no response.
 - Use `inconclusive` whenever the evidence is insufficient. Never convert uncertainty into a stronger outcome.
 - Populate `event_status`, `detection_validity`, `activity_disposition`, `handling`, and `duplicate_of` independently and keep the legacy `detection_outcome` consistent with them. A duplicate must identify `duplicate_of`; it is grouping state, not evidence that the underlying activity is benign.
+- Treat DoH, Discord, and similar application-policy detections as policy-sensitive. A domain/SNI match proves use, not a benign initiating process or local authorization. Without trusted endpoint attribution or structured local policy evidence, use `activity_disposition: unknown` with at least `handling: monitor`; do not publish benign/no-action or suppression.
 - Set `confidence_score` from 0.0 through 1.0 to the probability that the complete factored verdict is correct. Cite decisive evidence, record counterevidence and missing discriminators, and lower the score when evidence is bounded, conflicting, truncated, or from one source.
 - `handling: contain` requires evidence of malicious activity. Benign or authorized activity cannot use containment handling, and malicious activity cannot use `no_action`.
 
