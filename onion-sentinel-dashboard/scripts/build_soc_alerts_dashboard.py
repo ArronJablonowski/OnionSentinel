@@ -3902,12 +3902,13 @@ def reports_page_section(_reports: list[AlertReport]) -> str:
     return f'''
     <section class="view-section active reports-view" aria-label="AI analysis reports">
       {llm_current_panel(load_current_llm_analysis())}
-      <section class="llm-log-section" aria-label="AI analysis log">
+      <section class="llm-log-section" aria-label="Agent analysis activity log">
         <div class="llm-log-toolbar">
           <div>
             <span class="settings-kicker">Reports</span>
-            <h2>LLM Analysis Log</h2>
+            <h2>Agent Analysis Activity Log</h2>
             <span class="llm-log-total-runs"><b id="llm-log-total-runs">{total_runs}</b><em>Total runs</em></span>
+            <div id="llm-log-agent-totals" class="llm-log-agent-totals" aria-label="Runs by agent"></div>
           </div>
           <label>Rows
             <select id="llm-log-page-size" aria-label="Rows per log page">
@@ -3972,6 +3973,7 @@ REPORTS_PAGE_ASSETS = '''
 .llm-log-total-runs{display:inline-flex;align-items:baseline;gap:6px;width:max-content;margin-top:8px;border:1px solid rgba(34,211,238,.22);border-radius:999px;padding:5px 10px;color:#9fb0c4;background:rgba(34,211,238,.055);font-size:12px;font-weight:850}
 .llm-log-total-runs b{color:#8ff4ff;font-size:16px;line-height:1}
 .llm-log-total-runs em{font-style:normal;color:#9fb0c4}
+.llm-log-agent-totals{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.llm-log-agent-total{display:inline-flex;align-items:center;gap:5px;border:1px solid rgba(148,163,184,.18);border-radius:999px;padding:4px 8px;color:#9fb0c4;background:rgba(148,163,184,.045);font-size:10px;font-weight:850}.llm-log-agent-total b{color:#dce9f8;font-size:11px}
 .llm-log-toolbar label{display:flex;align-items:center;gap:8px;color:#9fb0c4;font-size:12px;font-weight:850}
 .llm-log-toolbar select{min-height:44px;border:1px solid rgba(34,211,238,.32);border-radius:8px;background:#0a141e;color:#e8f1fb;padding:8px 28px 8px 10px;font-weight:850}
 .llm-log-table-wrap{max-width:100%;overflow:auto;border:1px solid rgba(148,163,184,.12);border-radius:10px;box-shadow:inset -18px 0 18px -18px rgba(143,244,255,.38)}
@@ -4017,6 +4019,7 @@ REPORTS_PAGE_ASSETS = '''
   const next = document.querySelector('#llm-log-next');
   const status = document.querySelector('#llm-log-page-status');
   const totalRuns = document.querySelector('#llm-log-total-runs');
+  const agentTotals = document.querySelector('#llm-log-agent-totals');
   let page = 1;
   let totalPages = 1;
   let currentAnalysisState = {};
@@ -4203,6 +4206,21 @@ REPORTS_PAGE_ASSETS = '''
       }
       if (status) status.textContent = `Page ${page} of ${totalPages} · ${data.primary_total || 0} primary · ${data.second_opinion_total || 0} second opinion${activeRuns.length ? ` · ${activeRuns.length} running` : ''}`;
       if (totalRuns) totalRuns.textContent = String(data.total || 0);
+      if (agentTotals) {
+        const labels = {
+          'soc-analyst':'SOC Analyst',
+          'incident-responder':'Incident Responder',
+          'siem-engineer':'SIEM Engineer',
+          'cyber-threat-intel':'Cyber Threat Intel',
+          'threat-hunter':'Threat Hunter',
+          'unknown':'Legacy / unknown',
+        };
+        const totals = data.agent_totals && typeof data.agent_totals === 'object' ? data.agent_totals : {};
+        agentTotals.innerHTML = Object.entries(totals)
+          .sort((left, right) => Number(right[1] || 0) - Number(left[1] || 0))
+          .map(([role, count]) => `<span class="llm-log-agent-total">${esc(labels[role] || role)} <b>${esc(count)}</b></span>`)
+          .join('');
+      }
       if (prev) prev.disabled = page <= 1;
       if (next) next.disabled = page >= totalPages;
       return true;

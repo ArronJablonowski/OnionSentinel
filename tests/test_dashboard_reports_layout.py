@@ -24,6 +24,10 @@ class DashboardReportsLayoutTests(unittest.TestCase):
     def test_reports_show_observed_model_agent_and_job_provenance(self) -> None:
         source = DASHBOARD_BUILDER.read_text()
 
+        self.assertIn("Agent Analysis Activity Log", source)
+        self.assertIn('id="llm-log-agent-totals"', source)
+        self.assertIn("'siem-engineer':'SIEM Engineer'", source)
+        self.assertIn("'threat-hunter':'Threat Hunter'", source)
         self.assertIn('id="llm-current-agent"', source)
         self.assertIn('id="llm-current-job"', source)
         self.assertIn("<th>Status</th><th>Agent</th><th>Job</th>", source)

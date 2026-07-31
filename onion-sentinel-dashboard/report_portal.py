@@ -8343,6 +8343,228 @@ def llm_analysis_process_active(
 
 
 LLM_ANALYSIS_COMBINED_HISTORY_LIMIT = 5000
+LLM_AGENT_ACTIVITY_CACHE = ResponseCache(
+    3.0,
+    max_entries=1,
+    lock_stripes=1,
+)
+
+
+def _llm_analysis_run_timestamp(value: object) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        parsed = dt.datetime.fromisoformat(text.replace("  ", "T", 1))
+    except ValueError:
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.timestamp()
+
+
+def _llm_primary_run_identity(record: object) -> tuple[str, str, float]:
+    """Return a conservative fallback identity for pre-contract run records."""
+    current = record if isinstance(record, dict) else {}
+    alert = current.get("alert") if isinstance(current.get("alert"), dict) else {}
+    alert_id = str(
+        alert.get("primary_alert_id")
+        or current.get("alert_id")
+        or ""
+    ).strip()
+    role = str(current.get("agent_role") or "soc-analyst").strip().lower()
+    role = role.replace("_", "-")
+    timestamp = _llm_analysis_run_timestamp(
+        current.get("finished_at")
+        or current.get("generated_at")
+        or current.get("started_at")
+    )
+    return alert_id, role, timestamp
+
+
+def read_llm_database_primary_logs(
+    *,
+    limit: int = LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
+) -> list[dict]:
+    """Read committed primary executions for every configured agent role.
+
+    JSONL contains the richer runtime and mactop telemetry, but SQLite is the
+    authoritative record that an analysis was committed. Returning a bounded
+    database projection lets Reports surface SIEM Engineer, Threat Hunter,
+    Cyber Threat Intel, Incident Responder, and SOC Analyst runs even if their
+    local telemetry was rotated or missed during a rolling deployment.
+    """
+    try:
+        with soc_alert_db_connect() as conn:
+            if not sqlite_table_exists(conn, "ai_analysis_runs"):
+                return []
+            run_columns = sqlite_table_columns(conn, "ai_analysis_runs")
+            required = {"analysis_id", "alert_id", "generated_at"}
+            if not required.issubset(run_columns):
+                return []
+            role_sql = (
+                "COALESCE(NULLIF(TRIM(r.agent_role), ''), 'soc-analyst')"
+                if "agent_role" in run_columns
+                else "'soc-analyst'"
+            )
+            model_sql = "r.model" if "model" in run_columns else "NULL"
+            model_path_sql = (
+                "r.model_path" if "model_path" in run_columns else "NULL"
+            )
+            alert_columns = (
+                sqlite_table_columns(conn, "alerts")
+                if sqlite_table_exists(conn, "alerts")
+                else set()
+            )
+            alert_projection = {
+                "rule_name": (
+                    "a.rule_name" if "rule_name" in alert_columns else "NULL"
+                ),
+                "source_ip": (
+                    "a.source_ip" if "source_ip" in alert_columns else "NULL"
+                ),
+                "destination_ip": (
+                    "a.destination_ip"
+                    if "destination_ip" in alert_columns
+                    else "NULL"
+                ),
+                "destination_port": (
+                    "a.destination_port"
+                    if "destination_port" in alert_columns
+                    else "NULL"
+                ),
+                "seen_count": (
+                    "a.seen_count" if "seen_count" in alert_columns else "1"
+                ),
+            }
+            join_sql = (
+                "LEFT JOIN alerts AS a ON a.alert_id = r.alert_id"
+                if alert_columns
+                else ""
+            )
+            rows = conn.execute(
+                f"""
+                SELECT r.analysis_id, r.alert_id, r.generated_at,
+                       {role_sql} AS agent_role,
+                       {model_sql} AS model, {model_path_sql} AS model_path,
+                       {alert_projection["rule_name"]} AS rule_name,
+                       {alert_projection["source_ip"]} AS source_ip,
+                       {alert_projection["destination_ip"]} AS destination_ip,
+                       {alert_projection["destination_port"]} AS destination_port,
+                       {alert_projection["seen_count"]} AS seen_count
+                FROM ai_analysis_runs AS r
+                {join_sql}
+                ORDER BY r.generated_at DESC, r.analysis_id DESC
+                LIMIT ?
+                """,
+                (max(1, min(LLM_ANALYSIS_COMBINED_HISTORY_LIMIT, int(limit))),),
+            ).fetchall()
+    except (FileNotFoundError, sqlite3.Error, TypeError, ValueError):
+        return []
+
+    logs: list[dict] = []
+    for raw in rows:
+        row = dict(raw)
+        analysis_id = str(row.get("analysis_id") or "").strip()
+        alert_id = str(row.get("alert_id") or "").strip()
+        generated_at = str(row.get("generated_at") or "").strip()
+        try:
+            alert_count = max(1, int(row.get("seen_count") or 1))
+        except (TypeError, ValueError):
+            alert_count = 1
+        logs.append({
+            "log_id": analysis_id,
+            "analysis_id": analysis_id,
+            "run_kind": "primary_analysis",
+            "agent_role": row.get("agent_role") or "soc-analyst",
+            "status": "success",
+            "model": row.get("model"),
+            "model_path": row.get("model_path"),
+            "model_route": "",
+            # SQLite records the committed completion time, not the start.
+            # Display that observed timestamp without claiming a runtime.
+            "started_at": generated_at,
+            "finished_at": generated_at,
+            "runtime_seconds": None,
+            "telemetry_source": "analysis_run_database",
+            "error": "Committed analysis record; host telemetry unavailable",
+            "alert": {
+                "primary_alert_id": alert_id,
+                "rule_name": row.get("rule_name") or "Security Onion alert",
+                "alert_count": alert_count,
+                "source_ip": row.get("source_ip"),
+                "destination_ip": row.get("destination_ip"),
+                "destination_port": row.get("destination_port"),
+            },
+        })
+    return logs
+
+
+def reconcile_llm_primary_logs(
+    telemetry_logs: list[dict],
+    database_logs: list[dict],
+) -> tuple[list[dict], int]:
+    """Merge primary activity without double-counting legacy run identities."""
+    merged = [dict(item) for item in telemetry_logs if isinstance(item, dict)]
+    exact_ids: dict[str, int] = {}
+    fallback: dict[tuple[str, str], list[tuple[float, int]]] = {}
+    for index, item in enumerate(merged):
+        run_id = str(
+            item.get("analysis_id") or item.get("log_id") or ""
+        ).strip()
+        if run_id:
+            exact_ids[run_id] = index
+        alert_id, role, timestamp = _llm_primary_run_identity(item)
+        if alert_id and timestamp:
+            fallback.setdefault((alert_id, role), []).append((timestamp, index))
+
+    def confirm_database_identity(index: int, database: dict) -> None:
+        """Hydrate only provenance that SQLite authoritatively observed."""
+        current = merged[index]
+        if not str(current.get("agent_role") or "").strip():
+            current["agent_role"] = (
+                database.get("agent_role") or "soc-analyst"
+            )
+        if not str(current.get("analysis_id") or "").strip():
+            current["analysis_id"] = database.get("analysis_id")
+        current["database_confirmed"] = True
+
+    recovered = 0
+    for item in database_logs:
+        if not isinstance(item, dict):
+            continue
+        run_id = str(
+            item.get("analysis_id") or item.get("log_id") or ""
+        ).strip()
+        if run_id and run_id in exact_ids:
+            confirm_database_identity(exact_ids[run_id], item)
+            continue
+        alert_id, role, timestamp = _llm_primary_run_identity(item)
+        # Before the shared analysis-id contract, JSONL and SQLite used
+        # different IDs. Alert, role, and a five-second completion window are
+        # sufficiently strict to identify the same execution without merging
+        # distinct reruns hours or days apart.
+        matched_index = next(
+            (
+                index
+                for observed, index in fallback.get((alert_id, role), ())
+                if abs(timestamp - observed) <= 5.0
+            ),
+            None,
+        ) if alert_id and timestamp else None
+        if matched_index is not None:
+            confirm_database_identity(matched_index, item)
+            continue
+        merged.append(dict(item))
+        recovered += 1
+        merged_index = len(merged) - 1
+        if run_id:
+            exact_ids[run_id] = merged_index
+        if alert_id and timestamp:
+            fallback.setdefault((alert_id, role), []).append(
+                (timestamp, merged_index)
+            )
+    return merged, recovered
 
 
 def _llm_reviewer_started_at(generated_at: object, runtime: object) -> str:
@@ -8498,38 +8720,68 @@ def _llm_log_sort_timestamp(record: dict) -> float:
     return 0.0
 
 
+def read_llm_agent_activity_snapshot() -> dict:
+    """Build one bounded, role-complete history snapshot for pagination."""
+    def compute() -> dict:
+        telemetry_total, _, telemetry_logs = (
+            SOC_ALERT_LLM_ANALYSIS_LOG_INDEX.page(
+                page=1,
+                limit=LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
+            )
+        )
+        database_logs = read_llm_database_primary_logs()
+        primary_logs, database_recovered_total = reconcile_llm_primary_logs(
+            telemetry_logs,
+            database_logs,
+        )
+        reviewer_logs = read_llm_second_opinion_logs(primary_logs)
+        combined = [*primary_logs, *reviewer_logs]
+        combined.sort(
+            key=lambda record: (
+                _llm_log_sort_timestamp(record),
+                str(record.get("log_id") or ""),
+            ),
+            reverse=True,
+        )
+        agent_totals: dict[str, int] = {}
+        for record in combined:
+            role = str(
+                record.get("agent_role") or "unknown"
+            ).strip().lower()
+            role = role.replace("_", "-") or "unknown"
+            agent_totals[role] = agent_totals.get(role, 0) + 1
+        return {
+            "primary_logs": primary_logs,
+            "reviewer_logs": reviewer_logs,
+            "combined": combined,
+            "telemetry_total": telemetry_total,
+            "database_recovered_total": database_recovered_total,
+            "agent_totals": agent_totals,
+            "history_truncated": (
+                telemetry_total > len(telemetry_logs)
+                or len(database_logs) >= LLM_ANALYSIS_COMBINED_HISTORY_LIMIT
+                or len(reviewer_logs)
+                >= LLM_ANALYSIS_COMBINED_HISTORY_LIMIT
+            ),
+        }
+
+    return LLM_AGENT_ACTIVITY_CACHE.get_or_compute(
+        "role-complete-history",
+        compute,
+    )
+
+
 def llm_analysis_logs_response(query: dict[str, list[str]]) -> dict:
     requested_page = llm_analysis_log_page((query.get("page") or ["1"])[0])
     limit = llm_analysis_log_limit((query.get("limit") or ["25"])[0])
-    primary_total, _, _ = SOC_ALERT_LLM_ANALYSIS_LOG_INDEX.page(page=1, limit=1)
-    reviewer_logs = read_llm_second_opinion_logs([])
+    activity = read_llm_agent_activity_snapshot()
+    primary_logs = activity["primary_logs"]
+    reviewer_logs = activity["reviewer_logs"]
+    primary_total = len(primary_logs)
     total = primary_total + len(reviewer_logs)
     total_pages = max(1, math.ceil(total / limit)) if total else 1
     page = min(requested_page, total_pages)
-    # At most `page * limit` primary rows can appear before the requested
-    # combined page. Reading only that prefix keeps the common first-page poll
-    # proportional to the page size instead of reparsing the entire JSONL log.
-    primary_total, _, primary_logs = SOC_ALERT_LLM_ANALYSIS_LOG_INDEX.page(
-        page=1,
-        limit=page * limit,
-    )
-    if primary_logs:
-        parents = {
-            str(record.get("log_id") or ""): record
-            for record in primary_logs
-            if record.get("log_id")
-        }
-        for reviewer in reviewer_logs:
-            parent = parents.get(str(reviewer.get("parent_log_id") or ""))
-            hydrate_llm_reviewer_from_parent(reviewer, parent)
-    combined = [*primary_logs, *reviewer_logs]
-    combined.sort(
-        key=lambda record: (
-            _llm_log_sort_timestamp(record),
-            str(record.get("log_id") or ""),
-        ),
-        reverse=True,
-    )
+    combined = activity["combined"]
     start = (page - 1) * limit
     logs = combined[start:start + limit]
     return {
@@ -8538,8 +8790,13 @@ def llm_analysis_logs_response(query: dict[str, list[str]]) -> dict:
         "limit": limit,
         "total": total,
         "primary_total": primary_total,
+        "telemetry_total": activity["telemetry_total"],
+        "database_recovered_total": activity[
+            "database_recovered_total"
+        ],
         "second_opinion_total": len(reviewer_logs),
-        "history_truncated": len(reviewer_logs) >= LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
+        "agent_totals": activity["agent_totals"],
+        "history_truncated": activity["history_truncated"],
         "total_pages": total_pages,
         "logs": [
             decorate_llm_analysis_record(record, live=False)

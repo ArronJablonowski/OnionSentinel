@@ -1776,6 +1776,87 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(reviewer["cpu_used_percent_max"], 62.5)
         self.assertIn("material disagreement", reviewer["error"])
 
+    def test_llm_activity_reconciles_every_agent_role_from_database(self) -> None:
+        log_path = Path(self.tmp.name) / "llm-analysis-log.jsonl"
+        log_path.write_text(json.dumps({
+            "log_id": "legacy-jsonl-id",
+            "status": "success",
+            "agent_role": "soc-analyst",
+            "started_at": "2026-07-29  09:58:00-06:00",
+            "finished_at": "2026-07-29  10:00:00-06:00",
+            "model": "primary-model",
+            "model_path": "ollama",
+            "alert": {
+                "primary_alert_id": "newest-alert",
+                "rule_name": "Newest detection",
+                "alert_count": 5,
+            },
+        }) + "\n", encoding="utf-8")
+        self.portal.SOC_ALERT_LLM_ANALYSIS_LOG_INDEX = (
+            self.portal.JsonlLogIndex(log_path)
+        )
+        self.conn.execute(
+            "ALTER TABLE ai_analysis_runs ADD COLUMN "
+            "agent_role TEXT NOT NULL DEFAULT 'soc-analyst'"
+        )
+        self.conn.executemany(
+            """
+            INSERT INTO ai_analysis_runs (
+              analysis_id, group_id, alert_id, generated_at, model,
+              model_path, detection_outcome, bluf, summary, confidence,
+              artifact_path, evidence_hash, response_json, created_at,
+              agent_role
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL,
+                      NULL, NULL, '{}', ?, ?)
+            """,
+            [
+                (
+                    "database-id-for-legacy-run",
+                    "legacy-group",
+                    "newest-alert",
+                    "2026-07-29  10:00:02-06:00",
+                    "primary-model",
+                    "ollama",
+                    "2026-07-29  10:00:02-06:00",
+                    "soc-analyst",
+                ),
+                (
+                    "siem-engineer-run",
+                    "engineering-group",
+                    "older-alert",
+                    "2026-07-29  11:00:00-06:00",
+                    "engineering-model",
+                    "frontier-codex-cli",
+                    "2026-07-29  11:00:00-06:00",
+                    "siem-engineer",
+                ),
+            ],
+        )
+        self.conn.commit()
+
+        payload = self.portal.llm_analysis_logs_response({
+            "page": ["1"],
+            "limit": ["25"],
+        })
+
+        self.assertEqual(payload["telemetry_total"], 1)
+        self.assertEqual(payload["database_recovered_total"], 1)
+        self.assertEqual(payload["primary_total"], 2)
+        self.assertEqual(payload["total"], 2)
+        self.assertEqual(payload["agent_totals"]["soc-analyst"], 1)
+        self.assertEqual(payload["agent_totals"]["siem-engineer"], 1)
+        siem = next(
+            item for item in payload["logs"]
+            if item.get("agent_role") == "siem-engineer"
+        )
+        self.assertEqual(siem["agent_label"], "SIEM Engineer")
+        self.assertEqual(siem["job_label"], "Detection engineering analysis")
+        self.assertEqual(
+            siem["runtime_model_label"],
+            "Codex CLI · engineering-model",
+        )
+        self.assertEqual(siem["telemetry_source"], "analysis_run_database")
+
     def test_failed_report_without_observation_does_not_claim_assigned_model(self) -> None:
         historical = self.portal.decorate_llm_analysis_record(
             {
