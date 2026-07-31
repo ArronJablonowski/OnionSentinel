@@ -296,7 +296,14 @@ class AssetInventoryPageTests(unittest.TestCase):
             '<td><span class="asset-state">${esc(item.state||\'current\')}</span></td>',
             page,
         )
-        self.assertIn('colspan="9" class="ir-loading">Loading known assets', page)
+        self.assertIn("<th>From</th><th>Until</th><th>Source</th>", page)
+        self.assertIn(
+            '<td class="asset-validity">${timestamp(item.valid_from)}</td>'
+            '<td class="asset-validity">${timestamp(item.valid_until)}',
+            page,
+        )
+        self.assertNotIn("<th>Validity</th>", page)
+        self.assertIn('colspan="10" class="ir-loading">Loading known assets', page)
         self.assertIn("Current address from passive DHCP", page)
         self.assertIn("provisional DHCP observation", page)
         self.assertIn("Historical backfill has not run", page)
