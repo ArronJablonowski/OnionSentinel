@@ -35,6 +35,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `bin/asset_inventory.py` | Strict time-aware asset inventory loader and exact identifier resolver. |
 | `bin/collect-dhcp-asset-discovery.py` | Scheduled fixed-query DHCP identity collector with bounded truncation splitting and optional 1–30 day historical backfill. |
 | `bin/collect-software-inventory.py` | Hourly, last-good snapshot collector for fixed endpoint-reported, Zeek software, and HTTP User-Agent observations through the existing restricted relay lane. |
+| `bin/ac_hunter_contract.py` | Shared named-operation contract for the forced Mac-to-Relay AC Hunter transport; callers cannot supply an upstream URL, method, redirect, proxy, or TLS setting. |
 | `bin/promote-dhcp-asset.py` | Explicit fingerprint-bound operator promotion of one DHCP identity with collision checks, rollback copy, validation, and atomic inventory update. |
 | `bin/export-adjudicated-analysis-replays.py` | Exports append-only human adjudications into a private mode-0600 replay suite. |
 | `bin/agent_memory.py` | Shared role-aware Markdown memory library with relevance retrieval, validation, locking, deduplication, and expiry. |
@@ -54,6 +55,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `config/detection_playbooks.json` | Versioned, code-owned exact-ID validation playbooks for signature-specific discriminators and rule-drift checks. |
 | `config/asset_inventory.example.json` | Empty sanitized template for the operator-owned runtime asset inventory. |
 | `config/software-inventory.example.json` | Disabled-by-default configuration for the restricted Software Inventory collector. |
+| `config/ac-hunter.example.json` | Disabled, non-secret Mac client configuration for AC Hunter Deep Review. Live credentials remain in a separate owner-only runtime file. |
 | `agent-memory/` | Sanitized starter Markdown memory files for individual Cyber Security Agents plus shared cross-agent memory. Installed into `$HOME/n8n-local/soc-alerts/agent-memory` only if missing. |
 | `launchd/` | Mac Studio LaunchAgents for stack supervision, AI jobs, PCAP parsing, and dry-run PCAP retention. |
 
@@ -88,6 +90,14 @@ The installer creates or updates:
 It does not overwrite an existing `$HOME/n8n-local/.env`, and it never writes
 to `$HOME/.hermes` or `$HOME/report_portal`. Those paths belong to the separate
 Hermes LAN Portal project.
+
+AC Hunter Deep Review is also disabled on first install. The installer seeds
+only `$HOME/n8n-local/config/ac-hunter.json`, ensures the normalized cache
+directory is owner-only, and installs the shared contract and dashboard
+client. It never creates or reads
+`$HOME/n8n-local/config/ac-hunter-credentials.json`, never generates its
+dedicated SSH key, and never enables the Relay. Follow
+`../docs/ac-hunter-deep-review.md` to establish and validate that trust path.
 
 Agent memory is not a replacement for SQLite analysis history or the Markdown
 report corpus. The active SOC Analyst retrieves a small set of relevant role

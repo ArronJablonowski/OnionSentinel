@@ -21,5 +21,8 @@ Important documents:
   and visual regression workflow.
 - `dashboard-service-boundary.md`: strict ownership boundary between the
   independently served Onion Sentinel UI and the separate Hermes LAN Portal.
+- `ac-hunter-deep-review.md`: read-only AC Hunter integration, fixed
+  Mac-to-Relay-to-AC-Hunter path, secret boundaries, trust bootstrap,
+  validation, and rollback.
 
 The top-level node READMEs are the fastest path for rebuilds. These documents preserve design history and deeper operational context.

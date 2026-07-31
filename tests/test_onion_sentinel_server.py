@@ -46,6 +46,9 @@ class OnionSentinelServerTests(unittest.TestCase):
 
     def test_only_soc_api_routes_are_exposed(self):
         self.assertTrue(server.is_soc_get_api("/api/admin/session-status"))
+        self.assertTrue(
+            server.is_soc_get_api("/api/ac-hunter/deep-review")
+        )
         self.assertTrue(server.is_soc_get_api("/api/asset-inventory"))
         self.assertTrue(server.is_soc_get_api("/api/software-inventory"))
         self.assertTrue(server.is_soc_get_api("/api/soc-alerts"))
@@ -61,6 +64,9 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertFalse(server.is_soc_get_api("/api/admin/service-status"))
 
         self.assertTrue(server.is_soc_post_api("/api/soc-alerts/example/analyze"))
+        self.assertTrue(
+            server.is_soc_post_api("/api/ac-hunter/refresh")
+        )
         self.assertTrue(server.is_soc_post_api("/api/soc-alerts/example/pcap"))
         self.assertTrue(server.is_soc_post_api("/api/soc-alerts/example/escalate"))
         self.assertTrue(server.is_soc_post_api("/api/soc-alerts/example/adjudicate"))
@@ -146,6 +152,21 @@ class OnionSentinelServerTests(unittest.TestCase):
             server.OnionSentinelHandler._require_admin_auth,
             server.runtime.PortalHandler._require_admin_auth,
         )
+
+    def test_ac_hunter_force_refresh_requires_admin_session(self):
+        class Session:
+            def __init__(self, authenticated):
+                self.authenticated = authenticated
+
+            def _admin_authenticated(self):
+                return self.authenticated
+
+        authorize = (
+            server.OnionSentinelHandler
+            ._ac_hunter_force_refresh_authorized
+        )
+        self.assertFalse(authorize(Session(False)))
+        self.assertTrue(authorize(Session(True)))
 
     def test_all_role_primary_and_reviewer_prompt_routes_are_allowlisted(self):
         routes = {

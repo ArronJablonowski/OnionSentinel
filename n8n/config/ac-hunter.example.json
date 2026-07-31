@@ -1,0 +1,15 @@
+{
+  "schema": "onion-sentinel-ac-hunter-client-config-v1",
+  "enabled": false,
+  "dataset": "security-onion-rolling",
+  "relay_host": "10.88.8.8",
+  "relay_user": "aj",
+  "ssh_key": "__HOME__/.ssh/onion-sentinel-ac-hunter_ed25519",
+  "known_hosts": "__HOME__/n8n-local/config/ac-hunter-relay-known-hosts",
+  "credentials_file": "__HOME__/n8n-local/config/ac-hunter-credentials.json",
+  "cache_file": "__HOME__/n8n-local/cache/ac-hunter-deep-review.json",
+  "cache_ttl_seconds": 300,
+  "connect_timeout_seconds": 8,
+  "timeout_seconds": 45,
+  "max_response_bytes": 8388608
+}

@@ -128,7 +128,8 @@ if ! critical_launch_agents_are_down; then
   exit 1
 fi
 
-mkdir -p "$STACK_DIR/alert_store/config" "$STACK_DIR/alert_store/lib" "$STACK_DIR/postgres" "$STACK_DIR/bin" "$STACK_DIR/config" "$STACK_DIR/config/maxmind" "$STACK_DIR/logs" "$STACK_DIR/run" "$STACK_DIR/python" "$STACK_DIR/alert_store_data" "$STACK_DIR/alert_store_postgres_data" "$STACK_DIR/n8n_data" "$STACK_DIR/soc-alerts" "$STACK_DIR/soc-alerts/agent-memory" "$STACK_DIR/soc-alerts/pcap-analysis" "$STACK_DIR/pcap-evidence/artifacts" "$STACK_DIR/asset-discovery" "$STACK_DIR/software-inventory"
+mkdir -p "$STACK_DIR/alert_store/config" "$STACK_DIR/alert_store/lib" "$STACK_DIR/postgres" "$STACK_DIR/bin" "$STACK_DIR/cache" "$STACK_DIR/config" "$STACK_DIR/config/maxmind" "$STACK_DIR/logs" "$STACK_DIR/run" "$STACK_DIR/python" "$STACK_DIR/alert_store_data" "$STACK_DIR/alert_store_postgres_data" "$STACK_DIR/n8n_data" "$STACK_DIR/soc-alerts" "$STACK_DIR/soc-alerts/agent-memory" "$STACK_DIR/soc-alerts/pcap-analysis" "$STACK_DIR/pcap-evidence/artifacts" "$STACK_DIR/asset-discovery" "$STACK_DIR/software-inventory"
+chmod 0700 "$STACK_DIR/cache"
 chmod 0700 "$STACK_DIR/run"
 chmod 0700 "$STACK_DIR/asset-discovery"
 chmod 0700 "$STACK_DIR/software-inventory"
@@ -370,6 +371,7 @@ cp "$REPO_DIR/n8n/bin/install-investigation-query-runtime.py" "$STACK_DIR/bin/in
 cp "$REPO_DIR/n8n/bin/live_osquery_contract.py" "$STACK_DIR/bin/live_osquery_contract.py"
 cp "$REPO_DIR/n8n/bin/live_osquery_client.py" "$STACK_DIR/bin/live_osquery_client.py"
 cp "$REPO_DIR/n8n/bin/collect-live-osquery.py" "$STACK_DIR/bin/collect-live-osquery.py"
+cp "$REPO_DIR/n8n/bin/ac_hunter_contract.py" "$STACK_DIR/bin/ac_hunter_contract.py"
 cp "$REPO_DIR/n8n/bin/onion_sentinel_harness.py" "$STACK_DIR/bin/onion_sentinel_harness.py"
 cp "$REPO_DIR/n8n/bin/security_jsonl_log.py" "$STACK_DIR/bin/security_jsonl_log.py"
 cp "$REPO_DIR/operations/evaluate-harness-traces.py" "$STACK_DIR/bin/evaluate-harness-traces.py"
@@ -438,6 +440,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/http_runtime.py" "$DASHBOARD_RUNTIME_DIR/
 cp "$REPO_DIR/onion-sentinel-dashboard/jsonl_log.py" "$DASHBOARD_RUNTIME_DIR/jsonl_log.py"
 cp "$REPO_DIR/n8n/bin/security_jsonl_log.py" "$DASHBOARD_RUNTIME_DIR/security_jsonl_log.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/report_portal.py" "$DASHBOARD_RUNTIME_DIR/report_portal.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_review.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_review.py"
 cp "$REPO_DIR/n8n/bin/asset_inventory.py" "$DASHBOARD_RUNTIME_DIR/asset_inventory.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory.py" "$DASHBOARD_RUNTIME_DIR/software_inventory.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/soc_alert_api.py" "$DASHBOARD_RUNTIME_DIR/soc_alert_api.py"
@@ -491,6 +494,53 @@ Path(destination).write_text(
 PY
   chmod 0600 "$STACK_DIR/config/software-inventory.json"
   echo "Created disabled $STACK_DIR/config/software-inventory.json example." >&2
+fi
+# AC Hunter configuration, credentials, and normalized cache are separate trust
+# objects. Seed only the disabled non-secret configuration. Never create,
+# replace, parse, or print the dedicated service-account credential file.
+if [[ -L "$STACK_DIR/config/ac-hunter.json" ]] \
+  || [[ -e "$STACK_DIR/config/ac-hunter.json" \
+    && ! -f "$STACK_DIR/config/ac-hunter.json" ]]; then
+  echo "Refusing install: AC Hunter client config must be a regular file." >&2
+  exit 1
+fi
+if [[ ! -f "$STACK_DIR/config/ac-hunter.json" ]]; then
+  /usr/bin/python3 - "$HOME" "$REPO_DIR/n8n/config/ac-hunter.example.json" "$STACK_DIR/config/ac-hunter.json" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+home, source, destination = sys.argv[1:4]
+payload = Path(source).read_text(encoding="utf-8").replace("__HOME__", home)
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(destination, flags, 0o600)
+with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+    handle.write(payload)
+PY
+  echo "Created disabled $STACK_DIR/config/ac-hunter.json example." >&2
+fi
+chmod 0600 "$STACK_DIR/config/ac-hunter.json"
+
+AC_HUNTER_CREDENTIALS="$STACK_DIR/config/ac-hunter-credentials.json"
+if [[ -L "$AC_HUNTER_CREDENTIALS" ]] \
+  || [[ -e "$AC_HUNTER_CREDENTIALS" && ! -f "$AC_HUNTER_CREDENTIALS" ]]; then
+  echo "Refusing install: AC Hunter credentials must be a regular file." >&2
+  exit 1
+fi
+if [[ -f "$AC_HUNTER_CREDENTIALS" ]]; then
+  chmod 0600 "$AC_HUNTER_CREDENTIALS"
+fi
+
+AC_HUNTER_CACHE="$STACK_DIR/cache/ac-hunter-deep-review.json"
+if [[ -L "$AC_HUNTER_CACHE" ]] \
+  || [[ -e "$AC_HUNTER_CACHE" && ! -f "$AC_HUNTER_CACHE" ]]; then
+  echo "Refusing install: AC Hunter cache must be a regular file." >&2
+  exit 1
+fi
+if [[ -f "$AC_HUNTER_CACHE" ]]; then
+  chmod 0600 "$AC_HUNTER_CACHE"
 fi
 # DHCP discovery and software inventory intentionally inherit the established
 # read-only incident-evidence SSH lane. Preserve each collector's scheduling
@@ -656,5 +706,9 @@ Next manual steps:
    n8n/ssh/authorized_keys.alert-intake.example.
 6. Activate the workflow and validate synthetic post-commit delivery before
    enabling relay alert_ingest.
+7. AC Hunter Deep Review remains disabled. Follow
+   docs/ac-hunter-deep-review.md to install its dedicated key, host pin,
+   owner-only service credential, and Relay certificate trust before enabling
+   either side.
 
 MSG

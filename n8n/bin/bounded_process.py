@@ -10,7 +10,9 @@ import signal
 import stat
 import subprocess
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -632,6 +634,45 @@ def _select_timeout(
     return timeout
 
 
+@contextmanager
+def _pipe_stdin(payload: bytes):
+    """Yield a pipe-backed stdin stream without staging payload bytes on disk."""
+
+    read_fd, write_fd = os.pipe()
+    read_stream = os.fdopen(read_fd, "rb", closefd=True)
+
+    def write_payload() -> None:
+        remaining = memoryview(payload)
+        try:
+            while remaining:
+                written = os.write(write_fd, remaining[: 64 * 1024])
+                remaining = remaining[written:]
+        except (BrokenPipeError, OSError):
+            # A child that exits before consuming stdin will close the pipe.
+            # Its exit status/stderr remains the authoritative diagnostic.
+            pass
+        finally:
+            try:
+                os.close(write_fd)
+            except OSError:
+                pass
+
+    writer = threading.Thread(
+        target=write_payload,
+        name="bounded-process-stdin",
+        daemon=True,
+    )
+    writer.start()
+    try:
+        yield read_stream
+    finally:
+        # Closing the parent's read end releases a writer if the child exited
+        # without consuming all input. The bounded process cleanup has already
+        # stopped the child before this context unwinds on an exception.
+        read_stream.close()
+        writer.join(timeout=1.0)
+
+
 def run_bounded_command(
     command: Sequence[str],
     *,
@@ -654,9 +695,10 @@ def run_bounded_command(
     if progress_interval_seconds <= 0:
         raise ValueError("progress_interval_seconds must be positive")
 
-    with tempfile.TemporaryFile() as stdin_file:
-        stdin_file.write(stdin_text.encode("utf-8"))
-        stdin_file.seek(0)
+    # stdin can contain short-lived cookies, JWTs, or other private harness
+    # context. Stream it through an anonymous pipe instead of a disk-backed
+    # TemporaryFile.
+    with _pipe_stdin(stdin_text.encode("utf-8")) as stdin_file:
         containment = _prepare_process_containment(env)
         try:
             process = subprocess.Popen(

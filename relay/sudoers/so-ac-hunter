@@ -1,0 +1,1 @@
+__RELAY_ADMIN_USER__ ALL=(soalert) NOPASSWD: /usr/bin/python3 /usr/local/libexec/onion-sentinel/ac_hunter_broker.py

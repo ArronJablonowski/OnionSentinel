@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""Frontend contracts for the AC Hunter behavioral-triage workspace."""
+from __future__ import annotations
+
+import importlib.util
+import sys
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+BUILDER_PATH = (
+    ROOT
+    / "onion-sentinel-dashboard"
+    / "scripts"
+    / "build_soc_alerts_dashboard.py"
+)
+
+
+def load_builder():
+    spec = importlib.util.spec_from_file_location(
+        "ac_hunter_page_builder",
+        BUILDER_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class AcHunterPageTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.builder = load_builder()
+        cls.section = cls.builder.ac_hunter_page_section()
+        cls.page = cls.builder.render_static_page(
+            cls.builder.build_html([]),
+            "ac_hunter",
+            [],
+        )
+
+    def test_navigation_and_page_identity_are_generated(self) -> None:
+        keys = [definition[0] for definition in self.builder.PAGE_DEFS]
+
+        self.assertEqual(
+            keys[keys.index("system_health") + 1],
+            "ac_hunter",
+        )
+        self.assertIn(
+            '<a class="nav-item active" href="ac-hunter.html"',
+            self.page,
+        )
+        self.assertIn(
+            '<h1 id="page-title">AC Hunter Deep Review</h1>',
+            self.page,
+        )
+        self.assertIn('id="ac-hunter-deep-review-view"', self.page)
+        self.assertIn(
+            "Behavioral network findings correlated for analyst triage",
+            self.page,
+        )
+
+    def test_page_preserves_the_behavioral_triage_guardrail(self) -> None:
+        self.assertIn(
+            "AC Hunter is a behavioral triage source.",
+            self.section,
+        )
+        self.assertIn(
+            "Scores and heuristics do not establish malware or compromise.",
+            self.section,
+        )
+        self.assertIn(
+            "Validate findings with primary network and endpoint evidence",
+            self.section,
+        )
+        self.assertIn(
+            "No conclusion can be drawn from missing data.",
+            self.section,
+        )
+
+    def test_snapshot_metadata_and_verdict_summary_are_visible(self) -> None:
+        for identifier in (
+            "ac-hunter-cache-state",
+            "ac-hunter-dataset",
+            "ac-hunter-range-start",
+            "ac-hunter-range-end",
+            "ac-hunter-last-pulled",
+            "ac-hunter-loading",
+            "ac-hunter-stale",
+            "ac-hunter-error",
+        ):
+            self.assertIn(f'id="{identifier}"', self.section)
+
+        for verdict in (
+            "high_concern",
+            "needs_review",
+            "likely_benign",
+            "informational",
+        ):
+            self.assertIn(
+                f'data-ac-hunter-verdict-count="{verdict}"',
+                self.section,
+            )
+
+    def test_all_required_triage_modules_have_explicit_empty_states(self) -> None:
+        required = {
+            "beacons": "Beaconing detections",
+            "sni": "SNI beacon detections",
+            "proxy": "Proxy beacon detections",
+            "long": "Long connections over 5 hours",
+            "dns": "DNS anomalies",
+            "unexpected": "Unexpected protocol / port findings",
+            "blacklist": "Blacklist results",
+            "strobe": "Strobe / scanning results",
+        }
+        for key, title in required.items():
+            self.assertIn(title, self.section)
+            self.assertIn(f'id="ac-hunter-{key}-body"', self.section)
+            self.assertIn(f'id="ac-hunter-{key}-count"', self.section)
+
+        self.assertIn(
+            "No blacklist matches",
+            self.section,
+        )
+        self.assertIn(
+            "No strobe or scanning findings",
+            self.section,
+        )
+        self.assertIn(
+            "Data unavailable for this module. No conclusion can be drawn.",
+            self.section,
+        )
+
+    def test_host_correlation_and_analyst_notes_are_first_class_sections(
+        self,
+    ) -> None:
+        self.assertIn("Top risky internal hosts", self.section)
+        self.assertIn("Correlated host summary", self.section)
+        self.assertIn('id="ac-hunter-risky-hosts"', self.section)
+        self.assertIn('id="ac-hunter-correlated-hosts"', self.section)
+        self.assertIn('id="ac-hunter-notes-title">Findings that need', self.section)
+        self.assertIn('id="ac-hunter-notes"', self.section)
+        self.assertIn(
+            "Security Onion, Zeek, PCAP, or endpoint pivots",
+            self.section,
+        )
+
+    def test_api_calls_use_cached_read_and_explicit_refresh_routes(self) -> None:
+        self.assertIn(
+            "const GET_ENDPOINT='/api/ac-hunter/deep-review'",
+            self.section,
+        )
+        self.assertIn(
+            "const REFRESH_ENDPOINT='/api/ac-hunter/refresh'",
+            self.section,
+        )
+        self.assertIn(
+            "fetchJson(REFRESH_ENDPOINT,{method:'POST'",
+            self.section,
+        )
+        self.assertIn(
+            "'X-Onion-Sentinel-Request':'dashboard'",
+            self.section,
+        )
+        self.assertIn(
+            "credentials:'same-origin'",
+            self.section,
+        )
+        self.assertIn(
+            "window.OnionSentinelReactiveTables.register('ac-hunter-deep-review'",
+            self.section,
+        )
+
+    def test_api_values_are_inserted_as_text_not_html(self) -> None:
+        self.assertIn(
+            "const element=document.createElement(tag)",
+            self.section,
+        )
+        self.assertIn(
+            "element.textContent=String(text)",
+            self.section,
+        )
+        self.assertIn(
+            "body.replaceChildren(fragment)",
+            self.section,
+        )
+        self.assertNotIn(".innerHTML", self.section)
+        self.assertNotIn("insertAdjacentHTML", self.section)
+        self.assertNotIn("document.write", self.section)
+
+    def test_tables_render_only_normalized_and_module_specific_fields(
+        self,
+    ) -> None:
+        for field in (
+            "source_ip",
+            "destination_ip",
+            "fqdn",
+            "score",
+            "count",
+            "duration",
+            "port",
+            "protocol",
+            "evidence",
+            "verdict",
+            "reason",
+            "timing_mode",
+            "data_size_mode",
+            "responding_ips",
+        ):
+            self.assertIn(f".{field}", self.section)
+
+        self.assertNotIn("raw_response", self.section)
+        self.assertNotIn("session_cookie", self.section)
+        self.assertNotIn("Authorization", self.section)
+
+    def test_page_is_responsive_and_accessible(self) -> None:
+        self.assertIn("@media(max-width:820px)", self.section)
+        self.assertIn("@media(max-width:560px)", self.section)
+        self.assertIn("content:attr(data-label)", self.section)
+        self.assertIn('aria-live="polite"', self.section)
+        self.assertIn('role="alert"', self.section)
+        self.assertIn(
+            'aria-label="Refresh AC Hunter data"',
+            self.section,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

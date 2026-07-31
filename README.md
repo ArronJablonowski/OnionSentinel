@@ -21,6 +21,8 @@ flowchart LR
   SO -->|bounded PCAP export on request| PI
   PI -->|fulfilled metadata + copied runtime artifact| PCAP["Mac Studio Zeek/TShark PCAP evidence"]
   PCAP --> LLM
+  ACH["AC Hunter\n192.168.1.12"] -->|pinned HTTPS named operations| PI
+  PI -->|forced SSH normalized triage| UI
   DB --> LLM["Ollama / selected AI model"]
   LLM --> MD
 ```
@@ -73,6 +75,14 @@ The least-privilege migration plan for supported Security Onion APIs and
 policy-brokered OSQuery investigations is in
 `docs/security-onion-api-and-osquery-roadmap.md`. Restricted SSH remains the
 production transport until that roadmap's acceptance gates pass.
+
+AC Hunter Deep Review follows a separate read-only trust path. The Mac Studio
+holds the dedicated AC Hunter service credential and transient auth state,
+while a source-restricted forced SSH key lets the Relay perform only fixed,
+TLS-pinned AC Hunter API operations against `192.168.1.12`. The Relay stores no
+AC Hunter credentials or results, and the UI caches only normalized behavioral
+triage. Deployment and rollback are documented in
+`docs/ac-hunter-deep-review.md`.
 
 SOC analysts can escalate any grouped detection from the SOC Alerts table.
 Escalation creates or reopens one durable Incident Response case for the stable

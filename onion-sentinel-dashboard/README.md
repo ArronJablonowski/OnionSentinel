@@ -12,6 +12,7 @@ dependency.
 | `onion_sentinel_server.py` | Dedicated port `8766` service that exposes only Onion Sentinel static files, admin login, and SOC APIs. |
 | `report_portal.py` | Transitional SOC API implementation imported from the dedicated server; non-SOC routes are not exposed by `onion_sentinel_server.py`. |
 | `software_inventory.py` | Strict reader and filter layer for the collector-produced Software Inventory snapshot. |
+| `ac_hunter_review.py` | Read-only AC Hunter client, in-memory auth refresh, normalization, deterministic triage, and owner-only last-good cache. |
 | `artifact_cache.py` | Thread-safe, single-flight cache for parsed Markdown/JSON artifacts. |
 | `response_cache.py` | Short-lived, bounded cache for serialized read-only API responses. |
 | `scripts/build_soc_alerts_dashboard.py` | Builds the static dashboard pages from SQLite/report artifacts. |
@@ -38,6 +39,11 @@ dependency.
   freshness, collection health, and explicit provenance for endpoint-reported,
   network-observed, and inferred package evidence. The page reads only the
   local last-good snapshot; web requests never dispatch Security Onion queries.
+- AC Hunter Deep Review with dataset-range and cache provenance, correlated
+  host risk, beacon/SNI/proxy, long-connection, DNS, unexpected-port,
+  blacklist, and strobe evidence. Every upstream request follows the fixed
+  Mac-to-Relay-to-AC-Hunter transport; the page presents behavioral triage and
+  does not infer malware from an AC Hunter score alone.
 - SOC Alerts rows include an `Escalate` action. It creates or reopens one
   durable case for the stable group and queues Incident Responder analysis.
 - Incident Responder is a paginated case workspace with desktop and mobile

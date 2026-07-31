@@ -29,6 +29,8 @@ fi
 # are intentionally not world-readable.
 install -o soalert -g soalert -m 0700 -d /opt/so-alert-relay
 install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay/app
+install -o root -g root -m 0755 -d /usr/local/libexec
+install -o root -g root -m 0755 -d /usr/local/libexec/onion-sentinel
 install -o root -g root -m 0755 -d /usr/local/sbin
 install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay/keys
 install -o soalert -g soalert -m 0750 -d /opt/so-alert-relay/state
@@ -44,6 +46,15 @@ install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/incident_evidence_bro
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/live_osquery_broker.py" /opt/so-alert-relay/app/live_osquery_broker.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/n8n/bin/live_osquery_contract.py" /opt/so-alert-relay/app/live_osquery_contract.py
 install -o root -g root -m 0755 "$REPO_DIR/relay/bin/run-live-osquery-broker" /usr/local/sbin/run-live-osquery-broker
+install -o root -g root -m 0755 \
+  "$REPO_DIR/relay/app/ac_hunter_broker.py" \
+  /usr/local/libexec/onion-sentinel/ac_hunter_broker.py
+install -o root -g root -m 0644 \
+  "$REPO_DIR/n8n/bin/ac_hunter_contract.py" \
+  /usr/local/libexec/onion-sentinel/ac_hunter_contract.py
+install -o root -g root -m 0755 \
+  "$REPO_DIR/relay/bin/run-ac-hunter-broker" \
+  /usr/local/sbin/run-ac-hunter-broker
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/relay_health_wrapper.py" /opt/so-alert-relay/app/relay_health_wrapper.py
 install -o soalert -g soalert -m 0755 "$REPO_DIR/relay/app/storage_health.py" /opt/so-alert-relay/app/storage_health.py
 install -o soalert -g soalert -m 0644 "$REPO_DIR/relay/config/config.example.json" /opt/so-alert-relay/app/config.json
@@ -70,6 +81,24 @@ if [[ ! -f /etc/so-alert-relay/incident-evidence.json ]]; then
   echo "Created /etc/so-alert-relay/incident-evidence.json example." >&2
 fi
 
+AC_HUNTER_CONFIG=/etc/so-alert-relay/ac-hunter.json
+if [[ -L "$AC_HUNTER_CONFIG" ]] \
+  || [[ -e "$AC_HUNTER_CONFIG" && ! -f "$AC_HUNTER_CONFIG" ]]; then
+  echo "Refusing install: AC Hunter relay config must be a regular file." >&2
+  exit 1
+fi
+if [[ ! -f "$AC_HUNTER_CONFIG" ]]; then
+  # The example is pinned to one upstream and remains inert until the operator
+  # installs the verified CA, records the leaf fingerprint, and enables it.
+  install -o root -g soalert -m 0640 \
+    "$REPO_DIR/relay/config/ac-hunter.example.json" \
+    "$AC_HUNTER_CONFIG"
+  echo "Created disabled $AC_HUNTER_CONFIG example." >&2
+else
+  chown root:soalert "$AC_HUNTER_CONFIG"
+  chmod 0640 "$AC_HUNTER_CONFIG"
+fi
+
 
 install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-alert-relay.service" /etc/systemd/system/so-alert-relay.service
 install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/so-alert-relay.timer" /etc/systemd/system/so-alert-relay.timer
@@ -92,6 +121,22 @@ fi
 install -o root -g root -m 0440 "$LIVE_OSQUERY_SUDOERS_TMP" /etc/sudoers.d/92-so-alert-relay-live-osquery
 visudo -cf /etc/sudoers.d/92-so-alert-relay-live-osquery
 rm -f "$LIVE_OSQUERY_SUDOERS_TMP"
+trap - EXIT
+AC_HUNTER_SUDOERS_TMP="$(mktemp)"
+trap 'rm -f "$AC_HUNTER_SUDOERS_TMP"' EXIT
+sed "s/__RELAY_ADMIN_USER__/${RELAY_ADMIN_USER}/g" \
+  "$REPO_DIR/relay/sudoers/so-ac-hunter" > "$AC_HUNTER_SUDOERS_TMP"
+if grep -q "__RELAY_ADMIN_USER__" "$AC_HUNTER_SUDOERS_TMP"; then
+  echo "Failed to render the AC Hunter sudoers rule." >&2
+  exit 1
+fi
+chmod 0440 "$AC_HUNTER_SUDOERS_TMP"
+visudo -cf "$AC_HUNTER_SUDOERS_TMP"
+install -o root -g root -m 0440 \
+  "$AC_HUNTER_SUDOERS_TMP" \
+  /etc/sudoers.d/93-so-alert-relay-ac-hunter
+visudo -cf /etc/sudoers.d/93-so-alert-relay-ac-hunter
+rm -f "$AC_HUNTER_SUDOERS_TMP"
 trap - EXIT
 install -o root -g root -m 0755 -d /etc/systemd/journald.conf.d
 install -o root -g root -m 0644 "$REPO_DIR/relay/systemd/onion-sentinel-journald.conf" /etc/systemd/journald.conf.d/onion-sentinel.conf
@@ -120,6 +165,11 @@ Required manual steps:
    /etc/so-alert-relay/live-osquery.json contains exact operator aliases.
 9. DHCP discovery reuses the existing read-only incident-evidence key pair.
    Install the updated incident broker and validate its exact DHCP contract.
+10. AC Hunter Deep Review remains disabled. Install and verify the AC Hunter
+    CA at /etc/so-alert-relay/ac-hunter-ca.pem, record the exact leaf
+    fingerprint in /etc/so-alert-relay/ac-hunter.json, and install the
+    source-restricted dedicated public key from
+    relay/config/authorized_keys.ac-hunter.example before enabling it.
 
 Test:
   sudo -u soalert /usr/bin/python3 /opt/so-alert-relay/app/relay.py --config /opt/so-alert-relay/app/config.json --pull-once

@@ -31,6 +31,11 @@ replay a safely committed alert.
 | `bin/run-live-osquery-broker` | `/usr/local/sbin/run-live-osquery-broker` | Root-owned, SSH-traversable pre-sudo forced-command guard that rejects caller-supplied SSH commands. |
 | `config/live-osquery.example.json` | `/etc/so-alert-relay/live-osquery.json` | Exact alias roster and dedicated Security Onion SSH transport settings; must be `root:soalert 0640`. |
 | `sudoers/so-live-osquery` | `/etc/sudoers.d/92-so-alert-relay-live-osquery` | Installer-rendered rule that lets only the relay administrator execute the broker as `soalert`. |
+| `app/ac_hunter_broker.py` | `/usr/local/libexec/onion-sentinel/ac_hunter_broker.py` | Stateless named-operation HTTPS broker for the fixed, TLS-pinned AC Hunter upstream. |
+| `bin/run-ac-hunter-broker` | `/usr/local/sbin/run-ac-hunter-broker` | Root-owned pre-sudo forced-command guard for the dedicated Mac AC Hunter key. |
+| `config/ac-hunter.example.json` | `/etc/so-alert-relay/ac-hunter.json` | Disabled fixed-upstream configuration and certificate pin; must be `root:soalert 0640`. |
+| `config/authorized_keys.ac-hunter.example` | Relay administrator `authorized_keys` | Source-restricted forced-command template for the dedicated Mac AC Hunter public key. |
+| `sudoers/so-ac-hunter` | `/etc/sudoers.d/93-so-alert-relay-ac-hunter` | Installer-rendered rule allowing only the AC Hunter broker as `soalert`. |
 
 ## Install
 
@@ -130,6 +135,21 @@ index/dataset audit, and pseudonymous endpoint reference, and then forwards it
 to the co-located fixed helper on Security Onion. The scheduled Mac collector
 retains a cursor only in memory while proving a complete snapshot; it never
 persists or logs the transient OSQuery hostname cursor.
+
+AC Hunter Deep Review is an independent, disabled-by-default Mac-to-Relay
+transport. Its root-owned launcher rejects caller-supplied commands before
+sudo, and its root-owned broker accepts only the shared named-operation
+contract. The broker can connect only to `192.168.1.12:443`, requires the
+operator-installed CA and exact leaf certificate digest, rejects redirects,
+and bounds every request and response. AC Hunter credentials, Flask session
+cookies, and JWTs are held by the Mac client; they transit the broker only in
+memory and are never stored or logged on the Relay. Do not put any AC Hunter
+credential in `/etc/so-alert-relay`.
+
+The installer seeds `/etc/so-alert-relay/ac-hunter.json` with
+`"enabled": false` and does not install a CA or edit `authorized_keys`.
+Complete the certificate, dedicated-key, host-pin, fail-closed, and rollback
+procedure in `docs/ac-hunter-deep-review.md` before enabling the transport.
 
 Install the dedicated public key on the Mac Studio with the repo's backup-first
 helper:

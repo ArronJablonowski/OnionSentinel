@@ -25,6 +25,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 import report_portal as runtime
+import ac_hunter_review
 from http_runtime import BoundedThreadingHTTPServer
 
 try:
@@ -144,6 +145,7 @@ CONTROLLED_EVALUATION_DISPATCH_ROUTES = (
 )
 
 GET_API_ROUTES = {
+    "/api/ac-hunter/deep-review",
     "/api/admin/session-status",
     "/api/asset-inventory",
     "/api/dhcp-asset-discovery",
@@ -163,6 +165,7 @@ GET_API_ROUTES = {
     "/api/soc-settings/ollama-models",
 } | set(runtime.SOC_SETTINGS_PROMPT_API_PATHS)
 POST_API_ROUTES = {
+    "/api/ac-hunter/refresh",
     "/api/assets/approve-dhcp-ip-change",
     "/api/assets/demote",
     "/api/assets/promote-dhcp",
@@ -472,6 +475,11 @@ class OnionSentinelHandler(runtime.PortalHandler):
         """
         return True
 
+    def _ac_hunter_force_refresh_authorized(self) -> bool:
+        """Permit cache bypass only for an authenticated admin session."""
+
+        return bool(self._admin_authenticated())
+
     @property
     def dashboard_root(self) -> Path:
         return self.server.dashboard_root  # type: ignore[attr-defined]
@@ -601,6 +609,15 @@ class OnionSentinelHandler(runtime.PortalHandler):
             }
             status = HTTPStatus.OK if data["ok"] else HTTPStatus.SERVICE_UNAVAILABLE
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if path == "/api/ac-hunter/deep-review":
+            status, data = ac_hunter_review.deep_review_response(
+                force_refresh=False
+            )
+            return self._send(
+                status,
+                json.dumps(data, indent=2).encode(),
+                "application/json; charset=utf-8",
+            )
         if path == "/admin/login":
             if self._admin_authenticated():
                 return self._redirect("/admin")
@@ -685,6 +702,65 @@ class OnionSentinelHandler(runtime.PortalHandler):
                 return self._send(
                     status,
                     json.dumps({"ok": False, "error": message}).encode(),
+                    "application/json; charset=utf-8",
+                )
+            if path == "/api/ac-hunter/refresh":
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    length = 0
+                if length <= 0 or length > 1024:
+                    return self._send(
+                        HTTPStatus.BAD_REQUEST,
+                        json.dumps(
+                            {
+                                "ok": False,
+                                "error": "Invalid AC Hunter refresh request size.",
+                            }
+                        ).encode(),
+                        "application/json; charset=utf-8",
+                    )
+                try:
+                    payload = json.loads(
+                        self.rfile.read(length).decode(
+                            "utf-8",
+                            errors="strict",
+                        )
+                    )
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    payload = None
+                if not isinstance(payload, dict) or payload:
+                    return self._send(
+                        HTTPStatus.BAD_REQUEST,
+                        json.dumps(
+                            {
+                                "ok": False,
+                                "error": (
+                                    "AC Hunter refresh requires an empty "
+                                    "JSON object."
+                                ),
+                            }
+                        ).encode(),
+                        "application/json; charset=utf-8",
+                    )
+                force_authorized = (
+                    self._ac_hunter_force_refresh_authorized()
+                )
+                status, data = ac_hunter_review.deep_review_response(
+                    force_refresh=force_authorized
+                )
+                if not force_authorized and status == HTTPStatus.OK:
+                    cache = data.get("cache")
+                    if isinstance(cache, dict):
+                        cache["refresh_limited"] = True
+                        cache["refresh_available_in_seconds"] = max(
+                            0,
+                            int(cache.get("ttl_seconds") or 0)
+                            - int(cache.get("age_seconds") or 0),
+                        )
+                return self._send(
+                    status,
+                    json.dumps(data, indent=2).encode(),
                     "application/json; charset=utf-8",
                 )
             return super().do_POST()

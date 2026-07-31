@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 0 ] || [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
+  printf '%s\n' '{"contract":"onion-sentinel-ac-hunter-relay-v1","request_id":"00000000000000000000000000000000","ok":false,"status":0,"content_type":"","headers":{"location":"","set_cookie":[]},"body":null,"duration_ms":0,"error":"commands and arguments are not accepted by this forced endpoint"}'
+  exit 2
+fi
+
+exec /usr/bin/sudo -n -u soalert \
+  /usr/bin/python3 \
+  /usr/local/libexec/onion-sentinel/ac_hunter_broker.py
