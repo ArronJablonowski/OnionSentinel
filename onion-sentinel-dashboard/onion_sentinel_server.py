@@ -161,6 +161,8 @@ GET_API_ROUTES = {
     "/api/soc-settings/ollama-models",
 } | set(runtime.SOC_SETTINGS_PROMPT_API_PATHS)
 POST_API_ROUTES = {
+    "/api/assets/approve-dhcp-ip-change",
+    "/api/assets/promote-dhcp",
     "/api/soc-alerts/status",
     "/api/soc-incidents/reanalyze-all",
     "/api/soc-settings/agent-model",

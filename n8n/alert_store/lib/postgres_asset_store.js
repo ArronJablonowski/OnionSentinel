@@ -22,6 +22,48 @@ function cleanText(value, maximum, field, {required = false} = {}) {
   return text;
 }
 
+function normalizeMac(value, field, {required = false} = {}) {
+  const normalized = cleanText(value, 17, field, {required})
+    .toLowerCase().replaceAll('-', ':');
+  if (!normalized && !required) return '';
+  if (!/^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(normalized)) {
+    throw new Error(`${field} is invalid`);
+  }
+  return normalized;
+}
+
+function macScope(value) {
+  if (!value) return 'unknown';
+  const firstOctet = Number.parseInt(value.split(':', 1)[0], 16);
+  if (firstOctet & 1) return 'multicast';
+  if (firstOctet & 2) return 'locally_administered';
+  return 'globally_administered';
+}
+
+function normalizedHostname(value, field = 'expected_hostname') {
+  return cleanText(value, 253, field).toLowerCase().replace(/\.$/, '');
+}
+
+function assertFreshObservation(observation) {
+  const lastSeen = new Date(String(observation.last_seen || '')).getTime();
+  let leaseExpires = new Date(
+    String(observation.lease_expires_at || observation.last_seen || ''),
+  ).getTime();
+  if (!Number.isFinite(leaseExpires)) leaseExpires = lastSeen;
+  if (
+    !Number.isFinite(lastSeen)
+    || (lastSeen < Date.now() - 24 * 60 * 60 * 1000 && leaseExpires < Date.now())
+  ) {
+    throw new Error('stale DHCP identity cannot be approved');
+  }
+}
+
+function observationFingerprint(observation) {
+  return crypto.createHash('sha256')
+    .update(JSON.stringify(observation, Object.keys(observation).sort()))
+    .digest('hex');
+}
+
 function timestamp(value, field, {nullable = false} = {}) {
   if (nullable && (value === null || value === undefined || value === '')) return null;
   const parsed = new Date(String(value || ''));
@@ -583,9 +625,29 @@ function createPostgresAssetStore({pool, schemaPath, logger = console}) {
     if (!/^[0-9a-f]{20}$/.test(discoveryId)) throw new Error('discovery_id is invalid');
     const expectedIp = cleanText(payload.expected_ip, 64, 'expected_ip', {required: true});
     if (!net.isIP(expectedIp)) throw new Error('expected_ip is invalid');
-    const expectedMac = cleanText(payload.expected_mac, 17, 'expected_mac').toLowerCase();
-    const expectedHostname = cleanText(payload.expected_hostname, 253, 'expected_hostname')
-      .toLowerCase().replace(/\.$/, '');
+    const expectedMac = normalizeMac(
+      payload.expected_mac,
+      'expected_mac',
+      {required: true},
+    );
+    const expectedMacScope = macScope(expectedMac);
+    if (expectedMacScope === 'multicast') {
+      throw new Error('multicast MAC address cannot identify an asset');
+    }
+    if (
+      expectedMacScope === 'locally_administered'
+      && payload.accept_locally_administered_mac !== true
+    ) {
+      throw new Error(
+        'locally administered MAC requires explicit operator acceptance',
+      );
+    }
+    const expectedHostname = normalizedHostname(payload.expected_hostname);
+    if (cleanText(payload.confirm, 64, 'confirm', {required: true})
+      !== `PROMOTE:${discoveryId}`) {
+      throw new Error('explicit DHCP promotion confirmation is required');
+    }
+    const reason = cleanText(payload.reason, 1000, 'reason', {required: true});
     const record = normalizeInventoryRecord({
       asset_id: payload.asset_id,
       valid_from: new Date().toISOString(),
@@ -626,16 +688,7 @@ function createPostgresAssetStore({pool, schemaPath, logger = console}) {
       ) {
         throw new Error('DHCP identity changed after operator review');
       }
-      const lastSeen = new Date(String(observation.last_seen || '')).getTime();
-      const leaseExpires = new Date(
-        String(observation.lease_expires_at || observation.last_seen || ''),
-      ).getTime();
-      if (
-        !Number.isFinite(lastSeen)
-        || (lastSeen < Date.now() - 24 * 60 * 60 * 1000 && leaseExpires < Date.now())
-      ) {
-        throw new Error('stale DHCP identity cannot be promoted');
-      }
+      assertFreshObservation(observation);
       const normalizedIdentifiers = Object.values(record.identifiers).flat()
         .map((value) => value.toLowerCase());
       const collisions = await client.query(
@@ -680,9 +733,7 @@ function createPostgresAssetStore({pool, schemaPath, logger = console}) {
           );
         }
       }
-      const fingerprint = crypto.createHash('sha256')
-        .update(JSON.stringify(observation, Object.keys(observation).sort()))
-        .digest('hex');
+      const fingerprint = observationFingerprint(observation);
       await client.query(
         `INSERT INTO onion_sentinel_assets.review_decisions (
            discovery_id, decision, asset_id, reason, operator_ref,
@@ -690,7 +741,7 @@ function createPostgresAssetStore({pool, schemaPath, logger = console}) {
          ) VALUES ($1, 'promoted', $2, $3, $4, $5)`,
         [
           discoveryId, record.asset_id,
-          cleanText(payload.reason || 'operator-approved promotion', 1000, 'reason'),
+          reason,
           cleanText(actor, 300, 'actor'), fingerprint,
         ],
       );
@@ -711,6 +762,271 @@ function createPostgresAssetStore({pool, schemaPath, logger = console}) {
         status: 'promoted',
         asset_id: record.asset_id,
         discovery_id: discoveryId,
+        valid_from: inserted.rows[0].valid_from,
+        observation_fingerprint: fingerprint,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async function approveDhcpIpChange(payload, {actor = 'operator'} = {}) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new Error('IP change payload is invalid');
+    }
+    const discoveryId = cleanText(
+      payload.discovery_id,
+      20,
+      'discovery_id',
+      {required: true},
+    );
+    if (!/^[0-9a-f]{20}$/.test(discoveryId)) {
+      throw new Error('discovery_id is invalid');
+    }
+    const assetId = cleanText(
+      payload.asset_id,
+      160,
+      'asset_id',
+      {required: true},
+    );
+    const expectedIp = cleanText(
+      payload.expected_ip,
+      64,
+      'expected_ip',
+      {required: true},
+    );
+    if (!net.isIP(expectedIp)) throw new Error('expected_ip is invalid');
+    const expectedMac = normalizeMac(payload.expected_mac, 'expected_mac');
+    const expectedHostname = normalizedHostname(payload.expected_hostname);
+    const reason = cleanText(payload.reason, 1000, 'reason', {required: true});
+    if (
+      cleanText(payload.confirm, 256, 'confirm', {required: true})
+      !== `CHANGE-IP:${discoveryId}:${assetId}`
+    ) {
+      throw new Error('explicit DHCP IP-change confirmation is required');
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const observationResult = await client.query(
+        `SELECT raw_record
+         FROM onion_sentinel_assets.dhcp_observations
+         WHERE discovery_id = $1
+         FOR UPDATE`,
+        [discoveryId],
+      );
+      if (observationResult.rows.length !== 1) {
+        throw new Error('DHCP discovery identity is missing or ambiguous');
+      }
+      const observation = observationResult.rows[0].raw_record;
+      if (
+        String(observation.current_ip || '') !== expectedIp
+        || String(observation.mac_address || '').toLowerCase() !== expectedMac
+        || String(observation.hostname || '').toLowerCase().replace(/\.$/, '')
+          !== expectedHostname
+      ) {
+        throw new Error('DHCP identity changed after operator review');
+      }
+      assertFreshObservation(observation);
+
+      const currentResult = await client.query(
+        `SELECT record.*
+         FROM onion_sentinel_assets.inventory_records record
+         WHERE record.asset_id = $1
+           AND record.valid_from <= clock_timestamp()
+           AND (
+             record.valid_until IS NULL
+             OR record.valid_until > clock_timestamp()
+           )
+         FOR UPDATE`,
+        [assetId],
+      );
+      if (currentResult.rows.length !== 1) {
+        throw new Error('authoritative asset identity is missing or ambiguous');
+      }
+      const current = currentResult.rows[0];
+      const identifierResult = await client.query(
+        `SELECT identifier_type, identifier_value, normalized_value
+         FROM onion_sentinel_assets.identifiers
+         WHERE record_id = $1
+         ORDER BY identifier_type, normalized_value`,
+        [current.record_id],
+      );
+      current.ip_addresses = identifierResult.rows
+        .filter((item) => item.identifier_type === 'ip')
+        .map((item) => item.identifier_value);
+      current.mac_addresses = identifierResult.rows
+        .filter((item) => item.identifier_type === 'mac')
+        .map((item) => item.normalized_value);
+      current.hostnames = identifierResult.rows
+        .filter((item) => item.identifier_type === 'hostname')
+        .map((item) => item.normalized_value);
+      const stableMatch = (
+        expectedMac && current.mac_addresses.includes(expectedMac)
+      ) || (
+        expectedHostname && current.hostnames.includes(expectedHostname)
+      );
+      if (!stableMatch) {
+        throw new Error(
+          'DHCP observation does not match an authoritative hostname or MAC',
+        );
+      }
+      if (current.ip_addresses.includes(expectedIp)) {
+        throw new Error('DHCP address already matches authoritative inventory');
+      }
+      const stableCollisions = expectedMac || expectedHostname
+        ? await client.query(
+          `SELECT DISTINCT record.asset_id
+           FROM onion_sentinel_assets.identifiers identifier
+           JOIN onion_sentinel_assets.inventory_records record USING (record_id)
+           WHERE (
+               (
+                 identifier.identifier_type = 'mac'
+                 AND identifier.normalized_value = $1
+               )
+               OR (
+                 identifier.identifier_type = 'hostname'
+                 AND identifier.normalized_value = $2
+               )
+             )
+             AND record.asset_id <> $3
+             AND record.valid_from <= clock_timestamp()
+             AND (
+               record.valid_until IS NULL
+               OR record.valid_until > clock_timestamp()
+             )
+           ORDER BY record.asset_id`,
+          [expectedMac, expectedHostname, assetId],
+        )
+        : {rows: []};
+      if (stableCollisions.rows.length) {
+        throw new Error(
+          `DHCP stable identity overlaps authoritative asset ${stableCollisions.rows[0].asset_id}`,
+        );
+      }
+      const ipCollision = await client.query(
+        `SELECT DISTINCT record.asset_id
+         FROM onion_sentinel_assets.identifiers identifier
+         JOIN onion_sentinel_assets.inventory_records record USING (record_id)
+         WHERE identifier.identifier_type = 'ip'
+           AND identifier.normalized_value = $1
+           AND record.asset_id <> $2
+           AND record.valid_from <= clock_timestamp()
+           AND (
+             record.valid_until IS NULL
+             OR record.valid_until > clock_timestamp()
+           )
+         ORDER BY record.asset_id`,
+        [expectedIp.toLowerCase(), assetId],
+      );
+      if (ipCollision.rows.length) {
+        throw new Error(
+          `DHCP address belongs to authoritative asset ${ipCollision.rows[0].asset_id}`,
+        );
+      }
+
+      const transition = await client.query(
+        'SELECT clock_timestamp() AS changed_at',
+      );
+      const changedAt = transition.rows[0].changed_at;
+      await client.query(
+        `UPDATE onion_sentinel_assets.inventory_records
+         SET valid_until = $1, updated_at = clock_timestamp()
+         WHERE record_id = $2`,
+        [changedAt, current.record_id],
+      );
+      const sourceRef = cleanText(
+        `DHCP discovery ${discoveryId}; supersedes record ${current.record_id}`,
+        500,
+        'source_ref',
+      );
+      const inserted = await client.query(
+        `INSERT INTO onion_sentinel_assets.inventory_records (
+           asset_id, valid_from, valid_until, role, platform, owner_ref,
+           criticality, expected_services, expected_behaviors, source_type,
+           source_ref, confidence, share_with_hosted_models
+         ) VALUES (
+           $1, $2, NULL, $3, $4, $5, $6, $7, $8,
+           'operator-approved-dhcp-ip-change', $9, $10, $11
+         )
+         RETURNING record_id, valid_from`,
+        [
+          current.asset_id,
+          changedAt,
+          current.role,
+          current.platform,
+          current.owner_ref,
+          current.criticality,
+          current.expected_services,
+          current.expected_behaviors,
+          sourceRef,
+          current.confidence,
+          current.share_with_hosted_models,
+        ],
+      );
+      const newRecordId = inserted.rows[0].record_id;
+      await client.query(
+        `INSERT INTO onion_sentinel_assets.identifiers (
+           record_id, identifier_type, identifier_value, normalized_value
+         )
+         SELECT $1, identifier_type, identifier_value, normalized_value
+         FROM onion_sentinel_assets.identifiers
+         WHERE record_id = $2
+           AND identifier_type <> 'ip'`,
+        [newRecordId, current.record_id],
+      );
+      await client.query(
+        `INSERT INTO onion_sentinel_assets.identifiers (
+           record_id, identifier_type, identifier_value, normalized_value
+         ) VALUES ($1, 'ip', $2, $3)`,
+        [newRecordId, expectedIp, expectedIp.toLowerCase()],
+      );
+      const fingerprint = observationFingerprint(observation);
+      await client.query(
+        `INSERT INTO onion_sentinel_assets.review_decisions (
+           discovery_id, decision, asset_id, reason, operator_ref,
+           observation_fingerprint
+         ) VALUES ($1, 'ip_change_approved', $2, $3, $4, $5)`,
+        [
+          discoveryId,
+          assetId,
+          reason,
+          cleanText(actor, 300, 'actor'),
+          fingerprint,
+        ],
+      );
+      await client.query(
+        `INSERT INTO onion_sentinel_assets.audit_events (
+           event_type, actor, asset_id, discovery_id, event_data
+         ) VALUES (
+           'asset.ip_address_changed_from_dhcp',
+           $1, $2, $3, $4::jsonb
+         )`,
+        [
+          cleanText(actor, 160, 'actor'),
+          assetId,
+          discoveryId,
+          JSON.stringify({
+            previous_ip_addresses: current.ip_addresses,
+            current_ip_address: expectedIp,
+            previous_record_id: current.record_id,
+            current_record_id: newRecordId,
+            observation_fingerprint: fingerprint,
+          }),
+        ],
+      );
+      await client.query('COMMIT');
+      return {
+        ok: true,
+        status: 'ip_change_approved',
+        asset_id: assetId,
+        discovery_id: discoveryId,
+        previous_ip_addresses: current.ip_addresses,
+        current_ip_address: expectedIp,
         valid_from: inserted.rows[0].valid_from,
         observation_fingerprint: fingerprint,
       };
@@ -752,6 +1068,7 @@ function createPostgresAssetStore({pool, schemaPath, logger = console}) {
     putDhcpState,
     dhcpState,
     promoteDhcp,
+    approveDhcpIpChange,
     stats,
     normalizeInventoryRecord,
     normalizeDhcpState,

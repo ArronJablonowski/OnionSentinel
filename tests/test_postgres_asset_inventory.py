@@ -50,7 +50,72 @@ class PostgresAssetInventoryTests(unittest.TestCase):
         self.assertIn("crypto.timingSafeEqual", source)
         self.assertIn("ASSET_STORE_WRITE_TOKEN", source)
         self.assertIn("store.putDhcpState", source)
+        self.assertIn("store.promoteDhcp", source)
+        self.assertIn("store.approveDhcpIpChange", source)
+        self.assertIn("/assets/approve-dhcp-ip-change", source)
         self.assertIn("conditions.push('$1::timestamptz IS NOT NULL')", store)
+        self.assertIn("asset.ip_address_changed_from_dhcp", store)
+        self.assertIn("ip_change_approved", store)
+        self.assertIn("explicit DHCP IP-change confirmation is required", store)
+
+    def test_schema_allows_distinct_ip_change_review_decision(self) -> None:
+        sql = SCHEMA.read_text(encoding="utf-8")
+        self.assertIn("'ip_change_approved'", sql)
+        self.assertIn("review_decisions_decision_check", sql)
+
+    def test_store_rejects_unsafe_promotion_before_database_access(self) -> None:
+        script = f"""
+          const {{createPostgresAssetStore}} = require({json.dumps(str(STORE))});
+          const pool = {{
+            query: async () => {{ throw new Error('database must not be reached'); }},
+            connect: async () => {{ throw new Error('database must not be reached'); }},
+          }};
+          const store = createPostgresAssetStore({{
+            pool,
+            schemaPath: {json.dumps(str(SCHEMA))},
+          }});
+          (async () => {{
+            let localRejected = false;
+            try {{
+              await store.promoteDhcp({{
+                discovery_id: '0123456789abcdef0123',
+                expected_ip: '192.0.2.10',
+                expected_mac: '02:00:00:00:00:01',
+                expected_hostname: 'candidate.lan',
+                asset_id: 'candidate',
+                role: 'workstation',
+                reason: 'reviewed',
+                confirm: 'PROMOTE:0123456789abcdef0123',
+              }});
+            }} catch (error) {{
+              localRejected = /explicit operator acceptance/.test(error.message);
+            }}
+            let confirmationRejected = false;
+            try {{
+              await store.approveDhcpIpChange({{
+                discovery_id: '0123456789abcdef0123',
+                expected_ip: '192.0.2.11',
+                expected_mac: '',
+                expected_hostname: 'known.lan',
+                asset_id: 'known',
+                reason: 'reviewed',
+                confirm: 'wrong',
+              }});
+            }} catch (error) {{
+              confirmationRejected = /explicit DHCP IP-change confirmation/.test(
+                error.message,
+              );
+            }}
+            if (!localRejected || !confirmationRejected) process.exit(2);
+          }})().catch(() => process.exit(3));
+        """
+        result = subprocess.run(
+            ["node", "-e", script],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_runtime_collector_is_database_fail_closed(self) -> None:
         collector = COLLECTOR.read_text(encoding="utf-8")

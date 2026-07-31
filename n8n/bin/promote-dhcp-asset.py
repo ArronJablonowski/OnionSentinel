@@ -323,6 +323,10 @@ def promote(args: argparse.Namespace, now: dt.datetime) -> tuple[dict, Path]:
             "operator_ref": args.owner_ref,
             "criticality": args.criticality,
             "reason": "operator-approved DHCP promotion",
+            "confirm": args.confirm,
+            "accept_locally_administered_mac": (
+                args.accept_locally_administered_mac
+            ),
         },
     )
     snapshot = api_json(

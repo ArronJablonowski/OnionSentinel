@@ -129,6 +129,7 @@ ASSET_INVENTORY_MAX_BYTES = 64 * 1024 * 1024
 ASSET_DATABASE_READ_ENABLED = str(
     os.environ.get("ASSET_DATABASE_READ_ENABLED") or ""
 ).strip().lower() in {"1", "true", "yes"}
+ASSET_STORE_ENV_FILE = HOME / "n8n-local" / ".env"
 DHCP_ASSET_DISCOVERY_STATE_FILE = (
     HOME / "n8n-local" / "asset-discovery" / "dhcp-observations.json"
 )
@@ -6791,6 +6792,105 @@ class AlertStoreRequestError(RuntimeError):
         self.status_code = int(status_code)
 
 
+def asset_store_write_token() -> str:
+    """Read the owner-controlled local asset-write credential without exporting it."""
+    configured = str(os.environ.get("ASSET_STORE_WRITE_TOKEN") or "").strip()
+    if configured:
+        if len(configured) < 32:
+            raise RuntimeError("asset-store write credential is invalid")
+        return configured
+    path = Path(ASSET_STORE_ENV_FILE)
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise RuntimeError("asset-store write credential is unavailable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_size > 1024 * 1024
+    ):
+        raise RuntimeError("asset-store environment file is not owner-controlled")
+    values: dict[str, str] = {}
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            cleaned = value.strip()
+            if (
+                len(cleaned) >= 2
+                and cleaned[0] == cleaned[-1]
+                and cleaned[0] in {"'", '"'}
+            ):
+                cleaned = cleaned[1:-1]
+            values[key.strip()] = cleaned
+    except OSError as exc:
+        raise RuntimeError("asset-store write credential is unavailable") from exc
+    token = values.get("ASSET_STORE_WRITE_TOKEN") or values.get(
+        "N8N_POST_COMMIT_TOKEN",
+        "",
+    )
+    if len(token) < 32:
+        raise RuntimeError("asset-store write credential is invalid")
+    return token
+
+
+def asset_store_post_json(path: str, payload: dict, timeout: float = 10.0) -> dict:
+    """Send one authenticated asset mutation to the loopback alert-store."""
+    if path not in {
+        "/assets/promote-dhcp",
+        "/assets/approve-dhcp-ip-change",
+    }:
+        raise ValueError("asset-store mutation path is not allowlisted")
+    encoded = json.dumps(
+        payload,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Content-Length": str(len(encoded)),
+        "X-Onion-Sentinel-Asset-Token": asset_store_write_token(),
+    }
+    req = urllib_request.Request(
+        f"{SOC_ALERT_STORE_API_URL}{path}",
+        data=encoded,
+        method="POST",
+        headers=headers,
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=timeout) as response:
+            result = read_bounded_json(
+                response,
+                max_bytes=SOC_ALERT_STORE_RESPONSE_MAX_BYTES,
+            )
+    except urllib_error.HTTPError as exc:
+        try:
+            error_payload = read_bounded_json(
+                exc,
+                max_bytes=SOC_ALERT_STORE_RESPONSE_MAX_BYTES,
+            )
+            detail = str(
+                error_payload.get("reason")
+                or error_payload.get("error")
+                or exc.reason
+            )
+        except (OSError, BoundedResponseError, json.JSONDecodeError):
+            detail = str(exc.reason)
+        raise AlertStoreRequestError(
+            detail[:500],
+            int(exc.code or 503),
+        ) from exc
+    except (OSError, urllib_error.URLError, json.JSONDecodeError) as exc:
+        raise AlertStoreRequestError(str(exc)[:500], 503) from exc
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise AlertStoreRequestError("asset-store rejected request", 400)
+    return result
+
+
 def alert_store_post_json(path: str, payload: dict, timeout: float = 5.0) -> dict:
     """POST to the host alert-store and preserve its bounded error detail."""
     encoded = json.dumps(payload).encode("utf-8")
@@ -6826,6 +6926,154 @@ def alert_store_post_json(path: str, payload: dict, timeout: float = 5.0) -> dic
             400,
         )
     return result
+
+
+def _normalized_asset_review_payload(
+    payload: object,
+    *,
+    action: str,
+) -> dict:
+    """Bound the operator review payload before it reaches the asset store."""
+    if not isinstance(payload, dict):
+        raise ValueError("Request body must be a JSON object.")
+    allowed = {
+        "discovery_id",
+        "expected_ip",
+        "expected_mac",
+        "expected_hostname",
+        "asset_id",
+        "operator_ref",
+        "reason",
+        "confirm",
+    }
+    if action == "promote":
+        allowed |= {
+            "hostname",
+            "role",
+            "platform",
+            "criticality",
+            "owner_ref",
+            "accept_locally_administered_mac",
+        }
+    unknown = set(payload) - allowed
+    if unknown:
+        raise ValueError("Request contains unsupported asset review fields.")
+
+    limits = {
+        "discovery_id": 20,
+        "expected_ip": 64,
+        "expected_mac": 17,
+        "expected_hostname": 253,
+        "asset_id": 160,
+        "operator_ref": 160,
+        "reason": 1000,
+        "confirm": 256,
+        "hostname": 253,
+        "role": 160,
+        "platform": 160,
+        "criticality": 16,
+        "owner_ref": 300,
+    }
+    result = {
+        key: str(payload.get(key) or "").strip()[: maximum + 1]
+        for key, maximum in limits.items()
+        if key in allowed
+    }
+    for key, maximum in limits.items():
+        if key in result and len(result[key]) > maximum:
+            raise ValueError(f"{key} exceeds its maximum length.")
+    required = {
+        "discovery_id",
+        "expected_ip",
+        "asset_id",
+        "operator_ref",
+        "reason",
+        "confirm",
+    }
+    if action == "promote":
+        required |= {"expected_mac", "role"}
+    missing = sorted(key for key in required if not result.get(key))
+    if missing:
+        raise ValueError(
+            f"Required asset review field is missing: {missing[0]}."
+        )
+    if not re.fullmatch(r"[0-9a-f]{20}", result["discovery_id"]):
+        raise ValueError("discovery_id is invalid.")
+    try:
+        result["expected_ip"] = str(
+            ipaddress.ip_address(result["expected_ip"])
+        )
+    except ValueError as exc:
+        raise ValueError("expected_ip is invalid.") from exc
+    mac = result.get("expected_mac", "").lower().replace("-", ":")
+    if mac and not re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", mac):
+        raise ValueError("expected_mac is invalid.")
+    result["expected_mac"] = mac
+    result["expected_hostname"] = (
+        result.get("expected_hostname", "").rstrip(".").lower()
+    )
+    if action == "promote":
+        criticality = result.get("criticality") or "unknown"
+        if criticality not in {
+            "low",
+            "medium",
+            "high",
+            "critical",
+            "unknown",
+        }:
+            raise ValueError("criticality is invalid.")
+        result["criticality"] = criticality
+        result["accept_locally_administered_mac"] = (
+            payload.get("accept_locally_administered_mac") is True
+        )
+    return result
+
+
+def asset_dhcp_promotion_response(payload: object) -> tuple[int, dict]:
+    try:
+        normalized = _normalized_asset_review_payload(
+            payload,
+            action="promote",
+        )
+        result = asset_store_post_json("/assets/promote-dhcp", normalized)
+    except ValueError as exc:
+        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
+    except (RuntimeError, AlertStoreRequestError) as exc:
+        return int(getattr(exc, "status_code", 503)), {
+            "ok": False,
+            "error": str(exc),
+        }
+    with ASSET_INVENTORY_CACHE_LOCK:
+        ASSET_INVENTORY_CACHE.clear()
+        ASSET_INVENTORY_CACHE.update(
+            {"signature": None, "inventory": None, "expires_at": 0.0}
+        )
+    return HTTPStatus.CREATED, result
+
+
+def asset_dhcp_ip_change_response(payload: object) -> tuple[int, dict]:
+    try:
+        normalized = _normalized_asset_review_payload(
+            payload,
+            action="ip_change",
+        )
+        result = asset_store_post_json(
+            "/assets/approve-dhcp-ip-change",
+            normalized,
+        )
+    except ValueError as exc:
+        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
+    except (RuntimeError, AlertStoreRequestError) as exc:
+        return int(getattr(exc, "status_code", 503)), {
+            "ok": False,
+            "error": str(exc),
+        }
+    with ASSET_INVENTORY_CACHE_LOCK:
+        ASSET_INVENTORY_CACHE.clear()
+        ASSET_INVENTORY_CACHE.update(
+            {"signature": None, "inventory": None, "expires_at": 0.0}
+        )
+    return HTTPStatus.CREATED, result
 
 
 def alert_store_get_json(path: str, timeout: float = 5.0) -> dict:
@@ -12417,6 +12665,10 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        is_asset_write = parsed.path in {
+            "/api/assets/promote-dhcp",
+            "/api/assets/approve-dhcp-ip-change",
+        }
         is_incident_reanalysis = (
             parsed.path == "/api/soc-incidents/reanalyze-all"
             or (
@@ -12431,7 +12683,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             parsed.path.startswith("/api/soc-incidents/")
             and parsed.path.endswith(("/adjudicate", "/status"))
         )
-        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and parsed.path not in SOC_SETTINGS_PROMPT_API_PATHS and not (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) and not is_review_write and not is_incident_reanalysis:
+        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and parsed.path not in SOC_SETTINGS_PROMPT_API_PATHS and not (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) and not is_review_write and not is_incident_reanalysis and not is_asset_write:
             return self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain; charset=utf-8")
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -12440,7 +12692,7 @@ class PortalHandler(BaseHTTPRequestHandler):
         if length <= 0 or length > 50000:
             if parsed.path == "/api/admin/start-service":
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
-            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) or is_review_write or is_incident_reanalysis:
+            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) or is_review_write or is_incident_reanalysis or is_asset_write:
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
             if parsed.path.startswith("/api/resource-library/"):
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
@@ -12448,6 +12700,35 @@ class PortalHandler(BaseHTTPRequestHandler):
                 return self._send(HTTPStatus.BAD_REQUEST, render_admin_dashboard("Invalid admin action request size.", True))
             return self._send(HTTPStatus.BAD_REQUEST, render_admin_login("Invalid request size.", True))
         raw = self.rfile.read(length).decode("utf-8", errors="replace")
+        if is_asset_write:
+            if (
+                not self._admin_authenticated()
+                or not self._soc_review_write_authorized()
+            ):
+                return self._send(
+                    HTTPStatus.FORBIDDEN,
+                    json.dumps({
+                        "ok": False,
+                        "error": (
+                            "Sign in to Onion Sentinel Administration before "
+                            "approving asset inventory changes."
+                        ),
+                    }).encode(),
+                    "application/json; charset=utf-8",
+                )
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                payload = None
+            if parsed.path == "/api/assets/promote-dhcp":
+                status, data = asset_dhcp_promotion_response(payload)
+            else:
+                status, data = asset_dhcp_ip_change_response(payload)
+            return self._send(
+                status,
+                json.dumps(data, indent=2).encode(),
+                "application/json; charset=utf-8",
+            )
         if is_incident_reanalysis:
             if not self._soc_review_write_authorized():
                 return self._send(

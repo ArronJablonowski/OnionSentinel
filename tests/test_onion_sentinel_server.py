@@ -68,6 +68,10 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertTrue(server.is_soc_post_api("/api/soc-incidents/reanalyze-all"))
         self.assertTrue(server.is_soc_post_api("/api/soc-settings/agent-model"))
         self.assertTrue(server.is_soc_post_api("/api/soc-settings/ai-model"))
+        self.assertTrue(server.is_soc_post_api("/api/assets/promote-dhcp"))
+        self.assertTrue(
+            server.is_soc_post_api("/api/assets/approve-dhcp-ip-change")
+        )
         self.assertFalse(server.is_soc_post_api("/api/resource-library/remove"))
         self.assertFalse(server.is_soc_post_api("/api/admin/start-service"))
         self.assertFalse(server.is_soc_post_api("/admin/action"))

@@ -10879,6 +10879,19 @@ async function handleRequest(request, response) {
       sendJson(response, 201, result);
       return;
     }
+    if (
+      request.method === 'POST'
+      && parsedUrl.pathname === '/assets/approve-dhcp-ip-change'
+    ) {
+      requireAssetStoreWriteAuthorization(request);
+      const store = requirePostgresAssetStore();
+      const payload = await readJsonBody(request);
+      const result = await store.approveDhcpIpChange(payload, {
+        actor: payload.operator_ref || 'operator',
+      });
+      sendJson(response, 201, result);
+      return;
+    }
     if (request.method === 'GET' && parsedUrl.pathname === '/metrics') {
       sendJson(response, 200, {ok: true, metrics: await operationalMetricsSnapshot()});
       return;

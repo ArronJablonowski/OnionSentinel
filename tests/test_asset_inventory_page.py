@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -315,6 +316,14 @@ class AssetInventoryPageTests(unittest.TestCase):
         self.assertIn("provisional DHCP observation", page)
         self.assertIn("Historical backfill has not run", page)
         self.assertIn("mac_address_scope", page)
+        self.assertIn("<th>Evidence</th><th>Action</th>", page)
+        self.assertIn('data-dhcp-promote="${esc(item.discovery_id)}"', page)
+        self.assertIn('data-dhcp-ip-change="${esc(item.discovery_id)}"', page)
+        self.assertIn('id="dhcp-review-modal"', page)
+        self.assertIn("X-Onion-Sentinel-Request':'dashboard'", page)
+        self.assertIn("PROMOTE:${item.discovery_id}", page)
+        self.assertIn("CHANGE-IP:${item.discovery_id}:${authority.asset_id}", page)
+        self.assertIn("when:assetCanRefresh", page)
         self.assertIn("asset-inventory.html", page)
         self.assertIn("const assetIdentityHtml=asset=>", incident_page)
         self.assertIn("item.source_asset", incident_page)
@@ -326,6 +335,72 @@ class AssetInventoryPageTests(unittest.TestCase):
             'cp "$REPO_DIR/n8n/bin/asset_inventory.py" '
             '"$DASHBOARD_RUNTIME_DIR/asset_inventory.py"',
             installer,
+        )
+
+    def test_dashboard_asset_review_payloads_are_bounded_and_exact(self) -> None:
+        promotion = {
+            "discovery_id": "0123456789abcdef0123",
+            "expected_ip": "192.0.2.25",
+            "expected_mac": "00-11-22-33-44-55",
+            "expected_hostname": "Candidate.LAN.",
+            "asset_id": "candidate",
+            "hostname": "candidate.lan",
+            "role": "workstation",
+            "platform": "macOS",
+            "criticality": "medium",
+            "operator_ref": "change-123",
+            "reason": "Reviewed DHCP evidence.",
+            "confirm": "PROMOTE:0123456789abcdef0123",
+            "accept_locally_administered_mac": False,
+        }
+        with mock.patch.object(
+            self.portal,
+            "asset_store_post_json",
+            return_value={"ok": True, "status": "promoted"},
+        ) as post:
+            status, result = self.portal.asset_dhcp_promotion_response(
+                promotion
+            )
+        self.assertEqual(status, 201)
+        self.assertTrue(result["ok"])
+        path, payload = post.call_args.args
+        self.assertEqual(path, "/assets/promote-dhcp")
+        self.assertEqual(payload["expected_mac"], "00:11:22:33:44:55")
+        self.assertEqual(payload["expected_hostname"], "candidate.lan")
+
+        invalid = dict(promotion)
+        invalid["unexpected"] = "must fail closed"
+        with mock.patch.object(
+            self.portal,
+            "asset_store_post_json",
+        ) as blocked_post:
+            status, result = self.portal.asset_dhcp_promotion_response(invalid)
+        self.assertEqual(status, 400)
+        self.assertFalse(result["ok"])
+        blocked_post.assert_not_called()
+
+    def test_ip_change_approval_uses_dedicated_internal_route(self) -> None:
+        payload = {
+            "discovery_id": "fedcba9876543210fedc",
+            "expected_ip": "192.0.2.30",
+            "expected_mac": "",
+            "expected_hostname": "known.lan",
+            "asset_id": "known",
+            "operator_ref": "change-456",
+            "reason": "Stable hostname verified.",
+            "confirm": "CHANGE-IP:fedcba9876543210fedc:known",
+        }
+        with mock.patch.object(
+            self.portal,
+            "asset_store_post_json",
+            return_value={"ok": True, "status": "ip_change_approved"},
+        ) as post:
+            status, result = self.portal.asset_dhcp_ip_change_response(payload)
+        self.assertEqual(status, 201)
+        self.assertEqual(result["status"], "ip_change_approved")
+        self.assertEqual(
+            post.call_args.args[0],
+            "/assets/approve-dhcp-ip-change",
         )
 
 

@@ -113,7 +113,9 @@ CREATE INDEX IF NOT EXISTS idx_osa_dhcp_hostname
 CREATE TABLE IF NOT EXISTS onion_sentinel_assets.review_decisions (
   decision_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   discovery_id TEXT NOT NULL,
-  decision TEXT NOT NULL CHECK (decision IN ('promoted', 'rejected', 'deferred')),
+  decision TEXT NOT NULL
+    CONSTRAINT review_decisions_decision_check
+    CHECK (decision IN ('promoted', 'ip_change_approved', 'rejected', 'deferred')),
   asset_id TEXT,
   reason TEXT NOT NULL DEFAULT '' CHECK (length(reason) <= 1000),
   operator_ref TEXT NOT NULL DEFAULT '' CHECK (length(operator_ref) <= 300),
@@ -121,6 +123,31 @@ CREATE TABLE IF NOT EXISTS onion_sentinel_assets.review_decisions (
     CHECK (observation_fingerprint ~ '^[0-9a-f]{64}$'),
   decided_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid = 'onion_sentinel_assets.review_decisions'::regclass
+      AND conname = 'review_decisions_decision_check'
+      AND pg_get_constraintdef(oid) NOT LIKE '%ip_change_approved%'
+  ) THEN
+    ALTER TABLE onion_sentinel_assets.review_decisions
+      DROP CONSTRAINT review_decisions_decision_check;
+    ALTER TABLE onion_sentinel_assets.review_decisions
+      ADD CONSTRAINT review_decisions_decision_check
+      CHECK (
+        decision IN (
+          'promoted',
+          'ip_change_approved',
+          'rejected',
+          'deferred'
+        )
+      );
+  END IF;
+END
+$$;
 
 CREATE INDEX IF NOT EXISTS idx_osa_review_discovery
   ON onion_sentinel_assets.review_decisions (discovery_id, decided_at DESC);
