@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.arron.soc.ac-hunter</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__HOME__/n8n-local/bin/collect-ac-hunter.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__/n8n-local</string>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Minute</key>
+    <integer>35</integer>
+  </dict>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/n8n-local/logs/ac-hunter.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__HOME__/n8n-local/logs/ac-hunter.err.log</string>
+</dict>
+</plist>

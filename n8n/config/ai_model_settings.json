@@ -13,6 +13,13 @@
     "soc-analyst": "ollama:gemma4:31b",
     "threat-hunter": "ollama:gemma4:31b"
   },
+  "agent_adjudicator_models": {
+    "cyber-threat-intel": "codex-cli:gpt-5.6-terra:medium",
+    "incident-responder": "codex-cli:gpt-5.6-terra:medium",
+    "siem-engineer": "codex-cli:gpt-5.6-terra:medium",
+    "soc-analyst": "codex-cli:gpt-5.6-terra:medium",
+    "threat-hunter": "codex-cli:gpt-5.6-terra:medium"
+  },
   "cloud_command": "",
   "cloud_model": "gpt-5.5",
   "cloud_provider": "codex-cli",
@@ -29,7 +36,7 @@
       "reasoning_effort": "xhigh"
     },
     {
-      "enabled": false,
+      "enabled": true,
       "model": "gpt-5.6-terra",
       "reasoning_effort": "medium"
     },

@@ -42,6 +42,7 @@ if str(PORTAL_SOURCE_DIR) not in sys.path:
 
 import soc_alert_api
 import software_inventory
+import cti_program
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -148,6 +149,7 @@ SOFTWARE_INVENTORY_STATE_FILE = (
     HOME / "n8n-local" / "software-inventory" / "software-inventory.json"
 )
 SOFTWARE_INVENTORY_MAX_BYTES = software_inventory.MAX_STATE_BYTES
+CTI_PROGRAM_API_PATH = "/api/cyber-threat-intel/program"
 ASSET_INVENTORY_CACHE_LOCK = threading.RLock()
 ASSET_INVENTORY_CACHE: dict[str, object] = {
     "signature": None,
@@ -2505,6 +2507,10 @@ def default_soc_ai_settings() -> dict:
             role: ""
             for role in CYBER_SECURITY_AGENT_ROLES
         },
+        "agent_adjudicator_models": {
+            role: ""
+            for role in CYBER_SECURITY_AGENT_ROLES
+        },
         **{
             setting_key: default_path
             for setting_key, default_path in MAXMIND_GEOIP_DATABASE_SETTINGS.values()
@@ -2782,6 +2788,31 @@ def _normalize_agent_second_opinion_models(
     return assignments
 
 
+def _normalize_agent_adjudicator_models(
+    value: object,
+    enabled_routes: list[str],
+    primary_assignments: dict[str, str],
+    reviewer_assignments: dict[str, str],
+    settings: dict | None = None,
+) -> dict[str, str]:
+    """Validate optional adjudicators as a third provider/model identity."""
+    raw = value if isinstance(value, dict) else {}
+    assignments: dict[str, str] = {}
+    for role in CYBER_SECURITY_AGENT_ROLES:
+        route = _canonical_agent_route(raw.get(role), enabled_routes)
+        identity = _model_route_identity(route, settings)
+        excluded = {
+            _model_route_identity(primary_assignments.get(role), settings),
+            _model_route_identity(reviewer_assignments.get(role), settings),
+        }
+        assignments[role] = (
+            route
+            if route in enabled_routes and identity and identity not in excluded
+            else ""
+        )
+    return assignments
+
+
 def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
     """Validate and normalize editable SOC AI model routing settings."""
     payload = payload if isinstance(payload, dict) else {}
@@ -2795,6 +2826,7 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
             "openclaw_enabled",
             "agent_models",
             "agent_second_opinion_models",
+            "agent_adjudicator_models",
         }:
             continue
         if key in payload:
@@ -3009,6 +3041,13 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
         payload.get("agent_second_opinion_models"),
         enabled_routes,
         settings["agent_models"],
+        settings,
+    )
+    settings["agent_adjudicator_models"] = _normalize_agent_adjudicator_models(
+        payload.get("agent_adjudicator_models"),
+        enabled_routes,
+        settings["agent_models"],
+        settings["agent_second_opinion_models"],
         settings,
     )
     for setting_key, label in (
@@ -3468,13 +3507,18 @@ def save_soc_ai_settings(payload: object) -> tuple[bool, dict]:
 
 
 def save_soc_agent_model(payload: object) -> tuple[bool, dict]:
-    """Atomically update one agent's primary and optional secondary routes."""
+    """Atomically update one agent's primary, reviewer, and adjudicator routes."""
     payload = payload if isinstance(payload, dict) else {}
     role = str(payload.get("role") or "").strip()
     model_route = str(payload.get("model_route") or payload.get("model") or "").strip()[:260]
     second_model_route = str(
         payload.get("second_opinion_model_route")
         or payload.get("second_opinion_model")
+        or ""
+    ).strip()[:260]
+    adjudicator_model_route = str(
+        payload.get("adjudicator_model_route")
+        or payload.get("adjudicator_model")
         or ""
     ).strip()[:260]
     if role not in CYBER_SECURITY_AGENT_ROLES:
@@ -3512,6 +3556,11 @@ def save_soc_agent_model(payload: object) -> tuple[bool, dict]:
                 "ok": False,
                 "error": "That second-opinion model is not enabled. Save the global model roster first.",
             }
+        if adjudicator_model_route and adjudicator_model_route not in enabled_routes:
+            return False, {
+                "ok": False,
+                "error": "That adjudicator model is not enabled. Save the global model roster first.",
+            }
         if (
             second_model_route
             and _model_route_identity(second_model_route, current)
@@ -3524,8 +3573,21 @@ def save_soc_agent_model(payload: object) -> tuple[bool, dict]:
                     "primary and resolve to a different provider/model identity."
                 ),
             }
+        adjudicator_identity = _model_route_identity(adjudicator_model_route, current)
+        if adjudicator_model_route and adjudicator_identity in {
+            _model_route_identity(model_route, current),
+            _model_route_identity(second_model_route, current),
+        }:
+            return False, {
+                "ok": False,
+                "error": (
+                    "The adjudicator must differ from both the primary and "
+                    "second-opinion provider/model identities."
+                ),
+            }
         current["agent_models"][role] = model_route
         current["agent_second_opinion_models"][role] = second_model_route
+        current["agent_adjudicator_models"][role] = adjudicator_model_route
         ok, normalized = normalize_soc_ai_settings(current)
         if not ok:
             return False, normalized
@@ -3535,6 +3597,7 @@ def save_soc_agent_model(payload: object) -> tuple[bool, dict]:
             response["role"] = role
             response["model_route"] = normalized["agent_models"][role]
             response["second_opinion_model_route"] = normalized["agent_second_opinion_models"][role]
+            response["adjudicator_model_route"] = normalized["agent_adjudicator_models"][role]
         return saved, response
 
 
@@ -8293,6 +8356,7 @@ def llm_runtime_model_state(current: object) -> dict:
     phase_label = {
         "preparing": "Preparing analysis",
         "second_opinion": "Second-opinion review",
+        "disagreement_adjudication": "Disagreement adjudication",
         "live_follow_up": "Live-evidence follow-up",
         "primary_analysis": "Analyzing",
     }.get(phase, "Analyzing")
@@ -8775,6 +8839,101 @@ def read_llm_second_opinion_logs(
     return reviewer_logs
 
 
+def read_llm_disagreement_adjudication_logs(
+    primary_logs: list[dict],
+    *,
+    limit: int = LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
+) -> list[dict]:
+    """Return durable shadow adjudicator executions as distinct audit runs."""
+    primary_by_id = {
+        str(item.get("analysis_id") or item.get("log_id") or ""): item
+        for item in primary_logs
+        if isinstance(item, dict)
+    }
+    try:
+        with soc_alert_db_connect() as conn:
+            if not sqlite_table_exists(
+                conn,
+                "ai_disagreement_adjudication_runs",
+            ):
+                return []
+            rows = conn.execute(
+                """
+                SELECT analysis_id, alert_id, agent_role, status, mode,
+                       adjudicator_error, model_route, decision, confidence,
+                       confidence_score, adjudicator_runtime_seconds,
+                       human_adjudication_required, generated_at
+                FROM ai_disagreement_adjudication_runs
+                ORDER BY generated_at DESC, analysis_id DESC
+                LIMIT ?
+                """,
+                (max(1, min(LLM_ANALYSIS_COMBINED_HISTORY_LIMIT, int(limit))),),
+            ).fetchall()
+    except (FileNotFoundError, sqlite3.Error, TypeError, ValueError):
+        return []
+
+    logs: list[dict] = []
+    for raw in rows:
+        row = dict(raw)
+        analysis_id = str(row.get("analysis_id") or "")
+        parent = dict(primary_by_id.get(analysis_id) or {})
+        status = str(row.get("status") or "unknown").strip().lower()
+        decision = str(row.get("decision") or "").strip()
+        error = str(row.get("adjudicator_error") or "").strip()
+        route = str(row.get("model_route") or "").strip()
+        detail_parts = [
+            error,
+            f"Decision: {decision.replace('_', ' ')}" if decision else "",
+            (
+                "Human adjudication required"
+                if row.get("human_adjudication_required")
+                else ""
+            ),
+        ]
+        mode = str(row.get("mode") or "shadow")
+        if route.startswith("codex-cli:"):
+            mode = "codex-cli"
+        elif route.startswith("ollama:"):
+            mode = "ollama"
+        adjudicator = {
+            "log_id": f"{analysis_id}:disagreement-adjudication",
+            "analysis_id": analysis_id,
+            "parent_log_id": analysis_id,
+            "run_kind": "disagreement_adjudication",
+            "active_phase": "disagreement_adjudication",
+            "phase_label": "Disagreement adjudication",
+            "agent_role": row.get("agent_role"),
+            "job_label": "Disagreement adjudication",
+            "status": "success" if status == "completed" else status,
+            "review_status": status,
+            "error": " · ".join(part for part in detail_parts if part),
+            "model": route,
+            "model_path": mode,
+            "model_route": route,
+            "mode": mode,
+            "runtime_seconds": row.get("adjudicator_runtime_seconds"),
+            "started_at": _llm_reviewer_started_at(
+                row.get("generated_at"),
+                row.get("adjudicator_runtime_seconds"),
+            ),
+            "finished_at": row.get("generated_at"),
+            "alert": parent.get("alert") or {
+                "primary_alert_id": row.get("alert_id"),
+                "rule_name": "Security Onion alert",
+                "alert_count": 1,
+            },
+            "adjudication_decision": decision,
+            "adjudication_confidence": row.get("confidence"),
+            "adjudication_confidence_score": row.get("confidence_score"),
+            "human_adjudication_required": bool(
+                row.get("human_adjudication_required")
+            ),
+        }
+        hydrate_llm_reviewer_from_parent(adjudicator, parent)
+        logs.append(adjudicator)
+    return logs
+
+
 def _llm_log_sort_timestamp(record: dict) -> float:
     for key in ("started_at", "finished_at"):
         text = str(record.get(key) or "").strip()
@@ -8803,7 +8962,10 @@ def read_llm_agent_activity_snapshot() -> dict:
             database_logs,
         )
         reviewer_logs = read_llm_second_opinion_logs(primary_logs)
-        combined = [*primary_logs, *reviewer_logs]
+        adjudication_logs = read_llm_disagreement_adjudication_logs(
+            primary_logs,
+        )
+        combined = [*primary_logs, *reviewer_logs, *adjudication_logs]
         combined.sort(
             key=lambda record: (
                 _llm_log_sort_timestamp(record),
@@ -8821,6 +8983,7 @@ def read_llm_agent_activity_snapshot() -> dict:
         return {
             "primary_logs": primary_logs,
             "reviewer_logs": reviewer_logs,
+            "adjudication_logs": adjudication_logs,
             "combined": combined,
             "telemetry_total": telemetry_total,
             "database_recovered_total": database_recovered_total,
@@ -8829,6 +8992,8 @@ def read_llm_agent_activity_snapshot() -> dict:
                 telemetry_total > len(telemetry_logs)
                 or len(database_logs) >= LLM_ANALYSIS_COMBINED_HISTORY_LIMIT
                 or len(reviewer_logs)
+                >= LLM_ANALYSIS_COMBINED_HISTORY_LIMIT
+                or len(adjudication_logs)
                 >= LLM_ANALYSIS_COMBINED_HISTORY_LIMIT
             ),
         }
@@ -8845,8 +9010,9 @@ def llm_analysis_logs_response(query: dict[str, list[str]]) -> dict:
     activity = read_llm_agent_activity_snapshot()
     primary_logs = activity["primary_logs"]
     reviewer_logs = activity["reviewer_logs"]
+    adjudication_logs = activity["adjudication_logs"]
     primary_total = len(primary_logs)
-    total = primary_total + len(reviewer_logs)
+    total = primary_total + len(reviewer_logs) + len(adjudication_logs)
     total_pages = max(1, math.ceil(total / limit)) if total else 1
     page = min(requested_page, total_pages)
     combined = activity["combined"]
@@ -8863,6 +9029,7 @@ def llm_analysis_logs_response(query: dict[str, list[str]]) -> dict:
             "database_recovered_total"
         ],
         "second_opinion_total": len(reviewer_logs),
+        "disagreement_adjudication_total": len(adjudication_logs),
         "agent_totals": activity["agent_totals"],
         "history_truncated": activity["history_truncated"],
         "total_pages": total_pages,
@@ -13231,7 +13398,23 @@ def dashboard_live_revisions() -> dict[str, str]:
         "asset_inventory": asset_revision,
         "dhcp_asset_discovery": dhcp_asset_discovery_live_revision(asset_revision),
         "software_inventory": software_inventory_live_revision(),
+        "ac_hunter": ac_hunter_live_revision(),
     }
+
+
+def ac_hunter_live_revision() -> str:
+    """Return only the PostgreSQL AC Hunter dataset digest for SSE updates."""
+
+    try:
+        payload = alert_store_get_json("/ac-hunter/snapshot", timeout=2.0)
+        cache = payload.get("cache")
+        if isinstance(cache, dict):
+            digest = str(cache.get("dataset_digest") or "").strip().lower()
+            if re.fullmatch(r"[0-9a-f]{64}", digest):
+                return digest
+    except RuntimeError:
+        pass
+    return _revision_digest(("unavailable",))
 
 
 def cached_soc_alert_events_snapshot() -> dict:
@@ -13348,6 +13531,14 @@ class PortalHandler(BaseHTTPRequestHandler):
         """Require an Administration session unless a dedicated service narrows the policy."""
         return self._admin_authenticated()
 
+    def _cti_program_write_authorized(self) -> bool:
+        """Keep CTI source and technology governance behind Administration."""
+        return self._admin_authenticated()
+
+    def _cti_program_mutation_audit(self, program: dict[str, object]) -> None:
+        """Dedicated services may record a metadata-only CTI mutation event."""
+        return None
+
     def _soc_review_write_authorized(self) -> bool:
         """Reject cross-site/form writes while keeping the LAN analyst UI usable."""
         content_type = str(self.headers.get("Content-Type") or "").lower()
@@ -13372,7 +13563,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/admin/session-status", "/api/asset-inventory", "/api/dhcp-asset-discovery", "/api/software-inventory", "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-incidents", "/api/soc-incidents/reanalysis-runs", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-incidents/") and parsed.path.endswith("/detail")) or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith(("/ack", "/escalate"))):
+        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/admin/session-status", "/api/asset-inventory", "/api/dhcp-asset-discovery", "/api/software-inventory", CTI_PROGRAM_API_PATH, "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-incidents", "/api/soc-incidents/reanalysis-runs", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-incidents/") and parsed.path.endswith("/detail")) or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith(("/ack", "/escalate"))):
             if parsed.path == "/admin" and not self._admin_authenticated():
                 self.send_response(HTTPStatus.FOUND)
                 self.send_header("Location", "/admin/login")
@@ -13393,6 +13584,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        is_cti_program_write = parsed.path == CTI_PROGRAM_API_PATH
         is_asset_write = parsed.path in {
             "/api/assets/promote-dhcp",
             "/api/assets/approve-dhcp-ip-change",
@@ -13413,16 +13605,17 @@ class PortalHandler(BaseHTTPRequestHandler):
             parsed.path.startswith("/api/soc-incidents/")
             and parsed.path.endswith(("/adjudicate", "/status"))
         )
-        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and parsed.path not in SOC_SETTINGS_PROMPT_API_PATHS and not (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) and not is_review_write and not is_incident_reanalysis and not is_asset_write:
+        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and parsed.path not in SOC_SETTINGS_PROMPT_API_PATHS and not (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) and not is_review_write and not is_incident_reanalysis and not is_asset_write and not is_cti_program_write:
             return self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain; charset=utf-8")
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             length = 0
-        if length <= 0 or length > 50000:
+        request_limit = cti_program.MAX_FILE_BYTES if is_cti_program_write else 50000
+        if length <= 0 or length > request_limit:
             if parsed.path == "/api/admin/start-service":
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
-            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) or is_review_write or is_incident_reanalysis or is_asset_write:
+            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) or is_review_write or is_incident_reanalysis or is_asset_write or is_cti_program_write:
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
             if parsed.path.startswith("/api/resource-library/"):
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
@@ -13430,6 +13623,56 @@ class PortalHandler(BaseHTTPRequestHandler):
                 return self._send(HTTPStatus.BAD_REQUEST, render_admin_dashboard("Invalid admin action request size.", True))
             return self._send(HTTPStatus.BAD_REQUEST, render_admin_login("Invalid request size.", True))
         raw = self.rfile.read(length).decode("utf-8", errors="replace")
+        if is_cti_program_write:
+            if not self._soc_review_write_authorized():
+                return self._send(
+                    HTTPStatus.FORBIDDEN,
+                    json.dumps({
+                        "ok": False,
+                        "error": "CTI workspace changes must come from the same-origin Onion Sentinel dashboard.",
+                    }).encode(),
+                    "application/json; charset=utf-8",
+                )
+            if not self._cti_program_write_authorized():
+                return self._send(
+                    HTTPStatus.FORBIDDEN,
+                    json.dumps({
+                        "ok": False,
+                        "authentication_required": True,
+                        "error": "Sign in to Onion Sentinel Administration before editing the CTI workspace.",
+                    }).encode(),
+                    "application/json; charset=utf-8",
+                )
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                payload = None
+            try:
+                program = cti_program.save_program(payload)
+            except cti_program.CTIProgramConflict as exc:
+                return self._send(
+                    HTTPStatus.CONFLICT,
+                    json.dumps({"ok": False, "error": str(exc)}).encode(),
+                    "application/json; charset=utf-8",
+                )
+            except cti_program.CTIProgramError as exc:
+                return self._send(
+                    HTTPStatus.BAD_REQUEST,
+                    json.dumps({"ok": False, "error": str(exc)}).encode(),
+                    "application/json; charset=utf-8",
+                )
+            except OSError:
+                return self._send(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    json.dumps({"ok": False, "error": "Could not persist the CTI workspace."}).encode(),
+                    "application/json; charset=utf-8",
+                )
+            self._cti_program_mutation_audit(program)
+            return self._send(
+                HTTPStatus.OK,
+                json.dumps(cti_program.public_response(program), indent=2).encode(),
+                "application/json; charset=utf-8",
+            )
         if is_asset_write:
             if not self._soc_review_write_authorized():
                 return self._send(
@@ -13759,6 +14002,21 @@ class PortalHandler(BaseHTTPRequestHandler):
         if path == "/api/software-inventory":
             status, data = software_inventory_response(query=query)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if path == CTI_PROGRAM_API_PATH:
+            try:
+                data = cti_program.public_response(cti_program.load_program())
+                status = HTTPStatus.OK
+            except cti_program.CTIProgramError as exc:
+                data = {"ok": False, "error": str(exc)}
+                status = HTTPStatus.INTERNAL_SERVER_ERROR
+            except OSError:
+                data = {"ok": False, "error": "Could not read the CTI workspace."}
+                status = HTTPStatus.INTERNAL_SERVER_ERROR
+            return self._send(
+                status,
+                json.dumps(data, indent=2).encode(),
+                "application/json; charset=utf-8",
+            )
         if path == "/api/llm-analysis/current":
             return self._send(HTTPStatus.OK, json.dumps(read_llm_current_analysis(), indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/llm-analysis/logs":

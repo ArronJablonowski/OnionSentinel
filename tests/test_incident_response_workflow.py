@@ -85,6 +85,18 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertEqual(keys[keys.index("alerts") + 1], "investigations")
         self.assertEqual(
             keys[keys.index("investigations") + 1],
+            "cyber_threat_intel",
+        )
+        self.assertEqual(
+            keys[keys.index("cyber_threat_intel") + 1],
+            "siem_engineering",
+        )
+        self.assertEqual(
+            keys[keys.index("siem_engineering") + 1],
+            "threat_hunter",
+        )
+        self.assertEqual(
+            keys[keys.index("threat_hunter") + 1],
             "asset_inventory",
         )
         self.assertEqual(

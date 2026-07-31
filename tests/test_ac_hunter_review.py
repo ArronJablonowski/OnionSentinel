@@ -692,19 +692,18 @@ class AcHunterReviewTests(unittest.TestCase):
         self.assertEqual(len(responses), 4)
         self.assertTrue(all(status == 200 for status, _payload in responses))
 
-    def test_module_level_api_is_lazy_and_returns_sanitized_failure(self) -> None:
-        self.module._DEFAULT_SERVICE = None
-        missing = self.root / "missing-config.json"
-        with mock.patch.dict(
-            os.environ,
-            {"ONION_SENTINEL_AC_HUNTER_CONFIG": str(missing)},
-            clear=False,
+    def test_module_level_api_reads_database_and_returns_sanitized_failure(self) -> None:
+        with mock.patch.object(
+            self.module.urllib.request,
+            "urlopen",
+            side_effect=self.module.urllib.error.URLError("database offline"),
         ):
-            status, payload = self.module.deep_review_response()
+            status, payload = self.module.deep_review_response(force_refresh=True)
         self.assertEqual(status, 503)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["dataset"]["name"], "security-onion-rolling")
         self.assertIn("behavioral triage", payload["disclaimer"])
+        self.assertNotIn("database offline", json.dumps(payload))
 
 
 if __name__ == "__main__":

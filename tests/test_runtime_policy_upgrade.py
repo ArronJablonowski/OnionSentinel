@@ -13,6 +13,9 @@ INSTALLER = ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
 PRIOR_MODEL_SETTINGS_SHA256 = (
     "fd9f93123b22c0664d147fdcd012d1c016329566ffaea97cb4bfa7c5d7daaf2b"
 )
+PRE_ADJUDICATOR_MODEL_SETTINGS_SHA256 = (
+    "bafb138cf8d2c216bf9fe37ea92d5b822b9444a108e9ca5de51a09f587983118"
+)
 PRIOR_REVIEWER_PROMPT_SHA256 = {
     "cyber_threat_intel_second_opinion_prompt.md": (
         "2c0a5093fc6c79d6bb7f40a278a265e2edba91d69e7fa763508f16eaf5f69e44"
@@ -109,6 +112,10 @@ class RuntimePolicyUpgradeTests(unittest.TestCase):
     @staticmethod
     def prior_model_settings() -> dict:
         settings = json.loads(MODEL_SETTINGS.read_text(encoding="utf-8"))
+        settings.pop("agent_adjudicator_models", None)
+        for entry in settings["codex_cli_models"]:
+            if entry["model"] == "gpt-5.6-terra":
+                entry["enabled"] = False
         for key in (
             "hermes_agent_enabled",
             "hermes_agent_path",
@@ -202,11 +209,18 @@ class RuntimePolicyUpgradeTests(unittest.TestCase):
         migration = (
             '--source "$REPO_DIR/n8n/config/ai_model_settings.json" \\\n'
             '  --destination "$STACK_DIR/config/ai_model_settings.json" \\\n'
-            f'  --accepted-prior-sha256 "{PRIOR_MODEL_SETTINGS_SHA256}"'
         )
 
         self.assertIn(seed, installer)
         self.assertIn(migration, installer)
+        self.assertIn(
+            f'--accepted-prior-sha256 "{PRIOR_MODEL_SETTINGS_SHA256}"',
+            installer,
+        )
+        self.assertIn(
+            f'--accepted-prior-sha256 "{PRE_ADJUDICATOR_MODEL_SETTINGS_SHA256}"',
+            installer,
+        )
         self.assertLess(installer.index(seed), installer.index(migration))
 
     def test_installer_exactly_migrates_every_shipped_reviewer_prompt(self) -> None:

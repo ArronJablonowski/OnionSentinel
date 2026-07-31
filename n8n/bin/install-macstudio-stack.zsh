@@ -41,7 +41,8 @@ critical_launch_agents_down() {
     com.arron.soc.ai-analysis.plist \
     com.arron.soc.ai-analysis-cli.plist \
     com.arron.soc.dhcp-asset-discovery.plist \
-    com.arron.soc.software-inventory.plist
+    com.arron.soc.software-inventory.plist \
+    com.arron.soc.ac-hunter.plist
   do
     launchctl unload "$LAUNCHD_DIR/$plist" >/dev/null 2>&1 || true
   done
@@ -50,7 +51,8 @@ critical_launch_agents_down() {
     com.arron.soc.ai-analysis \
     com.arron.soc.ai-analysis-cli \
     com.arron.soc.dhcp-asset-discovery \
-    com.arron.soc.software-inventory
+    com.arron.soc.software-inventory \
+    com.arron.soc.ac-hunter
   do
     launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
   done
@@ -93,7 +95,8 @@ critical_launch_agents_are_down() {
     com.arron.soc.ai-analysis \
     com.arron.soc.ai-analysis-cli \
     com.arron.soc.dhcp-asset-discovery \
-    com.arron.soc.software-inventory
+    com.arron.soc.software-inventory \
+    com.arron.soc.ac-hunter
   do
     if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
       return 1
@@ -163,6 +166,7 @@ cp "$REPO_DIR/n8n/alert_store/lib/postgres_shadow_outbox.js" "$STACK_DIR/alert_s
 cp "$REPO_DIR/n8n/alert_store/lib/postgres_shadow_projector.js" "$STACK_DIR/alert_store/lib/postgres_shadow_projector.js"
 cp "$REPO_DIR/n8n/alert_store/lib/postgres_asset_store.js" "$STACK_DIR/alert_store/lib/postgres_asset_store.js"
 cp "$REPO_DIR/n8n/alert_store/lib/postgres_software_store.js" "$STACK_DIR/alert_store/lib/postgres_software_store.js"
+cp "$REPO_DIR/n8n/alert_store/lib/postgres_ac_hunter_store.js" "$STACK_DIR/alert_store/lib/postgres_ac_hunter_store.js"
 cp "$REPO_DIR/n8n/alert_store/lib/security_logger.js" "$STACK_DIR/alert_store/lib/security_logger.js"
 cp "$REPO_DIR/n8n/alert_store/lib/http_json_client.js" "$STACK_DIR/alert_store/lib/http_json_client.js"
 cp "$REPO_DIR/n8n/alert_store/lib/http_runtime.js" "$STACK_DIR/alert_store/lib/http_runtime.js"
@@ -174,6 +178,7 @@ cp "$REPO_DIR/n8n/alert_store/lib/soc_analysis_policy.js" "$STACK_DIR/alert_stor
 cp "$REPO_DIR/n8n/postgres/alert-store-queue-schema.sql" "$STACK_DIR/postgres/alert-store-queue-schema.sql"
 cp "$REPO_DIR/n8n/postgres/asset-inventory-schema.sql" "$STACK_DIR/postgres/asset-inventory-schema.sql"
 cp "$REPO_DIR/n8n/postgres/software-inventory-schema.sql" "$STACK_DIR/postgres/software-inventory-schema.sql"
+cp "$REPO_DIR/n8n/postgres/ac-hunter-schema.sql" "$STACK_DIR/postgres/ac-hunter-schema.sql"
 # The repository carries a sanitized DR baseline. Production tuning may contain
 # environment-specific rule names and addresses, so a repair install must not
 # erase it. Runtime backups remain responsible for preserving the live policy.
@@ -197,6 +202,12 @@ fi
 if [[ ! -f "$STACK_DIR/config/incident_responder_system_prompt.md" ]]; then
   cp "$REPO_DIR/n8n/config/incident_responder_system_prompt.md" "$STACK_DIR/config/incident_responder_system_prompt.md"
 fi
+# The bounded adjudicator contract is code-owned safety policy. Unlike the
+# role prompts, it is not operator-tunable because relaxing its closed choices
+# could accidentally turn shadow review into an automation authority.
+install -m 0600 \
+  "$REPO_DIR/n8n/config/disagreement_adjudicator_system_prompt.md" \
+  "$STACK_DIR/config/disagreement_adjudicator_system_prompt.md"
 # Reviewer prompts are operator-editable runtime policy, just like the primary
 # prompts. Seed missing files during recovery. Existing files are considered
 # for the byte-exact, reviewed baseline upgrades below.
@@ -247,6 +258,7 @@ fi
 /usr/bin/python3 "$REPO_DIR/n8n/bin/upgrade-runtime-policy.py" \
   --source "$REPO_DIR/n8n/config/ai_model_settings.json" \
   --destination "$STACK_DIR/config/ai_model_settings.json" \
+  --accepted-prior-sha256 "bafb138cf8d2c216bf9fe37ea92d5b822b9444a108e9ca5de51a09f587983118" \
   --accepted-prior-sha256 "fd9f93123b22c0664d147fdcd012d1c016329566ffaea97cb4bfa7c5d7daaf2b"
 # The investigation harness policy is operator-owned runtime policy. Seed the
 # checked-in, disabled-by-default baseline only on first install and preserve
@@ -273,6 +285,24 @@ if [[ ! -f "$STACK_DIR/config/investigation_harness_policy.json" ]]; then
 fi
 chmod 0600 "$STACK_DIR/config/investigation_harness_policy.json"
 cp "$REPO_DIR/n8n/config/detection_playbooks.json" "$STACK_DIR/config/detection_playbooks.json"
+for investigation_skill_file in \
+  investigation_skills.schema.json \
+  investigation_skills.json
+do
+  if [[ -L "$STACK_DIR/config/$investigation_skill_file" ]] \
+    || [[ -e "$STACK_DIR/config/$investigation_skill_file" \
+      && ! -f "$STACK_DIR/config/$investigation_skill_file" ]]; then
+    echo "Refusing install: $investigation_skill_file must be a regular file." >&2
+    exit 1
+  fi
+done
+cp "$REPO_DIR/n8n/config/investigation_skills.schema.json" \
+  "$STACK_DIR/config/investigation_skills.schema.json"
+cp "$REPO_DIR/n8n/config/investigation_skills.json" \
+  "$STACK_DIR/config/investigation_skills.json"
+chmod 0644 \
+  "$STACK_DIR/config/investigation_skills.schema.json" \
+  "$STACK_DIR/config/investigation_skills.json"
 if [[ ! -f "$STACK_DIR/config/asset_inventory.json" ]]; then
   cp "$REPO_DIR/n8n/config/asset_inventory.example.json" "$STACK_DIR/config/asset_inventory.json"
   chmod 0600 "$STACK_DIR/config/asset_inventory.json"
@@ -349,9 +379,11 @@ cp "$REPO_DIR/n8n/bin/run-recovery-restore-drill.py" "$STACK_DIR/bin/run-recover
 cp "$REPO_DIR/n8n/bin/run-alert-store-host.zsh" "$STACK_DIR/bin/run-alert-store-host.zsh"
 cp "$REPO_DIR/n8n/bin/maintain-alert-store-sqlite.zsh" "$STACK_DIR/bin/maintain-alert-store-sqlite.zsh"
 cp "$REPO_DIR/n8n/bin/detection_validation.py" "$STACK_DIR/bin/detection_validation.py"
+cp "$REPO_DIR/n8n/bin/investigation_skills.py" "$STACK_DIR/bin/investigation_skills.py"
 cp "$REPO_DIR/n8n/bin/asset_inventory.py" "$STACK_DIR/bin/asset_inventory.py"
 cp "$REPO_DIR/n8n/bin/collect-dhcp-asset-discovery.py" "$STACK_DIR/bin/collect-dhcp-asset-discovery.py"
 cp "$REPO_DIR/n8n/bin/collect-software-inventory.py" "$STACK_DIR/bin/collect-software-inventory.py"
+cp "$REPO_DIR/n8n/bin/collect-ac-hunter.py" "$STACK_DIR/bin/collect-ac-hunter.py"
 cp "$REPO_DIR/n8n/bin/migrate-software-inventory-to-postgres.py" "$STACK_DIR/bin/migrate-software-inventory-to-postgres.py"
 cp "$REPO_DIR/n8n/bin/query-security-onion.py" "$STACK_DIR/bin/query-security-onion.py"
 cp "$REPO_DIR/n8n/bin/promote-dhcp-asset.py" "$STACK_DIR/bin/promote-dhcp-asset.py"
@@ -436,11 +468,13 @@ cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_system_health_component
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_reactive_tables.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_reactive_tables.py"
 cp -R "$REPO_DIR/onion-sentinel-dashboard/assets/." "$DASHBOARD_RUNTIME_DIR/assets/"
 cp "$REPO_DIR/onion-sentinel-dashboard/onion_sentinel_server.py" "$DASHBOARD_RUNTIME_DIR/onion_sentinel_server.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/application_logs.py" "$DASHBOARD_RUNTIME_DIR/application_logs.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/http_runtime.py" "$DASHBOARD_RUNTIME_DIR/http_runtime.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/jsonl_log.py" "$DASHBOARD_RUNTIME_DIR/jsonl_log.py"
 cp "$REPO_DIR/n8n/bin/security_jsonl_log.py" "$DASHBOARD_RUNTIME_DIR/security_jsonl_log.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/report_portal.py" "$DASHBOARD_RUNTIME_DIR/report_portal.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/ac_hunter_review.py" "$DASHBOARD_RUNTIME_DIR/ac_hunter_review.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/cti_program.py" "$DASHBOARD_RUNTIME_DIR/cti_program.py"
 cp "$REPO_DIR/n8n/bin/asset_inventory.py" "$DASHBOARD_RUNTIME_DIR/asset_inventory.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory.py" "$DASHBOARD_RUNTIME_DIR/software_inventory.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/soc_alert_api.py" "$DASHBOARD_RUNTIME_DIR/soc_alert_api.py"
@@ -607,6 +641,7 @@ for plist in \
   com.arron.soc.daily-rollup.plist \
   com.arron.soc.dhcp-asset-discovery.plist \
   com.arron.soc.software-inventory.plist \
+  com.arron.soc.ac-hunter.plist \
   com.arron.onion-sentinel.web.plist \
   com.arron.onion-sentinel.web-guard.plist \
   com.arron.onion-sentinel.harness-maintenance.plist \
@@ -644,6 +679,7 @@ launchctl unload "$LAUNCHD_DIR/com.arron.soc.dashboard-refresh.plist" >/dev/null
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.dhcp-asset-discovery.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.software-inventory.plist" >/dev/null 2>&1 || true
+launchctl unload "$LAUNCHD_DIR/com.arron.soc.ac-hunter.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.web-guard.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.web.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.harness-maintenance.plist" >/dev/null 2>&1 || true
@@ -680,6 +716,7 @@ launchctl load "$LAUNCHD_DIR/com.arron.soc.dashboard-refresh.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.dhcp-asset-discovery.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.software-inventory.plist"
+launchctl load "$LAUNCHD_DIR/com.arron.soc.ac-hunter.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.web.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.web-guard.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.harness-maintenance.plist"
@@ -706,9 +743,8 @@ Next manual steps:
    n8n/ssh/authorized_keys.alert-intake.example.
 6. Activate the workflow and validate synthetic post-commit delivery before
    enabling relay alert_ingest.
-7. AC Hunter Deep Review remains disabled. Follow
-   docs/ac-hunter-deep-review.md to install its dedicated key, host pin,
-   owner-only service credential, and Relay certificate trust before enabling
-   either side.
+7. The PostgreSQL-backed AC Hunter collector is scheduled hourly at minute 35.
+   Follow docs/ac-hunter-deep-review.md for its dedicated key, host pin,
+   owner-only service credential, Relay trust, and validation procedure.
 
 MSG

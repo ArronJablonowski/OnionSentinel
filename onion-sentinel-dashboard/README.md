@@ -80,8 +80,10 @@ dependency.
 - Threat Hunter route with expandable hunt recommendations and copyable KQL/OQL/OSQuery pivots.
 - Cyber Threat Intel route for future intelligence briefs, indicators, and enrichment context.
 - SIEM Engineer menu route for model-backed tuning, detection recommendations, and a top ROI tuning candidate summary. Rows in both recommendation tables expand by click or keyboard to show an evidence-backed AI engineering report with the proposed change, rationale, grouped detection context, enrichment and PCAP findings, validation steps, rollback guidance, and complete escaped AI response JSON.
-- Settings page with collapsed Ollama and GPT CLI provider controls. The Ollama
-  section refreshes the local `ollama ls` inventory, supports multiple enabled
+- Settings page with separate Onion Sentinel, Hermes, and OpenClaw harness
+  sections. Ollama and Codex CLI are grouped under the Onion Sentinel Harness;
+  the Hermes and OpenClaw controls remain independent isolated harness routes.
+  The Ollama section refreshes the local `ollama ls` inventory, supports multiple enabled
   models as an approved roster, preserves configured unavailable models, and
   warns beside models whose bounded Ollama metadata lacks the completion,
   chat-template, or minimum-context capabilities required by the SOC workflow.
@@ -89,8 +91,11 @@ dependency.
   `gpt-5.6-luna` catalog with an independent enable toggle and reasoning
   selector for each model. Only enabled model/effort routes are assignable. Each
   Cyber Security Agent selects exactly one enabled primary route and an
-  optional distinct second-opinion route in its expanded panel. Its collapsed row shows both assignments and
-  explicitly reports `None selected` when no reviewer is configured. Both
+  optional distinct second-opinion route plus an optional third adjudicator
+  route in its expanded panel. The adjudicator selector excludes both underlying
+  provider/model identities and is used only for shadow review of material
+  disagreements. Its collapsed row shows all three assignments and explicitly
+  reports `None selected` when a reviewer or adjudicator is not configured. All
   labels refresh after role-scoped saves without rewriting unrelated settings.
   The active SOC Analyst worker honors those exact routes.
   The page also includes a standalone MaxMind GeoIP section

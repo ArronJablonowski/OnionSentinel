@@ -5,6 +5,11 @@ not classify a host as malicious from an AC Hunter score alone. Onion Sentinel
 normalizes the bounded AC Hunter results, applies explainable triage rules, and
 presents evidence for an analyst to investigate.
 
+Collection is schedule-owned rather than request-owned. The Mac Studio
+LaunchAgent `com.arron.soc.ac-hunter` runs once an hour at minute `35`. Public
+dashboard requests read PostgreSQL only and cannot trigger AC Hunter or Relay
+activity.
+
 The only supported network path is:
 
 ```text
@@ -40,10 +45,13 @@ responses.
   memory. They are streamed to the forced SSH process over an anonymous pipe;
   they are not staged in a temporary file and are never written to the
   normalized cache or application logs.
-- The Mac cache contains normalized AC Hunter findings only. It is stored at
-  `$HOME/n8n-local/cache/ac-hunter-deep-review.json` with owner-only
-  permissions. The client rejects any other cache target and rejects a cache
-  path that aliases its configuration, credentials, key, or known-hosts file.
+- PostgreSQL is authoritative for normalized AC Hunter findings. The
+  `onion_sentinel_ac_hunter` schema retains distinct snapshots and pull-run
+  history for 24 hours. The current snapshot is immutable and content
+  addressed: an identical hourly pull updates only poll state and does not
+  rewrite or insert the cached dataset.
+- The former owner-only JSON cache is migration input only. The WebUI and
+  dashboard API do not read it after the PostgreSQL cutover.
 - The Relay trusts one root-owned CA certificate and the exact SHA-256 digest
   of the AC Hunter leaf certificate. It does not disable certificate-chain
   verification. The current appliance certificate has no subjectAltName, so
@@ -137,8 +145,9 @@ Before enabling AC Hunter, prove that the forced key:
 
 ## Mac Studio installation
 
-The Mac stack installer copies the shared contract and dashboard client,
-creates the owner-only cache directory, and seeds
+The Mac stack installer copies the shared contract, scheduled collector,
+PostgreSQL schema/store, dashboard client, and the minute-35 LaunchAgent. It
+seeds
 `$HOME/n8n-local/config/ac-hunter.json` only when absent:
 
 ```bash
@@ -152,30 +161,46 @@ path. It never creates, replaces, or reads the credential file. Create that
 file separately with the credential schema above, make it `0600`, and verify
 that only the Mac runtime user owns it.
 
-Review the disabled client config, dedicated key, known-host pin, and
-credential file. Enable `/etc/so-alert-relay/ac-hunter.json` first and then
-`$HOME/n8n-local/config/ac-hunter.json`. That order ensures the Mac continues
-to fail closed until the Relay trust boundary is ready.
+Review the disabled client config, dedicated key, known-host pin, credential
+file, and owner-only `.env`. PostgreSQL AC Hunter storage follows
+`ASSET_POSTGRES_ENABLED` unless `AC_HUNTER_POSTGRES_ENABLED` is explicitly set.
+Enable `/etc/so-alert-relay/ac-hunter.json` first and then
+`$HOME/n8n-local/config/ac-hunter.json`. That order ensures the scheduled
+collector continues to fail closed until the Relay trust boundary is ready.
 
 ## Validation and rollback
 
-Use the page's refresh action or the local API after both sides are enabled:
+Run the collector once for cutover validation, then read the local database API:
 
 ```bash
+launchctl kickstart -k \
+  "gui/$(id -u)/com.arron.soc.ac-hunter"
+
 curl --fail --silent --show-error \
   http://127.0.0.1:8766/api/ac-hunter/deep-review
 ```
 
-Validate that the response identifies `security-onion-rolling`, has a bounded
-dataset time range, reports the cache age, and contains normalized findings
-rather than cookies, authorization headers, passwords, or raw login HTML.
-Check that a second request within the cache TTL does not issue a full AC
-Hunter pull.
+Validate that the response identifies `security-onion-rolling`, reports
+`storage_backend: postgresql`, has a bounded dataset time range, and contains
+normalized findings rather than cookies, authorization headers, passwords, or
+raw login HTML. Dashboard GET and reload requests must never produce SSH or AC
+Hunter activity.
 
-The public page may revalidate the cache, but only an authenticated
-Administration session can request a cache bypass. Even authenticated forced
-pulls are globally limited to one every five minutes so concurrent or repeated
-requests cannot queue full multi-module collections.
+Verify two identical collector runs. The second run must return
+`changed: false`, retain the same `dataset_digest`, leave the stored snapshot
+unchanged, and add only the bounded pull-state/audit observation. A change to
+any analyst-visible dataset field must produce `changed: true` and a new
+content-addressed snapshot. Snapshots and pull history older than 24 hours are
+pruned, except that the current snapshot is retained until replaced so an
+unchanged dataset does not disappear.
+
+The page rechecks PostgreSQL every 60 seconds for reactive display. Its
+“Reload stored snapshot” button also reads PostgreSQL only. The sole automatic
+pull schedule is:
+
+```text
+Every hour at HH:35 in the Mac Studio's configured timezone
+```
 
 The installed contract requests page `1` for bounded list operations. On the
 deployed AC Hunter release, page `0` ignores `size` for beacon endpoints and
@@ -184,11 +209,13 @@ compatibility guard, not an attempt to skip the first page.
 
 Rollback is immediate and does not affect alert ingestion or Security Onion:
 
-1. set `"enabled": false` in the Mac client config;
-2. set `"enabled": false` in the Relay config; and
-3. remove only the dedicated AC Hunter public-key entry if the transport is
+1. unload `com.arron.soc.ac-hunter`;
+2. set `"enabled": false` in the Mac client config;
+3. set `"enabled": false` in the Relay config; and
+4. remove only the dedicated AC Hunter public-key entry if the transport is
    being retired.
 
-Preserve the last normalized cache for analyst continuity unless incident
-handling requires its removal. Never copy the live credential file, private
-key, session cookie, JWT, CA trust decision, or cached findings into Git.
+Preserve the PostgreSQL schema and latest normalized snapshot for analyst
+continuity unless incident handling requires removal. Never copy the live
+credential file, private key, session cookie, JWT, CA trust decision, or cached
+findings into Git.

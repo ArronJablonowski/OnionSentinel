@@ -174,6 +174,9 @@ MEMORY_WRITEBACK_TASK_SCHEMA = "onion-sentinel-memory-writeback-task-v1"
 MAX_MEMORY_WRITEBACK_TASK_BYTES = 256 * 1024
 DEFAULT_SYSTEM_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system_prompt.md"
 DEFAULT_SECOND_OPINION_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_second_opinion_prompt.md"
+DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT_FILE = (
+    HOME / "n8n-local" / "config" / "disagreement_adjudicator_system_prompt.md"
+)
 DEFAULT_AI_SETTINGS_FILE = HOME / "n8n-local" / "config" / "ai_model_settings.json"
 DEFAULT_HERMES_AUTH_FILE = (
     HOME / "n8n-local" / "private" / "hermes-agent" / "auth.json"
@@ -584,6 +587,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_SECOND_OPINION_PROMPT_FILE,
         help="Independent second-opinion system prompt file",
+    )
+    parser.add_argument(
+        "--disagreement-adjudicator-prompt-file",
+        type=Path,
+        default=DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT_FILE,
+        help="Bounded shadow-mode disagreement adjudicator system prompt file",
     )
     parser.add_argument("--timeout", type=int, default=600, help="Ollama request timeout in seconds")
     parser.add_argument(
@@ -1824,6 +1833,9 @@ def default_ai_settings() -> dict[str, Any]:
         "agent_second_opinion_models": {
             role: "" for role in CYBER_SECURITY_AGENT_ROLES
         },
+        "agent_adjudicator_models": {
+            role: "" for role in CYBER_SECURITY_AGENT_ROLES
+        },
     }
 
 
@@ -2486,6 +2498,31 @@ def normalize_agent_second_opinion_models(
     }
 
 
+def normalize_agent_adjudicator_models(
+    value: Any,
+    routes: list[str],
+    primary_assignments: dict[str, str],
+    reviewer_assignments: dict[str, str],
+    settings: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Keep adjudicators optional, enabled, and independent of both positions."""
+    source = value if isinstance(value, dict) else {}
+    assignments: dict[str, str] = {}
+    for role in CYBER_SECURITY_AGENT_ROLES:
+        route = canonical_model_route(source.get(role), routes)
+        route_identity = model_route_identity(route, settings)
+        excluded = {
+            model_route_identity(primary_assignments.get(role), settings),
+            model_route_identity(reviewer_assignments.get(role), settings),
+        }
+        assignments[role] = (
+            route
+            if route in routes and route_identity and route_identity not in excluded
+            else ""
+        )
+    return assignments
+
+
 def apply_model_roster(settings: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
     """Migrate legacy single-model settings and derive the compatibility mode."""
     legacy_mode = str(raw.get("mode") or settings.get("mode") or "ollama").strip().lower()
@@ -2533,6 +2570,13 @@ def apply_model_roster(settings: dict[str, Any], raw: dict[str, Any]) -> dict[st
         raw.get("agent_second_opinion_models"),
         enabled_agent_model_routes(settings),
         settings["agent_models"],
+    )
+    settings["agent_adjudicator_models"] = normalize_agent_adjudicator_models(
+        raw.get("agent_adjudicator_models"),
+        enabled_agent_model_routes(settings),
+        settings["agent_models"],
+        settings["agent_second_opinion_models"],
+        settings,
     )
     return settings
 
@@ -2708,6 +2752,7 @@ def load_ai_settings(path: Path) -> dict[str, Any]:
             "openclaw_enabled",
             "agent_models",
             "agent_second_opinion_models",
+            "agent_adjudicator_models",
         }:
             continue
         if key in settings and value is not None:
@@ -2800,6 +2845,13 @@ def effective_ai_settings(args: argparse.Namespace) -> dict[str, Any]:
         settings.get("agent_second_opinion_models"),
         enabled_agent_model_routes(settings),
         settings["agent_models"],
+    )
+    settings["agent_adjudicator_models"] = normalize_agent_adjudicator_models(
+        settings.get("agent_adjudicator_models"),
+        enabled_agent_model_routes(settings),
+        settings["agent_models"],
+        settings["agent_second_opinion_models"],
+        settings,
     )
     return settings
 
@@ -12235,6 +12287,364 @@ def compare_analysis_results(
     }
 
 
+class DisagreementAdjudicationValidationError(ValueError):
+    """A bounded adjudicator response violated its closed decision contract."""
+
+
+def disagreement_adjudication_package(
+    prompt_package: dict[str, Any],
+    primary_response: dict[str, Any],
+    reviewer_response: dict[str, Any],
+    comparison: dict[str, Any],
+    *,
+    hosted: bool,
+) -> dict[str, Any]:
+    """Build a route-safe package containing two immutable disputed positions."""
+    package = independent_reviewer_package(prompt_package, hosted=hosted)
+    package.pop("second_opinion_review", None)
+    package.pop("review_contract", None)
+    disputed = [
+        item
+        for item in comparison.get("disputed_fields", [])
+        if isinstance(item, dict) and str(item.get("field") or "")
+    ][:16]
+    package["adjudication_positions"] = {
+        "primary": {
+            **dict(comparison.get("primary") or {}),
+            "bluf": str(primary_response.get("bluf") or "")[:4000],
+            "summary": str(primary_response.get("summary") or "")[:8000],
+            "evidence_used": list(primary_response.get("evidence_used") or [])[:100],
+            "evidence_gaps": list(primary_response.get("evidence_gaps") or [])[:50],
+        },
+        "reviewer": {
+            **dict(comparison.get("reviewer") or {}),
+            "bluf": str(reviewer_response.get("bluf") or "")[:4000],
+            "summary": str(reviewer_response.get("summary") or "")[:8000],
+            "evidence_used": list(reviewer_response.get("evidence_used") or [])[:100],
+            "evidence_gaps": list(reviewer_response.get("evidence_gaps") or [])[:50],
+        },
+        "disputed_fields": disputed,
+    }
+    package["response_schema"] = {
+        "adjudication_case_id": "exact adjudication_contract.case_id",
+        "adjudication_evidence_hash": "exact adjudication_contract.evidence_hash",
+        "decision": "primary_supported|reviewer_supported|unresolved",
+        "confidence": "low|medium|high",
+        "confidence_score": "number from 0.0 through 1.0",
+        "resolved_fields": ["exact field names from adjudication_contract.disputed_fields"],
+        "remaining_disagreements": ["exact field names from adjudication_contract.disputed_fields"],
+        "evidence_used": ["exact evidence_reference_contract ref strings"],
+        "rationale": "bounded explanation tied to cited evidence",
+        "additional_evidence_needed": ["bounded evidence needed to resolve remaining disagreement"],
+    }
+    contract = {
+        "schema": "onion-sentinel-disagreement-adjudication-v1",
+        "mode": "shadow",
+        "case_id": reviewer_case_id(package),
+        "disputed_fields": [str(item["field"]) for item in disputed],
+        "material_fields": [
+            str(item["field"])
+            for item in disputed
+            if item.get("material") is True
+        ],
+        "allowed_decisions": [
+            "primary_supported",
+            "reviewer_supported",
+            "unresolved",
+        ],
+        "maximum_model_calls": 2,
+        "automation_authorized": False,
+        "requirements": [
+            "Choose one allowed decision; never synthesize a third position.",
+            "Use only exact disputed field names and evidence refs.",
+            "A supported decision must resolve every material field.",
+            "Unresolved must retain at least one material disagreement.",
+            "Shadow adjudication never authorizes an operational action.",
+        ],
+    }
+    package["adjudication_contract"] = contract
+    digest_payload = model_safe_copy(package, reviewer_safe=True)
+    digest_contract = dict(digest_payload.get("adjudication_contract") or {})
+    digest_contract.pop("evidence_hash", None)
+    digest_payload["adjudication_contract"] = digest_contract
+    contract["evidence_hash"] = hashlib.sha256(
+        json.dumps(
+            digest_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    return package
+
+
+def validate_disagreement_adjudication(
+    response: Any,
+    package: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate identity, closed choices, disputed fields, and evidence citations."""
+    if not isinstance(response, dict):
+        raise DisagreementAdjudicationValidationError(
+            "adjudicator response must be an object"
+        )
+    contract = package.get("adjudication_contract")
+    if not isinstance(contract, dict):
+        raise DisagreementAdjudicationValidationError(
+            "adjudication contract is missing"
+        )
+    errors: list[str] = []
+    if str(response.get("adjudication_case_id") or "") != str(contract.get("case_id") or ""):
+        errors.append("adjudication_case_id does not match the contract")
+    if str(response.get("adjudication_evidence_hash") or "") != str(contract.get("evidence_hash") or ""):
+        errors.append("adjudication_evidence_hash does not match the contract")
+    decision = str(response.get("decision") or "").strip().lower()
+    allowed_decisions = set(contract.get("allowed_decisions") or [])
+    if decision not in allowed_decisions:
+        errors.append("decision is outside the closed vocabulary")
+    confidence = str(response.get("confidence") or "").strip().lower()
+    if confidence not in {"low", "medium", "high"}:
+        errors.append("confidence is outside the closed vocabulary")
+    try:
+        confidence_score = float(response.get("confidence_score"))
+    except (TypeError, ValueError, OverflowError):
+        confidence_score = -1.0
+    if not 0.0 <= confidence_score <= 1.0:
+        errors.append("confidence_score must be between 0 and 1")
+
+    allowed_fields = set(str(item) for item in contract.get("disputed_fields") or [])
+    material_fields = set(str(item) for item in contract.get("material_fields") or [])
+    normalized_field_lists: dict[str, list[str]] = {}
+    for key in ("resolved_fields", "remaining_disagreements"):
+        value = response.get(key)
+        if not isinstance(value, list) or len(value) > 16:
+            errors.append(f"{key} must be a bounded array")
+            normalized_field_lists[key] = []
+            continue
+        normalized = list(dict.fromkeys(str(item or "").strip() for item in value))
+        if any(not item or item not in allowed_fields for item in normalized):
+            errors.append(f"{key} contains a field outside the contract")
+        normalized_field_lists[key] = normalized
+    resolved = set(normalized_field_lists["resolved_fields"])
+    remaining = set(normalized_field_lists["remaining_disagreements"])
+    if resolved.intersection(remaining):
+        errors.append("a field cannot be both resolved and remaining")
+    if resolved.union(remaining) != allowed_fields:
+        errors.append("resolved and remaining fields must partition every disagreement")
+    if decision in {"primary_supported", "reviewer_supported"} and material_fields.intersection(remaining):
+        errors.append("a supported position must resolve every material field")
+    if decision == "unresolved" and material_fields and not material_fields.intersection(remaining):
+        errors.append("unresolved must retain at least one material field")
+
+    evidence_contract = package.get("evidence_reference_contract")
+    catalog = {
+        str(item.get("ref") or ""): item
+        for item in (
+            evidence_contract.get("references")
+            if isinstance(evidence_contract, dict)
+            and isinstance(evidence_contract.get("references"), list)
+            else []
+        )
+        if isinstance(item, dict) and str(item.get("ref") or "")
+    }
+    cited = response.get("evidence_used")
+    if not isinstance(cited, list) or len(cited) > 100:
+        errors.append("evidence_used must be a bounded array")
+        valid_evidence: list[str] = []
+    else:
+        valid_evidence = list(dict.fromkeys(_bounded_reference(item) for item in cited))
+        if any(not item or item not in catalog for item in valid_evidence):
+            errors.append("evidence_used contains a reference outside the contract")
+    if decision in {"primary_supported", "reviewer_supported"} and not any(
+        catalog.get(item, {}).get("corroborating") is True
+        for item in valid_evidence
+    ):
+        errors.append("a supported position requires current corroborating evidence")
+
+    rationale = re.sub(r"\s+", " ", str(response.get("rationale") or "")).strip()
+    if not rationale or len(rationale) > 4000:
+        errors.append("rationale must be a non-empty bounded string")
+    needed = response.get("additional_evidence_needed")
+    if not isinstance(needed, list) or len(needed) > 16:
+        errors.append("additional_evidence_needed must be a bounded array")
+        normalized_needed: list[str] = []
+    else:
+        normalized_needed = [
+            re.sub(r"\s+", " ", str(item or "")).strip()[:1000]
+            for item in needed
+            if str(item or "").strip()
+        ]
+    if errors:
+        raise DisagreementAdjudicationValidationError("; ".join(errors)[:2000])
+    return {
+        "adjudication_case_id": str(contract.get("case_id") or ""),
+        "adjudication_evidence_hash": str(contract.get("evidence_hash") or ""),
+        "decision": decision,
+        "confidence": confidence,
+        "confidence_score": round(confidence_score, 3),
+        "resolved_fields": normalized_field_lists["resolved_fields"],
+        "remaining_disagreements": normalized_field_lists["remaining_disagreements"],
+        "evidence_used": valid_evidence,
+        "rationale": rationale,
+        "additional_evidence_needed": normalized_needed,
+        "_adjudication_contract_validation": {
+            "schema": "onion-sentinel-disagreement-adjudication-validation-v1",
+            "valid": True,
+            "mode": "shadow",
+            "automation_authorized": False,
+        },
+    }
+
+
+def run_bounded_disagreement_adjudication(
+    prompt_package: dict[str, Any],
+    primary_response: dict[str, Any],
+    reviewer_response: dict[str, Any],
+    comparison: dict[str, Any],
+    args: argparse.Namespace,
+    settings: dict[str, Any],
+    agent_role: str,
+    phase_callback: Callable[[str, str, str], None] | None = None,
+    harness_runtime: OnionSentinelHarnessRun | None = None,
+) -> dict[str, Any]:
+    """Run at most two validation-bounded adjudicator calls in shadow mode."""
+    route = str(
+        (settings.get("agent_adjudicator_models") or {}).get(agent_role) or ""
+    ).strip()
+    if not route:
+        return {
+            "status": "not_configured",
+            "mode": "shadow",
+            "automation_authorized": False,
+            "error": "No independent disagreement adjudicator is configured.",
+        }
+    identities = {
+        model_route_identity((settings.get("agent_models") or {}).get(agent_role), settings),
+        model_route_identity((settings.get("agent_second_opinion_models") or {}).get(agent_role), settings),
+    }
+    if model_route_identity(route, settings) in identities:
+        return {
+            "status": "not_independent",
+            "mode": "shadow",
+            "model_route": route,
+            "automation_authorized": False,
+            "error": "The adjudicator resolves to a primary or reviewer provider/model identity.",
+        }
+    notify_analysis_phase(
+        phase_callback,
+        "disagreement_adjudication",
+        route,
+        "Material primary/reviewer disagreement requires bounded adjudication.",
+    )
+    package = disagreement_adjudication_package(
+        prompt_package,
+        primary_response,
+        reviewer_response,
+        comparison,
+        hosted=model_route_is_hosted(route, settings),
+    )
+    prompt_file = Path(
+        getattr(
+            args,
+            "disagreement_adjudicator_prompt_file",
+            DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT_FILE,
+        )
+    )
+    started = time.monotonic()
+    failures: list[dict[str, Any]] = []
+    attempts = 0
+    try:
+        result: dict[str, Any] | None = None
+        for attempt in range(1, 3):
+            attempts = attempt
+            call_id = f"disagreement-adjudication-{attempt}"
+            if harness_runtime is not None:
+                harness_runtime.preflight_model_call(
+                    call_id=call_id,
+                    input_value=package,
+                    requested_route=route,
+                    purpose="bounded disagreement adjudication",
+                    independent_review=True,
+                )
+            call_started = time.monotonic()
+            candidate = analyze_model_route(
+                route,
+                package,
+                args,
+                settings,
+                system_prompt_file=prompt_file,
+                independent_review=True,
+            )
+            try:
+                result = validate_disagreement_adjudication(candidate, package)
+                if harness_runtime is not None:
+                    harness_runtime.model_call(
+                        call_id=call_id,
+                        purpose="bounded disagreement adjudication",
+                        requested_route=route,
+                        response=candidate,
+                        input_value=package,
+                        duration_seconds=time.monotonic() - call_started,
+                        independent_review=True,
+                    )
+                break
+            except DisagreementAdjudicationValidationError as exc:
+                if harness_runtime is not None:
+                    harness_runtime.model_call(
+                        call_id=call_id,
+                        purpose="bounded disagreement adjudication",
+                        requested_route=route,
+                        response=candidate,
+                        input_value=package,
+                        duration_seconds=time.monotonic() - call_started,
+                        independent_review=True,
+                        status="validation-failed",
+                    )
+                failures.append({
+                    "attempt": attempt,
+                    "error": str(exc)[:2000],
+                })
+                if attempt >= 2:
+                    raise
+                package["adjudication_contract_repair"] = {
+                    "attempt": 1,
+                    "instruction": (
+                        "Return one fresh complete object matching response_schema. "
+                        "Use only exact contract field names and evidence refs."
+                    ),
+                    "validation_error": str(exc)[:1000],
+                }
+        if result is None:
+            raise DisagreementAdjudicationValidationError(
+                "adjudicator produced no validated response"
+            )
+        return {
+            "status": "completed",
+            "mode": "shadow",
+            "model_route": route,
+            "system_prompt_file": str(prompt_file),
+            "runtime_seconds": round(time.monotonic() - started, 3),
+            "attempts": attempts,
+            "validation_failures": failures,
+            "response": result,
+            "decision": result["decision"],
+            "automation_authorized": False,
+            "human_adjudication_required": True,
+        }
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "mode": "shadow",
+            "model_route": route,
+            "system_prompt_file": str(prompt_file),
+            "runtime_seconds": round(time.monotonic() - started, 3),
+            "attempts": attempts,
+            "validation_failures": failures,
+            "automation_authorized": False,
+            "human_adjudication_required": True,
+            "error": f"{type(exc).__name__}: {exc}"[:2000],
+        }
+
+
 def second_opinion_memory_eligibility(second_opinion: Any) -> tuple[bool, str]:
     """Gate reviewer memory so disagreement or uncertainty cannot become durable context."""
     if not isinstance(second_opinion, dict) or second_opinion.get("status") != "completed":
@@ -12787,6 +13197,7 @@ def apply_saved_response_review_gate(
         if str(key).startswith("_analysis_"):
             primary_response.pop(key, None)
     primary_response.pop("_second_opinion", None)
+    primary_response.pop("_disagreement_adjudication", None)
     primary_response["_analysis_input_mode"] = SAVED_RESPONSE_INPUT_MODE
     trigger = second_opinion_trigger(primary_response, prompt_package)
     if not trigger:
@@ -12840,6 +13251,7 @@ def apply_configured_second_opinion(
     # able to smuggle a forged reviewer result through a path on which no
     # independent review is actually invoked.
     primary_response.pop("_second_opinion", None)
+    primary_response.pop("_disagreement_adjudication", None)
     trigger = second_opinion_trigger(primary_response, prompt_package)
     if not trigger:
         primary_response["final_disposition_status"] = "primary_not_reviewed"
@@ -13060,6 +13472,23 @@ def apply_configured_second_opinion(
             "automation_authorization": automation_authorization,
         }
         if comparison["material_disagreement"]:
+            # The adjudicator receives both completed positions only after the
+            # blind reviewer has finished. Its shadow result is durable audit
+            # context; it never rewrites either position or relaxes the human
+            # disagreement gate.
+            primary_response["_disagreement_adjudication"] = (
+                run_bounded_disagreement_adjudication(
+                    prompt_package,
+                    primary_response,
+                    secondary,
+                    comparison,
+                    args,
+                    settings,
+                    agent_role,
+                    phase_callback,
+                    harness_runtime,
+                )
+            )
             apply_material_disagreement_gate(
                 primary_response,
                 secondary,
@@ -15872,6 +16301,16 @@ def render_markdown(prompt_package: dict[str, Any], response: dict[str, Any], ge
         )
         else {}
     )
+    adjudication = (
+        response.get("_disagreement_adjudication")
+        if isinstance(response.get("_disagreement_adjudication"), dict)
+        else {}
+    )
+    adjudication_response = (
+        adjudication.get("response")
+        if isinstance(adjudication.get("response"), dict)
+        else {}
+    )
     disputed_fields = [
         (
             f"{item.get('field', 'unknown')}: primary={item.get('primary', 'n/a')!s}; "
@@ -16029,6 +16468,27 @@ def render_markdown(prompt_package: dict[str, Any], response: dict[str, Any], ge
         "### Disputed Fields",
         "",
         markdown_list(disputed_fields),
+        "",
+        "## Bounded Disagreement Adjudication",
+        "",
+        f"- **Status:** {adjudication.get('status', 'not required')}",
+        f"- **Mode:** {adjudication.get('mode', 'shadow')}",
+        f"- **Model route:** {adjudication.get('model_route', 'n/a') or 'n/a'}",
+        f"- **Runtime:** {adjudication.get('runtime_seconds', 'n/a')} second(s)",
+        f"- **Decision:** {adjudication_response.get('decision', adjudication.get('decision', 'n/a'))}",
+        f"- **Confidence:** {adjudication_response.get('confidence', 'n/a')}",
+        f"- **Confidence score:** {adjudication_response.get('confidence_score', 'n/a')}",
+        f"- **Rationale:** {adjudication_response.get('rationale', adjudication.get('error', 'n/a'))}",
+        f"- **Automation authorized:** {adjudication.get('automation_authorized', False)}",
+        f"- **Human adjudication required:** {adjudication.get('human_adjudication_required', True)}",
+        "",
+        "### Remaining Disagreements",
+        "",
+        markdown_list(adjudication_response.get("remaining_disagreements", [])),
+        "",
+        "### Additional Evidence Needed",
+        "",
+        markdown_list(adjudication_response.get("additional_evidence_needed", [])),
         "",
     ])
     return "\n".join(lines)

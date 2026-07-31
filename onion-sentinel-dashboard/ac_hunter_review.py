@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Relay-only AC Hunter collection and behavioral-triage normalization.
+"""Relay-only AC Hunter collection and PostgreSQL-backed triage reads.
 
-The public web routes call :func:`deep_review_response`.  Importing this module
-does not read configuration, credentials, cache state, or the network.  On the
-first request, the service loads an owner-only configuration and uses a
-source-restricted, forced-command SSH key to submit named operations to the
-Relay.  The Relay is the only component that can contact AC Hunter.
+The scheduled collector uses the source-restricted, forced-command SSH path to
+submit named operations to the Relay.  The Relay is the only component that can
+contact AC Hunter.  Public web routes call :func:`deep_review_response`, which
+reads the latest normalized snapshot from the loopback alert-store API and can
+never initiate a Relay or AC Hunter request.
 
-Authentication cookies and JWTs exist only in process memory.  The disk cache
-contains normalized analyst-facing findings and never raw authentication
-responses, credentials, cookies, tokens, or arbitrary AC Hunter response
-bodies.
+Authentication cookies and JWTs exist only in the scheduled collector process.
+PostgreSQL contains normalized analyst-facing findings and never raw
+authentication responses, credentials, cookies, tokens, or arbitrary AC
+Hunter response bodies.
 """
 from __future__ import annotations
 
@@ -29,6 +29,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.cookies import SimpleCookie
 from pathlib import Path
 from types import ModuleType
@@ -50,6 +52,7 @@ DEFAULT_CACHE = (
     / "cache"
     / "ac-hunter-deep-review.json"
 )
+DEFAULT_DATABASE_API_URL = "http://127.0.0.1:8787/ac-hunter/snapshot"
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_CREDENTIAL_BYTES = 16 * 1024
 MAX_CACHE_BYTES = 32 * 1024 * 1024
@@ -1838,6 +1841,25 @@ def collect(client: AcHunterApiClient, clock: Callable[[], float]) -> Dict[str, 
     )
 
 
+def collect_from_relay(
+    config_path: Path = DEFAULT_CONFIG,
+    *,
+    clock: Callable[[], float] = time.time,
+) -> Dict[str, Any]:
+    """Run one scheduled, normalized collection through the fixed Relay path."""
+
+    config = load_config(config_path)
+    if config.get("enabled") is not True:
+        raise AcHunterConfigurationError("AC Hunter Deep Review is disabled")
+    transport = RelayTransport(config)
+    client = AcHunterApiClient(
+        transport,
+        lambda: load_credentials(Path(config["credentials_file"])),
+        clock=clock,
+    )
+    return validate_cache(collect(client, clock))
+
+
 def _validate_cache_tree(value: object, depth: int = 0) -> None:
     if depth > 12:
         raise AcHunterConfigurationError("AC Hunter cache nesting is invalid")
@@ -2149,36 +2171,55 @@ def _error_payload(error: str, *, stale: bool) -> Dict[str, Any]:
     }
 
 
-_DEFAULT_LOCK = threading.Lock()
-_DEFAULT_SERVICE: Optional[AcHunterReviewService] = None
+def database_review_response(
+    api_url: str = DEFAULT_DATABASE_API_URL,
+    *,
+    timeout: float = 10.0,
+) -> Tuple[int, Dict[str, Any]]:
+    """Read one bounded normalized snapshot from loopback PostgreSQL storage."""
+
+    if api_url != DEFAULT_DATABASE_API_URL:
+        return 503, _error_payload(
+            "AC Hunter database endpoint is outside the fixed allowlist",
+            stale=False,
+        )
+    request = urllib.request.Request(
+        api_url,
+        method="GET",
+        headers={"Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read(MAX_CACHE_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        message = (
+            "AC Hunter has not completed a scheduled database collection yet"
+            if exc.code == 404
+            else "AC Hunter PostgreSQL cache is unavailable"
+        )
+        return 503, _error_payload(message, stale=False)
+    except (OSError, urllib.error.URLError, TimeoutError):
+        return 503, _error_payload(
+            "AC Hunter PostgreSQL cache is unavailable", stale=False
+        )
+    if len(raw) > MAX_CACHE_BYTES:
+        return 503, _error_payload(
+            "AC Hunter PostgreSQL response exceeds its size boundary",
+            stale=False,
+        )
+    try:
+        payload = validate_cache(json.loads(raw.decode("utf-8")))
+    except (UnicodeDecodeError, json.JSONDecodeError, AcHunterError):
+        return 503, _error_payload(
+            "AC Hunter PostgreSQL returned an invalid snapshot", stale=False
+        )
+    return 200, payload
 
 
 def deep_review_response(
     force_refresh: bool = False,
 ) -> Tuple[int, Dict[str, object]]:
-    """Stable lazy route API for GET and explicit-refresh POST handlers."""
+    """Read the database cache; web requests never trigger AC Hunter pulls."""
 
-    global _DEFAULT_SERVICE
-    try:
-        if _DEFAULT_SERVICE is None:
-            with _DEFAULT_LOCK:
-                if _DEFAULT_SERVICE is None:
-                    config_path = Path(
-                        os.environ.get(
-                            "ONION_SENTINEL_AC_HUNTER_CONFIG",
-                            str(DEFAULT_CONFIG),
-                        )
-                    ).expanduser()
-                    _DEFAULT_SERVICE = AcHunterReviewService.from_config_path(
-                        config_path
-                    )
-        status, payload = _DEFAULT_SERVICE.response(
-            force_refresh=bool(force_refresh)
-        )
-        return status, payload
-    except AcHunterError as exc:
-        return 503, _error_payload(_safe_error(exc), stale=False)
-    except Exception:
-        return 503, _error_payload(
-            "AC Hunter Deep Review initialization failed", stale=False
-        )
+    del force_refresh
+    return database_review_response()

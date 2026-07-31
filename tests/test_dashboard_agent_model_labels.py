@@ -75,9 +75,11 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
 
         self.assertEqual(rendered.count('data-agent-model="'), 5)
         self.assertEqual(rendered.count('data-agent-second-opinion-model="'), 5)
-        self.assertEqual(rendered.count("None selected"), 5)
+        self.assertEqual(rendered.count('data-agent-adjudicator-model="'), 5)
+        self.assertEqual(rendered.count("None selected"), 10)
         self.assertEqual(rendered.count("data-agent-model-select"), 5)
         self.assertEqual(rendered.count("data-agent-second-opinion-select"), 5)
+        self.assertEqual(rendered.count("data-agent-adjudicator-select"), 5)
         self.assertEqual(rendered.count("data-agent-model-save="), 5)
         self.assertGreaterEqual(rendered.count("Ollama: local-test:latest"), 10)
 
@@ -110,7 +112,7 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
                 f'data-agent-second-opinion-model="{role}">Ollama: reviewer:latest</span>',
                 rendered,
             )
-        self.assertNotIn("None selected", rendered)
+        self.assertEqual(rendered.count("None selected"), 5)
 
     def test_model_selection_uses_collapsed_provider_sections_and_model_toggles(self) -> None:
         settings = {
@@ -126,6 +128,20 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
 
         self.assertIn('id="ollama-provider-settings"', rendered)
         self.assertIn('id="gpt-cli-provider-settings"', rendered)
+        self.assertIn('id="onion-sentinel-harness-settings"', rendered)
+        self.assertIn('id="hermes-harness-settings"', rendered)
+        self.assertIn('id="openclaw-harness-settings"', rendered)
+        self.assertIn('id="onion-sentinel-harness-title">Onion Sentinel Harness', rendered)
+        self.assertIn('id="hermes-harness-title">Hermes Harness', rendered)
+        self.assertIn('id="openclaw-harness-title">OpenClaw Harness', rendered)
+        onion_start = rendered.index('id="onion-sentinel-harness-settings"')
+        hermes_start = rendered.index('id="hermes-harness-settings"')
+        openclaw_start = rendered.index('id="openclaw-harness-settings"')
+        self.assertLess(onion_start, rendered.index('id="ollama-provider-settings"'))
+        self.assertLess(rendered.index('id="gpt-cli-provider-settings"'), hermes_start)
+        self.assertLess(hermes_start, rendered.index('id="ai-hermes-agent-enabled"'))
+        self.assertLess(rendered.index('id="ai-hermes-agent-reasoning-effort"'), openclaw_start)
+        self.assertLess(openclaw_start, rendered.index('id="ai-openclaw-enabled"'))
         self.assertIn("Codex CLI", rendered)
         self.assertIn('id="ai-codex-cli-path"', rendered)
         self.assertIn('id="ai-codex-cli-models"', rendered)
@@ -181,7 +197,8 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
         ):
             rendered = self.builder.settings_page_section()
 
-        self.assertIn("Compatible agent runtimes", rendered)
+        self.assertIn("Hermes Harness", rendered)
+        self.assertIn("OpenClaw Harness", rendered)
         self.assertIn('id="ai-hermes-agent-enabled"', rendered)
         self.assertIn("data-hermes-agent-enabled", rendered)
         self.assertIn('aria-label="Enable Hermes Agent" checked', rendered)
@@ -579,9 +596,12 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
         )
         self.assertIn("element.textContent = route ? agentModelRouteLabel(route, settings) : 'None selected';", script)
         self.assertIn("const agentSecondOpinionSelects", script)
+        self.assertIn("const agentAdjudicatorSelects", script)
         self.assertIn("settings.agent_second_opinion_models", script)
+        self.assertIn("settings.agent_adjudicator_models", script)
         self.assertIn("/api/soc-settings/agent-model", script)
-        self.assertIn("body: JSON.stringify({role, model, second_opinion_model: secondOpinionModel})", script)
+        self.assertIn("second_opinion_model: secondOpinionModel", script)
+        self.assertIn("adjudicator_model: adjudicatorModel", script)
         self.assertIn("data-agent-model-status", script)
         self.assertIn("element.classList.toggle('error', kind === 'error');", script)
         self.assertIn("element.classList.toggle('ok', kind === 'ok');", script)
@@ -597,6 +617,90 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
         self.assertIn("data.compatibility", script)
         self.assertIn("?refresh=1", script)
         self.assertIn(".settings-model-warning", css)
+
+    def test_onion_sentinel_harness_lists_read_only_investigation_skills(self) -> None:
+        settings = {
+            **self.builder.default_soc_ai_settings(),
+            "enabled_ollama_models": ["primary:latest"],
+            "ollama_model": "primary:latest",
+        }
+        registry = {
+            "schema": "onion-sentinel-investigation-skills-v1",
+            "version": 1,
+            "mode": "shadow",
+            "registry_sha256": "a" * 64,
+            "skills": [{
+                "id": "dns-activity-investigation",
+                "version": 3,
+                "status": "shadow",
+                "skill_sha256": "b" * 64,
+                "roles": ["soc-analyst", "incident-responder"],
+                "match": {"protocols": ["udp"], "destination_ports": [53]},
+                "objective": "Distinguish expected DNS from suspicious activity <safely>.",
+                "required_evidence": ["alert", "zeek_dns"],
+                "pivot_plan": [{
+                    "step": "dns-timeline",
+                    "backend": "elastic",
+                    "pack": "dns_activity",
+                    "purpose": "establish_timeline",
+                    "discriminator": "Recover exact requests and answers.",
+                    "required": True,
+                }],
+                "alternative_hypotheses": ["Expected resolution."],
+                "stop_conditions": ["Stop after the bounded timeline is resolved."],
+                "confidence_limiters": ["Reputation alone is not proof."],
+                "known_false_positive_patterns": ["Operating-system checks."],
+                "verification": ["Cite the query digest."],
+            }],
+        }
+        with (
+            mock.patch.object(self.builder, "load_soc_ai_settings", return_value=settings),
+            mock.patch.object(self.builder, "list_ollama_models", return_value=["primary:latest"]),
+            mock.patch.object(
+                self.builder,
+                "load_dashboard_investigation_skills",
+                return_value=registry,
+            ),
+        ):
+            rendered = self.builder.settings_page_section()
+
+        onion_start = rendered.index('id="onion-sentinel-harness-settings"')
+        skills_start = rendered.index('id="onion-sentinel-skills-title"')
+        hermes_start = rendered.index('id="hermes-harness-settings"')
+        self.assertLess(onion_start, skills_start)
+        self.assertLess(skills_start, hermes_start)
+        self.assertIn("Harness Skills", rendered)
+        self.assertIn('data-investigation-skill="dns-activity-investigation"', rendered)
+        self.assertIn("DNS Activity Investigation", rendered)
+        self.assertIn("1 shadow", rendered)
+        self.assertIn("v3", rendered)
+        self.assertIn("Repeatable evidence pivots", rendered)
+        self.assertIn("Skill source file", rendered)
+        self.assertIn("~/n8n-local/config/investigation_skills.json", rendered)
+        self.assertIn("Alternative hypotheses", rendered)
+        self.assertIn("Confidence limiters", rendered)
+        self.assertIn("Known false-positive patterns", rendered)
+        self.assertIn("Verification rules", rendered)
+        self.assertIn("b" * 64, rendered)
+        self.assertIn("a" * 64, rendered)
+        self.assertIn("&lt;safely&gt;", rendered)
+        skill_section = rendered[skills_start:hermes_start]
+        self.assertNotIn("Activate skill", skill_section)
+        self.assertNotIn("Edit skill", skill_section)
+        self.assertNotIn("Delete skill", skill_section)
+        self.assertIn("This catalog is read-only", skill_section)
+
+    def test_investigation_skill_catalog_fails_closed_when_registry_is_unavailable(self) -> None:
+        rendered = self.builder.investigation_skill_catalog({
+            "mode": "unavailable",
+            "skills": [],
+            "error": "invalid registry <blocked>",
+        })
+
+        self.assertIn("Harness Skills", rendered)
+        self.assertIn("Unavailable", rendered)
+        self.assertIn("invalid registry &lt;blocked&gt;", rendered)
+        self.assertNotIn("data-investigation-skill=", rendered)
 
 
 if __name__ == "__main__":

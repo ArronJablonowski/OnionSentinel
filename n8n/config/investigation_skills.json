@@ -1,0 +1,304 @@
+{
+  "schema": "onion-sentinel-investigation-skills-v1",
+  "version": 1,
+  "mode": "shadow",
+  "learning_policy": {
+    "agent_may_propose": true,
+    "agent_may_activate": false,
+    "require_replay_evaluation": true,
+    "require_independent_review": true,
+    "require_human_approval": true
+  },
+  "skills": [
+    {
+      "id": "dns-activity-investigation",
+      "version": 1,
+      "status": "shadow",
+      "roles": ["soc-analyst", "incident-responder", "cyber-threat-intel", "threat-hunter"],
+      "match": {
+        "protocols": ["udp"],
+        "destination_ports": [53]
+      },
+      "objective": "Determine whether the DNS activity is expected resolution, policy-relevant discovery, malicious infrastructure access, or a detection artifact without treating a domain or resolver reputation as dispositive.",
+      "required_evidence": ["alert", "asset_context", "cached_enrichment", "network_flow", "zeek_dns"],
+      "pivot_plan": [
+        {
+          "step": "dns-timeline",
+          "backend": "elastic",
+          "pack": "dns_activity",
+          "purpose": "establish_timeline",
+          "discriminator": "Establish exact query names, response codes, answer addresses, clients, and recurrence inside the bounded alert window.",
+          "required": true
+        },
+        {
+          "step": "cross-sensor-context",
+          "backend": "elastic",
+          "pack": "cross_sensor_timeline",
+          "purpose": "correlate_observable",
+          "discriminator": "Test whether subsequent connections or alerts involve the returned address and the same endpoint.",
+          "required": true
+        },
+        {
+          "step": "cache-first-reputation",
+          "backend": "enrichment",
+          "pack": "domain_reputation",
+          "purpose": "test_benign_hypothesis",
+          "discriminator": "Use cached provider evidence first and refresh only when policy permits and the result could change the disposition.",
+          "required": false
+        }
+      ],
+      "alternative_hypotheses": [
+        "Expected application or operating-system resolution produced the request.",
+        "The endpoint contacted newly observed or malicious infrastructure.",
+        "A shared resolver, CDN, sinkhole, or stale intelligence created misleading correlation.",
+        "The DNS telemetry was malformed, incomplete, or incorrectly grouped."
+      ],
+      "stop_conditions": [
+        "Stop when the exact client, query, answers, response status, recurrence, and related connection evidence are established or explicitly unavailable.",
+        "Do not widen the time window solely because a reputation provider returned unknown."
+      ],
+      "confidence_limiters": [
+        "A domain, ASN, CDN, public resolver, or provider verdict alone cannot prove maliciousness or benignness.",
+        "An unanswered or zero-row DNS query does not prove that no resolution occurred outside the bounded evidence window."
+      ],
+      "known_false_positive_patterns": [
+        "Operating-system connectivity checks, package repositories, telemetry endpoints, captive-portal tests, and shared cloud hosting can appear unusual without being malicious."
+      ],
+      "verification": [
+        "Cite the executed query digest for every timeline claim.",
+        "Keep the queried hostname, returned addresses, and subsequent network destinations distinct."
+      ]
+    },
+    {
+      "id": "tls-service-investigation",
+      "version": 1,
+      "status": "shadow",
+      "roles": ["soc-analyst", "incident-responder", "cyber-threat-intel", "threat-hunter"],
+      "match": {
+        "protocols": ["tcp"],
+        "destination_ports": [443]
+      },
+      "objective": "Validate the TLS destination, server name, certificate and fingerprint context, flow outcome, prevalence, and endpoint ownership before assigning intent.",
+      "required_evidence": ["alert", "asset_context", "network_flow", "zeek_conn", "zeek_tls"],
+      "pivot_plan": [
+        {
+          "step": "tls-metadata",
+          "backend": "elastic",
+          "pack": "zeek_tls",
+          "purpose": "validate_detection",
+          "discriminator": "Recover bounded SNI, version, validation status, certificate and JA fingerprint metadata for the exact flow tuple.",
+          "required": true
+        },
+        {
+          "step": "flow-outcome",
+          "backend": "elastic",
+          "pack": "network_flow",
+          "purpose": "establish_timeline",
+          "discriminator": "Determine whether the connection completed and measure bytes, duration, recurrence, and related endpoints.",
+          "required": true
+        },
+        {
+          "step": "destination-prevalence",
+          "backend": "oql",
+          "pack": "network_flow",
+          "purpose": "measure_prevalence",
+          "discriminator": "Test whether the destination and SNI are rare for the bounded internal population without broadening beyond broker limits.",
+          "required": false
+        }
+      ],
+      "alternative_hypotheses": [
+        "The connection is expected application or update traffic.",
+        "The connection is suspicious encrypted communication or payload delivery.",
+        "Shared hosting, a CDN, certificate reuse, or missing SNI created misleading attribution.",
+        "The alert tuple did not correspond to a completed TLS session."
+      ],
+      "stop_conditions": [
+        "Stop when the exact flow outcome and available TLS identity fields are established and further permitted pivots cannot distinguish the remaining hypotheses."
+      ],
+      "confidence_limiters": [
+        "SNI, certificate subject, JA fingerprints, geolocation, and ASN are context rather than proof of the initiating process or intent.",
+        "Missing TLS metadata cannot be silently interpreted as encrypted evasion."
+      ],
+      "known_false_positive_patterns": [
+        "Software updates, browser background services, content delivery networks, and privacy relays produce variable destinations and shared certificates."
+      ],
+      "verification": [
+        "Keep observed SNI, DNS names, certificate names, and destination ownership as separate evidence fields.",
+        "Cite exact query or evidence digests for flow completion and TLS metadata."
+      ]
+    },
+    {
+      "id": "ssh-investigation",
+      "version": 1,
+      "status": "shadow",
+      "roles": ["soc-analyst", "incident-responder", "siem-engineer", "threat-hunter"],
+      "match": {
+        "protocols": ["tcp"],
+        "destination_ports": [22]
+      },
+      "objective": "Distinguish scanning, failed authentication, successful administration, lateral movement, and incomplete flow telemetry using exact direction, endpoint identity, authentication, and session evidence.",
+      "required_evidence": ["alert", "asset_context", "elastic_events", "network_flow", "zeek_ssh"],
+      "pivot_plan": [
+        {
+          "step": "ssh-flow",
+          "backend": "elastic",
+          "pack": "zeek_ssh",
+          "purpose": "validate_detection",
+          "discriminator": "Establish direction, connection state, authentication outcome, client and server versions, and HASSH metadata.",
+          "required": true
+        },
+        {
+          "step": "authentication-events",
+          "backend": "elastic",
+          "pack": "system_auth",
+          "purpose": "establish_timeline",
+          "discriminator": "Test whether exact host and user authentication records corroborate success, failure, or absence within the bounded window.",
+          "required": true
+        },
+        {
+          "step": "endpoint-process",
+          "backend": "osquery",
+          "pack": "process_inventory",
+          "purpose": "attribute_process",
+          "discriminator": "When approved and materially necessary, identify the responsible live endpoint process and listening service using an allowlisted read-only query.",
+          "required": false
+        }
+      ],
+      "alternative_hypotheses": [
+        "The traffic is an unsuccessful scan with no authenticated session.",
+        "The traffic is authorized administration or automation.",
+        "The traffic is unauthorized lateral movement or external access.",
+        "The alert grouped unrelated connection attempts or reversed the initiating direction."
+      ],
+      "stop_conditions": [
+        "Stop when direction, connection outcome, authentication outcome, endpoint identity, and available process attribution are resolved or recorded as explicit gaps."
+      ],
+      "confidence_limiters": [
+        "A SYN, port hit, or Zeek connection record does not prove successful authentication or command execution.",
+        "A familiar internal address or registered asset role does not prove authorization."
+      ],
+      "known_false_positive_patterns": [
+        "Monitoring, vulnerability scanning, configuration management, backups, and administrator automation can create repeated SSH connections."
+      ],
+      "verification": [
+        "Do not label historical Elastic osquery events as live OSQuery execution.",
+        "Cite target alias and query digest for every live endpoint finding."
+      ]
+    },
+    {
+      "id": "suricata-rule-intent-validation",
+      "version": 1,
+      "status": "shadow",
+      "roles": ["soc-analyst", "incident-responder", "siem-engineer", "threat-hunter"],
+      "match": {
+        "event_datasets": ["suricata.alert"]
+      },
+      "objective": "Separate event occurrence, exact deployed-rule predicate satisfaction, rule intent, and malicious attribution before assigning a detection outcome.",
+      "required_evidence": ["alert", "pcap", "suricata"],
+      "pivot_plan": [
+        {
+          "step": "exact-alert-context",
+          "backend": "elastic",
+          "pack": "alert_context",
+          "purpose": "validate_detection",
+          "discriminator": "Confirm the exact signature ID, revision, tuple, timestamps, grouped count, and available rule text without substituting a newer public rule.",
+          "required": true
+        },
+        {
+          "step": "packet-facts",
+          "backend": "pcap_zeek",
+          "pack": "packet_facts",
+          "purpose": "validate_predicates",
+          "discriminator": "Use derived packet facts to test the exact deployed predicates and required protocol semantics without exposing unrestricted packet data.",
+          "required": true
+        },
+        {
+          "step": "related-activity",
+          "backend": "elastic",
+          "pack": "cross_sensor_timeline",
+          "purpose": "identify_related_activity",
+          "discriminator": "Test whether independently observed activity supports or contradicts the threat behavior implied by the signature.",
+          "required": false
+        }
+      ],
+      "alternative_hypotheses": [
+        "The event occurred and matched the deployed rule's intended threat behavior.",
+        "The event occurred but incidental bytes or state satisfied flawed detection logic.",
+        "The parser or field translation produced invalid evidence.",
+        "The event is real but available evidence cannot resolve intent."
+      ],
+      "stop_conditions": [
+        "Stop when the deployed rule identity, exact predicates, packet or protocol facts, and missing threat discriminators are documented."
+      ],
+      "confidence_limiters": [
+        "A Suricata alert proves that the deployed engine emitted an alert, not that malware attribution is correct.",
+        "Public rule documentation cannot replace the exact installed revision or runtime-owned detection validation."
+      ],
+      "known_false_positive_patterns": [
+        "Generic content markers, stateful xbits, broad protocol headers, and shared infrastructure can satisfy a signature without the intended threat behavior."
+      ],
+      "verification": [
+        "Treat runtime detection_validation as immutable evidence.",
+        "Record parser, logic, intelligence, and insufficient-evidence outcomes separately."
+      ]
+    },
+    {
+      "id": "web-service-investigation",
+      "version": 1,
+      "status": "shadow",
+      "roles": ["soc-analyst", "incident-responder", "cyber-threat-intel", "threat-hunter"],
+      "match": {
+        "protocols": ["tcp"],
+        "destination_ports": [80, 8080, 8000]
+      },
+      "objective": "Establish the HTTP transaction, requested resource, response, transferred file evidence, endpoint role, and subsequent activity before deciding whether traffic represents expected software, exploitation, or payload delivery.",
+      "required_evidence": ["alert", "asset_context", "network_flow", "zeek_files", "zeek_http"],
+      "pivot_plan": [
+        {
+          "step": "http-transaction",
+          "backend": "elastic",
+          "pack": "zeek_http",
+          "purpose": "validate_detection",
+          "discriminator": "Recover bounded method, host, URI, user agent, response status, MIME type, and transfer sizes for the exact flow.",
+          "required": true
+        },
+        {
+          "step": "file-transfer",
+          "backend": "elastic",
+          "pack": "zeek_files",
+          "purpose": "identify_related_activity",
+          "discriminator": "Determine whether a file was observed and whether hashes or analyzer results exist; do not infer execution from transfer alone.",
+          "required": true
+        },
+        {
+          "step": "endpoint-attribution",
+          "backend": "osquery",
+          "pack": "process_inventory",
+          "purpose": "attribute_process",
+          "discriminator": "When approved and materially necessary, identify the responsible live process and relevant file or persistence metadata with allowlisted read-only queries.",
+          "required": false
+        }
+      ],
+      "alternative_hypotheses": [
+        "The transaction is expected application, package, update, or administrative traffic.",
+        "The endpoint downloaded or served a suspicious payload.",
+        "The request reflects scanning or banner discovery without a successful transfer.",
+        "A proxy, shared service, or incomplete telemetry obscured the initiating process."
+      ],
+      "stop_conditions": [
+        "Stop when transaction outcome, transferred-file evidence, subsequent related activity, and available process attribution are resolved or explicitly blocked."
+      ],
+      "confidence_limiters": [
+        "A user agent, filename, URI, MIME type, or server banner is attacker-controlled context and does not prove process identity or execution.",
+        "A successful HTTP response or file transfer does not prove that the content executed."
+      ],
+      "known_false_positive_patterns": [
+        "Package managers, development servers, health checks, software updates, vulnerability scanners, and internal automation often use distinctive user agents or nonstandard ports."
+      ],
+      "verification": [
+        "Distinguish request, response, file observation, file persistence, and execution as separate claims.",
+        "Cite query digests and live endpoint target aliases where applicable."
+      ]
+    }
+  ]
+}

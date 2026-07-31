@@ -869,10 +869,14 @@ class SocSettingsPromptApiTest(unittest.TestCase):
         self.assertEqual(persisted["agent_models"]["threat-hunter"], "ollama:specialist:latest")
         self.assertEqual(persisted["agent_models"]["soc-analyst"], "ollama:primary:latest")
 
-    def test_agent_model_save_atomically_updates_optional_second_opinion(self) -> None:
+    def test_agent_model_save_atomically_updates_reviewer_and_adjudicator(self) -> None:
         settings = self.portal.default_soc_ai_settings()
         settings.update({
-            "enabled_ollama_models": ["primary:latest", "reviewer:latest"],
+            "enabled_ollama_models": [
+                "primary:latest",
+                "reviewer:latest",
+                "adjudicator:latest",
+            ],
             "agent_models": {
                 role: "ollama:primary:latest" for role in self.portal.CYBER_SECURITY_AGENT_ROLES
             },
@@ -884,15 +888,47 @@ class SocSettingsPromptApiTest(unittest.TestCase):
             "role": "soc-analyst",
             "model": "ollama:primary:latest",
             "second_opinion_model": "ollama:reviewer:latest",
+            "adjudicator_model": "ollama:adjudicator:latest",
         })
 
         self.assertTrue(ok)
         self.assertEqual(response["second_opinion_model_route"], "ollama:reviewer:latest")
+        self.assertEqual(
+            response["adjudicator_model_route"],
+            "ollama:adjudicator:latest",
+        )
         persisted = json.loads(self.portal.SOC_AI_SETTINGS_FILE.read_text(encoding="utf-8"))
         self.assertEqual(
             persisted["agent_second_opinion_models"]["soc-analyst"],
             "ollama:reviewer:latest",
         )
+        self.assertEqual(
+            persisted["agent_adjudicator_models"]["soc-analyst"],
+            "ollama:adjudicator:latest",
+        )
+
+    def test_agent_model_save_rejects_non_independent_adjudicator(self) -> None:
+        settings = self.portal.default_soc_ai_settings()
+        settings.update({
+            "enabled_ollama_models": ["primary:latest", "reviewer:latest"],
+            "agent_models": {
+                role: "ollama:primary:latest"
+                for role in self.portal.CYBER_SECURITY_AGENT_ROLES
+            },
+        })
+        saved, _ = self.portal.save_soc_ai_settings(settings)
+        self.assertTrue(saved)
+
+        for adjudicator in ("ollama:primary:latest", "ollama:reviewer:latest"):
+            with self.subTest(adjudicator=adjudicator):
+                ok, response = self.portal.save_soc_agent_model({
+                    "role": "soc-analyst",
+                    "model": "ollama:primary:latest",
+                    "second_opinion_model": "ollama:reviewer:latest",
+                    "adjudicator_model": adjudicator,
+                })
+                self.assertFalse(ok)
+                self.assertIn("adjudicator must differ", response["error"])
 
     def test_agent_model_save_rejects_primary_as_second_opinion(self) -> None:
         saved, _ = self.portal.save_soc_ai_settings(self.portal.default_soc_ai_settings())
