@@ -186,6 +186,14 @@ class SoftwareInventoryPageTests(unittest.TestCase):
         self.assertIn("${esc(first(item.product,'Unknown software'))}", self.page)
         self.assertIn("${esc(first(item.version,'Unknown version'))}", self.page)
         self.assertIn("first(item?.asset_label,item?.asset_ref,'Unresolved asset')", self.page)
+        self.assertIn(
+            "const assetLabel=String(item?.asset_label??'').trim()",
+            self.page,
+        )
+        self.assertNotIn(
+            "const assetLabel=String(first(item?.asset_label,''))",
+            self.page,
+        )
         self.assertIn("asset-inventory.html?asset=${esc(encodeURIComponent(assetLabel))}", self.page)
         self.assertIn("${esc(first(item.asset_ref,'Not supplied'))}", self.page)
         self.assertIn("warnings.map(value=>`<li>${esc(value)}</li>`)", self.page)
