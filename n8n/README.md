@@ -312,6 +312,19 @@ Post-commit worker settings are runtime-only:
 
 - `N8N_POST_COMMIT_URL=http://127.0.0.1:5678/webhook/onion-sentinel-committed-alert`
 - `N8N_POST_COMMIT_TOKEN=<same value as the n8n RELAY_WEBHOOK_TOKEN variable>`
+- `ENRICHMENT_CACHE_RAW_RESPONSE_MAX_BYTES=5242880` retains every provider body
+  accepted by the 5 MiB bounded HTTP client. Cache rows record the response
+  SHA-256, original byte count, and completeness flag.
+
+The AI investigation loop also exposes a structured `enrichment` pivot. It
+accepts only an exact public indicator already present in the alert or found in
+provenance-validated investigation evidence. The harness first calls the
+authenticated alert-store cache-only endpoint. It invokes the n8n
+`onion-sentinel-investigation-enrichment` webhook only when one or more
+configured provider entries are absent or stale. Alert-store repeats the cache
+check, coalesces identical in-flight requests, and reserves each provider's
+persisted rate-limit slot before outbound access. Full provider bodies remain
+in the cache; model prompts receive a digest-bound bounded projection.
 - `N8N_POST_COMMIT_INTERVAL_MS=5000`
 - `N8N_POST_COMMIT_TIMEOUT_MS=30000`
 - `N8N_POST_COMMIT_MAX_ATTEMPTS=12`

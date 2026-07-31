@@ -131,6 +131,36 @@
         1360,
         360
       ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "onion-sentinel-investigation-enrichment",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "onion-sentinel-investigation-enrichment-webhook",
+      "name": "Investigation Enrichment Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        800,
+        760
+      ],
+      "webhookId": "onion-sentinel-investigation-enrichment"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Authenticated, bounded investigation enrichment proxy. Provider selection,\n// cache rechecks, rate limiting, normalization, and evidence retention remain\n// owned by alert-store; n8n supplies the observable orchestration boundary.\nconst http = require('http');\n\nconst expectedToken = String($vars.RELAY_WEBHOOK_TOKEN || '').trim();\nconst headers = $json.headers || {};\nconst body = $json.body || $json;\nconst suppliedToken = String(headers['x-relay-token'] || headers['X-Relay-Token'] || '').trim();\nconst indicatorType = String(body?.indicator_type || '').trim().toLowerCase();\nconst indicator = String(body?.indicator || '').trim();\n\nif (!expectedToken || expectedToken === 'REPLACE_WITH_RELAY_TOKEN') {\n  throw new Error('RELAY_WEBHOOK_TOKEN is not configured in n8n');\n}\nif (suppliedToken !== expectedToken) {\n  throw new Error('invalid or missing X-Relay-Token');\n}\nif (!['ip', 'domain', 'url', 'hash', 'cve'].includes(indicatorType)) {\n  throw new Error('unsupported enrichment indicator_type');\n}\nif (!indicator || indicator.length > 2048) {\n  throw new Error('indicator is missing or oversized');\n}\n\nconst payload = JSON.stringify({indicator_type: indicatorType, indicator});\nconst result = await new Promise((resolve, reject) => {\n  const request = http.request({\n    hostname: 'alert-store',\n    port: 8787,\n    path: '/investigations/enrichment/query',\n    method: 'POST',\n    headers: {\n      'Content-Type': 'application/json',\n      'Content-Length': Buffer.byteLength(payload),\n      'X-Onion-Sentinel-Asset-Token': expectedToken,\n    },\n    timeout: 120000,\n  }, (response) => {\n    let responseBody = '';\n    let bytes = 0;\n    response.on('data', (chunk) => {\n      bytes += chunk.length;\n      if (bytes > 8 * 1024 * 1024) {\n        response.destroy(new Error('alert-store enrichment response exceeded 8 MiB'));\n        return;\n      }\n      responseBody += chunk;\n    });\n    response.on('end', () => {\n      let parsed;\n      try { parsed = JSON.parse(responseBody); }\n      catch { reject(new Error('alert-store returned invalid JSON')); return; }\n      if (response.statusCode < 200 || response.statusCode >= 300 || parsed.ok !== true) {\n        reject(new Error(`alert-store enrichment failed with HTTP ${response.statusCode}`));\n        return;\n      }\n      resolve(parsed);\n    });\n  });\n  request.on('timeout', () => request.destroy(new Error('alert-store enrichment timed out')));\n  request.on('error', reject);\n  request.write(payload);\n  request.end();\n});\n\nreturn [{json: result}];"
+      },
+      "id": "investigation-enrichment",
+      "name": "Investigation Enrichment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1080,
+        760
+      ]
     }
   ],
   "connections": {
@@ -205,6 +235,17 @@
         [
           {
             "node": "Write SOC Markdown Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Investigation Enrichment Webhook": {
+      "main": [
+        [
+          {
+            "node": "Investigation Enrichment",
             "type": "main",
             "index": 0
           }

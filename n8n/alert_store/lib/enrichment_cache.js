@@ -65,13 +65,20 @@ function parseJson(value, fallback) {
 function boundedRawResponse(value, maxBytes) {
   const serialized = JSON.stringify(value ?? null);
   const bytes = Buffer.byteLength(serialized);
-  if (bytes <= maxBytes) return {serialized, bytes, truncated: false};
+  const sha256 = crypto.createHash('sha256').update(serialized).digest('hex');
+  if (bytes <= maxBytes) return {serialized, bytes, sha256, truncated: false};
   const replacement = JSON.stringify({
     truncated: true,
     original_size_bytes: bytes,
     reason: 'Provider response exceeded the configured enrichment-cache evidence limit.',
   });
-  return {serialized: replacement, bytes: Buffer.byteLength(replacement), truncated: true};
+  return {
+    serialized: replacement,
+    bytes: Buffer.byteLength(replacement),
+    originalBytes: bytes,
+    sha256,
+    truncated: true,
+  };
 }
 
 function isNegativeRecord(record) {
@@ -120,6 +127,7 @@ function createEnrichmentCache(options = {}) {
     COALESCE(length(indicator_type), 0) + COALESCE(length(verdict), 0) +
     COALESCE(length(tags_json), 0) + COALESCE(length(first_seen), 0) +
     COALESCE(length(last_seen), 0) + COALESCE(length(raw_response_json), 0) +
+    COALESCE(length(raw_response_sha256), 0) + 16 +
     COALESCE(length(cached_at), 0) + COALESCE(length(expires_at), 0)
   `;
 
@@ -185,6 +193,9 @@ function createEnrichmentCache(options = {}) {
       first_seen: row.first_seen || null,
       last_seen: row.last_seen || null,
       raw_response: parseJson(row.raw_response_json || 'null', null),
+      raw_response_sha256: row.raw_response_sha256 || null,
+      raw_response_size_bytes: Number(row.raw_response_size_bytes || 0),
+      raw_response_complete: Number(row.raw_response_complete ?? 1) === 1,
       cached_at: row.cached_at,
       expires_at: row.expires_at,
       cache_state: state,
@@ -204,10 +215,22 @@ function createEnrichmentCache(options = {}) {
         first_seen TEXT,
         last_seen TEXT,
         raw_response_json TEXT,
+        raw_response_sha256 TEXT,
+        raw_response_size_bytes INTEGER,
+        raw_response_complete INTEGER NOT NULL DEFAULT 1,
         cached_at TEXT NOT NULL,
         expires_at TEXT NOT NULL
       )
     `);
+    const columns = await all('PRAGMA table_info(enrichment_cache)');
+    const names = new Set(columns.map((column) => column.name));
+    for (const [name, definition] of [
+      ['raw_response_sha256', 'TEXT'],
+      ['raw_response_size_bytes', 'INTEGER'],
+      ['raw_response_complete', 'INTEGER NOT NULL DEFAULT 1'],
+    ]) {
+      if (!names.has(name)) await run(`ALTER TABLE enrichment_cache ADD COLUMN ${name} ${definition}`);
+    }
     await run('CREATE INDEX IF NOT EXISTS idx_enrichment_cache_expires_at ON enrichment_cache(expires_at)');
     await run('CREATE INDEX IF NOT EXISTS idx_enrichment_cache_indicator ON enrichment_cache(indicator)');
     await run('CREATE INDEX IF NOT EXISTS idx_enrichment_cache_source_type ON enrichment_cache(source, indicator_type)');
@@ -264,9 +287,10 @@ function createEnrichmentCache(options = {}) {
       `
         INSERT INTO enrichment_cache (
           cache_key, source, indicator, indicator_type, verdict, confidence, tags_json,
-          first_seen, last_seen, raw_response_json, cached_at, expires_at
+          first_seen, last_seen, raw_response_json, raw_response_sha256,
+          raw_response_size_bytes, raw_response_complete, cached_at, expires_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(cache_key) DO UPDATE SET
           source = excluded.source,
           indicator = excluded.indicator,
@@ -277,6 +301,9 @@ function createEnrichmentCache(options = {}) {
           first_seen = excluded.first_seen,
           last_seen = excluded.last_seen,
           raw_response_json = excluded.raw_response_json,
+          raw_response_sha256 = excluded.raw_response_sha256,
+          raw_response_size_bytes = excluded.raw_response_size_bytes,
+          raw_response_complete = excluded.raw_response_complete,
           cached_at = excluded.cached_at,
           expires_at = excluded.expires_at
       `,
@@ -291,6 +318,9 @@ function createEnrichmentCache(options = {}) {
         normalized.first_seen || null,
         normalized.last_seen || null,
         bounded.serialized,
+        bounded.sha256,
+        bounded.originalBytes || bounded.bytes,
+        bounded.truncated ? 0 : 1,
         cachedAt,
         expiresAt,
       ],
@@ -300,6 +330,9 @@ function createEnrichmentCache(options = {}) {
     const saved = {
       ...normalized,
       raw_response: parseJson(bounded.serialized, null),
+      raw_response_sha256: bounded.sha256,
+      raw_response_size_bytes: bounded.originalBytes || bounded.bytes,
+      raw_response_complete: !bounded.truncated,
       cached_at: cachedAt,
       expires_at: expiresAt,
       cache_state: 'refreshed',
@@ -374,6 +407,14 @@ function createEnrichmentCache(options = {}) {
     }
   }
 
+  async function peek(source, indicatorType, indicator) {
+    const found = await read(source, indicatorType, indicator, false);
+    if (found.state !== 'fresh') {
+      return {record: null, cached: false, cache_state: found.state};
+    }
+    return {record: found.record, cached: true, cache_state: 'fresh'};
+  }
+
   async function prune() {
     const defaultCutoff = timestamp(currentMs() - (defaultStaleIfErrorSeconds * 1000));
     const vulnerabilityCutoff = timestamp(currentMs() - (vulnerabilityStaleIfErrorSeconds * 1000));
@@ -393,18 +434,24 @@ function createEnrichmentCache(options = {}) {
       // ceiling. Compact those legacy values in place so upgrading cannot
       // leave a cache that permanently violates its configured disk budget.
       const oversizedRawRows = await all(`
-        SELECT cache_key, length(raw_response_json) AS original_size_bytes
+        SELECT cache_key, raw_response_json,
+               length(raw_response_json) AS original_size_bytes
         FROM enrichment_cache
         WHERE length(raw_response_json) > ?
       `, [rawResponseMaxBytes]);
       for (const row of oversizedRawRows) {
+        const original = String(row.raw_response_json || 'null');
+        const digest = crypto.createHash('sha256').update(original).digest('hex');
         await run(
-          'UPDATE enrichment_cache SET raw_response_json = ? WHERE cache_key = ?',
+          `UPDATE enrichment_cache
+           SET raw_response_json = ?, raw_response_sha256 = ?,
+               raw_response_size_bytes = ?, raw_response_complete = 0
+           WHERE cache_key = ?`,
           [JSON.stringify({
             truncated: true,
             original_size_bytes: Number(row.original_size_bytes || 0),
             reason: 'Legacy provider response exceeded the configured enrichment-cache evidence limit.',
-          }), row.cache_key],
+          }), digest, Buffer.byteLength(original), row.cache_key],
         );
       }
 
@@ -508,7 +555,7 @@ function createEnrichmentCache(options = {}) {
     };
   }
 
-  return {install, lookup, prune, snapshot, stats};
+  return {install, lookup, peek, prune, snapshot, stats};
 }
 
 module.exports = {

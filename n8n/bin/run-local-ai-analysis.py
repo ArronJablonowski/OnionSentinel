@@ -276,7 +276,7 @@ MAX_INVESTIGATION_QUERIES_PER_ROUND = 4
 MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES = 1024 * 1024
 MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS = 1_200
 INVESTIGATION_QUERY_BACKENDS = frozenset(
-    {"elastic", "oql", "osquery", "pcap_zeek"}
+    {"elastic", "oql", "osquery", "pcap_zeek", "enrichment"}
 )
 INVESTIGATION_QUERY_PACKS = frozenset(
     {
@@ -4595,6 +4595,7 @@ INVESTIGATION_PARAMETER_KEYS = {
     }),
     "osquery": frozenset({"target_alias", "query"}),
     "pcap_zeek": frozenset({"operation", "filters", "indicator", "limit"}),
+    "enrichment": frozenset({"indicator_type", "indicator"}),
 }
 INVESTIGATION_PARAMETER_UNION = frozenset().union(
     *INVESTIGATION_PARAMETER_KEYS.values()
@@ -5045,6 +5046,45 @@ def normalize_investigation_query_request(
         except LiveOsqueryContractError as exc:
             raise InvestigationQueryError(str(exc)) from exc
         normalized_parameters = {"target_alias": target_alias, "query": query}
+    elif backend == "enrichment":
+        indicator_type = _query_text(parameters.get("indicator_type"), 16).lower()
+        indicator = _query_text(parameters.get("indicator"), 2048).strip()
+        if indicator_type not in {"ip", "domain", "url", "hash", "cve"}:
+            raise InvestigationQueryError("unsupported enrichment indicator type")
+        if not indicator:
+            raise InvestigationQueryError("enrichment request requires one exact indicator")
+        permitted: set[tuple[str, str]] = set()
+        if isinstance(authorization_context, dict):
+            network_observables = authorization_context.get("permitted_observables")
+            if isinstance(network_observables, dict):
+                for value in network_observables.get("ips", []):
+                    permitted.add(("ip", str(value).strip().lower()))
+                for value in network_observables.get("domains", []):
+                    permitted.add(("domain", str(value).strip().rstrip(".").lower()))
+            initial = authorization_context.get("permitted_enrichment_indicators")
+            if isinstance(initial, dict):
+                for kind, values in initial.items():
+                    if isinstance(values, list):
+                        permitted.update(
+                            (str(kind).lower(), str(value).strip().rstrip(".").lower())
+                            for value in values
+                            if str(value).strip()
+                        )
+            for item in authorization_context.get("discovered_observables", []):
+                if not isinstance(item, dict):
+                    continue
+                kind = {"ips": "ip", "domains": "domain"}.get(str(item.get("kind") or ""))
+                if kind:
+                    permitted.add((kind, str(item.get("value") or "").strip().rstrip(".").lower()))
+        normalized_indicator = indicator.rstrip(".") if indicator_type == "domain" else indicator
+        if (indicator_type, normalized_indicator.lower()) not in permitted:
+            raise InvestigationQueryError(
+                "enrichment indicator is not bound to original or provenance-validated evidence"
+            )
+        normalized_parameters = {
+            "indicator_type": indicator_type,
+            "indicator": normalized_indicator,
+        }
     else:
         operation = _query_text(parameters.get("operation"), 64).lower()
         if operation not in INVESTIGATION_DERIVED_OPERATIONS:
@@ -5782,6 +5822,157 @@ def accumulate_live_osquery_failure(
     )
 
 
+def _runtime_env_value(name: str) -> str:
+    direct = str(os.environ.get(name) or "").strip()
+    if direct:
+        return direct
+    env_file = Path.home() / "n8n-local" / ".env"
+    try:
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key.strip() == name:
+                return value.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+def prepare_investigation_enrichment_context(
+    prompt_package: dict[str, Any],
+    agent_role: str,
+    alert_store_url: str,
+) -> dict[str, Any]:
+    token = _runtime_env_value("N8N_POST_COMMIT_TOKEN")
+    enabled = agent_role in {"soc-analyst", "incident-responder"} and len(token) >= 32
+    config = {
+        "enabled": enabled,
+        "token": token,
+        "alert_store_url": alert_store_url.rstrip("/"),
+        "n8n_url": str(
+            os.environ.get("N8N_INVESTIGATION_ENRICHMENT_URL")
+            or "http://127.0.0.1:5678/webhook/onion-sentinel-investigation-enrichment"
+        ).rstrip("/"),
+        "timeout": 120,
+    }
+    capability = prompt_package.get("investigation_query_capability")
+    if isinstance(capability, dict):
+        backends = capability.get("backends")
+        if isinstance(backends, dict) and isinstance(backends.get("enrichment"), dict):
+            backends["enrichment"]["enabled"] = enabled
+        if enabled:
+            capability["enabled"] = True
+    return config
+
+
+def _post_investigation_enrichment_json(
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    timeout: int,
+) -> dict[str, Any]:
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json", **headers},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        result = read_bounded_json(response, max_bytes=8 * 1024 * 1024)
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise InvestigationQueryError("enrichment service returned an unsuccessful response")
+    return result
+
+
+def _project_investigation_enrichment_record(record: Any) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        return {}
+    raw = record.get("raw_response")
+    serialized = json.dumps(raw, sort_keys=True, separators=(",", ":"), default=str)
+    raw_bytes = serialized.encode("utf-8")
+    digest = str(record.get("raw_response_sha256") or "") or hashlib.sha256(raw_bytes).hexdigest()
+    return {
+        key: record.get(key)
+        for key in (
+            "source", "indicator", "indicator_type", "verdict", "confidence",
+            "tags", "first_seen", "last_seen", "cached_at", "expires_at",
+            "cache_state",
+        )
+    } | {
+        "provider_evidence": {
+            "response_sha256": digest,
+            "response_size_bytes": int(record.get("raw_response_size_bytes") or len(raw_bytes)),
+            "cache_response_complete": record.get("raw_response_complete", True) is True,
+            "prompt_projection_complete": len(raw_bytes) <= 32 * 1024,
+            **(
+                {"response": raw}
+                if len(raw_bytes) <= 32 * 1024
+                else {"response_json_prefix": raw_bytes[: 32 * 1024].decode("utf-8", "ignore")}
+            ),
+        }
+    }
+
+
+def collect_investigation_enrichment(
+    request: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    parameters = request.get("parameters") if isinstance(request.get("parameters"), dict) else {}
+    payload = {
+        "indicator_type": parameters.get("indicator_type"),
+        "indicator": parameters.get("indicator"),
+    }
+    token = str(config.get("token") or "")
+    timeout = int(config.get("timeout") or 120)
+    cache = _post_investigation_enrichment_json(
+        str(config["alert_store_url"]) + "/investigations/enrichment/cache",
+        payload,
+        {"X-Onion-Sentinel-Asset-Token": token},
+        timeout,
+    )
+    n8n_invoked = not bool(cache.get("cache_complete"))
+    source = cache
+    if n8n_invoked:
+        source = _post_investigation_enrichment_json(
+            str(config["n8n_url"]),
+            payload,
+            {"X-Relay-Token": token},
+            timeout,
+        )
+    raw_records = (
+        source.get("records")
+        if isinstance(source.get("records"), list)
+        else source.get("enrichment", {}).get("records", [])
+        if isinstance(source.get("enrichment"), dict)
+        else []
+    )
+    records = [
+        projected for projected in
+        (_project_investigation_enrichment_record(item) for item in raw_records[:16])
+        if projected
+    ]
+    canonical_query = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    canonical_result = json.dumps(records, sort_keys=True, separators=(",", ":"), default=str)
+    query_digest = hashlib.sha256(canonical_query.encode("utf-8")).hexdigest()
+    result_digest = hashlib.sha256(canonical_result.encode("utf-8")).hexdigest()
+    return {
+        "schema": "onion-sentinel-investigation-enrichment-evidence-v1",
+        "status": "ok",
+        "indicator_type": payload["indicator_type"],
+        "indicator": payload["indicator"],
+        "cache_checked_first": True,
+        "cache_complete": bool(cache.get("cache_complete")),
+        "n8n_invoked": n8n_invoked,
+        "rate_limits_enforced_by": "alert-store-persisted-provider-scheduler",
+        "records": records,
+        "skipped": (source.get("enrichment") or source).get("skipped", []),
+        "errors": (source.get("enrichment") or source).get("errors", []),
+        "query_digest": query_digest,
+        "result_digest": result_digest,
+        "evidence_ref": f"enrichment:{query_digest[:20]}:{result_digest[:20]}",
+    }
+
+
 def execute_investigation_query_batch(
     prompt_package: dict[str, Any],
     requests: list[dict[str, Any]],
@@ -5792,11 +5983,14 @@ def execute_investigation_query_batch(
     | None = None,
     osquery_executor: Callable[..., dict[str, Any]] | None = None,
     derived_executor: Callable[[dict[str, Any], Any], dict[str, Any]] | None = None,
+    enrichment_executor: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] | None = None,
+    enrichment_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute one mixed, read-only query batch through deterministic adapters."""
     security_onion_executor = security_onion_executor or collect_security_onion_pivots
     osquery_executor = osquery_executor or collect_live_osquery
     derived_executor = derived_executor or query_derived_pcap_evidence
+    enrichment_executor = enrichment_executor or collect_investigation_enrichment
     results: list[dict[str, Any]] = []
     audits: list[dict[str, Any]] = []
     local_context = prompt_package.get("_local_investigation_query_context")
@@ -6285,6 +6479,54 @@ def execute_investigation_query_batch(
                         "error": message,
                     }
                 )
+    enrichment_requests = [
+        request for request in requests if request["backend"] == "enrichment"
+    ]
+    for request in enrichment_requests:
+        try:
+            if not enrichment_config or enrichment_config.get("enabled") is not True:
+                raise InvestigationQueryError("investigation enrichment is not enabled")
+            evidence = enrichment_executor(request, enrichment_config)
+            if (
+                not isinstance(evidence, dict)
+                or evidence.get("schema") != "onion-sentinel-investigation-enrichment-evidence-v1"
+                or evidence.get("status") != "ok"
+            ):
+                raise InvestigationQueryError("enrichment orchestrator returned invalid evidence")
+            results.append({
+                "query_id": request["query_id"],
+                "backend": "enrichment",
+                "status": "ok",
+                "read_only": True,
+                "evidence": evidence,
+                "trusted_query_audit": [{
+                    "query_id": request["query_id"],
+                    "backend": "enrichment",
+                    "status": "ok",
+                    "indicator_type": evidence.get("indicator_type"),
+                    "indicator": evidence.get("indicator"),
+                    "cache_checked_first": evidence.get("cache_checked_first"),
+                    "n8n_invoked": evidence.get("n8n_invoked"),
+                    "query_digest": evidence.get("query_digest"),
+                    "result_digest": evidence.get("result_digest"),
+                    "evidence_ref": evidence.get("evidence_ref"),
+                }],
+            })
+            audits.append({
+                "backend": "enrichment",
+                "cache_checked_first": evidence.get("cache_checked_first"),
+                "n8n_invoked": evidence.get("n8n_invoked"),
+                "query_digest": evidence.get("query_digest"),
+                "result_digest": evidence.get("result_digest"),
+            })
+        except (InvestigationQueryError, OSError, urllib.error.URLError) as exc:
+            results.append({
+                "query_id": request["query_id"],
+                "backend": "enrichment",
+                "status": "error",
+                "read_only": True,
+                "error": f"{type(exc).__name__}: {exc}"[:1000],
+            })
     return {
         "schema": INVESTIGATION_QUERY_RESULT_SCHEMA,
         "round": round_number,
@@ -7999,6 +8241,8 @@ def investigation_backend_available(
         )
     if backend == "osquery":
         return bool(live_osquery_config and live_osquery_config.get("enabled"))
+    if backend == "enrichment":
+        return bool(descriptor.get("enabled"))
     return False
 
 
@@ -8060,6 +8304,9 @@ def investigation_request_semantic_digest(request: dict[str, Any]) -> str:
                 key: value.casefold() if isinstance(value, str) else value
                 for key, value in filters.items()
             }
+    elif backend == "enrichment" and isinstance(parameters, dict):
+        parameters["indicator_type"] = str(parameters.get("indicator_type") or "").lower()
+        parameters["indicator"] = str(parameters.get("indicator") or "").strip().rstrip(".").lower()
     canonical = {
         "backend": backend,
         "parameters": parameters,
@@ -8751,6 +8998,7 @@ def apply_investigation_query_loop(
     agent_role: str,
     *,
     live_osquery_config: dict[str, Any] | None = None,
+    enrichment_config: dict[str, Any] | None = None,
     harness_runtime: OnionSentinelHarnessRun | None = None,
     model_executor: Callable[[str, dict[str, Any], argparse.Namespace, dict[str, Any]], dict[str, Any]]
     | None = None,
@@ -9169,11 +9417,16 @@ def apply_investigation_query_loop(
                 if harness_runtime is not None
                 else None
             )
+            query_kwargs = {
+                "round_number": round_number,
+                "live_osquery_config": live_osquery_config,
+            }
+            if enrichment_config is not None:
+                query_kwargs["enrichment_config"] = enrichment_config
             round_result = query_executor(
                 prompt_package,
                 normalized,
-                round_number=round_number,
-                live_osquery_config=live_osquery_config,
+                **query_kwargs,
             )
             if (
                 not isinstance(round_result, dict)
@@ -13014,6 +13267,7 @@ def analyze_with_config(
     agent_role: str = "soc-analyst",
     settings: dict[str, Any] | None = None,
     live_osquery_config: dict[str, Any] | None = None,
+    enrichment_config: dict[str, Any] | None = None,
     phase_callback: Callable[[str, str, str], None] | None = None,
     harness_runtime: OnionSentinelHarnessRun | None = None,
 ) -> dict[str, Any]:
@@ -13110,6 +13364,7 @@ def analyze_with_config(
         settings,
         agent_role,
         live_osquery_config=live_osquery_config,
+        enrichment_config=enrichment_config,
         harness_runtime=harness_runtime,
     )
 
@@ -15983,6 +16238,11 @@ def main() -> int:
 
         settings = effective_ai_settings(args)
         live_osquery_config = prepare_live_osquery_context(prompt_package, agent_role)
+        enrichment_config = prepare_investigation_enrichment_context(
+            prompt_package,
+            agent_role,
+            args.alert_store_url,
+        )
         attach_evidence_reference_contract(prompt_package)
         enabled_routes = enabled_agent_model_routes(settings)
         assigned_route = canonical_model_route(
@@ -16128,6 +16388,7 @@ def main() -> int:
                 agent_role=agent_role,
                 settings=settings,
                 live_osquery_config=live_osquery_config,
+                enrichment_config=enrichment_config,
                 phase_callback=update_current_phase,
                 harness_runtime=harness_runtime,
             )

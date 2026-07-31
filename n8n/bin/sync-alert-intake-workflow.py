@@ -15,6 +15,7 @@ CODE_SOURCES = {
     "Validate Committed Alert": CODE_DIR / "validate-committed-alert.js",
     "Acknowledge Durable Alert Commit": CODE_DIR / "acknowledge-durable-alert.js",
     "Write SOC Markdown Report": CODE_DIR / "write-soc-markdown-report.js",
+    "Investigation Enrichment": CODE_DIR / "investigation-enrichment.js",
 }
 
 REQUIRED_NODES = (
@@ -48,6 +49,28 @@ REQUIRED_NODES = (
         "typeVersion": 2,
         "position": [1360, 360],
     },
+    {
+        "parameters": {
+            "httpMethod": "POST",
+            "path": "onion-sentinel-investigation-enrichment",
+            "responseMode": "lastNode",
+            "options": {},
+        },
+        "id": "onion-sentinel-investigation-enrichment-webhook",
+        "name": "Investigation Enrichment Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [800, 760],
+        "webhookId": "onion-sentinel-investigation-enrichment",
+    },
+    {
+        "parameters": {"jsCode": ""},
+        "id": "investigation-enrichment",
+        "name": "Investigation Enrichment",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [1080, 760],
+    },
 )
 
 
@@ -70,6 +93,10 @@ def rendered_workflow() -> str:
     workflow["connections"]["Validate Committed Alert"] = {
         "main": [[{"node": "Write SOC Markdown Report", "type": "main", "index": 0}]]
     }
+    workflow["connections"]["Investigation Enrichment Webhook"] = {
+        "main": [[{"node": "Investigation Enrichment", "type": "main", "index": 0}]]
+    }
+    workflow["connections"].pop("Investigation Enrichment", None)
     workflow["connections"].pop("Acknowledge Durable Alert Commit", None)
     return json.dumps(workflow, indent=2, ensure_ascii=True) + "\n"
 

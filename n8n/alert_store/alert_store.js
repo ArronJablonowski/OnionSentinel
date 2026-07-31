@@ -283,7 +283,10 @@ const enrichmentCacheMaxBytes = Math.max(
 );
 const enrichmentCacheRawResponseMaxBytes = Math.max(
   1024,
-  Number(process.env.ENRICHMENT_CACHE_RAW_RESPONSE_MAX_BYTES || 128 * 1024),
+  // Match the bounded HTTP client. Every provider response accepted by the
+  // client is therefore retained intact; responses above this limit fail
+  // before parsing instead of being silently reduced to a marker in cache.
+  Number(process.env.ENRICHMENT_CACHE_RAW_RESPONSE_MAX_BYTES || 5 * 1024 * 1024),
 );
 const enrichmentCacheCleanupIntervalMs = Math.max(
   5 * 60 * 1000,
@@ -1887,6 +1890,101 @@ async function enrichAlert(alert) {
     },
   };
   return {ok: true, status: 'enriched', alert: enrichedAlert, enrichment: enrichedAlert.enrichment.external_intel};
+}
+
+const investigationEnrichmentSources = Object.freeze({
+  ip: ['abuseipdb', 'greynoise', 'shodan_internetdb', 'otx', 'shodan', 'censys'],
+  domain: ['otx', 'urlscan', 'threatfox', 'virustotal'],
+  url: ['urlhaus', 'urlscan', 'google_safe_browsing', 'phishtank', 'otx', 'virustotal'],
+  hash: ['malwarebazaar', 'otx', 'threatfox', 'virustotal'],
+  cve: ['cisa_kev', 'epss', 'nvd'],
+});
+
+function normalizeInvestigationEnrichmentIndicator(indicatorType, indicator) {
+  const type = String(indicatorType || '').trim().toLowerCase();
+  const value = String(indicator || '').trim();
+  if (!Object.hasOwn(investigationEnrichmentSources, type)) {
+    throw Object.assign(new Error('unsupported enrichment indicator type'), {statusCode: 400});
+  }
+  let normalized = '';
+  if (type === 'ip') {
+    normalized = parseIpv4(value) && !isPrivateIpv4(value) ? value : '';
+  } else if (type === 'domain') {
+    normalized = publicHostname(value) || '';
+  } else if (type === 'url') {
+    normalized = redactUrlForPublicLookup(value) || '';
+  } else if (type === 'hash') {
+    normalized = /^(?:[a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64})$/i.test(value)
+      ? value.toLowerCase()
+      : '';
+  } else if (type === 'cve') {
+    normalized = /^CVE-\d{4}-\d{4,7}$/i.test(value) ? value.toUpperCase() : '';
+  }
+  if (!normalized) {
+    throw Object.assign(
+      new Error('indicator is invalid, private, internal, or unsafe for public enrichment'),
+      {statusCode: 400},
+    );
+  }
+  return {type, value: normalized};
+}
+
+function investigationIndicatorAlert(type, value) {
+  const alert = {
+    alert_id: `investigation-enrichment:${crypto.createHash('sha256').update(`${type}:${value}`).digest('hex')}`,
+    timestamp: nowUtc(),
+    rule_name: 'Bounded investigation enrichment pivot',
+    event_dataset: 'onion_sentinel.investigation_enrichment',
+    severity_label: 'high',
+    triage: {level: 'high'},
+  };
+  if (type === 'ip') alert.destination = {ip: value};
+  if (type === 'domain') alert.dns = {question: {name: value}};
+  if (type === 'url') alert.url = {full: value};
+  if (type === 'hash' || type === 'cve') alert.message = value;
+  return alert;
+}
+
+async function cachedInvestigationEnrichment(indicatorType, indicator) {
+  const normalized = normalizeInvestigationEnrichmentIndicator(indicatorType, indicator);
+  const records = [];
+  const misses = [];
+  const skipped = [];
+  for (const source of investigationEnrichmentSources[normalized.type]) {
+    if (!sourceConfigured(source)) {
+      skipped.push({source, reason: 'missing_api_key'});
+      continue;
+    }
+    const found = await enrichmentCache.peek(source, normalized.type, normalized.value);
+    if (found.cached && found.record) records.push(found.record);
+    else misses.push({source, cache_state: found.cache_state});
+  }
+  records.sort((left, right) => String(left.source).localeCompare(String(right.source)));
+  return {
+    ok: true,
+    schema: 'onion-sentinel-investigation-enrichment-v1',
+    indicator_type: normalized.type,
+    indicator: normalized.value,
+    cache_complete: misses.length === 0,
+    records,
+    misses,
+    skipped,
+  };
+}
+
+async function queryInvestigationEnrichment(indicatorType, indicator) {
+  const normalized = normalizeInvestigationEnrichmentIndicator(indicatorType, indicator);
+  const result = await enrichAlert(
+    investigationIndicatorAlert(normalized.type, normalized.value),
+  );
+  return {
+    ok: result.ok,
+    schema: 'onion-sentinel-investigation-enrichment-v1',
+    status: result.status,
+    indicator_type: normalized.type,
+    indicator: normalized.value,
+    enrichment: result.enrichment,
+  };
 }
 
 function parseIpv4(ip) {
@@ -11091,6 +11189,39 @@ async function handleRequest(request, response) {
       assertDiskWriteAdmission('alert enrichment');
       const result = await enrichAlert(alert);
       sendJson(response, result.ok ? 200 : 400, result);
+      return;
+    }
+    if (
+      request.method === 'POST'
+      && parsedUrl.pathname === '/investigations/enrichment/cache'
+    ) {
+      requireAssetStoreWriteAuthorization(request);
+      const payload = await readJsonBody(request);
+      sendJson(
+        response,
+        200,
+        await cachedInvestigationEnrichment(
+          payload.indicator_type,
+          payload.indicator,
+        ),
+      );
+      return;
+    }
+    if (
+      request.method === 'POST'
+      && parsedUrl.pathname === '/investigations/enrichment/query'
+    ) {
+      requireAssetStoreWriteAuthorization(request);
+      assertDiskWriteAdmission('investigation enrichment');
+      const payload = await readJsonBody(request);
+      sendJson(
+        response,
+        200,
+        await queryInvestigationEnrichment(
+          payload.indicator_type,
+          payload.indicator,
+        ),
+      );
       return;
     }
     if (request.method === 'POST' && parsedUrl.pathname === '/analysis/result') {

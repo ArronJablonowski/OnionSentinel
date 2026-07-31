@@ -233,6 +233,23 @@ test('raw provider payloads and total cache rows remain bounded', async (context
   assert.ok(stats.largest_raw_response_bytes < 1024);
 });
 
+test('complete accepted provider evidence carries exact digest and size metadata', async (context) => {
+  const env = await fixture({rawResponseMaxBytes: 5 * 1024 * 1024});
+  context.after(env.close);
+  const raw = {nested: {all: ['provider', 'fields']}, score: 42};
+  const result = await env.cache.lookup({
+    source: 'otx',
+    indicatorType: 'domain',
+    indicator: 'evidence.example',
+    ttlSeconds: 3600,
+    loader: async () => record('evidence.example', {raw_response: raw}),
+  });
+  assert.deepEqual(result.record.raw_response, raw);
+  assert.equal(result.record.raw_response_complete, true);
+  assert.equal(result.record.raw_response_size_bytes, Buffer.byteLength(JSON.stringify(raw)));
+  assert.match(result.record.raw_response_sha256, /^[a-f0-9]{64}$/);
+});
+
 test('retention compacts oversized provider responses written by older deployments', async (context) => {
   const env = await fixture({rawResponseMaxBytes: 1024});
   context.after(env.close);
