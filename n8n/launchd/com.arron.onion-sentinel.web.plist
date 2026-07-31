@@ -23,6 +23,8 @@
   <dict>
     <key>ASSET_DATABASE_READ_ENABLED</key>
     <string>true</string>
+    <key>ASSET_INVENTORY_ADMIN_WRITE_REQUIRED</key>
+    <string>false</string>
   </dict>
 
   <key>RunAtLoad</key>

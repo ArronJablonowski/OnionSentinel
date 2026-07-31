@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import io
 import importlib.util
 import json
 import sys
@@ -30,6 +31,37 @@ def load_module(name: str, path: Path):
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+class AssetWriteRequest:
+    """Minimal request stub for exercising asset-write authorization."""
+
+    def __init__(
+        self,
+        path: str,
+        payload: dict,
+        *,
+        same_origin: bool = True,
+        authenticated: bool = False,
+    ):
+        body = json.dumps(payload).encode("utf-8")
+        self.path = path
+        self.headers = {"Content-Length": str(len(body))}
+        self.rfile = io.BytesIO(body)
+        self.same_origin = same_origin
+        self.authenticated = authenticated
+        self.admin_auth_checks = 0
+        self.response: tuple[int, dict] | None = None
+
+    def _soc_review_write_authorized(self) -> bool:
+        return self.same_origin
+
+    def _admin_authenticated(self) -> bool:
+        self.admin_auth_checks += 1
+        return self.authenticated
+
+    def _send(self, status: int, body: bytes, _content_type: str = "") -> None:
+        self.response = (int(status), json.loads(body.decode("utf-8")))
 
 
 class AssetInventoryPageTests(unittest.TestCase):
@@ -400,6 +432,13 @@ class AssetInventoryPageTests(unittest.TestCase):
         self.assertIn("PROMOTE:${item.discovery_id}", page)
         self.assertIn("CHANGE-IP:${item.discovery_id}:${authority.asset_id}", page)
         self.assertIn("fetch('/api/admin/session-status'", page)
+        self.assertIn("adminRequired=false", page)
+        self.assertIn("payload.required===true", page)
+        self.assertIn("if(adminRequired&&adminAuthenticated!==true)", page)
+        self.assertIn(
+            "Administration sign-in is not required.",
+            page,
+        )
         self.assertIn("resumeAfterAuth=true", page)
         self.assertIn("this change will resume automatically", page)
         self.assertIn("closeReview();pageOffset=0", page)
@@ -408,17 +447,116 @@ class AssetInventoryPageTests(unittest.TestCase):
         self.assertIn("when:assetCanRefresh", page)
         self.assertIn(".dhcp-review-check[hidden]{display:none!important}", page)
         self.assertIn("asset-inventory.html", page)
+        portal_source = PORTAL_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            "ASSET_INVENTORY_ADMIN_WRITE_REQUIRED",
+            portal_source,
+        )
+        self.assertIn('"authentication_required": True', portal_source)
+        self.assertIn(
+            '"Asset inventory changes must come from the "',
+            portal_source,
+        )
         self.assertIn("const assetIdentityHtml=asset=>", incident_page)
         self.assertIn("item.source_asset", incident_page)
         self.assertIn("item.destination_asset", incident_page)
 
+    def test_asset_promotion_does_not_require_login_by_default(self) -> None:
+        request = AssetWriteRequest(
+            "/api/assets/promote-dhcp",
+            {"bounded": "payload"},
+            authenticated=False,
+        )
+        with (
+            mock.patch.object(
+                self.portal,
+                "ASSET_INVENTORY_ADMIN_WRITE_REQUIRED",
+                False,
+            ),
+            mock.patch.object(
+                self.portal,
+                "asset_dhcp_promotion_response",
+                return_value=(201, {"ok": True, "asset_id": "lan-client"}),
+            ) as promote,
+        ):
+            self.portal.PortalHandler.do_POST(request)
+
+        self.assertEqual(
+            request.response,
+            (201, {"ok": True, "asset_id": "lan-client"}),
+        )
+        self.assertEqual(request.admin_auth_checks, 0)
+        promote.assert_called_once_with({"bounded": "payload"})
+
+    def test_asset_promotion_still_requires_same_origin(self) -> None:
+        request = AssetWriteRequest(
+            "/api/assets/promote-dhcp",
+            {"bounded": "payload"},
+            same_origin=False,
+        )
+        with (
+            mock.patch.object(
+                self.portal,
+                "ASSET_INVENTORY_ADMIN_WRITE_REQUIRED",
+                False,
+            ),
+            mock.patch.object(
+                self.portal,
+                "asset_dhcp_promotion_response",
+            ) as promote,
+        ):
+            self.portal.PortalHandler.do_POST(request)
+
+        self.assertIsNotNone(request.response)
+        status, body = request.response
+        self.assertEqual(status, 403)
+        self.assertIn("same-origin", body["error"])
+        promote.assert_not_called()
+
+    def test_asset_promotion_login_can_be_enabled_later(self) -> None:
+        request = AssetWriteRequest(
+            "/api/assets/promote-dhcp",
+            {"bounded": "payload"},
+            authenticated=False,
+        )
+        with (
+            mock.patch.object(
+                self.portal,
+                "ASSET_INVENTORY_ADMIN_WRITE_REQUIRED",
+                True,
+            ),
+            mock.patch.object(
+                self.portal,
+                "asset_dhcp_promotion_response",
+            ) as promote,
+        ):
+            self.portal.PortalHandler.do_POST(request)
+
+        self.assertIsNotNone(request.response)
+        status, body = request.response
+        self.assertEqual(status, 403)
+        self.assertTrue(body["authentication_required"])
+        self.assertEqual(request.admin_auth_checks, 1)
+        promote.assert_not_called()
+
     def test_installer_deploys_shared_inventory_validator(self) -> None:
         installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        launch_agent = (
+            ROOT
+            / "n8n"
+            / "launchd"
+            / "com.arron.onion-sentinel.web.plist"
+        ).read_text(encoding="utf-8")
         self.assertIn(
             'cp "$REPO_DIR/n8n/bin/asset_inventory.py" '
             '"$DASHBOARD_RUNTIME_DIR/asset_inventory.py"',
             installer,
         )
+        self.assertIn(
+            "<key>ASSET_INVENTORY_ADMIN_WRITE_REQUIRED</key>",
+            launch_agent,
+        )
+        self.assertIn("<string>false</string>", launch_agent)
 
     def test_dashboard_asset_review_payloads_are_bounded_and_exact(self) -> None:
         promotion = {

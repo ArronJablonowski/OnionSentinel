@@ -130,6 +130,9 @@ ASSET_INVENTORY_MAX_BYTES = 64 * 1024 * 1024
 ASSET_DATABASE_READ_ENABLED = str(
     os.environ.get("ASSET_DATABASE_READ_ENABLED") or ""
 ).strip().lower() in {"1", "true", "yes"}
+ASSET_INVENTORY_ADMIN_WRITE_REQUIRED = str(
+    os.environ.get("ASSET_INVENTORY_ADMIN_WRITE_REQUIRED") or ""
+).strip().lower() in {"1", "true", "yes"}
 ASSET_STORE_ENV_FILE = HOME / "n8n-local" / ".env"
 DHCP_ASSET_DISCOVERY_STATE_FILE = (
     HOME / "n8n-local" / "asset-discovery" / "dhcp-observations.json"
@@ -12897,14 +12900,27 @@ class PortalHandler(BaseHTTPRequestHandler):
             return self._send(HTTPStatus.BAD_REQUEST, render_admin_login("Invalid request size.", True))
         raw = self.rfile.read(length).decode("utf-8", errors="replace")
         if is_asset_write:
+            if not self._soc_review_write_authorized():
+                return self._send(
+                    HTTPStatus.FORBIDDEN,
+                    json.dumps({
+                        "ok": False,
+                        "error": (
+                            "Asset inventory changes must come from the "
+                            "same-origin Onion Sentinel dashboard."
+                        ),
+                    }).encode(),
+                    "application/json; charset=utf-8",
+                )
             if (
-                not self._admin_authenticated()
-                or not self._soc_review_write_authorized()
+                ASSET_INVENTORY_ADMIN_WRITE_REQUIRED
+                and not self._admin_authenticated()
             ):
                 return self._send(
                     HTTPStatus.FORBIDDEN,
                     json.dumps({
                         "ok": False,
+                        "authentication_required": True,
                         "error": (
                             "Sign in to Onion Sentinel Administration before "
                             "approving asset inventory changes."
@@ -13182,6 +13198,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             data = {
                 "ok": True,
                 "authenticated": self._admin_authenticated(),
+                "required": ASSET_INVENTORY_ADMIN_WRITE_REQUIRED,
             }
             return self._send(
                 HTTPStatus.OK,
