@@ -534,6 +534,108 @@ def _mac_address_scope(value: object) -> str:
     return "globally_administered"
 
 
+def _annotate_exact_ip_dhcp_macs(
+    records: list[dict],
+    observed_at: dt.datetime,
+) -> dict:
+    """Attach display-only DHCP MAC evidence to exact-IP asset matches.
+
+    These fields deliberately remain separate from ``mac_addresses``. The
+    latter is authoritative inventory, while the former is passive evidence
+    that still requires operator review.
+    """
+    state, state_error = load_dhcp_asset_discovery_state_data()
+    collection = (
+        state.get("collection")
+        if isinstance(state.get("collection"), dict)
+        else {}
+    )
+    status = {
+        "status": str(collection.get("status") or "unknown")[:32],
+        "updated_at": str(state.get("updated_at") or "")[:64],
+        "error": str(
+            state_error or collection.get("last_error") or ""
+        )[:300],
+    }
+    if state_error:
+        return status
+
+    by_ip: dict[str, list[dict]] = {}
+    for raw in state.get("observations", []):
+        if not isinstance(raw, dict):
+            continue
+        mac = str(raw.get("mac_address") or "").strip().lower()
+        scope = _mac_address_scope(mac)
+        if scope in {"unknown", "multicast"}:
+            continue
+        try:
+            address = str(
+                ipaddress.ip_address(str(raw.get("current_ip") or "").strip())
+            )
+            last_seen = parse_iso_timestamp(raw.get("last_seen"))
+            if last_seen.tzinfo is None:
+                raise ValueError("last_seen lacks offset")
+            last_seen = last_seen.astimezone(dt.timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        lease_expires = None
+        if raw.get("lease_expires_at"):
+            try:
+                lease_expires = parse_iso_timestamp(
+                    raw["lease_expires_at"]
+                ).astimezone(dt.timezone.utc)
+            except (TypeError, ValueError):
+                lease_expires = None
+        stale = (
+            last_seen < observed_at - dt.timedelta(hours=24)
+            and (lease_expires is None or lease_expires < observed_at)
+        )
+        by_ip.setdefault(address, []).append(
+            {
+                "mac": mac,
+                "scope": scope,
+                "last_seen": str(raw.get("last_seen") or "")[:64],
+                "last_seen_value": last_seen,
+                "stale": stale,
+            }
+        )
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        candidates: list[dict] = []
+        for raw_address in record.get("ip_addresses") or []:
+            try:
+                address = str(ipaddress.ip_address(str(raw_address).strip()))
+            except ValueError:
+                continue
+            candidates.extend(by_ip.get(address, []))
+        if not candidates:
+            continue
+
+        fresh = [item for item in candidates if not item["stale"]]
+        selected = fresh or candidates
+        by_mac: dict[str, dict] = {}
+        for item in sorted(
+            selected,
+            key=lambda entry: entry["last_seen_value"],
+            reverse=True,
+        ):
+            by_mac.setdefault(str(item["mac"]), item)
+        if len(by_mac) != 1:
+            record["observed_mac_ambiguous"] = True
+            record["observed_mac_source"] = "zeek-dhcp-exact-ip"
+            continue
+
+        evidence = next(iter(by_mac.values()))
+        record["observed_mac_addresses"] = [str(evidence["mac"])]
+        record["observed_mac_source"] = "zeek-dhcp-exact-ip"
+        record["observed_mac_scope"] = str(evidence["scope"])
+        record["observed_mac_last_seen"] = str(evidence["last_seen"])
+        record["observed_mac_stale"] = bool(evidence["stale"])
+    return status
+
+
 def _dhcp_asset_inventory_overlay(
     inventory: dict,
     observed_at: dt.datetime,
@@ -718,7 +820,14 @@ def asset_inventory_response(
                 "error": f"Asset inventory unavailable: {exc}",
                 "assets": [],
             }
-        payload.setdefault("dhcp_discovery", {"status": "database"})
+        now = dt.datetime.now(dt.timezone.utc)
+        records = payload.get("assets")
+        discovery_status = (
+            _annotate_exact_ip_dhcp_macs(records, now)
+            if isinstance(records, list)
+            else {"status": "unavailable"}
+        )
+        payload["dhcp_discovery"] = discovery_status
         payload.setdefault("discovered_asset_count", 0)
         return HTTPStatus.OK, payload
 

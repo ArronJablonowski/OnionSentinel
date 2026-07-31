@@ -271,6 +271,68 @@ class AssetInventoryPageTests(unittest.TestCase):
         self.assertEqual(ambiguous["status"], "ambiguous")
         self.assertNotIn("hostname", ambiguous)
 
+    def test_database_api_labels_exact_ip_dhcp_mac_as_observed(self) -> None:
+        inventory_payload = {
+            "ok": True,
+            "assets": [
+                {
+                    "asset_id": "current-mac",
+                    "state": "current",
+                    "ip_addresses": ["10.66.6.210"],
+                    "mac_addresses": [],
+                    "hostnames": ["current-mac.example.lan"],
+                }
+            ],
+        }
+        dhcp_state = {
+            "schema": "onion-sentinel-dhcp-asset-observations-v1",
+            "updated_at": "2026-07-30T20:00:00Z",
+            "collection": {"status": "ok"},
+            "observations": [
+                {
+                    "current_ip": "10.66.6.210",
+                    "mac_address": "14:75:5b:3f:90:17",
+                    "last_seen": "2026-07-30T20:00:00Z",
+                    "lease_expires_at": "2099-07-30T21:00:00Z",
+                }
+            ],
+        }
+
+        def store_response(path: str, timeout: float = 5.0) -> dict:
+            if path.startswith("/assets/inventory?"):
+                return inventory_payload
+            if path == "/assets/dhcp-state":
+                return {"state": dhcp_state}
+            raise AssertionError(path)
+
+        with (
+            mock.patch.object(
+                self.portal,
+                "ASSET_DATABASE_READ_ENABLED",
+                True,
+            ),
+            mock.patch.object(
+                self.portal,
+                "alert_store_get_json",
+                side_effect=store_response,
+            ),
+        ):
+            status, payload = self.portal.asset_inventory_response()
+
+        self.assertEqual(status, 200)
+        record = payload["assets"][0]
+        self.assertEqual(record["mac_addresses"], [])
+        self.assertEqual(
+            record["observed_mac_addresses"],
+            ["14:75:5b:3f:90:17"],
+        )
+        self.assertEqual(
+            record["observed_mac_source"],
+            "zeek-dhcp-exact-ip",
+        )
+        self.assertFalse(record["observed_mac_stale"])
+        self.assertEqual(payload["dhcp_discovery"]["status"], "ok")
+
     def test_asset_page_and_navigation_are_generated(self) -> None:
         builder = load_module("asset_inventory_page_builder", BUILDER_PATH)
         builder.DB_PATH = Path(self.tmp.name) / "missing.sqlite3"
@@ -314,7 +376,10 @@ class AssetInventoryPageTests(unittest.TestCase):
         self.assertIn(".asset-table th:nth-child(1){width:220px}", page)
         self.assertIn(".asset-table th:nth-child(4){width:155px}", page)
         self.assertIn(".asset-table th:nth-child(5){width:220px}", page)
-        self.assertIn("values(item.mac_addresses,'asset-mac')", page)
+        self.assertIn("const macValues=item=>", page)
+        self.assertIn("item.observed_mac_addresses", page)
+        self.assertIn("Observed via DHCP", page)
+        self.assertIn("review required", page)
         self.assertIn(".asset-mac{white-space:nowrap!important", page)
         self.assertIn("text-overflow:ellipsis;white-space:nowrap!important", page)
         self.assertIn('title="${esc(value)}">${esc(value)}</code>', page)
