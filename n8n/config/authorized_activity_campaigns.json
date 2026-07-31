@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "policies": [
+    {
+      "id": "authorized-ssh-scanner-10-77-7-222",
+      "enabled": true,
+      "source_ips": [
+        "10.77.7.222"
+      ],
+      "rule_ids": [
+        "2003068"
+      ],
+      "destination_ports": [
+        22
+      ],
+      "transport_protocols": [
+        "tcp"
+      ],
+      "authorization_start": "2026-07-31T16:15:00-06:00",
+      "authorization_end": "2026-08-04T23:59:59-06:00",
+      "window_seconds": 900,
+      "pcap_sample_limit": 3,
+      "enrichment_sample_limit": 5,
+      "investigation_mode": "incident_response_only",
+      "reconcile_existing_pending": true,
+      "authorization": {
+        "authorized_by": "operator",
+        "scope": "Authorized outbound SSH scanning from the exact source IP for the production reliability soak. Authorization applies only to Suricata rule 2003068, TCP destination port 22, and the stated time window.",
+        "provenance": "operator-confirmed-in-codex-task"
+      }
+    },
+    {
+      "id": "authorized-tls-scan-responses-10-77-7-222",
+      "enabled": true,
+      "destination_ips": [
+        "10.77.7.222"
+      ],
+      "rule_ids": [
+        "2029340"
+      ],
+      "source_ports": [
+        443,
+        8443
+      ],
+      "destination_port_ranges": [
+        [
+          49152,
+          65535
+        ]
+      ],
+      "transport_protocols": [
+        "tcp"
+      ],
+      "authorization_start": "2026-07-31T16:15:00-06:00",
+      "authorization_end": "2026-08-04T23:59:59-06:00",
+      "window_seconds": 900,
+      "pcap_sample_limit": 3,
+      "enrichment_sample_limit": 5,
+      "investigation_mode": "incident_response_only",
+      "reconcile_existing_pending": true,
+      "authorization": {
+        "authorized_by": "operator",
+        "scope": "Response-side TLS handshake-failure telemetry returning from TCP 443 or 8443 targets to the exact authorized scanner endpoint during the production reliability soak. This does not authorize unrelated inbound traffic.",
+        "provenance": "operator-confirmed-scanner-correlated-with-observed-response-tuple"
+      }
+    }
+  ]
+}

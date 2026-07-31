@@ -175,6 +175,7 @@ cp "$REPO_DIR/n8n/alert_store/lib/group_identity.js" "$STACK_DIR/alert_store/lib
 cp "$REPO_DIR/n8n/alert_store/lib/correlation_context.js" "$STACK_DIR/alert_store/lib/correlation_context.js"
 cp "$REPO_DIR/n8n/alert_store/lib/enrichment_cache.js" "$STACK_DIR/alert_store/lib/enrichment_cache.js"
 cp "$REPO_DIR/n8n/alert_store/lib/soc_analysis_policy.js" "$STACK_DIR/alert_store/lib/soc_analysis_policy.js"
+cp "$REPO_DIR/n8n/alert_store/lib/authorized_activity_policy.js" "$STACK_DIR/alert_store/lib/authorized_activity_policy.js"
 cp "$REPO_DIR/n8n/postgres/alert-store-queue-schema.sql" "$STACK_DIR/postgres/alert-store-queue-schema.sql"
 cp "$REPO_DIR/n8n/postgres/asset-inventory-schema.sql" "$STACK_DIR/postgres/asset-inventory-schema.sql"
 cp "$REPO_DIR/n8n/postgres/software-inventory-schema.sql" "$STACK_DIR/postgres/software-inventory-schema.sql"
@@ -303,6 +304,17 @@ cp "$REPO_DIR/n8n/config/investigation_skills.json" \
 chmod 0644 \
   "$STACK_DIR/config/investigation_skills.schema.json" \
   "$STACK_DIR/config/investigation_skills.json"
+if [[ -L "$STACK_DIR/config/authorized_activity_campaigns.json" ]] \
+  || [[ -e "$STACK_DIR/config/authorized_activity_campaigns.json" \
+    && ! -f "$STACK_DIR/config/authorized_activity_campaigns.json" ]]; then
+  echo "Refusing install: authorized activity campaign policy must be a regular file." >&2
+  exit 1
+fi
+if [[ ! -f "$STACK_DIR/config/authorized_activity_campaigns.json" ]]; then
+  cp "$REPO_DIR/n8n/config/authorized_activity_campaigns.json" \
+    "$STACK_DIR/config/authorized_activity_campaigns.json"
+fi
+chmod 0600 "$STACK_DIR/config/authorized_activity_campaigns.json"
 if [[ ! -f "$STACK_DIR/config/asset_inventory.json" ]]; then
   cp "$REPO_DIR/n8n/config/asset_inventory.example.json" "$STACK_DIR/config/asset_inventory.json"
   chmod 0600 "$STACK_DIR/config/asset_inventory.json"

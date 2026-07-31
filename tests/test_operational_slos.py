@@ -446,6 +446,67 @@ class OperationalSloTests(unittest.TestCase):
                                         previous_ingest_errors=0)
         self.assertIn("AI analysis has been processing without state progress for 15 minutes", failures)
 
+    def test_incident_response_backlog_is_part_of_the_soak_gate(self):
+        now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
+        metrics = {"metrics": {
+            "process": {"ingest_errors": 0},
+            "durable_jobs": [
+                {"job_type": "incident_response_analysis", "status": "pending", "count": 30},
+            ],
+            "oldest_pending_jobs": [
+                {"job_type": "incident_response_analysis", "seconds": 1900},
+            ],
+            "latest_completed_jobs": [
+                {"job_type": "incident_response_analysis", "seconds": 1900},
+            ],
+            "oldest_pending_pcap_seconds": 0,
+        }}
+        health = {"summary": {"latest": {"timestamp_utc": "2026-07-14T17:55:00Z"}},
+                  "pcap": {"warning_count": 0}}
+        failures, snapshot = self.slo.evaluate(
+            metrics, health, now=now, disk_used_percent=55,
+            sqlite_backup_age=60, postgres_backup_age=60,
+            previous_ingest_errors=0,
+        )
+        self.assertIn(
+            "incident-response analysis has pending work but no completion within 30 minutes",
+            failures,
+        )
+        self.assertEqual(
+            snapshot["signals"]["pending_incident_response_job_count"], 30,
+        )
+
+    def test_material_combined_queue_growth_degrades_the_soak(self):
+        now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
+        metrics = {"metrics": {
+            "process": {"ingest_errors": 0},
+            "durable_jobs": [
+                {"job_type": "ai_analysis", "status": "pending", "count": 30},
+                {"job_type": "incident_response_analysis", "status": "pending", "count": 30},
+            ],
+            "oldest_pending_jobs": [
+                {"job_type": "ai_analysis", "seconds": 60},
+                {"job_type": "incident_response_analysis", "seconds": 60},
+            ],
+            "oldest_pending_pcap_seconds": 0,
+        }}
+        health = {"summary": {"latest": {"timestamp_utc": "2026-07-14T17:55:00Z"}},
+                  "pcap": {"warning_count": 0}}
+        failures, snapshot = self.slo.evaluate(
+            metrics, health, now=now, disk_used_percent=55,
+            sqlite_backup_age=60, postgres_backup_age=60,
+            previous_ingest_errors=0,
+            previous_pending_job_counts={
+                "ai_analysis": 20,
+                "incident_response_analysis": 20,
+            },
+        )
+        self.assertEqual(failures, [])
+        self.assertIn(
+            "combined AI and incident-response queues are growing faster than the bounded soak gate",
+            snapshot["advisories"],
+        )
+
     def test_soak_clock_continues_only_while_healthy(self):
         now = dt.datetime(2026, 7, 16, 18, tzinfo=dt.timezone.utc)
         state = self.slo.update_soak_state({"healthy_since": "2026-07-14  17:00:00+00:00"}, [], now)

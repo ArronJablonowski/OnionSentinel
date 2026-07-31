@@ -6,7 +6,12 @@
  * Serializing by provider protects free-tier quotas and cache coherence. Using
  * separate gates lets unrelated providers progress even when one is slow.
  */
-function createProviderScheduler({failureThreshold = 3, resetMs = 60000, formatTimestamp = String} = {}) {
+function createProviderScheduler({
+  failureThreshold = 3,
+  resetMs = 60000,
+  maxResetMs = 60 * 60 * 1000,
+  formatTimestamp = String,
+} = {}) {
   const gates = new Map();
   const states = new Map();
 
@@ -29,7 +34,15 @@ function createProviderScheduler({failureThreshold = 3, resetMs = 60000, formatT
       } catch (error) {
         if (!error.providerCircuitOpen) {
           state.failures += 1;
-          if (state.failures >= failureThreshold) state.openUntil = Date.now() + resetMs;
+          if (state.failures >= failureThreshold) {
+            const exponent = Math.min(10, state.failures - failureThreshold);
+            const adaptiveReset = Math.min(maxResetMs, resetMs * (2 ** exponent));
+            const providerReset = Number(error.retryAfterMs || 0);
+            state.openUntil = Date.now() + Math.max(
+              adaptiveReset,
+              Number.isFinite(providerReset) ? providerReset : 0,
+            );
+          }
         }
         throw error;
       } finally {
@@ -45,6 +58,12 @@ function createProviderScheduler({failureThreshold = 3, resetMs = 60000, formatT
       queued: state.queued,
       failures: state.failures,
       circuit_open: state.openUntil > Date.now(),
+      open_until: state.openUntil > Date.now()
+        ? formatTimestamp(new Date(state.openUntil))
+        : null,
+      backoff_seconds: state.openUntil > Date.now()
+        ? Math.ceil((state.openUntil - Date.now()) / 1000)
+        : 0,
     }]));
   }
 

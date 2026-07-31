@@ -112,6 +112,7 @@ def evaluate(
     sqlite_backup_age: int | None,
     postgres_backup_age: int | None,
     previous_ingest_errors: int | None,
+    previous_pending_job_counts: dict[str, int] | None = None,
     harness_database_present: bool = False,
     harness_maintenance: dict[str, object] | None = None,
     alert_store_postgres_shadow_enabled: bool = False,
@@ -164,6 +165,9 @@ def evaluate(
     ai_job_age = pending_job_ages.get("ai_analysis", aggregate_job_age if not pending_job_ages else 0)
     ai_completion_age = latest_completion_ages.get("ai_analysis")
     ai_processing_age = processing_job_ages.get("ai_analysis")
+    incident_job_age = pending_job_ages.get("incident_response_analysis", 0)
+    incident_completion_age = latest_completion_ages.get("incident_response_analysis")
+    incident_processing_age = processing_job_ages.get("incident_response_analysis")
 
     heartbeat_age = age_seconds(latest.get("timestamp_utc") or latest.get("timestamp"), now)
     if heartbeat_age is None or heartbeat_age > 20 * 60:
@@ -187,6 +191,60 @@ def evaluate(
         # Require the pending work itself to be stale so a newly arrived job
         # gets its normal scheduler/inference window before it can page.
         failures.append("AI analysis has pending work but no completion within 30 minutes")
+    incident_pending_count = pending_job_counts.get("incident_response_analysis", 0)
+    incident_processing_count = processing_job_counts.get("incident_response_analysis", 0)
+    if incident_processing_count and (
+        incident_processing_age is None or incident_processing_age > 15 * 60
+    ):
+        failures.append(
+            "incident-response analysis has been processing without state progress for 15 minutes"
+        )
+    elif (
+        incident_pending_count
+        and not incident_processing_count
+        and incident_job_age > 30 * 60
+        and (
+            incident_completion_age is None
+            or incident_completion_age > 30 * 60
+        )
+    ):
+        failures.append(
+            "incident-response analysis has pending work but no completion within 30 minutes"
+        )
+
+    previous_counts = previous_pending_job_counts or {}
+    analysis_pending_count = ai_pending_count + incident_pending_count
+    previous_analysis_pending = int(previous_counts.get("ai_analysis") or 0) + int(
+        previous_counts.get("incident_response_analysis") or 0
+    )
+    material_growth = max(5, int(previous_analysis_pending * 0.05))
+    if (
+        previous_analysis_pending > 0
+        and analysis_pending_count >= 25
+        and analysis_pending_count - previous_analysis_pending >= material_growth
+    ):
+        advisories.append(
+            "combined AI and incident-response queues are growing faster than the bounded soak gate"
+        )
+    for stage_name, label in (
+        ("ai_analysis", "AI analysis"),
+        ("incident_response_analysis", "incident-response analysis"),
+        ("pcap_transfer", "PCAP transfer"),
+    ):
+        stage = pipeline_stages.get(stage_name, {})
+        pending = int(stage.get("pending") or 0)
+        throughput = dict(stage.get("throughput") or {}).get("15m", {})
+        arrivals = int(throughput.get("enqueued") or 0)
+        completions = int(throughput.get("completed") or 0)
+        drain_eta = stage.get("drain_eta_seconds")
+        if pending >= 25 and arrivals > completions:
+            advisories.append(
+                f"{label} 15-minute arrivals exceed completions"
+            )
+        if pending >= 25 and drain_eta is not None and int(drain_eta) > 4 * 60 * 60:
+            advisories.append(
+                f"{label} projected drain time exceeds 4 hours"
+            )
     active_pcap_transfers = [
         item for item in (pcap.get("active_transfers") or [])
         if isinstance(item, dict) and item.get("progress_at")
@@ -301,6 +359,12 @@ def evaluate(
             "oldest_ai_processing_seconds": ai_processing_age,
             "pending_ai_job_count": ai_pending_count,
             "processing_ai_job_count": ai_processing_count,
+            "oldest_pending_incident_response_job_seconds": incident_job_age,
+            "latest_incident_response_completion_age_seconds": incident_completion_age,
+            "oldest_incident_response_processing_seconds": incident_processing_age,
+            "pending_incident_response_job_count": incident_pending_count,
+            "processing_incident_response_job_count": incident_processing_count,
+            "combined_analysis_pending_job_count": analysis_pending_count,
             "oldest_pending_pcap_seconds": int(metrics.get("oldest_pending_pcap_seconds") or 0),
             "pcap_warning_count": int(pcap.get("warning_count") or 0),
             "active_pcap_transfer_count": len(active_pcap_transfers),
@@ -415,6 +479,10 @@ def main() -> int:
         sqlite_backup_age=newest_file_age(args.stack_dir / "alert_store_backups", "*.backup", now),
         postgres_backup_age=newest_file_age(args.stack_dir / "recovery_backups", "*/n8n-postgres.dump", now),
         previous_ingest_errors=int(previous["ingest_errors"]) if "ingest_errors" in previous else None,
+        previous_pending_job_counts={
+            str(key): int(value)
+            for key, value in dict(previous.get("pending_job_counts") or {}).items()
+        },
         harness_database_present=(
             args.stack_dir
             / "alert_store_data/investigation-harness.sqlite3"
@@ -439,6 +507,10 @@ def main() -> int:
     state_path.write_text(json.dumps({
         "ingest_errors": snapshot["signals"]["ingest_errors"],
         "healthy_since": snapshot["soak"]["healthy_since"],
+        "pending_job_counts": {
+            "ai_analysis": snapshot["signals"]["pending_ai_job_count"],
+            "incident_response_analysis": snapshot["signals"]["pending_incident_response_job_count"],
+        },
     }) + "\n")
     os.chmod(state_path, 0o600)
     if failures:

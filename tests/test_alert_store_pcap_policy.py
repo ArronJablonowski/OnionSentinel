@@ -27,7 +27,8 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
             policy,
         )
         self.assertIn("async function maybeQueueAutomaticPcapRequest", code)
-        self.assertIn("const pcap = await maybeQueueAutomaticPcapRequest(alert, row, inserted, suppression);", code)
+        self.assertIn("const pcap = await maybeQueueAutomaticPcapRequest(alert, row, inserted, suppression, campaign);", code)
+        self.assertIn("status: 'coalesced_campaign'", code)
         self.assertIn("pcap,", code)
         self.assertIn("Automatic PCAP request for ${level} alert", code)
 

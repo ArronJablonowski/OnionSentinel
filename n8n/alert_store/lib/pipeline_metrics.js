@@ -281,6 +281,7 @@ function createPipelineMetrics({run, all, now, diskSnapshot, retentionHours = 16
       'pcap_transfer',
       'pcap_analysis',
       'ai_analysis',
+      'incident_response_analysis',
     ];
     const stages = stageNames.map((stage) => stageSnapshot(
       stage,

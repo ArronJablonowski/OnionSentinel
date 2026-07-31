@@ -51,6 +51,31 @@ const scheduler = createProviderScheduler({{failureThreshold: 2, resetMs: 60000}
         self.assertIn("provider circuit open", payload["circuit"])
         self.assertTrue(payload["snapshot"]["x"]["circuit_open"])
         self.assertEqual(payload["snapshot"]["x"]["queued"], 0)
+        self.assertGreater(payload["snapshot"]["x"]["backoff_seconds"], 0)
+
+    def test_repeated_failures_use_bounded_exponential_backoff(self) -> None:
+        payload = self.run_node(f"""
+const {{createProviderScheduler}} = require({json.dumps(str(SCHEDULER))});
+let current = 0;
+const realNow = Date.now;
+Date.now = () => current;
+const scheduler = createProviderScheduler({{failureThreshold: 1, resetMs: 1000, maxResetMs: 4000}});
+(async () => {{
+  try {{ await scheduler.run('x', async () => {{ throw new Error('first'); }}); }} catch {{}}
+  const first = scheduler.snapshot().x;
+  current = 1001;
+  try {{ await scheduler.run('x', async () => {{ throw new Error('second'); }}); }} catch {{}}
+  const second = scheduler.snapshot().x;
+  current = 3002;
+  try {{ await scheduler.run('x', async () => {{ throw new Error('third'); }}); }} catch {{}}
+  const third = scheduler.snapshot().x;
+  Date.now = realNow;
+  console.log(JSON.stringify({{first, second, third}}));
+}})();
+""")
+        self.assertEqual(payload["first"]["backoff_seconds"], 1)
+        self.assertEqual(payload["second"]["backoff_seconds"], 2)
+        self.assertEqual(payload["third"]["backoff_seconds"], 4)
 
 
 if __name__ == "__main__":

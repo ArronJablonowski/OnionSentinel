@@ -25,6 +25,10 @@ const {createSecurityLogger} = require('./lib/security_logger');
 const {createPipelineMetrics} = require('./lib/pipeline_metrics');
 const {createSocAnalysisPolicy} = require('./lib/soc_analysis_policy');
 const {
+  loadAuthorizedActivityPolicy,
+  matchAuthorizedActivity,
+} = require('./lib/authorized_activity_policy');
+const {
   stableGroupKey,
   stableGroupId,
   validPinnedStableGroupKey,
@@ -46,6 +50,9 @@ try {
 // .env only; this DR repo stores placeholders and source code.
 const dbPath = process.env.ALERT_STORE_DB || '/data/alerts.sqlite3';
 const scoringRulesPath = process.env.SCORING_RULES_PATH || '/app/config/scoring_rules.json';
+const authorizedActivityPolicyPath = process.env.AUTHORIZED_ACTIVITY_POLICY_PATH
+  || path.join(__dirname, '..', 'config', 'authorized_activity_campaigns.json');
+const authorizedActivityPolicy = loadAuthorizedActivityPolicy(authorizedActivityPolicyPath);
 const beaconPaths = (process.env.ALERT_STORE_BEACON_PATHS || '/data/n8n-beacon.json')
   .split(',')
   .map((value) => value.trim())
@@ -324,6 +331,10 @@ const httpJsonMaxResponseBytes = Math.max(
 );
 const enrichmentCircuitFailureThreshold = Math.max(1, Number(process.env.ENRICHMENT_CIRCUIT_FAILURE_THRESHOLD || 3));
 const enrichmentCircuitResetMs = Math.max(10000, Number(process.env.ENRICHMENT_CIRCUIT_RESET_MS || 60000));
+const enrichmentCircuitMaxResetMs = Math.max(
+  enrichmentCircuitResetMs,
+  Number(process.env.ENRICHMENT_CIRCUIT_MAX_RESET_MS || 3600000),
+);
 // Provider-specific reservations below enforce the actual external rate
 // limits. Poll the serial durable queue once per second so a burst does not
 // accumulate an avoidable four-second idle gap between completed bundles.
@@ -2321,6 +2332,7 @@ let activeSqliteWrites = 0;
 const enrichmentScheduler = createProviderScheduler({
   failureThreshold: enrichmentCircuitFailureThreshold,
   resetMs: enrichmentCircuitResetMs,
+  maxResetMs: enrichmentCircuitMaxResetMs,
   formatTimestamp: formatProjectTimestamp,
 });
 let telegramOutboxDrainActive = false;
@@ -2338,6 +2350,14 @@ let postgresSoftwareStoreError = '';
 let postgresAcHunterStore;
 let postgresAcHunterStoreError = '';
 let pipelineMetrics;
+let authorizedCampaignReconciliation = {
+  status: 'not_run',
+  campaigns: 0,
+  ai_jobs_coalesced: 0,
+  incident_jobs_coalesced: 0,
+  incident_cases_resolved_as_duplicates: 0,
+  pcap_requests_rejected_above_sample_limit: 0,
+};
 const serviceMetrics = {
   started_at: nowUtc(),
   ingest_requests: 0,
@@ -3121,6 +3141,42 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_alert_observables_group ON alert_observables(group_id, last_seen)');
   await run('CREATE INDEX IF NOT EXISTS idx_alert_observables_alert ON alert_observables(alert_id)');
   await run(`
+    CREATE TABLE IF NOT EXISTS authorized_activity_campaigns (
+      campaign_id TEXT PRIMARY KEY,
+      campaign_key TEXT NOT NULL UNIQUE,
+      policy_id TEXT NOT NULL,
+      representative_alert_id TEXT NOT NULL,
+      representative_group_id TEXT NOT NULL,
+      bucket_start TEXT NOT NULL,
+      bucket_end TEXT NOT NULL,
+      first_seen TEXT NOT NULL,
+      last_seen TEXT NOT NULL,
+      member_count INTEGER NOT NULL DEFAULT 0,
+      distinct_target_count INTEGER NOT NULL DEFAULT 0,
+      authorization_json TEXT NOT NULL,
+      policy_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_authorized_campaign_policy_time ON authorized_activity_campaigns(policy_id, bucket_start, bucket_end)');
+  await run('CREATE INDEX IF NOT EXISTS idx_authorized_campaign_representative ON authorized_activity_campaigns(representative_group_id)');
+  await run(`
+    CREATE TABLE IF NOT EXISTS authorized_activity_campaign_members (
+      campaign_id TEXT NOT NULL,
+      alert_id TEXT NOT NULL UNIQUE,
+      stable_group_id TEXT NOT NULL,
+      destination_ip TEXT,
+      destination_port INTEGER,
+      observed_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (campaign_id, alert_id),
+      FOREIGN KEY(campaign_id) REFERENCES authorized_activity_campaigns(campaign_id)
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_authorized_campaign_member_group ON authorized_activity_campaign_members(stable_group_id, campaign_id)');
+  await run('CREATE INDEX IF NOT EXISTS idx_authorized_campaign_member_time ON authorized_activity_campaign_members(campaign_id, observed_at)');
+  await run(`
     CREATE TABLE IF NOT EXISTS ai_analysis_runs (
       analysis_id TEXT PRIMARY KEY,
       group_id TEXT NOT NULL,
@@ -3522,6 +3578,8 @@ async function initDb() {
   initializePipelineMetrics();
   await pipelineMetrics.install();
   await backfillStableGroupIdentity();
+  await backfillAuthorizedActivityCampaigns();
+  await reconcileAuthorizedActivityBacklog();
   await backfillAlertObservables();
   await rebuildAlertGroupSummaries();
   await refreshGroupAliases();
@@ -3570,6 +3628,318 @@ async function backfillStableGroupIdentity() {
     }
   });
   return pending.length;
+}
+
+async function recordAuthorizedActivityCampaign(alert, row, inserted = true) {
+  if (!inserted || !row?.alert_id || !row?.stable_group_id) return null;
+  const policy = matchAuthorizedActivity(authorizedActivityPolicy, alert, row);
+  if (!policy) return null;
+  const existingMembership = await get(
+    `SELECT campaign.*, member.observed_at
+     FROM authorized_activity_campaign_members AS member
+     JOIN authorized_activity_campaigns AS campaign
+       ON campaign.campaign_id = member.campaign_id
+     WHERE member.alert_id = ? LIMIT 1`,
+    [row.alert_id],
+  );
+  if (existingMembership) {
+    const existingAdmission = parseJsonObject(existingMembership.policy_json);
+    const existingOrdinal = await get(
+      `SELECT COUNT(*) AS count
+       FROM authorized_activity_campaign_members
+       WHERE campaign_id = ?
+         AND (observed_at < ? OR (observed_at = ? AND alert_id <= ?))`,
+      [
+        existingMembership.campaign_id,
+        existingMembership.observed_at,
+        existingMembership.observed_at,
+        row.alert_id,
+      ],
+    );
+    return {
+      campaign_id: existingMembership.campaign_id,
+      policy_id: existingMembership.policy_id,
+      bucket_start: existingMembership.bucket_start,
+      bucket_end: existingMembership.bucket_end,
+      representative_alert_id: existingMembership.representative_alert_id,
+      representative_group_id: existingMembership.representative_group_id,
+      member_count: Number(existingMembership.member_count || 0),
+      distinct_target_count: Number(existingMembership.distinct_target_count || 0),
+      member_ordinal: Number(existingOrdinal?.count || 0),
+      is_representative: existingMembership.representative_alert_id === row.alert_id,
+      investigation_mode: existingAdmission.investigation_mode,
+      pcap_sample_limit: Number(existingAdmission.pcap_sample_limit || 0),
+      enrichment_sample_limit: Number(existingAdmission.enrichment_sample_limit || 0),
+    };
+  }
+  const observedAt = normalizeTimestampValue(
+    alert?.timestamp || row.timestamp || row.last_seen || row.first_seen,
+  ) || row.last_seen || row.first_seen || nowUtc();
+  const timestamp = nowUtc();
+  const policyEvidence = {
+    ...policy.authorization,
+    policy_id: policy.id,
+    source_ips: policy.source_ips,
+    destination_ips: policy.destination_ips,
+    rule_ids: policy.rule_ids,
+    source_ports: policy.source_ports,
+    destination_ports: policy.destination_ports,
+    destination_port_ranges: policy.destination_port_ranges,
+    transport_protocols: policy.transport_protocols,
+    authorization_start: policy.authorization_start,
+    authorization_end: policy.authorization_end,
+  };
+  const admissionPolicy = {
+    investigation_mode: policy.investigation_mode,
+    window_seconds: policy.window_seconds,
+    pcap_sample_limit: policy.pcap_sample_limit,
+    enrichment_sample_limit: policy.enrichment_sample_limit,
+    reconcile_existing_pending: policy.reconcile_existing_pending,
+  };
+  await run(
+    `INSERT OR IGNORE INTO authorized_activity_campaigns (
+       campaign_id, campaign_key, policy_id, representative_alert_id,
+       representative_group_id, bucket_start, bucket_end, first_seen,
+       last_seen, member_count, distinct_target_count, authorization_json,
+       policy_json, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)`,
+    [
+      policy.campaign_id,
+      policy.campaign_key,
+      policy.id,
+      row.alert_id,
+      row.stable_group_id,
+      policy.bucket_start,
+      policy.bucket_end,
+      observedAt,
+      observedAt,
+      jsonText(policyEvidence),
+      jsonText(admissionPolicy),
+      timestamp,
+      timestamp,
+    ],
+  );
+  await run(
+    `INSERT OR IGNORE INTO authorized_activity_campaign_members (
+       campaign_id, alert_id, stable_group_id, destination_ip,
+       destination_port, observed_at, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      policy.campaign_id,
+      row.alert_id,
+      row.stable_group_id,
+      row.destination_ip || null,
+      integerField(row.destination_port),
+      observedAt,
+      timestamp,
+    ],
+  );
+  await run(
+    `UPDATE authorized_activity_campaigns
+     SET first_seen = (
+           SELECT MIN(observed_at) FROM authorized_activity_campaign_members
+           WHERE campaign_id = ?
+         ),
+         last_seen = (
+           SELECT MAX(observed_at) FROM authorized_activity_campaign_members
+           WHERE campaign_id = ?
+         ),
+         member_count = (
+           SELECT COUNT(*) FROM authorized_activity_campaign_members
+           WHERE campaign_id = ?
+         ),
+         distinct_target_count = (
+           SELECT COUNT(DISTINCT COALESCE(destination_ip, '') || ':' || COALESCE(destination_port, ''))
+           FROM authorized_activity_campaign_members WHERE campaign_id = ?
+         ),
+         updated_at = ?
+     WHERE campaign_id = ?`,
+    [
+      policy.campaign_id,
+      policy.campaign_id,
+      policy.campaign_id,
+      policy.campaign_id,
+      timestamp,
+      policy.campaign_id,
+    ],
+  );
+  const campaign = await get(
+    `SELECT * FROM authorized_activity_campaigns WHERE campaign_id = ?`,
+    [policy.campaign_id],
+  );
+  const ordinal = await get(
+    `SELECT COUNT(*) AS count
+     FROM authorized_activity_campaign_members
+     WHERE campaign_id = ?
+       AND (observed_at < ? OR (observed_at = ? AND alert_id <= ?))`,
+    [policy.campaign_id, observedAt, observedAt, row.alert_id],
+  );
+  return {
+    campaign_id: policy.campaign_id,
+    policy_id: policy.id,
+    bucket_start: policy.bucket_start,
+    bucket_end: policy.bucket_end,
+    representative_alert_id: campaign.representative_alert_id,
+    representative_group_id: campaign.representative_group_id,
+    member_count: Number(campaign.member_count || 0),
+    distinct_target_count: Number(campaign.distinct_target_count || 0),
+    member_ordinal: Number(ordinal?.count || 0),
+    is_representative: campaign.representative_alert_id === row.alert_id,
+    investigation_mode: policy.investigation_mode,
+    pcap_sample_limit: policy.pcap_sample_limit,
+    enrichment_sample_limit: policy.enrichment_sample_limit,
+  };
+}
+
+async function backfillAuthorizedActivityCampaigns() {
+  const rows = await all(
+    `SELECT * FROM alerts
+     WHERE stable_group_id IS NOT NULL AND stable_group_id <> ''
+       AND COALESCE(filter_status, 'accepted') IN ('accepted', 'escalated', 'duplicate')
+     ORDER BY datetime(replace(COALESCE(timestamp, first_seen), '  ', 'T')) ASC,
+              alert_id ASC`,
+  );
+  let matched = 0;
+  await withImmediateTransaction(async () => {
+    for (const row of rows) {
+      const alert = parseJsonObject(row.alert_json);
+      if (await recordAuthorizedActivityCampaign(alert, row, true)) matched += 1;
+    }
+  });
+  return matched;
+}
+
+async function authorizedCampaignForAlertId(alertId) {
+  if (!alertId) return null;
+  const row = await get(
+    `SELECT campaign.campaign_id, campaign.policy_id,
+            campaign.representative_alert_id,
+            campaign.representative_group_id, campaign.member_count,
+            campaign.distinct_target_count, campaign.policy_json
+     FROM authorized_activity_campaign_members AS member
+     JOIN authorized_activity_campaigns AS campaign
+       ON campaign.campaign_id = member.campaign_id
+     WHERE member.alert_id = ?
+     ORDER BY campaign.bucket_start DESC LIMIT 1`,
+    [alertId],
+  );
+  if (!row) return null;
+  return {...row, ...parseJsonObject(row.policy_json)};
+}
+
+async function reconcileAuthorizedActivityBacklog() {
+  const summary = {
+    status: 'ok',
+    campaigns: 0,
+    ai_jobs_coalesced: 0,
+    incident_jobs_coalesced: 0,
+    incident_cases_resolved_as_duplicates: 0,
+    pcap_requests_rejected_above_sample_limit: 0,
+    completed_at: nowUtc(),
+  };
+  const campaigns = await all(
+    `SELECT * FROM authorized_activity_campaigns ORDER BY bucket_start ASC`,
+  );
+  for (const campaign of campaigns) {
+    const admission = parseJsonObject(campaign.policy_json);
+    if (
+      admission.investigation_mode !== 'incident_response_only'
+      || admission.reconcile_existing_pending !== true
+    ) continue;
+    const representativeCase = await get(
+      `SELECT case_id FROM incident_response_cases WHERE group_id = ?`,
+      [campaign.representative_group_id],
+    );
+    // Never retire analysis unless the campaign's replacement IR case exists.
+    if (!representativeCase?.case_id) continue;
+    summary.campaigns += 1;
+    const members = await all(
+      `SELECT stable_group_id, alert_id, observed_at
+       FROM authorized_activity_campaign_members
+       WHERE campaign_id = ?
+       ORDER BY observed_at ASC, alert_id ASC`,
+      [campaign.campaign_id],
+    );
+    const groupIds = [...new Set(members.map((item) => item.stable_group_id).filter(Boolean))];
+    const duplicateGroupIds = groupIds.filter(
+      (groupId) => groupId !== campaign.representative_group_id,
+    );
+    summary.ai_jobs_coalesced += await durableJobs.completePendingByDedupeKeys(
+      'ai_analysis',
+      groupIds,
+    );
+    summary.incident_jobs_coalesced += await durableJobs.completePendingByDedupeKeys(
+      'incident_response_analysis',
+      duplicateGroupIds,
+    );
+
+    for (let offset = 0; offset < duplicateGroupIds.length; offset += 500) {
+      const chunk = duplicateGroupIds.slice(offset, offset + 500);
+      if (!chunk.length) continue;
+      const placeholders = chunk.map(() => '?').join(', ');
+      const pendingCases = await all(
+        `SELECT case_id, group_id FROM incident_response_cases
+         WHERE group_id IN (${placeholders})
+           AND agent_status = 'queued' AND status <> 'resolved'`,
+        chunk,
+      );
+      const resolvedAt = nowUtc();
+      const resolutionReason = `Coalesced into authorized activity campaign ${campaign.campaign_id}; representative case ${representativeCase.case_id}`;
+      const updated = await run(
+        `UPDATE incident_response_cases
+         SET status = 'resolved', agent_status = 'analyzed', updated_at = ?,
+             resolution_reason = ?, resolved_at = ?,
+             resolved_by = 'authorized-activity-policy', latest_error = NULL
+         WHERE group_id IN (${placeholders})
+           AND agent_status = 'queued' AND status <> 'resolved'`,
+        [resolvedAt, resolutionReason, resolvedAt, ...chunk],
+      );
+      summary.incident_cases_resolved_as_duplicates += Number(updated.changes || 0);
+      for (const incident of pendingCases) {
+        await run(
+          `INSERT INTO incident_response_events
+             (case_id, event_type, actor, detail_json, created_at)
+           VALUES (?, 'campaign_coalesced', 'authorized-activity-policy', ?, ?)`,
+          [
+            incident.case_id,
+            jsonText({
+              campaign_id: campaign.campaign_id,
+              representative_case_id: representativeCase.case_id,
+              representative_group_id: campaign.representative_group_id,
+              resolution: 'duplicate_authorized_campaign_member',
+            }),
+            resolvedAt,
+          ],
+        );
+      }
+    }
+
+    const sampleLimit = Math.max(0, Number(admission.pcap_sample_limit || 0));
+    const rejectedAt = nowUtc();
+    const rejected = await run(
+      `UPDATE pcap_requests
+       SET status = 'rejected', outcome = 'rejected',
+           error = ?, completed_at = ?, updated_at = ?
+       WHERE status = 'pending'
+         AND alert_id IN (
+           SELECT alert_id FROM authorized_activity_campaign_members
+           WHERE campaign_id = ?
+           ORDER BY observed_at ASC, alert_id ASC
+           LIMIT -1 OFFSET ?
+         )`,
+      [
+        `Coalesced above the ${sampleLimit}-capture authorized campaign sample limit`,
+        rejectedAt,
+        rejectedAt,
+        campaign.campaign_id,
+        sampleLimit,
+      ],
+    );
+    summary.pcap_requests_rejected_above_sample_limit += Number(rejected.changes || 0);
+  }
+  summary.completed_at = nowUtc();
+  authorizedCampaignReconciliation = summary;
+  return summary;
 }
 
 async function indexAlertObservables(alert, row) {
@@ -4945,6 +5315,7 @@ function buildPostCommitPayload(rawAlert, stored) {
     first_seen: row.first_seen || null,
     last_seen: row.last_seen || null,
     seen_count: row.seen_count || null,
+    authorized_activity_campaign: stored.campaign || null,
     should_write_report: stored.status === 'accepted' && Boolean(stored.stored),
     report_decision: 'write_markdown_report',
     report_job_id: `alert-report:${row.alert_id || rawAlert.alert_id}`,
@@ -4983,7 +5354,14 @@ async function storeAlert(rawAlert) {
           sizeBytes: Buffer.byteLength(JSON.stringify(postCommitPayload)),
         });
       }
-      if (stored.alert?.alert_id && stored.status !== 'dropped' && !hasUsableExternalIntel(alert)) {
+      const campaignEnrichmentAdmitted = !stored.campaign
+        || stored.campaign.member_ordinal <= stored.campaign.enrichment_sample_limit;
+      if (
+        stored.alert?.alert_id
+        && stored.status !== 'dropped'
+        && !hasUsableExternalIntel(alert)
+        && campaignEnrichmentAdmitted
+      ) {
         const level = String(stored.alert.triage_level || nestedField(alert, 'triage.level') || 'informational').toLowerCase();
         await durableJobs.enqueue('public_enrichment', stored.alert.alert_id, {alert_id: stored.alert.alert_id}, {
           priority: severityRank[level] ?? 0,
@@ -4998,7 +5376,9 @@ async function storeAlert(rawAlert) {
         const groupKey = stored.alert.stable_group_key || alertGroupKeyFromRow(stored.alert);
         const groupId = stored.alert.stable_group_id || alertGroupId(groupKey);
         const level = String(stored.alert.triage_level || 'informational').toLowerCase();
-        if (socAnalysisPolicy.matchesAnalysis(level)) {
+        const campaignOwnsIncidentInvestigation = stored.campaign?.investigation_mode
+          === 'incident_response_only';
+        if (socAnalysisPolicy.matchesAnalysis(level) && !campaignOwnsIncidentInvestigation) {
           await durableJobs.enqueue('ai_analysis', groupId, {
             group_id: groupId,
             group_key: groupKey,
@@ -9369,7 +9749,10 @@ async function drainEnrichmentJobs() {
           const groupKey = updatedRow.stable_group_key || alertGroupKeyFromRow(updatedRow);
           const groupId = updatedRow.stable_group_id || alertGroupId(groupKey);
           const level = String(updatedRow.triage_level || 'informational').toLowerCase();
-          if (socAnalysisPolicy.matchesAnalysis(level)) {
+          const campaign = await authorizedCampaignForAlertId(updatedRow.alert_id);
+          const campaignOwnsIncidentInvestigation = campaign?.investigation_mode
+            === 'incident_response_only';
+          if (socAnalysisPolicy.matchesAnalysis(level) && !campaignOwnsIncidentInvestigation) {
             await durableJobs.enqueue('ai_analysis', groupId, {
               group_id: groupId,
               group_key: groupKey,
@@ -9660,13 +10043,14 @@ async function storeAlertUnlocked(alert) {
   const stableIdentity = await persistStableIdentity(alertId, row, alert);
   Object.assign(row, stableIdentity);
   await indexAlertObservables(alert, row);
+  const campaign = await recordAuthorizedActivityCampaign(alert, row, inserted);
   const nextGroupKey = alertGroupKeyFromRow(row);
   if (previousGroupKey && previousGroupKey !== nextGroupKey) {
     await refreshAlertGroupSummary(previousGroupKey);
   }
   await refreshAlertGroupSummary(nextGroupKey);
-  const pcap = await maybeQueueAutomaticPcapRequest(alert, row, inserted, suppression);
-  const incident = await maybeQueueAutomaticIncidentResponse(alert, row, inserted, suppression);
+  const pcap = await maybeQueueAutomaticPcapRequest(alert, row, inserted, suppression, campaign);
+  const incident = await maybeQueueAutomaticIncidentResponse(alert, row, inserted, suppression, campaign);
 
   return {
     ok: true,
@@ -9675,6 +10059,7 @@ async function storeAlertUnlocked(alert) {
     alert: row,
     triage: alert.triage,
     filter: suppression,
+    campaign,
     pcap,
     incident,
     notification: {channel: 'telegram', status: 'pending'},
@@ -10452,7 +10837,7 @@ async function createPcapRequest(payload) {
   };
 }
 
-async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppression) {
+async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppression, campaign = null) {
   if (!inserted) return {status: 'skipped_duplicate'};
   if (!storedRow || ['suppressed', 'dropped'].includes(String(storedRow.filter_status || '').toLowerCase())) {
     return {status: 'skipped_filter'};
@@ -10463,6 +10848,17 @@ async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppre
   const threshold = socAnalysisPolicy.read().soc_analyst_pcap_min_severity;
   if (!socAnalysisPolicy.matchesPcap(level)) {
     return {status: 'skipped_level', triage_level: level, threshold};
+  }
+  if (campaign && campaign.member_ordinal > campaign.pcap_sample_limit) {
+    return {
+      status: 'coalesced_campaign',
+      campaign_id: campaign.campaign_id,
+      representative_group_id: campaign.representative_group_id,
+      sample_limit: campaign.pcap_sample_limit,
+      member_ordinal: campaign.member_ordinal,
+      triage_level: level,
+      threshold,
+    };
   }
 
   try {
@@ -10513,7 +10909,7 @@ async function maybeQueueAutomaticPcapRequest(alert, storedRow, inserted, suppre
   }
 }
 
-async function maybeQueueAutomaticIncidentResponse(alert, storedRow, inserted, suppression) {
+async function maybeQueueAutomaticIncidentResponse(alert, storedRow, inserted, suppression, campaign = null) {
   if (!inserted) return {status: 'skipped_duplicate'};
   if (!storedRow || ['suppressed', 'dropped'].includes(String(storedRow.filter_status || '').toLowerCase())) {
     return {status: 'skipped_filter'};
@@ -10524,6 +10920,23 @@ async function maybeQueueAutomaticIncidentResponse(alert, storedRow, inserted, s
   const threshold = socAnalysisPolicy.read().soc_analyst_incident_min_severity;
   if (!socAnalysisPolicy.matchesIncident(level)) {
     return {status: 'skipped_level', triage_level: level, threshold};
+  }
+  if (campaign && !campaign.is_representative) {
+    const representative = await get(
+      `SELECT case_id, dashboard_group_id, representative_alert_id
+       FROM incident_response_cases WHERE group_id = ?`,
+      [campaign.representative_group_id],
+    );
+    return {
+      status: 'coalesced_campaign',
+      campaign_id: campaign.campaign_id,
+      campaign_member_count: campaign.member_count,
+      representative_group_id: campaign.representative_group_id,
+      representative_alert_id: campaign.representative_alert_id,
+      case_id: representative?.case_id || null,
+      triage_level: level,
+      threshold,
+    };
   }
 
   // Case creation and its durable worker job share the alert-ingest SQLite
@@ -10978,6 +11391,16 @@ async function completePcapAnalysis(payload) {
     && row?.queue_group_id
     && socAnalysisPolicy.matchesAnalysis(row.triage_level)
   ) {
+    const campaign = await authorizedCampaignForAlertId(row.alert_id);
+    if (campaign?.investigation_mode === 'incident_response_only') {
+      return {
+        ok: true,
+        request_id: requestId,
+        analysis_status: status,
+        wake_ai_analysis: false,
+        ai_analysis_coalesced_campaign: campaign.campaign_id,
+      };
+    }
     const groupId = String(row.queue_group_id);
     const groupKey = String(row.queue_group_key || groupId);
     const level = String(row.triage_level || 'informational').toLowerCase();
@@ -11199,6 +11622,11 @@ async function handleRequest(request, response) {
         health.telegram_outbox = await telegramOutboxSnapshot();
         health.enrichment_scheduler = enrichmentScheduler.snapshot();
         health.enrichment_cache = enrichmentCache.snapshot();
+        health.authorized_activity_campaigns = {
+          policy_path: authorizedActivityPolicyPath,
+          configured_policy_count: authorizedActivityPolicy.policies.length,
+          reconciliation: authorizedCampaignReconciliation,
+        };
         health.disk_capacity = diskCapacitySnapshot();
         health.postgres_shadow_outbox = postgresShadowOutbox
           ? await postgresShadowOutbox.stats()
