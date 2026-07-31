@@ -392,9 +392,19 @@ class AssetInventoryPageTests(unittest.TestCase):
         self.assertIn('data-dhcp-promote="${esc(item.discovery_id)}"', page)
         self.assertIn('data-dhcp-ip-change="${esc(item.discovery_id)}"', page)
         self.assertIn('id="dhcp-review-modal"', page)
+        self.assertIn(
+            'id="dhcp-review-form" class="dhcp-review-card" novalidate',
+            page,
+        )
         self.assertIn("X-Onion-Sentinel-Request':'dashboard'", page)
         self.assertIn("PROMOTE:${item.discovery_id}", page)
         self.assertIn("CHANGE-IP:${item.discovery_id}:${authority.asset_id}", page)
+        self.assertIn("fetch('/api/admin/session-status'", page)
+        self.assertIn("resumeAfterAuth=true", page)
+        self.assertIn("this change will resume automatically", page)
+        self.assertIn("closeReview();pageOffset=0", page)
+        self.assertIn("search.value=promotedAssetId", page)
+        self.assertIn('class="asset-promoted"', page)
         self.assertIn("when:assetCanRefresh", page)
         self.assertIn(".dhcp-review-check[hidden]{display:none!important}", page)
         self.assertIn("asset-inventory.html", page)

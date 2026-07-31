@@ -144,6 +144,7 @@ CONTROLLED_EVALUATION_DISPATCH_ROUTES = (
 )
 
 GET_API_ROUTES = {
+    "/api/admin/session-status",
     "/api/asset-inventory",
     "/api/dhcp-asset-discovery",
     "/api/software-inventory",
