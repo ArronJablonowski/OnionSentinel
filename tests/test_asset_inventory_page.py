@@ -290,6 +290,13 @@ class AssetInventoryPageTests(unittest.TestCase):
         self.assertIn('id="asset-inventory-view"', page)
         self.assertIn("fetch('/api/asset-inventory'", page)
         self.assertIn("Current IP address", page)
+        self.assertIn("<th>Asset</th><th>State</th><th>Current IP address</th>", page)
+        self.assertIn(
+            '<td><strong class="asset-name">${esc(item.asset_id)}</strong></td>'
+            '<td><span class="asset-state">${esc(item.state||\'current\')}</span></td>',
+            page,
+        )
+        self.assertIn('colspan="9" class="ir-loading">Loading known assets', page)
         self.assertIn("Current address from passive DHCP", page)
         self.assertIn("provisional DHCP observation", page)
         self.assertIn("Historical backfill has not run", page)
