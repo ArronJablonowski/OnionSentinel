@@ -20,8 +20,8 @@ from typing import Any
 
 STATE_SCHEMA = "onion-sentinel-software-inventory-state-v1"
 API_SCHEMA = "onion-sentinel-software-inventory-api-v1"
-MAX_STATE_BYTES = 32 * 1024 * 1024
-MAX_RECORDS = 50_000
+MAX_STATE_BYTES = 256 * 1024 * 1024
+MAX_RECORDS = 250_000
 MAX_OFFSET = 50_000
 MAX_LIMIT = 250
 DEFAULT_LIMIT = 100
