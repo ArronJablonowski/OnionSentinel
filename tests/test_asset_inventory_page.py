@@ -403,7 +403,7 @@ class AssetInventoryPageTests(unittest.TestCase):
             page,
         )
         self.assertNotIn("<th>Validity</th>", page)
-        self.assertIn('colspan="11" class="ir-loading">Loading known assets', page)
+        self.assertIn('colspan="12" class="ir-loading">Loading known assets', page)
         self.assertIn(".asset-table th:nth-child(11){width:190px}", page)
         self.assertIn(".asset-table th:nth-child(1){width:220px}", page)
         self.assertIn(".asset-table th:nth-child(4){width:155px}", page)
@@ -442,8 +442,17 @@ class AssetInventoryPageTests(unittest.TestCase):
         self.assertIn("resumeAfterAuth=true", page)
         self.assertIn("this change will resume automatically", page)
         self.assertIn("closeReview();pageOffset=0", page)
-        self.assertIn("search.value=promotedAssetId", page)
+        self.assertNotIn("search.value=promotedAssetId", page)
         self.assertIn('class="asset-promoted"', page)
+        self.assertIn('data-asset-edit="${esc(item.asset_id)}"', page)
+        self.assertIn('data-asset-demote="${esc(item.asset_id)}"', page)
+        self.assertIn('id="asset-review-modal"', page)
+        self.assertIn("'/api/assets/update'", page)
+        self.assertIn("'/api/assets/demote'", page)
+        self.assertIn("demoting?'DEMOTE':'EDIT'", page)
+        self.assertIn("assetReviewMode==='demote'?'DEMOTE':'EDIT'", page)
+        self.assertIn('data-discovery-id="${esc(item.discovery_id)}"', page)
+        self.assertIn("returned to DHCP review", page)
         self.assertIn("when:assetCanRefresh", page)
         self.assertIn(".dhcp-review-check[hidden]{display:none!important}", page)
         self.assertIn("asset-inventory.html", page)
@@ -623,6 +632,66 @@ class AssetInventoryPageTests(unittest.TestCase):
             post.call_args.args[0],
             "/assets/approve-dhcp-ip-change",
         )
+
+    def test_asset_edit_and_demotion_use_bounded_internal_routes(self) -> None:
+        common = {
+            "asset_id": "known",
+            "expected_valid_from": "2026-07-30T20:00:00Z",
+            "operator_ref": "change-789",
+            "reason": "Operator reviewed the authoritative record.",
+        }
+        edit = {
+            **common,
+            "confirm": "EDIT:known",
+            "ip_addresses": ["192.0.2.40"],
+            "mac_addresses": ["00-11-22-33-44-66"],
+            "hostnames": ["Known.LAN."],
+            "role": "workstation",
+            "platform": "macOS",
+            "criticality": "medium",
+            "confidence": "high",
+        }
+        with mock.patch.object(
+            self.portal,
+            "asset_store_post_json",
+            return_value={"ok": True, "status": "edited"},
+        ) as post:
+            status, result = self.portal.asset_update_response(edit)
+        self.assertEqual(status, 200)
+        self.assertTrue(result["ok"])
+        path, payload = post.call_args.args
+        self.assertEqual(path, "/assets/update")
+        self.assertEqual(payload["mac_addresses"], ["00:11:22:33:44:66"])
+        self.assertEqual(payload["hostnames"], ["known.lan"])
+
+        demote = {
+            **common,
+            "confirm": "DEMOTE:known",
+        }
+        with mock.patch.object(
+            self.portal,
+            "asset_store_post_json",
+            return_value={
+                "ok": True,
+                "status": "demoted",
+                "discovery_ids": ["0123456789abcdef0123"],
+            },
+        ) as post:
+            status, result = self.portal.asset_demote_response(demote)
+        self.assertEqual(status, 200)
+        self.assertTrue(result["ok"])
+        self.assertEqual(post.call_args.args[0], "/assets/demote")
+
+        invalid = dict(edit)
+        invalid["unexpected"] = "blocked"
+        with mock.patch.object(
+            self.portal,
+            "asset_store_post_json",
+        ) as blocked_post:
+            status, result = self.portal.asset_update_response(invalid)
+        self.assertEqual(status, 400)
+        self.assertFalse(result["ok"])
+        blocked_post.assert_not_called()
 
 
 if __name__ == "__main__":

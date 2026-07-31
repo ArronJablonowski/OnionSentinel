@@ -7033,6 +7033,8 @@ def asset_store_post_json(path: str, payload: dict, timeout: float = 10.0) -> di
     if path not in {
         "/assets/promote-dhcp",
         "/assets/approve-dhcp-ip-change",
+        "/assets/update",
+        "/assets/demote",
     }:
         raise ValueError("asset-store mutation path is not allowlisted")
     encoded = json.dumps(
@@ -7264,6 +7266,197 @@ def asset_dhcp_ip_change_response(payload: object) -> tuple[int, dict]:
             {"signature": None, "inventory": None, "expires_at": 0.0}
         )
     return HTTPStatus.CREATED, result
+
+
+def _normalized_asset_mutation_payload(
+    payload: object,
+    *,
+    action: str,
+) -> dict:
+    """Bound an operator edit or demotion before the database transaction."""
+    if not isinstance(payload, dict):
+        raise ValueError("Request body must be a JSON object.")
+    common = {
+        "asset_id",
+        "expected_valid_from",
+        "operator_ref",
+        "reason",
+        "confirm",
+    }
+    allowed = set(common)
+    if action == "edit":
+        allowed |= {
+            "ip_addresses",
+            "mac_addresses",
+            "hostnames",
+            "role",
+            "platform",
+            "criticality",
+            "confidence",
+        }
+    if set(payload) - allowed:
+        raise ValueError("Request contains unsupported asset mutation fields.")
+    limits = {
+        "asset_id": 160,
+        "expected_valid_from": 64,
+        "operator_ref": 160,
+        "reason": 1000,
+        "confirm": 256,
+        "role": 160,
+        "platform": 160,
+        "criticality": 16,
+        "confidence": 16,
+    }
+    result = {
+        key: str(payload.get(key) or "").strip()[: maximum + 1]
+        for key, maximum in limits.items()
+        if key in allowed
+    }
+    for key, maximum in limits.items():
+        if key in result and len(result[key]) > maximum:
+            raise ValueError(f"{key} exceeds its maximum length.")
+    missing = sorted(key for key in common if not result.get(key))
+    if missing:
+        raise ValueError(
+            f"Required asset mutation field is missing: {missing[0]}."
+        )
+    try:
+        parsed = parse_iso_timestamp(result["expected_valid_from"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expected_valid_from is invalid.") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("expected_valid_from is invalid.")
+    result["expected_valid_from"] = parsed.astimezone(
+        dt.timezone.utc
+    ).isoformat().replace("+00:00", "Z")
+    expected_confirmation = (
+        f"EDIT:{result['asset_id']}"
+        if action == "edit"
+        else f"DEMOTE:{result['asset_id']}"
+    )
+    if result["confirm"] != expected_confirmation:
+        raise ValueError(
+            f"Confirmation must exactly match {expected_confirmation}."
+        )
+    if action != "edit":
+        return result
+
+    def bounded_list(
+        key: str,
+        maximum: int,
+        *,
+        normalizer=None,
+    ) -> list[str]:
+        raw = payload.get(key)
+        if not isinstance(raw, list) or len(raw) > 64:
+            raise ValueError(f"{key} must be a bounded list.")
+        values = []
+        for item in raw:
+            value = str(item or "").strip()
+            if not value or len(value) > maximum:
+                raise ValueError(f"{key} contains an invalid value.")
+            if normalizer is not None:
+                value = normalizer(value)
+            if value not in values:
+                values.append(value)
+        return values
+
+    def normalize_ip(value: str) -> str:
+        try:
+            return str(ipaddress.ip_address(value))
+        except ValueError as exc:
+            raise ValueError("ip_addresses contains an invalid address.") from exc
+
+    def normalize_mac(value: str) -> str:
+        normalized = value.lower().replace("-", ":")
+        if not re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", normalized):
+            raise ValueError("mac_addresses contains an invalid address.")
+        if int(normalized.split(":", 1)[0], 16) & 1:
+            raise ValueError("multicast MAC addresses cannot identify assets.")
+        return normalized
+
+    def normalize_hostname(value: str) -> str:
+        normalized = value.rstrip(".").lower()
+        if not normalized:
+            raise ValueError("hostnames contains an invalid value.")
+        return normalized
+
+    result["ip_addresses"] = bounded_list(
+        "ip_addresses",
+        64,
+        normalizer=normalize_ip,
+    )
+    result["mac_addresses"] = bounded_list(
+        "mac_addresses",
+        17,
+        normalizer=normalize_mac,
+    )
+    result["hostnames"] = bounded_list(
+        "hostnames",
+        253,
+        normalizer=normalize_hostname,
+    )
+    if not (
+        result["ip_addresses"]
+        or result["mac_addresses"]
+        or result["hostnames"]
+    ):
+        raise ValueError("An asset must retain at least one identifier.")
+    if not result.get("role"):
+        raise ValueError("role is required.")
+    if result.get("criticality") not in {
+        "low", "medium", "high", "critical", "unknown"
+    }:
+        raise ValueError("criticality is invalid.")
+    if result.get("confidence") not in {
+        "low", "medium", "high", "unknown"
+    }:
+        raise ValueError("confidence is invalid.")
+    return result
+
+
+def asset_update_response(payload: object) -> tuple[int, dict]:
+    try:
+        normalized = _normalized_asset_mutation_payload(
+            payload,
+            action="edit",
+        )
+        result = asset_store_post_json("/assets/update", normalized)
+    except ValueError as exc:
+        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
+    except (RuntimeError, AlertStoreRequestError) as exc:
+        return int(getattr(exc, "status_code", 503)), {
+            "ok": False,
+            "error": str(exc),
+        }
+    with ASSET_INVENTORY_CACHE_LOCK:
+        ASSET_INVENTORY_CACHE.clear()
+        ASSET_INVENTORY_CACHE.update(
+            {"signature": None, "inventory": None, "expires_at": 0.0}
+        )
+    return HTTPStatus.OK, result
+
+
+def asset_demote_response(payload: object) -> tuple[int, dict]:
+    try:
+        normalized = _normalized_asset_mutation_payload(
+            payload,
+            action="demote",
+        )
+        result = asset_store_post_json("/assets/demote", normalized)
+    except ValueError as exc:
+        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)}
+    except (RuntimeError, AlertStoreRequestError) as exc:
+        return int(getattr(exc, "status_code", 503)), {
+            "ok": False,
+            "error": str(exc),
+        }
+    with ASSET_INVENTORY_CACHE_LOCK:
+        ASSET_INVENTORY_CACHE.clear()
+        ASSET_INVENTORY_CACHE.update(
+            {"signature": None, "inventory": None, "expires_at": 0.0}
+        )
+    return HTTPStatus.OK, result
 
 
 def alert_store_get_json(path: str, timeout: float = 5.0) -> dict:
@@ -12867,6 +13060,8 @@ class PortalHandler(BaseHTTPRequestHandler):
         is_asset_write = parsed.path in {
             "/api/assets/promote-dhcp",
             "/api/assets/approve-dhcp-ip-change",
+            "/api/assets/update",
+            "/api/assets/demote",
         }
         is_incident_reanalysis = (
             parsed.path == "/api/soc-incidents/reanalyze-all"
@@ -12934,8 +13129,12 @@ class PortalHandler(BaseHTTPRequestHandler):
                 payload = None
             if parsed.path == "/api/assets/promote-dhcp":
                 status, data = asset_dhcp_promotion_response(payload)
-            else:
+            elif parsed.path == "/api/assets/approve-dhcp-ip-change":
                 status, data = asset_dhcp_ip_change_response(payload)
+            elif parsed.path == "/api/assets/update":
+                status, data = asset_update_response(payload)
+            else:
+                status, data = asset_demote_response(payload)
             return self._send(
                 status,
                 json.dumps(data, indent=2).encode(),

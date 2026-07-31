@@ -164,7 +164,9 @@ GET_API_ROUTES = {
 } | set(runtime.SOC_SETTINGS_PROMPT_API_PATHS)
 POST_API_ROUTES = {
     "/api/assets/approve-dhcp-ip-change",
+    "/api/assets/demote",
     "/api/assets/promote-dhcp",
+    "/api/assets/update",
     "/api/soc-alerts/status",
     "/api/soc-incidents/reanalyze-all",
     "/api/soc-settings/agent-model",

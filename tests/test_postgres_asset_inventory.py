@@ -52,13 +52,23 @@ class PostgresAssetInventoryTests(unittest.TestCase):
         self.assertIn("store.putDhcpState", source)
         self.assertIn("store.promoteDhcp", source)
         self.assertIn("store.approveDhcpIpChange", source)
+        self.assertIn("store.updateAsset", source)
+        self.assertIn("store.demoteAsset", source)
         self.assertIn("/assets/approve-dhcp-ip-change", source)
+        self.assertIn("/assets/update", source)
+        self.assertIn("/assets/demote", source)
         self.assertIn("conditions.push('$1::timestamptz IS NOT NULL')", store)
         self.assertIn("asset.ip_address_changed_from_dhcp", store)
         self.assertIn("ip_change_approved", store)
         self.assertIn("explicit DHCP IP-change confirmation is required", store)
         self.assertIn("lower(asset_id) = lower($1)", store)
         self.assertIn("asset name already belongs to authoritative asset", store)
+        self.assertIn("asset.edited", store)
+        self.assertIn("asset.demoted_to_dhcp", store)
+        self.assertIn(
+            "asset has no preserved DHCP observation to return to review",
+            store,
+        )
 
     def test_schema_allows_distinct_ip_change_review_decision(self) -> None:
         sql = SCHEMA.read_text(encoding="utf-8")
@@ -108,7 +118,31 @@ class PostgresAssetInventoryTests(unittest.TestCase):
                 error.message,
               );
             }}
-            if (!localRejected || !confirmationRejected) process.exit(2);
+            let editRejected = false;
+            try {{
+              await store.updateAsset({{
+                asset_id: 'known',
+                expected_valid_from: '2026-07-30T20:00:00Z',
+                reason: 'reviewed',
+                confirm: 'wrong',
+              }});
+            }} catch (error) {{
+              editRejected = /explicit asset edit confirmation/.test(error.message);
+            }}
+            let demotionRejected = false;
+            try {{
+              await store.demoteAsset({{
+                asset_id: 'known',
+                expected_valid_from: '2026-07-30T20:00:00Z',
+                reason: 'reviewed',
+                confirm: 'wrong',
+              }});
+            }} catch (error) {{
+              demotionRejected = /explicit asset demotion confirmation/.test(
+                error.message,
+              );
+            }}
+            if (!localRejected || !confirmationRejected || !editRejected || !demotionRejected) process.exit(2);
           }})().catch(() => process.exit(3));
         """
         result = subprocess.run(
@@ -128,6 +162,109 @@ class PostgresAssetInventoryTests(unittest.TestCase):
             collector.rindex("database_result = persist_database_state("),
             collector.index("atomic_write_json(args.state, updated)"),
         )
+
+    def test_edit_and_demote_transactions_preserve_history_and_dhcp(self) -> None:
+        script = f"""
+          const {{createPostgresAssetStore}} = require({json.dumps(str(STORE))});
+          function currentRecord() {{
+            return {{
+              record_id: 41,
+              asset_id: 'known',
+              valid_from: new Date('2026-07-30T20:00:00Z'),
+              valid_until: null,
+              role: 'workstation',
+              platform: 'macOS',
+              owner_ref: 'operator-reviewed',
+              criticality: 'medium',
+              expected_services: [],
+              expected_behaviors: [],
+              source_type: 'operator-approved-dhcp',
+              source_ref: 'DHCP discovery',
+              confidence: 'medium',
+              share_with_hosted_models: false,
+            }};
+          }}
+          function fakePool(mode) {{
+            const statements = [];
+            const client = {{
+              query: async (sql, params=[]) => {{
+                statements.push(String(sql));
+                if (String(sql).includes('SELECT record.*')) return {{rows:[currentRecord()]}};
+                if (String(sql).includes('SELECT DISTINCT record.asset_id')) return {{rows:[]}};
+                if (String(sql).includes('SELECT identifier_type, normalized_value')) return {{rows:[
+                  {{identifier_type:'ip',normalized_value:'192.0.2.40'}},
+                  {{identifier_type:'mac',normalized_value:'00:11:22:33:44:66'}},
+                  {{identifier_type:'hostname',normalized_value:'known.lan'}},
+                ]}};
+                if (String(sql).includes('FROM onion_sentinel_assets.dhcp_observations')) return {{rows:[
+                  {{discovery_id:'0123456789abcdef0123',last_seen:new Date()}},
+                ]}};
+                if (String(sql).includes('clock_timestamp() AS changed_at')) return {{rows:[
+                  {{changed_at:new Date('2026-07-30T21:00:00Z')}},
+                ]}};
+                if (String(sql).includes('RETURNING record_id, valid_from')) return {{rows:[
+                  {{record_id:42,valid_from:new Date('2026-07-30T21:00:00Z')}},
+                ]}};
+                return {{rows:[],rowCount:1}};
+              }},
+              release: () => undefined,
+            }};
+            return {{
+              query: async () => {{ throw new Error('unexpected pool query'); }},
+              connect: async () => client,
+              statements,
+            }};
+          }}
+          (async () => {{
+            const editPool = fakePool('edit');
+            const editStore = createPostgresAssetStore({{
+              pool:editPool,
+              schemaPath:{json.dumps(str(SCHEMA))},
+            }});
+            const edited = await editStore.updateAsset({{
+              asset_id:'known',
+              expected_valid_from:'2026-07-30T20:00:00Z',
+              ip_addresses:['192.0.2.40'],
+              mac_addresses:['00:11:22:33:44:66'],
+              hostnames:['known.lan'],
+              role:'workstation',
+              platform:'macOS',
+              criticality:'medium',
+              confidence:'high',
+              reason:'reviewed edit',
+              confirm:'EDIT:known',
+            }}, {{actor:'change-1'}});
+            if (edited.status !== 'edited') process.exit(2);
+            if (!editPool.statements.some(sql => sql.includes(\"VALUES ('asset.edited'\"))) process.exit(3);
+            if (!editPool.statements.some(sql => sql.trim() === 'COMMIT')) process.exit(4);
+
+            const demotePool = fakePool('demote');
+            const demoteStore = createPostgresAssetStore({{
+              pool:demotePool,
+              schemaPath:{json.dumps(str(SCHEMA))},
+            }});
+            const demoted = await demoteStore.demoteAsset({{
+              asset_id:'known',
+              expected_valid_from:'2026-07-30T20:00:00Z',
+              reason:'return to DHCP review',
+              confirm:'DEMOTE:known',
+            }}, {{actor:'change-2'}});
+            if (demoted.status !== 'demoted') process.exit(5);
+            if (demoted.discovery_ids[0] !== '0123456789abcdef0123') process.exit(6);
+            if (!demotePool.statements.some(sql => sql.includes(\"VALUES ('asset.demoted_to_dhcp'\"))) process.exit(7);
+            if (!demotePool.statements.some(sql => sql.trim() === 'COMMIT')) process.exit(8);
+          }})().catch(error => {{
+            console.error(error);
+            process.exit(9);
+          }});
+        """
+        result = subprocess.run(
+            ["node", "-e", script],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_dashboard_uses_server_side_paging(self) -> None:
         portal = PORTAL.read_text(encoding="utf-8")

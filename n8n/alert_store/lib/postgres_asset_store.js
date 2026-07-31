@@ -1056,6 +1056,271 @@ function createPostgresAssetStore({pool, schemaPath, logger = console}) {
     }
   }
 
+  async function updateAsset(payload, {actor = 'operator'} = {}) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new Error('asset edit payload is invalid');
+    }
+    const assetId = cleanText(payload.asset_id, 160, 'asset_id', {required: true});
+    const expectedValidFrom = timestamp(
+      payload.expected_valid_from,
+      'expected_valid_from',
+    );
+    if (
+      cleanText(payload.confirm, 256, 'confirm', {required: true})
+      !== `EDIT:${assetId}`
+    ) {
+      throw new Error('explicit asset edit confirmation is required');
+    }
+    const reason = cleanText(payload.reason, 1000, 'reason', {required: true});
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const currentResult = await client.query(
+        `SELECT record.*
+         FROM onion_sentinel_assets.inventory_records record
+         WHERE record.asset_id = $1
+           AND record.valid_from = $2::timestamptz
+           AND record.valid_from <= clock_timestamp()
+           AND (
+             record.valid_until IS NULL
+             OR record.valid_until > clock_timestamp()
+           )
+         FOR UPDATE`,
+        [assetId, expectedValidFrom],
+      );
+      if (currentResult.rows.length !== 1) {
+        throw new Error('asset changed after the edit form was opened');
+      }
+      const current = currentResult.rows[0];
+      const desired = normalizeInventoryRecord({
+        asset_id: assetId,
+        valid_from: new Date().toISOString(),
+        valid_until: null,
+        identifiers: {
+          ip_addresses: payload.ip_addresses,
+          mac_addresses: payload.mac_addresses,
+          hostnames: payload.hostnames,
+        },
+        role: payload.role,
+        platform: payload.platform,
+        owner_ref: current.owner_ref,
+        criticality: payload.criticality,
+        expected_services: current.expected_services,
+        expected_behaviors: current.expected_behaviors,
+        source_type: 'operator-edited',
+        source_ref: `Asset edit superseding record ${current.record_id}`,
+        confidence: payload.confidence,
+        share_with_hosted_models: current.share_with_hosted_models,
+      });
+      const normalizedIdentifiers = Object.values(desired.identifiers).flat()
+        .map((value) => value.toLowerCase());
+      const collisions = await client.query(
+        `SELECT DISTINCT record.asset_id
+         FROM onion_sentinel_assets.identifiers identifier
+         JOIN onion_sentinel_assets.inventory_records record USING (record_id)
+         WHERE identifier.normalized_value = ANY($1::text[])
+           AND record.record_id <> $2
+           AND record.valid_from <= clock_timestamp()
+           AND (
+             record.valid_until IS NULL
+             OR record.valid_until > clock_timestamp()
+           )
+         ORDER BY record.asset_id`,
+        [normalizedIdentifiers, current.record_id],
+      );
+      if (collisions.rows.length) {
+        throw new Error(
+          `edited identity overlaps authoritative asset ${collisions.rows[0].asset_id}`,
+        );
+      }
+      const transition = await client.query(
+        'SELECT clock_timestamp() AS changed_at',
+      );
+      const changedAt = transition.rows[0].changed_at;
+      await client.query(
+        `UPDATE onion_sentinel_assets.inventory_records
+         SET valid_until = $1, updated_at = clock_timestamp()
+         WHERE record_id = $2`,
+        [changedAt, current.record_id],
+      );
+      const inserted = await client.query(
+        `INSERT INTO onion_sentinel_assets.inventory_records (
+           asset_id, valid_from, valid_until, role, platform, owner_ref,
+           criticality, expected_services, expected_behaviors, source_type,
+           source_ref, confidence, share_with_hosted_models
+         ) VALUES (
+           $1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+         )
+         RETURNING record_id, valid_from`,
+        [
+          desired.asset_id,
+          changedAt,
+          desired.role,
+          desired.platform,
+          desired.owner_ref,
+          desired.criticality,
+          desired.expected_services,
+          desired.expected_behaviors,
+          desired.source_type,
+          desired.source_ref,
+          desired.confidence,
+          desired.share_with_hosted_models,
+        ],
+      );
+      const newRecordId = inserted.rows[0].record_id;
+      for (const [kind, values] of Object.entries(desired.identifiers)) {
+        for (const value of values) {
+          await client.query(
+            `INSERT INTO onion_sentinel_assets.identifiers (
+               record_id, identifier_type, identifier_value, normalized_value
+             ) VALUES ($1, $2, $3, $4)`,
+            [newRecordId, kind, value, value.toLowerCase()],
+          );
+        }
+      }
+      await client.query(
+        `INSERT INTO onion_sentinel_assets.audit_events (
+           event_type, actor, asset_id, event_data
+         ) VALUES ('asset.edited', $1, $2, $3::jsonb)`,
+        [
+          cleanText(actor, 160, 'actor'),
+          assetId,
+          JSON.stringify({
+            reason,
+            previous_record_id: current.record_id,
+            current_record_id: newRecordId,
+            identifiers: desired.identifiers,
+            role: desired.role,
+            platform: desired.platform,
+            criticality: desired.criticality,
+            confidence: desired.confidence,
+          }),
+        ],
+      );
+      await client.query('COMMIT');
+      return {
+        ok: true,
+        status: 'edited',
+        asset_id: assetId,
+        valid_from: inserted.rows[0].valid_from,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async function demoteAsset(payload, {actor = 'operator'} = {}) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new Error('asset demotion payload is invalid');
+    }
+    const assetId = cleanText(payload.asset_id, 160, 'asset_id', {required: true});
+    const expectedValidFrom = timestamp(
+      payload.expected_valid_from,
+      'expected_valid_from',
+    );
+    if (
+      cleanText(payload.confirm, 256, 'confirm', {required: true})
+      !== `DEMOTE:${assetId}`
+    ) {
+      throw new Error('explicit asset demotion confirmation is required');
+    }
+    const reason = cleanText(payload.reason, 1000, 'reason', {required: true});
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const currentResult = await client.query(
+        `SELECT record.*
+         FROM onion_sentinel_assets.inventory_records record
+         WHERE record.asset_id = $1
+           AND record.valid_from = $2::timestamptz
+           AND record.valid_from <= clock_timestamp()
+           AND (
+             record.valid_until IS NULL
+             OR record.valid_until > clock_timestamp()
+           )
+         FOR UPDATE`,
+        [assetId, expectedValidFrom],
+      );
+      if (currentResult.rows.length !== 1) {
+        throw new Error('asset changed after the demotion form was opened');
+      }
+      const current = currentResult.rows[0];
+      const identifierResult = await client.query(
+        `SELECT identifier_type, normalized_value
+         FROM onion_sentinel_assets.identifiers
+         WHERE record_id = $1`,
+        [current.record_id],
+      );
+      const identifiers = {
+        ip: identifierResult.rows
+          .filter((item) => item.identifier_type === 'ip')
+          .map((item) => item.normalized_value),
+        mac: identifierResult.rows
+          .filter((item) => item.identifier_type === 'mac')
+          .map((item) => item.normalized_value),
+        hostname: identifierResult.rows
+          .filter((item) => item.identifier_type === 'hostname')
+          .map((item) => item.normalized_value),
+      };
+      const observations = await client.query(
+        `SELECT discovery_id, last_seen
+         FROM onion_sentinel_assets.dhcp_observations
+         WHERE current_ip::text = ANY($1::text[])
+            OR lower(mac_address) = ANY($2::text[])
+            OR lower(hostname) = ANY($3::text[])
+         ORDER BY last_seen DESC, discovery_id`,
+        [identifiers.ip, identifiers.mac, identifiers.hostname],
+      );
+      if (!observations.rows.length) {
+        throw new Error(
+          'asset has no preserved DHCP observation to return to review',
+        );
+      }
+      const transition = await client.query(
+        'SELECT clock_timestamp() AS changed_at',
+      );
+      const changedAt = transition.rows[0].changed_at;
+      await client.query(
+        `UPDATE onion_sentinel_assets.inventory_records
+         SET valid_until = $1, updated_at = clock_timestamp()
+         WHERE record_id = $2`,
+        [changedAt, current.record_id],
+      );
+      const discoveryIds = observations.rows.map((row) => row.discovery_id);
+      await client.query(
+        `INSERT INTO onion_sentinel_assets.audit_events (
+           event_type, actor, asset_id, discovery_id, event_data
+         ) VALUES ('asset.demoted_to_dhcp', $1, $2, $3, $4::jsonb)`,
+        [
+          cleanText(actor, 160, 'actor'),
+          assetId,
+          discoveryIds[0],
+          JSON.stringify({
+            reason,
+            previous_record_id: current.record_id,
+            returned_discovery_ids: discoveryIds,
+          }),
+        ],
+      );
+      await client.query('COMMIT');
+      return {
+        ok: true,
+        status: 'demoted',
+        asset_id: assetId,
+        valid_until: changedAt,
+        discovery_ids: discoveryIds,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async function stats() {
     const [inventory, dhcp, audits] = await Promise.all([
       pool.query('SELECT * FROM onion_sentinel_assets.inventory_counts'),
@@ -1087,6 +1352,8 @@ function createPostgresAssetStore({pool, schemaPath, logger = console}) {
     dhcpState,
     promoteDhcp,
     approveDhcpIpChange,
+    updateAsset,
+    demoteAsset,
     stats,
     normalizeInventoryRecord,
     normalizeDhcpState,

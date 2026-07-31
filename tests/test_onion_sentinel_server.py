@@ -71,6 +71,8 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertTrue(server.is_soc_post_api("/api/soc-settings/agent-model"))
         self.assertTrue(server.is_soc_post_api("/api/soc-settings/ai-model"))
         self.assertTrue(server.is_soc_post_api("/api/assets/promote-dhcp"))
+        self.assertTrue(server.is_soc_post_api("/api/assets/update"))
+        self.assertTrue(server.is_soc_post_api("/api/assets/demote"))
         self.assertTrue(
             server.is_soc_post_api("/api/assets/approve-dhcp-ip-change")
         )
