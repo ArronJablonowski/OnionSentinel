@@ -88,6 +88,34 @@ console.log(JSON.stringify({{match, wrongEndpoint, wrongService}}));
         self.assertIsNone(payload["wrongEndpoint"])
         self.assertIsNone(payload["wrongService"])
 
+    def test_relay_control_plane_match_disables_recursive_pcap(self) -> None:
+        payload = self.run_node(f"""
+const policy = require({json.dumps(str(MODULE))});
+const registry = policy.loadAuthorizedActivityPolicy({json.dumps(str(POLICY))});
+const base = {{
+  timestamp: '2026-07-31T23:47:39Z', rule_id: '2003068',
+  source: {{ip: '10.77.7.225'}},
+  destination: {{ip: '10.88.8.8', port: 22}},
+  network: {{transport: 'tcp'}},
+}};
+const match = policy.matchAuthorizedActivity(registry, base, {{}});
+const wrongSource = policy.matchAuthorizedActivity(
+  registry, {{...base, source: {{ip: '10.77.7.224'}}}}, {{}},
+);
+const wrongDestination = policy.matchAuthorizedActivity(
+  registry, {{...base, destination: {{ip: '10.88.8.9', port: 22}}}}, {{}},
+);
+console.log(JSON.stringify({{match, wrongSource, wrongDestination}}));
+""")
+        self.assertEqual(
+            payload["match"]["id"],
+            "onion-sentinel-relay-ssh-control-plane",
+        )
+        self.assertEqual(payload["match"]["pcap_sample_limit"], 0)
+        self.assertEqual(payload["match"]["enrichment_sample_limit"], 0)
+        self.assertIsNone(payload["wrongSource"])
+        self.assertIsNone(payload["wrongDestination"])
+
     def test_malformed_policy_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "policy.json"

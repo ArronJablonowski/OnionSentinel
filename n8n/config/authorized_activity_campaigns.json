@@ -63,6 +63,38 @@
         "scope": "Response-side TLS handshake-failure telemetry returning from TCP 443 or 8443 targets to the exact authorized scanner endpoint during the production reliability soak. This does not authorize unrelated inbound traffic.",
         "provenance": "operator-confirmed-scanner-correlated-with-observed-response-tuple"
       }
+    },
+    {
+      "id": "onion-sentinel-relay-ssh-control-plane",
+      "enabled": true,
+      "source_ips": [
+        "10.77.7.225"
+      ],
+      "destination_ips": [
+        "10.88.8.8"
+      ],
+      "rule_ids": [
+        "2001219",
+        "2003068"
+      ],
+      "destination_ports": [
+        22
+      ],
+      "transport_protocols": [
+        "tcp"
+      ],
+      "authorization_start": "2026-07-31T16:15:00-06:00",
+      "authorization_end": "2026-08-04T23:59:59-06:00",
+      "window_seconds": 900,
+      "pcap_sample_limit": 0,
+      "enrichment_sample_limit": 0,
+      "investigation_mode": "incident_response_only",
+      "reconcile_existing_pending": true,
+      "authorization": {
+        "authorized_by": "onion-sentinel-control-plane",
+        "scope": "Onion Sentinel application-host SSH traffic to the exact restricted evidence Relay during the production reliability soak. Authorization applies only to TCP destination port 22 and Suricata rules 2001219 or 2003068. Preserve one representative investigation, but do not recursively request PCAP or public enrichment for this control-plane traffic.",
+        "provenance": "documented-relay-only-security-onion-architecture"
+      }
     }
   ]
 }
