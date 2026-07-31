@@ -892,18 +892,11 @@ def software_inventory_response(
     query: dict[str, list[str]] | None = None,
 ) -> tuple[int, dict]:
     """Return only the bounded, collector-produced Software Inventory view."""
-    status, payload = software_inventory.build_response(
-        Path(SOFTWARE_INVENTORY_STATE_FILE),
-        query,
-        observed_at=observed_at,
-        maximum_bytes=SOFTWARE_INVENTORY_MAX_BYTES,
-    )
-    if status != HTTPStatus.OK or not isinstance(payload.get("items"), list):
-        return status, payload
-
     # Restricted-node responses keep endpoint hostnames pseudonymous. Resolve
-    # those stable references only against the already-public authoritative
-    # Asset Inventory. Ambiguous identifiers remain unlabeled.
+    # those stable references only against one complete, already-public
+    # authoritative Asset Inventory. Supplying that identity view while the
+    # software snapshot is built lets trusted endpoint OS evidence correlate
+    # before filtering and pagination. Ambiguous identifiers remain unlabeled.
     assets: list[dict] = []
     asset_inventory_complete = False
     offset = 0
@@ -940,15 +933,17 @@ def software_inventory_response(
         if next_offset <= offset:
             break
         offset = next_offset
-    labeled = software_inventory.apply_asset_labels(
-        payload["items"],
-        assets,
-        inventory_complete=asset_inventory_complete,
+
+    status, payload = software_inventory.build_response(
+        Path(SOFTWARE_INVENTORY_STATE_FILE),
+        query,
+        observed_at=observed_at,
+        maximum_bytes=SOFTWARE_INVENTORY_MAX_BYTES,
+        assets=assets,
+        asset_inventory_complete=asset_inventory_complete,
     )
-    coverage = payload.get("coverage")
-    if isinstance(coverage, dict):
-        coverage["labeled_visible_records"] = labeled
-        coverage["asset_label_inventory_complete"] = asset_inventory_complete
+    if status != HTTPStatus.OK or not isinstance(payload.get("items"), list):
+        return status, payload
     if not asset_inventory_complete:
         warnings = payload.get("warnings")
         if isinstance(warnings, list):

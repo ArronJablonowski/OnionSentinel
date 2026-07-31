@@ -245,6 +245,18 @@ class SoftwareInventoryPageTests(unittest.TestCase):
             self.page,
         )
         self.assertIn(
+            "String(item?.operating_system_observed_at??'').trim()",
+            self.page,
+        )
+        self.assertIn(
+            "String(item?.operating_system_freshness??'').trim()",
+            self.page,
+        )
+        self.assertIn(
+            "String(item?.operating_system_association??'').trim()",
+            self.page,
+        )
+        self.assertIn(
             "OS: ${esc(os.type||'Not observed')}",
             self.page,
         )
@@ -262,6 +274,22 @@ class SoftwareInventoryPageTests(unittest.TestCase):
         )
         self.assertIn(
             "<dt>OS evidence</dt>",
+            self.page,
+        )
+        self.assertIn(
+            "<dt>OS association</dt>",
+            self.page,
+        )
+        self.assertIn(
+            "<dt>OS observed</dt>",
+            self.page,
+        )
+        self.assertIn(
+            "<dt>OS evidence freshness</dt>",
+            self.page,
+        )
+        self.assertIn(
+            "Unique Asset Inventory hostname-to-static-IP association",
             self.page,
         )
         self.assertNotIn(

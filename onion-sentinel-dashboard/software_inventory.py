@@ -38,6 +38,8 @@ SOURCE_DATASETS = {
     "zeek_software": "zeek.software",
     "http_user_agent": "zeek.http",
 }
+ENDPOINT_OS_SOURCE = "osquery_manager.result:host.os"
+ASSET_OS_ASSOCIATION = "asset_inventory:unique-host-static-ip"
 LAN_NETWORKS = tuple(
     ipaddress.ip_network(value)
     for value in (
@@ -583,11 +585,33 @@ def _freshness(record: dict[str, object], observed_at: dt.datetime) -> str:
 def _public_record(
     record: dict[str, object], observed_at: dt.datetime
 ) -> dict[str, object]:
+    freshness = _freshness(record, observed_at)
     public = {
         key: value
         for key, value in record.items()
         if not key.startswith("_")
-    } | {"freshness": _freshness(record, observed_at)}
+    } | {
+        "freshness": freshness,
+        "operating_system_observed_at": str(
+            record.get("operating_system_observed_at") or ""
+        ),
+        "operating_system_freshness": str(
+            record.get("operating_system_freshness") or ""
+        ),
+        "operating_system_association": str(
+            record.get("operating_system_association") or ""
+        ),
+    }
+    if (
+        record["source"] == "osquery_apps"
+        and record["operating_system_source"] == ENDPOINT_OS_SOURCE
+        and (
+            record["operating_system_type"]
+            or record["operating_system_version"]
+        )
+    ):
+        public["operating_system_observed_at"] = record["last_seen"]
+        public["operating_system_freshness"] = freshness
     observed_user_agent = ""
     if record["source"] == "http_user_agent":
         observed_user_agent = str(record["product"])
@@ -699,6 +723,188 @@ def apply_asset_labels(
     return labeled
 
 
+def correlate_asset_operating_systems(
+    items: object,
+    endpoint_evidence: object,
+    *,
+    assets: object,
+    observed_at: dt.datetime,
+) -> int:
+    """Carry one trusted endpoint OS observation across one validated asset.
+
+    Both collections must already have passed ``apply_asset_labels`` against
+    the same complete Asset Inventory.  Passive IP evidence never supplies
+    the OS value; it can only receive a separately observed endpoint value
+    after both references resolve to one asset.  Conflicting or incomplete
+    candidates fail closed.
+    """
+    if (
+        not isinstance(items, list)
+        or not isinstance(endpoint_evidence, list)
+        or not isinstance(assets, list)
+    ):
+        return 0
+    if observed_at.tzinfo is None:
+        raise ValueError("observed_at must include a UTC offset")
+    now = observed_at.astimezone(dt.timezone.utc)
+    assets_by_id = {
+        str(item.get("asset_id") or "").strip(): item
+        for item in assets
+        if isinstance(item, dict)
+        and str(item.get("asset_id") or "").strip()
+    }
+
+    def valid_at(asset: dict, when: dt.datetime) -> bool:
+        try:
+            valid_from = _parse_timestamp(
+                asset.get("valid_from"), "asset.valid_from"
+            )
+            valid_until = (
+                _parse_timestamp(
+                    asset.get("valid_until"), "asset.valid_until"
+                )
+                if asset.get("valid_until")
+                else None
+            )
+        except InventoryStateError:
+            return False
+        return valid_from <= when and (
+            valid_until is None or when < valid_until
+        )
+
+    def trusted_asset(asset_label: str, when: dt.datetime) -> dict | None:
+        asset = assets_by_id.get(asset_label)
+        if (
+            not isinstance(asset, dict)
+            or str(asset.get("state") or "").strip().lower() != "current"
+            or str(asset.get("confidence") or "").strip().lower() != "high"
+            or str(asset.get("source_type") or "").strip().lower()
+            == "zeek-dhcp-observation"
+            or str(asset.get("current_ip_source") or "").strip().lower()
+            == "zeek-dhcp"
+            or not valid_at(asset, when)
+        ):
+            return None
+        return asset
+
+    candidates: dict[
+        str,
+        dict[dt.datetime, dict[tuple[str, str], dict[str, object]]],
+    ] = {}
+    for item in endpoint_evidence:
+        if not isinstance(item, dict):
+            continue
+        asset_label = str(item.get("asset_label") or "").strip()
+        os_type = str(item.get("operating_system_type") or "").strip()
+        os_version = str(
+            item.get("operating_system_version") or ""
+        ).strip()
+        if (
+            not asset_label
+            or item.get("source") != "osquery_apps"
+            or item.get("operating_system_source") != ENDPOINT_OS_SOURCE
+            or item.get("operating_system_confidence") != "high"
+            or not os_type
+            or not os_version
+        ):
+            continue
+        last_seen = item.get("_last_seen")
+        if not isinstance(last_seen, dt.datetime):
+            try:
+                last_seen = _parse_timestamp(
+                    item.get("last_seen"),
+                    "operating_system_observed_at",
+                )
+            except InventoryStateError:
+                continue
+        last_seen = last_seen.astimezone(dt.timezone.utc)
+        if (
+            last_seen > now + dt.timedelta(minutes=5)
+            or trusted_asset(asset_label, last_seen) is None
+        ):
+            continue
+        candidate = {
+            "operating_system_type": os_type,
+            "operating_system_version": os_version,
+            "operating_system_observed_at": _utc_iso(last_seen),
+            "operating_system_freshness": _freshness(item, now),
+        }
+        candidates.setdefault(asset_label, {}).setdefault(
+            last_seen, {}
+        )[(os_type.casefold(), os_version.casefold())] = candidate
+
+    trusted: dict[str, dict[str, object]] = {}
+    for asset_label, observations in candidates.items():
+        newest = max(observations)
+        values = observations[newest]
+        if len(values) == 1:
+            trusted[asset_label] = next(iter(values.values()))
+
+    correlated = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        asset_label = str(item.get("asset_label") or "").strip()
+        candidate = trusted.get(asset_label)
+        if not candidate:
+            continue
+        current_source = str(
+            item.get("operating_system_source") or ""
+        ).strip()
+        if current_source == ENDPOINT_OS_SOURCE:
+            continue
+        if item.get("source") not in {"zeek_software", "http_user_agent"}:
+            continue
+        item_last_seen = item.get("_last_seen")
+        if not isinstance(item_last_seen, dt.datetime):
+            try:
+                item_last_seen = _parse_timestamp(
+                    item.get("last_seen"), "last_seen"
+                )
+            except InventoryStateError:
+                continue
+        item_last_seen = item_last_seen.astimezone(dt.timezone.utc)
+        asset = trusted_asset(asset_label, item_last_seen)
+        if asset is None or item.get("asset_ref_type") != "ip":
+            continue
+        static_addresses = asset.get("configured_ip_addresses")
+        if not isinstance(static_addresses, list) or not static_addresses:
+            static_addresses = asset.get("ip_addresses")
+        normalized_addresses: set[str] = set()
+        if isinstance(static_addresses, list):
+            for value in static_addresses:
+                try:
+                    normalized_addresses.add(
+                        str(ipaddress.ip_address(str(value)))
+                    )
+                except ValueError:
+                    continue
+        if str(item.get("asset_ref") or "") not in normalized_addresses:
+            continue
+        current_type = str(
+            item.get("operating_system_type") or ""
+        ).strip()
+        current_version = str(
+            item.get("operating_system_version") or ""
+        ).strip()
+        candidate_type = str(candidate["operating_system_type"])
+        candidate_version = str(candidate["operating_system_version"])
+        if (
+            current_type
+            and current_type.casefold() != candidate_type.casefold()
+        ) or (
+            current_version
+            and current_version.casefold() != candidate_version.casefold()
+        ):
+            continue
+        item.update(candidate)
+        item["operating_system_source"] = ENDPOINT_OS_SOURCE
+        item["operating_system_confidence"] = "high"
+        item["operating_system_association"] = ASSET_OS_ASSOCIATION
+        correlated += 1
+    return correlated
+
+
 def _empty_payload(
     observed_at: dt.datetime,
     filters: dict[str, object],
@@ -738,6 +944,9 @@ def _empty_payload(
             "fresh_endpoint_inventories": 0,
             "network_observed_assets": 0,
             "coverage_gaps": None,
+            "labeled_visible_records": 0,
+            "asset_label_inventory_complete": False,
+            "asset_os_correlated_records": 0,
         },
         "filters": filters,
         "platforms": [],
@@ -760,6 +969,8 @@ def build_response(
     *,
     observed_at: dt.datetime | None = None,
     maximum_bytes: int = MAX_STATE_BYTES,
+    assets: object = None,
+    asset_inventory_complete: bool = False,
 ) -> tuple[int, dict[str, object]]:
     """Build one bounded public response from the local derived snapshot."""
     now = observed_at or dt.datetime.now(dt.timezone.utc)
@@ -777,10 +988,22 @@ def build_response(
     except InventoryStateError as exc:
         return 503, _empty_payload(now, filters, error=str(exc))
 
+    state_records = state["records"]  # type: ignore[assignment]
+    apply_asset_labels(
+        state_records,
+        assets,
+        inventory_complete=asset_inventory_complete,
+    )
+    correlate_asset_operating_systems(
+        state_records,
+        state_records,
+        assets=assets,
+        observed_at=now,
+    )
     window_start = now - WINDOWS[str(filters["window"])]
     all_window_records = [
         item
-        for item in state["records"]  # type: ignore[union-attr]
+        for item in state_records
         if item["_last_seen"] >= window_start  # type: ignore[index,operator]
     ]
     records = list(all_window_records)
@@ -925,6 +1148,14 @@ def build_response(
             "fresh_endpoint_inventories": len(fresh_endpoint_assets),
             "network_observed_assets": len(network_assets),
             "coverage_gaps": coverage_gaps,
+            "labeled_visible_records": sum(
+                bool(item.get("asset_label")) for item in records
+            ),
+            "asset_label_inventory_complete": asset_inventory_complete,
+            "asset_os_correlated_records": sum(
+                bool(item.get("operating_system_association"))
+                for item in records
+            ),
         },
         "filters": filters,
         "platforms": sorted(

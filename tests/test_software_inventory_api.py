@@ -163,6 +163,31 @@ class SoftwareInventoryApiTests(unittest.TestCase):
         self.assertNotIn("secret", payload)
         self.assertNotIn("relay_token", payload["collection"])
         self.assertNotIn("private_agent_id", payload["items"][0])
+        items = {item["product"]: item for item in payload["items"]}
+        self.assertEqual(
+            items["Firefox"]["operating_system_observed_at"],
+            iso(),
+        )
+        self.assertEqual(
+            items["Firefox"]["operating_system_freshness"],
+            "current",
+        )
+        self.assertEqual(
+            items["Old Utility"]["operating_system_observed_at"],
+            iso(days_ago=8),
+        )
+        self.assertEqual(
+            items["Old Utility"]["operating_system_freshness"],
+            "expired",
+        )
+        self.assertEqual(
+            items["OpenSSH"]["operating_system_observed_at"],
+            "",
+        )
+        self.assertEqual(
+            items["OpenSSH"]["operating_system_association"],
+            "",
+        )
         self.assertTrue(
             any("observable evidence" in warning for warning in payload["warnings"])
         )
@@ -368,10 +393,14 @@ class SoftwareInventoryApiTests(unittest.TestCase):
                     "assets": [
                         {
                             "asset_id": "studio",
+                            "state": "current",
                             "hostnames": [hostname.upper() + "."],
                             "ip_addresses": ["10.100.4.21"],
                             "platform": "macOS",
                             "confidence": "high",
+                            "valid_from": iso(days_ago=30),
+                            "valid_until": "",
+                            "source_type": "manual-inventory",
                         }
                     ]
                 },
@@ -405,16 +434,268 @@ class SoftwareInventoryApiTests(unittest.TestCase):
         )
         self.assertEqual(
             items["OpenSSH"]["operating_system_version"],
-            "",
+            "macOS 26.0 (25A5306g)",
         )
         self.assertEqual(
             items["OpenSSH"]["operating_system_source"],
-            "asset_inventory",
+            "osquery_manager.result:host.os",
         )
         self.assertEqual(
             items["OpenSSH"]["operating_system_confidence"],
             "high",
         )
+        self.assertEqual(
+            items["OpenSSH"]["operating_system_observed_at"],
+            iso(),
+        )
+        self.assertEqual(
+            items["OpenSSH"]["operating_system_freshness"],
+            "current",
+        )
+        self.assertEqual(
+            items["OpenSSH"]["operating_system_association"],
+            "asset_inventory:unique-host-static-ip",
+        )
+
+    def test_expired_endpoint_os_correlates_across_filters_with_freshness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = state()
+            hostname = "studio.example.test"
+            raw["records"][0]["asset_ref"] = __import__("hashlib").sha256(
+                ("host\0" + hostname).encode("utf-8")
+            ).hexdigest()[:24]
+            raw["records"][0]["first_seen"] = iso(days_ago=18)
+            raw["records"][0]["last_seen"] = iso(days_ago=17)
+            raw["records"][2]["first_seen"] = iso(days_ago=1)
+            raw["records"][2]["last_seen"] = iso()
+            path = self.write_state(tmp, raw)
+            original_state = portal.SOFTWARE_INVENTORY_STATE_FILE
+            original_inventory = portal.asset_inventory_response
+            portal.SOFTWARE_INVENTORY_STATE_FILE = path
+            portal.asset_inventory_response = lambda **_kwargs: (
+                200,
+                {
+                    "assets": [
+                        {
+                            "asset_id": "studio",
+                            "state": "current",
+                            "hostnames": [hostname],
+                            "ip_addresses": ["10.100.4.21"],
+                            "platform": "macOS",
+                            "confidence": "high",
+                            "valid_from": iso(days_ago=30),
+                            "valid_until": "",
+                            "source_type": "manual-inventory",
+                        }
+                    ]
+                },
+            )
+            try:
+                status, payload = portal.software_inventory_response(
+                    observed_at=NOW,
+                    query={
+                        "tier": ["observed"],
+                        "window": ["24h"],
+                    },
+                )
+            finally:
+                portal.SOFTWARE_INVENTORY_STATE_FILE = original_state
+                portal.asset_inventory_response = original_inventory
+
+        self.assertEqual(status, 200)
+        self.assertEqual([item["product"] for item in payload["items"]], ["OpenSSH"])
+        item = payload["items"][0]
+        self.assertEqual(item["freshness"], "current")
+        self.assertEqual(item["asset_label"], "studio")
+        self.assertEqual(item["operating_system_type"], "macOS")
+        self.assertEqual(
+            item["operating_system_version"],
+            "macOS 26.0 (25A5306g)",
+        )
+        self.assertEqual(
+            item["operating_system_source"],
+            "osquery_manager.result:host.os",
+        )
+        self.assertEqual(
+            item["operating_system_observed_at"],
+            iso(days_ago=17),
+        )
+        self.assertEqual(item["operating_system_freshness"], "expired")
+        self.assertEqual(
+            item["operating_system_association"],
+            "asset_inventory:unique-host-static-ip",
+        )
+        self.assertEqual(
+            payload["coverage"]["asset_os_correlated_records"],
+            1,
+        )
+
+    def test_endpoint_os_correlation_withholds_ambiguous_source_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = state()
+            hostname = "shared.example.test"
+            raw["records"][0]["asset_ref"] = __import__("hashlib").sha256(
+                ("host\0" + hostname).encode("utf-8")
+            ).hexdigest()[:24]
+            path = self.write_state(tmp, raw)
+            common = {
+                "state": "current",
+                "hostnames": [hostname],
+                "platform": "",
+                "confidence": "high",
+                "valid_from": iso(days_ago=30),
+                "valid_until": "",
+                "source_type": "manual-inventory",
+            }
+            original_state = portal.SOFTWARE_INVENTORY_STATE_FILE
+            original_inventory = portal.asset_inventory_response
+            portal.SOFTWARE_INVENTORY_STATE_FILE = path
+            portal.asset_inventory_response = lambda **_kwargs: (
+                200,
+                {
+                    "assets": [
+                        common
+                        | {
+                            "asset_id": "studio-a",
+                            "ip_addresses": ["10.100.4.21"],
+                        },
+                        common
+                        | {
+                            "asset_id": "studio-b",
+                            "ip_addresses": ["10.100.4.99"],
+                        },
+                    ]
+                },
+            )
+            try:
+                status, payload = portal.software_inventory_response(
+                    observed_at=NOW
+                )
+            finally:
+                portal.SOFTWARE_INVENTORY_STATE_FILE = original_state
+                portal.asset_inventory_response = original_inventory
+
+        self.assertEqual(status, 200)
+        items = {item["product"]: item for item in payload["items"]}
+        self.assertEqual(items["Firefox"]["asset_label"], "")
+        self.assertEqual(items["OpenSSH"]["asset_label"], "studio-a")
+        self.assertEqual(items["OpenSSH"]["operating_system_type"], "")
+        self.assertEqual(items["OpenSSH"]["operating_system_version"], "")
+        self.assertEqual(items["OpenSSH"]["operating_system_source"], "")
+        self.assertEqual(
+            items["OpenSSH"]["operating_system_association"],
+            "",
+        )
+
+    def test_endpoint_os_correlation_requires_static_high_confidence_identity(self):
+        hostname = "studio.example.test"
+        host_ref = __import__("hashlib").sha256(
+            ("host\0" + hostname).encode("utf-8")
+        ).hexdigest()[:24]
+        base_asset = {
+            "asset_id": "studio",
+            "state": "current",
+            "hostnames": [hostname],
+            "ip_addresses": ["10.100.4.21"],
+            "platform": "macOS",
+            "confidence": "high",
+            "valid_from": iso(days_ago=30),
+            "valid_until": "",
+            "source_type": "manual-inventory",
+        }
+        variants = {
+            "low confidence": {"confidence": "low"},
+            "provisional state": {"state": "observed"},
+            "dhcp overlay": {"current_ip_source": "zeek-dhcp"},
+            "dhcp source": {"source_type": "zeek-dhcp-observation"},
+            "outside validity": {"valid_from": iso(hours_ago=-1)},
+            "nonstatic address": {
+                "configured_ip_addresses": ["10.100.4.99"],
+            },
+        }
+        for label, changes in variants.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                raw = state()
+                raw["records"][0]["asset_ref"] = host_ref
+                path = self.write_state(tmp, raw)
+                sanitized, _revision = inventory.load_state(path)
+                assets = [base_asset | changes]
+                inventory.apply_asset_labels(
+                    sanitized["records"],
+                    assets,
+                    inventory_complete=True,
+                )
+                correlated = inventory.correlate_asset_operating_systems(
+                    sanitized["records"],
+                    sanitized["records"],
+                    assets=assets,
+                    observed_at=NOW,
+                )
+                passive = next(
+                    item
+                    for item in sanitized["records"]
+                    if item["product"] == "OpenSSH"
+                )
+                self.assertEqual(correlated, 0)
+                self.assertEqual(passive["operating_system_version"], "")
+                self.assertNotIn(
+                    "operating_system_association",
+                    passive,
+                )
+
+    def test_endpoint_os_correlation_rejects_conflicting_newest_observation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = state()
+            hostname = "studio.example.test"
+            host_ref = __import__("hashlib").sha256(
+                ("host\0" + hostname).encode("utf-8")
+            ).hexdigest()[:24]
+            raw["records"][0]["asset_ref"] = host_ref
+            conflicting = record(
+                "000000000000000000000005",
+                "osquery_apps",
+                host_ref,
+                "Another App",
+                version="2.0",
+            )
+            conflicting["operating_system_type"] = "Linux"
+            conflicting["operating_system_version"] = "Linux 9.9"
+            raw["records"].append(conflicting)
+            path = self.write_state(tmp, raw)
+            sanitized, _revision = inventory.load_state(path)
+            assets = [
+                {
+                    "asset_id": "studio",
+                    "state": "current",
+                    "hostnames": [hostname],
+                    "ip_addresses": ["10.100.4.21"],
+                    "platform": "",
+                    "confidence": "high",
+                    "valid_from": iso(days_ago=30),
+                    "valid_until": "",
+                    "source_type": "manual-inventory",
+                }
+            ]
+            inventory.apply_asset_labels(
+                sanitized["records"],
+                assets,
+                inventory_complete=True,
+            )
+            correlated = inventory.correlate_asset_operating_systems(
+                sanitized["records"],
+                sanitized["records"],
+                assets=assets,
+                observed_at=NOW,
+            )
+
+        passive = next(
+            item
+            for item in sanitized["records"]
+            if item["product"] == "OpenSSH"
+        )
+        self.assertEqual(correlated, 0)
+        self.assertEqual(passive["operating_system_type"], "")
+        self.assertEqual(passive["operating_system_version"], "")
 
     def test_portal_pages_beyond_the_default_asset_inventory_limit(self):
         with tempfile.TemporaryDirectory() as tmp:
