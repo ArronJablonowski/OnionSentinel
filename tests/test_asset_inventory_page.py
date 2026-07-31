@@ -304,6 +304,7 @@ class AssetInventoryPageTests(unittest.TestCase):
         )
         self.assertNotIn("<th>Validity</th>", page)
         self.assertIn('colspan="10" class="ir-loading">Loading known assets', page)
+        self.assertIn(".asset-table th:nth-child(10){width:190px}", page)
         self.assertIn("Current address from passive DHCP", page)
         self.assertIn("provisional DHCP observation", page)
         self.assertIn("Historical backfill has not run", page)
