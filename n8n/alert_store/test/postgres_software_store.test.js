@@ -77,3 +77,14 @@ test('bounds database query pagination and filters', () => {
   assert.throws(() => parseQuery({limit: '251'}), /limit/);
   assert.throws(() => parseQuery({window: '365d'}), /window/);
 });
+
+test('alert-store route serializes the default observation time', () => {
+  const source = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, '..', 'alert_store.js'),
+    'utf8',
+  );
+  assert.match(
+    source,
+    /parsedUrl\.searchParams\.get\('observed_at'\)[\s\S]{0,100}new Date\(\)\.toISOString\(\)/,
+  );
+});

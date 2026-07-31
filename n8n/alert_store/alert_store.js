@@ -10907,7 +10907,8 @@ async function handleRequest(request, response) {
         window: parsedUrl.searchParams.get('window') || '30d',
         sort: parsedUrl.searchParams.get('sort') || 'last_seen',
         direction: parsedUrl.searchParams.get('direction') || 'desc',
-        observed_at: parsedUrl.searchParams.get('observed_at') || new Date(),
+        observed_at: parsedUrl.searchParams.get('observed_at')
+          || new Date().toISOString(),
       });
       sendJson(response, 200, result);
       return;
