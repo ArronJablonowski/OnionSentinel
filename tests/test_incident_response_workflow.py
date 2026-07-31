@@ -89,6 +89,10 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(
             keys[keys.index("asset_inventory") + 1],
+            "software_inventory",
+        )
+        self.assertEqual(
+            keys[keys.index("software_inventory") + 1],
             "system_health",
         )
 

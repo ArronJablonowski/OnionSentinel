@@ -10,6 +10,7 @@ This directory contains the Security Onion-side pieces for Onion Sentinel.
 | `bin/export-pcap-window` | `/usr/local/sbin/export-pcap-window` | Restricted wrapper that streams one bounded, filtered rotation directly to the relay SSD without Security Onion staging. |
 | `bin/export-incident-evidence` | `/usr/local/sbin/export-incident-evidence` | Restricted baseline evidence and policy-brokered Elastic/OQL pivot wrapper. |
 | `bin/export-dhcp-observations` | `/usr/local/sbin/export-dhcp-observations` | Read-only, fixed-DSL Zeek DHCP helper routed by the incident-evidence wrapper. |
+| `bin/export-software-observations` | `/usr/local/sbin/export-software-observations` | Read-only, fixed-aggregation OSQuery Apps, Zeek Software, and LAN HTTP User-Agent helper. |
 | `bin/run-live-osquery` | `/usr/local/sbin/run-live-osquery` | Disabled-by-default live endpoint OSQuery wrapper with exact alias mapping and bounded Osquery Manager calls. |
 | `bin/run-live-osquery-forced` | `/usr/local/sbin/run-live-osquery-forced` | Pre-sudo forced-command guard that rejects caller-supplied SSH commands and arguments. |
 | `sudoers/90-so-ai-relay-export` | `/etc/sudoers.d/90-so-ai-relay-export` | Allows only the wrapper to run passwordless for `so-ai-relay`. |
@@ -54,6 +55,18 @@ The fixed projection includes the live Security Onion ECS fields
 Zeek/ECS fallbacks. `server.address` is deliberately excluded from both the
 projection and asset-address normalization so a DHCP server cannot be recorded
 as the requesting client.
+
+Software Inventory also reuses the incident-query key and forced
+`export-incident-evidence` command. The caller can choose only one of three
+named sources, a UTC window of at most 31 days, a page size of at most 500, and
+the prior validated composite cursor. Security Onion fixes the indices,
+datasets, fields, LAN address ranges, aggregations, and `/_search` operation.
+OSQuery Apps results are installed/high-confidence evidence; Zeek Software is
+observed/medium-confidence evidence; and HTTP User-Agent strings are
+inferred/low-confidence evidence. Passive sources are restricted to RFC1918
+and IPv6 ULA source addresses. The helper never accepts caller-provided DSL,
+indices, fields, networks, scripts, credentials, shell arguments, or write
+operations. Endpoint/Fleet UUIDs are not returned.
 
 Incident Response evidence collection uses another dedicated key entry based on
 `security-onion/ssh/authorized_keys.incident-query.example`. That key can invoke

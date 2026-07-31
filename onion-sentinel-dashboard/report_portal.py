@@ -41,6 +41,7 @@ if str(PORTAL_SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(PORTAL_SOURCE_DIR))
 
 import soc_alert_api
+import software_inventory
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -134,6 +135,10 @@ DHCP_ASSET_DISCOVERY_STATE_FILE = (
     HOME / "n8n-local" / "asset-discovery" / "dhcp-observations.json"
 )
 DHCP_ASSET_DISCOVERY_MAX_BYTES = 8 * 1024 * 1024
+SOFTWARE_INVENTORY_STATE_FILE = (
+    HOME / "n8n-local" / "software-inventory" / "software-inventory.json"
+)
+SOFTWARE_INVENTORY_MAX_BYTES = software_inventory.MAX_STATE_BYTES
 ASSET_INVENTORY_CACHE_LOCK = threading.RLock()
 ASSET_INVENTORY_CACHE: dict[str, object] = {
     "signature": None,
@@ -767,6 +772,79 @@ def asset_inventory_response(
         payload["error"] = f"Asset inventory unavailable: {error}"
         return HTTPStatus.SERVICE_UNAVAILABLE, payload
     return HTTPStatus.OK, payload
+
+
+def software_inventory_response(
+    *,
+    observed_at: dt.datetime | None = None,
+    query: dict[str, list[str]] | None = None,
+) -> tuple[int, dict]:
+    """Return only the bounded, collector-produced Software Inventory view."""
+    status, payload = software_inventory.build_response(
+        Path(SOFTWARE_INVENTORY_STATE_FILE),
+        query,
+        observed_at=observed_at,
+        maximum_bytes=SOFTWARE_INVENTORY_MAX_BYTES,
+    )
+    if status != HTTPStatus.OK or not isinstance(payload.get("items"), list):
+        return status, payload
+
+    # Restricted-node responses keep endpoint hostnames pseudonymous. Resolve
+    # those stable references only against the already-public authoritative
+    # Asset Inventory. Ambiguous identifiers remain unlabeled.
+    assets: list[dict] = []
+    asset_inventory_complete = False
+    offset = 0
+    for _page_number in range(software_inventory.ASSET_LABEL_MAX_PAGES):
+        inventory_status, inventory = asset_inventory_response(
+            query={
+                "limit": [str(software_inventory.ASSET_LABEL_PAGE_SIZE)],
+                "offset": [str(offset)],
+                "search": [""],
+                "sort": ["asset_id"],
+                "direction": ["asc"],
+                "state": ["current"],
+            }
+        )
+        if inventory_status != HTTPStatus.OK or not isinstance(inventory, dict):
+            break
+        page_assets = inventory.get("assets")
+        if not isinstance(page_assets, list):
+            break
+        if len(page_assets) > software_inventory.ASSET_LABEL_PAGE_SIZE:
+            break
+        remaining = software_inventory.ASSET_LABEL_MAX_RECORDS - len(assets)
+        if len(page_assets) > remaining:
+            break
+        assets.extend(item for item in page_assets if isinstance(item, dict))
+        page = inventory.get("page")
+        if not isinstance(page, dict) or page.get("has_more") is not True:
+            asset_inventory_complete = True
+            break
+        returned = len(page_assets)
+        if returned <= 0:
+            break
+        next_offset = offset + returned
+        if next_offset <= offset:
+            break
+        offset = next_offset
+    labeled = software_inventory.apply_asset_labels(
+        payload["items"],
+        assets,
+        inventory_complete=asset_inventory_complete,
+    )
+    coverage = payload.get("coverage")
+    if isinstance(coverage, dict):
+        coverage["labeled_visible_records"] = labeled
+        coverage["asset_label_inventory_complete"] = asset_inventory_complete
+    if not asset_inventory_complete:
+        warnings = payload.get("warnings")
+        if isinstance(warnings, list):
+            warnings.append(
+                "Asset labels are withheld because the complete bounded "
+                "Asset Inventory could not be read."
+            )
+    return status, payload
 
 
 def resolve_asset_ip(
@@ -12335,6 +12413,14 @@ def dhcp_asset_discovery_live_revision(asset_revision: str) -> str:
     return _revision_digest((state_revision, asset_revision))
 
 
+def software_inventory_live_revision() -> str:
+    """Track the local last-known-good software evidence snapshot."""
+    return _bounded_file_revision(
+        Path(SOFTWARE_INVENTORY_STATE_FILE),
+        SOFTWARE_INVENTORY_MAX_BYTES,
+    )
+
+
 def _revision_rows(
     conn: sqlite3.Connection,
     table: str,
@@ -12503,6 +12589,7 @@ def dashboard_live_revisions() -> dict[str, str]:
         "incidents": incident_response_live_revision(),
         "asset_inventory": asset_revision,
         "dhcp_asset_discovery": dhcp_asset_discovery_live_revision(asset_revision),
+        "software_inventory": software_inventory_live_revision(),
     }
 
 
@@ -12644,7 +12731,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/asset-inventory", "/api/dhcp-asset-discovery", "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-incidents", "/api/soc-incidents/reanalysis-runs", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-incidents/") and parsed.path.endswith("/detail")) or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith(("/ack", "/escalate"))):
+        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/asset-inventory", "/api/dhcp-asset-discovery", "/api/software-inventory", "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-incidents", "/api/soc-incidents/reanalysis-runs", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-incidents/") and parsed.path.endswith("/detail")) or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith(("/ack", "/escalate"))):
             if parsed.path == "/admin" and not self._admin_authenticated():
                 self.send_response(HTTPStatus.FOUND)
                 self.send_header("Location", "/admin/login")
@@ -12997,6 +13084,9 @@ class PortalHandler(BaseHTTPRequestHandler):
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/dhcp-asset-discovery":
             status, data = dhcp_asset_discovery_response()
+            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if path == "/api/software-inventory":
+            status, data = software_inventory_response(query=query)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/llm-analysis/current":
             return self._send(HTTPStatus.OK, json.dumps(read_llm_current_analysis(), indent=2).encode(), "application/json; charset=utf-8")

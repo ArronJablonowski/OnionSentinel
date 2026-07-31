@@ -46,6 +46,7 @@ class OnionSentinelServerTests(unittest.TestCase):
 
     def test_only_soc_api_routes_are_exposed(self):
         self.assertTrue(server.is_soc_get_api("/api/asset-inventory"))
+        self.assertTrue(server.is_soc_get_api("/api/software-inventory"))
         self.assertTrue(server.is_soc_get_api("/api/soc-alerts"))
         self.assertTrue(server.is_soc_get_api("/api/soc-incidents"))
         self.assertTrue(server.is_soc_get_api("/api/soc-incidents/reanalysis-runs"))

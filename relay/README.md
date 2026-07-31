@@ -122,6 +122,15 @@ collector is disabled; both use the same pinned hosts and existing
 incident-evidence key. Query details are returned only after the Mac validates
 the response contract and fixed query audit.
 
+Software Inventory uses the same existing key pair and broker without adding a
+route, account, or credential. The broker recognizes only the exact
+`onion-sentinel-software-inventory-v1` request, revalidates its source, bounded
+window, page size, cursor, record provenance, timestamps, pagination, fixed
+index/dataset audit, and pseudonymous endpoint reference, and then forwards it
+to the co-located fixed helper on Security Onion. The scheduled Mac collector
+retains a cursor only in memory while proving a complete snapshot; it never
+persists or logs the transient OSQuery hostname cursor.
+
 Install the dedicated public key on the Mac Studio with the repo's backup-first
 helper:
 

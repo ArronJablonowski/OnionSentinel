@@ -40,7 +40,8 @@ critical_launch_agents_down() {
     com.arron.soc.alert-store.plist \
     com.arron.soc.ai-analysis.plist \
     com.arron.soc.ai-analysis-cli.plist \
-    com.arron.soc.dhcp-asset-discovery.plist
+    com.arron.soc.dhcp-asset-discovery.plist \
+    com.arron.soc.software-inventory.plist
   do
     launchctl unload "$LAUNCHD_DIR/$plist" >/dev/null 2>&1 || true
   done
@@ -48,7 +49,8 @@ critical_launch_agents_down() {
     com.arron.soc.alert-store \
     com.arron.soc.ai-analysis \
     com.arron.soc.ai-analysis-cli \
-    com.arron.soc.dhcp-asset-discovery
+    com.arron.soc.dhcp-asset-discovery \
+    com.arron.soc.software-inventory
   do
     launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
   done
@@ -90,7 +92,8 @@ critical_launch_agents_are_down() {
     com.arron.soc.alert-store \
     com.arron.soc.ai-analysis \
     com.arron.soc.ai-analysis-cli \
-    com.arron.soc.dhcp-asset-discovery
+    com.arron.soc.dhcp-asset-discovery \
+    com.arron.soc.software-inventory
   do
     if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
       return 1
@@ -113,6 +116,7 @@ keep_critical_agents_down_on_failure() {
     critical_launch_agents_down
     echo "Install failed; alert-store and both AI LaunchAgents remain stopped." >&2
     echo "The DHCP asset-discovery LaunchAgent also remains stopped." >&2
+    echo "The software-inventory LaunchAgent also remains stopped." >&2
   fi
   return $exit_code
 }
@@ -124,9 +128,10 @@ if ! critical_launch_agents_are_down; then
   exit 1
 fi
 
-mkdir -p "$STACK_DIR/alert_store/config" "$STACK_DIR/alert_store/lib" "$STACK_DIR/postgres" "$STACK_DIR/bin" "$STACK_DIR/config" "$STACK_DIR/config/maxmind" "$STACK_DIR/logs" "$STACK_DIR/run" "$STACK_DIR/python" "$STACK_DIR/alert_store_data" "$STACK_DIR/alert_store_postgres_data" "$STACK_DIR/n8n_data" "$STACK_DIR/soc-alerts" "$STACK_DIR/soc-alerts/agent-memory" "$STACK_DIR/soc-alerts/pcap-analysis" "$STACK_DIR/pcap-evidence/artifacts" "$STACK_DIR/asset-discovery"
+mkdir -p "$STACK_DIR/alert_store/config" "$STACK_DIR/alert_store/lib" "$STACK_DIR/postgres" "$STACK_DIR/bin" "$STACK_DIR/config" "$STACK_DIR/config/maxmind" "$STACK_DIR/logs" "$STACK_DIR/run" "$STACK_DIR/python" "$STACK_DIR/alert_store_data" "$STACK_DIR/alert_store_postgres_data" "$STACK_DIR/n8n_data" "$STACK_DIR/soc-alerts" "$STACK_DIR/soc-alerts/agent-memory" "$STACK_DIR/soc-alerts/pcap-analysis" "$STACK_DIR/pcap-evidence/artifacts" "$STACK_DIR/asset-discovery" "$STACK_DIR/software-inventory"
 chmod 0700 "$STACK_DIR/run"
 chmod 0700 "$STACK_DIR/asset-discovery"
+chmod 0700 "$STACK_DIR/software-inventory"
 chmod 0750 "$STACK_DIR/config/maxmind"
 touch "$STACK_DIR/run/ai-analysis-ollama.wake" "$STACK_DIR/run/ai-analysis-cli.wake" "$STACK_DIR/run/pcap-analysis.wake"
 chmod 0600 "$STACK_DIR/run/ai-analysis-ollama.wake" "$STACK_DIR/run/ai-analysis-cli.wake" "$STACK_DIR/run/pcap-analysis.wake"
@@ -343,6 +348,7 @@ cp "$REPO_DIR/n8n/bin/maintain-alert-store-sqlite.zsh" "$STACK_DIR/bin/maintain-
 cp "$REPO_DIR/n8n/bin/detection_validation.py" "$STACK_DIR/bin/detection_validation.py"
 cp "$REPO_DIR/n8n/bin/asset_inventory.py" "$STACK_DIR/bin/asset_inventory.py"
 cp "$REPO_DIR/n8n/bin/collect-dhcp-asset-discovery.py" "$STACK_DIR/bin/collect-dhcp-asset-discovery.py"
+cp "$REPO_DIR/n8n/bin/collect-software-inventory.py" "$STACK_DIR/bin/collect-software-inventory.py"
 cp "$REPO_DIR/n8n/bin/query-security-onion.py" "$STACK_DIR/bin/query-security-onion.py"
 cp "$REPO_DIR/n8n/bin/promote-dhcp-asset.py" "$STACK_DIR/bin/promote-dhcp-asset.py"
 cp "$REPO_DIR/n8n/bin/migrate-assets-to-postgres.py" "$STACK_DIR/bin/migrate-assets-to-postgres.py"
@@ -430,6 +436,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/jsonl_log.py" "$DASHBOARD_RUNTIME_DIR/jso
 cp "$REPO_DIR/n8n/bin/security_jsonl_log.py" "$DASHBOARD_RUNTIME_DIR/security_jsonl_log.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/report_portal.py" "$DASHBOARD_RUNTIME_DIR/report_portal.py"
 cp "$REPO_DIR/n8n/bin/asset_inventory.py" "$DASHBOARD_RUNTIME_DIR/asset_inventory.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/software_inventory.py" "$DASHBOARD_RUNTIME_DIR/software_inventory.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/soc_alert_api.py" "$DASHBOARD_RUNTIME_DIR/soc_alert_api.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/artifact_cache.py" "$DASHBOARD_RUNTIME_DIR/artifact_cache.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/response_cache.py" "$DASHBOARD_RUNTIME_DIR/response_cache.py"
@@ -468,12 +475,26 @@ PY
   chmod 0600 "$STACK_DIR/config/dhcp-asset-discovery.json"
   echo "Created disabled $STACK_DIR/config/dhcp-asset-discovery.json example." >&2
 fi
-# Release 31aa015 initially introduced a dedicated DHCP key. The discovery
-# transport now intentionally inherits the established read-only
-# incident-evidence SSH lane. Preserve DHCP scheduling/retention choices while
-# synchronizing only the four SSH transport identity fields.
+if [[ ! -f "$STACK_DIR/config/software-inventory.json" ]]; then
+  /usr/bin/python3 - "$HOME" "$REPO_DIR/n8n/config/software-inventory.example.json" "$STACK_DIR/config/software-inventory.json" <<'PY'
+from pathlib import Path
+import sys
+
+home, source, destination = sys.argv[1:4]
+Path(destination).write_text(
+    Path(source).read_text(encoding="utf-8").replace("__HOME__", home),
+    encoding="utf-8",
+)
+PY
+  chmod 0600 "$STACK_DIR/config/software-inventory.json"
+  echo "Created disabled $STACK_DIR/config/software-inventory.json example." >&2
+fi
+# DHCP discovery and software inventory intentionally inherit the established
+# read-only incident-evidence SSH lane. Preserve each collector's scheduling
+# and paging choices while synchronizing only the four SSH identity fields.
 /usr/bin/python3 - \
   "$STACK_DIR/config/dhcp-asset-discovery.json" \
+  "$STACK_DIR/config/software-inventory.json" \
   "$STACK_DIR/config/incident-evidence.json" <<'PY'
 import json
 import os
@@ -481,35 +502,37 @@ from pathlib import Path
 import sys
 import tempfile
 
-destination_name, incident_name = sys.argv[1:3]
-destination = Path(destination_name)
-config = json.loads(destination.read_text(encoding="utf-8"))
+*destination_names, incident_name = sys.argv[1:]
 incident = json.loads(Path(incident_name).read_text(encoding="utf-8"))
 transport_fields = ("host", "ssh_user", "ssh_key", "known_hosts")
-if (
-    isinstance(config, dict)
-    and isinstance(incident, dict)
-    and all(isinstance(incident.get(field), str) and incident[field] for field in transport_fields)
+if isinstance(incident, dict) and all(
+    isinstance(incident.get(field), str) and incident[field]
+    for field in transport_fields
 ):
-    updated = False
-    for field in transport_fields:
-        if config.get(field) != incident[field]:
-            config[field] = incident[field]
-            updated = True
-    if not updated:
-        raise SystemExit(0)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=destination.parent,
-        prefix=f".{destination.name}.",
-        delete=False,
-    ) as handle:
-        json.dump(config, handle, indent=2)
-        handle.write("\n")
-        temporary = Path(handle.name)
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, destination)
+    for destination_name in destination_names:
+        destination = Path(destination_name)
+        config = json.loads(destination.read_text(encoding="utf-8"))
+        if not isinstance(config, dict):
+            continue
+        updated = False
+        for field in transport_fields:
+            if config.get(field) != incident[field]:
+                config[field] = incident[field]
+                updated = True
+        if not updated:
+            continue
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            delete=False,
+        ) as handle:
+            json.dump(config, handle, indent=2)
+            handle.write("\n")
+            temporary = Path(handle.name)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
 PY
 # Persist the already validated release marker while preserving every
 # operator-owned secret and comment in the live .env.
@@ -530,6 +553,7 @@ for plist in \
   com.arron.soc.dashboard-refresh.plist \
   com.arron.soc.daily-rollup.plist \
   com.arron.soc.dhcp-asset-discovery.plist \
+  com.arron.soc.software-inventory.plist \
   com.arron.onion-sentinel.web.plist \
   com.arron.onion-sentinel.web-guard.plist \
   com.arron.onion-sentinel.harness-maintenance.plist \
@@ -566,6 +590,7 @@ launchctl unload "$LAUNCHD_DIR/com.arron.soc.pcap-retention.plist" >/dev/null 2>
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.dashboard-refresh.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.dhcp-asset-discovery.plist" >/dev/null 2>&1 || true
+launchctl unload "$LAUNCHD_DIR/com.arron.soc.software-inventory.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.web-guard.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.web.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.harness-maintenance.plist" >/dev/null 2>&1 || true
@@ -581,6 +606,7 @@ launchctl load "$LAUNCHD_DIR/com.arron.soc.ai-analysis-cli.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.dashboard-refresh.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.dhcp-asset-discovery.plist"
+launchctl load "$LAUNCHD_DIR/com.arron.soc.software-inventory.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.web.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.web-guard.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.harness-maintenance.plist"

@@ -34,6 +34,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `bin/detection_validation.py` | Deterministic deployed-rule and packet-predicate validator; emits bounded semantics and never exposes raw payloads. |
 | `bin/asset_inventory.py` | Strict time-aware asset inventory loader and exact identifier resolver. |
 | `bin/collect-dhcp-asset-discovery.py` | Scheduled fixed-query DHCP identity collector with bounded truncation splitting and optional 1–30 day historical backfill. |
+| `bin/collect-software-inventory.py` | Hourly, last-good snapshot collector for fixed endpoint-reported, Zeek software, and HTTP User-Agent observations through the existing restricted relay lane. |
 | `bin/promote-dhcp-asset.py` | Explicit fingerprint-bound operator promotion of one DHCP identity with collision checks, rollback copy, validation, and atomic inventory update. |
 | `bin/export-adjudicated-analysis-replays.py` | Exports append-only human adjudications into a private mode-0600 replay suite. |
 | `bin/agent_memory.py` | Shared role-aware Markdown memory library with relevance retrieval, validation, locking, deduplication, and expiry. |
@@ -52,6 +53,7 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `config/ai_model_settings.json` | Enabled Ollama/GPT CLI roster, exact per-agent primary and optional second-opinion route assignments, legacy compatibility fields, and MaxMind paths. |
 | `config/detection_playbooks.json` | Versioned, code-owned exact-ID validation playbooks for signature-specific discriminators and rule-drift checks. |
 | `config/asset_inventory.example.json` | Empty sanitized template for the operator-owned runtime asset inventory. |
+| `config/software-inventory.example.json` | Disabled-by-default configuration for the restricted Software Inventory collector. |
 | `agent-memory/` | Sanitized starter Markdown memory files for individual Cyber Security Agents plus shared cross-agent memory. Installed into `$HOME/n8n-local/soc-alerts/agent-memory` only if missing. |
 | `launchd/` | Mac Studio LaunchAgents for stack supervision, AI jobs, PCAP parsing, and dry-run PCAP retention. |
 

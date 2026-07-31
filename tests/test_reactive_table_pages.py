@@ -54,6 +54,7 @@ class ReactiveTablePageTests(unittest.TestCase):
             "alerts": "soc-alerts-live-stream",
             "investigations": "incident-response-cases",
             "asset_inventory": "asset-inventory-tables",
+            "software_inventory": "software-inventory-table",
             "system_health": "system-health-tables",
             "siem_engineering": "siem-engineering-tables",
             "threat_hunter": "threat-hunter-tables",
@@ -86,6 +87,7 @@ class ReactiveTablePageTests(unittest.TestCase):
 
     def test_asset_and_report_refreshes_keep_existing_controls(self) -> None:
         asset_page = self.render("asset_inventory")
+        software_page = self.render("software_inventory")
         report_page = self.render("reports")
 
         self.assertIn("if(assetLoadPromise)return assetLoadPromise", asset_page)
@@ -97,6 +99,13 @@ class ReactiveTablePageTests(unittest.TestCase):
         self.assertIn("await load();", asset_page)
         self.assertIn("revisionKey:'asset_inventory'", asset_page)
         self.assertIn("revisionKey:'dhcp_asset_discovery'", asset_page)
+        self.assertIn("if(softwareLoadPromise){", software_page)
+        self.assertIn("if(announce)softwareReloadPending=true", software_page)
+        self.assertIn("if(nextSignature===softwareSignature)return false", software_page)
+        self.assertIn("captureViewState()", software_page)
+        self.assertIn("restoreViewState(viewState)", software_page)
+        self.assertIn("revisionKey:'software_inventory'", software_page)
+        self.assertIn("intervalMs:60000", software_page)
         self.assertIn("loadLogs(false)", report_page)
         self.assertIn("Promise.all([loadCurrent(), loadLogs(false)])", report_page)
         self.assertIn("if (nextSignature === currentSignature) return false", report_page)

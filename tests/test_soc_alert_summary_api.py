@@ -1544,7 +1544,12 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["metrics"]["by_analyst_status"]["total"], payload["counts"]["total"])
         self.assertEqual(
             set(payload["revisions"]),
-            {"incidents", "asset_inventory", "dhcp_asset_discovery"},
+            {
+                "incidents",
+                "asset_inventory",
+                "dhcp_asset_discovery",
+                "software_inventory",
+            },
         )
         self.assertTrue(all(len(value) == 64 for value in payload["revisions"].values()))
 
@@ -1554,7 +1559,12 @@ class SocAlertSummaryApiTest(unittest.TestCase):
 
         self.assertEqual(
             set(revisions),
-            {"incidents", "asset_inventory", "dhcp_asset_discovery"},
+            {
+                "incidents",
+                "asset_inventory",
+                "dhcp_asset_discovery",
+                "software_inventory",
+            },
         )
         self.assertNotIn("Newest detection", encoded)
         self.assertNotIn("192.0.2.10", encoded)

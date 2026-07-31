@@ -11,6 +11,7 @@ dependency.
 | --- | --- |
 | `onion_sentinel_server.py` | Dedicated port `8766` service that exposes only Onion Sentinel static files, admin login, and SOC APIs. |
 | `report_portal.py` | Transitional SOC API implementation imported from the dedicated server; non-SOC routes are not exposed by `onion_sentinel_server.py`. |
+| `software_inventory.py` | Strict reader and filter layer for the collector-produced Software Inventory snapshot. |
 | `artifact_cache.py` | Thread-safe, single-flight cache for parsed Markdown/JSON artifacts. |
 | `response_cache.py` | Short-lived, bounded cache for serialized read-only API responses. |
 | `scripts/build_soc_alerts_dashboard.py` | Builds the static dashboard pages from SQLite/report artifacts. |
@@ -33,6 +34,10 @@ dependency.
 ## Dashboard Features
 
 - API-backed paginated SOC Alerts table.
+- Software Inventory page with bounded search, filters, sorting, pagination,
+  freshness, collection health, and explicit provenance for endpoint-reported,
+  network-observed, and inferred package evidence. The page reads only the
+  local last-good snapshot; web requests never dispatch Security Onion queries.
 - SOC Alerts rows include an `Escalate` action. It creates or reopens one
   durable case for the stable group and queues Incident Responder analysis.
 - Incident Responder is a paginated case workspace with desktop and mobile

@@ -1,0 +1,648 @@
+#!/usr/bin/env python3
+"""Export bounded, normalized software observations from fixed Elastic sources.
+
+This helper is intentionally not a query proxy. The caller selects only a
+reviewed source, UTC window, page size, and validated composite cursor. Index
+names, datasets, fields, filters, aggregations, and output normalization remain
+fixed on Security Onion.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import ipaddress
+import json
+import os
+import re
+import selectors
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+CONTRACT = "onion-sentinel-software-inventory-v1"
+OPERATION = "software_observations"
+SO_QUERY = Path("/usr/sbin/so-elasticsearch-query")
+MAX_REQUEST_BYTES = 16 * 1024
+MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+MAX_STDERR_BYTES = 128 * 1024
+MAX_PAGE_SIZE = 500
+MAX_WINDOW = dt.timedelta(days=31)
+QUERY_TIMEOUT_SECONDS = 60
+CURSOR_KEYS = {"asset", "product", "version"}
+MAX_CURSOR_BYTES = {
+    "asset": 512,
+    "product": 4096,
+    "version": 1024,
+}
+# Network-derived inventory is intentionally limited to stable LAN address
+# space. Link-local ranges are excluded because they are not routable asset
+# identities and create noisy, interface-scoped duplicates.
+LAN_SOURCE_CIDRS = (
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "fc00::/7",
+)
+LAN_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in LAN_SOURCE_CIDRS
+)
+UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+RECORD_KEYS = {
+    "evidence_id",
+    "source",
+    "source_dataset",
+    "tier",
+    "confidence",
+    "asset_ref_type",
+    "asset_ref",
+    "platform",
+    "product",
+    "version",
+    "category",
+    "first_seen",
+    "last_seen",
+    "observation_count",
+}
+SOURCE_SPECS = {
+    "osquery_apps": {
+        "index": "logs-osquery_manager.result-default",
+        "dataset": "osquery_manager.result",
+        # The indexed hostname may appear only in the transient pagination
+        # cursor. Public records use a normalized stable digest and never
+        # expose agent/Fleet/action identifiers.
+        "asset_field": "host.name",
+        "product_field": "osquery.name",
+        "version_field": "osquery.bundle_short_version",
+        "required_fields": [
+            "host.name",
+            "osquery.name",
+            "osquery.bundle_identifier",
+        ],
+        "detail_fields": ["osquery.category"],
+        "asset_ref_type": "host",
+        "tier": "installed",
+        "confidence": "high",
+        "platform_default": "darwin",
+        "category_default": "application",
+        "platform_field": "",
+        "category_field": "osquery.category",
+        "lan_only": False,
+    },
+    "zeek_software": {
+        "index": "logs-zeek-so",
+        "dataset": "zeek.software",
+        "asset_field": "source.ip",
+        "product_field": "software.name",
+        "version_field": "software.version.unparsed",
+        "required_fields": ["source.ip", "software.name"],
+        "detail_fields": ["software.type"],
+        "asset_ref_type": "ip",
+        "tier": "observed",
+        "confidence": "medium",
+        "platform_default": "",
+        "category_default": "software",
+        "platform_field": "",
+        "category_field": "software.type",
+        "lan_only": True,
+    },
+    "http_user_agent": {
+        "index": "logs-zeek-so",
+        "dataset": "zeek.http",
+        "asset_field": "source.ip",
+        "product_field": "http.useragent",
+        # The deployed Zeek HTTP mapping has no populated parsed-UA version.
+        # Preserve that evidence gap rather than mislabeling HTTP protocol
+        # version as application version.
+        "version_field": None,
+        "required_fields": ["source.ip", "http.useragent"],
+        "detail_fields": [],
+        "asset_ref_type": "ip",
+        "tier": "inferred",
+        "confidence": "low",
+        "platform_default": "",
+        "category_default": "http_client",
+        "platform_field": "",
+        "category_field": "",
+        "lan_only": True,
+    },
+}
+
+
+class BoundedCommandError(RuntimeError):
+    pass
+
+
+def emit(payload: dict, code: int = 0) -> int:
+    sys.stdout.write(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
+    return code
+
+
+def parse_timestamp(value: object) -> dt.datetime:
+    text = str(value or "").strip().replace("Z", "+00:00")
+    parsed = dt.datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp lacks an offset")
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def format_timestamp(value: dt.datetime) -> str:
+    return (
+        value.astimezone(dt.timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _bounded_text(
+    value: object,
+    maximum_bytes: int,
+    *,
+    field: str,
+    allow_empty: bool = False,
+) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    if value != value.strip() or any(not character.isprintable() for character in value):
+        raise ValueError(f"{field} contains invalid whitespace or control characters")
+    if not value and not allow_empty:
+        raise ValueError(f"{field} must not be empty")
+    if len(value.encode("utf-8")) > maximum_bytes:
+        raise ValueError(f"{field} exceeds its byte limit")
+    return value
+
+
+def normalized_host_name(value: str) -> str:
+    normalized = value.strip().rstrip(".").lower()
+    if not normalized:
+        raise ValueError("OSQuery hostname must not be empty")
+    if UUID_RE.fullmatch(normalized):
+        raise ValueError("OSQuery hostname must not be a UUID-shaped identifier")
+    return _bounded_text(
+        normalized,
+        MAX_CURSOR_BYTES["asset"],
+        field="after.asset",
+    )
+
+
+def validate_cursor(value: object, source_name: str | None = None) -> dict | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != CURSOR_KEYS:
+        raise ValueError("after must be null or contain only asset, product, and version")
+    cursor = {
+        "asset": _bounded_text(
+            value["asset"],
+            MAX_CURSOR_BYTES["asset"],
+            field="after.asset",
+        ),
+        "product": _bounded_text(
+            value["product"],
+            MAX_CURSOR_BYTES["product"],
+            field="after.product",
+        ),
+        "version": None,
+    }
+    if value["version"] is not None:
+        cursor["version"] = _bounded_text(
+            value["version"],
+            MAX_CURSOR_BYTES["version"],
+            field="after.version",
+            allow_empty=True,
+        )
+    if source_name == "osquery_apps":
+        if UUID_RE.fullmatch(cursor["asset"]):
+            raise ValueError("OSQuery cursor hostname must not be UUID-shaped")
+    return cursor
+
+
+def validate_request(
+    request: object,
+    now: dt.datetime | None = None,
+) -> tuple[str, dt.datetime, dt.datetime, int, dict | None]:
+    expected = {"contract", "operation", "source", "window", "page_size", "after"}
+    if not isinstance(request, dict) or set(request) != expected:
+        raise ValueError(
+            "request must contain only contract, operation, source, window, "
+            "page_size, and after"
+        )
+    if request["contract"] != CONTRACT or request["operation"] != OPERATION:
+        raise ValueError("unsupported software inventory operation")
+    source = request["source"]
+    if not isinstance(source, str) or source not in SOURCE_SPECS:
+        raise ValueError("source is not allowed")
+    window = request["window"]
+    if not isinstance(window, dict) or set(window) != {"start", "end"}:
+        raise ValueError("window must contain only start and end")
+    start = parse_timestamp(window["start"])
+    end = parse_timestamp(window["end"])
+    current = (now or dt.datetime.now(dt.timezone.utc)).astimezone(dt.timezone.utc)
+    if start >= end or end - start > MAX_WINDOW:
+        raise ValueError("query window must be positive and no longer than 31 days")
+    if end > current + dt.timedelta(minutes=5):
+        raise ValueError("query window ends too far in the future")
+    page_size = request["page_size"]
+    if (
+        isinstance(page_size, bool)
+        or not isinstance(page_size, int)
+        or not 1 <= page_size <= MAX_PAGE_SIZE
+    ):
+        raise ValueError("page_size must be an integer from 1 through 500")
+    return (
+        source,
+        start,
+        end,
+        page_size,
+        validate_cursor(request["after"], source),
+    )
+
+
+def run_bounded_command(command: list[str]) -> subprocess.CompletedProcess:
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    assert process.stdout is not None and process.stderr is not None
+    selector = selectors.DefaultSelector()
+    streams = {
+        process.stdout: (bytearray(), MAX_OUTPUT_BYTES),
+        process.stderr: (bytearray(), MAX_STDERR_BYTES),
+    }
+    for stream in streams:
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ)
+    deadline = time.monotonic() + QUERY_TIMEOUT_SECONDS
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise BoundedCommandError("query timed out")
+            events = selector.select(timeout=min(0.25, remaining))
+            if not events and process.poll() is not None:
+                events = [
+                    (key, selectors.EVENT_READ)
+                    for key in selector.get_map().values()
+                ]
+            for key, _mask in events:
+                stream = key.fileobj
+                target, limit = streams[stream]
+                try:
+                    chunk = os.read(stream.fileno(), 64 * 1024)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(stream)
+                    continue
+                if len(target) + len(chunk) > limit:
+                    raise BoundedCommandError("query output exceeded its byte limit")
+                target.extend(chunk)
+        return_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            process.kill()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        raise
+    finally:
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
+    return subprocess.CompletedProcess(
+        command,
+        return_code,
+        bytes(streams[process.stdout][0]),
+        bytes(streams[process.stderr][0]),
+    )
+
+
+def nested_value(source: dict, dotted: str) -> object:
+    if dotted in source:
+        return source[dotted]
+    value: object = source
+    for component in dotted.split("."):
+        if not isinstance(value, dict) or component not in value:
+            return None
+        value = value[component]
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
+def _metric_timestamp(bucket: dict, name: str) -> str:
+    metric = bucket.get(name)
+    if not isinstance(metric, dict):
+        raise RuntimeError(f"software aggregation omitted {name}")
+    value = metric.get("value_as_string")
+    if isinstance(value, str):
+        try:
+            return format_timestamp(parse_timestamp(value))
+        except ValueError as exc:
+            raise RuntimeError(f"software aggregation returned invalid {name}") from exc
+    epoch_millis = metric.get("value")
+    if isinstance(epoch_millis, bool) or not isinstance(epoch_millis, (int, float)):
+        raise RuntimeError(f"software aggregation returned invalid {name}")
+    return format_timestamp(
+        dt.datetime.fromtimestamp(epoch_millis / 1000, tz=dt.timezone.utc)
+    )
+
+
+def _latest_source(bucket: dict) -> dict:
+    latest = bucket.get("latest")
+    hits = latest.get("hits") if isinstance(latest, dict) else None
+    rows = hits.get("hits") if isinstance(hits, dict) else None
+    if not isinstance(rows, list) or not rows:
+        return {}
+    first = rows[0]
+    source = first.get("_source") if isinstance(first, dict) else None
+    return source if isinstance(source, dict) else {}
+
+
+def _normalized_asset(source_name: str, raw_asset: str) -> tuple[str, str]:
+    spec = SOURCE_SPECS[source_name]
+    if spec["asset_ref_type"] == "host":
+        try:
+            host_name = normalized_host_name(raw_asset)
+        except ValueError as exc:
+            raise RuntimeError(
+                "software aggregation returned an invalid host identity"
+            ) from exc
+        digest = hashlib.sha256(("host\0" + host_name).encode("utf-8")).hexdigest()
+        return "host", digest[:24]
+    try:
+        address = ipaddress.ip_address(raw_asset)
+    except ValueError as exc:
+        raise RuntimeError("software aggregation returned an invalid IP asset") from exc
+    if not any(address in network for network in LAN_NETWORKS):
+        raise RuntimeError("software aggregation returned a non-LAN IP asset")
+    return "ip", str(address)
+
+
+def normalize_bucket(source_name: str, bucket: object) -> tuple[dict, dict]:
+    if not isinstance(bucket, dict):
+        raise RuntimeError("software aggregation returned a non-object bucket")
+    raw_cursor = bucket.get("key")
+    if (
+        SOURCE_SPECS[source_name]["version_field"] is None
+        and isinstance(raw_cursor, dict)
+        and set(raw_cursor) == {"asset", "product"}
+    ):
+        raw_cursor = {**raw_cursor, "version": None}
+    try:
+        cursor = validate_cursor(raw_cursor, source_name)
+    except ValueError as exc:
+        raise RuntimeError(f"software aggregation returned an invalid cursor: {exc}") from exc
+    if cursor is None:
+        raise RuntimeError("software aggregation bucket omitted its key")
+    spec = SOURCE_SPECS[source_name]
+    asset_ref_type, asset_ref = _normalized_asset(source_name, cursor["asset"])
+    product = cursor["product"]
+    version = cursor["version"] or ""
+    count = bucket.get("doc_count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        raise RuntimeError("software aggregation returned an invalid document count")
+    latest = _latest_source(bucket)
+    platform = spec["platform_default"]
+    category = spec["category_default"]
+    if spec["platform_field"]:
+        value = nested_value(latest, spec["platform_field"])
+        if isinstance(value, str) and value:
+            platform = _bounded_text(
+                value,
+                160,
+                field="record.platform",
+            )
+    if spec["category_field"]:
+        value = nested_value(latest, spec["category_field"])
+        if isinstance(value, str) and value:
+            category = _bounded_text(
+                value,
+                256,
+                field="record.category",
+            )
+    identity = "\0".join((source_name, asset_ref_type, asset_ref, product, version))
+    record = {
+        "evidence_id": hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24],
+        "source": source_name,
+        "source_dataset": spec["dataset"],
+        "tier": spec["tier"],
+        "confidence": spec["confidence"],
+        "asset_ref_type": asset_ref_type,
+        "asset_ref": asset_ref,
+        "platform": platform,
+        "product": product,
+        "version": version,
+        "category": category,
+        "first_seen": _metric_timestamp(bucket, "first_seen"),
+        "last_seen": _metric_timestamp(bucket, "last_seen"),
+        "observation_count": count,
+    }
+    if set(record) != RECORD_KEYS:
+        raise RuntimeError("internal normalized software record contract mismatch")
+    return record, cursor
+
+
+def build_query(
+    source_name: str,
+    start: dt.datetime,
+    end: dt.datetime,
+    page_size: int,
+    after: dict | None,
+) -> dict:
+    spec = SOURCE_SPECS[source_name]
+    filters = [
+        {"term": {"event.dataset": spec["dataset"]}},
+        {
+            "range": {
+                "@timestamp": {
+                    "gte": format_timestamp(start),
+                    "lt": format_timestamp(end),
+                }
+            }
+        },
+        *[
+            {"exists": {"field": field}}
+            for field in spec["required_fields"]
+        ],
+    ]
+    if spec["lan_only"]:
+        filters.append({
+            "bool": {
+                "should": [
+                    {"term": {"source.ip": cidr}}
+                    for cidr in LAN_SOURCE_CIDRS
+                ],
+                "minimum_should_match": 1,
+            }
+        })
+    composite_sources = [
+        {
+            "asset": {
+                "terms": {
+                    "field": spec["asset_field"],
+                    "missing_bucket": False,
+                }
+            }
+        },
+        {
+            "product": {
+                "terms": {
+                    "field": spec["product_field"],
+                    "missing_bucket": False,
+                }
+            }
+        },
+    ]
+    if spec["version_field"] is not None:
+        composite_sources.append({
+            "version": {
+                "terms": {
+                    "field": spec["version_field"],
+                    "missing_bucket": True,
+                    "missing_order": "first",
+                }
+            }
+        })
+    composite = {
+        # One look-ahead bucket gives unambiguous terminal pagination while
+        # the public page remains capped at MAX_PAGE_SIZE.
+        "size": page_size + 1,
+        "sources": composite_sources,
+    }
+    if after is not None:
+        elastic_after = dict(after)
+        if spec["version_field"] is None:
+            elastic_after.pop("version", None)
+        composite["after"] = elastic_after
+    child_aggs = {
+        "first_seen": {"min": {"field": "@timestamp"}},
+        "last_seen": {"max": {"field": "@timestamp"}},
+    }
+    if spec["detail_fields"]:
+        child_aggs["latest"] = {
+            "top_hits": {
+                "size": 1,
+                "sort": [{"@timestamp": {"order": "desc"}}],
+                "_source": spec["detail_fields"],
+            }
+        }
+    return {
+        "size": 0,
+        "query": {"bool": {"filter": filters}},
+        "aggs": {
+            "software": {
+                "composite": composite,
+                "aggs": child_aggs,
+            }
+        },
+    }
+
+
+def execute_request(request: object) -> dict:
+    source_name, start, end, page_size, after = validate_request(request)
+    spec = SOURCE_SPECS[source_name]
+    body = build_query(source_name, start, end, page_size, after)
+    encoded = json.dumps(body, separators=(",", ":"), sort_keys=True)
+    endpoint = f"{spec['index']}/_search"
+    try:
+        proc = run_bounded_command([str(SO_QUERY), endpoint, "-d", encoded])
+    except (BoundedCommandError, OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"bounded software inventory query failed: {exc}") from exc
+    if proc.returncode != 0:
+        detail = " ".join(proc.stderr.decode("utf-8", "replace").split())[:500]
+        raise RuntimeError(f"Security Onion software inventory query failed: {detail}")
+    try:
+        result = json.loads(proc.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Security Onion returned invalid JSON: {exc}") from exc
+    if not isinstance(result, dict):
+        raise RuntimeError("Security Onion software inventory response was not an object")
+    shards = result.get("_shards")
+    if (
+        result.get("timed_out") is True
+        or not isinstance(shards, dict)
+        or int(shards.get("failed") or 0) > 0
+        or int(shards.get("successful") or 0) < 1
+    ):
+        raise RuntimeError("Security Onion software inventory query was incomplete")
+    aggregations = result.get("aggregations")
+    software = (
+        aggregations.get("software")
+        if isinstance(aggregations, dict)
+        else None
+    )
+    buckets = software.get("buckets") if isinstance(software, dict) else None
+    if not isinstance(buckets, list):
+        raise RuntimeError("Security Onion software inventory aggregation was missing")
+    has_more = len(buckets) > page_size
+    selected = buckets[:page_size]
+    records = []
+    response_after = None
+    for bucket in selected:
+        record, cursor = normalize_bucket(source_name, bucket)
+        records.append(record)
+        response_after = cursor
+    if not has_more:
+        response_after = None
+    response = {
+        "ok": True,
+        "contract": CONTRACT,
+        "read_only": True,
+        "source": source_name,
+        "window": {
+            "start": format_timestamp(start),
+            "end": format_timestamp(end),
+        },
+        "returned": len(records),
+        "complete": not has_more,
+        "truncated": has_more,
+        "after": response_after,
+        "records": records,
+        "query_audit": {
+            "index": spec["index"],
+            "dataset": spec["dataset"],
+            "query_digest": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        },
+    }
+    output = json.dumps(response, separators=(",", ":"), sort_keys=True).encode()
+    if len(output) > MAX_OUTPUT_BYTES:
+        raise RuntimeError("bounded software inventory response exceeded its byte limit")
+    return response
+
+
+def main() -> int:
+    if os.environ.get("SSH_ORIGINAL_COMMAND", "").strip():
+        return emit(
+            {"ok": False, "error": "commands are not accepted by this forced endpoint"},
+            2,
+        )
+    raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
+    if len(raw) > MAX_REQUEST_BYTES:
+        return emit({"ok": False, "error": "request exceeds the wrapper byte limit"}, 2)
+    try:
+        request = json.loads(raw.decode("utf-8"))
+        response = execute_request(request)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        return emit(
+            {"ok": False, "error": f"invalid software inventory request: {exc}"},
+            2,
+        )
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        return emit({"ok": False, "error": str(exc)[:700]}, 3)
+    return emit(response)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

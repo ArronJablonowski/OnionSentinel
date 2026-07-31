@@ -14,6 +14,7 @@ install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/export-recent-aler
 install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/export-pcap-window" /usr/local/sbin/export-pcap-window
 install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/export-incident-evidence" /usr/local/sbin/export-incident-evidence
 install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/export-dhcp-observations" /usr/local/sbin/export-dhcp-observations
+install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/export-software-observations" /usr/local/sbin/export-software-observations
 install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/run-live-osquery" /usr/local/sbin/run-live-osquery
 install -o root -g root -m 0755 "$REPO_DIR/security-onion/bin/run-live-osquery-forced" /usr/local/sbin/run-live-osquery-forced
 install -o root -g root -m 0755 -d /usr/local/lib/onion-sentinel
@@ -96,6 +97,9 @@ Next manual step:
 7. DHCP asset discovery reuses the incident-query forced-command key. The
    incident wrapper accepts only the fixed, bounded zeek.dhcp contract and
    never accepts caller-supplied DSL.
+8. Software Inventory reuses that same forced-command lane. Its three named
+   sources are fixed read-only aggregations; it cannot accept an index, field,
+   network, query, or write operation from the caller.
 
 Test:
   sudo -u so-ai-relay sudo -n /usr/local/sbin/export-recent-alerts | jq '.alerts | length'
