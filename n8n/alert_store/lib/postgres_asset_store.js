@@ -968,7 +968,7 @@ function createPostgresAssetStore({pool, schemaPath, logger = console}) {
            criticality, expected_services, expected_behaviors, source_type,
            source_ref, confidence, share_with_hosted_models
          ) VALUES (
-           $1, $2, NULL, $3, $4, $5, $6, $7, $8,
+           $1, $2, NULL, $3, $4, $5, $6, $7::jsonb, $8::jsonb,
            'operator-approved-dhcp-ip-change', $9, $10, $11
          )
          RETURNING record_id, valid_from`,
@@ -979,8 +979,8 @@ function createPostgresAssetStore({pool, schemaPath, logger = console}) {
           current.platform,
           current.owner_ref,
           current.criticality,
-          current.expected_services,
-          current.expected_behaviors,
+          JSON.stringify(current.expected_services),
+          JSON.stringify(current.expected_behaviors),
           sourceRef,
           current.confidence,
           current.share_with_hosted_models,
@@ -1149,7 +1149,8 @@ function createPostgresAssetStore({pool, schemaPath, logger = console}) {
            criticality, expected_services, expected_behaviors, source_type,
            source_ref, confidence, share_with_hosted_models
          ) VALUES (
-           $1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+           $1, $2, NULL, $3, $4, $5, $6, $7::jsonb, $8::jsonb,
+           $9, $10, $11, $12
          )
          RETURNING record_id, valid_from`,
         [
@@ -1159,8 +1160,8 @@ function createPostgresAssetStore({pool, schemaPath, logger = console}) {
           desired.platform,
           desired.owner_ref,
           desired.criticality,
-          desired.expected_services,
-          desired.expected_behaviors,
+          JSON.stringify(desired.expected_services),
+          JSON.stringify(desired.expected_behaviors),
           desired.source_type,
           desired.source_ref,
           desired.confidence,

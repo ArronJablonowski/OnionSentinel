@@ -69,6 +69,11 @@ class PostgresAssetInventoryTests(unittest.TestCase):
             "asset has no preserved DHCP observation to return to review",
             store,
         )
+        self.assertEqual(store.count("$7::jsonb, $8::jsonb"), 2)
+        self.assertIn("JSON.stringify(current.expected_services)", store)
+        self.assertIn("JSON.stringify(current.expected_behaviors)", store)
+        self.assertIn("JSON.stringify(desired.expected_services)", store)
+        self.assertIn("JSON.stringify(desired.expected_behaviors)", store)
 
     def test_schema_allows_distinct_ip_change_review_decision(self) -> None:
         sql = SCHEMA.read_text(encoding="utf-8")
@@ -186,9 +191,11 @@ class PostgresAssetInventoryTests(unittest.TestCase):
           }}
           function fakePool(mode) {{
             const statements = [];
+            const calls = [];
             const client = {{
               query: async (sql, params=[]) => {{
                 statements.push(String(sql));
+                calls.push({{sql:String(sql),params}});
                 if (String(sql).includes('SELECT record.*')) return {{rows:[currentRecord()]}};
                 if (String(sql).includes('SELECT DISTINCT record.asset_id')) return {{rows:[]}};
                 if (String(sql).includes('SELECT identifier_type, normalized_value')) return {{rows:[
@@ -213,6 +220,7 @@ class PostgresAssetInventoryTests(unittest.TestCase):
               query: async () => {{ throw new Error('unexpected pool query'); }},
               connect: async () => client,
               statements,
+              calls,
             }};
           }}
           (async () => {{
@@ -237,6 +245,11 @@ class PostgresAssetInventoryTests(unittest.TestCase):
             if (edited.status !== 'edited') process.exit(2);
             if (!editPool.statements.some(sql => sql.includes(\"VALUES ('asset.edited'\"))) process.exit(3);
             if (!editPool.statements.some(sql => sql.trim() === 'COMMIT')) process.exit(4);
+            const versionInsert = editPool.calls.find(call =>
+              call.sql.includes('INSERT INTO onion_sentinel_assets.inventory_records')
+            );
+            if (!versionInsert.sql.includes('$7::jsonb, $8::jsonb')) process.exit(10);
+            if (versionInsert.params[6] !== '[]' || versionInsert.params[7] !== '[]') process.exit(11);
 
             const demotePool = fakePool('demote');
             const demoteStore = createPostgresAssetStore({{
