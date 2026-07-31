@@ -208,6 +208,11 @@ function createPostgresAssetStore({pool, schemaPath, logger = console}) {
       conditions.push('record.valid_until IS NOT NULL AND record.valid_until <= $1::timestamptz');
     } else if (state === 'scheduled') {
       conditions.push('record.valid_from > $1::timestamptz');
+    } else if (state === 'all') {
+      // Keep the parameter layout identical across filter modes. PostgreSQL
+      // rejects surplus bind values even when the generated WHERE clause is
+      // otherwise valid.
+      conditions.push('$1::timestamptz IS NOT NULL');
     } else if (state !== 'all') {
       throw new Error('asset state filter is invalid');
     }

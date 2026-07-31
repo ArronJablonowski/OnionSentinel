@@ -43,12 +43,14 @@ class PostgresAssetInventoryTests(unittest.TestCase):
 
     def test_service_has_paged_reads_and_token_gated_writes(self) -> None:
         source = SERVICE.read_text(encoding="utf-8")
+        store = STORE.read_text(encoding="utf-8")
         self.assertIn("GET' && parsedUrl.pathname === '/assets/inventory'", source)
         self.assertIn("parsedUrl.searchParams.get('limit')", source)
         self.assertIn("requireAssetStoreWriteAuthorization(request)", source)
         self.assertIn("crypto.timingSafeEqual", source)
         self.assertIn("ASSET_STORE_WRITE_TOKEN", source)
         self.assertIn("store.putDhcpState", source)
+        self.assertIn("conditions.push('$1::timestamptz IS NOT NULL')", store)
 
     def test_runtime_collector_is_database_fail_closed(self) -> None:
         collector = COLLECTOR.read_text(encoding="utf-8")
