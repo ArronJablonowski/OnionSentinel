@@ -1733,7 +1733,15 @@ async function lookupCensys(ip) {
 async function lookupCisaKev(cve) {
   const response = await requestJson({url: 'https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json'});
   const vuln = (response.body?.vulnerabilities || []).find((item) => String(item.cveID || '').toUpperCase() === cve);
-  return normalizedEnrichmentRecord('cisa_kev', cve, 'cve', vuln ? 'malicious' : 'unknown', vuln ? 90 : 0, [vuln?.vendorProject, vuln?.product, vuln?.knownRansomwareCampaignUse], vuln || {found: false});
+  return normalizedEnrichmentRecord(
+    'cisa_kev',
+    cve,
+    'cve',
+    vuln ? 'malicious' : 'unknown',
+    vuln ? 90 : 0,
+    [vuln?.vendorProject, vuln?.product, vuln?.knownRansomwareCampaignUse],
+    response.body,
+  );
 }
 
 async function lookupEpss(cve) {

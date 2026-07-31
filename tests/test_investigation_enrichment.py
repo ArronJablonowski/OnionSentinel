@@ -140,6 +140,10 @@ class InvestigationEnrichmentTests(unittest.TestCase):
         self.assertIn("cachedLookup(source, indicatorType, indicator", alert_store)
         self.assertIn("reserveProviderRateLimitSlot(source)", alert_store)
         self.assertIn("/investigations/enrichment/query", workflow)
+        self.assertIn(
+            "[vuln?.vendorProject, vuln?.product, vuln?.knownRansomwareCampaignUse],\n    response.body,",
+            alert_store,
+        )
         self.assertIn(".slice(0, 16)", alert_store)
         self.assertNotIn(
             "alert_id: `investigation-enrichment:${crypto.createHash",
