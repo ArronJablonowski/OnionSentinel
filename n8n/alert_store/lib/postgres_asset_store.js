@@ -344,51 +344,63 @@ function createPostgresAssetStore({pool, schemaPath, logger = console}) {
         await client.query('DELETE FROM onion_sentinel_assets.identifiers');
         await client.query('DELETE FROM onion_sentinel_assets.inventory_records');
       }
-      for (const record of records) {
-        const inserted = await client.query(
-          `INSERT INTO onion_sentinel_assets.inventory_records (
-             asset_id, valid_from, valid_until, role, platform, owner_ref,
-             criticality, expected_services, expected_behaviors, source_type,
-             source_ref, confidence, share_with_hosted_models
-           ) VALUES (
-             $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13
-           )
-           ON CONFLICT (asset_id, valid_from) DO UPDATE SET
-             valid_until = EXCLUDED.valid_until, role = EXCLUDED.role,
-             platform = EXCLUDED.platform, owner_ref = EXCLUDED.owner_ref,
-             criticality = EXCLUDED.criticality,
-             expected_services = EXCLUDED.expected_services,
-             expected_behaviors = EXCLUDED.expected_behaviors,
-             source_type = EXCLUDED.source_type, source_ref = EXCLUDED.source_ref,
-             confidence = EXCLUDED.confidence,
-             share_with_hosted_models = EXCLUDED.share_with_hosted_models,
-             updated_at = clock_timestamp()
-           RETURNING record_id`,
-          [
-            record.asset_id, record.valid_from, record.valid_until, record.role,
-            record.platform, record.owner_ref, record.criticality,
-            JSON.stringify(record.expected_services),
-            JSON.stringify(record.expected_behaviors), record.source_type,
-            record.source_ref, record.confidence,
-            record.share_with_hosted_models,
-          ],
-        );
-        const recordId = inserted.rows[0].record_id;
-        await client.query(
-          'DELETE FROM onion_sentinel_assets.identifiers WHERE record_id = $1',
-          [recordId],
-        );
-        for (const [kind, values] of Object.entries(record.identifiers)) {
-          for (const value of values) {
-            await client.query(
-              `INSERT INTO onion_sentinel_assets.identifiers (
-                 record_id, identifier_type, identifier_value, normalized_value
-               ) VALUES ($1, $2, $3, $4)`,
-              [recordId, kind, value, value.toLowerCase()],
-            );
-          }
-        }
-      }
+      const importJson = JSON.stringify(records);
+      await client.query(
+        `INSERT INTO onion_sentinel_assets.inventory_records (
+           asset_id, valid_from, valid_until, role, platform, owner_ref,
+           criticality, expected_services, expected_behaviors, source_type,
+           source_ref, confidence, share_with_hosted_models
+         )
+         SELECT asset_id, valid_from, valid_until, role, platform, owner_ref,
+                criticality, expected_services, expected_behaviors, source_type,
+                source_ref, confidence, share_with_hosted_models
+         FROM jsonb_to_recordset($1::jsonb) AS incoming (
+           asset_id TEXT, valid_from TIMESTAMPTZ, valid_until TIMESTAMPTZ,
+           identifiers JSONB, role TEXT, platform TEXT, owner_ref TEXT,
+           criticality TEXT, expected_services JSONB,
+           expected_behaviors JSONB, source_type TEXT, source_ref TEXT,
+           confidence TEXT, share_with_hosted_models BOOLEAN
+         )
+         ON CONFLICT (asset_id, valid_from) DO UPDATE SET
+           valid_until = EXCLUDED.valid_until, role = EXCLUDED.role,
+           platform = EXCLUDED.platform, owner_ref = EXCLUDED.owner_ref,
+           criticality = EXCLUDED.criticality,
+           expected_services = EXCLUDED.expected_services,
+           expected_behaviors = EXCLUDED.expected_behaviors,
+           source_type = EXCLUDED.source_type, source_ref = EXCLUDED.source_ref,
+           confidence = EXCLUDED.confidence,
+           share_with_hosted_models = EXCLUDED.share_with_hosted_models,
+           updated_at = clock_timestamp()`,
+        [importJson],
+      );
+      await client.query(
+        `DELETE FROM onion_sentinel_assets.identifiers identifier
+         USING onion_sentinel_assets.inventory_records record,
+               jsonb_to_recordset($1::jsonb) AS incoming (
+                 asset_id TEXT, valid_from TIMESTAMPTZ
+               )
+         WHERE identifier.record_id = record.record_id
+           AND record.asset_id = incoming.asset_id
+           AND record.valid_from = incoming.valid_from`,
+        [importJson],
+      );
+      await client.query(
+        `INSERT INTO onion_sentinel_assets.identifiers (
+           record_id, identifier_type, identifier_value, normalized_value
+         )
+         SELECT record.record_id, kind.key, value.identifier_value,
+                lower(value.identifier_value)
+         FROM jsonb_to_recordset($1::jsonb) AS incoming (
+           asset_id TEXT, valid_from TIMESTAMPTZ, identifiers JSONB
+         )
+         JOIN onion_sentinel_assets.inventory_records record
+           ON record.asset_id = incoming.asset_id
+          AND record.valid_from = incoming.valid_from
+         CROSS JOIN LATERAL jsonb_each(incoming.identifiers) kind
+         CROSS JOIN LATERAL jsonb_array_elements_text(kind.value)
+           value(identifier_value)`,
+        [importJson],
+      );
       const overlaps = await client.query(
         `SELECT left_record.asset_id
          FROM onion_sentinel_assets.inventory_records left_record
