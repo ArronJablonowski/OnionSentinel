@@ -44,12 +44,22 @@ class ResponseCacheTest(unittest.TestCase):
         cache = load_module().ResponseCache(10, lock_stripes=64)
         started = threading.Barrier(2)
 
+        first_key = "a"
+        second_key = next(
+            candidate
+            for candidate in (f"key-{index}" for index in range(128))
+            if cache._key_lock(candidate) is not cache._key_lock(first_key)
+        )
+
         def compute() -> bool:
             started.wait(timeout=1)
             return True
 
         results: list[bool] = []
-        threads = [threading.Thread(target=lambda key=key: results.append(cache.get_or_compute(key, compute))) for key in ("a", "b")]
+        threads = [
+            threading.Thread(target=lambda key=key: results.append(cache.get_or_compute(key, compute)))
+            for key in (first_key, second_key)
+        ]
         for thread in threads:
             thread.start()
         for thread in threads:
