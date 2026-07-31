@@ -151,6 +151,34 @@ class SoftwareInventoryApiTests(unittest.TestCase):
             any("observable evidence" in warning for warning in payload["warnings"])
         )
 
+    def test_response_exposes_user_agent_only_for_http_evidence(self):
+        raw = state()
+        raw["records"][2]["category"] = "HTTP::BROWSER"
+        raw["records"][2]["version"] = "OpenSSH-browser-agent/9.9"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write_state(tmp, raw)
+            status, payload = inventory.build_response(
+                path, observed_at=NOW
+            )
+
+        self.assertEqual(status, 200)
+        items = {
+            item["evidence_id"]: item
+            for item in payload["items"]
+        }
+        self.assertEqual(
+            items["000000000000000000000004"]["observed_user_agent"],
+            "Safari",
+        )
+        self.assertEqual(
+            items["000000000000000000000003"]["observed_user_agent"],
+            "OpenSSH-browser-agent/9.9",
+        )
+        self.assertNotIn(
+            "observed_user_agent",
+            items["000000000000000000000001"],
+        )
+
     def test_summary_products_counts_distinct_names_not_versions(self):
         raw = state()
         raw["records"].append(

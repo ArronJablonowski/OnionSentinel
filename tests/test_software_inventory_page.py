@@ -228,6 +228,23 @@ class SoftwareInventoryPageTests(unittest.TestCase):
             "metric(coverage.coverage_gaps,'Unknown')",
             self.page,
         )
+        self.assertIn(
+            "const userAgentEvidence=item=>",
+            self.page,
+        )
+        self.assertIn(
+            "<dt>Observed user-agent</dt><dd><code "
+            'class="software-code">${esc(userAgent)}</code></dd>',
+            self.page,
+        )
+        self.assertIn(
+            "${userAgentEvidence(item)}<dt>Asset reference type</dt>",
+            self.page,
+        )
+        self.assertIn(
+            "${userAgentEvidence(item)}<dt>First seen</dt>",
+            self.page,
+        )
 
     def test_responsive_cards_and_refresh_preserve_interaction_state(self) -> None:
         self.assertIn('id="software-mobile-list"', self.page)

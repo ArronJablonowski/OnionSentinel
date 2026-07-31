@@ -529,11 +529,22 @@ def _freshness(record: dict[str, object], observed_at: dt.datetime) -> str:
 def _public_record(
     record: dict[str, object], observed_at: dt.datetime
 ) -> dict[str, object]:
-    return {
+    public = {
         key: value
         for key, value in record.items()
         if not key.startswith("_")
     } | {"freshness": _freshness(record, observed_at)}
+    observed_user_agent = ""
+    if record["source"] == "http_user_agent":
+        observed_user_agent = str(record["product"])
+    elif (
+        record["source"] == "zeek_software"
+        and str(record["category"]).casefold() == "http::browser"
+    ):
+        observed_user_agent = str(record["version"])
+    if observed_user_agent:
+        public["observed_user_agent"] = observed_user_agent
+    return public
 
 
 def apply_asset_labels(
