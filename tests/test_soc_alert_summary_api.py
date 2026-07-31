@@ -1549,6 +1549,7 @@ class SocAlertSummaryApiTest(unittest.TestCase):
                 "asset_inventory",
                 "dhcp_asset_discovery",
                 "software_inventory",
+                "ac_hunter",
             },
         )
         self.assertTrue(all(len(value) == 64 for value in payload["revisions"].values()))
@@ -1564,6 +1565,7 @@ class SocAlertSummaryApiTest(unittest.TestCase):
                 "asset_inventory",
                 "dhcp_asset_discovery",
                 "software_inventory",
+                "ac_hunter",
             },
         )
         self.assertNotIn("Newest detection", encoded)

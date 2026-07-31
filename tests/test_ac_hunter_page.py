@@ -146,23 +146,16 @@ class AcHunterPageTests(unittest.TestCase):
             self.section,
         )
 
-    def test_api_calls_use_cached_read_and_explicit_refresh_routes(self) -> None:
+    def test_api_calls_use_database_read_without_web_triggered_collection(self) -> None:
         self.assertIn(
             "const GET_ENDPOINT='/api/ac-hunter/deep-review'",
             self.section,
         )
-        self.assertIn(
-            "const REFRESH_ENDPOINT='/api/ac-hunter/refresh'",
-            self.section,
-        )
-        self.assertIn(
-            "fetchJson(REFRESH_ENDPOINT,{method:'POST'",
-            self.section,
-        )
-        self.assertIn(
-            "'X-Onion-Sentinel-Request':'dashboard'",
-            self.section,
-        )
+        self.assertNotIn("const REFRESH_ENDPOINT=", self.section)
+        self.assertNotIn("fetchJson(REFRESH_ENDPOINT", self.section)
+        self.assertIn("Reloading the latest AC Hunter snapshot from PostgreSQL", self.section)
+        self.assertIn("once an hour at 35 minutes after the hour", self.section)
+        self.assertIn("stores a new snapshot only when the dataset changes", self.section)
         self.assertIn(
             "credentials:'same-origin'",
             self.section,
@@ -214,6 +207,29 @@ class AcHunterPageTests(unittest.TestCase):
         self.assertNotIn("session_cookie", self.section)
         self.assertNotIn("Authorization", self.section)
 
+    def test_beacon_rows_match_review_cards_and_verdicts_have_room(self) -> None:
+        self.assertIn(
+            '<table class="ac-hunter-beacons-table">',
+            self.section,
+        )
+        self.assertIn(
+            "row.dataset.verdict=token(finding?.verdict)",
+            self.section,
+        )
+        self.assertIn(
+            ".ac-hunter-table-wrap td:last-child{width:280px}",
+            self.section,
+        )
+        self.assertIn(
+            "grid-template-columns:minmax(max-content,1.05fr)",
+            self.section,
+        )
+        self.assertIn("minmax(120px,.9fr) minmax(120px,.9fr)", self.section)
+        self.assertIn(".ac-hunter-beacons-table td{width:auto!important", self.section)
+        self.assertIn("white-space:nowrap;", self.section)
+        self.assertIn("overflow-wrap:normal;", self.section)
+        self.assertIn(".ac-hunter-verdict{white-space:nowrap}", self.section)
+
     def test_page_is_responsive_and_accessible(self) -> None:
         self.assertIn("@media(max-width:820px)", self.section)
         self.assertIn("@media(max-width:560px)", self.section)
@@ -221,7 +237,7 @@ class AcHunterPageTests(unittest.TestCase):
         self.assertIn('aria-live="polite"', self.section)
         self.assertIn('role="alert"', self.section)
         self.assertIn(
-            'aria-label="Refresh AC Hunter data"',
+            'aria-label="Reload stored AC Hunter snapshot"',
             self.section,
         )
 

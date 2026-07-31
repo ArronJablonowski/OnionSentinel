@@ -20,6 +20,7 @@ const {createPostgresShadowOutbox} = require('./lib/postgres_shadow_outbox');
 const {createPostgresShadowProjector} = require('./lib/postgres_shadow_projector');
 const {createPostgresAssetStore} = require('./lib/postgres_asset_store');
 const {createPostgresSoftwareStore} = require('./lib/postgres_software_store');
+const {createPostgresAcHunterStore} = require('./lib/postgres_ac_hunter_store');
 const {createSecurityLogger} = require('./lib/security_logger');
 const {createPipelineMetrics} = require('./lib/pipeline_metrics');
 const {createSocAnalysisPolicy} = require('./lib/soc_analysis_policy');
@@ -80,6 +81,15 @@ const softwarePostgresEnabled = ['1', 'true', 'yes'].includes(
 );
 const softwarePostgresSchemaPath = process.env.SOFTWARE_POSTGRES_SCHEMA_PATH
   || path.join(__dirname, '..', 'postgres', 'software-inventory-schema.sql');
+const acHunterPostgresEnabled = ['1', 'true', 'yes'].includes(
+  String(
+    process.env.AC_HUNTER_POSTGRES_ENABLED
+    ?? process.env.ASSET_POSTGRES_ENABLED
+    ?? '0',
+  ).trim().toLowerCase(),
+);
+const acHunterPostgresSchemaPath = process.env.AC_HUNTER_POSTGRES_SCHEMA_PATH
+  || path.join(__dirname, '..', 'postgres', 'ac-hunter-schema.sql');
 const assetStoreWriteToken = String(
   process.env.ASSET_STORE_WRITE_TOKEN
   || process.env.N8N_POST_COMMIT_TOKEN
@@ -95,7 +105,7 @@ if (!['', '0', '1'].includes(evaluationModeValue)) {
 }
 const controlledEvaluationMode = evaluationModeValue === '1';
 if (
-  (assetPostgresEnabled || softwarePostgresEnabled)
+  (assetPostgresEnabled || softwarePostgresEnabled || acHunterPostgresEnabled)
   && !controlledEvaluationMode
   && assetStoreWriteToken.length < 32
 ) {
@@ -2325,6 +2335,8 @@ let postgresAssetStore;
 let postgresAssetStoreError = '';
 let postgresSoftwareStore;
 let postgresSoftwareStoreError = '';
+let postgresAcHunterStore;
+let postgresAcHunterStoreError = '';
 let pipelineMetrics;
 const serviceMetrics = {
   started_at: nowUtc(),
@@ -2442,7 +2454,10 @@ function initializePostgresShadowProjector() {
 }
 
 async function initializePostgresAssetStore() {
-  if ((!assetPostgresEnabled && !softwarePostgresEnabled) || controlledEvaluationMode) return;
+  if (
+    (!assetPostgresEnabled && !softwarePostgresEnabled && !acHunterPostgresEnabled)
+    || controlledEvaluationMode
+  ) return;
   const requiredKeys = [
     'ALERT_STORE_POSTGRES_HOST',
     'ALERT_STORE_POSTGRES_DATABASE',
@@ -2455,6 +2470,7 @@ async function initializePostgresAssetStore() {
   if (missing.length) {
     postgresAssetStoreError = `missing ${missing.join(', ')}`;
     postgresSoftwareStoreError = `missing ${missing.join(', ')}`;
+    postgresAcHunterStoreError = `missing ${missing.join(', ')}`;
     return;
   }
   try {
@@ -2471,10 +2487,12 @@ async function initializePostgresAssetStore() {
         Number(process.env.ASSET_POSTGRES_CONNECT_TIMEOUT_MS || 3000),
       ),
       idleTimeoutMillis: 10000,
-      application_name: 'onion-sentinel-asset-store',
+      application_name: 'onion-sentinel-postgres-store',
     });
     postgresAssetPool.on('error', (error) => {
       postgresAssetStoreError = String(error.message || error).slice(0, 500);
+      postgresSoftwareStoreError = postgresAssetStoreError;
+      postgresAcHunterStoreError = postgresAssetStoreError;
       applicationLogger.log('error', 'asset_store.postgres_idle_error', {
         error_message: postgresAssetStoreError,
       });
@@ -2495,8 +2513,39 @@ async function initializePostgresAssetStore() {
   } catch (error) {
     postgresAssetStore = null;
     postgresAssetStoreError = String(error.message || error).slice(0, 500);
+    postgresSoftwareStoreError = postgresAssetStoreError;
+    postgresAcHunterStoreError = postgresAssetStoreError;
     applicationLogger.log('error', 'asset_store.initialization_failed', {
       error_message: postgresAssetStoreError,
+    });
+  }
+}
+
+async function initializePostgresAcHunterStore() {
+  if (!acHunterPostgresEnabled || controlledEvaluationMode) return;
+  if (!postgresAssetPool) {
+    postgresAcHunterStoreError = 'shared PostgreSQL pool is unavailable';
+    return;
+  }
+  try {
+    postgresAcHunterStore = createPostgresAcHunterStore({
+      pool: postgresAssetPool,
+      schemaPath: acHunterPostgresSchemaPath,
+      logger: applicationLogger,
+    });
+    await postgresAcHunterStore.initialize();
+    postgresAcHunterStoreError = '';
+    applicationLogger.log('info', 'ac_hunter_store.ready', {
+      backend: 'postgresql',
+      schema_version: 1,
+      retention_seconds: 86400,
+      scheduled_minute: 35,
+    });
+  } catch (error) {
+    postgresAcHunterStore = null;
+    postgresAcHunterStoreError = String(error.message || error).slice(0, 500);
+    applicationLogger.log('error', 'ac_hunter_store.initialization_failed', {
+      error_message: postgresAcHunterStoreError,
     });
   }
 }
@@ -2562,6 +2611,24 @@ function requirePostgresSoftwareStore() {
     throw error;
   }
   return postgresSoftwareStore;
+}
+
+function requirePostgresAcHunterStore() {
+  if (!acHunterPostgresEnabled) {
+    const error = new Error('PostgreSQL AC Hunter cache is disabled');
+    error.statusCode = 503;
+    throw error;
+  }
+  if (!postgresAcHunterStore) {
+    const error = new Error(
+      `PostgreSQL AC Hunter cache is unavailable${
+        postgresAcHunterStoreError ? `: ${postgresAcHunterStoreError}` : ''
+      }`,
+    );
+    error.statusCode = 503;
+    throw error;
+  }
+  return postgresAcHunterStore;
 }
 
 function assetStoreWriteAuthorized(request) {
@@ -10857,6 +10924,14 @@ async function operationalMetricsSnapshot() {
         available: false,
         error: postgresAssetStoreError || null,
       },
+    ac_hunter: postgresAcHunterStore
+      ? await postgresAcHunterStore.stats()
+      : {
+        enabled: acHunterPostgresEnabled,
+        backend: 'postgresql',
+        available: false,
+        error: postgresAcHunterStoreError || null,
+      },
     oldest_pending_job_seconds: Number(oldestJob?.seconds || 0),
     oldest_pending_jobs: oldestJobsByType,
     latest_completed_jobs: latestCompletedJobsByType,
@@ -11004,8 +11079,37 @@ async function handleRequest(request, response) {
             available: false,
             error: postgresSoftwareStoreError || null,
           };
+        health.ac_hunter = postgresAcHunterStore
+          ? await postgresAcHunterStore.stats()
+          : {
+            enabled: acHunterPostgresEnabled,
+            backend: 'postgresql',
+            available: false,
+            error: postgresAcHunterStoreError || null,
+          };
       }
       sendJson(response, 200, health);
+      return;
+    }
+    if (request.method === 'GET' && parsedUrl.pathname === '/ac-hunter/snapshot') {
+      const snapshot = await requirePostgresAcHunterStore().latest();
+      if (!snapshot) {
+        sendJson(response, 404, {
+          ok: false,
+          status: 'not_collected',
+          error: 'AC Hunter has not completed a scheduled database collection yet',
+        });
+        return;
+      }
+      sendJson(response, 200, snapshot);
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/ac-hunter/snapshots') {
+      requireAssetStoreWriteAuthorization(request);
+      const result = await requirePostgresAcHunterStore().ingest(
+        await readJsonBody(request),
+      );
+      sendJson(response, result.changed ? 201 : 200, result);
       return;
     }
     if (request.method === 'GET' && parsedUrl.pathname === '/software-inventory') {
@@ -11593,6 +11697,7 @@ function installControlledEvaluationShutdown(server) {
 initDb().then(async () => {
   await initializePostgresAssetStore();
   await initializePostgresSoftwareStore();
+  await initializePostgresAcHunterStore();
   applicationLogger.log('info', 'database.initialized', {
     database_path: dbPath,
     postgres_shadow_enabled: postgresShadowEnabled,
@@ -11600,6 +11705,8 @@ initDb().then(async () => {
     asset_postgres_available: Boolean(postgresAssetStore),
     software_postgres_enabled: softwarePostgresEnabled,
     software_postgres_available: Boolean(postgresSoftwareStore),
+    ac_hunter_postgres_enabled: acHunterPostgresEnabled,
+    ac_hunter_postgres_available: Boolean(postgresAcHunterStore),
   });
   const server = configureHttpServer(http.createServer((request, response) => {
     void dispatchRequest(request, response).catch((error) => {

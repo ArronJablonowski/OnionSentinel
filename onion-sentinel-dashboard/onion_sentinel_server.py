@@ -148,6 +148,7 @@ GET_API_ROUTES = {
     "/api/ac-hunter/deep-review",
     "/api/admin/session-status",
     "/api/asset-inventory",
+    "/api/cyber-threat-intel/program",
     "/api/dhcp-asset-discovery",
     "/api/software-inventory",
     "/api/system-health/beacons",
@@ -170,6 +171,7 @@ POST_API_ROUTES = {
     "/api/assets/demote",
     "/api/assets/promote-dhcp",
     "/api/assets/update",
+    "/api/cyber-threat-intel/program",
     "/api/soc-alerts/status",
     "/api/soc-incidents/reanalyze-all",
     "/api/soc-settings/agent-model",
@@ -475,10 +477,32 @@ class OnionSentinelHandler(runtime.PortalHandler):
         """
         return True
 
-    def _ac_hunter_force_refresh_authorized(self) -> bool:
-        """Permit cache bypass only for an authenticated admin session."""
-
-        return bool(self._admin_authenticated())
+    def _cti_program_mutation_audit(self, program: dict[str, object]) -> None:
+        """Record CTI governance changes without logging source content."""
+        sources = program.get("sources") if isinstance(program.get("sources"), list) else []
+        technologies = (
+            program.get("technologies")
+            if isinstance(program.get("technologies"), list)
+            else []
+        )
+        APPLICATION_LOGGER.log(
+            "info",
+            "cti.program.updated",
+            request_id=getattr(self, "application_request_id", ""),
+            remote_address=self.client_address[0],
+            revision=int(program.get("revision") or 0),
+            source_count=len(sources),
+            enabled_source_count=sum(
+                1 for source in sources
+                if isinstance(source, dict) and source.get("enabled") is True
+            ),
+            technology_count=len(technologies),
+            enabled_technology_count=sum(
+                1 for technology in technologies
+                if isinstance(technology, dict) and technology.get("enabled") is True
+            ),
+            digest=runtime.cti_program.program_digest(program),
+        )
 
     @property
     def dashboard_root(self) -> Path:
@@ -743,21 +767,9 @@ class OnionSentinelHandler(runtime.PortalHandler):
                         ).encode(),
                         "application/json; charset=utf-8",
                     )
-                force_authorized = (
-                    self._ac_hunter_force_refresh_authorized()
-                )
                 status, data = ac_hunter_review.deep_review_response(
-                    force_refresh=force_authorized
+                    force_refresh=False
                 )
-                if not force_authorized and status == HTTPStatus.OK:
-                    cache = data.get("cache")
-                    if isinstance(cache, dict):
-                        cache["refresh_limited"] = True
-                        cache["refresh_available_in_seconds"] = max(
-                            0,
-                            int(cache.get("ttl_seconds") or 0)
-                            - int(cache.get("age_seconds") or 0),
-                        )
                 return self._send(
                     status,
                     json.dumps(data, indent=2).encode(),

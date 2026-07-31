@@ -42,6 +42,7 @@ if str(PORTAL_SOURCE_DIR) not in sys.path:
 
 import soc_alert_api
 import software_inventory
+import cti_program
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
@@ -148,6 +149,7 @@ SOFTWARE_INVENTORY_STATE_FILE = (
     HOME / "n8n-local" / "software-inventory" / "software-inventory.json"
 )
 SOFTWARE_INVENTORY_MAX_BYTES = software_inventory.MAX_STATE_BYTES
+CTI_PROGRAM_API_PATH = "/api/cyber-threat-intel/program"
 ASSET_INVENTORY_CACHE_LOCK = threading.RLock()
 ASSET_INVENTORY_CACHE: dict[str, object] = {
     "signature": None,
@@ -13231,7 +13233,23 @@ def dashboard_live_revisions() -> dict[str, str]:
         "asset_inventory": asset_revision,
         "dhcp_asset_discovery": dhcp_asset_discovery_live_revision(asset_revision),
         "software_inventory": software_inventory_live_revision(),
+        "ac_hunter": ac_hunter_live_revision(),
     }
+
+
+def ac_hunter_live_revision() -> str:
+    """Return only the PostgreSQL AC Hunter dataset digest for SSE updates."""
+
+    try:
+        payload = alert_store_get_json("/ac-hunter/snapshot", timeout=2.0)
+        cache = payload.get("cache")
+        if isinstance(cache, dict):
+            digest = str(cache.get("dataset_digest") or "").strip().lower()
+            if re.fullmatch(r"[0-9a-f]{64}", digest):
+                return digest
+    except RuntimeError:
+        pass
+    return _revision_digest(("unavailable",))
 
 
 def cached_soc_alert_events_snapshot() -> dict:
@@ -13348,6 +13366,14 @@ class PortalHandler(BaseHTTPRequestHandler):
         """Require an Administration session unless a dedicated service narrows the policy."""
         return self._admin_authenticated()
 
+    def _cti_program_write_authorized(self) -> bool:
+        """Keep CTI source and technology governance behind Administration."""
+        return self._admin_authenticated()
+
+    def _cti_program_mutation_audit(self, program: dict[str, object]) -> None:
+        """Dedicated services may record a metadata-only CTI mutation event."""
+        return None
+
     def _soc_review_write_authorized(self) -> bool:
         """Reject cross-site/form writes while keeping the LAN analyst UI usable."""
         content_type = str(self.headers.get("Content-Type") or "").lower()
@@ -13372,7 +13398,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/admin/session-status", "/api/asset-inventory", "/api/dhcp-asset-discovery", "/api/software-inventory", "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-incidents", "/api/soc-incidents/reanalysis-runs", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-incidents/") and parsed.path.endswith("/detail")) or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith(("/ack", "/escalate"))):
+        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/admin/session-status", "/api/asset-inventory", "/api/dhcp-asset-discovery", "/api/software-inventory", CTI_PROGRAM_API_PATH, "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-incidents", "/api/soc-incidents/reanalysis-runs", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-incidents/") and parsed.path.endswith("/detail")) or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith(("/ack", "/escalate"))):
             if parsed.path == "/admin" and not self._admin_authenticated():
                 self.send_response(HTTPStatus.FOUND)
                 self.send_header("Location", "/admin/login")
@@ -13393,6 +13419,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        is_cti_program_write = parsed.path == CTI_PROGRAM_API_PATH
         is_asset_write = parsed.path in {
             "/api/assets/promote-dhcp",
             "/api/assets/approve-dhcp-ip-change",
@@ -13413,16 +13440,17 @@ class PortalHandler(BaseHTTPRequestHandler):
             parsed.path.startswith("/api/soc-incidents/")
             and parsed.path.endswith(("/adjudicate", "/status"))
         )
-        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and parsed.path not in SOC_SETTINGS_PROMPT_API_PATHS and not (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) and not is_review_write and not is_incident_reanalysis and not is_asset_write:
+        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and parsed.path not in SOC_SETTINGS_PROMPT_API_PATHS and not (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) and not is_review_write and not is_incident_reanalysis and not is_asset_write and not is_cti_program_write:
             return self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain; charset=utf-8")
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             length = 0
-        if length <= 0 or length > 50000:
+        request_limit = cti_program.MAX_FILE_BYTES if is_cti_program_write else 50000
+        if length <= 0 or length > request_limit:
             if parsed.path == "/api/admin/start-service":
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
-            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) or is_review_write or is_incident_reanalysis or is_asset_write:
+            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) or is_review_write or is_incident_reanalysis or is_asset_write or is_cti_program_write:
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
             if parsed.path.startswith("/api/resource-library/"):
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
@@ -13430,6 +13458,56 @@ class PortalHandler(BaseHTTPRequestHandler):
                 return self._send(HTTPStatus.BAD_REQUEST, render_admin_dashboard("Invalid admin action request size.", True))
             return self._send(HTTPStatus.BAD_REQUEST, render_admin_login("Invalid request size.", True))
         raw = self.rfile.read(length).decode("utf-8", errors="replace")
+        if is_cti_program_write:
+            if not self._soc_review_write_authorized():
+                return self._send(
+                    HTTPStatus.FORBIDDEN,
+                    json.dumps({
+                        "ok": False,
+                        "error": "CTI workspace changes must come from the same-origin Onion Sentinel dashboard.",
+                    }).encode(),
+                    "application/json; charset=utf-8",
+                )
+            if not self._cti_program_write_authorized():
+                return self._send(
+                    HTTPStatus.FORBIDDEN,
+                    json.dumps({
+                        "ok": False,
+                        "authentication_required": True,
+                        "error": "Sign in to Onion Sentinel Administration before editing the CTI workspace.",
+                    }).encode(),
+                    "application/json; charset=utf-8",
+                )
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                payload = None
+            try:
+                program = cti_program.save_program(payload)
+            except cti_program.CTIProgramConflict as exc:
+                return self._send(
+                    HTTPStatus.CONFLICT,
+                    json.dumps({"ok": False, "error": str(exc)}).encode(),
+                    "application/json; charset=utf-8",
+                )
+            except cti_program.CTIProgramError as exc:
+                return self._send(
+                    HTTPStatus.BAD_REQUEST,
+                    json.dumps({"ok": False, "error": str(exc)}).encode(),
+                    "application/json; charset=utf-8",
+                )
+            except OSError:
+                return self._send(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    json.dumps({"ok": False, "error": "Could not persist the CTI workspace."}).encode(),
+                    "application/json; charset=utf-8",
+                )
+            self._cti_program_mutation_audit(program)
+            return self._send(
+                HTTPStatus.OK,
+                json.dumps(cti_program.public_response(program), indent=2).encode(),
+                "application/json; charset=utf-8",
+            )
         if is_asset_write:
             if not self._soc_review_write_authorized():
                 return self._send(
@@ -13759,6 +13837,21 @@ class PortalHandler(BaseHTTPRequestHandler):
         if path == "/api/software-inventory":
             status, data = software_inventory_response(query=query)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        if path == CTI_PROGRAM_API_PATH:
+            try:
+                data = cti_program.public_response(cti_program.load_program())
+                status = HTTPStatus.OK
+            except cti_program.CTIProgramError as exc:
+                data = {"ok": False, "error": str(exc)}
+                status = HTTPStatus.INTERNAL_SERVER_ERROR
+            except OSError:
+                data = {"ok": False, "error": "Could not read the CTI workspace."}
+                status = HTTPStatus.INTERNAL_SERVER_ERROR
+            return self._send(
+                status,
+                json.dumps(data, indent=2).encode(),
+                "application/json; charset=utf-8",
+            )
         if path == "/api/llm-analysis/current":
             return self._send(HTTPStatus.OK, json.dumps(read_llm_current_analysis(), indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/llm-analysis/logs":

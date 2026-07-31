@@ -50,6 +50,9 @@ class OnionSentinelServerTests(unittest.TestCase):
             server.is_soc_get_api("/api/ac-hunter/deep-review")
         )
         self.assertTrue(server.is_soc_get_api("/api/asset-inventory"))
+        self.assertTrue(
+            server.is_soc_get_api("/api/cyber-threat-intel/program")
+        )
         self.assertTrue(server.is_soc_get_api("/api/software-inventory"))
         self.assertTrue(server.is_soc_get_api("/api/soc-alerts"))
         self.assertTrue(server.is_soc_get_api("/api/soc-incidents"))
@@ -76,6 +79,9 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertTrue(server.is_soc_post_api("/api/soc-incidents/reanalyze-all"))
         self.assertTrue(server.is_soc_post_api("/api/soc-settings/agent-model"))
         self.assertTrue(server.is_soc_post_api("/api/soc-settings/ai-model"))
+        self.assertTrue(
+            server.is_soc_post_api("/api/cyber-threat-intel/program")
+        )
         self.assertTrue(server.is_soc_post_api("/api/assets/promote-dhcp"))
         self.assertTrue(server.is_soc_post_api("/api/assets/update"))
         self.assertTrue(server.is_soc_post_api("/api/assets/demote"))
@@ -85,6 +91,18 @@ class OnionSentinelServerTests(unittest.TestCase):
         self.assertFalse(server.is_soc_post_api("/api/resource-library/remove"))
         self.assertFalse(server.is_soc_post_api("/api/admin/start-service"))
         self.assertFalse(server.is_soc_post_api("/admin/action"))
+
+    def test_cti_program_route_is_fixed_and_not_prefix_writable(self):
+        route = "/api/cyber-threat-intel/program"
+        self.assertTrue(server.is_soc_get_api(route))
+        self.assertTrue(server.is_soc_post_api(route))
+        for malformed in (
+            "/api/cyber-threat-intel/program/",
+            "/api/cyber-threat-intel/program/source-1",
+            "/api/cyber-threat-intel/arbitrary",
+        ):
+            self.assertFalse(server.is_soc_get_api(malformed), malformed)
+            self.assertFalse(server.is_soc_post_api(malformed), malformed)
 
     def test_dynamic_soc_routes_require_one_exact_resource_segment(self):
         allowed_get = (
@@ -153,7 +171,6 @@ class OnionSentinelServerTests(unittest.TestCase):
             server.runtime.PortalHandler._require_admin_auth,
         )
 
-    def test_ac_hunter_force_refresh_requires_admin_session(self):
         class Session:
             def __init__(self, authenticated):
                 self.authenticated = authenticated
@@ -161,12 +178,11 @@ class OnionSentinelServerTests(unittest.TestCase):
             def _admin_authenticated(self):
                 return self.authenticated
 
-        authorize = (
-            server.OnionSentinelHandler
-            ._ac_hunter_force_refresh_authorized
+        authorize_cti = (
+            server.OnionSentinelHandler._cti_program_write_authorized
         )
-        self.assertFalse(authorize(Session(False)))
-        self.assertTrue(authorize(Session(True)))
+        self.assertFalse(authorize_cti(Session(False)))
+        self.assertTrue(authorize_cti(Session(True)))
 
     def test_all_role_primary_and_reviewer_prompt_routes_are_allowlisted(self):
         routes = {
