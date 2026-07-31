@@ -8358,6 +8358,33 @@ def _llm_reviewer_started_at(generated_at: object, runtime: object) -> str:
     ).replace("T", "  ", 1)
 
 
+LLM_PARENT_RUN_FIELDS = (
+    "alert",
+    "gpu_temperature_celsius_max",
+    "gpu_utilization_percent_max",
+    "gpu_percent_max",
+    "cpu_temperature_celsius_max",
+    "soc_temperature_celsius_max",
+    "memory_used_percent_max",
+    "power_watts_max",
+    "cpu_used_percent_max",
+    "pcap_total_size_bytes",
+    "alert_context_size_bytes",
+)
+
+
+def hydrate_llm_reviewer_from_parent(
+    reviewer: dict,
+    parent: dict | None,
+) -> None:
+    """Attach collector-owned context from the reviewer's exact parent run."""
+    if not isinstance(parent, dict):
+        return
+    for key in LLM_PARENT_RUN_FIELDS:
+        if key in parent:
+            reviewer[key] = parent.get(key)
+
+
 def read_llm_second_opinion_logs(
     primary_logs: list[dict],
     *,
@@ -8416,24 +8443,7 @@ def read_llm_second_opinion_logs(
             f"Agreement: {agreement.replace('_', ' ')}" if agreement else "",
             f"Outcome: {outcome.replace('_', ' ')}" if outcome else "",
         ]
-        reviewer_logs.append({
-            **{
-                key: parent.get(key)
-                for key in (
-                    "alert",
-                    "gpu_temperature_celsius_max",
-                    "gpu_utilization_percent_max",
-                    "gpu_percent_max",
-                    "cpu_temperature_celsius_max",
-                    "soc_temperature_celsius_max",
-                    "memory_used_percent_max",
-                    "power_watts_max",
-                    "cpu_used_percent_max",
-                    "pcap_total_size_bytes",
-                    "alert_context_size_bytes",
-                )
-                if key in parent
-            },
+        reviewer = {
             "log_id": f"{analysis_id}:second-opinion",
             "analysis_id": analysis_id,
             "parent_log_id": analysis_id,
@@ -8469,7 +8479,9 @@ def read_llm_second_opinion_logs(
             "reviewer_confidence": row.get("reviewer_confidence"),
             "agreement": agreement,
             "material_disagreement": bool(row.get("material_disagreement")),
-        })
+        }
+        hydrate_llm_reviewer_from_parent(reviewer, parent)
+        reviewer_logs.append(reviewer)
     return reviewer_logs
 
 
@@ -8509,8 +8521,7 @@ def llm_analysis_logs_response(query: dict[str, list[str]]) -> dict:
         }
         for reviewer in reviewer_logs:
             parent = parents.get(str(reviewer.get("parent_log_id") or ""))
-            if parent:
-                reviewer["alert"] = parent.get("alert") or reviewer.get("alert")
+            hydrate_llm_reviewer_from_parent(reviewer, parent)
     combined = [*primary_logs, *reviewer_logs]
     combined.sort(
         key=lambda record: (

@@ -1695,6 +1695,13 @@ class SocAlertSummaryApiTest(unittest.TestCase):
             "runtime_seconds": 120,
             "model": "primary-model",
             "model_path": "ollama",
+            "gpu_temperature_celsius_max": 41.25,
+            "gpu_utilization_percent_max": 88.5,
+            "cpu_temperature_celsius_max": 49.75,
+            "soc_temperature_celsius_max": 51.0,
+            "memory_used_percent_max": 57.5,
+            "power_watts_max": 33.25,
+            "cpu_used_percent_max": 62.5,
             "alert": {
                 "primary_alert_id": "newest-alert",
                 "rule_name": "Reviewer visibility test",
@@ -1760,6 +1767,13 @@ class SocAlertSummaryApiTest(unittest.TestCase):
             reviewer["alert"]["rule_name"],
             "Reviewer visibility test",
         )
+        self.assertEqual(reviewer["gpu_temperature_celsius_max"], 41.25)
+        self.assertEqual(reviewer["gpu_utilization_percent_max"], 88.5)
+        self.assertEqual(reviewer["cpu_temperature_celsius_max"], 49.75)
+        self.assertEqual(reviewer["soc_temperature_celsius_max"], 51.0)
+        self.assertEqual(reviewer["memory_used_percent_max"], 57.5)
+        self.assertEqual(reviewer["power_watts_max"], 33.25)
+        self.assertEqual(reviewer["cpu_used_percent_max"], 62.5)
         self.assertIn("material disagreement", reviewer["error"])
 
     def test_failed_report_without_observation_does_not_claim_assigned_model(self) -> None:
