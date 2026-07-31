@@ -327,6 +327,9 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(payload["alerts"][0]["pcap_size_bytes"], 0)
         self.assertEqual(payload["alerts"][0]["detection_outcome"], "")
         self.assertEqual(payload["alerts"][0]["detection_outcome_label"], "n/a")
+        self.assertEqual(payload["alerts"][0]["incident_case_id"], "")
+        self.assertEqual(payload["alerts"][0]["incident_status"], "not_escalated")
+        self.assertEqual(payload["alerts"][0]["incident_agent_status"], "not_queued")
         self.assertNotIn("backend-suppressed-alert", [alert["representative_alert_id"] for alert in payload["alerts"]])
 
     def test_manual_incident_escalation_removes_every_group_alias_from_soc_alerts(self) -> None:
@@ -437,7 +440,14 @@ class SocAlertSummaryApiTest(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(payload["total_matching"], 2)
-        self.assertIn("newest-alert", [alert["representative_alert_id"] for alert in payload["alerts"]])
+        alerts = {
+            alert["representative_alert_id"]: alert
+            for alert in payload["alerts"]
+        }
+        self.assertIn("newest-alert", alerts)
+        self.assertEqual(alerts["newest-alert"]["incident_case_id"], "ir-auto-unit")
+        self.assertEqual(alerts["newest-alert"]["incident_status"], "open")
+        self.assertEqual(alerts["newest-alert"]["incident_agent_status"], "queued")
 
     def test_active_metrics_are_independent_of_page_size_and_selected_status_bucket(self) -> None:
         _, one_row = self.portal.soc_alerts_query_response({"limit": ["1"], "analyst_status": ["open"]})

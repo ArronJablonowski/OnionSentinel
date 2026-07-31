@@ -10526,6 +10526,12 @@ async function maybeQueueAutomaticIncidentResponse(alert, storedRow, inserted, s
     return {status: 'skipped_level', triage_level: level, threshold};
   }
 
+  // Case creation and its durable worker job share the alert-ingest SQLite
+  // transaction. Do not convert a routing failure into a successful alert
+  // acknowledgement: that would commit an eligible detection without the IR
+  // work required by Settings and leave no retryable signal for n8n/the Relay.
+  // A 503 rolls the entire transaction back, so the upstream retry remains
+  // idempotent and cannot strand a partially-created case.
   try {
     const dashboardGroupId = alertGroupId(alertGroupKeyFromRow(storedRow));
     const result = await queueIncidentResponseForGroup({
@@ -10541,7 +10547,8 @@ async function maybeQueueAutomaticIncidentResponse(alert, storedRow, inserted, s
     });
     return {...result, triage_level: level, threshold};
   } catch (error) {
-    return {status: 'failed', reason: error.message, triage_level: level, threshold};
+    error.statusCode = Number(error.statusCode || 503);
+    throw error;
   }
 }
 

@@ -31,6 +31,17 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
         self.assertIn("pcap,", code)
         self.assertIn("Automatic PCAP request for ${level} alert", code)
 
+    def test_automatic_incident_routing_failure_rolls_back_for_upstream_retry(self) -> None:
+        code = ALERT_STORE.read_text(encoding="utf-8")
+        start = code.index("async function maybeQueueAutomaticIncidentResponse")
+        end = code.index("async function listPcapRequests", start)
+        function = code[start:end]
+
+        self.assertIn("queueIncidentResponseForGroup", function)
+        self.assertIn("error.statusCode = Number(error.statusCode || 503)", function)
+        self.assertIn("throw error", function)
+        self.assertNotIn("status: 'failed'", function)
+
     def test_runtime_templates_expose_auto_pcap_policy(self) -> None:
         env_example = ENV_EXAMPLE.read_text()
         host_runner = HOST_RUNNER.read_text()
