@@ -57,6 +57,8 @@ class PostgresAssetInventoryTests(unittest.TestCase):
         self.assertIn("asset.ip_address_changed_from_dhcp", store)
         self.assertIn("ip_change_approved", store)
         self.assertIn("explicit DHCP IP-change confirmation is required", store)
+        self.assertIn("lower(asset_id) = lower($1)", store)
+        self.assertIn("asset name already belongs to authoritative asset", store)
 
     def test_schema_allows_distinct_ip_change_review_decision(self) -> None:
         sql = SCHEMA.read_text(encoding="utf-8")

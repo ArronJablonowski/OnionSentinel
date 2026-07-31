@@ -706,6 +706,24 @@ function createPostgresAssetStore({pool, schemaPath, logger = console}) {
           `DHCP identity overlaps authoritative asset ${collisions.rows[0].asset_id}`,
         );
       }
+      const assetIdCollision = await client.query(
+        `SELECT asset_id
+         FROM onion_sentinel_assets.inventory_records
+         WHERE lower(asset_id) = lower($1)
+           AND valid_from <= clock_timestamp()
+           AND (
+             valid_until IS NULL
+             OR valid_until > clock_timestamp()
+           )
+         ORDER BY valid_from DESC
+         LIMIT 1`,
+        [record.asset_id],
+      );
+      if (assetIdCollision.rows.length) {
+        throw new Error(
+          `asset name already belongs to authoritative asset ${assetIdCollision.rows[0].asset_id}`,
+        );
+      }
       const inserted = await client.query(
         `INSERT INTO onion_sentinel_assets.inventory_records (
            asset_id, valid_from, valid_until, role, platform, owner_ref,
