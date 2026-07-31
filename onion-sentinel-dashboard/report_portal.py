@@ -2507,6 +2507,10 @@ def default_soc_ai_settings() -> dict:
             role: ""
             for role in CYBER_SECURITY_AGENT_ROLES
         },
+        "agent_adjudicator_models": {
+            role: ""
+            for role in CYBER_SECURITY_AGENT_ROLES
+        },
         **{
             setting_key: default_path
             for setting_key, default_path in MAXMIND_GEOIP_DATABASE_SETTINGS.values()
@@ -2784,6 +2788,31 @@ def _normalize_agent_second_opinion_models(
     return assignments
 
 
+def _normalize_agent_adjudicator_models(
+    value: object,
+    enabled_routes: list[str],
+    primary_assignments: dict[str, str],
+    reviewer_assignments: dict[str, str],
+    settings: dict | None = None,
+) -> dict[str, str]:
+    """Validate optional adjudicators as a third provider/model identity."""
+    raw = value if isinstance(value, dict) else {}
+    assignments: dict[str, str] = {}
+    for role in CYBER_SECURITY_AGENT_ROLES:
+        route = _canonical_agent_route(raw.get(role), enabled_routes)
+        identity = _model_route_identity(route, settings)
+        excluded = {
+            _model_route_identity(primary_assignments.get(role), settings),
+            _model_route_identity(reviewer_assignments.get(role), settings),
+        }
+        assignments[role] = (
+            route
+            if route in enabled_routes and identity and identity not in excluded
+            else ""
+        )
+    return assignments
+
+
 def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
     """Validate and normalize editable SOC AI model routing settings."""
     payload = payload if isinstance(payload, dict) else {}
@@ -2797,6 +2826,7 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
             "openclaw_enabled",
             "agent_models",
             "agent_second_opinion_models",
+            "agent_adjudicator_models",
         }:
             continue
         if key in payload:
@@ -3011,6 +3041,13 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
         payload.get("agent_second_opinion_models"),
         enabled_routes,
         settings["agent_models"],
+        settings,
+    )
+    settings["agent_adjudicator_models"] = _normalize_agent_adjudicator_models(
+        payload.get("agent_adjudicator_models"),
+        enabled_routes,
+        settings["agent_models"],
+        settings["agent_second_opinion_models"],
         settings,
     )
     for setting_key, label in (
@@ -3470,13 +3507,18 @@ def save_soc_ai_settings(payload: object) -> tuple[bool, dict]:
 
 
 def save_soc_agent_model(payload: object) -> tuple[bool, dict]:
-    """Atomically update one agent's primary and optional secondary routes."""
+    """Atomically update one agent's primary, reviewer, and adjudicator routes."""
     payload = payload if isinstance(payload, dict) else {}
     role = str(payload.get("role") or "").strip()
     model_route = str(payload.get("model_route") or payload.get("model") or "").strip()[:260]
     second_model_route = str(
         payload.get("second_opinion_model_route")
         or payload.get("second_opinion_model")
+        or ""
+    ).strip()[:260]
+    adjudicator_model_route = str(
+        payload.get("adjudicator_model_route")
+        or payload.get("adjudicator_model")
         or ""
     ).strip()[:260]
     if role not in CYBER_SECURITY_AGENT_ROLES:
@@ -3514,6 +3556,11 @@ def save_soc_agent_model(payload: object) -> tuple[bool, dict]:
                 "ok": False,
                 "error": "That second-opinion model is not enabled. Save the global model roster first.",
             }
+        if adjudicator_model_route and adjudicator_model_route not in enabled_routes:
+            return False, {
+                "ok": False,
+                "error": "That adjudicator model is not enabled. Save the global model roster first.",
+            }
         if (
             second_model_route
             and _model_route_identity(second_model_route, current)
@@ -3526,8 +3573,21 @@ def save_soc_agent_model(payload: object) -> tuple[bool, dict]:
                     "primary and resolve to a different provider/model identity."
                 ),
             }
+        adjudicator_identity = _model_route_identity(adjudicator_model_route, current)
+        if adjudicator_model_route and adjudicator_identity in {
+            _model_route_identity(model_route, current),
+            _model_route_identity(second_model_route, current),
+        }:
+            return False, {
+                "ok": False,
+                "error": (
+                    "The adjudicator must differ from both the primary and "
+                    "second-opinion provider/model identities."
+                ),
+            }
         current["agent_models"][role] = model_route
         current["agent_second_opinion_models"][role] = second_model_route
+        current["agent_adjudicator_models"][role] = adjudicator_model_route
         ok, normalized = normalize_soc_ai_settings(current)
         if not ok:
             return False, normalized
@@ -3537,6 +3597,7 @@ def save_soc_agent_model(payload: object) -> tuple[bool, dict]:
             response["role"] = role
             response["model_route"] = normalized["agent_models"][role]
             response["second_opinion_model_route"] = normalized["agent_second_opinion_models"][role]
+            response["adjudicator_model_route"] = normalized["agent_adjudicator_models"][role]
         return saved, response
 
 
@@ -8295,6 +8356,7 @@ def llm_runtime_model_state(current: object) -> dict:
     phase_label = {
         "preparing": "Preparing analysis",
         "second_opinion": "Second-opinion review",
+        "disagreement_adjudication": "Disagreement adjudication",
         "live_follow_up": "Live-evidence follow-up",
         "primary_analysis": "Analyzing",
     }.get(phase, "Analyzing")
@@ -8777,6 +8839,101 @@ def read_llm_second_opinion_logs(
     return reviewer_logs
 
 
+def read_llm_disagreement_adjudication_logs(
+    primary_logs: list[dict],
+    *,
+    limit: int = LLM_ANALYSIS_COMBINED_HISTORY_LIMIT,
+) -> list[dict]:
+    """Return durable shadow adjudicator executions as distinct audit runs."""
+    primary_by_id = {
+        str(item.get("analysis_id") or item.get("log_id") or ""): item
+        for item in primary_logs
+        if isinstance(item, dict)
+    }
+    try:
+        with soc_alert_db_connect() as conn:
+            if not sqlite_table_exists(
+                conn,
+                "ai_disagreement_adjudication_runs",
+            ):
+                return []
+            rows = conn.execute(
+                """
+                SELECT analysis_id, alert_id, agent_role, status, mode,
+                       adjudicator_error, model_route, decision, confidence,
+                       confidence_score, adjudicator_runtime_seconds,
+                       human_adjudication_required, generated_at
+                FROM ai_disagreement_adjudication_runs
+                ORDER BY generated_at DESC, analysis_id DESC
+                LIMIT ?
+                """,
+                (max(1, min(LLM_ANALYSIS_COMBINED_HISTORY_LIMIT, int(limit))),),
+            ).fetchall()
+    except (FileNotFoundError, sqlite3.Error, TypeError, ValueError):
+        return []
+
+    logs: list[dict] = []
+    for raw in rows:
+        row = dict(raw)
+        analysis_id = str(row.get("analysis_id") or "")
+        parent = dict(primary_by_id.get(analysis_id) or {})
+        status = str(row.get("status") or "unknown").strip().lower()
+        decision = str(row.get("decision") or "").strip()
+        error = str(row.get("adjudicator_error") or "").strip()
+        route = str(row.get("model_route") or "").strip()
+        detail_parts = [
+            error,
+            f"Decision: {decision.replace('_', ' ')}" if decision else "",
+            (
+                "Human adjudication required"
+                if row.get("human_adjudication_required")
+                else ""
+            ),
+        ]
+        mode = str(row.get("mode") or "shadow")
+        if route.startswith("codex-cli:"):
+            mode = "codex-cli"
+        elif route.startswith("ollama:"):
+            mode = "ollama"
+        adjudicator = {
+            "log_id": f"{analysis_id}:disagreement-adjudication",
+            "analysis_id": analysis_id,
+            "parent_log_id": analysis_id,
+            "run_kind": "disagreement_adjudication",
+            "active_phase": "disagreement_adjudication",
+            "phase_label": "Disagreement adjudication",
+            "agent_role": row.get("agent_role"),
+            "job_label": "Disagreement adjudication",
+            "status": "success" if status == "completed" else status,
+            "review_status": status,
+            "error": " · ".join(part for part in detail_parts if part),
+            "model": route,
+            "model_path": mode,
+            "model_route": route,
+            "mode": mode,
+            "runtime_seconds": row.get("adjudicator_runtime_seconds"),
+            "started_at": _llm_reviewer_started_at(
+                row.get("generated_at"),
+                row.get("adjudicator_runtime_seconds"),
+            ),
+            "finished_at": row.get("generated_at"),
+            "alert": parent.get("alert") or {
+                "primary_alert_id": row.get("alert_id"),
+                "rule_name": "Security Onion alert",
+                "alert_count": 1,
+            },
+            "adjudication_decision": decision,
+            "adjudication_confidence": row.get("confidence"),
+            "adjudication_confidence_score": row.get("confidence_score"),
+            "human_adjudication_required": bool(
+                row.get("human_adjudication_required")
+            ),
+        }
+        hydrate_llm_reviewer_from_parent(adjudicator, parent)
+        logs.append(adjudicator)
+    return logs
+
+
 def _llm_log_sort_timestamp(record: dict) -> float:
     for key in ("started_at", "finished_at"):
         text = str(record.get(key) or "").strip()
@@ -8805,7 +8962,10 @@ def read_llm_agent_activity_snapshot() -> dict:
             database_logs,
         )
         reviewer_logs = read_llm_second_opinion_logs(primary_logs)
-        combined = [*primary_logs, *reviewer_logs]
+        adjudication_logs = read_llm_disagreement_adjudication_logs(
+            primary_logs,
+        )
+        combined = [*primary_logs, *reviewer_logs, *adjudication_logs]
         combined.sort(
             key=lambda record: (
                 _llm_log_sort_timestamp(record),
@@ -8823,6 +8983,7 @@ def read_llm_agent_activity_snapshot() -> dict:
         return {
             "primary_logs": primary_logs,
             "reviewer_logs": reviewer_logs,
+            "adjudication_logs": adjudication_logs,
             "combined": combined,
             "telemetry_total": telemetry_total,
             "database_recovered_total": database_recovered_total,
@@ -8831,6 +8992,8 @@ def read_llm_agent_activity_snapshot() -> dict:
                 telemetry_total > len(telemetry_logs)
                 or len(database_logs) >= LLM_ANALYSIS_COMBINED_HISTORY_LIMIT
                 or len(reviewer_logs)
+                >= LLM_ANALYSIS_COMBINED_HISTORY_LIMIT
+                or len(adjudication_logs)
                 >= LLM_ANALYSIS_COMBINED_HISTORY_LIMIT
             ),
         }
@@ -8847,8 +9010,9 @@ def llm_analysis_logs_response(query: dict[str, list[str]]) -> dict:
     activity = read_llm_agent_activity_snapshot()
     primary_logs = activity["primary_logs"]
     reviewer_logs = activity["reviewer_logs"]
+    adjudication_logs = activity["adjudication_logs"]
     primary_total = len(primary_logs)
-    total = primary_total + len(reviewer_logs)
+    total = primary_total + len(reviewer_logs) + len(adjudication_logs)
     total_pages = max(1, math.ceil(total / limit)) if total else 1
     page = min(requested_page, total_pages)
     combined = activity["combined"]
@@ -8865,6 +9029,7 @@ def llm_analysis_logs_response(query: dict[str, list[str]]) -> dict:
             "database_recovered_total"
         ],
         "second_opinion_total": len(reviewer_logs),
+        "disagreement_adjudication_total": len(adjudication_logs),
         "agent_totals": activity["agent_totals"],
         "history_truncated": activity["history_truncated"],
         "total_pages": total_pages,

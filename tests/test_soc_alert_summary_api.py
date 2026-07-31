@@ -1741,6 +1741,27 @@ class SocAlertSummaryApiTest(unittest.TestCase):
               'true_positive_suspicious', 'high', 'material_disagreement', 1,
               45.5, '2026-07-29  10:01:45-06:00'
             );
+            CREATE TABLE ai_disagreement_adjudication_runs (
+              analysis_id TEXT PRIMARY KEY,
+              alert_id TEXT NOT NULL,
+              agent_role TEXT NOT NULL,
+              status TEXT NOT NULL,
+              mode TEXT NOT NULL,
+              adjudicator_error TEXT,
+              model_route TEXT,
+              decision TEXT,
+              confidence TEXT,
+              confidence_score REAL,
+              adjudicator_runtime_seconds REAL,
+              human_adjudication_required INTEGER NOT NULL,
+              generated_at TEXT NOT NULL
+            );
+            INSERT INTO ai_disagreement_adjudication_runs VALUES (
+              'analysis-review-unit', 'newest-alert', 'soc-analyst',
+              'completed', 'shadow', NULL,
+              'codex-cli:gpt-5.6-terra:medium', 'unresolved', 'medium',
+              0.55, 30.0, 1, '2026-07-29  10:01:55-06:00'
+            );
             """
         )
         self.conn.commit()
@@ -1752,7 +1773,8 @@ class SocAlertSummaryApiTest(unittest.TestCase):
 
         self.assertEqual(payload["primary_total"], 1)
         self.assertEqual(payload["second_opinion_total"], 1)
-        self.assertEqual(payload["total"], 2)
+        self.assertEqual(payload["disagreement_adjudication_total"], 1)
+        self.assertEqual(payload["total"], 3)
         reviewer = next(
             item for item in payload["logs"]
             if item.get("run_kind") == "second_opinion"
@@ -1777,6 +1799,26 @@ class SocAlertSummaryApiTest(unittest.TestCase):
         self.assertEqual(reviewer["power_watts_max"], 33.25)
         self.assertEqual(reviewer["cpu_used_percent_max"], 62.5)
         self.assertIn("material disagreement", reviewer["error"])
+        adjudicator = next(
+            item for item in payload["logs"]
+            if item.get("run_kind") == "disagreement_adjudication"
+        )
+        self.assertEqual(
+            adjudicator["parent_log_id"],
+            "analysis-review-unit",
+        )
+        self.assertEqual(
+            adjudicator["job_label"],
+            "Disagreement adjudication",
+        )
+        self.assertEqual(adjudicator["status"], "success")
+        self.assertEqual(adjudicator["runtime_seconds"], 30.0)
+        self.assertEqual(
+            adjudicator["runtime_model_label"],
+            "Codex CLI · gpt-5.6-terra (medium)",
+        )
+        self.assertEqual(adjudicator["gpu_temperature_celsius_max"], 41.25)
+        self.assertTrue(adjudicator["human_adjudication_required"])
 
     def test_llm_activity_reconciles_every_agent_role_from_database(self) -> None:
         log_path = Path(self.tmp.name) / "llm-analysis-log.jsonl"

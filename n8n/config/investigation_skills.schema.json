@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onion-sentinel.local/schemas/investigation-skills-v1.json",
+  "title": "Onion Sentinel Investigation Skills Registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "mode", "learning_policy", "skills"],
+  "properties": {
+    "schema": {"const": "onion-sentinel-investigation-skills-v1"},
+    "version": {"const": 1},
+    "mode": {"const": "shadow"},
+    "learning_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_may_propose",
+        "agent_may_activate",
+        "require_replay_evaluation",
+        "require_independent_review",
+        "require_human_approval"
+      ],
+      "properties": {
+        "agent_may_propose": {"const": true},
+        "agent_may_activate": {"const": false},
+        "require_replay_evaluation": {"const": true},
+        "require_independent_review": {"const": true},
+        "require_human_approval": {"const": true}
+      }
+    },
+    "skills": {
+      "type": "array",
+      "maxItems": 250,
+      "items": {"$ref": "#/$defs/skill"}
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._:-]{0,127}$"
+    },
+    "boundedText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "boundedTextList": {
+      "type": "array",
+      "maxItems": 24,
+      "items": {"$ref": "#/$defs/boundedText"}
+    },
+    "skill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "status",
+        "roles",
+        "match",
+        "objective",
+        "required_evidence",
+        "pivot_plan",
+        "alternative_hypotheses",
+        "stop_conditions",
+        "confidence_limiters",
+        "known_false_positive_patterns",
+        "verification"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "version": {"type": "integer", "minimum": 1},
+        "status": {"enum": ["candidate", "shadow", "active", "deprecated"]},
+        "roles": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 24,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["soc-analyst", "incident-responder", "siem-engineer", "cyber-threat-intel", "threat-hunter"]
+          }
+        },
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "event_datasets": {"$ref": "#/$defs/boundedTextList"},
+            "protocols": {"$ref": "#/$defs/boundedTextList"},
+            "destination_ports": {
+              "type": "array",
+              "maxItems": 24,
+              "uniqueItems": true,
+              "items": {"type": "integer", "minimum": 1, "maximum": 65535}
+            },
+            "rule_name_contains": {"$ref": "#/$defs/boundedTextList"}
+          }
+        },
+        "objective": {"$ref": "#/$defs/boundedText"},
+        "required_evidence": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 24,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["alert", "asset_context", "cached_enrichment", "elastic_events", "endpoint_osquery", "network_flow", "pcap", "suricata", "zeek_conn", "zeek_dns", "zeek_files", "zeek_http", "zeek_ssh", "zeek_tls"]
+          }
+        },
+        "pivot_plan": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["step", "backend", "pack", "purpose", "discriminator", "required"],
+            "properties": {
+              "step": {"$ref": "#/$defs/identifier"},
+              "backend": {"enum": ["elastic", "oql", "osquery", "pcap_zeek", "enrichment"]},
+              "pack": {"$ref": "#/$defs/identifier"},
+              "purpose": {"$ref": "#/$defs/identifier"},
+              "discriminator": {"$ref": "#/$defs/boundedText"},
+              "required": {"type": "boolean"}
+            }
+          }
+        },
+        "alternative_hypotheses": {"$ref": "#/$defs/boundedTextList"},
+        "stop_conditions": {"$ref": "#/$defs/boundedTextList"},
+        "confidence_limiters": {"$ref": "#/$defs/boundedTextList"},
+        "known_false_positive_patterns": {"$ref": "#/$defs/boundedTextList"},
+        "verification": {"$ref": "#/$defs/boundedTextList"}
+      }
+    }
+  }
+}

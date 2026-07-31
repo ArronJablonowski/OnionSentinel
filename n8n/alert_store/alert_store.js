@@ -2772,6 +2772,30 @@ async function assertControlledEvaluationSchema() {
       'created_at',
       'updated_at',
     ],
+    ai_disagreement_adjudication_runs: [
+      'analysis_id',
+      'group_id',
+      'alert_id',
+      'agent_role',
+      'status',
+      'mode',
+      'adjudicator_error',
+      'model_route',
+      'decision',
+      'confidence',
+      'confidence_score',
+      'resolved_fields_json',
+      'remaining_disagreements_json',
+      'evidence_used_json',
+      'rationale',
+      'additional_evidence_needed_json',
+      'adjudicator_runtime_seconds',
+      'automation_authorized',
+      'human_adjudication_required',
+      'generated_at',
+      'created_at',
+      'updated_at',
+    ],
     alert_correlations: [
       'source_group_id',
       'related_group_id',
@@ -3281,6 +3305,35 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_ai_second_opinion_agreement ON ai_second_opinion_runs(agreement, generated_at DESC)');
   await run('CREATE INDEX IF NOT EXISTS idx_ai_second_opinion_group ON ai_second_opinion_runs(group_id, generated_at DESC)');
   await run(`
+    CREATE TABLE IF NOT EXISTS ai_disagreement_adjudication_runs (
+      analysis_id TEXT PRIMARY KEY,
+      group_id TEXT NOT NULL,
+      alert_id TEXT NOT NULL,
+      agent_role TEXT NOT NULL,
+      status TEXT NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'shadow',
+      adjudicator_error TEXT,
+      model_route TEXT,
+      decision TEXT,
+      confidence TEXT,
+      confidence_score REAL,
+      resolved_fields_json TEXT NOT NULL DEFAULT '[]',
+      remaining_disagreements_json TEXT NOT NULL DEFAULT '[]',
+      evidence_used_json TEXT NOT NULL DEFAULT '[]',
+      rationale TEXT,
+      additional_evidence_needed_json TEXT NOT NULL DEFAULT '[]',
+      adjudicator_runtime_seconds REAL,
+      automation_authorized INTEGER NOT NULL DEFAULT 0,
+      human_adjudication_required INTEGER NOT NULL DEFAULT 1,
+      generated_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_ai_adjudication_generated ON ai_disagreement_adjudication_runs(generated_at DESC)');
+  await run('CREATE INDEX IF NOT EXISTS idx_ai_adjudication_decision ON ai_disagreement_adjudication_runs(decision, generated_at DESC)');
+  await run('CREATE INDEX IF NOT EXISTS idx_ai_adjudication_group ON ai_disagreement_adjudication_runs(group_id, generated_at DESC)');
+  await run(`
     CREATE TABLE IF NOT EXISTS analyst_adjudications (
       adjudication_id TEXT PRIMARY KEY,
       dashboard_group_id TEXT NOT NULL,
@@ -3712,6 +3765,10 @@ async function recordAiAnalysisResult(payload) {
       'SELECT 1 AS present FROM ai_second_opinion_runs WHERE analysis_id = ?',
       [analysisId],
     );
+    const adjudicationRow = await get(
+      'SELECT 1 AS present FROM ai_disagreement_adjudication_runs WHERE analysis_id = ?',
+      [analysisId],
+    );
     const correlationRow = await get(
       'SELECT COUNT(*) AS count FROM alert_correlations WHERE analysis_id = ?',
       [analysisId],
@@ -3725,6 +3782,7 @@ async function recordAiAnalysisResult(payload) {
       group_id: groupId,
       correlations: Number(correlationRow?.count || 0),
       second_opinion_recorded: Boolean(secondOpinionRow),
+      disagreement_adjudication_recorded: Boolean(adjudicationRow),
       reanalysis_run_id: incidentReanalysisBinding?.run_id || null,
       reanalysis_attempt_id: incidentReanalysisBinding?.attempt_id || null,
       reanalysis_authoritative: incidentReanalysisBinding
@@ -3837,6 +3895,83 @@ async function recordAiAnalysisResult(payload) {
     secondOpinionRecorded = true;
   }
 
+  const adjudication = (
+    response._disagreement_adjudication
+    && typeof response._disagreement_adjudication === 'object'
+    && !Array.isArray(response._disagreement_adjudication)
+  ) ? response._disagreement_adjudication : null;
+  let disagreementAdjudicationRecorded = false;
+  if (adjudication) {
+    const adjudicatorResponse = (
+      adjudication.response
+      && typeof adjudication.response === 'object'
+      && !Array.isArray(adjudication.response)
+    ) ? adjudication.response : {};
+    const runtime = Number(adjudication.runtime_seconds);
+    const score = Number(adjudicatorResponse.confidence_score);
+    const now = nowUtc();
+    await run(
+      `INSERT INTO ai_disagreement_adjudication_runs (
+         analysis_id, group_id, alert_id, agent_role, status, mode,
+         adjudicator_error, model_route, decision, confidence, confidence_score,
+         resolved_fields_json, remaining_disagreements_json, evidence_used_json,
+         rationale, additional_evidence_needed_json, adjudicator_runtime_seconds,
+         automation_authorized, human_adjudication_required, generated_at,
+         created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(analysis_id) DO UPDATE SET
+         group_id = excluded.group_id,
+         alert_id = excluded.alert_id,
+         agent_role = excluded.agent_role,
+         status = excluded.status,
+         mode = excluded.mode,
+         adjudicator_error = excluded.adjudicator_error,
+         model_route = excluded.model_route,
+         decision = excluded.decision,
+         confidence = excluded.confidence,
+         confidence_score = excluded.confidence_score,
+         resolved_fields_json = excluded.resolved_fields_json,
+         remaining_disagreements_json = excluded.remaining_disagreements_json,
+         evidence_used_json = excluded.evidence_used_json,
+         rationale = excluded.rationale,
+         additional_evidence_needed_json = excluded.additional_evidence_needed_json,
+         adjudicator_runtime_seconds = excluded.adjudicator_runtime_seconds,
+         automation_authorized = excluded.automation_authorized,
+         human_adjudication_required = excluded.human_adjudication_required,
+         generated_at = excluded.generated_at,
+         updated_at = excluded.updated_at`,
+      [
+        analysisId,
+        groupId,
+        alertId,
+        agentRole,
+        safeString(adjudication.status || 'unknown', 32),
+        safeString(adjudication.mode || 'shadow', 32),
+        safeString(adjudication.error, 2000),
+        safeString(adjudication.model_route, 200),
+        safeString(adjudicatorResponse.decision || adjudication.decision, 64),
+        safeString(adjudicatorResponse.confidence, 16).toLowerCase(),
+        Number.isFinite(score) && score >= 0 && score <= 1 ? score : null,
+        jsonText(Array.isArray(adjudicatorResponse.resolved_fields)
+          ? adjudicatorResponse.resolved_fields : []),
+        jsonText(Array.isArray(adjudicatorResponse.remaining_disagreements)
+          ? adjudicatorResponse.remaining_disagreements : []),
+        jsonText(Array.isArray(adjudicatorResponse.evidence_used)
+          ? adjudicatorResponse.evidence_used : []),
+        safeString(adjudicatorResponse.rationale, 4000),
+        jsonText(Array.isArray(adjudicatorResponse.additional_evidence_needed)
+          ? adjudicatorResponse.additional_evidence_needed : []),
+        Number.isFinite(runtime) && runtime >= 0 ? runtime : null,
+        0,
+        1,
+        generatedAt,
+        now,
+        now,
+      ],
+    );
+    disagreementAdjudicationRecorded = true;
+  }
+
   let incidentReanalysisBinding = null;
   if (agentRole === 'incident-responder') {
     const executedModel = safeString(payload?.model || response._analysis_model, 200);
@@ -3942,6 +4077,7 @@ async function recordAiAnalysisResult(payload) {
     group_id: groupId,
     correlations,
     second_opinion_recorded: secondOpinionRecorded,
+    disagreement_adjudication_recorded: disagreementAdjudicationRecorded,
     reanalysis_run_id: incidentReanalysisBinding?.run_id || null,
     reanalysis_attempt_id: incidentReanalysisBinding?.attempt_id || null,
     reanalysis_authoritative: incidentReanalysisBinding

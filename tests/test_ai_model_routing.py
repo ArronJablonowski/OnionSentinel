@@ -135,7 +135,7 @@ class AiModelRoutingTests(unittest.TestCase):
             settings["codex_cli_models"],
             [
                 {
-                    "enabled": model in {"gpt-5.5", "gpt-5.6-sol"},
+                    "enabled": model in {"gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra"},
                     "model": model,
                     "reasoning_effort": (
                         "xhigh" if model == "gpt-5.6-sol" else "medium"
@@ -152,6 +152,13 @@ class AiModelRoutingTests(unittest.TestCase):
                     if role == "incident-responder"
                     else reviewer
                 )
+                for role in self.runner.CYBER_SECURITY_AGENT_ROLES
+            },
+        )
+        self.assertEqual(
+            settings["agent_adjudicator_models"],
+            {
+                role: "codex-cli:gpt-5.6-terra:medium"
                 for role in self.runner.CYBER_SECURITY_AGENT_ROLES
             },
         )
@@ -2796,6 +2803,158 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(settings["agent_second_opinion_models"]["soc-analyst"], "ollama:reviewer:latest")
         self.assertEqual(settings["agent_second_opinion_models"]["incident-responder"], "")
         self.assertEqual(settings["agent_second_opinion_models"]["siem-engineer"], "")
+
+    def test_adjudicator_assignments_must_be_enabled_and_independent(self) -> None:
+        settings = self.runner.default_ai_settings()
+
+        self.runner.apply_model_roster(settings, {
+            "enabled_ollama_models": [
+                "primary:latest",
+                "reviewer:latest",
+                "adjudicator:latest",
+            ],
+            "gpt_cli_enabled": False,
+            "agent_models": {"soc-analyst": "ollama:primary:latest"},
+            "agent_second_opinion_models": {
+                "soc-analyst": "ollama:reviewer:latest",
+                "siem-engineer": "ollama:reviewer:latest",
+            },
+            "agent_adjudicator_models": {
+                "soc-analyst": "ollama:adjudicator:latest",
+                "incident-responder": "ollama:primary:latest",
+                "siem-engineer": "ollama:reviewer:latest",
+                "threat-hunter": "ollama:disabled:latest",
+            },
+        })
+
+        self.assertEqual(
+            settings["agent_adjudicator_models"]["soc-analyst"],
+            "ollama:adjudicator:latest",
+        )
+        self.assertEqual(settings["agent_adjudicator_models"]["incident-responder"], "")
+        self.assertEqual(settings["agent_adjudicator_models"]["siem-engineer"], "")
+        self.assertEqual(settings["agent_adjudicator_models"]["threat-hunter"], "")
+
+    def test_bounded_adjudicator_uses_closed_shadow_contract(self) -> None:
+        prompt_file = Path("/tmp/synthetic-disagreement-adjudicator.md")
+        args = type(
+            "Args",
+            (),
+            {"disagreement_adjudicator_prompt_file": prompt_file},
+        )()
+        settings = self.runner.default_ai_settings()
+        settings["enabled_ollama_models"] = [
+            "primary:latest",
+            "reviewer:latest",
+            "adjudicator:latest",
+        ]
+        settings["agent_models"]["soc-analyst"] = "ollama:primary:latest"
+        settings["agent_second_opinion_models"]["soc-analyst"] = (
+            "ollama:reviewer:latest"
+        )
+        settings["agent_adjudicator_models"]["soc-analyst"] = (
+            "ollama:adjudicator:latest"
+        )
+        comparison = {
+            "primary": {"detection_outcome": "inconclusive"},
+            "reviewer": {"detection_outcome": "true_positive_suspicious"},
+            "disputed_fields": [
+                {
+                    "field": "detection_outcome",
+                    "primary": "inconclusive",
+                    "reviewer": "true_positive_suspicious",
+                    "material": True,
+                }
+            ],
+            "material_disagreement": True,
+        }
+        phases: list[tuple[str, str, str]] = []
+
+        def adjudicated(route, package, *unused_args, **unused_kwargs):
+            contract = package["adjudication_contract"]
+            return {
+                "adjudication_case_id": contract["case_id"],
+                "adjudication_evidence_hash": contract["evidence_hash"],
+                "decision": "unresolved",
+                "confidence": "medium",
+                "confidence_score": 0.55,
+                "resolved_fields": [],
+                "remaining_disagreements": ["detection_outcome"],
+                "evidence_used": ["alert:synthetic-adjudication"],
+                "rationale": "The bounded alert evidence does not distinguish the positions.",
+                "additional_evidence_needed": ["Collect endpoint process evidence."],
+            }
+
+        with mock.patch.object(
+            self.runner,
+            "analyze_model_route",
+            side_effect=adjudicated,
+        ) as analyze:
+            result = self.runner.run_bounded_disagreement_adjudication(
+                {"alert": {"alert_id": "synthetic-adjudication"}},
+                self.complete_response(),
+                self.complete_response(),
+                comparison,
+                args,
+                settings,
+                "soc-analyst",
+                phase_callback=lambda phase, route, trigger: phases.append(
+                    (phase, route, trigger)
+                ),
+            )
+
+        analyze.assert_called_once()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["decision"], "unresolved")
+        self.assertEqual(result["mode"], "shadow")
+        self.assertFalse(result["automation_authorized"])
+        self.assertTrue(result["human_adjudication_required"])
+        self.assertEqual(analyze.call_args.args[0], "ollama:adjudicator:latest")
+        self.assertTrue(analyze.call_args.kwargs["independent_review"])
+        self.assertEqual(analyze.call_args.kwargs["system_prompt_file"], prompt_file)
+        self.assertNotIn(
+            "second_opinion_review",
+            analyze.call_args.args[1],
+        )
+        self.assertEqual(phases[0][0], "disagreement_adjudication")
+
+    def test_adjudicator_rejects_a_synthetic_compromise_position(self) -> None:
+        package = {
+            "adjudication_contract": {
+                "case_id": "case-1",
+                "evidence_hash": "a" * 64,
+                "allowed_decisions": [
+                    "primary_supported",
+                    "reviewer_supported",
+                    "unresolved",
+                ],
+                "disputed_fields": ["detection_outcome"],
+                "material_fields": ["detection_outcome"],
+            },
+            "evidence_reference_contract": {
+                "references": [
+                    {"ref": "alert:case-1", "corroborating": True},
+                ],
+            },
+        }
+        response = {
+            "adjudication_case_id": "case-1",
+            "adjudication_evidence_hash": "a" * 64,
+            "decision": "compromise_consensus",
+            "confidence": "medium",
+            "confidence_score": 0.5,
+            "resolved_fields": [],
+            "remaining_disagreements": ["detection_outcome"],
+            "evidence_used": ["alert:case-1"],
+            "rationale": "Synthetic compromise is outside the contract.",
+            "additional_evidence_needed": [],
+        }
+
+        with self.assertRaisesRegex(
+            self.runner.DisagreementAdjudicationValidationError,
+            "closed vocabulary",
+        ):
+            self.runner.validate_disagreement_adjudication(response, package)
 
     def test_ollama_second_opinion_uses_explicit_independent_review_task(self) -> None:
         args = type("Args", (), {})()

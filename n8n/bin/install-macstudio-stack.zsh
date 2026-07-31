@@ -202,6 +202,12 @@ fi
 if [[ ! -f "$STACK_DIR/config/incident_responder_system_prompt.md" ]]; then
   cp "$REPO_DIR/n8n/config/incident_responder_system_prompt.md" "$STACK_DIR/config/incident_responder_system_prompt.md"
 fi
+# The bounded adjudicator contract is code-owned safety policy. Unlike the
+# role prompts, it is not operator-tunable because relaxing its closed choices
+# could accidentally turn shadow review into an automation authority.
+install -m 0600 \
+  "$REPO_DIR/n8n/config/disagreement_adjudicator_system_prompt.md" \
+  "$STACK_DIR/config/disagreement_adjudicator_system_prompt.md"
 # Reviewer prompts are operator-editable runtime policy, just like the primary
 # prompts. Seed missing files during recovery. Existing files are considered
 # for the byte-exact, reviewed baseline upgrades below.
@@ -252,6 +258,7 @@ fi
 /usr/bin/python3 "$REPO_DIR/n8n/bin/upgrade-runtime-policy.py" \
   --source "$REPO_DIR/n8n/config/ai_model_settings.json" \
   --destination "$STACK_DIR/config/ai_model_settings.json" \
+  --accepted-prior-sha256 "bafb138cf8d2c216bf9fe37ea92d5b822b9444a108e9ca5de51a09f587983118" \
   --accepted-prior-sha256 "fd9f93123b22c0664d147fdcd012d1c016329566ffaea97cb4bfa7c5d7daaf2b"
 # The investigation harness policy is operator-owned runtime policy. Seed the
 # checked-in, disabled-by-default baseline only on first install and preserve
@@ -278,6 +285,24 @@ if [[ ! -f "$STACK_DIR/config/investigation_harness_policy.json" ]]; then
 fi
 chmod 0600 "$STACK_DIR/config/investigation_harness_policy.json"
 cp "$REPO_DIR/n8n/config/detection_playbooks.json" "$STACK_DIR/config/detection_playbooks.json"
+for investigation_skill_file in \
+  investigation_skills.schema.json \
+  investigation_skills.json
+do
+  if [[ -L "$STACK_DIR/config/$investigation_skill_file" ]] \
+    || [[ -e "$STACK_DIR/config/$investigation_skill_file" \
+      && ! -f "$STACK_DIR/config/$investigation_skill_file" ]]; then
+    echo "Refusing install: $investigation_skill_file must be a regular file." >&2
+    exit 1
+  fi
+done
+cp "$REPO_DIR/n8n/config/investigation_skills.schema.json" \
+  "$STACK_DIR/config/investigation_skills.schema.json"
+cp "$REPO_DIR/n8n/config/investigation_skills.json" \
+  "$STACK_DIR/config/investigation_skills.json"
+chmod 0644 \
+  "$STACK_DIR/config/investigation_skills.schema.json" \
+  "$STACK_DIR/config/investigation_skills.json"
 if [[ ! -f "$STACK_DIR/config/asset_inventory.json" ]]; then
   cp "$REPO_DIR/n8n/config/asset_inventory.example.json" "$STACK_DIR/config/asset_inventory.json"
   chmod 0600 "$STACK_DIR/config/asset_inventory.json"
@@ -354,6 +379,7 @@ cp "$REPO_DIR/n8n/bin/run-recovery-restore-drill.py" "$STACK_DIR/bin/run-recover
 cp "$REPO_DIR/n8n/bin/run-alert-store-host.zsh" "$STACK_DIR/bin/run-alert-store-host.zsh"
 cp "$REPO_DIR/n8n/bin/maintain-alert-store-sqlite.zsh" "$STACK_DIR/bin/maintain-alert-store-sqlite.zsh"
 cp "$REPO_DIR/n8n/bin/detection_validation.py" "$STACK_DIR/bin/detection_validation.py"
+cp "$REPO_DIR/n8n/bin/investigation_skills.py" "$STACK_DIR/bin/investigation_skills.py"
 cp "$REPO_DIR/n8n/bin/asset_inventory.py" "$STACK_DIR/bin/asset_inventory.py"
 cp "$REPO_DIR/n8n/bin/collect-dhcp-asset-discovery.py" "$STACK_DIR/bin/collect-dhcp-asset-discovery.py"
 cp "$REPO_DIR/n8n/bin/collect-software-inventory.py" "$STACK_DIR/bin/collect-software-inventory.py"
@@ -442,6 +468,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_system_health_component
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_reactive_tables.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_reactive_tables.py"
 cp -R "$REPO_DIR/onion-sentinel-dashboard/assets/." "$DASHBOARD_RUNTIME_DIR/assets/"
 cp "$REPO_DIR/onion-sentinel-dashboard/onion_sentinel_server.py" "$DASHBOARD_RUNTIME_DIR/onion_sentinel_server.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/application_logs.py" "$DASHBOARD_RUNTIME_DIR/application_logs.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/http_runtime.py" "$DASHBOARD_RUNTIME_DIR/http_runtime.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/jsonl_log.py" "$DASHBOARD_RUNTIME_DIR/jsonl_log.py"
 cp "$REPO_DIR/n8n/bin/security_jsonl_log.py" "$DASHBOARD_RUNTIME_DIR/security_jsonl_log.py"

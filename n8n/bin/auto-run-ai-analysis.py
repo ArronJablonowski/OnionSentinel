@@ -49,6 +49,9 @@ DEFAULT_INVESTIGATION_HARNESS_POLICY = (
 DEFAULT_DETECTION_PLAYBOOKS = (
     HOME / "n8n-local" / "config" / "detection_playbooks.json"
 )
+DEFAULT_INVESTIGATION_SKILLS = (
+    HOME / "n8n-local" / "config" / "investigation_skills.json"
+)
 DEFAULT_LOCK = HOME / "n8n-local" / "run" / "ai-analysis.lock"
 DEFAULT_WAKE = Path(os.environ.get(
     "AI_ANALYSIS_WAKE_PATH",
@@ -245,6 +248,11 @@ def controlled_evaluation_runtime(
         args.ai_settings_file,
         args.investigation_harness_policy,
         args.detection_playbooks,
+        *(
+            (args.investigation_skills,)
+            if hasattr(args, "investigation_skills")
+            else ()
+        ),
     )
     try:
         alert_store_origin = urlparse(args.alert_store_url)
@@ -1423,6 +1431,12 @@ def parse_args() -> argparse.Namespace:
         help="Deterministic detection validation playbooks",
     )
     parser.add_argument(
+        "--investigation-skills",
+        type=Path,
+        default=DEFAULT_INVESTIGATION_SKILLS,
+        help="Versioned read-only investigation skill registry",
+    )
+    parser.add_argument(
         "--provider-lane",
         choices=("any", "ollama", "cli"),
         default="any",
@@ -1617,7 +1631,11 @@ def _role_uses_codex_cli(
         else:
             raw = {}
         if isinstance(raw, dict):
-            for field in ("agent_models", "agent_second_opinion_models"):
+            for field in (
+                "agent_models",
+                "agent_second_opinion_models",
+                "agent_adjudicator_models",
+            ):
                 mapping = raw.get(field)
                 if isinstance(mapping, dict):
                     routes.append(
@@ -3147,6 +3165,14 @@ def build_prompt(
                 args,
                 "detection_playbooks",
                 DEFAULT_DETECTION_PLAYBOOKS,
+            )
+        ),
+        "--investigation-skills",
+        str(
+            getattr(
+                args,
+                "investigation_skills",
+                DEFAULT_INVESTIGATION_SKILLS,
             )
         ),
     ]

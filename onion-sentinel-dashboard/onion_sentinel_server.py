@@ -26,6 +26,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import report_portal as runtime
 import ac_hunter_review
+import application_logs
 from http_runtime import BoundedThreadingHTTPServer
 
 try:
@@ -183,6 +184,8 @@ INCIDENT_GET_SUFFIXES = ("/detail", "/adjudications")
 INCIDENT_POST_SUFFIXES = ("/adjudicate", "/status", "/reanalyze")
 ALERT_ROUTE_ID_PATTERN = re.compile(r"[A-Za-z0-9._:@=-]{1,256}")
 INCIDENT_ROUTE_ID_PATTERN = re.compile(r"ir-[a-z0-9_-]{1,64}", re.IGNORECASE)
+APPLICATION_LOG_API_PATH = "/api/application-logs"
+APPLICATION_LOG_API_PREFIX = f"{APPLICATION_LOG_API_PATH}/"
 
 
 def configure_runtime_paths(dashboard_root: Path) -> None:
@@ -287,6 +290,21 @@ def is_soc_post_api(path: str) -> bool:
         )
         for suffix in INCIDENT_POST_SUFFIXES
     )
+
+
+def application_log_route_identifier(path: str) -> str | None:
+    """Return an allowlisted log ID for an exact dedicated-service route."""
+    identifier = _dynamic_route_identifier(
+        path,
+        APPLICATION_LOG_API_PREFIX,
+    )
+    if identifier is None or not application_logs.is_application_log_id(identifier):
+        return None
+    return identifier
+
+
+def is_application_log_get_api(path: str) -> bool:
+    return path == APPLICATION_LOG_API_PATH or application_log_route_identifier(path) is not None
 
 
 def is_controlled_evaluation_dispatch(path: str) -> bool:
@@ -561,6 +579,19 @@ class OnionSentinelHandler(runtime.PortalHandler):
             self.send_response(HTTPStatus.FORBIDDEN)
             self.end_headers()
             return
+        if is_application_log_get_api(path):
+            status = (
+                HTTPStatus.OK
+                if self._admin_authenticated()
+                else HTTPStatus.FORBIDDEN
+            )
+            self.send_response(status)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            for key, value in self._security_headers().items():
+                self.send_header(key, value)
+            self.end_headers()
+            return
         target = resolve_dashboard_target(self.dashboard_root, self.path)
         if path in ("/healthz", "/admin", "/admin/login") or is_soc_get_api(path) or target:
             self.send_response(HTTPStatus.OK)
@@ -633,6 +664,68 @@ class OnionSentinelHandler(runtime.PortalHandler):
             }
             status = HTTPStatus.OK if data["ok"] else HTTPStatus.SERVICE_UNAVAILABLE
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        log_id = application_log_route_identifier(path)
+        if path == APPLICATION_LOG_API_PATH or log_id is not None:
+            if not self._admin_authenticated():
+                return self._send(
+                    HTTPStatus.FORBIDDEN,
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "authentication_required": True,
+                            "error": "Administration sign-in is required to view application logs",
+                        }
+                    ).encode(),
+                    "application/json; charset=utf-8",
+                )
+            try:
+                if path == APPLICATION_LOG_API_PATH:
+                    data = application_logs.catalog_response()
+                else:
+                    query = parse_qs(parsed.query, keep_blank_values=True)
+                    raw_lines = (query.get("lines") or [str(application_logs.DEFAULT_TAIL_LINES)])[0]
+                    try:
+                        lines = int(raw_lines)
+                    except (TypeError, ValueError) as exc:
+                        raise application_logs.ApplicationLogError(
+                            HTTPStatus.BAD_REQUEST,
+                            "lines must be an integer",
+                        ) from exc
+                    lines = max(1, min(application_logs.MAX_TAIL_LINES, lines))
+                    member = str((query.get("member") or [""])[0])
+                    data = application_logs.content_response(
+                        str(log_id),
+                        member=member,
+                        lines=lines,
+                    )
+                return self._send(
+                    HTTPStatus.OK,
+                    json.dumps(data, indent=2).encode(),
+                    "application/json; charset=utf-8",
+                )
+            except application_logs.ApplicationLogError as exc:
+                return self._send(
+                    exc.status,
+                    json.dumps(
+                        {"ok": False, "error": exc.message}
+                    ).encode(),
+                    "application/json; charset=utf-8",
+                )
+            except Exception as exc:
+                APPLICATION_LOGGER.log(
+                    "error",
+                    "application_logs.read_failed",
+                    request_id=getattr(self, "application_request_id", ""),
+                    log_id=log_id or "catalog",
+                    error_type=type(exc).__name__,
+                )
+                return self._send(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    json.dumps(
+                        {"ok": False, "error": "Application logs are unavailable"}
+                    ).encode(),
+                    "application/json; charset=utf-8",
+                )
         if path == "/api/ac-hunter/deep-review":
             status, data = ac_hunter_review.deep_review_response(
                 force_refresh=False

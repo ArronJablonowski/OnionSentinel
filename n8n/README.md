@@ -51,8 +51,11 @@ This directory restores the Mac Studio Docker n8n stack, the Node.js alert-store
 | `config/cyber_threat_intel_system_prompt.md` | Cyber threat intelligence analyst prompt used for intelligence briefs, indicators, and enrichment context. |
 | `config/incident_responder_system_prompt.md` | Incident responder prompt used for response planning and future host artifact collection guidance. |
 | `config/*_second_opinion_prompt.md` | Independent reviewer prompts for all five Cyber Security Agent roles. Reviewers receive the same bounded evidence without the primary conclusion. |
-| `config/ai_model_settings.json` | Enabled Ollama/GPT CLI roster, exact per-agent primary and optional second-opinion route assignments, legacy compatibility fields, and MaxMind paths. |
+| `config/disagreement_adjudicator_system_prompt.md` | Code-owned closed-choice shadow adjudicator policy used only after a material primary/reviewer disagreement. |
+| `config/ai_model_settings.json` | Enabled Ollama/GPT CLI roster, exact per-agent primary, optional second-opinion, and optional independent adjudicator route assignments, legacy compatibility fields, and MaxMind paths. |
 | `config/detection_playbooks.json` | Versioned, code-owned exact-ID validation playbooks for signature-specific discriminators and rule-drift checks. |
+| `config/investigation_skills.json` | Versioned shadow-mode procedural skill registry with deterministic triggers, evidence requirements, bounded pivot plans, alternative hypotheses, stopping rules, and digest-bound selections. |
+| `config/investigation_skills.schema.json` | Strict JSON Schema for the investigation skill registry and its non-bypassable learning/promotion gates. |
 | `config/asset_inventory.example.json` | Empty sanitized template for the operator-owned runtime asset inventory. |
 | `config/software-inventory.example.json` | Disabled-by-default configuration for the restricted Software Inventory collector. |
 | `config/ac-hunter.example.json` | Disabled, non-secret Mac client configuration for AC Hunter Deep Review. Live credentials remain in a separate owner-only runtime file. |
@@ -191,6 +194,16 @@ effectiveness telemetry to SQLite `ai_second_opinion_runs`. Reviewer memory is
 promoted only after complete high-confidence agreement and the standard
 grounding, redaction, deduplication, expiry, and size gates.
 
+When that deterministic comparison finds a material disagreement, an optional
+third route receives the two immutable positions, the exact disputed fields,
+and the same bounded evidence contract. It must return one closed decision:
+`primary_supported`, `reviewer_supported`, or `unresolved`. The runner permits
+one response plus one schema-repair attempt, records the result in
+`ai_disagreement_adjudication_runs`, and never asks the models to debate or
+manufactures consensus. Adjudication is shadow-only: it cannot rewrite either
+position, close or contain a case, tune a rule, or promote memory. The existing
+human-review gate remains authoritative for every material disagreement.
+
 The runner separates five verdict dimensions: event occurrence, detection
 validity, activity disposition, handling, and duplicate identity. The legacy
 Detection Outcome remains a deterministic compatibility projection of those
@@ -211,6 +224,14 @@ and resolution output is capped with explicit truncation metadata. Registered
 roles and expected services are context, never proof of authorization or
 benignness. Owner aliases are removed from hosted/reviewer packages unless that
 individual asset explicitly sets `share_with_hosted_models`.
+
+`config/investigation_skills.json` is also deployed as reviewed code-owned
+policy. The initial registry is fixed to shadow mode. Skills can advise the
+model about required evidence, alternative hypotheses, confidence limits, and
+bounded pivots, but cannot execute a query or activate a candidate change.
+Every selected skill is projected into the prompt with registry and skill
+SHA-256 digests. Candidate promotion requires replay evaluation, independent
+review, and human approval.
 
 Primary/reviewer material disagreement is persisted and shown as disputed.
 Suppressing an alert or resolving an incident is blocked until an analyst
