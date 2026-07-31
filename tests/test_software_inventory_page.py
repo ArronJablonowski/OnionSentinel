@@ -271,22 +271,21 @@ class SoftwareInventoryPageTests(unittest.TestCase):
             self.page,
         )
 
-    def test_desktop_software_column_does_not_wrap(self) -> None:
-        self.assertIn(".software-table{table-layout:auto}", self.page)
+    def test_desktop_software_column_wraps_only_when_width_requires_it(self) -> None:
         self.assertIn(
-            ".software-table th:nth-child(2),.software-table td:nth-child(2)"
-            "{white-space:nowrap}",
+            ".software-table{min-width:1710px;table-layout:fixed}",
+            self.page,
+        )
+        self.assertIn(
+            ".software-table th:nth-child(2){width:420px}",
             self.page,
         )
         self.assertIn(
             ".software-table td:nth-child(2) .software-name"
-            "{overflow-wrap:normal;word-break:normal}",
+            "{white-space:normal;overflow-wrap:anywhere;word-break:normal}",
             self.page,
         )
-        self.assertNotIn(
-            ".software-mobile-title{white-space:nowrap}",
-            self.page,
-        )
+        self.assertNotIn("td:nth-child(2){white-space:nowrap}", self.page)
 
 
 if __name__ == "__main__":
