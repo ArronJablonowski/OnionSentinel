@@ -82,12 +82,26 @@ SOFTWARE_RECORD_KEYS = {
     "last_seen",
     "observation_count",
 }
+SOFTWARE_OS_RECORD_KEYS = SOFTWARE_RECORD_KEYS | {
+    "operating_system_type",
+    "operating_system_version",
+    "operating_system_source",
+    "operating_system_confidence",
+}
+SOFTWARE_RECORD_KEY_SETS = {
+    frozenset(SOFTWARE_RECORD_KEYS),
+    frozenset(SOFTWARE_OS_RECORD_KEYS),
+}
 SOFTWARE_TEXT_LIMITS = {
     "asset": 512,
     "product": 4096,
     "version": 1024,
     "platform": 160,
     "category": 256,
+    "operating_system_type": 160,
+    "operating_system_version": 512,
+    "operating_system_source": 128,
+    "operating_system_confidence": 16,
 }
 SOFTWARE_LAN_NETWORKS = tuple(
     ipaddress.ip_network(cidr)
@@ -221,7 +235,10 @@ def _validate_software_record(
     start: dt.datetime,
     end: dt.datetime,
 ) -> None:
-    if not isinstance(record, dict) or set(record) != SOFTWARE_RECORD_KEYS:
+    if (
+        not isinstance(record, dict)
+        or frozenset(record) not in SOFTWARE_RECORD_KEY_SETS
+    ):
         raise ValueError("software inventory record fields failed validation")
     expected = SOFTWARE_INVENTORY_SOURCES[source]
     if (
@@ -260,6 +277,51 @@ def _validate_software_record(
             field=f"record.{field}",
             allow_empty=field != "product",
         )
+    if set(record) == SOFTWARE_OS_RECORD_KEYS:
+        for field in (
+            "operating_system_type",
+            "operating_system_version",
+            "operating_system_source",
+            "operating_system_confidence",
+        ):
+            _software_text(
+                record[field],
+                SOFTWARE_TEXT_LIMITS[field],
+                field=f"record.{field}",
+                allow_empty=True,
+            )
+        os_present = bool(
+            record["operating_system_type"]
+            or record["operating_system_version"]
+        )
+        if source == "osquery_apps":
+            if os_present and (
+                record["operating_system_source"]
+                != "osquery_manager.result:host.os"
+                or record["operating_system_confidence"] != "high"
+            ):
+                raise ValueError(
+                    "endpoint operating-system provenance failed validation"
+                )
+            if not os_present and (
+                record["operating_system_source"]
+                or record["operating_system_confidence"]
+            ):
+                raise ValueError(
+                    "empty endpoint operating-system evidence claims provenance"
+                )
+        elif any(
+            record[field]
+            for field in (
+                "operating_system_type",
+                "operating_system_version",
+                "operating_system_source",
+                "operating_system_confidence",
+            )
+        ):
+            raise ValueError(
+                "passive software evidence cannot assert an exact operating system"
+            )
     first_seen = _parse_dhcp_timestamp(record["first_seen"])
     last_seen = _parse_dhcp_timestamp(record["last_seen"])
     if first_seen > last_seen or first_seen < start or last_seen >= end:

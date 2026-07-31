@@ -233,6 +233,43 @@ class SoftwareInventoryPageTests(unittest.TestCase):
             self.page,
         )
         self.assertIn(
+            "const operatingSystem=item=>",
+            self.page,
+        )
+        self.assertIn(
+            "String(item?.operating_system_type??'').trim()",
+            self.page,
+        )
+        self.assertIn(
+            "String(item?.operating_system_version??'').trim()",
+            self.page,
+        )
+        self.assertIn(
+            "OS: ${esc(os.type||'Not observed')}",
+            self.page,
+        )
+        self.assertIn(
+            "Full version: ${esc(os.version||'Not observed')}",
+            self.page,
+        )
+        self.assertIn(
+            "<dt>Operating system type</dt>",
+            self.page,
+        )
+        self.assertIn(
+            "<dt>Full OS version</dt>",
+            self.page,
+        )
+        self.assertIn(
+            "<dt>OS evidence</dt>",
+            self.page,
+        )
+        self.assertNotIn(
+            "words(first(item?.platform,'unknown platform'))",
+            self.page,
+        )
+        self.assertNotIn("<th>Operating system</th>", self.page)
+        self.assertIn(
             "String(item?.observed_user_agent??'').trim()",
             self.page,
         )
@@ -246,11 +283,13 @@ class SoftwareInventoryPageTests(unittest.TestCase):
             self.page,
         )
         self.assertIn(
-            "${userAgentEvidence(item)}<dt>Asset reference type</dt>",
+            "${operatingSystemEvidence(item)}${userAgentEvidence(item)}"
+            "<dt>Asset reference type</dt>",
             self.page,
         )
         self.assertIn(
-            "${userAgentEvidence(item)}<dt>First seen</dt>",
+            "${operatingSystemEvidence(item)}${userAgentEvidence(item)}"
+            "<dt>First seen</dt>",
             self.page,
         )
 

@@ -97,6 +97,10 @@ class SoftwareInventoryCollectorTests(unittest.TestCase):
             "asset_ref_type": policy["asset_ref_type"],
             "asset_ref": asset,
             "platform": policy["platform"],
+            "operating_system_type": "",
+            "operating_system_version": "",
+            "operating_system_source": "",
+            "operating_system_confidence": "",
             "product": product,
             "version": version,
             "category": (
@@ -110,6 +114,44 @@ class SoftwareInventoryCollectorTests(unittest.TestCase):
             "last_seen": "2026-07-30T17:00:00.000Z",
             "observation_count": 2,
         }
+
+    def test_endpoint_operating_system_provenance_is_preserved(self) -> None:
+        value = self.record(
+            "osquery_apps",
+            asset=self.host_ref("studio.example"),
+            product="Example",
+            version="1",
+            evidence="a",
+        )
+        value.update(
+            {
+                "operating_system_type": "macOS",
+                "operating_system_version": "macOS 26.0 (25A5306g)",
+                "operating_system_source": "osquery_manager.result:host.os",
+                "operating_system_confidence": "high",
+            }
+        )
+
+        normalized = self.collector._normalize_record(value)
+
+        self.assertEqual(normalized["operating_system_type"], "macOS")
+        self.assertEqual(
+            normalized["operating_system_version"],
+            "macOS 26.0 (25A5306g)",
+        )
+        passive = self.record(
+            "zeek_software",
+            asset="10.66.6.20",
+            product="Example",
+            version="1",
+            evidence="b",
+        )
+        passive["operating_system_type"] = "Linux"
+        with self.assertRaisesRegex(
+            ValueError,
+            "passive software evidence",
+        ):
+            self.collector._normalize_record(passive)
 
     def response(
         self,

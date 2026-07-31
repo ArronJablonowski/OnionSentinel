@@ -383,6 +383,56 @@ def _sanitize_record(raw: object) -> dict[str, object]:
     version = _safe_text(raw.get("version"), "version", maximum=1024)
     if source == "http_user_agent" and version:
         raise InventoryStateError("HTTP User-Agent evidence cannot invent a version")
+    operating_system_type = _safe_text(
+        raw.get("operating_system_type"),
+        "operating_system_type",
+        maximum=160,
+    )
+    operating_system_version = _safe_text(
+        raw.get("operating_system_version"),
+        "operating_system_version",
+        maximum=512,
+    )
+    operating_system_source = _safe_text(
+        raw.get("operating_system_source"),
+        "operating_system_source",
+        maximum=128,
+    )
+    operating_system_confidence = _safe_text(
+        raw.get("operating_system_confidence"),
+        "operating_system_confidence",
+        maximum=16,
+    ).lower()
+    os_present = bool(operating_system_type or operating_system_version)
+    if operating_system_confidence not in {"", "low", "medium", "high"}:
+        raise InventoryStateError(
+            "operating_system_confidence is unsupported"
+        )
+    if source == "osquery_apps":
+        if os_present and (
+            operating_system_source != "osquery_manager.result:host.os"
+            or operating_system_confidence != "high"
+        ):
+            raise InventoryStateError(
+                "endpoint operating-system provenance is invalid"
+            )
+        if not os_present and (
+            operating_system_source or operating_system_confidence
+        ):
+            raise InventoryStateError(
+                "empty endpoint operating-system evidence claims provenance"
+            )
+    elif any(
+        (
+            operating_system_type,
+            operating_system_version,
+            operating_system_source,
+            operating_system_confidence,
+        )
+    ):
+        raise InventoryStateError(
+            "passive software evidence cannot assert an exact operating system"
+        )
     return {
         "evidence_id": evidence_id,
         "source": source,
@@ -394,6 +444,10 @@ def _sanitize_record(raw: object) -> dict[str, object]:
         "platform": _safe_text(
             raw.get("platform"), "platform", maximum=160
         ),
+        "operating_system_type": operating_system_type,
+        "operating_system_version": operating_system_version,
+        "operating_system_source": operating_system_source,
+        "operating_system_confidence": operating_system_confidence,
         "product": _safe_text(
             raw.get("product"), "product", maximum=4096, required=True
         ),
@@ -573,12 +627,14 @@ def apply_asset_labels(
         return 0
 
     claims: dict[tuple[str, str], set[str]] = {}
+    assets_by_id: dict[str, dict] = {}
     for raw in assets:
         if not isinstance(raw, dict):
             continue
         asset_id = str(raw.get("asset_id") or "").strip()
         if not asset_id:
             continue
+        assets_by_id[asset_id] = raw
         hostnames = raw.get("hostnames")
         if isinstance(hostnames, list):
             for hostname in hostnames:
@@ -610,7 +666,35 @@ def apply_asset_labels(
             set(),
         )
         if len(matches) == 1:
-            item["asset_label"] = next(iter(matches))
+            asset_id = next(iter(matches))
+            item["asset_label"] = asset_id
+            asset = assets_by_id.get(asset_id, {})
+            operating_system_type = str(
+                asset.get("operating_system_type")
+                or asset.get("platform")
+                or ""
+            ).strip()[:160]
+            operating_system_version = str(
+                asset.get("operating_system_version") or ""
+            ).strip()[:512]
+            if not str(item.get("operating_system_type") or "").strip():
+                item["operating_system_type"] = operating_system_type
+            if not str(item.get("operating_system_version") or "").strip():
+                item["operating_system_version"] = operating_system_version
+            if (
+                (
+                    operating_system_type
+                    or operating_system_version
+                )
+                and not str(item.get("operating_system_source") or "").strip()
+            ):
+                item["operating_system_source"] = "asset_inventory"
+                confidence = str(asset.get("confidence") or "").strip().lower()
+                item["operating_system_confidence"] = (
+                    confidence
+                    if confidence in {"low", "medium", "high"}
+                    else ""
+                )
             labeled += 1
     return labeled
 
@@ -734,6 +818,8 @@ def build_response(
                     "version",
                     "asset_ref",
                     "platform",
+                    "operating_system_type",
+                    "operating_system_version",
                     "category",
                     "source",
                 )

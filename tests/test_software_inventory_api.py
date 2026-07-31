@@ -47,6 +47,22 @@ def record(
         "asset_ref_type": "host" if source == "osquery_apps" else "ip",
         "asset_ref": asset_ref,
         "platform": "macOS" if source == "osquery_apps" else "network",
+        "operating_system_type": (
+            "macOS" if source == "osquery_apps" else ""
+        ),
+        "operating_system_version": (
+            "macOS 26.0 (25A5306g)"
+            if source == "osquery_apps"
+            else ""
+        ),
+        "operating_system_source": (
+            "osquery_manager.result:host.os"
+            if source == "osquery_apps"
+            else ""
+        ),
+        "operating_system_confidence": (
+            "high" if source == "osquery_apps" else ""
+        ),
         "product": product,
         "version": version,
         "category": "application",
@@ -354,6 +370,8 @@ class SoftwareInventoryApiTests(unittest.TestCase):
                             "asset_id": "studio",
                             "hostnames": [hostname.upper() + "."],
                             "ip_addresses": ["10.100.4.21"],
+                            "platform": "macOS",
+                            "confidence": "high",
                         }
                     ]
                 },
@@ -372,6 +390,31 @@ class SoftwareInventoryApiTests(unittest.TestCase):
         self.assertEqual(labels["Firefox"], "studio")
         self.assertEqual(labels["OpenSSH"], "studio")
         self.assertEqual(labels["Safari"], "")
+        items = {item["product"]: item for item in payload["items"]}
+        self.assertEqual(
+            items["Firefox"]["operating_system_source"],
+            "osquery_manager.result:host.os",
+        )
+        self.assertEqual(
+            items["Firefox"]["operating_system_version"],
+            "macOS 26.0 (25A5306g)",
+        )
+        self.assertEqual(
+            items["OpenSSH"]["operating_system_type"],
+            "macOS",
+        )
+        self.assertEqual(
+            items["OpenSSH"]["operating_system_version"],
+            "",
+        )
+        self.assertEqual(
+            items["OpenSSH"]["operating_system_source"],
+            "asset_inventory",
+        )
+        self.assertEqual(
+            items["OpenSSH"]["operating_system_confidence"],
+            "high",
+        )
 
     def test_portal_pages_beyond_the_default_asset_inventory_limit(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -472,6 +515,13 @@ class SoftwareInventoryApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(calls), inventory.ASSET_LABEL_MAX_PAGES)
         self.assertTrue(all(not item["asset_label"] for item in payload["items"]))
+        self.assertTrue(
+            all(
+                not item["operating_system_type"]
+                or item["source"] == "osquery_apps"
+                for item in payload["items"]
+            )
+        )
         self.assertFalse(
             payload["coverage"]["asset_label_inventory_complete"]
         )

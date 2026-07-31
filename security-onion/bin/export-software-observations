@@ -63,6 +63,10 @@ RECORD_KEYS = {
     "asset_ref_type",
     "asset_ref",
     "platform",
+    "operating_system_type",
+    "operating_system_version",
+    "operating_system_source",
+    "operating_system_confidence",
     "product",
     "version",
     "category",
@@ -86,6 +90,14 @@ SOURCE_SPECS = {
             "osquery.bundle_identifier",
         ],
         "detail_fields": ["osquery.category"],
+        "operating_system_fields": [
+            "host.os.name",
+            "host.os.type",
+            "host.os.platform",
+            "host.os.version",
+            "host.os.full",
+            "host.os.build",
+        ],
         "asset_ref_type": "host",
         "tier": "installed",
         "confidence": "high",
@@ -103,6 +115,7 @@ SOURCE_SPECS = {
         "version_field": "software.version.unparsed",
         "required_fields": ["source.ip", "software.name"],
         "detail_fields": ["software.type"],
+        "operating_system_fields": [],
         "asset_ref_type": "ip",
         "tier": "observed",
         "confidence": "medium",
@@ -123,6 +136,7 @@ SOURCE_SPECS = {
         "version_field": None,
         "required_fields": ["source.ip", "http.useragent"],
         "detail_fields": [],
+        "operating_system_fields": [],
         "asset_ref_type": "ip",
         "tier": "inferred",
         "confidence": "low",
@@ -416,6 +430,10 @@ def normalize_bucket(source_name: str, bucket: object) -> tuple[dict, dict]:
     latest = _latest_source(bucket)
     platform = spec["platform_default"]
     category = spec["category_default"]
+    operating_system_type = ""
+    operating_system_version = ""
+    operating_system_source = ""
+    operating_system_confidence = ""
     if spec["platform_field"]:
         value = nested_value(latest, spec["platform_field"])
         if isinstance(value, str) and value:
@@ -432,6 +450,39 @@ def normalize_bucket(source_name: str, bucket: object) -> tuple[dict, dict]:
                 256,
                 field="record.category",
             )
+    if spec["operating_system_fields"]:
+        for field in ("host.os.name", "host.os.type", "host.os.platform"):
+            value = nested_value(latest, field)
+            if isinstance(value, str) and value.strip():
+                operating_system_type = _bounded_text(
+                    value.strip(),
+                    160,
+                    field="record.operating_system_type",
+                )
+                break
+        full = nested_value(latest, "host.os.full")
+        version_value = nested_value(latest, "host.os.version")
+        build = nested_value(latest, "host.os.build")
+        if isinstance(full, str) and full.strip():
+            operating_system_version = _bounded_text(
+                full.strip(),
+                512,
+                field="record.operating_system_version",
+            )
+        elif isinstance(version_value, str) and version_value.strip():
+            operating_system_version = version_value.strip()
+            if isinstance(build, str) and build.strip():
+                operating_system_version = (
+                    f"{operating_system_version} (build {build.strip()})"
+                )
+            operating_system_version = _bounded_text(
+                operating_system_version,
+                512,
+                field="record.operating_system_version",
+            )
+        if operating_system_type or operating_system_version:
+            operating_system_source = "osquery_manager.result:host.os"
+            operating_system_confidence = "high"
     identity = "\0".join((source_name, asset_ref_type, asset_ref, product, version))
     record = {
         "evidence_id": hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24],
@@ -442,6 +493,10 @@ def normalize_bucket(source_name: str, bucket: object) -> tuple[dict, dict]:
         "asset_ref_type": asset_ref_type,
         "asset_ref": asset_ref,
         "platform": platform,
+        "operating_system_type": operating_system_type,
+        "operating_system_version": operating_system_version,
+        "operating_system_source": operating_system_source,
+        "operating_system_confidence": operating_system_confidence,
         "product": product,
         "version": version,
         "category": category,
@@ -530,12 +585,18 @@ def build_query(
         "first_seen": {"min": {"field": "@timestamp"}},
         "last_seen": {"max": {"field": "@timestamp"}},
     }
-    if spec["detail_fields"]:
+    detail_fields = list(
+        dict.fromkeys(
+            list(spec["detail_fields"])
+            + list(spec["operating_system_fields"])
+        )
+    )
+    if detail_fields:
         child_aggs["latest"] = {
             "top_hits": {
                 "size": 1,
                 "sort": [{"@timestamp": {"order": "desc"}}],
-                "_source": spec["detail_fields"],
+                "_source": detail_fields,
             }
         }
     return {

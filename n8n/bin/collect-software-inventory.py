@@ -79,12 +79,26 @@ RECORD_KEYS = {
     "asset_ref_type",
     "asset_ref",
     "platform",
+    "operating_system_type",
+    "operating_system_version",
+    "operating_system_source",
+    "operating_system_confidence",
     "product",
     "version",
     "category",
     "first_seen",
     "last_seen",
     "observation_count",
+}
+LEGACY_RECORD_KEYS = RECORD_KEYS - {
+    "operating_system_type",
+    "operating_system_version",
+    "operating_system_source",
+    "operating_system_confidence",
+}
+RECORD_KEY_SETS = {
+    frozenset(RECORD_KEYS),
+    frozenset(LEGACY_RECORD_KEYS),
 }
 CURSOR_KEYS = {"asset", "product", "version"}
 QUERY_AUDIT_KEYS = {"index", "dataset", "query_digest"}
@@ -451,7 +465,10 @@ def _normalize_record(
     expected_source: Optional[str] = None,
     expected_window: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != RECORD_KEYS:
+    if (
+        not isinstance(value, dict)
+        or frozenset(value) not in RECORD_KEY_SETS
+    ):
         raise ValueError("software inventory record has an invalid shape")
     source = _bounded_text(
         value.get("source"),
@@ -544,6 +561,52 @@ def _normalize_record(
         field="software inventory category",
         maximum=256,
     )
+    operating_system_type = _bounded_text(
+        value.get("operating_system_type") or "",
+        field="software inventory operating system type",
+        maximum=160,
+    )
+    operating_system_version = _bounded_text(
+        value.get("operating_system_version") or "",
+        field="software inventory operating system version",
+        maximum=512,
+    )
+    operating_system_source = _bounded_text(
+        value.get("operating_system_source") or "",
+        field="software inventory operating system source",
+        maximum=128,
+    )
+    operating_system_confidence = _bounded_text(
+        value.get("operating_system_confidence") or "",
+        field="software inventory operating system confidence",
+        maximum=16,
+    ).lower()
+    os_present = bool(operating_system_type or operating_system_version)
+    if source == "osquery_apps":
+        if os_present and (
+            operating_system_source != "osquery_manager.result:host.os"
+            or operating_system_confidence != "high"
+        ):
+            raise ValueError(
+                "endpoint operating system evidence has invalid provenance"
+            )
+        if not os_present and (
+            operating_system_source or operating_system_confidence
+        ):
+            raise ValueError(
+                "empty endpoint operating system evidence claims provenance"
+            )
+    elif any(
+        (
+            operating_system_type,
+            operating_system_version,
+            operating_system_source,
+            operating_system_confidence,
+        )
+    ):
+        raise ValueError(
+            "passive software evidence cannot assert an exact operating system"
+        )
     first_seen = parse_timestamp(value.get("first_seen"))
     last_seen = parse_timestamp(value.get("last_seen"))
     if first_seen > last_seen:
@@ -568,6 +631,10 @@ def _normalize_record(
         "asset_ref_type": asset_ref_type,
         "asset_ref": asset_ref,
         "platform": platform,
+        "operating_system_type": operating_system_type,
+        "operating_system_version": operating_system_version,
+        "operating_system_source": operating_system_source,
+        "operating_system_confidence": operating_system_confidence,
         "product": product,
         "version": version,
         "category": category,

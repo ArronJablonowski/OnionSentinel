@@ -205,6 +205,15 @@ class SoftwareInventorySecurityOnionTests(unittest.TestCase):
                 ]
                 if source == "osquery_apps":
                     self.assertEqual(lan_filters, [])
+                    latest = query["aggs"]["software"]["aggs"]["latest"]
+                    self.assertIn(
+                        "host.os.full",
+                        latest["top_hits"]["_source"],
+                    )
+                    self.assertIn(
+                        "host.os.version",
+                        latest["top_hits"]["_source"],
+                    )
                 else:
                     self.assertEqual(len(lan_filters), 1)
                     self.assertEqual(
@@ -256,7 +265,15 @@ class SoftwareInventorySecurityOnionTests(unittest.TestCase):
                 product="Example App",
                 version="7.8.9",
                 latest={
-                    "host": {"os": {"platform": "darwin"}},
+                    "host": {
+                        "os": {
+                            "name": "macOS",
+                            "platform": "darwin",
+                            "version": "26.0",
+                            "full": "macOS 26.0 (25A5306g)",
+                            "build": "25A5306g",
+                        }
+                    },
                     "osquery": {"category": "public.app-category.productivity"},
                 },
             ),
@@ -267,6 +284,16 @@ class SoftwareInventorySecurityOnionTests(unittest.TestCase):
         self.assertEqual(record["confidence"], "high")
         self.assertEqual(record["asset_ref_type"], "host")
         self.assertEqual(record["platform"], "darwin")
+        self.assertEqual(record["operating_system_type"], "macOS")
+        self.assertEqual(
+            record["operating_system_version"],
+            "macOS 26.0 (25A5306g)",
+        )
+        self.assertEqual(
+            record["operating_system_source"],
+            "osquery_manager.result:host.os",
+        )
+        self.assertEqual(record["operating_system_confidence"], "high")
         self.assertEqual(len(record["asset_ref"]), 24)
         self.assertNotIn("mac-workstation", json.dumps(record))
         expected = hashlib.sha256(
@@ -296,6 +323,8 @@ class SoftwareInventorySecurityOnionTests(unittest.TestCase):
         self.assertEqual(zeek["confidence"], "medium")
         self.assertEqual(zeek["version"], "")
         self.assertEqual(zeek["asset_ref"], "10.66.6.10")
+        self.assertEqual(zeek["operating_system_type"], "")
+        self.assertEqual(zeek["operating_system_version"], "")
 
         user_agent_bucket = self.bucket(
             asset="fd00::20",
@@ -464,6 +493,22 @@ class SoftwareInventoryRelayTests(unittest.TestCase):
                 else "10.66.6.10"
             ),
             "platform": "darwin" if source == "osquery_apps" else "",
+            "operating_system_type": (
+                "macOS" if source == "osquery_apps" else ""
+            ),
+            "operating_system_version": (
+                "macOS 26.0 (25A5306g)"
+                if source == "osquery_apps"
+                else ""
+            ),
+            "operating_system_source": (
+                "osquery_manager.result:host.os"
+                if source == "osquery_apps"
+                else ""
+            ),
+            "operating_system_confidence": (
+                "high" if source == "osquery_apps" else ""
+            ),
             "product": "Example App",
             "version": "1.2.3",
             "category": "application",
@@ -521,6 +566,11 @@ class SoftwareInventoryRelayTests(unittest.TestCase):
 
         mutated = json.loads(json.dumps(response))
         mutated["records"][0]["asset_ref"] = "raw-host-identity"
+        with self.assertRaises(ValueError):
+            self.broker.validate_software_response(mutated, request)
+
+        mutated = json.loads(json.dumps(response))
+        mutated["records"][0]["operating_system_source"] = "untrusted"
         with self.assertRaises(ValueError):
             self.broker.validate_software_response(mutated, request)
 
