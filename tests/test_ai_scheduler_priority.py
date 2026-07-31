@@ -482,6 +482,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         *,
         payload: dict | None = None,
         job_type: str = "ai_analysis",
+        priority: int = 0,
         status: str = "pending",
         next_attempt_at: str = "2020-01-01  00:00:00Z",
         processing_started_at: str | None = None,
@@ -493,13 +494,14 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                 job_type, dedupe_key, status, payload_json, priority,
                 attempt_count, max_attempts, next_attempt_at,
                 processing_started_at, rerun_requested, requested_at
-            ) VALUES (?, ?, ?, ?, 0, 0, 8, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, 0, 8, ?, ?, ?, ?)
             """,
             (
                 job_type,
                 group_id,
                 status,
                 json.dumps(payload or {}),
+                priority,
                 next_attempt_at,
                 processing_started_at,
                 rerun_requested,
@@ -2112,12 +2114,14 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         self.insert_indexed_job(
             "soc-medium-group",
             payload={"agent_role": "soc-analyst"},
+            priority=2,
             next_attempt_at="2026-07-31  12:00:00-06:00",
         )
         self.insert_indexed_job(
             "incident-medium-group",
             payload={"agent_role": "incident-responder"},
             job_type="incident_response_analysis",
+            priority=102,
             next_attempt_at="2026-07-31  12:20:00-06:00",
         )
         self.conn.commit()

@@ -2604,7 +2604,11 @@ def select_next_alert_indexed(
           {group_filter_sql}
           {lane_sql}
         ORDER BY request_bucket ASC, severity_rank ASC,
-                 fairness_bucket ASC, COALESCE(p.priority, 0) DESC,
+                 fairness_bucket ASC,
+                 CASE WHEN fairness_bucket = 0
+                      THEN julianday(replace(p.requested_at, '  ', 'T'))
+                      ELSE NULL END ASC,
+                 COALESCE(p.priority, 0) DESC,
                  julianday(replace(p.requested_at, '  ', 'T')) ASC,
                  CASE p.job_type WHEN 'incident_response_analysis' THEN 0 ELSE 1 END,
                  queue_time_sort DESC,
