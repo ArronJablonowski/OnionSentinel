@@ -128,6 +128,10 @@ CONTROLLED_TIMESTAMP_RE = re.compile(
 RUNTIME_RELEASE_ENV_KEY = "ONION_SENTINEL_RELEASE_ID"
 DEFAULT_RUNTIME_ENV_PATH = HOME / "n8n-local" / ".env"
 MAX_RUNTIME_ENV_BYTES = 1024 * 1024
+# Keep one busy provider lane from starving another analysis role. This is
+# deliberately shorter than the 30-minute operational SLO so an eligible job
+# receives a scheduling opportunity before the stalled-worker alarm fires.
+AI_JOB_FAIRNESS_AGE_SECONDS = 15 * 60
 _CONTROLLED_EVALUATION_TOKEN = ""
 
 
@@ -2470,9 +2474,11 @@ def select_next_alert_indexed(
     """Select one group using only indexed SQLite state.
 
     Durable intent overrides age, suppression, test, and prior-analysis filters.
-    Manual requests get their own priority bucket, then every bucket follows
-    strict severity/newest ordering. Re-running this query before every model
-    call preserves preemption when a more severe alert arrives mid-drain.
+    Manual requests get their own priority bucket. Automatic work is ordered by
+    strict severity and then receives bounded age fairness across agent roles.
+    Re-running this query before every model call preserves critical/high
+    preemption while preventing a continuous Incident Responder stream from
+    starving SOC Analyst work assigned to the same provider lane.
     """
     levels = [level.strip().lower() for level in args.levels.split(",") if level.strip()]
     if not levels:
@@ -2510,6 +2516,7 @@ def select_next_alert_indexed(
         f"""
         WITH due_jobs_ranked AS (
           SELECT id, job_type, dedupe_key, payload_json, priority,
+                 requested_at,
                  ROW_NUMBER() OVER (
                    PARTITION BY dedupe_key
                    ORDER BY CASE job_type WHEN 'incident_response_analysis' THEN 0 ELSE 1 END,
@@ -2523,7 +2530,8 @@ def select_next_alert_indexed(
                 julianday(replace(?, '  ', 'T'))
         ),
         due_jobs AS (
-          SELECT id, job_type, dedupe_key, payload_json, priority
+          SELECT id, job_type, dedupe_key, payload_json, priority,
+                 requested_at
           FROM due_jobs_ranked WHERE job_rank = 1
         ),
         ranked AS (
@@ -2547,14 +2555,22 @@ def select_next_alert_indexed(
                p.id AS durable_job_id,
                p.payload_json AS durable_payload_json,
                p.job_type AS durable_job_type,
+               p.requested_at AS durable_requested_at,
                CASE WHEN p.id IS NOT NULL THEN 1 ELSE 0 END AS has_durable_intent,
                CASE
-                 WHEN p.job_type = 'incident_response_analysis' THEN 0
                  WHEN p.id IS NOT NULL
                    AND instr(replace(p.payload_json, ' ', ''), '"manual_reanalysis":true') > 0 THEN 0
                  WHEN p.id IS NOT NULL THEN 1
                  ELSE 2
                END AS request_bucket,
+               CASE
+                 WHEN p.id IS NOT NULL
+                   AND julianday(replace(p.requested_at, '  ', 'T')) <=
+                       julianday(replace(?, '  ', 'T'))
+                       - (? / 86400.0)
+                 THEN 0
+                 ELSE 1
+               END AS fairness_bucket,
                r.severity_rank, r.queue_time_sort
         FROM ranked AS r
         LEFT JOIN due_jobs AS p ON p.dedupe_key = r.stable_group_id
@@ -2587,13 +2603,18 @@ def select_next_alert_indexed(
           )
           {group_filter_sql}
           {lane_sql}
-        ORDER BY request_bucket ASC, COALESCE(p.priority, 0) DESC,
-                 severity_rank ASC, queue_time_sort DESC,
+        ORDER BY request_bucket ASC, severity_rank ASC,
+                 fairness_bucket ASC, COALESCE(p.priority, 0) DESC,
+                 julianday(replace(p.requested_at, '  ', 'T')) ASC,
+                 CASE p.job_type WHEN 'incident_response_analysis' THEN 0 ELSE 1 END,
+                 queue_time_sort DESC,
                  COALESCE(r.triage_score, 0) DESC, r.alert_id DESC
         LIMIT 1
         """,
         [
             project_now_precise(),
+            project_now_precise(),
+            AI_JOB_FAIRNESS_AGE_SECONDS,
             since,
             *levels,
             *ELIGIBLE_FILTER_STATUSES,

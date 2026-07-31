@@ -2091,6 +2091,103 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         self.assertEqual(first["alert_id"], "critical-old")
         self.assertEqual(second["alert_id"], "high-new")
 
+    def test_indexed_queue_prevents_incident_role_from_starving_soc_analysis(
+        self,
+    ) -> None:
+        self.enable_indexed_scheduler()
+        self.insert_alert(
+            "soc-medium",
+            "medium",
+            "2026-07-31  12:00:00-06:00",
+            60,
+        )
+        self.insert_alert(
+            "incident-medium",
+            "medium",
+            "2026-07-31  12:20:00-06:00",
+            60,
+        )
+        self.set_stable_group("soc-medium", "soc-medium-group")
+        self.set_stable_group("incident-medium", "incident-medium-group")
+        self.insert_indexed_job(
+            "soc-medium-group",
+            payload={"agent_role": "soc-analyst"},
+            next_attempt_at="2026-07-31  12:00:00-06:00",
+        )
+        self.insert_indexed_job(
+            "incident-medium-group",
+            payload={"agent_role": "incident-responder"},
+            job_type="incident_response_analysis",
+            next_attempt_at="2026-07-31  12:20:00-06:00",
+        )
+        self.conn.commit()
+
+        with mock.patch.object(
+            self.scheduler,
+            "project_now_precise",
+            return_value="2026-07-31  12:30:00-06:00",
+        ):
+            selected = self.scheduler.select_next_alert_indexed(
+                self.conn,
+                self.args,
+            )
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["alert_id"], "soc-medium")
+        self.assertEqual(selected["durable_job_type"], "ai_analysis")
+        self.assertEqual(selected["fairness_bucket"], 0)
+
+    def test_indexed_queue_keeps_severity_ahead_of_cross_role_age_fairness(
+        self,
+    ) -> None:
+        self.enable_indexed_scheduler()
+        self.insert_alert(
+            "soc-medium-old",
+            "medium",
+            "2026-07-31  11:00:00-06:00",
+            60,
+        )
+        self.insert_alert(
+            "incident-critical-new",
+            "critical",
+            "2026-07-31  12:25:00-06:00",
+            95,
+        )
+        self.set_stable_group("soc-medium-old", "soc-medium-old-group")
+        self.set_stable_group(
+            "incident-critical-new",
+            "incident-critical-new-group",
+        )
+        self.insert_indexed_job(
+            "soc-medium-old-group",
+            payload={"agent_role": "soc-analyst"},
+            next_attempt_at="2026-07-31  11:00:00-06:00",
+        )
+        self.insert_indexed_job(
+            "incident-critical-new-group",
+            payload={"agent_role": "incident-responder"},
+            job_type="incident_response_analysis",
+            next_attempt_at="2026-07-31  12:25:00-06:00",
+        )
+        self.conn.commit()
+
+        with mock.patch.object(
+            self.scheduler,
+            "project_now_precise",
+            return_value="2026-07-31  12:30:00-06:00",
+        ):
+            selected = self.scheduler.select_next_alert_indexed(
+                self.conn,
+                self.args,
+            )
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["alert_id"], "incident-critical-new")
+        self.assertEqual(
+            selected["durable_job_type"],
+            "incident_response_analysis",
+        )
+
     def test_indexed_queue_uses_subsecond_due_clock(self) -> None:
         self.enable_indexed_scheduler()
         group_id = "0123456789abcdefabcd"
