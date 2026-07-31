@@ -291,7 +291,11 @@ class AssetInventoryPageTests(unittest.TestCase):
         self.assertIn('id="asset-inventory-view"', page)
         self.assertIn("fetch('/api/asset-inventory'", page)
         self.assertIn("Current IP address", page)
-        self.assertIn("<th>Asset</th><th>State</th><th>Current IP address</th>", page)
+        self.assertIn(
+            "<th>Asset</th><th>State</th><th>Current IP address</th>"
+            "<th>MAC address</th><th>Hostname</th>",
+            page,
+        )
         self.assertIn(
             '<td><strong class="asset-name" title="${esc(item.asset_id)}">'
             '${esc(item.asset_id)}</strong></td>'
@@ -305,10 +309,13 @@ class AssetInventoryPageTests(unittest.TestCase):
             page,
         )
         self.assertNotIn("<th>Validity</th>", page)
-        self.assertIn('colspan="10" class="ir-loading">Loading known assets', page)
-        self.assertIn(".asset-table th:nth-child(10){width:190px}", page)
+        self.assertIn('colspan="11" class="ir-loading">Loading known assets', page)
+        self.assertIn(".asset-table th:nth-child(11){width:190px}", page)
         self.assertIn(".asset-table th:nth-child(1){width:220px}", page)
-        self.assertIn(".asset-table th:nth-child(4){width:220px}", page)
+        self.assertIn(".asset-table th:nth-child(4){width:155px}", page)
+        self.assertIn(".asset-table th:nth-child(5){width:220px}", page)
+        self.assertIn("values(item.mac_addresses,'asset-mac')", page)
+        self.assertIn(".asset-mac{white-space:nowrap!important", page)
         self.assertIn("text-overflow:ellipsis;white-space:nowrap!important", page)
         self.assertIn('title="${esc(value)}">${esc(value)}</code>', page)
         self.assertIn("text-overflow:ellipsis;white-space:nowrap", page)
