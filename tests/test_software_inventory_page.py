@@ -233,6 +233,14 @@ class SoftwareInventoryPageTests(unittest.TestCase):
             self.page,
         )
         self.assertIn(
+            "String(item?.observed_user_agent??'').trim()",
+            self.page,
+        )
+        self.assertNotIn(
+            "String(first(item?.observed_user_agent,'')).trim()",
+            self.page,
+        )
+        self.assertIn(
             "<dt>Observed user-agent</dt><dd><code "
             'class="software-code">${esc(userAgent)}</code></dd>',
             self.page,
