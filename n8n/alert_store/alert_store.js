@@ -1930,8 +1930,16 @@ function normalizeInvestigationEnrichmentIndicator(indicatorType, indicator) {
 }
 
 function investigationIndicatorAlert(type, value) {
+  // Keep the internal correlation token shorter than every supported hash
+  // format. extractAlertIndicators intentionally scans the complete original
+  // alert for hashes, so a full SHA-256 here would create an unrelated pivot.
+  const correlationToken = crypto
+    .createHash('sha256')
+    .update(`${type}:${value}`)
+    .digest('hex')
+    .slice(0, 16);
   const alert = {
-    alert_id: `investigation-enrichment:${crypto.createHash('sha256').update(`${type}:${value}`).digest('hex')}`,
+    alert_id: `investigation-enrichment:${correlationToken}`,
     timestamp: nowUtc(),
     rule_name: 'Bounded investigation enrichment pivot',
     event_dataset: 'onion_sentinel.investigation_enrichment',

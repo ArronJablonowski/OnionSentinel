@@ -140,6 +140,11 @@ class InvestigationEnrichmentTests(unittest.TestCase):
         self.assertIn("cachedLookup(source, indicatorType, indicator", alert_store)
         self.assertIn("reserveProviderRateLimitSlot(source)", alert_store)
         self.assertIn("/investigations/enrichment/query", workflow)
+        self.assertIn(".slice(0, 16)", alert_store)
+        self.assertNotIn(
+            "alert_id: `investigation-enrichment:${crypto.createHash",
+            alert_store,
+        )
 
 
 if __name__ == "__main__":
