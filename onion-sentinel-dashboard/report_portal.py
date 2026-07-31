@@ -130,6 +130,12 @@ ASSET_INVENTORY_MAX_BYTES = 64 * 1024 * 1024
 ASSET_DATABASE_READ_ENABLED = str(
     os.environ.get("ASSET_DATABASE_READ_ENABLED") or ""
 ).strip().lower() in {"1", "true", "yes"}
+SOFTWARE_DATABASE_READ_ENABLED = str(
+    os.environ.get(
+        "SOFTWARE_DATABASE_READ_ENABLED",
+        os.environ.get("ASSET_DATABASE_READ_ENABLED") or "",
+    )
+).strip().lower() in {"1", "true", "yes"}
 ASSET_INVENTORY_ADMIN_WRITE_REQUIRED = str(
     os.environ.get("ASSET_INVENTORY_ADMIN_WRITE_REQUIRED") or ""
 ).strip().lower() in {"1", "true", "yes"}
@@ -933,6 +939,73 @@ def software_inventory_response(
         if next_offset <= offset:
             break
         offset = next_offset
+
+    if SOFTWARE_DATABASE_READ_ENABLED:
+        query = query or {}
+        allowed = {
+            "limit": (query.get("limit") or ["100"])[0],
+            "offset": (query.get("offset") or ["0"])[0],
+            "search": (query.get("search") or [""])[0],
+            "tier": (query.get("tier") or ["all"])[0],
+            "confidence": (query.get("confidence") or ["all"])[0],
+            "freshness": (query.get("freshness") or ["all"])[0],
+            "platform": (query.get("platform") or ["all"])[0],
+            "window": (query.get("window") or ["30d"])[0],
+            "sort": (query.get("sort") or ["last_seen"])[0],
+            "direction": (query.get("direction") or ["desc"])[0],
+        }
+        if observed_at is not None:
+            allowed["observed_at"] = software_inventory._utc_iso(
+                observed_at.astimezone(dt.timezone.utc)
+            )
+        try:
+            payload = alert_store_get_json(
+                f"/software-inventory?{urlencode(allowed)}",
+                timeout=10.0,
+            )
+        except RuntimeError as exc:
+            filters = software_inventory.parse_filters(query)
+            return HTTPStatus.SERVICE_UNAVAILABLE, software_inventory._empty_payload(
+                observed_at or dt.datetime.now(dt.timezone.utc),
+                filters,
+                error=f"PostgreSQL software inventory unavailable: {exc}",
+            )
+        items = payload.get("items")
+        if isinstance(items, list):
+            software_inventory.apply_asset_labels(
+                items,
+                assets,
+                inventory_complete=asset_inventory_complete,
+            )
+            software_inventory.correlate_asset_operating_systems(
+                items,
+                items,
+                assets=assets,
+                observed_at=observed_at or dt.datetime.now(dt.timezone.utc),
+            )
+            coverage = payload.get("coverage")
+            if isinstance(coverage, dict):
+                coverage["labeled_visible_records"] = sum(
+                    bool(item.get("asset_label"))
+                    for item in items
+                    if isinstance(item, dict)
+                )
+                coverage["asset_label_inventory_complete"] = (
+                    asset_inventory_complete
+                )
+                coverage["asset_os_correlated_records"] = sum(
+                    bool(item.get("operating_system_association"))
+                    for item in items
+                    if isinstance(item, dict)
+                )
+        if not asset_inventory_complete:
+            warnings = payload.get("warnings")
+            if isinstance(warnings, list):
+                warnings.append(
+                    "Asset labels are withheld because the complete bounded "
+                    "Asset Inventory could not be read."
+                )
+        return HTTPStatus.OK, payload
 
     status, payload = software_inventory.build_response(
         Path(SOFTWARE_INVENTORY_STATE_FILE),

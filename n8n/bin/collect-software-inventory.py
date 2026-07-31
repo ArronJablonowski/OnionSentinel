@@ -22,6 +22,8 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from bounded_process import BoundedProcessError, run_bounded_command
 from security_jsonl_log import SecurityJsonlLogger
@@ -175,6 +177,9 @@ DEFAULT_STATE = (
     / "software-inventory.json"
 )
 DEFAULT_LOG = HOME / "n8n-local" / "logs" / "software-inventory.jsonl"
+DEFAULT_ENV = HOME / "n8n-local" / ".env"
+DEFAULT_DATABASE_API_URL = "http://127.0.0.1:8787"
+DATABASE_CHUNK_SIZE = 500
 
 
 class SoftwareInventoryError(RuntimeError):
@@ -187,6 +192,123 @@ class SoftwareInventoryError(RuntimeError):
     ) -> None:
         super().__init__(message)
         self.source_statuses = source_statuses
+
+
+def database_write_token(path: Path) -> str:
+    metadata = path.lstat()
+    if (
+        not path.is_file()
+        or path.is_symlink()
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_size > 1024 * 1024
+    ):
+        raise ValueError("runtime environment file is not owner-controlled")
+    values: Dict[str, str] = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    token = values.get("ASSET_STORE_WRITE_TOKEN") or values.get(
+        "N8N_POST_COMMIT_TOKEN"
+    )
+    if not token or len(token) < 32:
+        raise ValueError("software inventory database write token is missing")
+    return token
+
+
+def _database_post(
+    api_url: str,
+    token: str,
+    route: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    encoded = json.dumps(
+        payload,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    request = urllib_request.Request(
+        f"{api_url.rstrip('/')}{route}",
+        data=encoded,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Content-Length": str(len(encoded)),
+            "X-Onion-Sentinel-Asset-Token": token,
+        },
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=60) as response:
+            body = response.read(1024 * 1024 + 1)
+    except urllib_error.HTTPError as exc:
+        detail = exc.read(4096).decode("utf-8", "replace")
+        raise RuntimeError(
+            f"software inventory database returned HTTP {exc.code}: "
+            f"{' '.join(detail.split())[:300]}"
+        ) from exc
+    except (OSError, urllib_error.URLError) as exc:
+        raise RuntimeError(
+            f"software inventory database is unavailable: {exc}"
+        ) from exc
+    if len(body) > 1024 * 1024:
+        raise RuntimeError("software inventory database response is too large")
+    result = json.loads(body)
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise RuntimeError("software inventory database rejected the request")
+    return result
+
+
+def publish_database_snapshot(
+    state: Dict[str, Any],
+    *,
+    api_url: str,
+    token: str,
+) -> Dict[str, Any]:
+    normalized = validate_state(state)
+    canonical = json.dumps(
+        normalized,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    snapshot_id = hashlib.sha256(canonical).hexdigest()
+    start = _database_post(
+        api_url,
+        token,
+        "/software-inventory/import/start",
+        {
+            "snapshot_id": snapshot_id,
+            "updated_at": normalized["updated_at"],
+            "collection": normalized["collection"],
+            "expected_records": len(normalized["records"]),
+        },
+    )
+    if start.get("already_active") is not True:
+        records = normalized["records"]
+        for offset in range(0, len(records), DATABASE_CHUNK_SIZE):
+            _database_post(
+                api_url,
+                token,
+                "/software-inventory/import/chunk",
+                {
+                    "snapshot_id": snapshot_id,
+                    "records": records[offset : offset + DATABASE_CHUNK_SIZE],
+                },
+            )
+        _database_post(
+            api_url,
+            token,
+            "/software-inventory/import/commit",
+            {"snapshot_id": snapshot_id},
+        )
+    return {
+        "ok": True,
+        "snapshot_id": snapshot_id,
+        "records": len(normalized["records"]),
+        "already_active": start.get("already_active") is True,
+    }
 
 
 def utc_now() -> dt.datetime:
@@ -1420,6 +1542,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
+    parser.add_argument("--env", type=Path, default=DEFAULT_ENV)
+    parser.add_argument(
+        "--database-api-url",
+        default=DEFAULT_DATABASE_API_URL,
+    )
     args = parser.parse_args(argv)
     logger = SecurityJsonlLogger(args.log, service="software-inventory")
     attempted_at = utc_now()
@@ -1438,11 +1565,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                 )
                 return 0
             updated = collect_snapshot(config, previous, attempted_at)
+            database_result = publish_database_snapshot(
+                updated,
+                api_url=args.database_api_url,
+                token=database_write_token(args.env),
+            )
             atomic_write_json(args.state, updated)
             logger.log(
                 "info",
                 "software_inventory.completed",
                 returned=len(updated["records"]),
+                storage_backend="postgresql",
+                snapshot_id=database_result["snapshot_id"],
                 source_statuses=updated["collection"]["source_statuses"],
             )
             return 0

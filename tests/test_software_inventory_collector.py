@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -180,6 +181,85 @@ class SoftwareInventoryCollectorTests(unittest.TestCase):
                 "query_digest": "d" * 64,
             },
         }
+
+    def test_database_publish_is_chunked_and_committed_last(self) -> None:
+        records = [
+            self.record(
+                "osquery_apps",
+                asset=self.host_ref("studio.example"),
+                product=f"Product {index}",
+                version="1",
+                evidence=f"{index % 16:x}",
+            )
+            for index in range(501)
+        ]
+        # Evidence fixtures above repeat after sixteen values; give each record
+        # the full unique 24-hex identity required by the collector contract.
+        for index, item in enumerate(records):
+            item["evidence_id"] = f"{index:024x}"
+        value = self.collector.empty_state()
+        value.update(
+            {
+                "updated_at": "2026-07-30T18:00:00.000Z",
+                "collection": {
+                    "status": "ok",
+                    "last_attempt_at": "2026-07-30T18:00:00.000Z",
+                    "last_success_at": "2026-07-30T18:00:00.000Z",
+                    "last_error": "",
+                    "window": {
+                        "start": "2026-06-30T18:00:00.000Z",
+                        "end": "2026-07-30T18:00:00.000Z",
+                    },
+                    "source_statuses": {
+                        source: {
+                            "status": "ok",
+                            "complete": True,
+                            "pages": 1,
+                            "returned": (
+                                len(records) if source == "osquery_apps" else 0
+                            ),
+                            "freshness": (
+                                "fresh" if source == "osquery_apps" else "empty"
+                            ),
+                            "latest_observation_at": (
+                                "2026-07-30T17:00:00.000Z"
+                                if source == "osquery_apps"
+                                else ""
+                            ),
+                        }
+                        for source in self.collector.SOURCES
+                    },
+                    "complete": True,
+                },
+                "records": records,
+            }
+        )
+        calls = []
+
+        def post(_url, _token, route, payload):
+            calls.append((route, payload))
+            return {"ok": True, "already_active": False}
+
+        with mock.patch.object(self.collector, "_database_post", post):
+            result = self.collector.publish_database_snapshot(
+                value,
+                api_url="http://127.0.0.1:8787",
+                token="x" * 32,
+            )
+
+        self.assertEqual(result["records"], 501)
+        self.assertEqual(
+            [route for route, _payload in calls],
+            [
+                "/software-inventory/import/start",
+                "/software-inventory/import/chunk",
+                "/software-inventory/import/chunk",
+                "/software-inventory/import/commit",
+            ],
+        )
+        self.assertEqual(len(calls[1][1]["records"]), 500)
+        self.assertEqual(len(calls[2][1]["records"]), 1)
+        self.assertRegex(result["snapshot_id"], r"^[0-9a-f]{64}$")
 
     def test_complete_three_source_snapshot_replaces_last_good_records(self) -> None:
         window = self.collector.collection_window(self.now)

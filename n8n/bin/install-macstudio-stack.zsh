@@ -161,6 +161,7 @@ cp "$REPO_DIR/n8n/alert_store/lib/durable_job_queue.js" "$STACK_DIR/alert_store/
 cp "$REPO_DIR/n8n/alert_store/lib/postgres_shadow_outbox.js" "$STACK_DIR/alert_store/lib/postgres_shadow_outbox.js"
 cp "$REPO_DIR/n8n/alert_store/lib/postgres_shadow_projector.js" "$STACK_DIR/alert_store/lib/postgres_shadow_projector.js"
 cp "$REPO_DIR/n8n/alert_store/lib/postgres_asset_store.js" "$STACK_DIR/alert_store/lib/postgres_asset_store.js"
+cp "$REPO_DIR/n8n/alert_store/lib/postgres_software_store.js" "$STACK_DIR/alert_store/lib/postgres_software_store.js"
 cp "$REPO_DIR/n8n/alert_store/lib/security_logger.js" "$STACK_DIR/alert_store/lib/security_logger.js"
 cp "$REPO_DIR/n8n/alert_store/lib/http_json_client.js" "$STACK_DIR/alert_store/lib/http_json_client.js"
 cp "$REPO_DIR/n8n/alert_store/lib/http_runtime.js" "$STACK_DIR/alert_store/lib/http_runtime.js"
@@ -171,6 +172,7 @@ cp "$REPO_DIR/n8n/alert_store/lib/enrichment_cache.js" "$STACK_DIR/alert_store/l
 cp "$REPO_DIR/n8n/alert_store/lib/soc_analysis_policy.js" "$STACK_DIR/alert_store/lib/soc_analysis_policy.js"
 cp "$REPO_DIR/n8n/postgres/alert-store-queue-schema.sql" "$STACK_DIR/postgres/alert-store-queue-schema.sql"
 cp "$REPO_DIR/n8n/postgres/asset-inventory-schema.sql" "$STACK_DIR/postgres/asset-inventory-schema.sql"
+cp "$REPO_DIR/n8n/postgres/software-inventory-schema.sql" "$STACK_DIR/postgres/software-inventory-schema.sql"
 # The repository carries a sanitized DR baseline. Production tuning may contain
 # environment-specific rule names and addresses, so a repair install must not
 # erase it. Runtime backups remain responsible for preserving the live policy.
@@ -349,6 +351,7 @@ cp "$REPO_DIR/n8n/bin/detection_validation.py" "$STACK_DIR/bin/detection_validat
 cp "$REPO_DIR/n8n/bin/asset_inventory.py" "$STACK_DIR/bin/asset_inventory.py"
 cp "$REPO_DIR/n8n/bin/collect-dhcp-asset-discovery.py" "$STACK_DIR/bin/collect-dhcp-asset-discovery.py"
 cp "$REPO_DIR/n8n/bin/collect-software-inventory.py" "$STACK_DIR/bin/collect-software-inventory.py"
+cp "$REPO_DIR/n8n/bin/migrate-software-inventory-to-postgres.py" "$STACK_DIR/bin/migrate-software-inventory-to-postgres.py"
 cp "$REPO_DIR/n8n/bin/query-security-onion.py" "$STACK_DIR/bin/query-security-onion.py"
 cp "$REPO_DIR/n8n/bin/promote-dhcp-asset.py" "$STACK_DIR/bin/promote-dhcp-asset.py"
 cp "$REPO_DIR/n8n/bin/migrate-assets-to-postgres.py" "$STACK_DIR/bin/migrate-assets-to-postgres.py"
@@ -598,6 +601,26 @@ launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.runtime-backup.plist" >/
 launchctl load "$LAUNCHD_DIR/com.arron.n8n.ensure-stack.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.n8n.monitor-stack.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.alert-store.plist"
+# Cut an existing last-good Software Inventory snapshot over before the
+# scheduled collector is loaded. This avoids a race where the dashboard starts
+# against an empty database while the first relay collection is still running.
+if [[ -s "$STACK_DIR/software-inventory/software-inventory.json" ]]; then
+  alert_store_ready=false
+  for _attempt in {1..30}; do
+    if /usr/bin/curl --fail --silent --max-time 2 \
+      "http://127.0.0.1:8787/health" >/dev/null; then
+      alert_store_ready=true
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$alert_store_ready" != "true" ]]; then
+    echo "Alert store did not become ready for Software Inventory migration." >&2
+    exit 1
+  fi
+  /usr/bin/python3 \
+    "$STACK_DIR/bin/migrate-software-inventory-to-postgres.py"
+fi
 launchctl load "$LAUNCHD_DIR/com.arron.soc.alert-store-maintenance.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.pcap-analysis.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.pcap-retention.plist"

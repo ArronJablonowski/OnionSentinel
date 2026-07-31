@@ -376,6 +376,94 @@ class SoftwareInventoryApiTests(unittest.TestCase):
         self.assertTrue(all(item["platform"] == "macOS" for item in payload["items"]))
         self.assertTrue(all("asset_label" in item for item in payload["items"]))
 
+    def test_portal_uses_postgresql_software_inventory_when_enabled(self):
+        database_payload = {
+            "ok": True,
+            "schema": inventory.API_SCHEMA,
+            "generated_at": iso(),
+            "observed_at": iso(),
+            "storage_backend": "postgresql",
+            "collection": {"complete": True, "last_error": ""},
+            "summary": {
+                "records": 1,
+                "products": 1,
+                "assets": 1,
+                "installed": 1,
+                "observed": 0,
+                "inferred": 0,
+                "current": 1,
+                "recent": 0,
+                "historical": 0,
+                "expired": 0,
+            },
+            "coverage": {
+                "authoritative_denominator": None,
+                "denominator_status": "unknown",
+                "osquery_ready": 1,
+                "fresh_endpoint_inventories": 1,
+                "network_observed_assets": 0,
+                "coverage_gaps": 0,
+                "labeled_visible_records": 0,
+                "asset_label_inventory_complete": False,
+                "asset_os_correlated_records": 0,
+            },
+            "filters": inventory.parse_filters(None),
+            "platforms": ["macOS"],
+            "page": {
+                "limit": 100,
+                "offset": 0,
+                "filtered_total": 1,
+                "has_more": False,
+            },
+            "items": [
+                {
+                    key: value
+                    for key, value in record(
+                        "000000000000000000000001",
+                        "osquery_apps",
+                        "aaaaaaaaaaaaaaaaaaaaaaaa",
+                        "Firefox",
+                    ).items()
+                    if key != "private_agent_id"
+                }
+                | {
+                    "freshness": "current",
+                    "asset_label": "",
+                    "operating_system_observed_at": iso(),
+                    "operating_system_freshness": "current",
+                    "operating_system_association": "",
+                }
+            ],
+            "warnings": [],
+            "revision": "d" * 64,
+        }
+        original_enabled = portal.SOFTWARE_DATABASE_READ_ENABLED
+        original_get = portal.alert_store_get_json
+        original_inventory = portal.asset_inventory_response
+        paths = []
+        portal.SOFTWARE_DATABASE_READ_ENABLED = True
+        portal.alert_store_get_json = lambda path, timeout=5.0: (
+            paths.append(path) or database_payload
+        )
+        portal.asset_inventory_response = lambda **_kwargs: (
+            200,
+            {"assets": [], "page": {"has_more": False}},
+        )
+        try:
+            status, payload = portal.software_inventory_response(
+                observed_at=NOW,
+                query={"search": ["Firefox"]},
+            )
+        finally:
+            portal.SOFTWARE_DATABASE_READ_ENABLED = original_enabled
+            portal.alert_store_get_json = original_get
+            portal.asset_inventory_response = original_inventory
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["storage_backend"], "postgresql")
+        self.assertIn("/software-inventory?", paths[0])
+        self.assertIn("search=Firefox", paths[0])
+
     def test_portal_labels_only_unambiguous_known_assets(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = state()

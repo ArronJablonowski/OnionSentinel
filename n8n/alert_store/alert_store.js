@@ -19,6 +19,7 @@ const {createDurableJobQueue} = require('./lib/durable_job_queue');
 const {createPostgresShadowOutbox} = require('./lib/postgres_shadow_outbox');
 const {createPostgresShadowProjector} = require('./lib/postgres_shadow_projector');
 const {createPostgresAssetStore} = require('./lib/postgres_asset_store');
+const {createPostgresSoftwareStore} = require('./lib/postgres_software_store');
 const {createSecurityLogger} = require('./lib/security_logger');
 const {createPipelineMetrics} = require('./lib/pipeline_metrics');
 const {createSocAnalysisPolicy} = require('./lib/soc_analysis_policy');
@@ -70,6 +71,15 @@ const assetPostgresEnabled = ['1', 'true', 'yes'].includes(
 );
 const assetPostgresSchemaPath = process.env.ASSET_POSTGRES_SCHEMA_PATH
   || path.join(__dirname, '..', 'postgres', 'asset-inventory-schema.sql');
+const softwarePostgresEnabled = ['1', 'true', 'yes'].includes(
+  String(
+    process.env.SOFTWARE_POSTGRES_ENABLED
+    ?? process.env.ASSET_POSTGRES_ENABLED
+    ?? '0',
+  ).trim().toLowerCase(),
+);
+const softwarePostgresSchemaPath = process.env.SOFTWARE_POSTGRES_SCHEMA_PATH
+  || path.join(__dirname, '..', 'postgres', 'software-inventory-schema.sql');
 const assetStoreWriteToken = String(
   process.env.ASSET_STORE_WRITE_TOKEN
   || process.env.N8N_POST_COMMIT_TOKEN
@@ -85,7 +95,7 @@ if (!['', '0', '1'].includes(evaluationModeValue)) {
 }
 const controlledEvaluationMode = evaluationModeValue === '1';
 if (
-  assetPostgresEnabled
+  (assetPostgresEnabled || softwarePostgresEnabled)
   && !controlledEvaluationMode
   && assetStoreWriteToken.length < 32
 ) {
@@ -2199,6 +2209,8 @@ let postgresShadowProjector;
 let postgresAssetPool;
 let postgresAssetStore;
 let postgresAssetStoreError = '';
+let postgresSoftwareStore;
+let postgresSoftwareStoreError = '';
 let pipelineMetrics;
 const serviceMetrics = {
   started_at: nowUtc(),
@@ -2316,7 +2328,7 @@ function initializePostgresShadowProjector() {
 }
 
 async function initializePostgresAssetStore() {
-  if (!assetPostgresEnabled || controlledEvaluationMode) return;
+  if ((!assetPostgresEnabled && !softwarePostgresEnabled) || controlledEvaluationMode) return;
   const requiredKeys = [
     'ALERT_STORE_POSTGRES_HOST',
     'ALERT_STORE_POSTGRES_DATABASE',
@@ -2328,6 +2340,7 @@ async function initializePostgresAssetStore() {
   );
   if (missing.length) {
     postgresAssetStoreError = `missing ${missing.join(', ')}`;
+    postgresSoftwareStoreError = `missing ${missing.join(', ')}`;
     return;
   }
   try {
@@ -2352,22 +2365,53 @@ async function initializePostgresAssetStore() {
         error_message: postgresAssetStoreError,
       });
     });
-    postgresAssetStore = createPostgresAssetStore({
-      pool: postgresAssetPool,
-      schemaPath: assetPostgresSchemaPath,
-      logger: applicationLogger,
-    });
-    await postgresAssetStore.initialize();
-    postgresAssetStoreError = '';
-    applicationLogger.log('info', 'asset_store.ready', {
-      backend: 'postgresql',
-      schema_version: 1,
-    });
+    if (assetPostgresEnabled) {
+      postgresAssetStore = createPostgresAssetStore({
+        pool: postgresAssetPool,
+        schemaPath: assetPostgresSchemaPath,
+        logger: applicationLogger,
+      });
+      await postgresAssetStore.initialize();
+      postgresAssetStoreError = '';
+      applicationLogger.log('info', 'asset_store.ready', {
+        backend: 'postgresql',
+        schema_version: 1,
+      });
+    }
   } catch (error) {
     postgresAssetStore = null;
     postgresAssetStoreError = String(error.message || error).slice(0, 500);
     applicationLogger.log('error', 'asset_store.initialization_failed', {
       error_message: postgresAssetStoreError,
+    });
+  }
+}
+
+async function initializePostgresSoftwareStore() {
+  if (!softwarePostgresEnabled || controlledEvaluationMode) return;
+  if (!postgresAssetPool) {
+    postgresSoftwareStoreError = (
+      'shared PostgreSQL pool is unavailable; enable the PostgreSQL asset store'
+    );
+    return;
+  }
+  try {
+    postgresSoftwareStore = createPostgresSoftwareStore({
+      pool: postgresAssetPool,
+      schemaPath: softwarePostgresSchemaPath,
+      logger: applicationLogger,
+    });
+    await postgresSoftwareStore.initialize();
+    postgresSoftwareStoreError = '';
+    applicationLogger.log('info', 'software_inventory_store.ready', {
+      backend: 'postgresql',
+      schema_version: 1,
+    });
+  } catch (error) {
+    postgresSoftwareStore = null;
+    postgresSoftwareStoreError = String(error.message || error).slice(0, 500);
+    applicationLogger.log('error', 'software_inventory_store.initialization_failed', {
+      error_message: postgresSoftwareStoreError,
     });
   }
 }
@@ -2386,6 +2430,24 @@ function requirePostgresAssetStore() {
     throw error;
   }
   return postgresAssetStore;
+}
+
+function requirePostgresSoftwareStore() {
+  if (!softwarePostgresEnabled) {
+    const error = new Error('PostgreSQL software inventory is disabled');
+    error.statusCode = 503;
+    throw error;
+  }
+  if (!postgresSoftwareStore) {
+    const error = new Error(
+      `PostgreSQL software inventory is unavailable${
+        postgresSoftwareStoreError ? `: ${postgresSoftwareStoreError}` : ''
+      }`,
+    );
+    error.statusCode = 503;
+    throw error;
+  }
+  return postgresSoftwareStore;
 }
 
 function assetStoreWriteAuthorized(request) {
@@ -10820,8 +10882,61 @@ async function handleRequest(request, response) {
             available: false,
             error: postgresAssetStoreError || null,
           };
+        health.software_inventory = postgresSoftwareStore
+          ? await postgresSoftwareStore.stats()
+          : {
+            enabled: softwarePostgresEnabled,
+            backend: 'postgresql',
+            available: false,
+            error: postgresSoftwareStoreError || null,
+          };
       }
       sendJson(response, 200, health);
+      return;
+    }
+    if (request.method === 'GET' && parsedUrl.pathname === '/software-inventory') {
+      const store = requirePostgresSoftwareStore();
+      const result = await store.query({
+        limit: parsedUrl.searchParams.get('limit') || 100,
+        offset: parsedUrl.searchParams.get('offset') || 0,
+        search: parsedUrl.searchParams.get('search') || '',
+        tier: parsedUrl.searchParams.get('tier') || 'all',
+        confidence: parsedUrl.searchParams.get('confidence') || 'all',
+        freshness: parsedUrl.searchParams.get('freshness') || 'all',
+        platform: parsedUrl.searchParams.get('platform') || 'all',
+        window: parsedUrl.searchParams.get('window') || '30d',
+        sort: parsedUrl.searchParams.get('sort') || 'last_seen',
+        direction: parsedUrl.searchParams.get('direction') || 'desc',
+        observed_at: parsedUrl.searchParams.get('observed_at') || new Date(),
+      });
+      sendJson(response, 200, result);
+      return;
+    }
+    if (
+      request.method === 'POST'
+      && parsedUrl.pathname === '/software-inventory/import/start'
+    ) {
+      requireAssetStoreWriteAuthorization(request);
+      const store = requirePostgresSoftwareStore();
+      sendJson(response, 200, await store.startImport(await readJsonBody(request)));
+      return;
+    }
+    if (
+      request.method === 'POST'
+      && parsedUrl.pathname === '/software-inventory/import/chunk'
+    ) {
+      requireAssetStoreWriteAuthorization(request);
+      const store = requirePostgresSoftwareStore();
+      sendJson(response, 200, await store.putChunk(await readJsonBody(request)));
+      return;
+    }
+    if (
+      request.method === 'POST'
+      && parsedUrl.pathname === '/software-inventory/import/commit'
+    ) {
+      requireAssetStoreWriteAuthorization(request);
+      const store = requirePostgresSoftwareStore();
+      sendJson(response, 200, await store.commitImport(await readJsonBody(request)));
       return;
     }
     if (request.method === 'GET' && parsedUrl.pathname === '/assets/inventory') {
@@ -11329,11 +11444,14 @@ function installControlledEvaluationShutdown(server) {
 
 initDb().then(async () => {
   await initializePostgresAssetStore();
+  await initializePostgresSoftwareStore();
   applicationLogger.log('info', 'database.initialized', {
     database_path: dbPath,
     postgres_shadow_enabled: postgresShadowEnabled,
     asset_postgres_enabled: assetPostgresEnabled,
     asset_postgres_available: Boolean(postgresAssetStore),
+    software_postgres_enabled: softwarePostgresEnabled,
+    software_postgres_available: Boolean(postgresSoftwareStore),
   });
   const server = configureHttpServer(http.createServer((request, response) => {
     void dispatchRequest(request, response).catch((error) => {
