@@ -324,6 +324,7 @@ class AssetInventoryPageTests(unittest.TestCase):
         self.assertIn("PROMOTE:${item.discovery_id}", page)
         self.assertIn("CHANGE-IP:${item.discovery_id}:${authority.asset_id}", page)
         self.assertIn("when:assetCanRefresh", page)
+        self.assertIn(".dhcp-review-check[hidden]{display:none!important}", page)
         self.assertIn("asset-inventory.html", page)
         self.assertIn("const assetIdentityHtml=asset=>", incident_page)
         self.assertIn("item.source_asset", incident_page)
