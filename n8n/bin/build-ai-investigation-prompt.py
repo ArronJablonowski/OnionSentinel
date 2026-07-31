@@ -66,7 +66,12 @@ DEFAULT_AGENT_MEMORY_DIR = HOME / "n8n-local" / "soc-alerts" / "agent-memory"
 DEFAULT_PCAP_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "pcap-analysis"
 DEFAULT_AI_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-analysis"
 DEFAULT_DETECTION_PLAYBOOKS_FILE = HOME / "n8n-local" / "config" / "detection_playbooks.json"
-DEFAULT_ASSET_INVENTORY_FILE = HOME / "n8n-local" / "config" / "asset_inventory.json"
+DEFAULT_ASSET_INVENTORY_FILE = (
+    HOME
+    / "n8n-local"
+    / "config"
+    / "asset_inventory.database-export.json"
+)
 DEFAULT_SOC_ANALYST_MEMORY_FILE = DEFAULT_AGENT_MEMORY_DIR / "soc-analyst-memory.md"
 DEFAULT_SHARED_AGENT_MEMORY_FILE = DEFAULT_AGENT_MEMORY_DIR / "shared-agent-memory.md"
 DEFAULT_SYSTEM_PROMPT = "You are a careful SOC analyst assisting with Security Onion alerts."

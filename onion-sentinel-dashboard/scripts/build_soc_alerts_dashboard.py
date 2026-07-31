@@ -6008,16 +6008,24 @@ def asset_inventory_page_section() -> str:
         <label>Sort
           <select id="asset-sort">
             <option value="asset_id">Asset name</option>
-            <option value="ip">IP address</option>
-            <option value="hostname">Hostname</option>
             <option value="criticality">Criticality</option>
             <option value="valid_from">Valid since</option>
+            <option value="role">Role</option>
+            <option value="platform">Platform</option>
           </select>
         </label>
         <label>Direction
           <select id="asset-direction">
             <option value="asc">Ascending</option>
             <option value="desc">Descending</option>
+          </select>
+        </label>
+        <label>Rows
+          <select id="asset-page-size">
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="250">250</option>
+            <option value="500">500</option>
           </select>
         </label>
       </div>
@@ -6033,11 +6041,16 @@ def asset_inventory_page_section() -> str:
           <tbody id="asset-table-body"><tr><td colspan="8" class="ir-loading">Loading known assets…</td></tr></tbody>
         </table>
       </div>
+      <div class="asset-pagination" aria-label="Asset inventory pages">
+        <button id="asset-page-previous" type="button">Previous</button>
+        <span id="asset-page-summary">Page 1</span>
+        <button id="asset-page-next" type="button">Next</button>
+      </div>
       <div class="dhcp-section">
         <div class="dhcp-heading">
           <div>
             <h2>DHCP network discovery</h2>
-            <p>Read-only Zeek DHCP observations update current-address display and surface provisional LAN clients. Candidates and conflicts remain non-authoritative until operator review.</p>
+            <p>Read-only Zeek DHCP observations update current-address display and surface provisional DHCP observations for LAN clients. Candidates and conflicts remain non-authoritative until operator review.</p>
           </div>
           <span id="dhcp-collection-badge" class="asset-state">Loading</span>
         </div>
@@ -6063,7 +6076,7 @@ def asset_inventory_page_section() -> str:
       </div>
     </section>
     <style>
-      .asset-view{display:block;padding:0 0 28px}.asset-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:0 0 16px}.asset-metrics>div{min-height:84px;padding:16px 18px;border:1px solid #223341;border-radius:8px;background:#0d1822}.asset-metrics span{display:block;color:#9caec2;font-size:.76rem;font-weight:800;text-transform:uppercase}.asset-metrics strong{display:block;margin-top:7px;color:#75efff;font-size:1.55rem}.asset-toolbar{display:grid;grid-template-columns:minmax(260px,1fr) 180px 150px;gap:12px;align-items:end;margin-bottom:12px}.asset-toolbar label{color:#9caec2;font-size:.76rem;font-weight:800;text-transform:uppercase}.asset-toolbar input,.asset-toolbar select{display:block;width:100%;min-height:44px;margin-top:5px;padding:0 12px;color:#e9f2ff;background:#0b1620;border:1px solid #07566a;border-radius:8px;font:inherit}.asset-status{margin:0 0 12px;color:#8fa2b8;font-size:.8rem}.asset-table-wrap{overflow-x:auto;border:1px solid #223341;border-radius:8px;background:#09131d}.asset-table{width:100%;min-width:1180px;border-collapse:collapse;table-layout:fixed}.asset-table th,.asset-table td{padding:13px 12px;text-align:left;vertical-align:top;border-bottom:1px solid #1e303d}.asset-table th{color:#9caec2;background:#101e2a;font-size:.72rem;text-transform:uppercase}.asset-table th:nth-child(1){width:150px}.asset-table th:nth-child(2){width:190px}.asset-table th:nth-child(3){width:210px}.asset-table th:nth-child(4){width:210px}.asset-table th:nth-child(5){width:105px}.asset-table th:nth-child(6){width:100px}.asset-table th:nth-child(7){width:160px}.asset-table th:nth-child(8){width:150px}.asset-table tbody tr:hover td{background:#0e202b}.asset-name{display:block;color:#eef5ff;font-weight:900;overflow-wrap:anywhere}.asset-state{display:inline-block;margin-top:6px;padding:3px 7px;border:1px solid #205069;border-radius:999px;color:#75efff;background:#0a1a24;font-size:.62rem;font-weight:900;text-transform:uppercase}.asset-values{display:grid;gap:5px}.asset-values code{display:block;color:#d8e7f8;font:700 12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere;white-space:normal}.asset-hostname{color:#69e89a!important}.asset-muted{display:block;color:#8397ab;font-size:.75rem;line-height:1.4;overflow-wrap:anywhere}.asset-criticality{font-weight:900;text-transform:uppercase}.asset-criticality-critical{color:#ff6681}.asset-criticality-high{color:#ff963e}.asset-criticality-medium{color:#ffca67}.asset-criticality-low{color:#72e99c}.asset-criticality-unknown{color:#9caec2}.asset-empty{color:#8397ab;font-style:italic}.asset-validity{font-variant-numeric:tabular-nums}.dhcp-section{margin-top:32px;padding-top:24px;border-top:1px solid #223341}.dhcp-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:16px}.dhcp-heading h2{margin:0;color:#eef5ff;font-size:1.15rem}.dhcp-heading p{max-width:820px;margin:6px 0 0;color:#8fa2b8;font-size:.82rem}.dhcp-heading .asset-state{margin:0}.dhcp-table{min-width:1260px}.dhcp-table th:nth-child(1){width:160px}.dhcp-table th:nth-child(2){width:180px}.dhcp-table th:nth-child(3){width:210px}.dhcp-table th:nth-child(4){width:180px}.dhcp-table th:nth-child(5){width:220px}.dhcp-table th:nth-child(6){width:210px}.dhcp-table th:nth-child(7){width:150px}.dhcp-reconciliation{display:inline-block;padding:4px 8px;border:1px solid currentColor;border-radius:999px;font-size:.63rem;font-weight:900;text-transform:uppercase}.dhcp-verified_match{color:#69e89a}.dhcp-candidate{color:#ffca67}.dhcp-conflict{color:#ff6681}.dhcp-stale{display:block;margin-top:7px;color:#ffca67;font-size:.68rem;font-weight:900;text-transform:uppercase}.dhcp-ip{white-space:nowrap!important;overflow-wrap:normal!important}@media(max-width:900px){.asset-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.asset-toolbar{grid-template-columns:1fr 1fr}.asset-search-label{grid-column:1/-1}}@media(max-width:560px){.asset-metrics,.asset-toolbar{grid-template-columns:1fr}.asset-search-label{grid-column:auto}.dhcp-heading{display:block}.dhcp-heading .asset-state{margin-top:10px}}
+      .asset-view{display:block;padding:0 0 28px}.asset-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:0 0 16px}.asset-metrics>div{min-height:84px;padding:16px 18px;border:1px solid #223341;border-radius:8px;background:#0d1822}.asset-metrics span{display:block;color:#9caec2;font-size:.76rem;font-weight:800;text-transform:uppercase}.asset-metrics strong{display:block;margin-top:7px;color:#75efff;font-size:1.55rem}.asset-toolbar{display:grid;grid-template-columns:minmax(260px,1fr) 180px 150px 110px;gap:12px;align-items:end;margin-bottom:12px}.asset-toolbar label{color:#9caec2;font-size:.76rem;font-weight:800;text-transform:uppercase}.asset-toolbar input,.asset-toolbar select{display:block;width:100%;min-height:44px;margin-top:5px;padding:0 12px;color:#e9f2ff;background:#0b1620;border:1px solid #07566a;border-radius:8px;font:inherit}.asset-status{margin:0 0 12px;color:#8fa2b8;font-size:.8rem}.asset-table-wrap{overflow-x:auto;border:1px solid #223341;border-radius:8px;background:#09131d}.asset-table{width:100%;min-width:1180px;border-collapse:collapse;table-layout:fixed}.asset-table th,.asset-table td{padding:13px 12px;text-align:left;vertical-align:top;border-bottom:1px solid #1e303d}.asset-table th{color:#9caec2;background:#101e2a;font-size:.72rem;text-transform:uppercase}.asset-table th:nth-child(1){width:150px}.asset-table th:nth-child(2){width:190px}.asset-table th:nth-child(3){width:210px}.asset-table th:nth-child(4){width:210px}.asset-table th:nth-child(5){width:105px}.asset-table th:nth-child(6){width:100px}.asset-table th:nth-child(7){width:160px}.asset-table th:nth-child(8){width:150px}.asset-table tbody tr:hover td{background:#0e202b}.asset-pagination{display:flex;align-items:center;justify-content:flex-end;gap:12px;margin:12px 0 0;color:#9caec2;font-size:.78rem}.asset-pagination button{min-width:92px;min-height:38px;border:1px solid #07566a;border-radius:7px;color:#e9f2ff;background:#0b1620;font-weight:800}.asset-pagination button:disabled{opacity:.4;cursor:not-allowed}.asset-name{display:block;color:#eef5ff;font-weight:900;overflow-wrap:anywhere}.asset-state{display:inline-block;margin-top:6px;padding:3px 7px;border:1px solid #205069;border-radius:999px;color:#75efff;background:#0a1a24;font-size:.62rem;font-weight:900;text-transform:uppercase}.asset-values{display:grid;gap:5px}.asset-values code{display:block;color:#d8e7f8;font:700 12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere;white-space:normal}.asset-hostname{color:#69e89a!important}.asset-muted{display:block;color:#8397ab;font-size:.75rem;line-height:1.4;overflow-wrap:anywhere}.asset-criticality{font-weight:900;text-transform:uppercase}.asset-criticality-critical{color:#ff6681}.asset-criticality-high{color:#ff963e}.asset-criticality-medium{color:#ffca67}.asset-criticality-low{color:#72e99c}.asset-criticality-unknown{color:#9caec2}.asset-empty{color:#8397ab;font-style:italic}.asset-validity{font-variant-numeric:tabular-nums}.dhcp-section{margin-top:32px;padding-top:24px;border-top:1px solid #223341}.dhcp-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:16px}.dhcp-heading h2{margin:0;color:#eef5ff;font-size:1.15rem}.dhcp-heading p{max-width:820px;margin:6px 0 0;color:#8fa2b8;font-size:.82rem}.dhcp-heading .asset-state{margin:0}.dhcp-table{min-width:1260px}.dhcp-table th:nth-child(1){width:160px}.dhcp-table th:nth-child(2){width:180px}.dhcp-table th:nth-child(3){width:210px}.dhcp-table th:nth-child(4){width:180px}.dhcp-table th:nth-child(5){width:220px}.dhcp-table th:nth-child(6){width:210px}.dhcp-table th:nth-child(7){width:150px}.dhcp-reconciliation{display:inline-block;padding:4px 8px;border:1px solid currentColor;border-radius:999px;font-size:.63rem;font-weight:900;text-transform:uppercase}.dhcp-verified_match{color:#69e89a}.dhcp-candidate{color:#ffca67}.dhcp-conflict{color:#ff6681}.dhcp-stale{display:block;margin-top:7px;color:#ffca67;font-size:.68rem;font-weight:900;text-transform:uppercase}.dhcp-ip{white-space:nowrap!important;overflow-wrap:normal!important}@media(max-width:900px){.asset-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.asset-toolbar{grid-template-columns:1fr 1fr}.asset-search-label{grid-column:1/-1}}@media(max-width:560px){.asset-metrics,.asset-toolbar{grid-template-columns:1fr}.asset-search-label{grid-column:auto}.dhcp-heading{display:block}.dhcp-heading .asset-state{margin-top:10px}}
     </style>
     <script>
     (()=> {
@@ -6071,48 +6084,52 @@ def asset_inventory_page_section() -> str:
       const search=document.getElementById('asset-search');
       const sort=document.getElementById('asset-sort');
       const direction=document.getElementById('asset-direction');
+      const pageSize=document.getElementById('asset-page-size');
+      const previousPage=document.getElementById('asset-page-previous');
+      const nextPage=document.getElementById('asset-page-next');
+      const pageSummary=document.getElementById('asset-page-summary');
       const status=document.getElementById('asset-inventory-status');
       const errorBox=document.getElementById('asset-inventory-error');
       const dhcpBody=document.getElementById('dhcp-table-body');
       const dhcpStatus=document.getElementById('dhcp-discovery-status');
       const dhcpError=document.getElementById('dhcp-discovery-error');
       const dhcpBadge=document.getElementById('dhcp-collection-badge');
-      let assets=[],assetLoadPromise=null,dhcpLoadPromise=null,assetSignature='',dhcpSignature='',requestedAssetApplied=false;
+      let assets=[],assetLoadPromise=null,dhcpLoadPromise=null,assetSignature='',dhcpSignature='',requestedAssetApplied=false,pageOffset=0,pageMeta={limit:100,offset:0,filtered_total:0,has_more:false},searchTimer=null;
+      const requestedAsset=new URLSearchParams(location.search).get('asset');
+      if(requestedAsset){search.value=requestedAsset;requestedAssetApplied=true}
       const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
       const stableSignature=value=>JSON.stringify(value,(key,item)=>key==='generated_at'||key==='observed_at'?undefined:item);
       const values=(items,className='')=>Array.isArray(items)&&items.length?`<span class="asset-values">${items.map(value=>`<code class="${className}">${esc(value)}</code>`).join('')}</span>`:'<span class="asset-empty">Not registered</span>';
       const timestamp=value=>{const text=String(value||'').trim();return text?esc(text.replace('T','  ')):'Open-ended'};
-      const sortValue=(item,key)=>key==='ip'?String(item.ip_addresses?.[0]||''):key==='hostname'?String(item.hostnames?.[0]||''):String(item[key]||'');
       const row=item=>{const criticality=String(item.criticality||'unknown').toLowerCase().replace(/[^a-z]/g,'')||'unknown';const dynamic=item.current_ip_source==='zeek-dhcp';const configured=Array.isArray(item.configured_ip_addresses)&&item.configured_ip_addresses.length&&JSON.stringify(item.configured_ip_addresses)!==JSON.stringify(item.ip_addresses)?`<span class="asset-muted">Configured: ${esc(item.configured_ip_addresses.join(', '))}</span>`:'';return `<tr data-asset-id="${esc(item.asset_id)}"><td><strong class="asset-name">${esc(item.asset_id)}</strong><span class="asset-state">${esc(item.state||'current')}</span></td><td>${values(item.ip_addresses)}${dynamic?'<span class="asset-muted">Current address from passive DHCP</span>':''}${configured}</td><td>${values(item.hostnames,'asset-hostname')}</td><td><strong class="asset-name">${esc(item.role||'Unspecified role')}</strong><span class="asset-muted">${esc(item.platform||'Platform not registered')}</span></td><td><span class="asset-criticality asset-criticality-${esc(criticality)}">${esc(item.criticality||'unknown')}</span></td><td>${esc(item.confidence||'unknown')}</td><td class="asset-validity"><span class="asset-muted">From</span>${timestamp(item.valid_from)}<span class="asset-muted">Until</span>${timestamp(item.valid_until)}${item.dhcp_last_seen?`<span class="asset-muted">DHCP last seen ${timestamp(item.dhcp_last_seen)}</span>`:''}</td><td><strong class="asset-name">${esc(item.source_type||'Operator inventory')}</strong><span class="asset-muted">${esc(item.source_ref||'No source reference')}</span></td></tr>`};
       function render(){
-        const needle=search.value.trim().toLowerCase();
-        const selected=sort.value,sign=direction.value==='desc'?-1:1;
-        const filtered=assets.filter(item=>!needle||JSON.stringify([item.asset_id,item.ip_addresses,item.hostnames,item.role,item.platform,item.criticality,item.source_type,item.source_ref]).toLowerCase().includes(needle));
-        filtered.sort((left,right)=>sortValue(left,selected).localeCompare(sortValue(right,selected),undefined,{numeric:true,sensitivity:'base'})*sign);
-        body.innerHTML=filtered.length?filtered.map(row).join(''):'<tr><td colspan="8" class="ir-loading">No current assets match this search.</td></tr>';
+        body.innerHTML=assets.length?assets.map(row).join(''):'<tr><td colspan="8" class="ir-loading">No current assets match this search.</td></tr>';
         body.dataset.liveRenderVersion=String(Number(body.dataset.liveRenderVersion||0)+1);
-        const observed=assets.filter(item=>item.state==='observed').length;
-        status.textContent=`Showing ${filtered.length} of ${assets.length} current asset(s), including ${observed} provisional DHCP observation(s). Operator inventory remains authoritative for investigation identity.`;
+        const start=pageMeta.filtered_total?Number(pageMeta.offset||0)+1:0,end=Number(pageMeta.offset||0)+assets.length,total=Number(pageMeta.filtered_total||0),page=Math.floor(Number(pageMeta.offset||0)/Number(pageMeta.limit||100))+1,pages=Math.max(1,Math.ceil(total/Number(pageMeta.limit||100)));
+        status.textContent=`Showing ${start}–${end} of ${total} matching current asset(s). PostgreSQL is authoritative for investigation identity.`;
+        pageSummary.textContent=`Page ${page} of ${pages}`;
+        previousPage.disabled=Number(pageMeta.offset||0)<=0;
+        nextPage.disabled=!pageMeta.has_more;
       }
       function load(){
         if(assetLoadPromise)return assetLoadPromise;
         assetLoadPromise=(async()=>{
           errorBox.hidden=true;
           try{
-          const response=await fetch('/api/asset-inventory',{cache:'no-store'});
+          const params=new URLSearchParams({limit:pageSize.value,offset:String(pageOffset),search:search.value.trim(),sort:sort.value,direction:direction.value,state:'current'});
+          const response=await fetch('/api/asset-inventory'+`?${params}`,{cache:'no-store'});
           const payload=await response.json();
           if(!response.ok||payload.ok===false)throw new Error(payload.error||`HTTP ${response.status}`);
           const nextSignature=stableSignature(payload);
           if(nextSignature===assetSignature)return false;
           assetSignature=nextSignature;
           assets=Array.isArray(payload.assets)?payload.assets:[];
+          pageMeta=payload.page||{limit:Number(pageSize.value),offset:pageOffset,filtered_total:assets.length,has_more:false};
           document.getElementById('asset-records-total').textContent=Number(payload.records_total||0);
           document.getElementById('asset-current-total').textContent=Number(payload.current_asset_count||0);
           document.getElementById('asset-ip-total').textContent=Number(payload.current_ip_count||0);
           document.getElementById('asset-hostname-total').textContent=Number(payload.current_hostname_count||0);
           document.getElementById('asset-expired-total').textContent=Number(payload.state_counts?.expired||0);
-          const requested=new URLSearchParams(location.search).get('asset');
-          if(requested&&!requestedAssetApplied){search.value=requested;requestedAssetApplied=true}
           render();
           return true;
           }catch(error){
@@ -6163,7 +6180,13 @@ def asset_inventory_page_section() -> str:
         })();
         return dhcpLoadPromise;
       }
-      search.addEventListener('input',render);sort.addEventListener('change',render);direction.addEventListener('change',render);load();loadDhcp();
+      const resetAndLoad=()=>{pageOffset=0;assetSignature='';load()};
+      search.addEventListener('input',render);
+      search.addEventListener('input',()=>{window.clearTimeout(searchTimer);searchTimer=window.setTimeout(resetAndLoad,250)});
+      sort.addEventListener('change',resetAndLoad);direction.addEventListener('change',resetAndLoad);pageSize.addEventListener('change',resetAndLoad);
+      previousPage.addEventListener('click',()=>{pageOffset=Math.max(0,pageOffset-Number(pageSize.value));assetSignature='';load()});
+      nextPage.addEventListener('click',()=>{if(pageMeta.has_more){pageOffset+=Number(pageSize.value);assetSignature='';load()}});
+      load();loadDhcp();
       const assetLiveRefresh=async()=>{const results=await Promise.all([load(),loadDhcp()]);return results.some(Boolean)};
       if(window.OnionSentinelReactiveTables){
         window.OnionSentinelReactiveTables.register('asset-inventory-tables',assetLiveRefresh,{intervalMs:60000,revisionKey:'asset_inventory'});

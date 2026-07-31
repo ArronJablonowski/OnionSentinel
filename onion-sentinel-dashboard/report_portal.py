@@ -34,7 +34,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib import error as urllib_error
 from urllib import request as urllib_request
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 PORTAL_SOURCE_DIR = Path(__file__).resolve().parent
 if str(PORTAL_SOURCE_DIR) not in sys.path:
@@ -125,7 +125,10 @@ THREAT_HUNTER_MEMORY_FILE = AGENT_MEMORY_DIR / "threat-hunter-memory.md"
 SHARED_AGENT_MEMORY_FILE = AGENT_MEMORY_DIR / "shared-agent-memory.md"
 SOC_AI_SETTINGS_FILE = HOME / "n8n-local" / "config" / "ai_model_settings.json"
 ASSET_INVENTORY_FILE = HOME / "n8n-local" / "config" / "asset_inventory.json"
-ASSET_INVENTORY_MAX_BYTES = 1024 * 1024
+ASSET_INVENTORY_MAX_BYTES = 64 * 1024 * 1024
+ASSET_DATABASE_READ_ENABLED = str(
+    os.environ.get("ASSET_DATABASE_READ_ENABLED") or ""
+).strip().lower() in {"1", "true", "yes"}
 DHCP_ASSET_DISCOVERY_STATE_FILE = (
     HOME / "n8n-local" / "asset-discovery" / "dhcp-observations.json"
 )
@@ -134,6 +137,7 @@ ASSET_INVENTORY_CACHE_LOCK = threading.RLock()
 ASSET_INVENTORY_CACHE: dict[str, object] = {
     "signature": None,
     "inventory": None,
+    "expires_at": 0.0,
 }
 DEFAULT_HERMES_AUTH_FILE = (
     HOME / "n8n-local" / "private" / "hermes-agent" / "auth.json"
@@ -144,7 +148,7 @@ AGENT_MEMORY_VIEW_MAX_BYTES = 1024 * 1024
 SOC_ALERT_API_MAX_LIMIT = 500
 SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS = 30
 SOC_ALERT_DB_BUSY_TIMEOUT_MS = SOC_ALERT_DB_BUSY_TIMEOUT_SECONDS * 1000
-SOC_ALERT_STORE_RESPONSE_MAX_BYTES = 1024 * 1024
+SOC_ALERT_STORE_RESPONSE_MAX_BYTES = 64 * 1024 * 1024
 SOC_ALERT_DETAIL_FRAGMENT_MAX_BYTES = 32 * 1024 * 1024
 SOC_ALERT_LEVEL_RANK = {
     "critical": 5,
@@ -333,7 +337,41 @@ def _asset_inventory_module():
 
 
 def load_asset_inventory_data() -> tuple[dict, str]:
-    """Return one validated inventory snapshot with a small mtime cache."""
+    """Return the PostgreSQL export used by investigation identity resolution."""
+    if ASSET_DATABASE_READ_ENABLED:
+        with ASSET_INVENTORY_CACHE_LOCK:
+            if (
+                float(ASSET_INVENTORY_CACHE.get("expires_at") or 0) > time.time()
+                and isinstance(ASSET_INVENTORY_CACHE.get("inventory"), dict)
+            ):
+                return dict(ASSET_INVENTORY_CACHE["inventory"]), ""
+        try:
+            result = alert_store_get_json("/assets/snapshot", timeout=5.0)
+            raw_inventory = result.get("inventory")
+            inventory = _asset_inventory_module().validate_asset_inventory(
+                raw_inventory
+            )
+            inventory["inventory_status"] = "database"
+        except (
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
+            return {
+                "assets": [],
+                "inventory_status": "unavailable",
+            }, f"PostgreSQL asset inventory unavailable: {exc}"
+        with ASSET_INVENTORY_CACHE_LOCK:
+            ASSET_INVENTORY_CACHE["signature"] = "postgresql"
+            ASSET_INVENTORY_CACHE["inventory"] = inventory
+            ASSET_INVENTORY_CACHE["expires_at"] = time.time() + 5.0
+        return dict(inventory), ""
+
+    # Offline disaster recovery and unit tests retain a strictly validated
+    # file reader. Production never silently falls back from PostgreSQL to this
+    # snapshot because that would create two competing sources of truth.
     path = Path(ASSET_INVENTORY_FILE)
     try:
         metadata = path.stat()
@@ -418,6 +456,26 @@ def _asset_public_record(asset: dict, state: str) -> dict:
 
 def load_dhcp_asset_discovery_state_data() -> tuple[dict, str]:
     """Load the bounded collector state without treating absence as an error."""
+    if ASSET_DATABASE_READ_ENABLED:
+        try:
+            result = alert_store_get_json("/assets/dhcp-state", timeout=5.0)
+            state = result.get("state")
+            if (
+                not isinstance(state, dict)
+                or state.get("schema")
+                != "onion-sentinel-dhcp-asset-observations-v1"
+                or not isinstance(state.get("collection"), dict)
+                or not isinstance(state.get("observations"), list)
+                or len(state["observations"]) > 100_000
+            ):
+                raise ValueError("database DHCP state failed validation")
+            return state, ""
+        except (RuntimeError, TypeError, ValueError) as exc:
+            return {
+                "collection": {"status": "unavailable"},
+                "observations": [],
+            }, f"PostgreSQL DHCP state unavailable: {exc}"
+
     state_path = Path(DHCP_ASSET_DISCOVERY_STATE_FILE)
     try:
         metadata = state_path.stat()
@@ -627,8 +685,37 @@ def _dhcp_asset_inventory_overlay(
 def asset_inventory_response(
     *,
     observed_at: dt.datetime | None = None,
+    query: dict[str, list[str]] | None = None,
 ) -> tuple[int, dict]:
     """Return current authoritative asset-to-address assignments."""
+    if ASSET_DATABASE_READ_ENABLED and observed_at is None:
+        query = query or {}
+        allowed = {
+            "limit": (query.get("limit") or ["100"])[0],
+            "offset": (query.get("offset") or ["0"])[0],
+            "search": (query.get("search") or [""])[0],
+            "sort": (query.get("sort") or ["asset_id"])[0],
+            "direction": (query.get("direction") or ["asc"])[0],
+            "state": (query.get("state") or ["current"])[0],
+        }
+        encoded = urlencode(allowed)
+        try:
+            payload = alert_store_get_json(
+                f"/assets/inventory?{encoded}",
+                timeout=5.0,
+            )
+        except RuntimeError as exc:
+            return HTTPStatus.SERVICE_UNAVAILABLE, {
+                "ok": False,
+                "inventory_status": "unavailable",
+                "storage_backend": "postgresql",
+                "error": f"Asset inventory unavailable: {exc}",
+                "assets": [],
+            }
+        payload.setdefault("dhcp_discovery", {"status": "database"})
+        payload.setdefault("discovered_asset_count", 0)
+        return HTTPStatus.OK, payload
+
     now = observed_at or dt.datetime.now(dt.timezone.utc)
     if now.tzinfo is None:
         now = now.astimezone()
@@ -12625,7 +12712,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             data = n8n_beacon_history_response(query)
             return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/asset-inventory":
-            status, data = asset_inventory_response()
+            status, data = asset_inventory_response(query=query)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if path == "/api/dhcp-asset-discovery":
             status, data = dhcp_asset_discovery_response()

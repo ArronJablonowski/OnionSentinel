@@ -155,6 +155,7 @@ cp "$REPO_DIR/n8n/alert_store/lib/provider_scheduler.js" "$STACK_DIR/alert_store
 cp "$REPO_DIR/n8n/alert_store/lib/durable_job_queue.js" "$STACK_DIR/alert_store/lib/durable_job_queue.js"
 cp "$REPO_DIR/n8n/alert_store/lib/postgres_shadow_outbox.js" "$STACK_DIR/alert_store/lib/postgres_shadow_outbox.js"
 cp "$REPO_DIR/n8n/alert_store/lib/postgres_shadow_projector.js" "$STACK_DIR/alert_store/lib/postgres_shadow_projector.js"
+cp "$REPO_DIR/n8n/alert_store/lib/postgres_asset_store.js" "$STACK_DIR/alert_store/lib/postgres_asset_store.js"
 cp "$REPO_DIR/n8n/alert_store/lib/security_logger.js" "$STACK_DIR/alert_store/lib/security_logger.js"
 cp "$REPO_DIR/n8n/alert_store/lib/http_json_client.js" "$STACK_DIR/alert_store/lib/http_json_client.js"
 cp "$REPO_DIR/n8n/alert_store/lib/http_runtime.js" "$STACK_DIR/alert_store/lib/http_runtime.js"
@@ -164,6 +165,7 @@ cp "$REPO_DIR/n8n/alert_store/lib/correlation_context.js" "$STACK_DIR/alert_stor
 cp "$REPO_DIR/n8n/alert_store/lib/enrichment_cache.js" "$STACK_DIR/alert_store/lib/enrichment_cache.js"
 cp "$REPO_DIR/n8n/alert_store/lib/soc_analysis_policy.js" "$STACK_DIR/alert_store/lib/soc_analysis_policy.js"
 cp "$REPO_DIR/n8n/postgres/alert-store-queue-schema.sql" "$STACK_DIR/postgres/alert-store-queue-schema.sql"
+cp "$REPO_DIR/n8n/postgres/asset-inventory-schema.sql" "$STACK_DIR/postgres/asset-inventory-schema.sql"
 # The repository carries a sanitized DR baseline. Production tuning may contain
 # environment-specific rule names and addresses, so a repair install must not
 # erase it. Runtime backups remain responsible for preserving the live policy.
@@ -343,6 +345,7 @@ cp "$REPO_DIR/n8n/bin/asset_inventory.py" "$STACK_DIR/bin/asset_inventory.py"
 cp "$REPO_DIR/n8n/bin/collect-dhcp-asset-discovery.py" "$STACK_DIR/bin/collect-dhcp-asset-discovery.py"
 cp "$REPO_DIR/n8n/bin/query-security-onion.py" "$STACK_DIR/bin/query-security-onion.py"
 cp "$REPO_DIR/n8n/bin/promote-dhcp-asset.py" "$STACK_DIR/bin/promote-dhcp-asset.py"
+cp "$REPO_DIR/n8n/bin/migrate-assets-to-postgres.py" "$STACK_DIR/bin/migrate-assets-to-postgres.py"
 cp "$REPO_DIR/n8n/bin/incident_evidence_contract.py" "$STACK_DIR/bin/incident_evidence_contract.py"
 cp "$REPO_DIR/n8n/bin/collect-incident-evidence.py" "$STACK_DIR/bin/collect-incident-evidence.py"
 cp "$REPO_DIR/n8n/bin/install-investigation-query-runtime.py" "$STACK_DIR/bin/install-investigation-query-runtime.py"

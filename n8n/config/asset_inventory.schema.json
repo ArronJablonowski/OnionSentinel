@@ -24,7 +24,7 @@
     },
     "assets": {
       "type": "array",
-      "maxItems": 5000,
+      "maxItems": 100000,
       "items": {
         "$ref": "#/$defs/asset"
       }

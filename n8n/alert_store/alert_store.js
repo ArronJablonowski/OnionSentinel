@@ -18,6 +18,7 @@ const {createProviderScheduler} = require('./lib/provider_scheduler');
 const {createDurableJobQueue} = require('./lib/durable_job_queue');
 const {createPostgresShadowOutbox} = require('./lib/postgres_shadow_outbox');
 const {createPostgresShadowProjector} = require('./lib/postgres_shadow_projector');
+const {createPostgresAssetStore} = require('./lib/postgres_asset_store');
 const {createSecurityLogger} = require('./lib/security_logger');
 const {createPipelineMetrics} = require('./lib/pipeline_metrics');
 const {createSocAnalysisPolicy} = require('./lib/soc_analysis_policy');
@@ -64,6 +65,16 @@ const postgresShadowBatchSize = Math.max(
   1,
   Math.min(1000, Number(process.env.ALERT_STORE_POSTGRES_SHADOW_BATCH_SIZE || 50)),
 );
+const assetPostgresEnabled = ['1', 'true', 'yes'].includes(
+  String(process.env.ASSET_POSTGRES_ENABLED || '0').trim().toLowerCase(),
+);
+const assetPostgresSchemaPath = process.env.ASSET_POSTGRES_SCHEMA_PATH
+  || path.join(__dirname, '..', 'postgres', 'asset-inventory-schema.sql');
+const assetStoreWriteToken = String(
+  process.env.ASSET_STORE_WRITE_TOKEN
+  || process.env.N8N_POST_COMMIT_TOKEN
+  || '',
+).trim();
 const evaluationModeValue = String(
   process.env.ONION_SENTINEL_EVALUATION_MODE || '',
 ).trim();
@@ -73,6 +84,15 @@ if (!['', '0', '1'].includes(evaluationModeValue)) {
   );
 }
 const controlledEvaluationMode = evaluationModeValue === '1';
+if (
+  assetPostgresEnabled
+  && !controlledEvaluationMode
+  && assetStoreWriteToken.length < 32
+) {
+  throw new Error(
+    'ASSET_STORE_WRITE_TOKEN must contain at least 32 characters when PostgreSQL assets are enabled',
+  );
+}
 const runtimeReleaseIdValue = String(
   process.env.ONION_SENTINEL_RELEASE_ID || '',
 ).trim();
@@ -83,6 +103,7 @@ const evaluationCredentialEnvironmentKeys = Object.freeze([
   'TELEGRAM_BOT_TOKEN',
   'TELEGRAM_CHAT_ID',
   'N8N_POST_COMMIT_TOKEN',
+  'ASSET_STORE_WRITE_TOKEN',
   'ABUSEIPDB_API_KEY',
   'GREYNOISE_API_KEY',
   'OTX_API_KEY',
@@ -2175,6 +2196,9 @@ let durableJobRecoveryActive = false;
 let durableJobs;
 let postgresShadowOutbox;
 let postgresShadowProjector;
+let postgresAssetPool;
+let postgresAssetStore;
+let postgresAssetStoreError = '';
 let pipelineMetrics;
 const serviceMetrics = {
   started_at: nowUtc(),
@@ -2289,6 +2313,95 @@ function initializePostgresShadowProjector() {
     now: nowUtc,
     batchSize: postgresShadowBatchSize,
   });
+}
+
+async function initializePostgresAssetStore() {
+  if (!assetPostgresEnabled || controlledEvaluationMode) return;
+  const requiredKeys = [
+    'ALERT_STORE_POSTGRES_HOST',
+    'ALERT_STORE_POSTGRES_DATABASE',
+    'ALERT_STORE_POSTGRES_USER',
+    'ALERT_STORE_POSTGRES_PASSWORD',
+  ];
+  const missing = requiredKeys.filter(
+    (key) => !String(process.env[key] || '').trim(),
+  );
+  if (missing.length) {
+    postgresAssetStoreError = `missing ${missing.join(', ')}`;
+    return;
+  }
+  try {
+    const {Pool} = require('pg');
+    postgresAssetPool = new Pool({
+      host: String(process.env.ALERT_STORE_POSTGRES_HOST),
+      port: Number(process.env.ALERT_STORE_POSTGRES_PORT || 5433),
+      database: String(process.env.ALERT_STORE_POSTGRES_DATABASE),
+      user: String(process.env.ALERT_STORE_POSTGRES_USER),
+      password: String(process.env.ALERT_STORE_POSTGRES_PASSWORD),
+      max: Math.max(2, Math.min(20, Number(process.env.ASSET_POSTGRES_POOL_SIZE || 8))),
+      connectionTimeoutMillis: Math.max(
+        1000,
+        Number(process.env.ASSET_POSTGRES_CONNECT_TIMEOUT_MS || 3000),
+      ),
+      idleTimeoutMillis: 10000,
+      application_name: 'onion-sentinel-asset-store',
+    });
+    postgresAssetPool.on('error', (error) => {
+      postgresAssetStoreError = String(error.message || error).slice(0, 500);
+      applicationLogger.log('error', 'asset_store.postgres_idle_error', {
+        error_message: postgresAssetStoreError,
+      });
+    });
+    postgresAssetStore = createPostgresAssetStore({
+      pool: postgresAssetPool,
+      schemaPath: assetPostgresSchemaPath,
+      logger: applicationLogger,
+    });
+    await postgresAssetStore.initialize();
+    postgresAssetStoreError = '';
+    applicationLogger.log('info', 'asset_store.ready', {
+      backend: 'postgresql',
+      schema_version: 1,
+    });
+  } catch (error) {
+    postgresAssetStore = null;
+    postgresAssetStoreError = String(error.message || error).slice(0, 500);
+    applicationLogger.log('error', 'asset_store.initialization_failed', {
+      error_message: postgresAssetStoreError,
+    });
+  }
+}
+
+function requirePostgresAssetStore() {
+  if (!assetPostgresEnabled) {
+    const error = new Error('PostgreSQL asset inventory is disabled');
+    error.statusCode = 503;
+    throw error;
+  }
+  if (!postgresAssetStore) {
+    const error = new Error(
+      `PostgreSQL asset inventory is unavailable${postgresAssetStoreError ? `: ${postgresAssetStoreError}` : ''}`,
+    );
+    error.statusCode = 503;
+    throw error;
+  }
+  return postgresAssetStore;
+}
+
+function assetStoreWriteAuthorized(request) {
+  const supplied = request.headers['x-onion-sentinel-asset-token'];
+  if (typeof supplied !== 'string') return false;
+  const expected = Buffer.from(assetStoreWriteToken, 'utf8');
+  const actual = Buffer.from(supplied, 'utf8');
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
+
+function requireAssetStoreWriteAuthorization(request) {
+  if (!assetStoreWriteAuthorized(request)) {
+    const error = new Error('asset-store write authorization failed');
+    error.statusCode = 403;
+    throw error;
+  }
 }
 
 function initializePipelineMetrics() {
@@ -10560,6 +10673,14 @@ async function operationalMetricsSnapshot() {
     postgres_shadow_projector: postgresShadowProjector
       ? postgresShadowProjector.snapshot()
       : {enabled: postgresShadowEnabled, active: false},
+    asset_inventory: postgresAssetStore
+      ? await postgresAssetStore.stats()
+      : {
+        enabled: assetPostgresEnabled,
+        backend: 'postgresql',
+        available: false,
+        error: postgresAssetStoreError || null,
+      },
     oldest_pending_job_seconds: Number(oldestJob?.seconds || 0),
     oldest_pending_jobs: oldestJobsByType,
     latest_completed_jobs: latestCompletedJobsByType,
@@ -10691,8 +10812,71 @@ async function handleRequest(request, response) {
         health.postgres_shadow_projector = postgresShadowProjector
           ? postgresShadowProjector.snapshot()
           : {enabled: postgresShadowEnabled, active: false};
+        health.asset_inventory = postgresAssetStore
+          ? await postgresAssetStore.stats()
+          : {
+            enabled: assetPostgresEnabled,
+            backend: 'postgresql',
+            available: false,
+            error: postgresAssetStoreError || null,
+          };
       }
       sendJson(response, 200, health);
+      return;
+    }
+    if (request.method === 'GET' && parsedUrl.pathname === '/assets/inventory') {
+      const store = requirePostgresAssetStore();
+      const result = await store.page({
+        limit: parsedUrl.searchParams.get('limit') || 250,
+        offset: parsedUrl.searchParams.get('offset') || 0,
+        search: parsedUrl.searchParams.get('search') || '',
+        sort: parsedUrl.searchParams.get('sort') || 'asset_id',
+        direction: parsedUrl.searchParams.get('direction') || 'asc',
+        state: parsedUrl.searchParams.get('state') || 'current',
+        at: parsedUrl.searchParams.get('at') || new Date(),
+      });
+      sendJson(response, 200, result);
+      return;
+    }
+    if (request.method === 'GET' && parsedUrl.pathname === '/assets/snapshot') {
+      const store = requirePostgresAssetStore();
+      sendJson(response, 200, {ok: true, inventory: await store.snapshot()});
+      return;
+    }
+    if (request.method === 'GET' && parsedUrl.pathname === '/assets/dhcp-state') {
+      const store = requirePostgresAssetStore();
+      sendJson(response, 200, {ok: true, state: await store.dhcpState()});
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/assets/import') {
+      requireAssetStoreWriteAuthorization(request);
+      const store = requirePostgresAssetStore();
+      const payload = await readJsonBody(request);
+      const result = await store.importInventory(payload.inventory, {
+        actor: payload.actor || 'migration',
+        replace: payload.replace === true,
+      });
+      sendJson(response, 200, result);
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/assets/dhcp-state') {
+      requireAssetStoreWriteAuthorization(request);
+      const store = requirePostgresAssetStore();
+      const payload = await readJsonBody(request);
+      const result = await store.putDhcpState(payload.state, {
+        actor: payload.actor || 'dhcp-collector',
+      });
+      sendJson(response, 200, result);
+      return;
+    }
+    if (request.method === 'POST' && parsedUrl.pathname === '/assets/promote-dhcp') {
+      requireAssetStoreWriteAuthorization(request);
+      const store = requirePostgresAssetStore();
+      const payload = await readJsonBody(request);
+      const result = await store.promoteDhcp(payload, {
+        actor: payload.operator_ref || 'operator',
+      });
+      sendJson(response, 201, result);
       return;
     }
     if (request.method === 'GET' && parsedUrl.pathname === '/metrics') {
@@ -11110,10 +11294,13 @@ function installControlledEvaluationShutdown(server) {
   process.once('SIGINT', shutdown);
 }
 
-initDb().then(() => {
+initDb().then(async () => {
+  await initializePostgresAssetStore();
   applicationLogger.log('info', 'database.initialized', {
     database_path: dbPath,
     postgres_shadow_enabled: postgresShadowEnabled,
+    asset_postgres_enabled: assetPostgresEnabled,
+    asset_postgres_available: Boolean(postgresAssetStore),
   });
   const server = configureHttpServer(http.createServer((request, response) => {
     void dispatchRequest(request, response).catch((error) => {

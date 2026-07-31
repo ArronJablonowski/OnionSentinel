@@ -9,8 +9,11 @@ import ipaddress
 import json
 import os
 import re
+import stat
 import tempfile
 from pathlib import Path
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from bounded_process import BoundedProcessError, run_bounded_command
 from security_jsonl_log import SecurityJsonlLogger
@@ -30,6 +33,8 @@ HOME = Path.home()
 DEFAULT_CONFIG = HOME / "n8n-local" / "config" / "dhcp-asset-discovery.json"
 DEFAULT_STATE = HOME / "n8n-local" / "asset-discovery" / "dhcp-observations.json"
 DEFAULT_LOG = HOME / "n8n-local" / "logs" / "dhcp-asset-discovery.jsonl"
+DEFAULT_ENV = HOME / "n8n-local" / ".env"
+DEFAULT_ASSET_API_URL = "http://127.0.0.1:8787"
 HOSTNAME_RE = re.compile(
     r"(?=.{1,253}\Z)(?:[A-Za-z0-9](?:[A-Za-z0-9_-]{0,62})?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9_-]{0,62})?))*\.?"
 )
@@ -48,6 +53,63 @@ CONFIG_KEYS = {
     "query_size",
     "retention_days",
 }
+
+
+def asset_store_token(path: Path) -> str:
+    metadata = path.lstat()
+    if (
+        not path.is_file()
+        or path.is_symlink()
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_size > 1024 * 1024
+    ):
+        raise ValueError("runtime environment file is not owner-controlled")
+    values = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    token = values.get("ASSET_STORE_WRITE_TOKEN") or values.get(
+        "N8N_POST_COMMIT_TOKEN"
+    )
+    if not token or len(token) < 32:
+        raise ValueError("asset-store write token is missing or too short")
+    return token
+
+
+def persist_database_state(api_url: str, token: str, state: dict) -> dict:
+    payload = json.dumps(
+        {"state": state, "actor": "scheduled-dhcp-collector"},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    request = urllib_request.Request(
+        f"{api_url.rstrip('/')}/assets/dhcp-state",
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Content-Length": str(len(payload)),
+            "X-Onion-Sentinel-Asset-Token": token,
+        },
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=30) as response:
+            encoded = response.read(1024 * 1024 + 1)
+    except urllib_error.HTTPError as exc:
+        detail = exc.read(4096).decode("utf-8", "replace")
+        raise RuntimeError(f"asset database returned HTTP {exc.code}: {detail[:300]}") from exc
+    except (OSError, urllib_error.URLError) as exc:
+        raise RuntimeError(f"asset database is unavailable: {exc}") from exc
+    if len(encoded) > 1024 * 1024:
+        raise RuntimeError("asset database response exceeded its byte limit")
+    result = json.loads(encoded)
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise RuntimeError("asset database rejected DHCP state")
+    return result
 
 
 def utc_now() -> dt.datetime:
@@ -571,6 +633,13 @@ def main() -> int:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
+    parser.add_argument("--env", type=Path, default=DEFAULT_ENV)
+    parser.add_argument("--asset-api-url", default=DEFAULT_ASSET_API_URL)
+    parser.add_argument(
+        "--require-database",
+        action="store_true",
+        help="fail closed unless PostgreSQL accepts the state before the JSON cache is written",
+    )
     parser.add_argument(
         "--backfill-days",
         type=int,
@@ -591,6 +660,9 @@ def main() -> int:
                 "last_attempt_at": format_timestamp(attempted_at),
                 "last_error": "",
             }
+            if args.require_database:
+                token = asset_store_token(args.env)
+                persist_database_state(args.asset_api_url, token, state)
             atomic_write_json(args.state, state)
             logger.log("info", "dhcp_asset_discovery.disabled", state_file=str(args.state))
             return 0
@@ -611,6 +683,14 @@ def main() -> int:
             status = updated["collection"]["status"]
             returned = updated["collection"]["last_returned"]
             truncated = updated["collection"]["last_truncated"]
+        database_result = {}
+        if args.require_database:
+            token = asset_store_token(args.env)
+            database_result = persist_database_state(
+                args.asset_api_url,
+                token,
+                updated,
+            )
         atomic_write_json(args.state, updated)
         logger.log(
             "info",
@@ -618,6 +698,7 @@ def main() -> int:
             status=status,
             returned=returned,
             retained=len(updated["observations"]),
+            database_retained=int(database_result.get("retained") or 0),
             truncated=truncated,
         )
         return 0
@@ -634,6 +715,12 @@ def main() -> int:
             "last_attempt_at": format_timestamp(attempted_at),
             "last_error": message,
         }
+        try:
+            if args.require_database:
+                token = asset_store_token(args.env)
+                persist_database_state(args.asset_api_url, token, state)
+        except (OSError, UnicodeError, ValueError, RuntimeError, json.JSONDecodeError):
+            pass
         try:
             atomic_write_json(args.state, state)
         except (OSError, ValueError):

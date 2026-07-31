@@ -19,6 +19,12 @@
   <key>WorkingDirectory</key>
   <string>__HOME__/n8n-local/onion-sentinel-dashboard</string>
 
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ASSET_DATABASE_READ_ENABLED</key>
+    <string>true</string>
+  </dict>
+
   <key>RunAtLoad</key>
   <true/>
 

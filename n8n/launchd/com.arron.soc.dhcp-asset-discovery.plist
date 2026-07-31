@@ -10,6 +10,7 @@
   <array>
     <string>/usr/bin/python3</string>
     <string>__HOME__/n8n-local/bin/collect-dhcp-asset-discovery.py</string>
+    <string>--require-database</string>
   </array>
 
   <key>WorkingDirectory</key>
