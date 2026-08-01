@@ -109,6 +109,22 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
         self.assertIn("status = 'pending'", code)
         self.assertIn("status: 'coalesced'", code)
 
+    def test_recovered_analysis_leases_reapply_campaign_admission(self) -> None:
+        code = ALERT_STORE.read_text(encoding="utf-8")
+        start = code.index("async function recoverExpiredDurableJobs")
+        end = code.index("const cohortIdPattern", start)
+        recovery = code[start:end]
+        self.assertIn("await durableJobs.recoverExpired()", recovery)
+        self.assertIn(
+            "recovered.authorized_activity = await "
+            "reconcileAuthorizedActivityBacklog()",
+            recovery,
+        )
+        self.assertLess(
+            recovery.index("reconcileAuthorizedActivityBacklog()"),
+            recovery.index("signalAiWorkers('ai-lease-recovered')"),
+        )
+
     def test_pcap_terminal_outcomes_and_storage_metrics_are_durable(self) -> None:
         code = ALERT_STORE.read_text(encoding="utf-8")
         self.assertIn("ensureColumn('pcap_requests', 'outcome', 'TEXT')", code)

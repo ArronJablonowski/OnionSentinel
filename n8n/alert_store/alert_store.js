@@ -6234,6 +6234,16 @@ async function recoverExpiredDurableJobs() {
     const summary = await withSqliteWriteGate(() => withImmediateTransaction(async () => {
       const recovered = await durableJobs.recoverExpired();
       recovered.reanalysis_attempts = await reconcileRecoveredIncidentReanalysisAttempts();
+      if (
+        recovered.job_types?.ai_analysis
+        || recovered.job_types?.incident_response_analysis
+      ) {
+        // A lease can expire after the startup campaign pass (for example,
+        // when a controlled deployment interrupts a worker). Reapply campaign
+        // admission before signaling workers so a recovered duplicate cannot
+        // escape the same coalescing policy that governs new work.
+        recovered.authorized_activity = await reconcileAuthorizedActivityBacklog();
+      }
       return recovered;
     }));
     if (!summary.recovered && !summary.failed && !summary.reanalysis_attempts) return;
