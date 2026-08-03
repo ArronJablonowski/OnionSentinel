@@ -1394,6 +1394,13 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                 "users": [],
             },
             "discovered_observables": [],
+            "permitted_enrichment_indicators": {
+                "ip": ["192.0.2.10"],
+                "domain": [],
+                "url": [],
+                "hash": [],
+                "cve": [],
+            },
         }
         valid = self.runner.normalize_investigation_query_request(
             self.elastic_request("valid"),
@@ -1441,12 +1448,27 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             [item["query_id"] for item in proposal["queries"]],
             ["valid"],
         )
+        forwarded_context = security.call_args.args[1]
+        self.assertNotIn(
+            "permitted_enrichment_indicators",
+            forwarded_context,
+        )
+        self.assertIn("permitted_enrichment_indicators", context)
         rejected = next(
             item for item in result["results"]
             if item.get("query_id") == "invalid"
         )
         self.assertEqual(rejected["status"], "rejected")
         self.assertIn("isolated local authorization", rejected["error"])
+
+    def test_security_context_projection_rejects_unknown_local_fields(self) -> None:
+        with self.assertRaisesRegex(
+            self.runner.InvestigationQueryContractError,
+            "unsupported fields: unexpected",
+        ):
+            self.runner.security_onion_authorization_context(
+                {"unexpected": True}
+            )
 
     def test_security_batch_forwards_only_authorized_event_tuple(self) -> None:
         context = {

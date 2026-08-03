@@ -302,6 +302,21 @@ INVESTIGATION_QUERY_V2 = (
     INVESTIGATION_QUERY_CONTRACT
     == "onion-sentinel-investigation-pivots-v2"
 )
+INVESTIGATION_SECURITY_ONION_AUTHORIZATION_CONTEXT_FIELDS = (
+    "context_id",
+    "case_id",
+    "group_id",
+    "actor_role",
+    "anchor",
+    *(("anchor_time",) if INVESTIGATION_QUERY_V2 else ()),
+    "time_envelope",
+    "permitted_observables",
+    "discovered_observables",
+    "permitted_event_tuples",
+)
+INVESTIGATION_LOCAL_ONLY_AUTHORIZATION_CONTEXT_FIELDS = frozenset(
+    {"permitted_enrichment_indicators"}
+)
 INVESTIGATION_QUERY_AGGREGATIONS = frozenset(
     {
         "events",
@@ -6025,6 +6040,26 @@ def collect_investigation_enrichment(
     }
 
 
+def security_onion_authorization_context(value: Any) -> dict[str, Any]:
+    """Project local-only policy data out of the restricted broker contract."""
+    if not isinstance(value, dict):
+        return {}
+    unsupported = set(value).difference(
+        INVESTIGATION_SECURITY_ONION_AUTHORIZATION_CONTEXT_FIELDS,
+        INVESTIGATION_LOCAL_ONLY_AUTHORIZATION_CONTEXT_FIELDS,
+    )
+    if unsupported:
+        raise InvestigationQueryContractError(
+            "local authorization context contains unsupported fields: "
+            + ", ".join(sorted(str(item) for item in unsupported))
+        )
+    return {
+        key: copy.deepcopy(value[key])
+        for key in INVESTIGATION_SECURITY_ONION_AUTHORIZATION_CONTEXT_FIELDS
+        if key in value
+    }
+
+
 def execute_investigation_query_batch(
     prompt_package: dict[str, Any],
     requests: list[dict[str, Any]],
@@ -6051,10 +6086,21 @@ def execute_investigation_query_batch(
     security_requests = [
         request for request in requests if request["backend"] in {"elastic", "oql"}
     ]
+    security_context_error = ""
+    try:
+        security_authorization_context = security_onion_authorization_context(
+            authorization_context
+        )
+    except InvestigationQueryContractError as exc:
+        security_authorization_context = {}
+        security_context_error = (
+            "Security Onion query failed isolated local authorization: "
+            f"{str(exc)[:700]}"
+        )
     admitted_security: list[dict[str, Any]] = []
     security_observables: set[tuple[str, str]] = set()
     can_preflight_security = all(
-        key in authorization_context
+        key in security_authorization_context
         for key in (
             "context_id",
             "case_id",
@@ -6075,8 +6121,10 @@ def execute_investigation_query_batch(
             for kind, values in request["parameters"]["observables"].items()
             for value in values
         }
-        reason = ""
-        if len(admitted_security) >= 4:
+        reason = security_context_error
+        if reason:
+            pass
+        elif len(admitted_security) >= 4:
             reason = "at most four Security Onion Elastic/OQL queries are allowed per round"
         elif len(security_observables.union(request_observables)) > 24:
             reason = "Security Onion query batch exceeds 24 distinct observables"
@@ -6105,7 +6153,7 @@ def execute_investigation_query_batch(
             try:
                 authorize_investigation_query_request(
                     preflight_proposal,
-                    authorization_context,
+                    security_authorization_context,
                 )
             except InvestigationQueryContractError as exc:
                 reason = (
@@ -6155,7 +6203,10 @@ def execute_investigation_query_batch(
             ],
         }
         try:
-            artifact = security_onion_executor(proposal, authorization_context)
+            artifact = security_onion_executor(
+                proposal,
+                security_authorization_context,
+            )
             model_evidence = (
                 artifact.get("model_evidence")
                 if isinstance(artifact, dict)
