@@ -5420,9 +5420,12 @@ function controlledJobClaimIdentity(value) {
     'expected_representative_alert_id',
     'expected_dispatch_id',
     'expected_stable_group_key',
+    'expected_assigned_route',
+    'expected_reviewer_route',
+    'reviewer_required',
   ].filter((field) => requestHasOwnField(value, field));
   if (!supplied.length) return null;
-  if (supplied.length !== 4) {
+  if (supplied.length !== 7) {
     throw incidentIdentityConflict(
       'controlled durable job claim identity is incomplete',
     );
@@ -5431,6 +5434,8 @@ function controlledJobClaimIdentity(value) {
   const representativeAlertId = value.expected_representative_alert_id;
   const dispatchId = value.expected_dispatch_id;
   const stableGroupKey = value.expected_stable_group_key;
+  const expectedAssignedRoute = value.expected_assigned_route;
+  const expectedReviewerRoute = value.expected_reviewer_route;
   if (!Number.isSafeInteger(jobId) || jobId < 1) {
     throw incidentIdentityConflict(
       'controlled durable job claim ID is invalid',
@@ -5457,7 +5462,28 @@ function controlledJobClaimIdentity(value) {
       'controlled durable job stable group key is invalid',
     );
   }
-  return {jobId, representativeAlertId, dispatchId, stableGroupKey};
+  if (
+    typeof expectedAssignedRoute !== 'string'
+    || typeof expectedReviewerRoute !== 'string'
+    || !controlledRoutePattern.test(expectedAssignedRoute)
+    || !controlledRoutePattern.test(expectedReviewerRoute)
+    || controlledRouteModelIdentity(expectedAssignedRoute)
+      === controlledRouteModelIdentity(expectedReviewerRoute)
+    || value.reviewer_required !== true
+  ) {
+    throw incidentIdentityConflict(
+      'controlled durable job route identity is invalid',
+    );
+  }
+  return {
+    jobId,
+    representativeAlertId,
+    dispatchId,
+    stableGroupKey,
+    expectedAssignedRoute,
+    expectedReviewerRoute,
+    reviewerRequired: true,
+  };
 }
 
 const controlledEvaluationLeases = new Map();
@@ -5561,6 +5587,18 @@ async function controlledJobTransitionAdmission(payload) {
     )
     || currentPayload.release_id !== controlledRuntimeReleaseId()
     || currentPayload.agent_role !== expectedRole
+    || !controlledRoutePattern.test(
+      String(currentPayload.expected_assigned_route || ''),
+    )
+    || !controlledRoutePattern.test(
+      String(currentPayload.expected_reviewer_route || ''),
+    )
+    || controlledRouteModelIdentity(
+      currentPayload.expected_assigned_route,
+    ) === controlledRouteModelIdentity(
+      currentPayload.expected_reviewer_route,
+    )
+    || currentPayload.reviewer_required !== true
   ) {
     throw incidentIdentityConflict(
       'controlled evaluation lease is no longer active',
@@ -5618,6 +5656,9 @@ async function controlledJobTransitionAdmission(payload) {
     stableGroupId: String(currentPayload.stable_group_id || ''),
     stableGroupKey: currentPayload.stable_group_key,
     agentRole: expectedRole,
+    expectedAssignedRoute: currentPayload.expected_assigned_route,
+    expectedReviewerRoute: currentPayload.expected_reviewer_route,
+    reviewerRequired: true,
     reanalysisAttemptId,
     resultCommitted: false,
     analysisId: '',
@@ -5657,6 +5698,9 @@ function applyControlledJobTransition(admission, transition) {
       stableGroupId: String(payload.stable_group_id || ''),
       stableGroupKey: String(payload.stable_group_key || ''),
       agentRole: String(payload.agent_role || ''),
+      expectedAssignedRoute: String(payload.expected_assigned_route || ''),
+      expectedReviewerRoute: String(payload.expected_reviewer_route || ''),
+      reviewerRequired: payload.reviewer_required === true,
       reanalysisAttemptId: String(
         claim.reanalysis_attempt_id || '',
       ),
@@ -5702,6 +5746,9 @@ async function controlledEvaluationResultAdmission(payload) {
     'agent_role',
     'reanalysis_attempt_id',
     'release_id',
+    'expected_assigned_route',
+    'expected_reviewer_route',
+    'reviewer_required',
   ];
   if (
     !identity
@@ -5731,6 +5778,14 @@ async function controlledEvaluationResultAdmission(payload) {
     80,
   ).toLowerCase();
   const releaseId = safeString(identity.release_id, 40).toLowerCase();
+  const expectedAssignedRoute = safeString(
+    identity.expected_assigned_route,
+    256,
+  );
+  const expectedReviewerRoute = safeString(
+    identity.expected_reviewer_route,
+    256,
+  );
   const analysisId = safeString(payload?.analysis_id, 128).toLowerCase();
   const claimDigest = controlledEvaluationClaimDigest(identity);
   const expectedRole = {
@@ -5759,6 +5814,15 @@ async function controlledEvaluationResultAdmission(payload) {
     || identity.reanalysis_attempt_id !== reanalysisAttemptId
     || typeof identity.release_id !== 'string'
     || identity.release_id !== releaseId
+    || typeof identity.expected_assigned_route !== 'string'
+    || identity.expected_assigned_route !== expectedAssignedRoute
+    || typeof identity.expected_reviewer_route !== 'string'
+    || identity.expected_reviewer_route !== expectedReviewerRoute
+    || !controlledRoutePattern.test(expectedAssignedRoute)
+    || !controlledRoutePattern.test(expectedReviewerRoute)
+    || controlledRouteModelIdentity(expectedAssignedRoute)
+      === controlledRouteModelIdentity(expectedReviewerRoute)
+    || identity.reviewer_required !== true
     || typeof payload?.analysis_id !== 'string'
     || payload.analysis_id !== analysisId
     || !/^[a-z0-9_-]{8,128}$/.test(analysisId)
@@ -5785,6 +5849,12 @@ async function controlledEvaluationResultAdmission(payload) {
       !== reanalysisAttemptId
     || payload?.response?._analysis_evaluation_memory_frozen !== true
     || payload?.response?._analysis_controlled_claim_sha256 !== claimDigest
+    || payload?.response?._analysis_model_route !== expectedAssignedRoute
+    || payload?.response?._second_opinion?.status !== 'completed'
+    || payload?.response?._second_opinion?.model_route
+      !== expectedReviewerRoute
+    || payload?.response?._second_opinion?.response?._analysis_model_route
+      !== expectedReviewerRoute
   ) {
     throw incidentIdentityConflict(
       'controlled evaluation result identity is invalid',
@@ -5804,6 +5874,9 @@ async function controlledEvaluationResultAdmission(payload) {
     || currentPayload.cohort_id !== cohortId
     || currentPayload.dispatch_id !== dispatchId
     || currentPayload.release_id !== releaseId
+    || currentPayload.expected_assigned_route !== expectedAssignedRoute
+    || currentPayload.expected_reviewer_route !== expectedReviewerRoute
+    || currentPayload.reviewer_required !== true
     || currentPayload.alert_id !== representativeAlertId
     || currentPayload.representative_alert_id !== representativeAlertId
     || currentPayload.group_id !== stableGroupId
@@ -5978,6 +6051,11 @@ async function transitionDurableJobStatus(
       || candidatePayload.stable_group_id !== resolvedKey
       || candidatePayload.stable_group_key !== exactClaim.stableGroupKey
       || candidatePayload.dispatch_id !== exactClaim.dispatchId
+      || candidatePayload.expected_assigned_route
+        !== exactClaim.expectedAssignedRoute
+      || candidatePayload.expected_reviewer_route
+        !== exactClaim.expectedReviewerRoute
+      || candidatePayload.reviewer_required !== exactClaim.reviewerRequired
       || !runtimeReleaseId
       || candidatePayload.release_id !== runtimeReleaseId
       || typeof candidatePayload.agent_role !== 'string'
@@ -6263,6 +6341,10 @@ const stableGroupIdPattern = /^[a-f0-9]{20}$/;
 const dispatchIdPattern = /^[a-f0-9]{64}$/;
 const releaseIdPattern = /^[a-f0-9]{40}$/;
 const representativeAlertIdPattern = /^[A-Za-z0-9._:@=-]{1,256}$/;
+const controlledRoutePattern = /^codex-cli:(?:gpt-5\.5|gpt-5\.6-(?:sol|terra|luna)):(?:low|medium|high|xhigh)$/;
+function controlledRouteModelIdentity(route) {
+  return String(route || '').split(':').slice(0, -1).join(':');
+}
 const controlledRetirementSchema =
   'onion-sentinel-controlled-evaluation-retirement-v1';
 const controlledRetirementReceiptSchema =
@@ -7901,6 +7983,18 @@ function manualDispatchIdentity(payload) {
   const cohortIdSupplied = requestHasOwnField(payload, 'cohort_id');
   const dispatchIdSupplied = requestHasOwnField(payload, 'dispatch_id');
   const releaseIdSupplied = requestHasOwnField(payload, 'release_id');
+  const expectedAssignedRouteSupplied = requestHasOwnField(
+    payload,
+    'expected_assigned_route',
+  );
+  const expectedReviewerRouteSupplied = requestHasOwnField(
+    payload,
+    'expected_reviewer_route',
+  );
+  const reviewerRequiredSupplied = requestHasOwnField(
+    payload,
+    'reviewer_required',
+  );
   const representativeAlertId = representativeAlertIdSupplied
     && typeof payload.representative_alert_id === 'string'
     ? payload.representative_alert_id
@@ -7922,6 +8016,14 @@ function manualDispatchIdentity(payload) {
   const releaseId = releaseIdSupplied && typeof payload.release_id === 'string'
     ? payload.release_id
     : '';
+  const expectedAssignedRoute = expectedAssignedRouteSupplied
+    && typeof payload.expected_assigned_route === 'string'
+    ? payload.expected_assigned_route
+    : '';
+  const expectedReviewerRoute = expectedReviewerRouteSupplied
+    && typeof payload.expected_reviewer_route === 'string'
+    ? payload.expected_reviewer_route
+    : '';
 
   if (
     stableGroupIdSupplied
@@ -7942,9 +8044,25 @@ function manualDispatchIdentity(payload) {
   if (
     cohortIdSupplied !== dispatchIdSupplied
     || (cohortIdSupplied && !releaseIdSupplied)
+    || (
+      cohortIdSupplied
+      && (
+        !expectedAssignedRouteSupplied
+        || !expectedReviewerRouteSupplied
+        || !reviewerRequiredSupplied
+      )
+    )
+    || (
+      !cohortIdSupplied
+      && (
+        expectedAssignedRouteSupplied
+        || expectedReviewerRouteSupplied
+        || reviewerRequiredSupplied
+      )
+    )
   ) {
     const error = new Error(
-      'cohort_id, dispatch_id, and release_id must be supplied together',
+      'controlled cohort identity and route contract must be supplied together',
     );
     error.statusCode = 409;
     throw error;
@@ -7965,6 +8083,19 @@ function manualDispatchIdentity(payload) {
     throw error;
   }
   if (cohortIdSupplied) {
+    if (
+      typeof payload.expected_assigned_route !== 'string'
+      || typeof payload.expected_reviewer_route !== 'string'
+      || !controlledRoutePattern.test(expectedAssignedRoute)
+      || !controlledRoutePattern.test(expectedReviewerRoute)
+      || controlledRouteModelIdentity(expectedAssignedRoute)
+        === controlledRouteModelIdentity(expectedReviewerRoute)
+      || payload.reviewer_required !== true
+    ) {
+      throw incidentIdentityConflict(
+        'controlled cohort route contract is invalid',
+      );
+    }
     const runtimeReleaseId = controlledRuntimeReleaseId();
     if (!runtimeReleaseId) {
       throw incidentIdentityConflict(
@@ -8012,6 +8143,9 @@ function manualDispatchIdentity(payload) {
     cohortId,
     dispatchId,
     releaseId,
+    expectedAssignedRoute,
+    expectedReviewerRoute,
+    reviewerRequired: payload?.reviewer_required === true,
   };
 }
 
@@ -8149,6 +8283,9 @@ async function requestAiReanalysis(payload) {
       cohort_id: identity.cohortId,
       dispatch_id: identity.dispatchId,
       release_id: identity.releaseId,
+      expected_assigned_route: identity.expectedAssignedRoute,
+      expected_reviewer_route: identity.expectedReviewerRoute,
+      reviewer_required: identity.reviewerRequired,
       agent_role: 'soc-analyst',
     } : {}),
     manual_reanalysis: true,
@@ -8177,6 +8314,9 @@ async function requestAiReanalysis(payload) {
       cohort_id: identity.cohortId,
       dispatch_id: identity.dispatchId,
       release_id: identity.releaseId,
+      expected_assigned_route: identity.expectedAssignedRoute,
+      expected_reviewer_route: identity.expectedReviewerRoute,
+      reviewer_required: identity.reviewerRequired,
     } : {}),
     requested_at: requestedAt,
   };
@@ -8216,6 +8356,9 @@ async function requestIncidentEscalation(payload) {
     cohortId: identity.cohortId,
     dispatchId: identity.dispatchId,
     releaseId: identity.releaseId,
+    expectedAssignedRoute: identity.expectedAssignedRoute,
+    expectedReviewerRoute: identity.expectedReviewerRoute,
+    reviewerRequired: identity.reviewerRequired,
     representativeAlertIdPinned: identity.representativeAlertIdSupplied,
     stableGroupIdPinned: identity.stableGroupIdSupplied,
     stableGroupKey: identity.stableGroupKey,
@@ -8236,6 +8379,9 @@ async function queueIncidentResponseForGroup({
   cohortId = '',
   dispatchId = '',
   releaseId = '',
+  expectedAssignedRoute = '',
+  expectedReviewerRoute = '',
+  reviewerRequired = false,
   representativeAlertIdPinned = false,
   stableGroupIdPinned = false,
   stableGroupKey = '',
@@ -8311,6 +8457,9 @@ async function queueIncidentResponseForGroup({
           cohort_id: cohortId,
           dispatch_id: dispatchId,
           release_id: releaseId,
+          expected_assigned_route: expectedAssignedRoute,
+          expected_reviewer_route: expectedReviewerRoute,
+          reviewer_required: reviewerRequired,
         } : {}),
         reason: normalizedReason,
       }),
@@ -8332,6 +8481,9 @@ async function queueIncidentResponseForGroup({
       cohort_id: cohortId,
       dispatch_id: dispatchId,
       release_id: releaseId,
+      expected_assigned_route: expectedAssignedRoute,
+      expected_reviewer_route: expectedReviewerRoute,
+      reviewer_required: reviewerRequired,
     } : {}),
     manual_reanalysis: Boolean(manualReanalysis),
     requested_by: actor,
@@ -8356,6 +8508,9 @@ async function queueIncidentResponseForGroup({
       cohort_id: cohortId,
       dispatch_id: dispatchId,
       release_id: releaseId,
+      expected_assigned_route: expectedAssignedRoute,
+      expected_reviewer_route: expectedReviewerRoute,
+      reviewer_required: reviewerRequired,
     } : {}),
     escalated_at: incident.escalated_at,
     requested_at: requestedAt,
@@ -8495,6 +8650,9 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
         || receipt.cohort_id !== identity.cohortId
         || receipt.dispatch_id !== identity.dispatchId
         || receipt.release_id !== identity.releaseId
+        || receipt.expected_assigned_route !== identity.expectedAssignedRoute
+        || receipt.expected_reviewer_route !== identity.expectedReviewerRoute
+        || receipt.reviewer_required !== identity.reviewerRequired
         || receipt.representative_alert_id
           !== identity.representativeAlertId
         || receipt.stable_group_id !== identity.stableGroupId
@@ -8707,6 +8865,9 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
               cohort_id: identity.cohortId,
               dispatch_id: identity.dispatchId,
               release_id: identity.releaseId,
+              expected_assigned_route: identity.expectedAssignedRoute,
+              expected_reviewer_route: identity.expectedReviewerRoute,
+              reviewer_required: identity.reviewerRequired,
             } : {}),
           }),
           requestedAt,
@@ -8890,6 +9051,9 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
         cohort_id: identity.cohortId,
         dispatch_id: identity.dispatchId,
         release_id: identity.releaseId,
+        expected_assigned_route: identity.expectedAssignedRoute,
+        expected_reviewer_route: identity.expectedReviewerRoute,
+        reviewer_required: identity.reviewerRequired,
       } : {}),
       reanalysis_run_id: runId,
       reanalysis_release_id: releaseId,
@@ -8928,6 +9092,9 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
           ...(identity.cohortId ? {
             cohort_id: identity.cohortId,
             dispatch_id: identity.dispatchId,
+            expected_assigned_route: identity.expectedAssignedRoute,
+            expected_reviewer_route: identity.expectedReviewerRoute,
+            reviewer_required: identity.reviewerRequired,
           } : {}),
           reason,
         }),
@@ -8955,6 +9122,9 @@ async function requestIncidentReanalysis(payload, requestedCaseId = '') {
       cohort_id: identity.cohortId,
       dispatch_id: identity.dispatchId,
       release_id: identity.releaseId,
+      expected_assigned_route: identity.expectedAssignedRoute,
+      expected_reviewer_route: identity.expectedReviewerRoute,
+      reviewer_required: identity.reviewerRequired,
     } : {}),
   };
   if (controlledIncidentDispatch) {

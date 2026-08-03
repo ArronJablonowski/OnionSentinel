@@ -10522,6 +10522,27 @@ def soc_alert_group_representative_alert_id(group_id: str) -> str:
     return ""
 
 
+def _forward_controlled_dispatch_contract(
+    payload: dict,
+    request_payload: dict,
+) -> None:
+    """Forward frozen route fields only for a controlled cohort dispatch."""
+
+    if "cohort_id" not in payload and "dispatch_id" not in payload:
+        return
+    for field in (
+        "release_id",
+        "expected_assigned_route",
+        "expected_reviewer_route",
+        "reviewer_required",
+    ):
+        if field in payload:
+            # Preserve exact values. The alert-store is the authoritative
+            # validator and must see omissions, malformed routes, and false
+            # reviewer flags rather than dashboard-normalized substitutes.
+            request_payload[field] = payload[field]
+
+
 def soc_alert_queue_analysis_response(group_id: str, payload: dict | None = None) -> tuple[int, dict]:
     """Record durable reanalysis intent; the worker builds fresh evidence later."""
     group_id = str(group_id or "").strip().lower()
@@ -10548,10 +10569,7 @@ def soc_alert_queue_analysis_response(group_id: str, payload: dict | None = None
                 # exact value so malformed or stale pins cannot be normalized
                 # into a different, apparently valid dispatch.
                 request_payload[identity_field] = payload[identity_field]
-        if "release_id" in payload and (
-            "cohort_id" in payload or "dispatch_id" in payload
-        ):
-            request_payload["release_id"] = payload["release_id"]
+        _forward_controlled_dispatch_contract(payload, request_payload)
         data = alert_store_post_json(
             "/ai/request",
             request_payload,
@@ -10597,10 +10615,7 @@ def soc_alert_escalate_response(group_id: str, payload: dict | None = None) -> t
         ):
             if identity_field in payload:
                 request_payload[identity_field] = payload[identity_field]
-        if "release_id" in payload and (
-            "cohort_id" in payload or "dispatch_id" in payload
-        ):
-            request_payload["release_id"] = payload["release_id"]
+        _forward_controlled_dispatch_contract(payload, request_payload)
         data = alert_store_post_json(
             "/incidents/escalate",
             request_payload,
@@ -11016,10 +11031,7 @@ def soc_incident_reanalysis_response(
     ):
         if identity_field in payload:
             request_payload[identity_field] = payload[identity_field]
-    if "release_id" in payload and (
-        "cohort_id" in payload or "dispatch_id" in payload
-    ):
-        request_payload["release_id"] = payload["release_id"]
+    _forward_controlled_dispatch_contract(payload, request_payload)
     return _soc_alert_store_mutation(
         "/incidents/reanalyze",
         request_payload,

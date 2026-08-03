@@ -80,8 +80,14 @@ python3 operations/run-incident-harness-cohort.py freeze-from-rows \
   --reason "Evaluate the Incident Responder harness against a frozen cohort." \
   --expected-count 20 \
   --expected-assigned-route codex-cli:gpt-5.5:high \
-  --expected-reviewer-route codex-cli:gpt-5.6-sol:xhigh
+  --expected-reviewer-route codex-cli:gpt-5.6-sol:xhigh \
+  --evaluation-profile onion-sentinel-gpt55-high-gpt56-sol-xhigh-v1
 ```
+
+The optional named profile pins this campaign to GPT-5.5 High as primary and
+GPT-5.6 Sol XHigh as the required independent reviewer. Omitting the profile
+keeps the reusable cohort tool route-agnostic, while still requiring two
+enabled canonical Codex routes with different provider/model identities.
 
 The import preserves source order and validates every dashboard group, stable
 group, representative alert, supplied case state, and inactive queue state
@@ -143,7 +149,12 @@ prompts, model responses, query text/results, job payloads, and credentials.
 Accuracy grading is fail closed: provide both the SOC Analyst and Incident
 Responder exports made from the same source-row file. The offline evaluator
 refuses to score either role unless all 40 results pass their machine gates,
-the two exports have the same source SHA-256 and ordered identities, and every
+the two exports have the same full execution contract, source SHA-256, and
+ordered identities, and every
 independent adjudication is bound to the exact fresh analysis ID. The final
 dual-role gate may claim read-only query ledgers only after all 40 results meet
-the positive successful-tool requirement above.
+the positive successful-tool requirement above. For the pinned GPT-5.5 High /
+GPT-5.6 Sol XHigh campaign, pass
+`--required-evaluation-profile onion-sentinel-gpt55-high-gpt56-sol-xhigh-v1`
+to `evaluate-investigation-cohort.py`; generic grading may omit that optional
+selector.

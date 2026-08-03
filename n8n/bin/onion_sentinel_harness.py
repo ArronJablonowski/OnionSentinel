@@ -68,6 +68,19 @@ MAX_DECISION_EVIDENCE_REFS = 256
 # Control characters and whitespace remain prohibited.
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9.][A-Za-z0-9._:@+=/-]{0,255}$")
 DIGEST_RE = re.compile(r"^[a-f0-9]{64}$")
+INVESTIGATION_SKILL_ADVISORY_MODE = "advisory_only"
+INVESTIGATION_SKILL_UNAVAILABLE_MODE = "unavailable"
+MAX_ATTESTED_INVESTIGATION_SKILLS = 4
+INVESTIGATION_SKILL_ATTESTATION_KEYS = frozenset(
+    {
+        "registry_version",
+        "registry_sha256",
+        "selected",
+        "selected_count",
+        "truncated",
+        "advisory_mode",
+    }
+)
 EXTERNAL_AGENT_HARNESS_PROVIDERS = frozenset(
     {"hermes-agent", "openclaw"}
 )
@@ -749,6 +762,136 @@ def bounded_metadata(value: Any) -> dict[str, Any]:
     }
 
 
+def investigation_skill_selection_attestation(
+    prompt_package: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project prompt skill selection into a bounded, content-free identity.
+
+    Skill bodies and alert context remain in the prompt package digest.  This
+    separate projection makes the exact registry and selected skill versions
+    easy to attest without copying guidance, evidence, telemetry, or secrets
+    into the audit event stream.
+    """
+    raw = prompt_package.get("investigation_skills")
+    if raw is None:
+        return {
+            "registry_version": 0,
+            "registry_sha256": "",
+            "selected": [],
+            "selected_count": 0,
+            "truncated": False,
+            "advisory_mode": INVESTIGATION_SKILL_UNAVAILABLE_MODE,
+        }
+    if not isinstance(raw, Mapping):
+        raise HarnessIntegrityError(
+            "investigation skill selection must be an object"
+        )
+    registry_version = raw.get("registry_version")
+    if (
+        not isinstance(registry_version, int)
+        or isinstance(registry_version, bool)
+        or registry_version < 0
+    ):
+        raise HarnessIntegrityError(
+            "investigation skill registry version is invalid"
+        )
+    registry_sha256 = str(raw.get("registry_sha256") or "")
+    if not DIGEST_RE.fullmatch(registry_sha256):
+        raise HarnessIntegrityError(
+            "investigation skill registry digest is invalid"
+        )
+    if (
+        raw.get("mode") != "shadow"
+        or raw.get("enforcement") != INVESTIGATION_SKILL_ADVISORY_MODE
+    ):
+        raise HarnessIntegrityError(
+            "investigation skills must remain advisory-only in shadow mode"
+        )
+    selected = raw.get("selected")
+    if (
+        not isinstance(selected, list)
+        or len(selected) > MAX_ATTESTED_INVESTIGATION_SKILLS
+    ):
+        raise HarnessIntegrityError(
+            "investigation skill selection exceeds its bounded list"
+        )
+    projected: list[dict[str, Any]] = []
+    identities: set[tuple[str, int]] = set()
+    for item in selected:
+        if not isinstance(item, Mapping):
+            raise HarnessIntegrityError(
+                "selected investigation skill identity must be an object"
+            )
+        skill_id = str(item.get("id") or "")
+        version = item.get("version")
+        skill_sha256 = str(item.get("skill_sha256") or "")
+        if not IDENTIFIER_RE.fullmatch(skill_id):
+            raise HarnessIntegrityError(
+                "selected investigation skill id is invalid"
+            )
+        if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or version < 1
+        ):
+            raise HarnessIntegrityError(
+                "selected investigation skill version is invalid"
+            )
+        if not DIGEST_RE.fullmatch(skill_sha256):
+            raise HarnessIntegrityError(
+                "selected investigation skill digest is invalid"
+            )
+        identity = (skill_id, version)
+        if identity in identities:
+            raise HarnessIntegrityError(
+                "selected investigation skill identities must be unique"
+            )
+        identities.add(identity)
+        projected.append(
+            {
+                "id": skill_id,
+                "version": version,
+                "skill_sha256": skill_sha256,
+            }
+        )
+    selected_count = raw.get("selected_count")
+    if (
+        not isinstance(selected_count, int)
+        or isinstance(selected_count, bool)
+        or selected_count != len(projected)
+    ):
+        raise HarnessIntegrityError(
+            "investigation skill selected count does not match selection"
+        )
+    truncated = raw.get("truncated")
+    if not isinstance(truncated, bool):
+        raise HarnessIntegrityError(
+            "investigation skill truncation flag is invalid"
+        )
+    advisory_mode = INVESTIGATION_SKILL_ADVISORY_MODE
+    if registry_version == 0:
+        if projected or selected_count or truncated:
+            raise HarnessIntegrityError(
+                "unavailable investigation skill registry must be empty"
+            )
+        advisory_mode = INVESTIGATION_SKILL_UNAVAILABLE_MODE
+    projected.sort(
+        key=lambda item: (
+            str(item["id"]),
+            int(item["version"]),
+            str(item["skill_sha256"]),
+        )
+    )
+    return {
+        "registry_version": registry_version,
+        "registry_sha256": registry_sha256,
+        "selected": projected,
+        "selected_count": selected_count,
+        "truncated": truncated,
+        "advisory_mode": advisory_mode,
+    }
+
+
 def hypothesis_manifest_digest(rows: Iterable[Mapping[str, Any]]) -> str:
     manifest = [
         {
@@ -1200,6 +1343,7 @@ class JobEnvelope:
     prompt_digest: str
     evidence_manifest_digest: str
     configuration_digest: str
+    skill_selection_attestation: dict[str, Any]
     parent_run_id: str
     created_at: str
 
@@ -1280,6 +1424,9 @@ class JobEnvelope:
             prompt_digest=digest_json(prompt_package),
             evidence_manifest_digest=digest_json(contract),
             configuration_digest=digest_json(configuration),
+            skill_selection_attestation=(
+                investigation_skill_selection_attestation(prompt_package)
+            ),
             parent_run_id=str(
                 prompt_package.get("parent_analysis_id")
                 or prompt_package.get("prior_analysis_id")
@@ -1918,6 +2065,10 @@ class HarnessStore:
                     "prompt_digest": envelope.prompt_digest,
                     "evidence_manifest_digest": envelope.evidence_manifest_digest,
                     "configuration_digest": envelope.configuration_digest,
+                    "skill_selection_attestation": (
+                        envelope.skill_selection_attestation
+                    ),
+                    "job_digest": envelope.job_digest,
                     "policy_version": policy.version,
                     "policy_digest": policy.digest,
                     "policy_mode": policy.mode,

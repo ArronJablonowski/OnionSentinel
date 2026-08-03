@@ -169,6 +169,68 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         ]
         self.assertEqual(incompatible_calls, [])
 
+    def test_runner_accepts_only_builder_normalized_campaign_authorization(
+        self,
+    ) -> None:
+        selected = {
+            "alert_id": "fixture-alert",
+            "alert_json": "{}",
+            "timestamp": "2026-07-31T23:10:00Z",
+            "first_seen": "2026-07-31T23:10:00Z",
+            "last_seen": "2026-07-31T23:10:00Z",
+            "rule_id": "2003068",
+            "source_ip": "10.77.7.222",
+            "source_port": 41000,
+            "destination_ip": "192.0.2.20",
+            "destination_port": 22,
+            "transport_protocol": "tcp",
+        }
+        authorization = {
+            "status": "operator_authorized",
+            "policy_id": "authorized-ssh-scan",
+            "source_ips": ["10.77.7.222"],
+            "destination_ips": ["192.0.2.20"],
+            "rule_ids": ["2003068"],
+            "source_ports": [41000],
+            "destination_ports": [22],
+            "destination_port_ranges": [],
+            "transport_protocols": ["tcp"],
+            "authorization_start": "2026-07-31T23:00:00Z",
+            "authorization_end": "2026-07-31T23:20:00Z",
+        }
+        entry = self.builder.canonical_authorized_activity_entry(
+            selected,
+            authorization,
+            policy_id="authorized-ssh-scan",
+        )
+
+        self.assertIsNotNone(entry)
+        self.assertTrue(
+            self.runner._has_structured_authorization_evidence(
+                {
+                    "alert": dict(selected),
+                    "authorization_evidence": {
+                        "status": "operator_authorized",
+                        "entries": [entry],
+                    }
+                }
+            )
+        )
+
+        mismatched = dict(selected)
+        mismatched["destination_port"] = 23
+        rejected = self.builder.canonical_authorized_activity_entry(
+            mismatched,
+            authorization,
+            policy_id="authorized-ssh-scan",
+        )
+        self.assertIsNone(rejected)
+        self.assertFalse(
+            self.runner._has_structured_authorization_evidence(
+                {"authorization_evidence": rejected}
+            )
+        )
+
     def test_incident_responder_protocol_plan_is_repeatable_and_truthful(
         self,
     ) -> None:
@@ -7062,6 +7124,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                 config = self.runner.prepare_live_osquery_context(
                     prompt_package,
                     "soc-analyst",
+                    config_path=config_path,
                 )
 
         self.assertTrue(config["enabled"])
@@ -7115,7 +7178,11 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
                         return_value=configured,
                     ),
                 ):
-                    scoped = self.runner.prepare_live_osquery_context(package, role)
+                    scoped = self.runner.prepare_live_osquery_context(
+                        package,
+                        role,
+                        config_path=config_path,
+                    )
             return package, scoped
 
         base = {

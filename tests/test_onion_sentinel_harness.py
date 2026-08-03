@@ -109,6 +109,33 @@ class OnionSentinelHarnessTests(unittest.TestCase):
         }
 
     @staticmethod
+    def investigation_skill_selection() -> dict:
+        return {
+            "schema": "onion-sentinel-investigation-skill-selection-v1",
+            "mode": "shadow",
+            "registry_version": 1,
+            "registry_sha256": "a" * 64,
+            "selected": [
+                {
+                    "id": "suricata-detection-validation",
+                    "version": 3,
+                    "skill_sha256": "c" * 64,
+                    "guidance": "Do not copy this skill body into traces.",
+                    "telemetry": {"source_ip": "192.0.2.10"},
+                },
+                {
+                    "id": "dns-activity-investigation",
+                    "version": 2,
+                    "skill_sha256": "b" * 64,
+                    "secret": "never-export-this-selection-secret",
+                },
+            ],
+            "selected_count": 2,
+            "truncated": False,
+            "enforcement": "advisory_only",
+        }
+
+    @staticmethod
     def response() -> dict:
         return {
             "_analysis_model": "gpt-5.6-sol",
@@ -609,6 +636,134 @@ class OnionSentinelHarnessTests(unittest.TestCase):
         self.assertEqual(manual.task_kind, "reanalysis")
         self.assertEqual(automatic.correlation_id, stable_group_id)
         self.assertEqual(automatic.task_kind, "alert-triage")
+
+    def test_skill_selection_attestation_is_sanitized_and_digest_bound(
+        self,
+    ) -> None:
+        prompt = self.prompt_package()
+        prompt["investigation_skills"] = self.investigation_skill_selection()
+        envelope = self.envelope(
+            "skill-attestation-run",
+            prompt_package=prompt,
+        )
+        expected = {
+            "registry_version": 1,
+            "registry_sha256": "a" * 64,
+            "selected": [
+                {
+                    "id": "dns-activity-investigation",
+                    "version": 2,
+                    "skill_sha256": "b" * 64,
+                },
+                {
+                    "id": "suricata-detection-validation",
+                    "version": 3,
+                    "skill_sha256": "c" * 64,
+                },
+            ],
+            "selected_count": 2,
+            "truncated": False,
+            "advisory_mode": "advisory_only",
+        }
+        self.assertEqual(envelope.skill_selection_attestation, expected)
+        self.assertEqual(
+            set(envelope.skill_selection_attestation),
+            HARNESS.INVESTIGATION_SKILL_ATTESTATION_KEYS,
+        )
+
+        changed_prompt = json.loads(json.dumps(prompt))
+        changed_prompt["investigation_skills"]["selected"][0][
+            "skill_sha256"
+        ] = "d" * 64
+        changed = self.envelope(
+            "skill-attestation-run",
+            prompt_package=changed_prompt,
+        )
+        self.assertNotEqual(envelope.job_digest, changed.job_digest)
+
+        run = HARNESS.HarnessRun(
+            HARNESS.HarnessStore(self.db_path),
+            envelope,
+            HARNESS.HarnessPolicy.from_dict(self.policy_document()),
+        )
+        started = next(
+            event
+            for event in run.store.export_trace(run.run_id)["events"]
+            if event["event_type"] == "run.started"
+        )
+        started_payload = json.loads(started["payload_json"])
+        self.assertEqual(
+            started_payload["skill_selection_attestation"],
+            expected,
+        )
+        self.assertEqual(started_payload["job_digest"], envelope.job_digest)
+        serialized = json.dumps(started_payload, sort_keys=True)
+        self.assertNotIn("Do not copy this skill body", serialized)
+        self.assertNotIn("192.0.2.10", serialized)
+        self.assertNotIn("never-export-this-selection-secret", serialized)
+
+    def test_skill_selection_attestation_rejects_inconsistent_count(
+        self,
+    ) -> None:
+        prompt = self.prompt_package()
+        prompt["investigation_skills"] = self.investigation_skill_selection()
+        prompt["investigation_skills"]["selected_count"] = 1
+        with self.assertRaisesRegex(
+            HARNESS.HarnessIntegrityError,
+            "selected count does not match",
+        ):
+            self.envelope(
+                "invalid-skill-attestation-run",
+                prompt_package=prompt,
+            )
+
+    def test_version_zero_skill_registry_is_attested_as_unavailable(
+        self,
+    ) -> None:
+        missing = self.envelope(
+            "missing-skill-registry-run",
+            prompt_package=self.prompt_package(),
+        )
+        self.assertEqual(
+            missing.skill_selection_attestation,
+            {
+                "registry_version": 0,
+                "registry_sha256": "",
+                "selected": [],
+                "selected_count": 0,
+                "truncated": False,
+                "advisory_mode": "unavailable",
+            },
+        )
+
+        prompt = self.prompt_package()
+        selection = self.investigation_skill_selection()
+        selection.update(
+            {
+                "registry_version": 0,
+                "selected": [],
+                "selected_count": 0,
+                "truncated": False,
+            }
+        )
+        prompt["investigation_skills"] = selection
+
+        envelope = self.envelope(
+            "unavailable-skill-registry-run",
+            prompt_package=prompt,
+        )
+
+        self.assertEqual(
+            envelope.skill_selection_attestation,
+            {
+                "registry_version": 0,
+                "registry_sha256": "a" * 64,
+                "selected": [],
+                "selected_count": 0,
+                "truncated": False,
+                "advisory_mode": "unavailable",
+            },
+        )
 
     def test_external_agent_routes_never_start_or_create_harness_state(
         self,

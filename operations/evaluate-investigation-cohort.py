@@ -8,7 +8,7 @@ The evaluator consumes only:
 * one independent, digest-referenced adjudication document.
 
 It refuses to grade until both exports prove the same frozen ordered cohort
-and all 40 fresh analyses pass their collector-owned harness execution gates.
+and all fresh analyses pass their collector-owned harness execution gates.
 It does not open the alert store, contact Security Onion, execute queries, or
 copy prompts, evidence, query text, query results, or model responses into its
 reports.  Human comparison work is represented by bounded rubric scores and
@@ -20,6 +20,7 @@ Example:
     evaluate-investigation-cohort.py \
       --result incident-responder=/private/ir-export.json \
       --result soc-analyst=/private/soc-export.json \
+      --expected-count 10 \
       --adjudication /private/independent-adjudication.json \
       --json-out /private/cohort-evaluation.json \
       --markdown-out /private/cohort-evaluation.md
@@ -43,15 +44,17 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-RESULT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v3"
-MANIFEST_SCHEMA = "onion-sentinel-incident-harness-cohort-v3"
+RESULT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v4"
+MANIFEST_SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
 ADJUDICATION_SCHEMA = "onion-sentinel-investigation-cohort-adjudication-v1"
 REPORT_SCHEMA = "onion-sentinel-investigation-cohort-evaluation-v1"
 
 MAX_INPUT_BYTES = 10_000_000
 MAX_COHORT_SIZE = 100
+MIN_GRADED_ROLE_COUNT = 1
 EXPECTED_ROLE_COUNT = 20
-EXPECTED_TOTAL_RESULTS = 40
+MAX_GRADED_ROLE_COUNT = EXPECTED_ROLE_COUNT
+MINIMUM_PASS_RATE = 0.9
 MAX_STABLE_GROUP_KEY_BYTES = 2048
 MAX_CODE_ITEMS = 16
 MAX_CODE_LENGTH = 80
@@ -70,8 +73,29 @@ REPRESENTATIVE_ALERT_ID_RE = re.compile(r"[A-Za-z0-9._:@=-]{1,256}")
 RELEASE_ID_RE = re.compile(r"[a-f0-9]{40}")
 CODE_RE = re.compile(r"[a-z][a-z0-9_]{1,79}")
 SHA256_RE = re.compile(r"[a-f0-9]{64}")
+SKILL_ID_RE = re.compile(r"[A-Za-z0-9.][A-Za-z0-9._:@+=/-]{0,255}")
+MAX_ATTESTED_INVESTIGATION_SKILLS = 4
+SKILL_SELECTION_SUMMARY_KEYS = frozenset(
+    {
+        "registry_version",
+        "registry_sha256",
+        "selected",
+        "selected_count",
+        "truncated",
+        "advisory_mode",
+    }
+)
 SAFE_ROUTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{2,255}")
+CONTROLLED_ROUTE_RE = re.compile(
+    r"codex-cli:(?:gpt-5\.5|gpt-5\.6-(?:sol|terra|luna)):"
+    r"(?:low|medium|high|xhigh)"
+)
 MODEL_CALL_CONTRACT_SCHEMA = "onion-sentinel-model-call-contract-v1"
+CONTROLLED_EVALUATION_PROFILE = (
+    "onion-sentinel-gpt55-high-gpt56-sol-xhigh-v1"
+)
+PROFILE_ASSIGNED_ROUTE = "codex-cli:gpt-5.5:high"
+PROFILE_REVIEWER_ROUTE = "codex-cli:gpt-5.6-sol:xhigh"
 MAX_RUNTIME_MODEL_CALLS = 6
 DISPATCH_ID_SCHEMA = "onion-sentinel-cohort-member-dispatch-v1"
 MODEL_CALL_FACT_KEYS = frozenset(
@@ -1108,8 +1132,12 @@ def _execution_contract(value: Any, label: str) -> dict[str, Any]:
         "expected_reviewer_route": str(
             value.get("expected_reviewer_route") or ""
         ).strip(),
+        "reviewer_required": value.get("reviewer_required"),
+        "evaluation_profile": str(
+            value.get("evaluation_profile") or ""
+        ).strip(),
     }
-    if value != expected or not SAFE_ROUTE_RE.fullmatch(
+    if value != expected or not CONTROLLED_ROUTE_RE.fullmatch(
         expected["expected_assigned_route"]
     ):
         raise CohortEvaluationError(
@@ -1120,9 +1148,23 @@ def _execution_contract(value: Any, label: str) -> dict[str, Any]:
             f"{label} expected release ID is malformed"
         )
     reviewer_route = expected["expected_reviewer_route"]
-    if reviewer_route and not SAFE_ROUTE_RE.fullmatch(reviewer_route):
+    if (
+        expected["reviewer_required"] is not True
+        or not CONTROLLED_ROUTE_RE.fullmatch(reviewer_route)
+        or reviewer_route.rsplit(":", 1)[0]
+        == expected["expected_assigned_route"].rsplit(":", 1)[0]
+    ):
         raise CohortEvaluationError(
-            f"{label} expected reviewer route is malformed"
+            f"{label} expected reviewer route contract is malformed"
+        )
+    profile = expected["evaluation_profile"]
+    if profile and (
+        profile != CONTROLLED_EVALUATION_PROFILE
+        or expected["expected_assigned_route"] != PROFILE_ASSIGNED_ROUTE
+        or expected["expected_reviewer_route"] != PROFILE_REVIEWER_ROUTE
+    ):
+        raise CohortEvaluationError(
+            f"{label} controlled evaluation profile does not match"
         )
     return expected
 
@@ -1284,6 +1326,12 @@ def _validate_durable_job_proof(
         "cohort_id": cohort_id,
         "stable_group_key": stable_group_key,
         "release_id": release_id,
+        "expected_assigned_route": str(
+            contract.get("expected_assigned_route") or ""
+        ),
+        "expected_reviewer_route": str(
+            contract.get("expected_reviewer_route") or ""
+        ),
     }
     for source_label, source in provenance:
         for field, expected in expected_shared.items():
@@ -1291,6 +1339,10 @@ def _validate_durable_job_proof(
                 raise CohortEvaluationError(
                     f"{label} {source_label} {field} does not match"
                 )
+        if source.get("reviewer_required") is not True:
+            raise CohortEvaluationError(
+                f"{label} {source_label} reviewer_required does not match"
+            )
     for source_label, source in (
         ("accepted response", accepted),
         ("durable readback", readback),
@@ -1363,6 +1415,98 @@ def _validate_durable_job_proof(
             f"{label} analysis is outside its exact durable job window"
         )
     return dict(job)
+
+
+def _validate_skill_selection_attestation_proof(
+    harness: Mapping[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    """Require the collector's bounded, content-free skill proof."""
+    if harness.get("skill_selection_attestation_validated") is not True:
+        raise CohortEvaluationError(
+            f"{label} skill selection attestation was not validated"
+        )
+    summary = harness.get("skill_selection_attestation")
+    if (
+        not isinstance(summary, dict)
+        or set(summary) != SKILL_SELECTION_SUMMARY_KEYS
+    ):
+        raise CohortEvaluationError(
+            f"{label} skill selection attestation schema is invalid"
+        )
+    registry_version = summary.get("registry_version")
+    registry_sha256 = str(summary.get("registry_sha256") or "")
+    selected_count = summary.get("selected_count")
+    truncated = summary.get("truncated")
+    advisory_mode = str(summary.get("advisory_mode") or "")
+    selected = summary.get("selected")
+    if (
+        not isinstance(registry_version, int)
+        or isinstance(registry_version, bool)
+        or registry_version < 1
+        or SHA256_RE.fullmatch(registry_sha256) is None
+        or not isinstance(selected, list)
+        or len(selected) > MAX_ATTESTED_INVESTIGATION_SKILLS
+        or not isinstance(selected_count, int)
+        or isinstance(selected_count, bool)
+        or selected_count != len(selected)
+        or not isinstance(truncated, bool)
+        or advisory_mode != "advisory_only"
+    ):
+        raise CohortEvaluationError(
+            f"{label} skill selection attestation values are invalid"
+        )
+    projected: list[dict[str, Any]] = []
+    identities: set[tuple[str, int]] = set()
+    for item in selected:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"id", "version", "skill_sha256"}
+        ):
+            raise CohortEvaluationError(
+                f"{label} selected skill identity schema is invalid"
+            )
+        skill_id = str(item.get("id") or "")
+        version = item.get("version")
+        skill_sha256 = str(item.get("skill_sha256") or "")
+        if (
+            SKILL_ID_RE.fullmatch(skill_id) is None
+            or not isinstance(version, int)
+            or isinstance(version, bool)
+            or version < 1
+            or SHA256_RE.fullmatch(skill_sha256) is None
+            or (skill_id, version) in identities
+        ):
+            raise CohortEvaluationError(
+                f"{label} selected skill identity is invalid"
+            )
+        identities.add((skill_id, version))
+        projected.append(
+            {
+                "id": skill_id,
+                "version": version,
+                "skill_sha256": skill_sha256,
+            }
+        )
+    if projected != sorted(
+        projected,
+        key=lambda item: (
+            str(item["id"]),
+            int(item["version"]),
+            str(item["skill_sha256"]),
+        ),
+    ):
+        raise CohortEvaluationError(
+            f"{label} selected skill identities are not canonical"
+        )
+    return {
+        "registry_version": registry_version,
+        "registry_sha256": registry_sha256,
+        "selected": projected,
+        "selected_count": selected_count,
+        "truncated": truncated,
+        "advisory_mode": advisory_mode,
+    }
 
 
 def _validate_execution_proof(
@@ -1441,6 +1585,26 @@ def _validate_execution_proof(
         raise CohortEvaluationError(
             f"{label} response route/freeze attestation does not match"
         )
+    expected_reviewer_route = str(contract["expected_reviewer_route"])
+    second_opinion = (
+        analysis_result.get("_second_opinion")
+        if isinstance(analysis_result.get("_second_opinion"), dict)
+        else {}
+    )
+    reviewer_response = (
+        second_opinion.get("response")
+        if isinstance(second_opinion.get("response"), dict)
+        else {}
+    )
+    if (
+        second_opinion.get("status") != "completed"
+        or second_opinion.get("model_route") != expected_reviewer_route
+        or reviewer_response.get("_analysis_model_route")
+        != expected_reviewer_route
+    ):
+        raise CohortEvaluationError(
+            f"{label} response reviewer route attestation does not match"
+        )
     canonical_response_sha256 = str(
         analysis.get("response_canonical_sha256") or ""
     )
@@ -1473,6 +1637,7 @@ def _validate_execution_proof(
     harness = proof.get("harness")
     if not isinstance(harness, dict):
         raise CohortEvaluationError(f"{label} has no harness proof")
+    _validate_skill_selection_attestation_proof(harness, label)
     expected_harness = {
         "run_id": analysis_id,
         "status": "succeeded",
@@ -1520,6 +1685,12 @@ def _validate_execution_proof(
         or harness.get("memory_frozen") is not True
         or not _bounded_model_call_proof_valid(harness)
         or int(harness.get("successful_primary_model_call_count") or 0) < 1
+        or int(
+            (harness.get("reviewer_completion") or {}).get(
+                "model_call_count"
+            )
+            or 0
+        ) < 1
         or int(harness.get("model_purpose_count") or 0) < 1
         or int(
             harness.get("terminally_successful_model_purpose_count")
@@ -2074,6 +2245,7 @@ def _role_aggregate(
         )
         for item in cases
     )
+    required_pass_count = math.ceil(expected_count * MINIMUM_PASS_RATE)
     acceptance_checks = {
         "exact_case_count": len(cases) == expected_count,
         "all_completed": completed_count == expected_count,
@@ -2081,8 +2253,8 @@ def _role_aggregate(
         "at_least_90_percent_exact_verdicts": (
             expected_count > 0 and exact_count / expected_count >= 0.9
         ),
-        "at_least_18_of_20_pass": (
-            expected_count == 20 and classifications["pass"] >= 18
+        "at_least_90_percent_pass": (
+            classifications["pass"] >= required_pass_count
         ),
         "mean_at_least_85": _mean(effective_scores) >= PASS_SCORE,
         "median_at_least_85": _median(effective_scores) >= PASS_SCORE,
@@ -2131,9 +2303,22 @@ def _role_aggregate(
         "shadow_acceptance_gate": {
             "passed": all(acceptance_checks.values()),
             "checks": acceptance_checks,
+            "required_pass_count": required_pass_count,
+            "minimum_pass_rate": MINIMUM_PASS_RATE,
+            "production_promotion_size_met": (
+                expected_count == EXPECTED_ROLE_COUNT
+            ),
             "scope_warning": (
-                "A newest-20 shadow cohort is a diagnostic gate, not sufficient "
-                "evidence for production promotion; use a larger stratified corpus."
+                "A 20-case-per-role paired shadow cohort is the minimum "
+                "production-promotion gate, not sufficient evidence by itself; "
+                "also use a larger stratified corpus."
+                if expected_count == EXPECTED_ROLE_COUNT
+                else (
+                    f"A {expected_count}-case-per-role paired shadow cohort is "
+                    "a diagnostic gate and is not eligible for production "
+                    "promotion; use 20 cases per role plus a larger stratified "
+                    "corpus."
+                )
             ),
         },
     }
@@ -2190,11 +2375,17 @@ def evaluate_cohorts(
     result_paths: Mapping[str, Path],
     adjudication_path: Path,
     expected_count: int = EXPECTED_ROLE_COUNT,
+    required_evaluation_profile: str = "",
 ) -> dict[str, Any]:
-    if expected_count != EXPECTED_ROLE_COUNT:
+    if (
+        isinstance(expected_count, bool)
+        or not isinstance(expected_count, int)
+        or expected_count < MIN_GRADED_ROLE_COUNT
+        or expected_count > MAX_GRADED_ROLE_COUNT
+    ):
         raise CohortEvaluationError(
-            "paired newest-20 grading requires exactly 20 results per role "
-            f"and {EXPECTED_TOTAL_RESULTS} total"
+            "expected_count must be an integer between "
+            f"{MIN_GRADED_ROLE_COUNT} and {MAX_GRADED_ROLE_COUNT} per role"
         )
     roles = tuple(role for role in SUPPORTED_ROLES if role in result_paths)
     if set(result_paths) != set(SUPPORTED_ROLES):
@@ -2226,6 +2417,18 @@ def evaluate_cohorts(
             "expected_release_id": loaded["execution_contract"][
                 "expected_release_id"
             ],
+            "expected_assigned_route": loaded["execution_contract"][
+                "expected_assigned_route"
+            ],
+            "expected_reviewer_route": loaded["execution_contract"][
+                "expected_reviewer_route"
+            ],
+            "reviewer_required": loaded["execution_contract"][
+                "reviewer_required"
+            ],
+            "evaluation_profile": loaded["execution_contract"][
+                "evaluation_profile"
+            ],
         }
     incident_result = loaded_results["incident-responder"]
     soc_result = loaded_results["soc-analyst"]
@@ -2238,12 +2441,21 @@ def evaluate_cohorts(
         != soc_result["ordered_identities"]
         or incident_result["ordered_detection_projection"]
         != soc_result["ordered_detection_projection"]
-        or incident_result["execution_contract"]["expected_release_id"]
-        != soc_result["execution_contract"]["expected_release_id"]
+        or incident_result["execution_contract"]
+        != soc_result["execution_contract"]
     ):
         raise CohortEvaluationError(
             "SOC Analyst and Incident Responder exports are not the same "
-            "frozen source cohort in the same order"
+            "frozen source cohort with the same execution contract and order"
+        )
+    required_profile = str(required_evaluation_profile or "").strip()
+    if required_profile and (
+        required_profile != CONTROLLED_EVALUATION_PROFILE
+        or incident_result["execution_contract"]["evaluation_profile"]
+        != required_profile
+    ):
+        raise CohortEvaluationError(
+            "result exports do not declare the required evaluation profile"
         )
 
     adjudication_raw, adjudication_source_sha256 = load_private_json(
@@ -2320,6 +2532,11 @@ def evaluate_cohorts(
             "pass_requires_exact_verdict": True,
             "hard_failure_codes": sorted(HARD_FAILURE_CODES),
             "hard_failure_effective_score": 0,
+            "minimum_pass_rate": MINIMUM_PASS_RATE,
+            "required_pass_count": math.ceil(
+                expected_count * MINIMUM_PASS_RATE
+            ),
+            "default_production_promotion_count": EXPECTED_ROLE_COUNT,
         },
         "adjudication": {
             "source_file_sha256": adjudication_source_sha256,
@@ -2328,6 +2545,9 @@ def evaluate_cohorts(
             "adjudicated_at": adjudication["adjudicated_at"],
             "methodology_sha256": adjudication["methodology_sha256"],
         },
+        "execution_contract": dict(
+            incident_result["execution_contract"]
+        ),
         "result_sources": result_sources,
         "dual_role_execution_gate": {
             "passed": True,
@@ -2435,6 +2655,7 @@ def _markdown_cell(value: object, maximum: int = 160) -> str:
 
 
 def render_markdown(report: Mapping[str, Any]) -> str:
+    contract = report["execution_contract"]
     lines = [
         "# Onion Sentinel investigation cohort evaluation",
         "",
@@ -2444,6 +2665,12 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         f"({int(report['dual_role_execution_gate']['analysis_count'])} "
         "fresh shadow-harness analyses)",
         f"- Generated: `{_markdown_cell(report['generated_at'])}`",
+        "- Evaluation profile: `"
+        f"{_markdown_cell(contract.get('evaluation_profile') or 'generic')}`",
+        "- Primary route: `"
+        f"{_markdown_cell(contract['expected_assigned_route'])}`",
+        "- Required reviewer route: `"
+        f"{_markdown_cell(contract['expected_reviewer_route'])}`",
         f"- Report digest: `{_markdown_cell(report['report_sha256'])}`",
         "",
         "This report contains verdict labels, rubric scores, digests, and "
@@ -2601,6 +2828,21 @@ def _parse_result_argument(value: str) -> tuple[str, Path]:
     return role, Path(raw_path.strip())
 
 
+def _parse_expected_count(value: str) -> int:
+    try:
+        expected_count = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            "--expected-count must be an integer"
+        ) from exc
+    if not MIN_GRADED_ROLE_COUNT <= expected_count <= MAX_GRADED_ROLE_COUNT:
+        raise argparse.ArgumentTypeError(
+            "--expected-count must be between "
+            f"{MIN_GRADED_ROLE_COUNT} and {MAX_GRADED_ROLE_COUNT} per role"
+        )
+    return expected_count
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -2612,6 +2854,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="metadata-only cohort export; repeat once per evaluated role",
     )
     parser.add_argument("--adjudication", required=True, type=Path)
+    parser.add_argument(
+        "--expected-count",
+        type=_parse_expected_count,
+        default=EXPECTED_ROLE_COUNT,
+        metavar="COUNT",
+        help=(
+            "cases per role to grade (1-20; default 20, the minimum "
+            "production-promotion cohort size)"
+        ),
+    )
+    parser.add_argument(
+        "--required-evaluation-profile",
+        default="",
+        help=(
+            "optional exact campaign profile that both result exports must "
+            "declare"
+        ),
+    )
     parser.add_argument("--json-out", required=True, type=Path)
     parser.add_argument("--markdown-out", required=True, type=Path)
     parser.add_argument(
@@ -2638,6 +2898,8 @@ def main(argv: list[str] | None = None) -> int:
         report = evaluate_cohorts(
             result_paths=result_paths,
             adjudication_path=args.adjudication,
+            expected_count=args.expected_count,
+            required_evaluation_profile=args.required_evaluation_profile,
         )
         write_private_json(
             args.json_out, report, replace=bool(args.replace)

@@ -24,6 +24,13 @@ ALERT_STORE_DIR = REPO_ROOT / "n8n" / "alert_store"
 ALERT_STORE = ALERT_STORE_DIR / "alert_store.js"
 SCORING_RULES = ALERT_STORE_DIR / "config" / "scoring_rules.json"
 DEPLOYED_RELEASE = "d" * 40
+PRIMARY_ROUTE = "codex-cli:gpt-5.5:high"
+REVIEWER_ROUTE = "codex-cli:gpt-5.6-sol:xhigh"
+CONTROLLED_ROUTE_FIELDS = {
+    "expected_assigned_route": PRIMARY_ROUTE,
+    "expected_reviewer_route": REVIEWER_ROUTE,
+    "reviewer_required": True,
+}
 COHORT_MODULE_PATH = (
     REPO_ROOT / "operations" / "run-incident-harness-cohort.py"
 )
@@ -482,6 +489,7 @@ class IncidentReanalysisLineageTests(unittest.TestCase):
                 "dispatch_id": dispatch_id,
                 "release_id": DEPLOYED_RELEASE,
                 "requested_by": "frozen-lineage-test",
+                **CONTROLLED_ROUTE_FIELDS,
             },
             expected_status=202,
         )
@@ -599,6 +607,7 @@ class IncidentReanalysisLineageTests(unittest.TestCase):
                 "dispatch_id": dispatch_id,
                 "release_id": DEPLOYED_RELEASE,
                 "requested_by": "frozen-rebind-test",
+                **CONTROLLED_ROUTE_FIELDS,
             },
             expected_status=202,
         )
@@ -714,6 +723,7 @@ class IncidentReanalysisLineageTests(unittest.TestCase):
                 "dispatch_id": "7" * 64,
                 "release_id": DEPLOYED_RELEASE,
                 "requested_by": "legacy-case-rebind-test",
+                **CONTROLLED_ROUTE_FIELDS,
             },
             expected_status=202,
         )

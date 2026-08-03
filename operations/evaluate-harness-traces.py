@@ -83,6 +83,36 @@ MATERIAL_REVIEW_FIELDS = (
     "duplicate_of",
 )
 MAX_REPORTED_IDS = 100
+SKILL_SELECTION_ATTESTATION_KEYS = frozenset(
+    {
+        "registry_version",
+        "registry_sha256",
+        "selected",
+        "selected_count",
+        "truncated",
+        "advisory_mode",
+    }
+)
+SKILL_SELECTION_ID_RE = re.compile(
+    r"^[A-Za-z0-9.][A-Za-z0-9._:@+=/-]{0,255}$"
+)
+SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+MAX_ATTESTED_INVESTIGATION_SKILLS = 4
+JOB_ENVELOPE_DIGEST_FIELDS = (
+    "run_id",
+    "trace_id",
+    "correlation_id",
+    "case_id",
+    "alert_id",
+    "role",
+    "task_kind",
+    "assigned_route",
+    "assigned_reviewer_route",
+    "prompt_digest",
+    "evidence_manifest_digest",
+    "configuration_digest",
+    "parent_run_id",
+)
 RUN_IDENTITY_COLUMNS = (
     "run_id",
     "trace_id",
@@ -175,6 +205,223 @@ def safe_json(
         malformed[label] += 1
         return default
     return decoded
+
+
+def skill_selection_attestation_result(
+    run: Mapping[str, Any],
+    events: Iterable[Mapping[str, Any]],
+    malformed: collections.Counter[str],
+) -> dict[str, Any]:
+    """Validate and project the content-free skill selection attestation."""
+    started_event = next(
+        (
+            event
+            for event in events
+            if str(event.get("event_type") or "") == "run.started"
+        ),
+        None,
+    )
+    if started_event is None:
+        return {
+            "present": False,
+            "legacy": True,
+            "valid": True,
+            "available": False,
+            "job_digest_bound": False,
+            "mandatory_ready": False,
+            "registry_version": None,
+            "registry_sha256": "",
+            "selected": [],
+            "selected_count": 0,
+            "truncated": False,
+            "advisory_mode": "",
+            "error_count": 0,
+            "errors": [],
+        }
+    payload = safe_json(
+        started_event.get("payload_json"),
+        {},
+        malformed,
+        "event.run_started.payload_json",
+    )
+    if "skill_selection_attestation" not in payload:
+        # Traces written before skill attestation remain readable and valid.
+        return {
+            "present": False,
+            "legacy": True,
+            "valid": True,
+            "available": False,
+            "job_digest_bound": False,
+            "mandatory_ready": False,
+            "registry_version": None,
+            "registry_sha256": "",
+            "selected": [],
+            "selected_count": 0,
+            "truncated": False,
+            "advisory_mode": "",
+            "error_count": 0,
+            "errors": [],
+        }
+
+    raw = payload.get("skill_selection_attestation")
+    errors: list[str] = []
+    if not isinstance(raw, dict):
+        raw = {}
+        errors.append("skill selection attestation is not an object")
+    unexpected_keys = sorted(set(raw) - SKILL_SELECTION_ATTESTATION_KEYS)
+    missing_keys = sorted(SKILL_SELECTION_ATTESTATION_KEYS - set(raw))
+    if unexpected_keys:
+        errors.append("skill selection attestation has unexpected fields")
+    if missing_keys:
+        errors.append("skill selection attestation is missing fields")
+
+    registry_version = raw.get("registry_version")
+    if (
+        not isinstance(registry_version, int)
+        or isinstance(registry_version, bool)
+        or registry_version < 0
+    ):
+        registry_version = None
+        errors.append("skill selection registry version is invalid")
+    registry_sha256 = str(raw.get("registry_sha256") or "")
+    advisory_mode = str(raw.get("advisory_mode") or "")
+    selected_raw = raw.get("selected")
+    selected: list[dict[str, Any]] = []
+    identities: set[tuple[str, int]] = set()
+    if (
+        not isinstance(selected_raw, list)
+        or len(selected_raw) > MAX_ATTESTED_INVESTIGATION_SKILLS
+    ):
+        errors.append("skill selection identities are not a bounded list")
+        selected_raw = []
+    for item in selected_raw:
+        if not isinstance(item, dict):
+            errors.append("selected skill identity is not an object")
+            continue
+        if set(item) != {"id", "version", "skill_sha256"}:
+            errors.append("selected skill identity has invalid fields")
+        skill_id = str(item.get("id") or "")
+        version = item.get("version")
+        skill_sha256 = str(item.get("skill_sha256") or "")
+        identity_valid = True
+        if not SKILL_SELECTION_ID_RE.fullmatch(skill_id):
+            errors.append("selected skill id is invalid")
+            identity_valid = False
+        if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or version < 1
+        ):
+            errors.append("selected skill version is invalid")
+            identity_valid = False
+        if not SHA256_RE.fullmatch(skill_sha256):
+            errors.append("selected skill digest is invalid")
+            identity_valid = False
+        if not identity_valid:
+            continue
+        identity = (skill_id, version)
+        if identity in identities:
+            errors.append("selected skill identity is duplicated")
+            continue
+        identities.add(identity)
+        selected.append(
+            {
+                "id": skill_id,
+                "version": version,
+                "skill_sha256": skill_sha256,
+            }
+        )
+    expected_order = sorted(
+        selected,
+        key=lambda item: (
+            str(item["id"]),
+            int(item["version"]),
+            str(item["skill_sha256"]),
+        ),
+    )
+    if selected != expected_order:
+        errors.append("selected skill identities are not in canonical order")
+    selected_count = raw.get("selected_count")
+    if (
+        not isinstance(selected_count, int)
+        or isinstance(selected_count, bool)
+        or selected_count != len(selected_raw)
+        or selected_count != len(selected)
+    ):
+        errors.append("skill selection count does not match identities")
+        selected_count = len(selected)
+    truncated = raw.get("truncated")
+    if not isinstance(truncated, bool):
+        errors.append("skill selection truncation flag is invalid")
+        truncated = False
+    available = (
+        registry_version is not None
+        and registry_version > 0
+        and SHA256_RE.fullmatch(registry_sha256) is not None
+        and advisory_mode == "advisory_only"
+    )
+    if advisory_mode not in {"advisory_only", "unavailable"}:
+        errors.append("skill selection advisory mode is invalid")
+    if advisory_mode == "advisory_only" and not SHA256_RE.fullmatch(
+        registry_sha256
+    ):
+        errors.append("skill selection registry digest is invalid")
+    if advisory_mode == "advisory_only" and (
+        registry_version is None or registry_version < 1
+    ):
+        errors.append("version-zero skill registry is unavailable")
+    if advisory_mode == "unavailable" and (
+        registry_version != 0
+        or selected
+        or selected_count
+        or truncated
+        or (
+            registry_sha256
+            and SHA256_RE.fullmatch(registry_sha256) is None
+        )
+    ):
+        errors.append("unavailable skill selection is not empty")
+
+    job_digest_bound = False
+    if all(field in run for field in JOB_ENVELOPE_DIGEST_FIELDS):
+        expected_job = {
+            field: run.get(field) for field in JOB_ENVELOPE_DIGEST_FIELDS
+        }
+        expected_job["skill_selection_attestation"] = {
+            key: raw.get(key)
+            for key in SKILL_SELECTION_ATTESTATION_KEYS
+        }
+        expected_digest = digest_json(expected_job)
+        stored_digest = str(run.get("job_digest") or "")
+        event_digest = str(payload.get("job_digest") or "")
+        job_digest_bound = (
+            SHA256_RE.fullmatch(stored_digest) is not None
+            and stored_digest == expected_digest
+            and event_digest == stored_digest
+        )
+        if not job_digest_bound:
+            errors.append("skill selection attestation is not job-digest bound")
+    else:
+        errors.append("skill selection job identity is incomplete")
+
+    errors = list(dict.fromkeys(errors))
+    valid = not errors
+    return {
+        "present": True,
+        "legacy": False,
+        "valid": valid,
+        "available": available,
+        "job_digest_bound": job_digest_bound,
+        "mandatory_ready": valid and available and job_digest_bound,
+        "registry_version": registry_version,
+        "registry_sha256": registry_sha256,
+        "selected": selected,
+        "selected_count": selected_count,
+        "truncated": truncated,
+        "advisory_mode": advisory_mode,
+        "error_count": len(errors),
+        "errors": errors[:MAX_REPORTED_IDS],
+    }
 
 
 def connect_read_only(path: Path) -> sqlite3.Connection:
@@ -1543,6 +1790,11 @@ def evaluate_run(
         model_calls,
         malformed,
     )
+    skill_selection = skill_selection_attestation_result(
+        run,
+        events,
+        malformed,
+    )
     unresolved_hypotheses = sum(
         normalize_status(row.get("status"))
         in {"", "unknown", "unresolved", "open", "proposed"}
@@ -1604,6 +1856,7 @@ def evaluate_run(
             run.get("status"),
             malformed,
         ),
+        "skill_selection_attestation": skill_selection,
         "integrity": verify_chain(
             run_id,
             events,
@@ -1760,9 +2013,23 @@ def summarize(
     noncanonical_model_calls = invalid_model_call_contract_runs = 0
     route_authorization_failure_run_ids: list[str] = []
     model_identity_failure_run_ids: list[str] = []
+    skill_attestation_present = skill_attestation_valid = 0
+    skill_attestation_ready = skill_attestation_legacy = 0
+    skill_attestation_unavailable = 0
+    skill_attestation_invalid_run_ids: list[str] = []
 
     for result in run_results:
         run_id = result["run_id"]
+        skill_attestation = result["skill_selection_attestation"]
+        skill_attestation_present += int(skill_attestation["present"])
+        skill_attestation_valid += int(skill_attestation["valid"])
+        skill_attestation_ready += int(skill_attestation["mandatory_ready"])
+        skill_attestation_legacy += int(skill_attestation["legacy"])
+        skill_attestation_unavailable += int(
+            not skill_attestation["available"]
+        )
+        if not skill_attestation["valid"]:
+            skill_attestation_invalid_run_ids.append(run_id)
         statuses[normalize_status(result["status"])] += 1
         roles[result["role"] or "unknown"] += 1
         task_kinds[result["task_kind"] or "unknown"] += 1
@@ -1947,6 +2214,17 @@ def summarize(
             "role_counts": counter_dict(roles),
             "task_kind_counts": counter_dict(task_kinds),
             "policy_mode_counts": counter_dict(policy_modes),
+        },
+        "skill_selection_attestation": {
+            "present_run_count": skill_attestation_present,
+            "valid_run_count": skill_attestation_valid,
+            "mandatory_ready_run_count": skill_attestation_ready,
+            "legacy_run_count": skill_attestation_legacy,
+            "unavailable_run_count": skill_attestation_unavailable,
+            "invalid_run_count": len(skill_attestation_invalid_run_ids),
+            "invalid_run_ids": skill_attestation_invalid_run_ids[
+                :MAX_REPORTED_IDS
+            ],
         },
         "models": {
             "call_count": total_model_calls,
@@ -2150,6 +2428,7 @@ def atomic_private_json(path: Path, value: Mapping[str, Any]) -> None:
 def human_report(report: Mapping[str, Any]) -> str:
     completion = report["completion"]
     integrity = report["integrity"]
+    skill_selection = report["skill_selection_attestation"]
     models = report["models"]
     tools = report["tools"]
     evidence = report["evidence"]
@@ -2167,6 +2446,10 @@ def human_report(report: Mapping[str, Any]) -> str:
             f"Integrity: {integrity['valid_run_count']} valid, "
             f"{integrity['invalid_run_count']} invalid "
             f"({integrity['event_count']} events)",
+            "Skill selection: "
+            f"{skill_selection['mandatory_ready_run_count']} evaluation-ready, "
+            f"{skill_selection['legacy_run_count']} legacy, "
+            f"{skill_selection['invalid_run_count']} invalid",
             f"Models: {models['call_count']} calls, "
             f"{models['independent_review_call_count']} reviewer calls",
             f"Tools: {tools['call_count']} calls, "

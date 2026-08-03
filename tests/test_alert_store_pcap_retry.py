@@ -22,6 +22,11 @@ ALERT_STORE_DIR = REPO_ROOT / "n8n" / "alert_store"
 ALERT_STORE = ALERT_STORE_DIR / "alert_store.js"
 SCORING_RULES = ALERT_STORE_DIR / "config" / "scoring_rules.json"
 DEPLOYED_RELEASE = "d" * 40
+CONTROLLED_ROUTE_FIELDS = {
+    "expected_assigned_route": "codex-cli:gpt-5.5:high",
+    "expected_reviewer_route": "codex-cli:gpt-5.6-sol:xhigh",
+    "reviewer_required": True,
+}
 
 
 def available_port() -> int:
@@ -713,6 +718,7 @@ class AlertStorePcapRetryTest(unittest.TestCase):
                 "cohort_id": cohort_id,
                 "dispatch_id": dispatch_id,
                 "release_id": DEPLOYED_RELEASE,
+                **CONTROLLED_ROUTE_FIELDS,
             },
         )
         self.assertEqual(status, 202, pinned)
@@ -882,6 +888,7 @@ class AlertStorePcapRetryTest(unittest.TestCase):
             "cohort_id": "newest-20-soc.utf8-boundary",
             "dispatch_id": "6" * 64,
             "release_id": DEPLOYED_RELEASE,
+            **CONTROLLED_ROUTE_FIELDS,
         }
         status, queued = self.manual_dispatch_request("/ai/request", request)
         self.assertEqual(status, 202, queued)
@@ -939,6 +946,7 @@ class AlertStorePcapRetryTest(unittest.TestCase):
             "cohort_id": "newest-20-soc.exact-claim",
             "dispatch_id": dispatch_id,
             "release_id": DEPLOYED_RELEASE,
+            **CONTROLLED_ROUTE_FIELDS,
         }
         status, queued = self.manual_dispatch_request("/ai/request", request)
         self.assertEqual(status, 202, queued)
@@ -1034,6 +1042,7 @@ class AlertStorePcapRetryTest(unittest.TestCase):
                 "cohort_id": "newest-20-soc.processing-conflict",
                 "dispatch_id": "6" * 64,
                 "release_id": DEPLOYED_RELEASE,
+                **CONTROLLED_ROUTE_FIELDS,
             },
         )
         self.assertEqual(status, 409, rejected)
@@ -1079,6 +1088,7 @@ class AlertStorePcapRetryTest(unittest.TestCase):
                 "cohort_id": cohort_id,
                 "dispatch_id": dispatch_id,
                 "release_id": DEPLOYED_RELEASE,
+                **CONTROLLED_ROUTE_FIELDS,
             },
         )
         self.assertEqual(status, 202, pinned)
@@ -1208,6 +1218,7 @@ class AlertStorePcapRetryTest(unittest.TestCase):
                 "cohort_id": "newest-20-ir.processing-conflict",
                 "dispatch_id": "7" * 64,
                 "release_id": DEPLOYED_RELEASE,
+                **CONTROLLED_ROUTE_FIELDS,
             },
         )
         self.assertEqual(status, 409, rejected)

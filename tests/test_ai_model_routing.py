@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from contextlib import ExitStack
+import hashlib
 import importlib.util
 import io
 import json
@@ -104,6 +105,56 @@ class AiModelRoutingTests(unittest.TestCase):
                     },
                     "results": [],
                 },
+            },
+        }
+        prompt.update(overrides)
+        return prompt
+
+    def canonical_authorization_prompt(self, **overrides):
+        alert = {
+            "alert_id": "synthetic-authorized-alert",
+            "timestamp": "2026-07-24T18:30:00Z",
+            "first_seen": "2026-07-24T18:30:00Z",
+            "last_seen": "2026-07-24T18:30:00Z",
+            "source_ip": "192.0.2.10",
+            "source_port": 49152,
+            "destination_ip": "198.51.100.20",
+            "destination_port": 443,
+            "rule_id": "2100001",
+            "transport_protocol": "tcp",
+        }
+        alert.update(overrides.pop("alert", {}))
+        coverage = {
+            "source_ips": [alert["source_ip"]],
+            "destination_ips": [alert["destination_ip"]],
+            "rule_ids": [alert["rule_id"]],
+            "source_ports": [alert["source_port"]],
+            "destination_ports": [alert["destination_port"]],
+            "destination_port_ranges": [],
+            "transport_protocols": [alert["transport_protocol"]],
+            "authorization_start": "2026-07-24T18:00:00Z",
+            "authorization_end": "2026-07-24T19:00:00Z",
+        }
+        coverage.update(overrides.pop("coverage", {}))
+        digest = hashlib.sha256(
+            json.dumps(
+                {"coverage": coverage},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        entry = {
+            "authorized": True,
+            "source": "operator_assertion",
+            "evidence_ref": f"authorized-activity:sha256:{digest}",
+            "coverage": coverage,
+        }
+        entry.update(overrides.pop("entry", {}))
+        prompt = {
+            "alert": alert,
+            "authorization_evidence": {
+                "status": "operator_authorized",
+                "entries": [entry],
             },
         }
         prompt.update(overrides)
@@ -4858,12 +4909,17 @@ class AiModelRoutingTests(unittest.TestCase):
             confidence_score=0.9,
             detection_outcome="true_positive_malicious",
         ))
-        suppression = self.runner.validate_response(self.complete_response(
-            confidence="high",
-            confidence_score=0.9,
-            detection_outcome="true_positive_suspicious",
-            tuning_recommendation="suppress",
-        ))
+        suppression = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.9,
+                detection_outcome="true_positive_suspicious",
+                detection_validity="matched_intent",
+                activity_disposition="suspicious",
+                tuning_recommendation="suppress",
+            ),
+            self.canonical_authorization_prompt(),
+        )
         closure = self.runner.validate_response(self.complete_response(
             confidence="high",
             confidence_score=0.9,
@@ -4884,6 +4940,222 @@ class AiModelRoutingTests(unittest.TestCase):
                 {"alert": {"triage_level": "high"}},
             ),
             "A high-severity detection received a consequential closure disposition.",
+        )
+
+    def test_tuning_coherence_guard_downgrades_each_unsafe_context(self) -> None:
+        authorized_prompt = self.canonical_authorization_prompt()
+        cases = (
+            (
+                "unknown detection validity",
+                {
+                    "detection_validity": "unknown",
+                    "activity_disposition": "benign",
+                    "evidence_gaps": [],
+                },
+                authorized_prompt,
+                "detection_validity_unknown",
+            ),
+            (
+                "unknown activity disposition",
+                {
+                    "detection_validity": "matched_intent",
+                    "activity_disposition": "unknown",
+                    "evidence_gaps": [],
+                },
+                authorized_prompt,
+                "activity_disposition_unknown",
+            ),
+            (
+                "material evidence gap",
+                {
+                    "detection_validity": "matched_intent",
+                    "activity_disposition": "benign",
+                    "evidence_gaps": ["Endpoint attribution is unavailable."],
+                },
+                authorized_prompt,
+                "material_evidence_gaps",
+            ),
+            (
+                "missing structured authorization",
+                {
+                    "detection_validity": "matched_intent",
+                    "activity_disposition": "benign",
+                    "evidence_gaps": [],
+                },
+                {},
+                "structured_authorization_missing",
+            ),
+        )
+        for label, overrides, prompt, expected_reason in cases:
+            with self.subTest(label=label):
+                response = self.runner.validate_response(
+                    self.complete_response(
+                        detection_outcome="informational_no_action",
+                        handling="no_action",
+                        tuning_recommendation="suppress",
+                        recommended_tuning_actions=[
+                            "Suppress this synthetic signal."
+                        ],
+                        **overrides,
+                    ),
+                    prompt,
+                )
+                self.assertEqual(
+                    response["tuning_recommendation"],
+                    "needs_more_data",
+                )
+                self.assertEqual(response["recommended_tuning_actions"], [])
+                guard = response["_tuning_coherence_guard"]
+                self.assertTrue(guard["downgrade_applied"])
+                self.assertTrue(guard["invalid_for_context"])
+                self.assertIn(expected_reason, guard["blocking_reasons"])
+                self.assertFalse(guard["automatic_tuning_authorized"])
+                self.assertTrue(
+                    response["_automation_controls"]["tuning_blocked"]
+                )
+                self.assertIn(
+                    "Suppress/drop tuning is not decision-ready",
+                    response["evidence_gaps"][-1],
+                )
+                self.assertLessEqual(len(guard["blocking_reasons"]), 8)
+                self.assertLessEqual(
+                    len(guard["material_evidence_gap_signals"]),
+                    12,
+                )
+
+    def test_coherent_tuning_remains_advisory_and_never_auto_authorized(
+        self,
+    ) -> None:
+        prompt = self.canonical_authorization_prompt()
+        response = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.9,
+                detection_outcome="informational_no_action",
+                detection_validity="matched_intent",
+                activity_disposition="benign",
+                handling="no_action",
+                evidence_gaps=[],
+                tuning_recommendation="drop",
+                recommended_tuning_actions=[
+                    "Submit this drop proposal for human approval."
+                ],
+            ),
+            prompt,
+        )
+
+        self.assertEqual(response["tuning_recommendation"], "drop")
+        guard = response["_tuning_coherence_guard"]
+        self.assertFalse(guard["downgrade_applied"])
+        self.assertFalse(guard["automatic_tuning_authorized"])
+        self.assertTrue(guard["human_approval_required"])
+        self.assertTrue(response["_automation_controls"]["tuning_blocked"])
+        comparison = self.runner.compare_analysis_results(
+            response,
+            dict(response),
+        )
+        authorization = self.runner.reviewer_automation_authorization(
+            response,
+            dict(response),
+            comparison,
+        )
+        self.assertTrue(authorization["authorized"])
+        self.assertTrue(authorization["control_tuning_requested"])
+        self.assertFalse(authorization["tuning_authorized"])
+
+    def test_reviewer_authorization_remembers_downgraded_control_request(
+        self,
+    ) -> None:
+        prompt = {
+            "alert": self.canonical_authorization_prompt()["alert"],
+        }
+        response = self.runner.validate_response(
+            self.complete_response(
+                confidence="high",
+                confidence_score=0.9,
+                detection_outcome="true_positive_suspicious",
+                event_status="observed",
+                detection_validity="matched_intent",
+                activity_disposition="suspicious",
+                handling="investigate",
+                evidence_gaps=[],
+                tuning_recommendation="suppress",
+            ),
+            prompt,
+        )
+        self.assertEqual(
+            response["tuning_recommendation"],
+            "needs_more_data",
+        )
+        self.assertEqual(
+            response["_tuning_coherence_guard"]["requested_tuning"],
+            "suppress",
+        )
+        comparison = self.runner.compare_analysis_results(
+            response,
+            dict(response),
+        )
+        authorization = self.runner.reviewer_automation_authorization(
+            response,
+            dict(response),
+            comparison,
+        )
+        self.assertTrue(authorization["authorized"])
+        self.assertTrue(authorization["control_tuning_requested"])
+        self.assertFalse(authorization["tuning_authorized"])
+
+    def test_final_tuning_guard_downgrades_unresolved_reviewer_disagreement(
+        self,
+    ) -> None:
+        prompt = self.canonical_authorization_prompt()
+        response = self.runner.validate_response(
+            self.complete_response(
+                detection_outcome="informational_no_action",
+                detection_validity="matched_intent",
+                activity_disposition="benign",
+                handling="no_action",
+                evidence_gaps=[],
+                tuning_recommendation="suppress",
+            ),
+            prompt,
+        )
+        response["_second_opinion"] = {
+            "status": "completed",
+            "comparison": {
+                "agreement": "material_disagreement",
+                "material_disagreement": True,
+            },
+        }
+
+        guarded = self.runner.apply_tuning_coherence_guard(
+            response,
+            prompt,
+        )
+        guarded = self.runner.apply_tuning_coherence_guard(
+            guarded,
+            prompt,
+        )
+
+        self.assertEqual(
+            guarded["tuning_recommendation"],
+            "needs_more_data",
+        )
+        audit = guarded["_tuning_coherence_guard"]
+        self.assertEqual(audit["requested_tuning"], "suppress")
+        self.assertIn(
+            "reviewer_material_disagreement_unresolved",
+            audit["blocking_reasons"],
+        )
+        self.assertTrue(
+            audit["reviewer_material_disagreement_unresolved"]
+        )
+        self.assertEqual(
+            guarded["evidence_gaps"].count(
+                "Suppress/drop tuning is not decision-ready because deterministic "
+                "coherence checks found unresolved evidence, authorization, or "
+                "independent-review requirements."
+            ),
+            1,
         )
 
     def test_independent_reviewer_package_removes_model_anchoring_context(self) -> None:
@@ -5627,6 +5899,9 @@ class AiModelRoutingTests(unittest.TestCase):
         )
 
     def test_incident_responder_accepts_explicit_structured_authorization(self) -> None:
+        prompt = self.canonical_authorization_prompt(
+            agent_role="incident-responder"
+        )
         response = self.runner.apply_authorized_benign_evidence_guard(
             self.complete_response(
                 detection_outcome="true_positive_authorized_benign",
@@ -5635,18 +5910,7 @@ class AiModelRoutingTests(unittest.TestCase):
                 activity_disposition="authorized_benign",
                 handling="no_action",
             ),
-            {
-                "agent_role": "incident-responder",
-                "authorization_evidence": {
-                    "entries": [
-                        {
-                            "authorized": True,
-                            "source": "approved_change",
-                            "evidence_ref": "change:CHG-1234",
-                        }
-                    ]
-                },
-            },
+            prompt,
         )
 
         self.assertEqual(
@@ -5661,6 +5925,63 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertFalse(
             response["_authorization_evidence_guard"]["override_applied"]
         )
+
+    def test_structured_authorization_requires_canonical_covered_entry(
+        self,
+    ) -> None:
+        valid = self.canonical_authorization_prompt()
+        self.assertTrue(
+            self.runner._has_structured_authorization_evidence(valid)
+        )
+
+        shortcut = {
+            "alert": copy.deepcopy(valid["alert"]),
+            "authorization_evidence": copy.deepcopy(
+                valid["authorization_evidence"]["entries"][0]
+            ),
+        }
+        loose_entry = copy.deepcopy(valid)
+        loose_entry["authorization_evidence"]["entries"] = [
+            {
+                "authorized": True,
+                "source": "operator_assertion",
+                "evidence_ref": "authorized-activity:sha256:" + "a" * 64,
+            }
+        ]
+        wrong_source = copy.deepcopy(valid)
+        wrong_source["authorization_evidence"]["entries"][0][
+            "source"
+        ] = "approved_change"
+        tampered_digest = copy.deepcopy(valid)
+        tampered_digest["authorization_evidence"]["entries"][0][
+            "evidence_ref"
+        ] = "authorized-activity:sha256:" + "f" * 64
+        tuple_mismatch = copy.deepcopy(valid)
+        tuple_mismatch["alert"]["destination_port"] = 444
+        extra_coverage_field = self.canonical_authorization_prompt(
+            coverage={"free_form_scope": "must fail closed"}
+        )
+        missing_status = copy.deepcopy(valid)
+        missing_status["authorization_evidence"].pop("status")
+        too_many_entries = copy.deepcopy(valid)
+        too_many_entries["authorization_evidence"]["entries"] *= 9
+
+        for label, prompt in (
+            ("legacy top-level shortcut", shortcut),
+            ("loose entry", loose_entry),
+            ("unsupported source", wrong_source),
+            ("tampered digest", tampered_digest),
+            ("alert tuple mismatch", tuple_mismatch),
+            ("extra coverage field", extra_coverage_field),
+            ("missing container status", missing_status),
+            ("unbounded entries", too_many_entries),
+        ):
+            with self.subTest(label=label):
+                self.assertFalse(
+                    self.runner._has_structured_authorization_evidence(
+                        prompt
+                    )
+                )
 
     def test_policy_sensitive_doh_without_endpoint_or_policy_stays_unknown(
         self,

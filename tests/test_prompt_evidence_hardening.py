@@ -2,6 +2,7 @@ import base64
 import copy
 import importlib.util
 import json
+import sqlite3
 import sys
 import unittest
 from contextlib import ExitStack
@@ -80,6 +81,206 @@ def alert_row():
 
 
 class PromptEvidenceHardeningTests(unittest.TestCase):
+    def authorized_activity_fixture(self):
+        selected = alert_row()
+        selected.update(
+            {
+                "timestamp": "2026-07-31T23:10:00Z",
+                "first_seen": "2026-07-31T23:10:00Z",
+                "last_seen": "2026-07-31T23:10:00Z",
+                "rule_id": "2003068",
+                "source_ip": "10.77.7.222",
+                "source_port": 41000,
+                "destination_ip": "192.0.2.20",
+                "destination_port": 22,
+                "transport_protocol": "tcp",
+            }
+        )
+        authorization = {
+            "status": "operator_authorized",
+            "policy_id": "authorized-ssh-scan",
+            "source_ips": ["10.77.7.222"],
+            "destination_ips": ["192.0.2.20"],
+            "rule_ids": ["2003068"],
+            "source_ports": [41000],
+            "destination_ports": [22],
+            "destination_port_ranges": [],
+            "transport_protocols": ["tcp"],
+            "authorization_start": "2026-07-31T23:00:00Z",
+            "authorization_end": "2026-07-31T23:20:00Z",
+            "authorized_by": "must-not-enter-the-canonical-entry",
+            "scope": "free-form policy prose is not guard evidence",
+            "provenance": "free-form provenance is not guard evidence",
+        }
+        return selected, authorization
+
+    def test_authorized_activity_entry_binds_exact_selected_tuple_and_time(self):
+        selected, authorization = self.authorized_activity_fixture()
+
+        first = builder.canonical_authorized_activity_entry(
+            selected,
+            authorization,
+            policy_id="authorized-ssh-scan",
+        )
+        second = builder.canonical_authorized_activity_entry(
+            selected,
+            copy.deepcopy(authorization),
+            policy_id="authorized-ssh-scan",
+        )
+
+        self.assertEqual(first, second)
+        self.assertIsNotNone(first)
+        self.assertEqual(first["source"], "operator_assertion")
+        self.assertRegex(
+            first["evidence_ref"],
+            r"^authorized-activity:sha256:[0-9a-f]{64}$",
+        )
+        self.assertNotIn("authorized_by", first)
+        self.assertNotIn("scope", first)
+        self.assertNotIn("provenance", first)
+
+    def test_authorized_activity_entry_fails_closed_on_every_scope_mismatch(self):
+        selected, authorization = self.authorized_activity_fixture()
+        variants = {
+            "source_ip": {"source_ip": "10.77.7.223"},
+            "destination_ip": {"destination_ip": "192.0.2.21"},
+            "rule_id": {"rule_id": "2003069"},
+            "source_port": {"source_port": 41001},
+            "destination_port": {"destination_port": 23},
+            "transport": {"transport_protocol": "udp"},
+            "before_authorization": {"timestamp": "2026-07-31T22:59:59Z"},
+            "after_authorization": {"timestamp": "2026-07-31T23:20:01Z"},
+        }
+        for name, changes in variants.items():
+            with self.subTest(name=name):
+                mismatched = copy.deepcopy(selected)
+                mismatched.update(changes)
+                self.assertIsNone(
+                    builder.canonical_authorized_activity_entry(
+                        mismatched,
+                        authorization,
+                        policy_id="authorized-ssh-scan",
+                    )
+                )
+
+    def test_authorized_activity_entry_accepts_bounded_destination_port_range(self):
+        selected, authorization = self.authorized_activity_fixture()
+        authorization["destination_ports"] = []
+        authorization["destination_port_ranges"] = [[20, 25]]
+
+        entry = builder.canonical_authorized_activity_entry(
+            selected,
+            authorization,
+            policy_id="authorized-ssh-scan",
+        )
+
+        self.assertIsNotNone(entry)
+        self.assertEqual(
+            entry["coverage"]["destination_port_ranges"],
+            [[20, 25]],
+        )
+
+    def test_authorized_activity_entry_rejects_malformed_or_wrong_policy(self):
+        selected, authorization = self.authorized_activity_fixture()
+        malformed = {
+            "wrong_status": {**authorization, "status": "operator_claimed"},
+            "bad_range": {
+                **authorization,
+                "destination_ports": [],
+                "destination_port_ranges": [[25, 20]],
+            },
+            "missing_endpoint": {
+                **authorization,
+                "source_ips": [],
+                "destination_ips": [],
+            },
+            "unbounded_time": {
+                **authorization,
+                "authorization_end": "not-a-timestamp",
+            },
+        }
+        for name, evidence in malformed.items():
+            with self.subTest(name=name):
+                self.assertIsNone(
+                    builder.canonical_authorized_activity_entry(
+                        selected,
+                        evidence,
+                        policy_id="authorized-ssh-scan",
+                    )
+                )
+        self.assertIsNone(
+            builder.canonical_authorized_activity_entry(
+                selected,
+                authorization,
+                policy_id="different-policy",
+            )
+        )
+
+    def test_authorized_activity_context_emits_only_canonical_guard_evidence(self):
+        selected, authorization = self.authorized_activity_fixture()
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.executescript(
+            """
+            CREATE TABLE authorized_activity_campaigns (
+              campaign_id TEXT, policy_id TEXT, representative_alert_id TEXT,
+              representative_group_id TEXT, bucket_start TEXT, bucket_end TEXT,
+              first_seen TEXT, last_seen TEXT, member_count INTEGER,
+              distinct_target_count INTEGER, authorization_json TEXT
+            );
+            CREATE TABLE authorized_activity_campaign_members (
+              campaign_id TEXT, alert_id TEXT, stable_group_id TEXT,
+              destination_ip TEXT, destination_port INTEGER, observed_at TEXT
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO authorized_activity_campaigns VALUES
+              (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "campaign-fixture",
+                "authorized-ssh-scan",
+                selected["alert_id"],
+                selected["stable_group_id"],
+                "2026-07-31T23:00:00Z",
+                "2026-07-31T23:15:00Z",
+                selected["timestamp"],
+                selected["timestamp"],
+                1,
+                1,
+                json.dumps(authorization),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO authorized_activity_campaign_members VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "campaign-fixture",
+                selected["alert_id"],
+                selected["stable_group_id"],
+                selected["destination_ip"],
+                selected["destination_port"],
+                selected["timestamp"],
+            ),
+        )
+
+        context = builder.authorized_activity_context(connection, selected)
+
+        self.assertEqual(context["status"], "operator_authorized")
+        self.assertEqual(len(context["entries"]), 1)
+        self.assertEqual(context["entries"][0]["source"], "operator_assertion")
+        self.assertNotIn("authorized_by", context["authorization"])
+        self.assertNotIn("scope", context["authorization"])
+        self.assertNotIn("provenance", context["authorization"])
+
+        mismatched = copy.deepcopy(selected)
+        mismatched["source_ip"] = "10.77.7.223"
+        self.assertIsNone(
+            builder.authorized_activity_context(connection, mismatched)
+        )
+        connection.close()
+
     def test_execution_lineage_uses_stable_group_and_blind_rerun_flag(self):
         lineage = builder.execution_lineage(
             alert_row(),

@@ -496,6 +496,9 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
             "cohort_id": "newest-20-ir.2026_07_26",
             "dispatch_id": "b" * 64,
             "release_id": "d" * 40,
+            "expected_assigned_route": "codex-cli:gpt-5.5:high",
+            "expected_reviewer_route": "codex-cli:gpt-5.6-sol:xhigh",
+            "reviewer_required": True,
         }
         with mock.patch.object(
             self.portal,
@@ -961,6 +964,9 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
                 "ir-case",
                 {
                     "release_id": "forged-browser-release",
+                    "expected_assigned_route": "codex-cli:gpt-5.5:high",
+                    "expected_reviewer_route": "codex-cli:gpt-5.6-sol:xhigh",
+                    "reviewer_required": True,
                     "requested_by": "dashboard",
                 },
             )
@@ -975,6 +981,9 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertEqual(len(captured), 2)
         for _path, forwarded in captured:
             self.assertNotIn("release_id", forwarded)
+            self.assertNotIn("expected_assigned_route", forwarded)
+            self.assertNotIn("expected_reviewer_route", forwarded)
+            self.assertNotIn("reviewer_required", forwarded)
 
     def test_case_reanalysis_forwards_exact_frozen_dispatch_identity(self) -> None:
         identity = {
@@ -984,6 +993,9 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
             "cohort_id": "newest-20-ir.2026_07_26",
             "dispatch_id": "c" * 64,
             "release_id": "d" * 40,
+            "expected_assigned_route": "codex-cli:gpt-5.5:high",
+            "expected_reviewer_route": "codex-cli:gpt-5.6-sol:xhigh",
+            "reviewer_required": True,
         }
         with (
             mock.patch.object(

@@ -403,11 +403,38 @@ def create_trace_database(path: Path) -> None:
         connection.commit()
 
 
-def create_terminal_harness_database(path: Path) -> str:
+def create_terminal_harness_database(
+    path: Path,
+    *,
+    skill_registry_version: int = 1,
+) -> str:
     prompt = {
         "alert": {
             "alert_id": "alert-ledger-1",
             "rule_name": "Terminal ledger evaluator fixture",
+        },
+        "investigation_skills": {
+            "schema": "onion-sentinel-investigation-skill-selection-v1",
+            "mode": "shadow",
+            "registry_version": skill_registry_version,
+            "registry_sha256": "a" * 64,
+            "selected": (
+                [
+                    {
+                        "id": "suricata-detection-validation",
+                        "version": 3,
+                        "skill_sha256": "b" * 64,
+                        "evidence_requirements": [
+                            "This skill content must not enter the trace."
+                        ],
+                    }
+                ]
+                if skill_registry_version > 0
+                else []
+            ),
+            "selected_count": 1 if skill_registry_version > 0 else 0,
+            "truncated": False,
+            "enforcement": "advisory_only",
         },
         "evidence_reference_contract": {
             "schema": "onion-sentinel-evidence-reference-contract-v1",
@@ -535,6 +562,16 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
             self.assertEqual(report["run_count"], 1)
             self.assertEqual(report["completion"]["success_rate"], 1.0)
             self.assertTrue(report["integrity"]["all_chains_valid"])
+            legacy_skill = report["runs"][0][
+                "skill_selection_attestation"
+            ]
+            self.assertTrue(legacy_skill["legacy"])
+            self.assertTrue(legacy_skill["valid"])
+            self.assertFalse(legacy_skill["mandatory_ready"])
+            self.assertEqual(
+                report["skill_selection_attestation"]["legacy_run_count"],
+                1,
+            )
             self.assertEqual(report["models"]["call_count"], 2)
             self.assertEqual(report["models"]["independent_review_call_count"], 1)
             self.assertEqual(report["models"]["purpose_count"], 2)
@@ -636,6 +673,91 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
                 before_digest,
             )
             self.assertEqual(database.stat().st_mtime_ns, before_mtime)
+
+    def test_validates_digest_bound_sanitized_skill_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "harness.sqlite3"
+            run_id = create_terminal_harness_database(database)
+
+            report = evaluator.evaluate_database(database, run_id)
+
+            attestation = report["runs"][0][
+                "skill_selection_attestation"
+            ]
+            self.assertEqual(
+                attestation,
+                {
+                    "present": True,
+                    "legacy": False,
+                    "valid": True,
+                    "available": True,
+                    "job_digest_bound": True,
+                    "mandatory_ready": True,
+                    "registry_version": 1,
+                    "registry_sha256": "a" * 64,
+                    "selected": [
+                        {
+                            "id": "suricata-detection-validation",
+                            "version": 3,
+                            "skill_sha256": "b" * 64,
+                        }
+                    ],
+                    "selected_count": 1,
+                    "truncated": False,
+                    "advisory_mode": "advisory_only",
+                    "error_count": 0,
+                    "errors": [],
+                },
+            )
+            self.assertEqual(
+                report["skill_selection_attestation"],
+                {
+                    "present_run_count": 1,
+                    "valid_run_count": 1,
+                    "mandatory_ready_run_count": 1,
+                    "legacy_run_count": 0,
+                    "unavailable_run_count": 0,
+                    "invalid_run_count": 0,
+                    "invalid_run_ids": [],
+                },
+            )
+            serialized = json.dumps(report, sort_keys=True)
+            self.assertNotIn(
+                "This skill content must not enter the trace",
+                serialized,
+            )
+
+    def test_version_zero_skill_registry_is_never_evaluation_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "harness.sqlite3"
+            run_id = create_terminal_harness_database(
+                database,
+                skill_registry_version=0,
+            )
+
+            report = evaluator.evaluate_database(database, run_id)
+
+            attestation = report["runs"][0][
+                "skill_selection_attestation"
+            ]
+            self.assertTrue(attestation["present"])
+            self.assertTrue(attestation["valid"])
+            self.assertFalse(attestation["available"])
+            self.assertFalse(attestation["mandatory_ready"])
+            self.assertEqual(attestation["registry_version"], 0)
+            self.assertEqual(attestation["advisory_mode"], "unavailable")
+            self.assertEqual(
+                report["skill_selection_attestation"][
+                    "mandatory_ready_run_count"
+                ],
+                0,
+            )
+            self.assertEqual(
+                report["skill_selection_attestation"][
+                    "unavailable_run_count"
+                ],
+                1,
+            )
 
     def test_exact_reviewer_validation_repair_completes_one_purpose(self):
         with tempfile.TemporaryDirectory() as directory:

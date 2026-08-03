@@ -81,14 +81,17 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         role: str,
         cohort_id: str,
         *,
+        expected_count: int = evaluator.EXPECTED_ROLE_COUNT,
         second_outcome: str = "true_positive_suspicious",
         second_read_only: bool = True,
         source_rows_sha256: str = "e" * 64,
         first_detection_rule: str | None = None,
+        expected_route: str = "codex-cli:gpt-5.5:high",
+        reviewer_route: str = "codex-cli:gpt-5.6-sol:xhigh",
+        evaluation_profile: str = "",
     ) -> dict:
         members = []
-        expected_route = "codex-cli:gpt-test:high"
-        reviewer_route = "codex-cli:gpt-reviewer:xhigh"
+        stable_ids = self.stable_ids[:expected_count]
         contract = {
             "harness_required": True,
             "harness_mode": "shadow",
@@ -96,8 +99,10 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             "expected_release_id": self.release_id,
             "expected_assigned_route": expected_route,
             "expected_reviewer_route": reviewer_route,
+            "reviewer_required": True,
+            "evaluation_profile": evaluation_profile,
         }
-        for rank, stable_id in enumerate(self.stable_ids, start=1):
+        for rank, stable_id in enumerate(stable_ids, start=1):
             stable_group_key = f"v2|fixture|{rank}"
             labels = self._labels(
                 outcome=(
@@ -223,6 +228,15 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                     "ledger_manifest_schema": (
                         "onion-sentinel-harness-ledger-manifest-v2"
                     ),
+                    "skill_selection_attestation_validated": True,
+                    "skill_selection_attestation": {
+                        "registry_version": 1,
+                        "registry_sha256": "9" * 64,
+                        "selected": [],
+                        "selected_count": 0,
+                        "truncated": False,
+                        "advisory_mode": "advisory_only",
+                    },
                     "model_call_count": 2,
                     "successful_model_call_count": 2,
                     "successful_primary_model_call_count": 1,
@@ -344,6 +358,13 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                                 "_analysis_provider": "codex-cli",
                                 "_analysis_model_route": expected_route,
                                 "_analysis_evaluation_memory_frozen": True,
+                                "_second_opinion": {
+                                    "status": "completed",
+                                    "model_route": reviewer_route,
+                                    "response": {
+                                        "_analysis_model_route": reviewer_route,
+                                    },
+                                },
                             },
                             "query_audit": query_audit,
                         },
@@ -370,7 +391,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         selection = {
             "mode": "imported_rows",
             "source_sha256": source_rows_sha256,
-            "source_count": evaluator.EXPECTED_ROLE_COUNT,
+            "source_count": expected_count,
             "order_preserved": True,
             "ordered_identity_sha256": evaluator.sha256_value(
                 ordered_identities
@@ -380,7 +401,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             "schema": evaluator.MANIFEST_SCHEMA,
             "cohort_id": cohort_id,
             "agent_role": role,
-            "count": evaluator.EXPECTED_ROLE_COUNT,
+            "count": expected_count,
             "created_at": "2026-07-25T00:00:00Z",
             "selection": selection,
             "execution_contract": contract,
@@ -416,6 +437,9 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                 "cohort_id": cohort_id,
                 "dispatch_id": dispatch_id,
                 "release_id": self.release_id,
+                "expected_assigned_route": expected_route,
+                "expected_reviewer_route": reviewer_route,
+                "reviewer_required": True,
             }
             dispatch.update(
                 {
@@ -450,7 +474,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             "agent_role": role,
             "cohort_id": cohort_id,
             "reason": "Unit-test cohort",
-            "count": evaluator.EXPECTED_ROLE_COUNT,
+            "count": expected_count,
             "frozen_at": "2026-07-25T00:00:00Z",
             "exported_at": "2026-07-25T01:00:00Z",
             "source_manifest_sha256": "f" * 64,
@@ -459,8 +483,8 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             "execution_contract": contract,
             "execution_gate": {
                 "status": "passed",
-                "expected_count": evaluator.EXPECTED_ROLE_COUNT,
-                "passed_count": evaluator.EXPECTED_ROLE_COUNT,
+                "expected_count": expected_count,
+                "passed_count": expected_count,
                 "ordered_identity_sha256": selection[
                     "ordered_identity_sha256"
                 ],
@@ -499,9 +523,15 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             "improvement_codes": improvement_codes or [],
         }
 
-    def _adjudication(self) -> dict:
+    def _adjudication(
+        self,
+        *,
+        expected_count: int = evaluator.EXPECTED_ROLE_COUNT,
+    ) -> dict:
         cases = []
-        for rank, stable_id in enumerate(self.stable_ids, start=1):
+        for rank, stable_id in enumerate(
+            self.stable_ids[:expected_count], start=1
+        ):
             cases.append(
                 {
                     "stable_group_id": stable_id,
@@ -552,8 +582,8 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             )
         return {
             "schema": evaluator.ADJUDICATION_SCHEMA,
-            "experiment_id": "newest-20-unit",
-            "expected_count": evaluator.EXPECTED_ROLE_COUNT,
+            "experiment_id": "bounded-cohort-unit",
+            "expected_count": expected_count,
             "independent_review": True,
             "reviewer_count": 1,
             "adjudicated_at": "2026-07-25T02:00:00Z",
@@ -568,6 +598,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
     def _write_fixture_documents(
         self,
         *,
+        expected_count: int = evaluator.EXPECTED_ROLE_COUNT,
         soc_second_outcome: str = "true_positive_malicious",
         ir_second_read_only: bool = True,
     ) -> None:
@@ -576,6 +607,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             self._result_export(
                 "incident-responder",
                 "ir-newest-unit",
+                expected_count=expected_count,
                 second_read_only=ir_second_read_only,
             ),
         )
@@ -584,12 +616,13 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             self._result_export(
                 "soc-analyst",
                 "soc-newest-unit",
+                expected_count=expected_count,
                 second_outcome=soc_second_outcome,
             ),
         )
         self._write_private(
             self.adjudication_path,
-            self._adjudication(),
+            self._adjudication(expected_count=expected_count),
         )
 
     def test_scores_roles_separately_and_enforces_hard_failures(self) -> None:
@@ -604,6 +637,17 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         )
 
         self.assertEqual(report["schema"], evaluator.REPORT_SCHEMA)
+        self.assertEqual(
+            report["execution_contract"]["expected_assigned_route"],
+            "codex-cli:gpt-5.5:high",
+        )
+        for source in report["result_sources"].values():
+            self.assertEqual(
+                source["expected_reviewer_route"],
+                "codex-cli:gpt-5.6-sol:xhigh",
+            )
+            self.assertIs(source["reviewer_required"], True)
+            self.assertEqual(source["evaluation_profile"], "")
         incident = report["roles"]["incident-responder"]
         soc = report["roles"]["soc-analyst"]
         self.assertEqual(
@@ -632,6 +676,81 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         self.assertFalse(
             incident["aggregate"]["shadow_acceptance_gate"]["passed"]
         )
+
+    def test_cross_role_routes_and_required_profile_must_match(self) -> None:
+        self._write_private(
+            self.ir_path,
+            self._result_export(
+                "incident-responder",
+                "ir-newest-unit",
+            ),
+        )
+        self._write_private(
+            self.soc_path,
+            self._result_export(
+                "soc-analyst",
+                "soc-newest-unit",
+                expected_route="codex-cli:gpt-5.6-terra:high",
+                reviewer_route="codex-cli:gpt-5.6-luna:xhigh",
+            ),
+        )
+        self._write_private(
+            self.adjudication_path,
+            self._adjudication(),
+        )
+        with self.assertRaisesRegex(
+            evaluator.CohortEvaluationError,
+            "same execution contract",
+        ):
+            evaluator.evaluate_cohorts(
+                result_paths={
+                    "incident-responder": self.ir_path,
+                    "soc-analyst": self.soc_path,
+                },
+                adjudication_path=self.adjudication_path,
+            )
+
+        profile = "onion-sentinel-gpt55-high-gpt56-sol-xhigh-v1"
+        self._write_private(
+            self.ir_path,
+            self._result_export(
+                "incident-responder",
+                "ir-newest-unit",
+                evaluation_profile=profile,
+            ),
+        )
+        self._write_private(
+            self.soc_path,
+            self._result_export(
+                "soc-analyst",
+                "soc-newest-unit",
+                evaluation_profile=profile,
+            ),
+        )
+        report = evaluator.evaluate_cohorts(
+            result_paths={
+                "incident-responder": self.ir_path,
+                "soc-analyst": self.soc_path,
+            },
+            adjudication_path=self.adjudication_path,
+            required_evaluation_profile=profile,
+        )
+        self.assertEqual(
+            report["execution_contract"]["evaluation_profile"], profile
+        )
+
+        with self.assertRaisesRegex(
+            evaluator.CohortEvaluationError,
+            "required evaluation profile",
+        ):
+            evaluator.evaluate_cohorts(
+                result_paths={
+                    "incident-responder": self.ir_path,
+                    "soc-analyst": self.soc_path,
+                },
+                adjudication_path=self.adjudication_path,
+                required_evaluation_profile="wrong-profile",
+            )
 
     def test_explicit_non_read_only_audit_blocks_grading(self) -> None:
         self._write_fixture_documents(ir_second_read_only=False)
@@ -1172,12 +1291,69 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
             evaluator.CohortEvaluationError,
             "unsupported schema",
         ):
-            evaluator.load_result_export(
-                self.soc_path,
-                role="soc-analyst",
-                expected_count=evaluator.EXPECTED_ROLE_COUNT,
-            )
+                evaluator.load_result_export(
+                    self.soc_path,
+                    role="soc-analyst",
+                    expected_count=evaluator.EXPECTED_ROLE_COUNT,
+                )
 
+    def test_rejects_legacy_or_unsafe_skill_selection_proof(self) -> None:
+        def missing_validation(harness: dict) -> None:
+            harness.pop("skill_selection_attestation_validated")
+
+        def version_zero(harness: dict) -> None:
+            harness["skill_selection_attestation"][
+                "registry_version"
+            ] = 0
+
+        def invalid_registry_digest(harness: dict) -> None:
+            harness["skill_selection_attestation"][
+                "registry_sha256"
+            ] = "not-a-digest"
+
+        def leaked_skill_content(harness: dict) -> None:
+            harness["skill_selection_attestation"]["selected"] = [
+                {
+                    "id": "suricata-detection-validation",
+                    "version": 1,
+                    "skill_sha256": "8" * 64,
+                    "guidance": "raw skill content is forbidden",
+                }
+            ]
+            harness["skill_selection_attestation"]["selected_count"] = 1
+
+        mutations = {
+            "legacy-missing-validation": missing_validation,
+            "version-zero": version_zero,
+            "invalid-registry-digest": invalid_registry_digest,
+            "skill-content-leak": leaked_skill_content,
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                document = self._result_export(
+                    "soc-analyst",
+                    "soc-skill-proof-unit",
+                )
+                proof = document["members"][0]["execution_proof"]
+                mutate(proof["harness"])
+                proof.pop("proof_sha256")
+                proof["proof_sha256"] = evaluator.sha256_value(proof)
+                document.pop("export_sha256")
+                document["export_sha256"] = evaluator.sha256_value(
+                    document
+                )
+                self._write_private(self.soc_path, document)
+                with self.assertRaisesRegex(
+                    evaluator.CohortEvaluationError,
+                    "skill (selection|identity)",
+                ):
+                    evaluator.load_result_export(
+                        self.soc_path,
+                        role="soc-analyst",
+                        expected_count=evaluator.EXPECTED_ROLE_COUNT,
+                    )
+
+    def test_rejects_missing_exact_durable_job_proof(self) -> None:
         mutations = {
             "missing-job": lambda member: member["result"].pop("job"),
             "wrong-job-id": lambda member: member["result"]["job"].update(
@@ -1213,38 +1389,93 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
                         expected_count=evaluator.EXPECTED_ROLE_COUNT,
                     )
 
-    def test_paired_newest_20_count_cannot_be_reduced(self) -> None:
-        self._write_fixture_documents()
-        with self.assertRaisesRegex(
-            evaluator.CohortEvaluationError,
-            "exactly 20 results per role",
-        ):
-            evaluator.evaluate_cohorts(
-                result_paths={
-                    "incident-responder": self.ir_path,
-                    "soc-analyst": self.soc_path,
-                },
-                adjudication_path=self.adjudication_path,
-                expected_count=1,
-            )
-        with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit):
-                evaluator.build_parser().parse_args(
-                    [
-                        "--result",
-                        f"incident-responder={self.ir_path}",
-                        "--result",
-                        f"soc-analyst={self.soc_path}",
-                        "--adjudication",
-                        str(self.adjudication_path),
-                        "--expected-count",
-                        "1",
-                        "--json-out",
-                        str(self.root / "result.json"),
-                        "--markdown-out",
-                        str(self.root / "result.md"),
-                    ]
+    def test_grades_bounded_1_10_and_20_case_cohorts(self) -> None:
+        for expected_count, required_pass_count in ((1, 1), (10, 9), (20, 18)):
+            with self.subTest(expected_count=expected_count):
+                self._write_fixture_documents(
+                    expected_count=expected_count,
+                    soc_second_outcome="true_positive_suspicious",
                 )
+                adjudication = self._adjudication(
+                    expected_count=expected_count
+                )
+                for rank, case in enumerate(adjudication["cases"], start=1):
+                    score = 90 if rank <= required_pass_count else 80
+                    for role in evaluator.SUPPORTED_ROLES:
+                        assessment = self._assessment(
+                            role,
+                            rank,
+                            score=score,
+                        )
+                        assessment["scores"]["occurrence_validity"] -= 5
+                        assessment["scores"]["route_trace_integrity"] = 5
+                        case["role_assessments"][role] = assessment
+                self._write_private(self.adjudication_path, adjudication)
+
+                report = evaluator.evaluate_cohorts(
+                    result_paths={
+                        "incident-responder": self.ir_path,
+                        "soc-analyst": self.soc_path,
+                    },
+                    adjudication_path=self.adjudication_path,
+                    expected_count=expected_count,
+                )
+
+                self.assertEqual(report["expected_count"], expected_count)
+                self.assertEqual(
+                    report["rubric"]["required_pass_count"],
+                    required_pass_count,
+                )
+                for role in evaluator.SUPPORTED_ROLES:
+                    gate = report["roles"][role]["aggregate"][
+                        "shadow_acceptance_gate"
+                    ]
+                    self.assertTrue(gate["passed"])
+                    self.assertEqual(
+                        gate["required_pass_count"], required_pass_count
+                    )
+                    self.assertEqual(
+                        gate["production_promotion_size_met"],
+                        expected_count == evaluator.EXPECTED_ROLE_COUNT,
+                    )
+
+    def test_expected_count_defaults_to_20_and_rejects_invalid_bounds(
+        self,
+    ) -> None:
+        parser = evaluator.build_parser()
+        common = [
+            "--result",
+            f"incident-responder={self.ir_path}",
+            "--result",
+            f"soc-analyst={self.soc_path}",
+            "--adjudication",
+            str(self.adjudication_path),
+            "--json-out",
+            str(self.root / "result.json"),
+            "--markdown-out",
+            str(self.root / "result.md"),
+        ]
+        self.assertEqual(
+            parser.parse_args(common).expected_count,
+            evaluator.EXPECTED_ROLE_COUNT,
+        )
+        for invalid_count in (0, evaluator.EXPECTED_ROLE_COUNT + 1):
+            with self.subTest(invalid_count=invalid_count):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        parser.parse_args(
+                            common
+                            + ["--expected-count", str(invalid_count)]
+                        )
+                with self.assertRaisesRegex(
+                    evaluator.CohortEvaluationError,
+                    "between 1 and 20",
+                ):
+                    evaluator.evaluate_cohorts(
+                        result_paths={},
+                        adjudication_path=self.adjudication_path,
+                        expected_count=invalid_count,
+                    )
 
 
 if __name__ == "__main__":

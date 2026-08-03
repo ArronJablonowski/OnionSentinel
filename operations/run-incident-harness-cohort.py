@@ -42,14 +42,15 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 
-SCHEMA = "onion-sentinel-incident-harness-cohort-v3"
-EXPORT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v3"
+SCHEMA = "onion-sentinel-incident-harness-cohort-v4"
+EXPORT_SCHEMA = "onion-sentinel-incident-harness-cohort-export-v4"
 MAX_COHORT_SIZE = 100
 MAX_HTTP_BODY_BYTES = 1_000_000
 MAX_SOURCE_ROWS_BYTES = 2_000_000
 MAX_MANIFEST_BYTES = 10_000_000
 MAX_STORED_RESPONSE_BYTES = 8_000_000
 MAX_STABLE_GROUP_KEY_BYTES = 2048
+MAX_EVALUATION_TOKEN_BYTES = 64
 TERMINAL_MONITOR_STATES = {"completed", "failed", "skipped"}
 ACTIVE_JOB_STATES = {"pending", "processing"}
 ACTIVE_AGENT_STATES = {"queued", "analyzing"}
@@ -62,8 +63,19 @@ REPRESENTATIVE_ALERT_ID_RE = re.compile(r"[A-Za-z0-9._:@=-]{1,256}")
 CASE_ID_RE = re.compile(r"ir-[a-z0-9_-]{1,64}")
 RUN_ID_RE = re.compile(r"irr-[a-z0-9-]{1,64}")
 SHA256_RE = re.compile(r"[a-f0-9]{64}")
+SKILL_ID_RE = re.compile(r"[A-Za-z0-9.][A-Za-z0-9._:@+=/-]{0,255}")
+MAX_ATTESTED_INVESTIGATION_SKILLS = 4
 RELEASE_ID_RE = re.compile(r"[a-f0-9]{40}")
 SAFE_ROUTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{2,255}")
+CONTROLLED_ROUTE_RE = re.compile(
+    r"codex-cli:(?:gpt-5\.5|gpt-5\.6-(?:sol|terra|luna)):"
+    r"(?:low|medium|high|xhigh)"
+)
+CONTROLLED_EVALUATION_PROFILE = (
+    "onion-sentinel-gpt55-high-gpt56-sol-xhigh-v1"
+)
+PROFILE_ASSIGNED_ROUTE = "codex-cli:gpt-5.5:high"
+PROFILE_REVIEWER_ROUTE = "codex-cli:gpt-5.6-sol:xhigh"
 TRACE_EVALUATOR_PATH = Path(__file__).with_name("evaluate-harness-traces.py")
 ALERT_STORE_CANONICAL_SHA256_JS = r"""
 const crypto = require("node:crypto");
@@ -293,6 +305,9 @@ def load_private_manifest(path: Path) -> dict[str, Any]:
         expected_reviewer_route=str(
             (contract or {}).get("expected_reviewer_route") or ""
         ),
+        evaluation_profile=str(
+            (contract or {}).get("evaluation_profile") or ""
+        ),
     ):
         raise CohortError("cohort execution contract is missing or malformed")
     frozen_plan_sha256 = str(document.get("frozen_plan_sha256") or "")
@@ -422,24 +437,48 @@ def execution_contract(
     *,
     expected_release_id: str,
     expected_assigned_route: str,
-    expected_reviewer_route: str = "",
+    expected_reviewer_route: str = "codex-cli:gpt-5.6-sol:xhigh",
+    evaluation_profile: str = "",
 ) -> dict[str, Any]:
     """Return the immutable controls required for a gradeable harness run."""
+
+    assigned_route = validate_model_route(
+        expected_assigned_route,
+        "expected assigned route",
+    )
+    reviewer_route = validate_model_route(
+        expected_reviewer_route,
+        "expected reviewer route",
+    )
+    if (
+        not CONTROLLED_ROUTE_RE.fullmatch(assigned_route)
+        or not CONTROLLED_ROUTE_RE.fullmatch(reviewer_route)
+        or assigned_route.rsplit(":", 1)[0]
+        == reviewer_route.rsplit(":", 1)[0]
+    ):
+        raise CohortError(
+            "controlled evaluation requires distinct non-empty canonical Codex "
+            "primary and reviewer routes"
+        )
+    profile = str(evaluation_profile or "").strip()
+    if profile and (
+        profile != CONTROLLED_EVALUATION_PROFILE
+        or assigned_route != PROFILE_ASSIGNED_ROUTE
+        or reviewer_route != PROFILE_REVIEWER_ROUTE
+    ):
+        raise CohortError(
+            "controlled evaluation profile does not match its exact routes"
+        )
 
     return {
         "harness_required": True,
         "harness_mode": "shadow",
         "memory_frozen": True,
         "expected_release_id": validate_release_id(expected_release_id),
-        "expected_assigned_route": validate_model_route(
-            expected_assigned_route,
-            "expected assigned route",
-        ),
-        "expected_reviewer_route": validate_model_route(
-            expected_reviewer_route,
-            "expected reviewer route",
-            allow_empty=True,
-        ),
+        "expected_assigned_route": assigned_route,
+        "expected_reviewer_route": reviewer_route,
+        "reviewer_required": True,
+        "evaluation_profile": profile,
     }
 
 
@@ -1159,8 +1198,9 @@ def freeze_cohort(
     reason: str,
     count: int,
     expected_release_id: str,
-    expected_assigned_route: str = "codex-cli:gpt-5.6-sol:high",
-    expected_reviewer_route: str = "",
+    expected_assigned_route: str = "codex-cli:gpt-5.5:high",
+    expected_reviewer_route: str = "codex-cli:gpt-5.6-sol:xhigh",
+    evaluation_profile: str = "",
     dry_run: bool = False,
 ) -> dict[str, Any]:
     cohort_id, reason = validate_cohort_identity(cohort_id, reason)
@@ -1287,6 +1327,7 @@ def freeze_cohort(
                 expected_release_id=expected_release_id,
                 expected_assigned_route=expected_assigned_route,
                 expected_reviewer_route=expected_reviewer_route,
+                evaluation_profile=evaluation_profile,
             ),
             "database": {
                 "path": str(database_path.expanduser().resolve()),
@@ -1433,8 +1474,9 @@ def freeze_cohort_from_rows(
     expected_count: int,
     expected_release_id: str,
     agent_role: str = "incident-responder",
-    expected_assigned_route: str = "codex-cli:gpt-5.6-sol:high",
-    expected_reviewer_route: str = "",
+    expected_assigned_route: str = "codex-cli:gpt-5.5:high",
+    expected_reviewer_route: str = "codex-cli:gpt-5.6-sol:xhigh",
+    evaluation_profile: str = "",
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Import exact preselected identities; never recompute cohort membership."""
@@ -1597,6 +1639,7 @@ def freeze_cohort_from_rows(
                 expected_release_id=expected_release_id,
                 expected_assigned_route=expected_assigned_route,
                 expected_reviewer_route=expected_reviewer_route,
+                evaluation_profile=evaluation_profile,
             ),
             "database": {
                 "path": str(database_path.expanduser().resolve()),
@@ -1951,6 +1994,91 @@ def validate_loopback_base_url(value: str) -> str:
     return f"http://{rendered_host}:{port}"
 
 
+def load_evaluation_token(path: Path) -> str:
+    """Read a fixed-size evaluation token from an owner-only regular file.
+
+    The path, rather than the credential, is accepted by the CLI so the token
+    never appears in process arguments.  Open the file without following
+    symlinks and revalidate the opened inode to fail closed across replacement
+    races.
+    """
+
+    target = path.expanduser()
+    try:
+        link_metadata = os.lstat(target)
+    except OSError as exc:
+        raise CohortError(
+            "evaluation token file is missing or inaccessible"
+        ) from exc
+    if not stat.S_ISREG(link_metadata.st_mode):
+        raise CohortError(
+            "evaluation token file must be a regular non-symlink file"
+        )
+    mode = stat.S_IMODE(link_metadata.st_mode)
+    if mode & 0o077:
+        raise CohortError(
+            "evaluation token file must be owner-only (0600 or stricter)"
+        )
+    if link_metadata.st_uid != os.geteuid():
+        raise CohortError(
+            "evaluation token file is not owned by the current user"
+        )
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        file_descriptor = os.open(target, flags)
+    except OSError as exc:
+        raise CohortError(
+            "evaluation token file could not be opened safely"
+        ) from exc
+    try:
+        metadata = os.fstat(file_descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_dev != link_metadata.st_dev
+            or metadata.st_ino != link_metadata.st_ino
+        ):
+            raise CohortError(
+                "evaluation token file changed during validation"
+            )
+        opened_mode = stat.S_IMODE(metadata.st_mode)
+        if opened_mode & 0o077:
+            raise CohortError(
+                "evaluation token file must be owner-only (0600 or stricter)"
+            )
+        if metadata.st_uid != os.geteuid():
+            raise CohortError(
+                "evaluation token file is not owned by the current user"
+            )
+        if metadata.st_size != MAX_EVALUATION_TOKEN_BYTES:
+            raise CohortError(
+                "evaluation token must be exactly 64 lowercase hexadecimal characters"
+            )
+        raw = os.read(file_descriptor, MAX_EVALUATION_TOKEN_BYTES + 1)
+        if (
+            len(raw) != MAX_EVALUATION_TOKEN_BYTES
+            or os.read(file_descriptor, 1)
+        ):
+            raise CohortError(
+                "evaluation token must be exactly 64 lowercase hexadecimal characters"
+            )
+    finally:
+        os.close(file_descriptor)
+    try:
+        token = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise CohortError(
+            "evaluation token must be exactly 64 lowercase hexadecimal characters"
+        ) from exc
+    if not SHA256_RE.fullmatch(token):
+        raise CohortError(
+            "evaluation token must be exactly 64 lowercase hexadecimal characters"
+        )
+    return token
+
+
 class HttpResult:
     def __init__(self, status: int, payload: Any, body_sha256: str):
         self.status = status
@@ -1963,22 +2091,28 @@ def dashboard_post_json(
     payload: Mapping[str, Any],
     *,
     timeout: float,
+    evaluation_token: str | None = None,
 ) -> HttpResult:
     body = canonical_bytes(payload)
     origin = urllib.parse.urlunsplit(
         (*urllib.parse.urlsplit(url)[:2], "", "", "")
     )
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Origin": origin,
+        "Sec-Fetch-Site": "same-origin",
+        "X-Onion-Sentinel-Request": "dashboard",
+    }
+    if evaluation_token is not None:
+        if not SHA256_RE.fullmatch(evaluation_token):
+            raise CohortError("evaluation token is malformed")
+        headers["X-Onion-Sentinel-Evaluation-Token"] = evaluation_token
     request = urllib.request.Request(
         url,
         data=body,
         method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Origin": origin,
-            "Sec-Fetch-Site": "same-origin",
-            "X-Onion-Sentinel-Request": "dashboard",
-        },
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -2023,6 +2157,10 @@ def _request_for_member(
             "expected_release_id"
         ),
     )
+    contract = manifest["execution_contract"]
+    expected_assigned_route = str(contract["expected_assigned_route"])
+    expected_reviewer_route = str(contract["expected_reviewer_route"])
+    reviewer_required = contract["reviewer_required"]
     stable_group_key = _member_stable_group_key(member)
     dispatch_kind = str((member.get("dispatch") or {}).get("kind") or "")
     if dispatch_kind == "escalate":
@@ -2044,6 +2182,9 @@ def _request_for_member(
             "cohort_id": cohort_id,
             "dispatch_id": dispatch_id,
             "release_id": release_id,
+            "expected_assigned_route": expected_assigned_route,
+            "expected_reviewer_route": expected_reviewer_route,
+            "reviewer_required": reviewer_required,
         }
     elif dispatch_kind == "analyze":
         path = (
@@ -2064,6 +2205,9 @@ def _request_for_member(
             "cohort_id": cohort_id,
             "dispatch_id": dispatch_id,
             "release_id": release_id,
+            "expected_assigned_route": expected_assigned_route,
+            "expected_reviewer_route": expected_reviewer_route,
+            "reviewer_required": reviewer_required,
         }
     elif dispatch_kind == "reanalyze":
         case_id = str(
@@ -2090,6 +2234,9 @@ def _request_for_member(
             "cohort_id": cohort_id,
             "dispatch_id": dispatch_id,
             "release_id": release_id,
+            "expected_assigned_route": expected_assigned_route,
+            "expected_reviewer_route": expected_reviewer_route,
+            "reviewer_required": reviewer_required,
         }
     else:
         raise CohortError(f"unsupported dispatch kind: {dispatch_kind!r}")
@@ -2119,6 +2266,12 @@ def _validate_success_response(
         "http_status": result.status,
         "response_sha256": result.body_sha256,
     }
+    contract = manifest["execution_contract"]
+    route_identity = {
+        "expected_assigned_route": contract["expected_assigned_route"],
+        "expected_reviewer_route": contract["expected_reviewer_route"],
+        "reviewer_required": contract["reviewer_required"],
+    }
     if kind == "escalate":
         expected = {
             "group_id": member["dashboard_group_id"],
@@ -2131,6 +2284,7 @@ def _validate_success_response(
             "release_id": manifest["execution_contract"][
                 "expected_release_id"
             ],
+            **route_identity,
         }
         if any(payload.get(key) != value for key, value in expected.items()):
             raise AmbiguousDispatchError(
@@ -2160,6 +2314,7 @@ def _validate_success_response(
             "release_id": manifest["execution_contract"][
                 "expected_release_id"
             ],
+            **route_identity,
         }
         if any(payload.get(key) != value for key, value in expected.items()):
             raise AmbiguousDispatchError(
@@ -2181,6 +2336,7 @@ def _validate_success_response(
             "release_id": manifest["execution_contract"][
                 "expected_release_id"
             ],
+            **route_identity,
         }
         if any(payload.get(key) != value for key, value in expected.items()):
             raise AmbiguousDispatchError(
@@ -2258,6 +2414,15 @@ def _validate_dispatch_job_payload(
         "cohort_id": manifest["cohort_id"],
         "dispatch_id": deterministic_dispatch_id(manifest, member),
         "release_id": manifest["execution_contract"]["expected_release_id"],
+        "expected_assigned_route": manifest["execution_contract"][
+            "expected_assigned_route"
+        ],
+        "expected_reviewer_route": manifest["execution_contract"][
+            "expected_reviewer_route"
+        ],
+        "reviewer_required": manifest["execution_contract"][
+            "reviewer_required"
+        ],
         "agent_role": manifest["agent_role"],
     }
     if expected_case_id:
@@ -2327,6 +2492,13 @@ def _verify_dispatch_readback(
                 "release_id": str(
                     manifest["execution_contract"]["expected_release_id"]
                 ),
+                "expected_assigned_route": job_binding[
+                    "expected_assigned_route"
+                ],
+                "expected_reviewer_route": job_binding[
+                    "expected_reviewer_route"
+                ],
+                "reviewer_required": job_binding["reviewer_required"],
                 "job_id": int(job["id"]),
                 "job_status": job_status,
                 "job_payload_sha256": job_binding["payload_sha256"],
@@ -2364,6 +2536,15 @@ def _verify_dispatch_readback(
             "release_id": str(
                 manifest["execution_contract"]["expected_release_id"]
             ),
+            "expected_assigned_route": manifest["execution_contract"][
+                "expected_assigned_route"
+            ],
+            "expected_reviewer_route": manifest["execution_contract"][
+                "expected_reviewer_route"
+            ],
+            "reviewer_required": manifest["execution_contract"][
+                "reviewer_required"
+            ],
             "agent_status": str(case.get("agent_status") or ""),
             "fresh_analysis_count": 0,
         }
@@ -2548,6 +2729,15 @@ def _monitor_dispatch_job_binding(
     expected_release_id = str(
         manifest["execution_contract"]["expected_release_id"]
     )
+    expected_assigned_route = str(
+        manifest["execution_contract"]["expected_assigned_route"]
+    )
+    expected_reviewer_route = str(
+        manifest["execution_contract"]["expected_reviewer_route"]
+    )
+    reviewer_required = manifest["execution_contract"][
+        "reviewer_required"
+    ]
     provenance_sources = (
         ("accepted response", accepted),
         ("durable readback", readback),
@@ -2558,6 +2748,11 @@ def _monitor_dispatch_job_binding(
             or source.get("cohort_id") != expected_cohort_id
             or source.get("stable_group_key") != stable_group_key
             or source.get("release_id") != expected_release_id
+            or source.get("expected_assigned_route")
+            != expected_assigned_route
+            or source.get("expected_reviewer_route")
+            != expected_reviewer_route
+            or source.get("reviewer_required") is not reviewer_required
         ):
             raise CohortError(
                 f"{label} dispatch identity changed during monitoring"
@@ -2580,6 +2775,9 @@ def _monitor_dispatch_job_binding(
         "stable_group_key": stable_group_key,
         "representative_alert_id": member["representative_alert_id"],
         "release_id": expected_release_id,
+        "expected_assigned_route": expected_assigned_route,
+        "expected_reviewer_route": expected_reviewer_route,
+        "reviewer_required": reviewer_required,
     }
     if kind != "analyze":
         expected_readback["case_id"] = case_id
@@ -2600,6 +2798,9 @@ def _monitor_dispatch_job_binding(
         "cohort_id": expected_cohort_id,
         "dispatch_id": expected_dispatch_id,
         "release_id": expected_release_id,
+        "expected_assigned_route": expected_assigned_route,
+        "expected_reviewer_route": expected_reviewer_route,
+        "reviewer_required": reviewer_required,
         "stable_group_id": stable_id,
         "stable_group_key": stable_group_key,
         "representative_alert_id": str(
@@ -2622,9 +2823,15 @@ def queue_cohort(
     timeout: float = 15.0,
     dry_run: bool = False,
     poster: Poster | None = None,
+    evaluation_token_file: Path | None = None,
 ) -> dict[str, Any]:
     manifest = load_private_manifest(manifest_path)
     base_url = validate_loopback_base_url(base_url)
+    evaluation_token = (
+        load_evaluation_token(evaluation_token_file)
+        if evaluation_token_file is not None
+        else None
+    )
     states = {
         str((member.get("dispatch") or {}).get("state") or "")
         for member in manifest["members"]
@@ -2651,7 +2858,12 @@ def queue_cohort(
     def do_post(url: str, payload: Mapping[str, Any]) -> HttpResult:
         if poster is not None:
             return poster(url, payload)
-        return dashboard_post_json(url, payload, timeout=timeout)
+        return dashboard_post_json(
+            url,
+            payload,
+            timeout=timeout,
+            evaluation_token=evaluation_token,
+        )
 
     manifest["state"] = "queueing"
     manifest["queue_started_at"] = utc_now()
@@ -2843,6 +3055,26 @@ def _analysis_metadata(
         if key in response
         and isinstance(response.get(key), (str, int, float, bool, type(None)))
     }
+    second_opinion = (
+        response.get("_second_opinion")
+        if isinstance(response.get("_second_opinion"), dict)
+        else {}
+    )
+    reviewer_response = (
+        second_opinion.get("response")
+        if isinstance(second_opinion.get("response"), dict)
+        else {}
+    )
+    if second_opinion:
+        item["result"]["_second_opinion"] = {
+            "status": str(second_opinion.get("status") or ""),
+            "model_route": str(second_opinion.get("model_route") or ""),
+            "response": {
+                "_analysis_model_route": str(
+                    reviewer_response.get("_analysis_model_route") or ""
+                )
+            },
+        }
     item["query_audit"] = _bounded_query_audit_metadata(response)
     return item
 
@@ -3755,6 +3987,23 @@ def _harness_execution_proof(
         failures.append("analysis-memory-freeze-not-attested")
     if str(analysis_result.get("_analysis_model_route") or "") != expected_route:
         failures.append("analysis-route-mismatch")
+    second_opinion = (
+        analysis_result.get("_second_opinion")
+        if isinstance(analysis_result.get("_second_opinion"), dict)
+        else {}
+    )
+    reviewer_response = (
+        second_opinion.get("response")
+        if isinstance(second_opinion.get("response"), dict)
+        else {}
+    )
+    if contract.get("reviewer_required") is True and (
+        second_opinion.get("status") != "completed"
+        or second_opinion.get("model_route") != expected_reviewer_route
+        or reviewer_response.get("_analysis_model_route")
+        != expected_reviewer_route
+    ):
+        failures.append("analysis-reviewer-route-mismatch")
 
     trace_evaluator = _load_trace_evaluator()
     try:
@@ -3805,6 +4054,77 @@ def _harness_execution_proof(
         if isinstance(trace.get("terminal_execution_summary"), dict)
         else {}
     )
+    skill_attestation = (
+        trace.get("skill_selection_attestation")
+        if isinstance(trace.get("skill_selection_attestation"), dict)
+        else {}
+    )
+    selected_skills = skill_attestation.get("selected")
+    selected_skills = selected_skills if isinstance(selected_skills, list) else []
+    skill_summary_selected: list[dict[str, Any]] = []
+    skill_identity_valid = len(selected_skills) <= (
+        MAX_ATTESTED_INVESTIGATION_SKILLS
+    )
+    for selected_skill in selected_skills:
+        if not isinstance(selected_skill, dict):
+            skill_identity_valid = False
+            continue
+        skill_id = str(selected_skill.get("id") or "")
+        version = selected_skill.get("version")
+        skill_sha256 = str(selected_skill.get("skill_sha256") or "")
+        if (
+            set(selected_skill) != {"id", "version", "skill_sha256"}
+            or not SKILL_ID_RE.fullmatch(skill_id)
+            or not isinstance(version, int)
+            or isinstance(version, bool)
+            or version < 1
+            or not SHA256_RE.fullmatch(skill_sha256)
+        ):
+            skill_identity_valid = False
+            continue
+        skill_summary_selected.append(
+            {
+                "id": skill_id,
+                "version": version,
+                "skill_sha256": skill_sha256,
+            }
+        )
+    registry_version = skill_attestation.get("registry_version")
+    registry_sha256 = str(skill_attestation.get("registry_sha256") or "")
+    selected_count = skill_attestation.get("selected_count")
+    truncated = skill_attestation.get("truncated")
+    advisory_mode = str(skill_attestation.get("advisory_mode") or "")
+    skill_attestation_valid = (
+        skill_attestation.get("present") is True
+        and skill_attestation.get("legacy") is False
+        and skill_attestation.get("valid") is True
+        and skill_attestation.get("available") is True
+        and skill_attestation.get("job_digest_bound") is True
+        and skill_attestation.get("mandatory_ready") is True
+        and skill_attestation.get("error_count") == 0
+        and skill_attestation.get("errors") == []
+        and isinstance(registry_version, int)
+        and not isinstance(registry_version, bool)
+        and registry_version > 0
+        and SHA256_RE.fullmatch(registry_sha256) is not None
+        and skill_identity_valid
+        and len(skill_summary_selected) == len(selected_skills)
+        and isinstance(selected_count, int)
+        and not isinstance(selected_count, bool)
+        and selected_count == len(skill_summary_selected)
+        and isinstance(truncated, bool)
+        and advisory_mode == "advisory_only"
+    )
+    if not skill_attestation_valid:
+        failures.append("harness-skill-selection-attestation-invalid")
+    skill_selection_summary = {
+        "registry_version": registry_version,
+        "registry_sha256": registry_sha256,
+        "selected": skill_summary_selected,
+        "selected_count": selected_count,
+        "truncated": truncated,
+        "advisory_mode": advisory_mode,
+    }
     if str(trace.get("run_id") or "") != analysis_id:
         failures.append("harness-run-analysis-binding-failed")
     if str(trace.get("status") or "") != "succeeded":
@@ -3881,6 +4201,11 @@ def _harness_execution_proof(
     reviewer_decision_count = int(
         reviewer.get("reviewer_decision_count") or 0
     )
+    if (
+        contract.get("reviewer_required") is True
+        and reviewer_model_call_count < 1
+    ):
+        failures.append("harness-required-reviewer-call-missing")
     if reviewer_model_call_count > 0 and (
         reviewer_completed_model_call_count != 1
         or reviewer_primary_decision_count != 1
@@ -4138,6 +4463,8 @@ def _harness_execution_proof(
             "ledger_manifest_schema": str(
                 integrity.get("ledger_manifest_schema") or ""
             ),
+            "skill_selection_attestation_validated": True,
+            "skill_selection_attestation": skill_selection_summary,
             "model_call_count": int(
                 (trace.get("counts") or {}).get("model_calls") or 0
             ),
@@ -4404,7 +4731,15 @@ def build_parser() -> argparse.ArgumentParser:
     freeze.add_argument("--count", required=True, type=int)
     freeze.add_argument("--expected-release-id", required=True)
     freeze.add_argument("--expected-assigned-route", required=True)
-    freeze.add_argument("--expected-reviewer-route", default="")
+    freeze.add_argument("--expected-reviewer-route", required=True)
+    freeze.add_argument(
+        "--evaluation-profile",
+        default="",
+        help=(
+            "optional exact controlled campaign profile; the named profile "
+            "pins its approved primary and reviewer routes"
+        ),
+    )
     freeze.add_argument(
         "--dry-run",
         action="store_true",
@@ -4423,7 +4758,15 @@ def build_parser() -> argparse.ArgumentParser:
     imported.add_argument("--expected-count", required=True, type=int)
     imported.add_argument("--expected-release-id", required=True)
     imported.add_argument("--expected-assigned-route", required=True)
-    imported.add_argument("--expected-reviewer-route", default="")
+    imported.add_argument("--expected-reviewer-route", required=True)
+    imported.add_argument(
+        "--evaluation-profile",
+        default="",
+        help=(
+            "optional exact controlled campaign profile; the named profile "
+            "pins its approved primary and reviewer routes"
+        ),
+    )
     imported.add_argument(
         "--agent-role",
         choices=sorted(AGENT_ROLES),
@@ -4445,6 +4788,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="loopback dashboard origin",
     )
     queue.add_argument("--http-timeout", type=float, default=15.0)
+    queue.add_argument(
+        "--evaluation-token-file",
+        type=Path,
+        help=(
+            "owner-only file containing the 64-character evaluation token; "
+            "the token is sent only as an evaluation POST header"
+        ),
+    )
     queue.add_argument(
         "--dry-run",
         action="store_true",
@@ -4488,6 +4839,7 @@ def main(argv: list[str] | None = None) -> int:
                 expected_release_id=args.expected_release_id,
                 expected_assigned_route=args.expected_assigned_route,
                 expected_reviewer_route=args.expected_reviewer_route,
+                evaluation_profile=args.evaluation_profile,
                 dry_run=args.dry_run,
             )
             _print_summary(result)
@@ -4504,6 +4856,7 @@ def main(argv: list[str] | None = None) -> int:
                 agent_role=args.agent_role,
                 expected_assigned_route=args.expected_assigned_route,
                 expected_reviewer_route=args.expected_reviewer_route,
+                evaluation_profile=args.evaluation_profile,
                 dry_run=args.dry_run,
             )
             _print_summary(result)
@@ -4515,6 +4868,7 @@ def main(argv: list[str] | None = None) -> int:
                 base_url=args.base_url,
                 timeout=args.http_timeout,
                 dry_run=args.dry_run,
+                evaluation_token_file=args.evaluation_token_file,
             )
             _print_summary(result)
             return 0

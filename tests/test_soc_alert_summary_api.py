@@ -1207,6 +1207,9 @@ class SocAlertSummaryApiTest(unittest.TestCase):
             "cohort_id": "newest-20-soc.2026_07_26",
             "dispatch_id": "a" * 64,
             "release_id": "d" * 40,
+            "expected_assigned_route": "codex-cli:gpt-5.5:high",
+            "expected_reviewer_route": "codex-cli:gpt-5.6-sol:xhigh",
+            "reviewer_required": True,
         }
         with mock.patch.object(
             self.portal,

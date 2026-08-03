@@ -434,6 +434,15 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                                 "cohort_id": payload["cohort_id"],
                                 "dispatch_id": payload["dispatch_id"],
                                 "release_id": payload["release_id"],
+                                "expected_assigned_route": payload[
+                                    "expected_assigned_route"
+                                ],
+                                "expected_reviewer_route": payload[
+                                    "expected_reviewer_route"
+                                ],
+                                "reviewer_required": payload[
+                                    "reviewer_required"
+                                ],
                                 "agent_role": "incident-responder",
                                 "manual_reanalysis": False,
                             }
@@ -452,6 +461,13 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                     "cohort_id": payload["cohort_id"],
                     "dispatch_id": payload["dispatch_id"],
                     "release_id": payload["release_id"],
+                    "expected_assigned_route": payload[
+                        "expected_assigned_route"
+                    ],
+                    "expected_reviewer_route": payload[
+                        "expected_reviewer_route"
+                    ],
+                    "reviewer_required": payload["reviewer_required"],
                     "requested_at": "2026-07-25T12:01:00Z",
                 }
             elif url.endswith("/ir-existing/reanalyze"):
@@ -511,6 +527,15 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                                 "cohort_id": payload["cohort_id"],
                                 "dispatch_id": payload["dispatch_id"],
                                 "release_id": payload["release_id"],
+                                "expected_assigned_route": payload[
+                                    "expected_assigned_route"
+                                ],
+                                "expected_reviewer_route": payload[
+                                    "expected_reviewer_route"
+                                ],
+                                "reviewer_required": payload[
+                                    "reviewer_required"
+                                ],
                                 "agent_role": "incident-responder",
                                 "manual_reanalysis": True,
                             }
@@ -538,6 +563,13 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                     "representative_alert_id": "alert-c-existing",
                     "cohort_id": payload["cohort_id"],
                     "dispatch_id": payload["dispatch_id"],
+                    "expected_assigned_route": payload[
+                        "expected_assigned_route"
+                    ],
+                    "expected_reviewer_route": payload[
+                        "expected_reviewer_route"
+                    ],
+                    "reviewer_required": payload["reviewer_required"],
                 }
             else:
                 connection.close()
@@ -592,6 +624,15 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                             "cohort_id": payload["cohort_id"],
                             "dispatch_id": payload["dispatch_id"],
                             "release_id": payload["release_id"],
+                            "expected_assigned_route": payload[
+                                "expected_assigned_route"
+                            ],
+                            "expected_reviewer_route": payload[
+                                "expected_reviewer_route"
+                            ],
+                            "reviewer_required": payload[
+                                "reviewer_required"
+                            ],
                             "agent_role": "soc-analyst",
                             "manual_reanalysis": True,
                         }
@@ -625,6 +666,13 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 "cohort_id": payload["cohort_id"],
                 "dispatch_id": payload["dispatch_id"],
                 "release_id": payload["release_id"],
+                "expected_assigned_route": payload[
+                    "expected_assigned_route"
+                ],
+                "expected_reviewer_route": payload[
+                    "expected_reviewer_route"
+                ],
+                "reviewer_required": payload["reviewer_required"],
                 "requested_at": "2026-07-25T12:10:00Z",
             }
             return cohort.HttpResult(
@@ -688,6 +736,88 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         )
         loaded = cohort.load_private_manifest(self.manifest_path)
         self.assertEqual(loaded["manifest_sha256"], manifest["manifest_sha256"])
+
+    def test_controlled_profile_cli_pins_exact_independent_routes(self) -> None:
+        profile = "onion-sentinel-gpt55-high-gpt56-sol-xhigh-v1"
+        parsed = cohort.build_parser().parse_args(
+            [
+                "freeze",
+                "--db",
+                str(self.db_path),
+                "--manifest",
+                str(self.manifest_path),
+                "--cohort-id",
+                "profile-cli-test",
+                "--reason",
+                "Validate the exact controlled evaluation profile.",
+                "--count",
+                "1",
+                "--expected-release-id",
+                self.release_id,
+                "--expected-assigned-route",
+                "codex-cli:gpt-5.5:high",
+                "--expected-reviewer-route",
+                "codex-cli:gpt-5.6-sol:xhigh",
+                "--evaluation-profile",
+                profile,
+            ]
+        )
+        self.assertEqual(parsed.evaluation_profile, profile)
+        frozen = cohort.freeze_cohort(
+            self.db_path,
+            self.manifest_path,
+            cohort_id="profile-freeze-test",
+            reason="Freeze the exact controlled evaluation profile.",
+            count=1,
+            expected_release_id=self.release_id,
+            expected_assigned_route="codex-cli:gpt-5.5:high",
+            expected_reviewer_route="codex-cli:gpt-5.6-sol:xhigh",
+            evaluation_profile=profile,
+        )
+        self.assertEqual(
+            frozen["execution_contract"]["evaluation_profile"], profile
+        )
+
+        wrong_manifest = self.root / "wrong-profile-manifest.json"
+        with self.assertRaisesRegex(cohort.CohortError, "profile"):
+            cohort.freeze_cohort(
+                self.db_path,
+                wrong_manifest,
+                cohort_id="profile-wrong-route-test",
+                reason="Reject a profile whose primary route drifted.",
+                count=1,
+                expected_release_id=self.release_id,
+                expected_assigned_route="codex-cli:gpt-5.6-terra:high",
+                expected_reviewer_route="codex-cli:gpt-5.6-sol:xhigh",
+                evaluation_profile=profile,
+            )
+        self.assertFalse(wrong_manifest.exists())
+
+    def test_generic_contract_rejects_same_model_different_effort(self) -> None:
+        generic = cohort.execution_contract(
+            expected_release_id=self.release_id,
+            expected_assigned_route="codex-cli:gpt-5.6-terra:high",
+            expected_reviewer_route="codex-cli:gpt-5.6-luna:xhigh",
+        )
+        self.assertEqual(generic["evaluation_profile"], "")
+        with self.assertRaisesRegex(cohort.CohortError, "distinct"):
+            cohort.execution_contract(
+                expected_release_id=self.release_id,
+                expected_assigned_route="codex-cli:gpt-5.5:high",
+                expected_reviewer_route="codex-cli:gpt-5.5:xhigh",
+            )
+        with self.assertRaisesRegex(
+            cohort_evaluator.CohortEvaluationError,
+            "reviewer route contract",
+        ):
+            cohort_evaluator._execution_contract(
+                {
+                    **generic,
+                    "expected_assigned_route": "codex-cli:gpt-5.5:high",
+                    "expected_reviewer_route": "codex-cli:gpt-5.5:xhigh",
+                },
+                "same-model contract",
+            )
 
     def test_frozen_plan_digest_binds_detection_evidence(self) -> None:
         self._freeze(count=1)
@@ -1118,6 +1248,134 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             cohort.load_private_manifest(self.manifest_path)["state"],
             "frozen",
         )
+
+    def test_evaluation_token_is_sent_as_post_header_only(self) -> None:
+        token = "a" * 64
+        captured_requests = []
+
+        class Response:
+            status = 202
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _traceback):
+                return False
+
+            def read(self, _limit):
+                return b'{"ok":true}'
+
+        def urlopen(request, *, timeout):
+            self.assertEqual(timeout, 3.0)
+            captured_requests.append(request)
+            return Response()
+
+        with mock.patch.object(
+            cohort.urllib.request,
+            "urlopen",
+            side_effect=urlopen,
+        ):
+            cohort.dashboard_post_json(
+                "http://127.0.0.1:8766/api/test",
+                {"safe": "payload"},
+                timeout=3.0,
+                evaluation_token=token,
+            )
+            cohort.dashboard_post_json(
+                "http://127.0.0.1:8766/api/test",
+                {"safe": "payload"},
+                timeout=3.0,
+            )
+
+        self.assertEqual(len(captured_requests), 2)
+        protected_headers = {
+            key.lower(): value
+            for key, value in captured_requests[0].header_items()
+        }
+        normal_headers = {
+            key.lower(): value
+            for key, value in captured_requests[1].header_items()
+        }
+        self.assertEqual(
+            protected_headers["x-onion-sentinel-evaluation-token"],
+            token,
+        )
+        self.assertNotIn(
+            "x-onion-sentinel-evaluation-token",
+            normal_headers,
+        )
+        self.assertEqual(captured_requests[0].get_method(), "POST")
+        self.assertNotIn(token.encode("ascii"), captured_requests[0].data)
+
+    def test_queue_uses_private_token_file_without_persisting_token(self) -> None:
+        self._freeze(count=1)
+        token = "b" * 64
+        token_path = self.root / "evaluation-token"
+        token_path.write_text(token, encoding="ascii")
+        os.chmod(token_path, 0o600)
+        _calls, poster = self._api_poster()
+        observed_tokens = []
+
+        def transport(url, payload, *, timeout, evaluation_token=None):
+            self.assertEqual(timeout, 15.0)
+            observed_tokens.append(evaluation_token)
+            return poster(url, payload)
+
+        with mock.patch.object(
+            cohort,
+            "dashboard_post_json",
+            side_effect=transport,
+        ):
+            queued = cohort.queue_cohort(
+                self.db_path,
+                self.manifest_path,
+                base_url="http://127.0.0.1:8766",
+                evaluation_token_file=token_path,
+            )
+
+        self.assertEqual(observed_tokens, [token])
+        self.assertNotIn(token, self.manifest_path.read_text(encoding="utf-8"))
+        self.assertNotIn(token, json.dumps(queued, sort_keys=True))
+
+    def test_evaluation_token_file_must_exist(self) -> None:
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "missing or inaccessible",
+        ):
+            cohort.load_evaluation_token(self.root / "missing-token")
+
+    def test_evaluation_token_file_rejects_malformed_secret_without_leak(self) -> None:
+        malformed = "SECRET-MARKER-" + ("a" * 50)
+        token_path = self.root / "malformed-token"
+        token_path.write_text(malformed, encoding="ascii")
+        os.chmod(token_path, 0o600)
+
+        with self.assertRaises(cohort.CohortError) as raised:
+            cohort.load_evaluation_token(token_path)
+
+        self.assertIn("exactly 64 lowercase hexadecimal", str(raised.exception))
+        self.assertNotIn(malformed, str(raised.exception))
+
+    def test_evaluation_token_file_rejects_insecure_permissions(self) -> None:
+        token_path = self.root / "insecure-token"
+        token_path.write_text("c" * 64, encoding="ascii")
+        os.chmod(token_path, 0o644)
+
+        with self.assertRaisesRegex(cohort.CohortError, "owner-only"):
+            cohort.load_evaluation_token(token_path)
+
+    def test_evaluation_token_file_rejects_symlink(self) -> None:
+        token_path = self.root / "real-token"
+        token_path.write_text("d" * 64, encoding="ascii")
+        os.chmod(token_path, 0o600)
+        symlink_path = self.root / "linked-token"
+        symlink_path.symlink_to(token_path)
+
+        with self.assertRaisesRegex(
+            cohort.CohortError,
+            "regular non-symlink",
+        ):
+            cohort.load_evaluation_token(symlink_path)
 
     def test_dispatch_rejects_noncanonical_representative_alert_id(self) -> None:
         manifest = self._freeze()
@@ -1623,6 +1881,15 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 ),
                 "release_id": manifest["execution_contract"][
                     "expected_release_id"
+                ],
+                "expected_assigned_route": manifest["execution_contract"][
+                    "expected_assigned_route"
+                ],
+                "expected_reviewer_route": manifest["execution_contract"][
+                    "expected_reviewer_route"
+                ],
+                "reviewer_required": manifest["execution_contract"][
+                    "reviewer_required"
                 ],
                 "agent_role": expected_role,
                 "manual_reanalysis": expected_role == "soc-analyst",
@@ -2287,6 +2554,15 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                             "cohort_id": payload["cohort_id"],
                             "dispatch_id": payload["dispatch_id"],
                             "release_id": payload["release_id"],
+                            "expected_assigned_route": payload[
+                                "expected_assigned_route"
+                            ],
+                            "expected_reviewer_route": payload[
+                                "expected_reviewer_route"
+                            ],
+                            "reviewer_required": payload[
+                                "reviewer_required"
+                            ],
                             "agent_role": "soc-analyst",
                             "manual_reanalysis": True,
                         }
@@ -2306,6 +2582,13 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 "cohort_id": payload["cohort_id"],
                 "dispatch_id": payload["dispatch_id"],
                 "release_id": payload["release_id"],
+                "expected_assigned_route": payload[
+                    "expected_assigned_route"
+                ],
+                "expected_reviewer_route": payload[
+                    "expected_reviewer_route"
+                ],
+                "reviewer_required": payload["reviewer_required"],
                 "requested_at": "2026-07-25T12:10:00Z",
             }
             return cohort.HttpResult(
@@ -2358,12 +2641,21 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 "\ue000": "private-use",
                 "😀": "astral",
             },
-            "_analysis_model": "gpt-5.6-sol",
+            "_analysis_model": "gpt-5.5",
             "_analysis_model_path": "codex_cli",
-            "_analysis_model_route": "codex-cli:gpt-5.6-sol:high",
+            "_analysis_model_route": "codex-cli:gpt-5.5:high",
             "_analysis_provider": "codex-cli",
             "_analysis_harness": "onion-sentinel",
             "_analysis_evaluation_memory_frozen": True,
+            "_second_opinion": {
+                "status": "completed",
+                "model_route": "codex-cli:gpt-5.6-sol:xhigh",
+                "response": {
+                    "_analysis_model_route": (
+                        "codex-cli:gpt-5.6-sol:xhigh"
+                    )
+                },
+            },
             "_investigation_query_audit": {
                 "read_only": True,
                 "complete": True,
@@ -2411,7 +2703,7 @@ class IncidentHarnessCohortTests(unittest.TestCase):
               evidence_hash, response_json, created_at
             ) VALUES (
               'analysis-soc-new', ?, 'alert-a-newest', 'soc-analyst',
-              '2026-07-25T12:11:00Z', 'gpt-5.6-sol', 'codex_cli',
+              '2026-07-25T12:11:00Z', 'gpt-5.5', 'codex_cli',
               'true_positive_suspicious', 'high', 'evidence-soc',
               ?, '2026-07-25T12:11:00Z'
             )
@@ -2456,10 +2748,17 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             {
                 "call_id": "primary-initial",
                 "purpose": "initial primary analysis",
-                "requested_route": "codex-cli:gpt-5.6-sol:high",
+                "requested_route": "codex-cli:gpt-5.5:high",
                 "independent_review": False,
                 "status": "completed",
-            }
+            },
+            {
+                "call_id": "independent-review-1",
+                "purpose": "independent second-opinion review",
+                "requested_route": "codex-cli:gpt-5.6-sol:xhigh",
+                "independent_review": True,
+                "status": "completed",
+            },
         ]
         proof = {
             "status": "passed",
@@ -2478,8 +2777,8 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 "role": "soc-analyst",
                 "task_kind": "reanalysis",
                 "policy_mode": "shadow",
-                "assigned_route": "codex-cli:gpt-5.6-sol:high",
-                "assigned_reviewer_route": "",
+                "assigned_route": "codex-cli:gpt-5.5:high",
+                "assigned_reviewer_route": "codex-cli:gpt-5.6-sol:xhigh",
                 "started_at": "2026-07-25T12:10:30Z",
                 "completed_at": "2026-07-25T12:12:00Z",
                 "chain_valid": True,
@@ -2488,11 +2787,20 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 "ledger_manifest_schema": (
                     "onion-sentinel-harness-ledger-manifest-v2"
                 ),
-                "model_call_count": 1,
-                "successful_model_call_count": 1,
+                "skill_selection_attestation_validated": True,
+                "skill_selection_attestation": {
+                    "registry_version": 1,
+                    "registry_sha256": "9" * 64,
+                    "selected": [],
+                    "selected_count": 0,
+                    "truncated": False,
+                    "advisory_mode": "advisory_only",
+                },
+                "model_call_count": 2,
+                "successful_model_call_count": 2,
                 "successful_primary_model_call_count": 1,
-                "model_purpose_count": 1,
-                "terminally_successful_model_purpose_count": 1,
+                "model_purpose_count": 2,
+                "terminally_successful_model_purpose_count": 2,
                 "incomplete_model_purpose_count": 0,
                 "exact_reviewer_repair_count": 0,
                 "superseded_validation_failure_count": 0,
@@ -2501,13 +2809,13 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 "model_call_contract": {
                     "schema": "onion-sentinel-model-call-contract-v1",
                     "valid": True,
-                    "model_call_count": 1,
-                    "canonical_model_call_count": 1,
+                    "model_call_count": 2,
+                    "canonical_model_call_count": 2,
                     "noncanonical_model_call_count": 0,
                     "primary_initial_call_count": 1,
                     "query_planning_call_count": 0,
                     "primary_followup_call_count": 0,
-                    "reviewer_model_call_count": 0,
+                    "reviewer_model_call_count": 1,
                     "facts": exported_model_call_facts,
                     "facts_sha256": cohort.sha256_value(
                         exported_model_call_facts
@@ -2517,15 +2825,15 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                     "global_reasons": [],
                 },
                 "reviewer_completion": {
-                    "model_call_count": 0,
-                    "completed_model_call_count": 0,
+                    "model_call_count": 1,
+                    "completed_model_call_count": 1,
                     "primary_decision_count": 1,
-                    "reviewer_decision_count": 0,
+                    "reviewer_decision_count": 1,
                     "has_primary_decision": True,
-                    "has_reviewer_decision": False,
-                    "decision_comparable": False,
+                    "has_reviewer_decision": True,
+                    "decision_comparable": True,
                     "missing_reviewer_decision": False,
-                    "completion_contract_required": False,
+                    "completion_contract_required": True,
                     "completion_contract_satisfied": True,
                     "completion_contract_failure_reasons": [],
                 },
@@ -2566,7 +2874,7 @@ class IncidentHarnessCohortTests(unittest.TestCase):
         self.assertEqual(exported["agent_role"], "soc-analyst")
         self.assertEqual(
             exported["members"][0]["result"]["analysis"]["model"],
-            "gpt-5.6-sol",
+            "gpt-5.5",
         )
         loaded, _source_file_sha256 = (
             cohort_evaluator.load_result_export(
@@ -2790,7 +3098,7 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             "execution_contract": cohort.execution_contract(
                 expected_release_id=self.release_id,
                 expected_assigned_route=(
-                    "codex-cli:gpt-5.6-sol:high"
+                    "codex-cli:gpt-5.5:high"
                 ),
                 expected_reviewer_route=(
                     "codex-cli:gpt-5.6-sol:xhigh"
@@ -2819,9 +3127,18 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                 "response_canonical_sha256": response_digest,
                 "result": {
                     "_analysis_model_route": (
-                        "codex-cli:gpt-5.6-sol:high"
+                        "codex-cli:gpt-5.5:high"
                     ),
                     "_analysis_evaluation_memory_frozen": True,
+                    "_second_opinion": {
+                        "status": "completed",
+                        "model_route": "codex-cli:gpt-5.6-sol:xhigh",
+                        "response": {
+                            "_analysis_model_route": (
+                                "codex-cli:gpt-5.6-sol:xhigh"
+                            )
+                        },
+                    },
                 },
                 "query_audit": {
                     "_investigation_query_audit": {
@@ -2876,7 +3193,7 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             {
                 "call_id": "primary-initial",
                 "purpose": "initial primary analysis",
-                "requested_route": "codex-cli:gpt-5.6-sol:high",
+                "requested_route": "codex-cli:gpt-5.5:high",
                 "independent_review": False,
                 "status": "completed",
             },
@@ -2899,7 +3216,7 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                     "task_kind": "reanalysis",
                     "status": "succeeded",
                     "stage": "complete",
-                    "assigned_route": "codex-cli:gpt-5.6-sol:high",
+                    "assigned_route": "codex-cli:gpt-5.5:high",
                     "assigned_reviewer_route": (
                         "codex-cli:gpt-5.6-sol:xhigh"
                     ),
@@ -2911,6 +3228,28 @@ class IncidentHarnessCohortTests(unittest.TestCase):
                         "submitted_response_sha256": submitted_digest,
                         "stored_response_sha256": response_digest,
                         "evaluation_memory_frozen": True,
+                    },
+                    "skill_selection_attestation": {
+                        "present": True,
+                        "legacy": False,
+                        "valid": True,
+                        "available": True,
+                        "job_digest_bound": True,
+                        "mandatory_ready": True,
+                        "registry_version": 1,
+                        "registry_sha256": "9" * 64,
+                        "selected": [
+                            {
+                                "id": "suricata-detection-validation",
+                                "version": 3,
+                                "skill_sha256": "8" * 64,
+                            }
+                        ],
+                        "selected_count": 1,
+                        "truncated": False,
+                        "advisory_mode": "advisory_only",
+                        "error_count": 0,
+                        "errors": [],
                     },
                     "integrity": {
                         "valid": True,
@@ -3010,8 +3349,68 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             proof["harness"]["successful_tool_call_count"],
             1,
         )
+        self.assertTrue(
+            proof["harness"][
+                "skill_selection_attestation_validated"
+            ]
+        )
+        self.assertEqual(
+            proof["harness"]["skill_selection_attestation"],
+            {
+                "registry_version": 1,
+                "registry_sha256": "9" * 64,
+                "selected": [
+                    {
+                        "id": "suricata-detection-validation",
+                        "version": 3,
+                        "skill_sha256": "8" * 64,
+                    }
+                ],
+                "selected_count": 1,
+                "truncated": False,
+                "advisory_mode": "advisory_only",
+            },
+        )
 
         trace = trace_report["runs"][0]
+        trace["skill_selection_attestation"]["mandatory_ready"] = False
+        with mock.patch.object(
+            cohort,
+            "_load_trace_evaluator",
+            return_value=fake_evaluator,
+        ):
+            with self.assertRaisesRegex(
+                cohort.CohortError,
+                "harness-skill-selection-attestation-invalid",
+            ):
+                cohort._harness_execution_proof(
+                    harness_database_path=(
+                        self.root / "synthetic-harness.sqlite3"
+                    ),
+                    manifest=manifest,
+                    member=member,
+                    monitor=monitor,
+                )
+        trace["skill_selection_attestation"]["mandatory_ready"] = True
+        trace["skill_selection_attestation"]["registry_version"] = 0
+        with mock.patch.object(
+            cohort,
+            "_load_trace_evaluator",
+            return_value=fake_evaluator,
+        ):
+            with self.assertRaisesRegex(
+                cohort.CohortError,
+                "harness-skill-selection-attestation-invalid",
+            ):
+                cohort._harness_execution_proof(
+                    harness_database_path=(
+                        self.root / "synthetic-harness.sqlite3"
+                    ),
+                    manifest=manifest,
+                    member=member,
+                    monitor=monitor,
+                )
+        trace["skill_selection_attestation"]["registry_version"] = 1
         trace["counts"]["model_calls"] = 1
         trace["models"].update(
             {
@@ -3048,18 +3447,18 @@ class IncidentHarnessCohortTests(unittest.TestCase):
             "_load_trace_evaluator",
             return_value=fake_evaluator,
         ):
-            optional_reviewer_proof = cohort._harness_execution_proof(
-                harness_database_path=self.root / "synthetic-harness.sqlite3",
-                manifest=manifest,
-                member=member,
-                monitor=monitor,
-            )
-        self.assertEqual(
-            optional_reviewer_proof["harness"]["reviewer_completion"][
-                "model_call_count"
-            ],
-            0,
-        )
+            with self.assertRaisesRegex(
+                cohort.CohortError,
+                "harness-required-reviewer-call-missing",
+            ):
+                cohort._harness_execution_proof(
+                    harness_database_path=(
+                        self.root / "synthetic-harness.sqlite3"
+                    ),
+                    manifest=manifest,
+                    member=member,
+                    monitor=monitor,
+                )
 
         trace["counts"]["model_calls"] = 3
         trace["models"].update(

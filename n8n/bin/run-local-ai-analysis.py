@@ -44,6 +44,11 @@ from agent_memory import (  # noqa: E402
 )
 from bounded_http import BoundedHttpError, read_bounded_json  # noqa: E402
 from bounded_process import BoundedProcessError, run_bounded_command  # noqa: E402
+from controlled_evaluation_isolation import (  # noqa: E402
+    ControlledEvaluationIsolationError,
+    pin_controlled_tmpdir,
+    validate_controlled_incident_evidence_route,
+)
 from incident_evidence_contract import validate_incident_evidence_artifact  # noqa: E402
 from investigation_query_contract import (  # noqa: E402
     INVESTIGATION_QUERY_CONTRACT,
@@ -154,6 +159,7 @@ CONTROLLED_EVALUATION_TOKEN_HEADER = (
     "X-Onion-Sentinel-Evaluation-Token"
 )
 CONTROLLED_EVALUATION_TOKEN_RE = re.compile(r"[a-f0-9]{64}")
+_CONTROLLED_EVALUATION_TMPDIR: Path | None = None
 CONTROLLED_RESULT_ENVIRONMENT = {
     "job_id": "ONION_SENTINEL_EVALUATION_JOB_ID",
     "job_type": "ONION_SENTINEL_EVALUATION_JOB_TYPE",
@@ -169,6 +175,14 @@ CONTROLLED_RESULT_ENVIRONMENT = {
     "reanalysis_attempt_id": (
         "ONION_SENTINEL_EVALUATION_REANALYSIS_ATTEMPT_ID"
     ),
+    "release_id": "ONION_SENTINEL_EVALUATION_RELEASE_ID",
+    "expected_assigned_route": (
+        "ONION_SENTINEL_EVALUATION_EXPECTED_ASSIGNED_ROUTE"
+    ),
+    "expected_reviewer_route": (
+        "ONION_SENTINEL_EVALUATION_EXPECTED_REVIEWER_ROUTE"
+    ),
+    "reviewer_required": "ONION_SENTINEL_EVALUATION_REVIEWER_REQUIRED",
 }
 MEMORY_WRITEBACK_TASK_SCHEMA = "onion-sentinel-memory-writeback-task-v1"
 MAX_MEMORY_WRITEBACK_TASK_BYTES = 256 * 1024
@@ -176,6 +190,12 @@ DEFAULT_SYSTEM_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_system
 DEFAULT_SECOND_OPINION_PROMPT_FILE = HOME / "n8n-local" / "config" / "soc_analyst_second_opinion_prompt.md"
 DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT_FILE = (
     HOME / "n8n-local" / "config" / "disagreement_adjudicator_system_prompt.md"
+)
+DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE = (
+    HOME / "n8n-local" / "config" / "incident-evidence.json"
+)
+DEFAULT_INVESTIGATION_PIVOT_DIR = (
+    HOME / "n8n-local" / "soc-alerts" / "investigation-pivots"
 )
 DEFAULT_AI_SETTINGS_FILE = HOME / "n8n-local" / "config" / "ai_model_settings.json"
 DEFAULT_HERMES_AUTH_FILE = (
@@ -229,6 +249,10 @@ CODEX_CLI_MODEL_CATALOG = (
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
+)
+CONTROLLED_MODEL_ROUTE_RE = re.compile(
+    r"codex-cli:(?:gpt-5\.5|gpt-5\.6-(?:sol|terra|luna)):"
+    r"(?:low|medium|high|xhigh)"
 )
 # The builder is held below the complete Codex transport ceiling so runtime
 # citation contracts and the one authoritative role prompt still have bounded
@@ -608,6 +632,24 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT_FILE,
         help="Bounded shadow-mode disagreement adjudicator system prompt file",
+    )
+    parser.add_argument(
+        "--live-osquery-config",
+        type=Path,
+        default=DEFAULT_LIVE_OSQUERY_CONFIG_FILE,
+        help="Explicit live OSQuery capability configuration",
+    )
+    parser.add_argument(
+        "--incident-evidence-config",
+        type=Path,
+        default=DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE,
+        help="Explicit restricted read-only Relay evidence transport config",
+    )
+    parser.add_argument(
+        "--investigation-pivot-dir",
+        type=Path,
+        default=DEFAULT_INVESTIGATION_PIVOT_DIR,
+        help="Directory for restricted dynamic-investigation pivot artifacts",
     )
     parser.add_argument("--timeout", type=int, default=600, help="Ollama request timeout in seconds")
     parser.add_argument(
@@ -1883,9 +1925,17 @@ def boolean_setting(value: Any, default: bool = False) -> bool:
 
 
 def controlled_evaluation_runtime(
-    alert_store_url: str,
+    runtime: argparse.Namespace | str,
 ) -> tuple[bool, Path | None]:
     """Resolve an owner-only spool root for one controlled evaluation."""
+    global _CONTROLLED_EVALUATION_TMPDIR
+    _CONTROLLED_EVALUATION_TMPDIR = None
+    runtime_args = None if isinstance(runtime, str) else runtime
+    alert_store_url = (
+        runtime
+        if isinstance(runtime, str)
+        else str(runtime.alert_store_url or "")
+    )
     mode_value = str(
         os.environ.get(CONTROLLED_EVALUATION_MODE_ENV) or ""
     ).strip()
@@ -1895,6 +1945,19 @@ def controlled_evaluation_runtime(
         )
     if mode_value != "1":
         return False, None
+    if (
+        runtime_args is not None
+        and str(getattr(runtime_args, "model", "") or "").strip()
+    ):
+        raise SystemExit(
+            "controlled evaluation forbids --model and SOC_AI_MODEL overrides"
+        )
+    if runtime_args is not None and bool(
+        getattr(runtime_args, "generate_prompt", False)
+    ):
+        raise SystemExit(
+            "controlled evaluation forbids --generate-prompt; use the frozen prompt"
+        )
     evaluation_token = str(
         os.environ.get(CONTROLLED_EVALUATION_TOKEN_ENV) or ""
     ).strip()
@@ -1957,6 +2020,99 @@ def controlled_evaluation_runtime(
         raise SystemExit(
             "controlled evaluation runtime directory must be owner-only"
         )
+    try:
+        controlled_tmpdir = pin_controlled_tmpdir(resolved)
+    except ControlledEvaluationIsolationError as exc:
+        raise SystemExit(f"controlled evaluation {exc}") from exc
+    if runtime_args is not None:
+        def owner_private_path(
+            candidate: Path,
+            *,
+            label: str,
+            kind: str,
+            inside_runtime: bool = True,
+        ) -> Path:
+            candidate = candidate.expanduser()
+            try:
+                candidate_metadata = candidate.lstat()
+                resolved_candidate = candidate.resolve(strict=True)
+                if inside_runtime:
+                    resolved_candidate.relative_to(resolved)
+            except (FileNotFoundError, OSError, ValueError) as exc:
+                location = " inside the evaluation runtime" if inside_runtime else ""
+                raise SystemExit(
+                    f"controlled evaluation {label} must be a canonical "
+                    f"owner-private {kind}{location}"
+                ) from exc
+            expected_kind = (
+                candidate.is_file() if kind == "file" else candidate.is_dir()
+            )
+            if (
+                not candidate.is_absolute()
+                or resolved_candidate != candidate
+                or candidate.is_symlink()
+                or not expected_kind
+                or candidate_metadata.st_uid != os.getuid()
+                or stat.S_IMODE(candidate_metadata.st_mode) & 0o077
+            ):
+                location = " inside the evaluation runtime" if inside_runtime else ""
+                raise SystemExit(
+                    f"controlled evaluation {label} must be a canonical "
+                    f"owner-private {kind}{location}"
+                )
+            return resolved_candidate
+
+        for label, candidate in {
+            "prompt directory": runtime_args.prompt_dir,
+            "analysis output directory": runtime_args.out_dir,
+            "investigation-pivot directory": runtime_args.investigation_pivot_dir,
+        }.items():
+            owner_private_path(candidate, label=label, kind="directory")
+        runtime_files = {
+            "prompt package": runtime_args.prompt_package,
+            "AI settings": runtime_args.ai_settings_file,
+            "harness policy": runtime_args.investigation_harness_policy,
+            "primary system prompt": runtime_args.system_prompt_file,
+            "reviewer system prompt": runtime_args.second_opinion_prompt_file,
+            "disagreement prompt": runtime_args.disagreement_adjudicator_prompt_file,
+            "live OSQuery config": runtime_args.live_osquery_config,
+        }
+        if runtime_args.response_json is not None:
+            runtime_files["saved response"] = runtime_args.response_json
+        for label, candidate in runtime_files.items():
+            if candidate is None:
+                raise SystemExit(
+                    f"controlled evaluation requires an explicit {label}"
+                )
+            owner_private_path(candidate, label=label, kind="file")
+
+        try:
+            validate_controlled_incident_evidence_route(
+                runtime_args.incident_evidence_config,
+                resolved,
+                expected_home=HOME,
+            )
+        except ControlledEvaluationIsolationError as exc:
+            raise SystemExit(
+                f"controlled evaluation {exc}"
+            ) from exc
+
+        try:
+            live_osquery_document = json.loads(
+                runtime_args.live_osquery_config.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise SystemExit(
+                "controlled evaluation live OSQuery config is invalid"
+            ) from exc
+        if (
+            not isinstance(live_osquery_document, dict)
+            or live_osquery_document.get("enabled") is not False
+        ):
+            raise SystemExit(
+                "controlled evaluation requires live OSQuery to be explicitly disabled"
+            )
+    _CONTROLLED_EVALUATION_TMPDIR = controlled_tmpdir
     return True, resolved
 
 
@@ -2036,6 +2192,8 @@ def controlled_evaluation_result_identity(
         "incident_response_analysis": "incident-responder",
     }.get(job_type)
     attempt_id = supplied["reanalysis_attempt_id"]
+    assigned_route = supplied["expected_assigned_route"]
+    reviewer_route = supplied["expected_reviewer_route"]
     stable_group_key = supplied["stable_group_key"]
     try:
         stable_group_key_bytes = stable_group_key.encode("utf-8")
@@ -2074,21 +2232,30 @@ def controlled_evaluation_result_identity(
             and not re.fullmatch(r"ira-[a-f0-9]{40}", attempt_id)
         )
         or attempt_id != str(reanalysis_attempt_id or "")
+        or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(assigned_route)
+        or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(reviewer_route)
+        or assigned_route.rsplit(":", 1)[0]
+        == reviewer_route.rsplit(":", 1)[0]
+        or supplied["reviewer_required"] != "1"
     ):
         raise SystemExit(
             "controlled evaluation result identity is invalid"
         )
-    release_id = str(
+    runtime_release_id = str(
         os.environ.get("ONION_SENTINEL_RELEASE_ID") or ""
     ).strip()
-    if not re.fullmatch(r"[a-f0-9]{40}", release_id):
+    if (
+        not re.fullmatch(r"[a-f0-9]{40}", runtime_release_id)
+        or supplied["release_id"] != runtime_release_id
+    ):
         raise SystemExit(
             "controlled evaluation release identity is invalid"
         )
     return {
         **supplied,
         "job_id": job_id,
-        "release_id": release_id,
+        "release_id": runtime_release_id,
+        "reviewer_required": True,
     }
 
 
@@ -2102,6 +2269,98 @@ def controlled_evaluation_claim_digest(identity: dict[str, Any]) -> str:
             ensure_ascii=False,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def require_controlled_evaluation_routes(
+    identity: dict[str, Any] | None,
+    args: argparse.Namespace,
+    settings: dict[str, Any],
+    agent_role: str,
+) -> None:
+    """Recheck frozen route assignments before any Relay or model call."""
+
+    if identity is None:
+        return
+    assigned_route = identity.get("expected_assigned_route")
+    reviewer_route = identity.get("expected_reviewer_route")
+    if (
+        identity.get("reviewer_required") is not True
+        or identity.get("agent_role") != agent_role
+        or not isinstance(assigned_route, str)
+        or not isinstance(reviewer_route, str)
+        or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(assigned_route)
+        or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(reviewer_route)
+        or assigned_route.rsplit(":", 1)[0]
+        == reviewer_route.rsplit(":", 1)[0]
+    ):
+        raise SystemExit(
+            "controlled evaluation route identity is invalid"
+        )
+    settings_path = Path(
+        getattr(args, "ai_settings_file", DEFAULT_AI_SETTINGS_FILE)
+    )
+    try:
+        if (
+            not settings_path.is_file()
+            or settings_path.stat().st_size > DEFAULT_MAX_SETTINGS_BYTES
+        ):
+            raise ValueError("settings file is missing or oversized")
+        raw = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        raise SystemExit(
+            "controlled evaluation route settings are unavailable"
+        ) from exc
+    raw_assigned = raw.get("agent_models") if isinstance(raw, dict) else None
+    raw_reviewers = (
+        raw.get("agent_second_opinion_models")
+        if isinstance(raw, dict)
+        else None
+    )
+    enabled_routes = enabled_agent_model_routes(settings)
+    if (
+        not isinstance(raw_assigned, dict)
+        or raw_assigned.get(agent_role) != assigned_route
+        or not isinstance(raw_reviewers, dict)
+        or raw_reviewers.get(agent_role) != reviewer_route
+        or (settings.get("agent_models") or {}).get(agent_role)
+        != assigned_route
+        or (settings.get("agent_second_opinion_models") or {}).get(agent_role)
+        != reviewer_route
+        or assigned_route not in enabled_routes
+        or reviewer_route not in enabled_routes
+    ):
+        raise SystemExit(
+            "controlled evaluation routes do not exactly match enabled settings"
+        )
+
+
+def require_controlled_evaluation_result_routes(
+    identity: dict[str, Any] | None,
+    response: dict[str, Any],
+) -> None:
+    """Reject a controlled result unless both frozen routes actually ran."""
+
+    if identity is None:
+        return
+    assigned_route = identity["expected_assigned_route"]
+    reviewer_route = identity["expected_reviewer_route"]
+    second_opinion = response.get("_second_opinion")
+    reviewer_response = (
+        second_opinion.get("response")
+        if isinstance(second_opinion, dict)
+        else None
+    )
+    if (
+        response.get("_analysis_model_route") != assigned_route
+        or not isinstance(second_opinion, dict)
+        or second_opinion.get("status") != "completed"
+        or second_opinion.get("model_route") != reviewer_route
+        or not isinstance(reviewer_response, dict)
+        or reviewer_response.get("_analysis_model_route") != reviewer_route
+    ):
+        raise ControlledEvaluationReviewerGateError(
+            "controlled evaluation result does not attest both frozen routes"
+        )
 
 
 def apply_evaluation_memory_freeze(
@@ -5281,12 +5540,17 @@ def _load_pivot_collector() -> Any:
 def collect_security_onion_pivots(
     proposal: dict[str, Any],
     authorization_context: dict[str, Any],
+    *,
+    config_path: Path = DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE,
+    out_dir: Path = DEFAULT_INVESTIGATION_PIVOT_DIR,
 ) -> dict[str, Any]:
     """Invoke the restricted broker without giving a model transport access."""
     module = _load_pivot_collector()
     return module.collect_investigation_pivots(
         proposal,
         authorization_context,
+        config_path=config_path,
+        out_dir=out_dir,
         persist=True,
     )
 
@@ -5890,6 +6154,14 @@ def accumulate_live_osquery_failure(
 
 
 def _runtime_env_value(name: str) -> str:
+    if (
+        str(os.environ.get(CONTROLLED_EVALUATION_MODE_ENV) or "").strip()
+        == "1"
+    ):
+        # Controlled evaluations have no credential-bearing runtime input.
+        # In particular, never discover production secrets through the real
+        # user's ~/n8n-local/.env while exercising an isolated database.
+        return ""
     direct = str(os.environ.get(name) or "").strip()
     if direct:
         return direct
@@ -6072,9 +6344,19 @@ def execute_investigation_query_batch(
     derived_executor: Callable[[dict[str, Any], Any], dict[str, Any]] | None = None,
     enrichment_executor: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] | None = None,
     enrichment_config: dict[str, Any] | None = None,
+    security_onion_config_path: Path = DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE,
+    investigation_pivot_dir: Path = DEFAULT_INVESTIGATION_PIVOT_DIR,
 ) -> dict[str, Any]:
     """Execute one mixed, read-only query batch through deterministic adapters."""
-    security_onion_executor = security_onion_executor or collect_security_onion_pivots
+    if security_onion_executor is None:
+        security_onion_executor = lambda proposal, authorization: (
+            collect_security_onion_pivots(
+                proposal,
+                authorization,
+                config_path=security_onion_config_path,
+                out_dir=investigation_pivot_dir,
+            )
+        )
     osquery_executor = osquery_executor or collect_live_osquery
     derived_executor = derived_executor or query_derived_pcap_evidence
     enrichment_executor = enrichment_executor or collect_investigation_enrichment
@@ -9102,6 +9384,8 @@ def apply_investigation_query_loop(
     *,
     live_osquery_config: dict[str, Any] | None = None,
     enrichment_config: dict[str, Any] | None = None,
+    security_onion_config_path: Path = DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE,
+    investigation_pivot_dir: Path = DEFAULT_INVESTIGATION_PIVOT_DIR,
     harness_runtime: OnionSentinelHarnessRun | None = None,
     model_executor: Callable[[str, dict[str, Any], argparse.Namespace, dict[str, Any]], dict[str, Any]]
     | None = None,
@@ -9116,6 +9400,7 @@ def apply_investigation_query_loop(
             model_settings,
         )
     )
+    configured_query_executor = query_executor is None
     query_executor = query_executor or execute_investigation_query_batch
     route = canonical_model_route((settings.get("agent_models") or {}).get(agent_role))
     response = primary_response
@@ -9524,6 +9809,13 @@ def apply_investigation_query_loop(
                 "round_number": round_number,
                 "live_osquery_config": live_osquery_config,
             }
+            if configured_query_executor:
+                query_kwargs.update(
+                    {
+                        "security_onion_config_path": security_onion_config_path,
+                        "investigation_pivot_dir": investigation_pivot_dir,
+                    }
+                )
             if enrichment_config is not None:
                 query_kwargs["enrichment_config"] = enrichment_config
             round_result = query_executor(
@@ -10557,7 +10849,14 @@ def cloud_cli_chat(
         system_prompt_file=system_prompt_file,
         independent_review=independent_review,
     )
-    with tempfile.TemporaryDirectory(prefix="onion-sentinel-codex-") as temp_name:
+    with tempfile.TemporaryDirectory(
+        prefix="onion-sentinel-codex-",
+        dir=(
+            str(_CONTROLLED_EVALUATION_TMPDIR)
+            if _CONTROLLED_EVALUATION_TMPDIR is not None
+            else None
+        ),
+    ) as temp_name:
         work_dir = Path(temp_name)
         final_message = work_dir / "final-response.json"
         output_schema = work_dir / "response-schema.json"
@@ -12734,6 +13033,21 @@ def reviewer_automation_authorization(
         comparison.get("material_disagreement")
     )
     authorized = bool(high_confidence and not material_disagreement)
+    tuning_guard = (
+        primary_response.get("_tuning_coherence_guard")
+        if isinstance(
+            primary_response.get("_tuning_coherence_guard"),
+            dict,
+        )
+        else {}
+    )
+    control_tuning_requested = any(
+        str(value or "").strip().lower() in CONTROL_TUNING_VALUES
+        for value in (
+            primary_response.get("tuning_recommendation"),
+            tuning_guard.get("requested_tuning"),
+        )
+    )
     full_agreement = comparison.get("agreement") == "agreement"
     if material_disagreement:
         reason_code = "material_disagreement"
@@ -12769,7 +13083,12 @@ def reviewer_automation_authorization(
         ),
         "automatic_closure_authorized": authorized,
         "containment_authorized": authorized,
-        "tuning_authorized": authorized,
+        # Suppress/drop is always a human-approved control change even when
+        # the reviewer fully corroborates the analysis.
+        "tuning_authorized": bool(
+            authorized and not control_tuning_requested
+        ),
+        "control_tuning_requested": control_tuning_requested,
         "memory_writeback_authorized": bool(
             authorized and full_agreement
         ),
@@ -13291,6 +13610,7 @@ def apply_configured_second_opinion(
     agent_role: str,
     phase_callback: Callable[[str, str, str], None] | None = None,
     harness_runtime: OnionSentinelHarnessRun | None = None,
+    force_review_reason: str = "",
 ) -> dict[str, Any]:
     """Run an optional independent reviewer while preserving primary success.
 
@@ -13303,7 +13623,10 @@ def apply_configured_second_opinion(
     # independent review is actually invoked.
     primary_response.pop("_second_opinion", None)
     primary_response.pop("_disagreement_adjudication", None)
-    trigger = second_opinion_trigger(primary_response, prompt_package)
+    trigger = (
+        second_opinion_trigger(primary_response, prompt_package)
+        or str(force_review_reason or "").strip()
+    )
     if not trigger:
         primary_response["final_disposition_status"] = "primary_not_reviewed"
         notify_analysis_phase(phase_callback, "post_processing")
@@ -13618,6 +13941,10 @@ def apply_configured_second_opinion(
             "error": f"{type(exc).__name__}: {exc}"[:1000],
         }
     finally:
+        apply_tuning_coherence_guard(
+            primary_response,
+            prompt_package,
+        )
         reconcile_incident_response_report(primary_response, prompt_package)
         notify_analysis_phase(
             phase_callback,
@@ -13748,6 +14075,8 @@ def analyze_with_config(
     settings: dict[str, Any] | None = None,
     live_osquery_config: dict[str, Any] | None = None,
     enrichment_config: dict[str, Any] | None = None,
+    security_onion_config_path: Path = DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE,
+    investigation_pivot_dir: Path = DEFAULT_INVESTIGATION_PIVOT_DIR,
     phase_callback: Callable[[str, str, str], None] | None = None,
     harness_runtime: OnionSentinelHarnessRun | None = None,
 ) -> dict[str, Any]:
@@ -13845,6 +14174,8 @@ def analyze_with_config(
         agent_role,
         live_osquery_config=live_osquery_config,
         enrichment_config=enrichment_config,
+        security_onion_config_path=security_onion_config_path,
+        investigation_pivot_dir=investigation_pivot_dir,
         harness_runtime=harness_runtime,
     )
 
@@ -14697,41 +15028,551 @@ def _is_incident_responder_package(prompt_package: dict[str, Any] | None) -> boo
     return role == "incident-responder"
 
 
+AUTHORIZATION_COVERAGE_KEYS = frozenset(
+    {
+        "source_ips",
+        "destination_ips",
+        "rule_ids",
+        "source_ports",
+        "destination_ports",
+        "destination_port_ranges",
+        "transport_protocols",
+        "authorization_start",
+        "authorization_end",
+    }
+)
+AUTHORIZATION_ENTRY_KEYS = frozenset(
+    {"authorized", "source", "evidence_ref", "coverage"}
+)
+AUTHORIZATION_EVIDENCE_REF_RE = re.compile(
+    r"authorized-activity:sha256:([0-9a-f]{64})"
+)
+AUTHORIZATION_CANONICAL_UTC_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"
+)
+
+
+def _canonical_authorization_timestamp(value: Any) -> dt.datetime | None:
+    text = str(value or "")
+    if not AUTHORIZATION_CANONICAL_UTC_RE.fullmatch(text):
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(text[:-1] + "+00:00")
+    except ValueError:
+        return None
+    if (
+        parsed.astimezone(dt.timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+        != text
+    ):
+        return None
+    return parsed
+
+
+def _prompt_authorization_event_tuple(
+    prompt_package: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Normalize the exact alert tuple used by the prompt builder."""
+    import ipaddress
+
+    alert = prompt_package.get("alert")
+    if not isinstance(alert, dict):
+        return None
+    timestamp: dt.datetime | None = None
+    for key in ("timestamp", "last_seen", "first_seen"):
+        raw = str(alert.get(key) or "").strip().replace("  ", "T", 1)
+        if not raw:
+            continue
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            candidate = dt.datetime.fromisoformat(raw)
+        except ValueError:
+            continue
+        if candidate.tzinfo is not None:
+            timestamp = candidate.astimezone(dt.timezone.utc)
+            break
+    if timestamp is None:
+        return None
+
+    def address(key: str) -> str | None:
+        text = str(alert.get(key) or "").strip().lower()
+        if not text:
+            return ""
+        try:
+            ipaddress.ip_address(text)
+        except ValueError:
+            return None
+        return text
+
+    def port(key: str) -> int | None:
+        value = alert.get(key)
+        if value in (None, "") or isinstance(value, bool):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        if str(value).strip() != str(parsed) or not 1 <= parsed <= 65535:
+            return None
+        return parsed
+
+    source_ip = address("source_ip")
+    destination_ip = address("destination_ip")
+    source_port = port("source_port")
+    destination_port = port("destination_port")
+    rule_id = str(alert.get("rule_id") or "").strip().lower()
+    transport = str(
+        alert.get("transport_protocol")
+        or alert.get("network_protocol")
+        or ""
+    ).strip().lower()
+    if (
+        source_ip is None
+        or destination_ip is None
+        or not (source_ip or destination_ip)
+        or destination_port is None
+        or not re.fullmatch(r"[a-z0-9_.:-]{1,128}", rule_id)
+        or not re.fullmatch(r"[a-z0-9_.-]{1,32}", transport)
+    ):
+        return None
+    return {
+        "timestamp": timestamp,
+        "source_ip": source_ip,
+        "destination_ip": destination_ip,
+        "source_port": source_port,
+        "destination_port": destination_port,
+        "rule_id": rule_id,
+        "transport": transport,
+    }
+
+
+def _canonical_authorization_coverage(
+    value: Any,
+) -> dict[str, Any] | None:
+    """Validate the prompt builder's exact, digest-bound coverage shape."""
+    import ipaddress
+
+    if not isinstance(value, dict) or set(value) != AUTHORIZATION_COVERAGE_KEYS:
+        return None
+
+    def strings(
+        key: str,
+        *,
+        maximum: int,
+        required: bool,
+        validator: Callable[[str], bool],
+    ) -> list[str] | None:
+        raw = value.get(key)
+        if not isinstance(raw, list) or len(raw) > maximum:
+            return None
+        if required and not raw:
+            return None
+        normalized: list[str] = []
+        for item in raw:
+            text = str(item or "").strip().lower()
+            if (
+                not text
+                or text != item
+                or not validator(text)
+                or text in normalized
+            ):
+                return None
+            normalized.append(text)
+        return normalized
+
+    def ports(key: str, *, maximum: int) -> list[int] | None:
+        raw = value.get(key)
+        if not isinstance(raw, list) or len(raw) > maximum:
+            return None
+        normalized: list[int] = []
+        for item in raw:
+            if (
+                isinstance(item, bool)
+                or not isinstance(item, int)
+                or not 1 <= item <= 65535
+                or item in normalized
+            ):
+                return None
+            normalized.append(item)
+        return normalized
+
+    def valid_ip(text: str) -> bool:
+        try:
+            ipaddress.ip_address(text)
+        except ValueError:
+            return False
+        return True
+
+    source_ips = strings(
+        "source_ips",
+        maximum=100,
+        required=False,
+        validator=valid_ip,
+    )
+    destination_ips = strings(
+        "destination_ips",
+        maximum=100,
+        required=False,
+        validator=valid_ip,
+    )
+    rule_ids = strings(
+        "rule_ids",
+        maximum=100,
+        required=True,
+        validator=lambda item: bool(
+            re.fullmatch(r"[a-z0-9_.:-]{1,128}", item)
+        ),
+    )
+    transport_protocols = strings(
+        "transport_protocols",
+        maximum=100,
+        required=True,
+        validator=lambda item: bool(
+            re.fullmatch(r"[a-z0-9_.-]{1,32}", item)
+        ),
+    )
+    source_ports = ports("source_ports", maximum=100)
+    destination_ports = ports("destination_ports", maximum=100)
+    raw_ranges = value.get("destination_port_ranges")
+    if not isinstance(raw_ranges, list) or len(raw_ranges) > 20:
+        return None
+    destination_port_ranges: list[list[int]] = []
+    for item in raw_ranges:
+        if (
+            not isinstance(item, list)
+            or len(item) != 2
+            or any(
+                isinstance(part, bool) or not isinstance(part, int)
+                for part in item
+            )
+            or not 1 <= item[0] <= item[1] <= 65535
+            or item in destination_port_ranges
+        ):
+            return None
+        destination_port_ranges.append(list(item))
+    authorization_start = _canonical_authorization_timestamp(
+        value.get("authorization_start")
+    )
+    authorization_end = _canonical_authorization_timestamp(
+        value.get("authorization_end")
+    )
+    if (
+        source_ips is None
+        or destination_ips is None
+        or not (source_ips or destination_ips)
+        or rule_ids is None
+        or source_ports is None
+        or destination_ports is None
+        or not (destination_ports or destination_port_ranges)
+        or transport_protocols is None
+        or authorization_start is None
+        or authorization_end is None
+        or authorization_end <= authorization_start
+    ):
+        return None
+    return {
+        "source_ips": source_ips,
+        "destination_ips": destination_ips,
+        "rule_ids": rule_ids,
+        "source_ports": source_ports,
+        "destination_ports": destination_ports,
+        "destination_port_ranges": destination_port_ranges,
+        "transport_protocols": transport_protocols,
+        "authorization_start": str(value["authorization_start"]),
+        "authorization_end": str(value["authorization_end"]),
+    }
+
+
+def _canonical_authorization_entry_covers_event(
+    entry: Any,
+    event: dict[str, Any],
+) -> bool:
+    if not isinstance(entry, dict) or set(entry) != AUTHORIZATION_ENTRY_KEYS:
+        return False
+    if (
+        entry.get("authorized") is not True
+        or entry.get("source") != "operator_assertion"
+    ):
+        return False
+    evidence_ref = str(entry.get("evidence_ref") or "")
+    match = AUTHORIZATION_EVIDENCE_REF_RE.fullmatch(evidence_ref)
+    coverage = _canonical_authorization_coverage(entry.get("coverage"))
+    if match is None or coverage is None:
+        return False
+    expected_digest = hashlib.sha256(
+        json.dumps(
+            {"coverage": coverage},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if match.group(1) != expected_digest:
+        return False
+    start = _canonical_authorization_timestamp(
+        coverage["authorization_start"]
+    )
+    end = _canonical_authorization_timestamp(
+        coverage["authorization_end"]
+    )
+    assert start is not None and end is not None
+    destination_port = event["destination_port"]
+    return bool(
+        start <= event["timestamp"] <= end
+        and (
+            not coverage["source_ips"]
+            or event["source_ip"] in coverage["source_ips"]
+        )
+        and (
+            not coverage["destination_ips"]
+            or event["destination_ip"] in coverage["destination_ips"]
+        )
+        and event["rule_id"] in coverage["rule_ids"]
+        and (
+            not coverage["source_ports"]
+            or event["source_port"] in coverage["source_ports"]
+        )
+        and (
+            destination_port in coverage["destination_ports"]
+            or any(
+                lower <= destination_port <= upper
+                for lower, upper in coverage["destination_port_ranges"]
+            )
+        )
+        and event["transport"] in coverage["transport_protocols"]
+    )
+
+
 def _has_structured_authorization_evidence(
     prompt_package: dict[str, Any] | None,
 ) -> bool:
-    """Require a trusted, explicit authorization assertion for that label.
+    """Accept only canonical builder entries covering this exact alert.
 
-    Asset expectations, vendor ownership, recurrence, and model prose can
-    support a benign hypothesis, but none proves that an operator authorized
-    the selected activity. The input is deliberately a separate structured
-    lane so a model cannot promote contextual evidence into authorization.
+    Asset expectations, vendor ownership, recurrence, model prose, and the
+    former top-level ``authorized/source/evidence_ref`` shortcut are not
+    authorization. Every accepted entry is shape-checked, digest-bound, and
+    re-evaluated against the prompt alert's endpoint/rule/port/transport/time
+    tuple. Missing or tampered fields fail closed.
     """
     if not isinstance(prompt_package, dict):
         return False
     raw = prompt_package.get("authorization_evidence")
-    if isinstance(raw, dict):
-        entries = raw.get("entries")
-        if not isinstance(entries, list):
-            entries = [raw]
-    elif isinstance(raw, list):
-        entries = raw
-    else:
+    if (
+        not isinstance(raw, dict)
+        or raw.get("status") != "operator_authorized"
+        or not isinstance(raw.get("entries"), list)
+        or not 1 <= len(raw["entries"]) <= 8
+    ):
         return False
-    trusted_sources = {
-        "approved_change",
-        "human_adjudication",
-        "operator_assertion",
-        "policy_exception",
+    event = _prompt_authorization_event_tuple(prompt_package)
+    if event is None:
+        return False
+    return all(
+        _canonical_authorization_entry_covers_event(entry, event)
+        for entry in raw["entries"]
+    )
+
+
+def _tuning_material_evidence_gap_signals(
+    response: dict[str, Any],
+) -> list[str]:
+    """Return bounded, non-sensitive signals that make control tuning unsafe."""
+    signals: list[str] = []
+
+    def add(signal: str) -> None:
+        if signal not in signals and len(signals) < 12:
+            signals.append(signal)
+
+    if bounded_text_list(response.get("evidence_gaps"), limit=1):
+        add("reported_evidence_gaps")
+    report = response.get("incident_response_report")
+    if isinstance(report, dict) and (
+        bounded_text_list(report.get("evidence_gaps"), limit=1)
+        or bounded_text_list(report.get("constraints"), limit=1)
+    ):
+        add("incident_report_evidence_gaps")
+    completeness = response.get("_incident_evidence_completeness")
+    if isinstance(completeness, dict) and (
+        completeness.get("complete_for_high_confidence") is False
+        or bool(completeness.get("limiters"))
+    ):
+        add("incident_evidence_incomplete")
+    reference_validation = response.get("_evidence_reference_validation")
+    if isinstance(reference_validation, dict) and bool(
+        reference_validation.get("invalid_refs")
+    ):
+        add("invalid_evidence_references")
+    verdict_validation = response.get("_verdict_validation")
+    if isinstance(verdict_validation, dict) and verdict_validation.get(
+        "material_contradiction"
+    ):
+        add("material_evidence_contradiction")
+    return signals
+
+
+def _unresolved_reviewer_material_disagreement(
+    response: dict[str, Any],
+) -> bool:
+    """Treat shadow reviewer disagreement as unresolved until a human decides."""
+    second_opinion = response.get("_second_opinion")
+    comparison = (
+        second_opinion.get("comparison")
+        if isinstance(second_opinion, dict)
+        and isinstance(second_opinion.get("comparison"), dict)
+        else {}
+    )
+    return bool(comparison.get("material_disagreement"))
+
+
+def apply_tuning_coherence_guard(
+    response: dict[str, Any],
+    prompt_package: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep suppress/drop advisory, evidence-complete, and human-controlled.
+
+    A model may recommend a detection-control change, but the runtime must not
+    preserve that recommendation as decision-ready while its factored verdict
+    is unknown, material evidence gaps remain, structured operator
+    authorization is absent, or an independent reviewer still materially
+    disagrees. Even a coherent recommendation is never authorized for
+    automatic suppress/drop execution.
+    """
+    previous = (
+        dict(response.get("_tuning_coherence_guard"))
+        if isinstance(response.get("_tuning_coherence_guard"), dict)
+        else {}
+    )
+    current_tuning = str(
+        response.get("tuning_recommendation") or ""
+    ).strip().lower()
+    previous_requested = str(
+        previous.get("requested_tuning") or ""
+    ).strip().lower()
+    requested_tuning = (
+        current_tuning
+        if current_tuning in CONTROL_TUNING_VALUES
+        else previous_requested
+        if previous_requested in CONTROL_TUNING_VALUES
+        else ""
+    )
+    if not requested_tuning:
+        return response
+
+    detection_validity = str(
+        response.get("detection_validity") or "unknown"
+    ).strip().lower()
+    activity_disposition = str(
+        response.get("activity_disposition") or "unknown"
+    ).strip().lower()
+    evidence_gap_signals = _tuning_material_evidence_gap_signals(response)
+    structured_authorization = _has_structured_authorization_evidence(
+        prompt_package
+    )
+    reviewer_disagreement = _unresolved_reviewer_material_disagreement(
+        response
+    )
+    blocking_reasons: list[str] = []
+    if detection_validity == "unknown":
+        blocking_reasons.append("detection_validity_unknown")
+    if activity_disposition == "unknown":
+        blocking_reasons.append("activity_disposition_unknown")
+    if evidence_gap_signals:
+        blocking_reasons.append("material_evidence_gaps")
+    if not structured_authorization:
+        blocking_reasons.append("structured_authorization_missing")
+    if reviewer_disagreement:
+        blocking_reasons.append(
+            "reviewer_material_disagreement_unresolved"
+        )
+
+    downgrade_applied = bool(blocking_reasons)
+    if downgrade_applied:
+        response["tuning_recommendation"] = "needs_more_data"
+        response["recommended_tuning_actions"] = []
+        response["tuning_reason"] = (
+            "Suppress/drop tuning was downgraded because deterministic "
+            "coherence requirements were not met; resolve the recorded "
+            "evidence, authorization, and review blockers before proposing "
+            "a human-approved detection change."
+        )
+
+    controls = (
+        dict(response.get("_automation_controls"))
+        if isinstance(response.get("_automation_controls"), dict)
+        else {}
+    )
+    controls.update(
+        {
+            "tuning_blocked": True,
+            "automatic_tuning_authorized": False,
+            "tuning_requires_human_approval": True,
+            "requires_human_review": True,
+        }
+    )
+    if not str(controls.get("reason") or "").strip():
+        controls["reason"] = (
+            "suppress/drop tuning is advisory and requires explicit human "
+            "approval"
+        )
+    response["_automation_controls"] = controls
+
+    gap = (
+        "Suppress/drop tuning is not decision-ready because deterministic "
+        "coherence checks found unresolved evidence, authorization, or "
+        "independent-review requirements."
+    )
+    if downgrade_applied:
+        evidence_gaps = bounded_text_list(
+            response.get("evidence_gaps"),
+            limit=49,
+            item_limit=4000,
+        )
+        if gap not in evidence_gaps:
+            evidence_gaps.append(gap)
+        response["evidence_gaps"] = evidence_gaps[:50]
+
+    verdict_validation = (
+        dict(response.get("_verdict_validation"))
+        if isinstance(response.get("_verdict_validation"), dict)
+        else {}
+    )
+    warnings = bounded_text_list(
+        verdict_validation.get("warnings"),
+        limit=49,
+        item_limit=1000,
+    )
+    warning = (
+        "suppress/drop tuning was downgraded by the deterministic coherence guard"
+        if downgrade_applied
+        else (
+            "suppress/drop tuning remains advisory; automatic application is "
+            "blocked"
+        )
+    )
+    if warning not in warnings:
+        warnings.append(warning)
+    verdict_validation["warnings"] = warnings[:50]
+    response["_verdict_validation"] = verdict_validation
+
+    response["_tuning_coherence_guard"] = {
+        "schema": "onion-sentinel-tuning-coherence-guard-v1",
+        "version": 1,
+        "control_requested": True,
+        "requested_tuning": requested_tuning,
+        "resulting_tuning": str(
+            response.get("tuning_recommendation") or "needs_more_data"
+        )[:40],
+        "downgrade_applied": downgrade_applied,
+        "invalid_for_context": downgrade_applied,
+        "blocking_reasons": blocking_reasons[:8],
+        "material_evidence_gap_signals": evidence_gap_signals[:12],
+        "structured_authorization_present": structured_authorization,
+        "reviewer_material_disagreement_unresolved": reviewer_disagreement,
+        "automatic_tuning_authorized": False,
+        "human_approval_required": True,
     }
-    for entry in entries[:50]:
-        if not isinstance(entry, dict) or entry.get("authorized") is not True:
-            continue
-        source = str(entry.get("source") or "").strip().lower()
-        evidence_ref = str(entry.get("evidence_ref") or "").strip()
-        if source in trusted_sources and evidence_ref:
-            return True
-    return False
+    return response
 
 
 def apply_authorized_benign_evidence_guard(
@@ -15803,12 +16644,14 @@ def incident_live_osquery_audit(prompt_package: dict[str, Any]) -> dict[str, Any
 def prepare_live_osquery_context(
     prompt_package: dict[str, Any],
     agent_role: str,
+    config_path: Path = DEFAULT_LIVE_OSQUERY_CONFIG_FILE,
 ) -> dict[str, Any] | None:
     """Expose a model-safe capability descriptor without exposing transport secrets."""
     if agent_role not in {"soc-analyst", "incident-responder"}:
         return None
-    if DEFAULT_LIVE_OSQUERY_CONFIG_FILE.is_file():
-        config = load_live_osquery_config(DEFAULT_LIVE_OSQUERY_CONFIG_FILE)
+    config_path = config_path.expanduser()
+    if config_path.is_file():
+        config = load_live_osquery_config(config_path)
     else:
         config = {
             "enabled": False,
@@ -16069,6 +16912,10 @@ def validate_response(
         prompt_package,
     )
     normalized = validate_evidence_references(normalized, prompt_package)
+    normalized = apply_tuning_coherence_guard(
+        normalized,
+        prompt_package,
+    )
     normalized = calibrate_response_confidence(normalized)
     normalized = reconcile_incident_response_report(
         normalized,
@@ -16593,7 +17440,7 @@ def write_outputs(
 def main() -> int:
     args = parse_args()
     controlled_evaluation, evaluation_runtime_dir = (
-        controlled_evaluation_runtime(args.alert_store_url)
+        controlled_evaluation_runtime(args)
     )
     if (
         controlled_evaluation
@@ -16748,7 +17595,21 @@ def main() -> int:
             validate_incident_evidence_artifact(prompt_package.get("incident_response_evidence"))
 
         settings = effective_ai_settings(args)
-        live_osquery_config = prepare_live_osquery_context(prompt_package, agent_role)
+        require_controlled_evaluation_routes(
+            controlled_result_identity,
+            args,
+            settings,
+            agent_role,
+        )
+        live_osquery_config = prepare_live_osquery_context(
+            prompt_package,
+            agent_role,
+            getattr(
+                args,
+                "live_osquery_config",
+                DEFAULT_LIVE_OSQUERY_CONFIG_FILE,
+            ),
+        )
         enrichment_config = prepare_investigation_enrichment_context(
             prompt_package,
             agent_role,
@@ -16900,6 +17761,16 @@ def main() -> int:
                 settings=settings,
                 live_osquery_config=live_osquery_config,
                 enrichment_config=enrichment_config,
+                security_onion_config_path=getattr(
+                    args,
+                    "incident_evidence_config",
+                    DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE,
+                ),
+                investigation_pivot_dir=getattr(
+                    args,
+                    "investigation_pivot_dir",
+                    DEFAULT_INVESTIGATION_PIVOT_DIR,
+                ),
                 phase_callback=update_current_phase,
                 harness_runtime=harness_runtime,
             )
@@ -16914,9 +17785,15 @@ def main() -> int:
             if harness_runtime is not None
             else None
         )
-        configured_reviewer_trigger = second_opinion_trigger(
-            response,
-            prompt_package,
+        controlled_reviewer_trigger = (
+            "controlled evaluation requires an independent reviewer"
+            if controlled_result_identity is not None
+            and controlled_result_identity.get("reviewer_required") is True
+            else ""
+        )
+        configured_reviewer_trigger = (
+            second_opinion_trigger(response, prompt_package)
+            or controlled_reviewer_trigger
         )
         if not args.response_json:
             response = apply_configured_second_opinion(
@@ -16927,6 +17804,7 @@ def main() -> int:
                 agent_role,
                 phase_callback=update_current_phase,
                 harness_runtime=harness_runtime,
+                force_review_reason=controlled_reviewer_trigger,
             )
         else:
             response = apply_saved_response_review_gate(
@@ -16941,6 +17819,10 @@ def main() -> int:
             agent_role,
             trigger_reason=configured_reviewer_trigger,
             freeze_enabled=evaluation_memory_frozen,
+        )
+        require_controlled_evaluation_result_routes(
+            controlled_result_identity,
+            response,
         )
         if isinstance(reviewer_response, dict):
             observe_harness(

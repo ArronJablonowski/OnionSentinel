@@ -12,12 +12,14 @@ import argparse
 import datetime as dt
 import fcntl
 import hashlib
+import importlib.util
 import json
 import math
 import os
 import re
 import sqlite3
 import stat
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -30,9 +32,18 @@ BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 from disk_capacity import require_runtime_capacity
-from agent_memory import role_prompt_file, role_second_opinion_prompt_file
+from agent_memory import (
+    role_memory_file,
+    role_prompt_file,
+    role_second_opinion_prompt_file,
+)
 from bounded_http import BoundedHttpError, read_bounded_json
 from bounded_process import BoundedProcessError, run_bounded_command
+from controlled_evaluation_isolation import (
+    ControlledEvaluationIsolationError,
+    pin_controlled_tmpdir,
+    validate_controlled_incident_evidence_route,
+)
 
 
 HOME = Path.home()
@@ -40,6 +51,23 @@ DEFAULT_DB = HOME / "n8n-local" / "alert_store_data" / "alerts.sqlite3"
 DEFAULT_PROMPT_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-prompts"
 DEFAULT_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-analysis"
 DEFAULT_PCAP_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "pcap-analysis"
+DEFAULT_ROLLUP_DIR = HOME / "n8n-local" / "soc-alerts" / "daily-rollups"
+DEFAULT_AGENT_MEMORY_DIR = HOME / "n8n-local" / "soc-alerts" / "agent-memory"
+DEFAULT_SHARED_MEMORY_FILE = (
+    DEFAULT_AGENT_MEMORY_DIR / "shared-agent-memory.md"
+)
+DEFAULT_ASSET_INVENTORY_FILE = (
+    HOME / "n8n-local" / "config" / "asset_inventory.database-export.json"
+)
+DEFAULT_LIVE_OSQUERY_CONFIG = (
+    HOME / "n8n-local" / "config" / "live-osquery.json"
+)
+DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT = (
+    HOME / "n8n-local" / "config" / "disagreement_adjudicator_system_prompt.md"
+)
+DEFAULT_INVESTIGATION_PIVOT_DIR = (
+    HOME / "n8n-local" / "soc-alerts" / "investigation-pivots"
+)
 DEFAULT_INCIDENT_EVIDENCE_DIR = HOME / "n8n-local" / "soc-alerts" / "incident-evidence"
 DEFAULT_INCIDENT_EVIDENCE_CONFIG = HOME / "n8n-local" / "config" / "incident-evidence.json"
 DEFAULT_AI_SETTINGS = HOME / "n8n-local" / "config" / "ai_model_settings.json"
@@ -97,6 +125,10 @@ AGENT_ROLES = (
 CONTROLLED_ALERT_ID_RE = re.compile(r"[A-Za-z0-9._:@=-]{1,256}")
 CONTROLLED_DISPATCH_ID_RE = re.compile(r"[a-f0-9]{64}")
 CONTROLLED_RELEASE_ID_RE = re.compile(r"[a-f0-9]{40}")
+CONTROLLED_MODEL_ROUTE_RE = re.compile(
+    r"codex-cli:(?:gpt-5\.5|gpt-5\.6-(?:sol|terra|luna)):"
+    r"(?:low|medium|high|xhigh)"
+)
 CONTROLLED_COHORT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{2,63}")
 CONTROLLED_LEASE_TOKEN_RE = re.compile(
     r"[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-"
@@ -118,6 +150,8 @@ CONTROLLED_TIMESTAMP_SEPARATOR_RE = re.compile(
     rf"(?:T|[{CONTROLLED_JS_WHITESPACE_CLASS}]+)"
     rf"(?=\d{{2}}:\d{{2}}:\d{{2}})"
 )
+
+_STRICT_AI_SETTINGS_MODULE: Any | None = None
 CONTROLLED_TIMESTAMP_RE = re.compile(
     rf"(?<![A-Za-z0-9_])\d{{4}}-\d{{2}}-\d{{2}}"
     rf"(?:T|[{CONTROLLED_JS_WHITESPACE_CLASS}]+)"
@@ -225,6 +259,10 @@ def controlled_evaluation_runtime(
         )
     if mode_value != "1":
         return None
+    if str(getattr(args, "model", "") or "").strip():
+        raise SystemExit(
+            "controlled evaluation forbids --model and SOC_AI_MODEL overrides"
+        )
     raw_root = str(
         os.environ.get("ONION_SENTINEL_EVALUATION_RUNTIME_DIR") or ""
     ).strip()
@@ -240,24 +278,6 @@ def controlled_evaluation_runtime(
         raise SystemExit(
             f"controlled evaluation runtime directory is unsafe: {exc}"
         ) from exc
-    writable_paths = (
-        args.prompt_dir,
-        args.analysis_dir,
-        args.incident_evidence_dir,
-        args.lock_file,
-        args.wake_file,
-        args.portal_wake_file,
-    )
-    runtime_read_paths = (
-        args.ai_settings_file,
-        args.investigation_harness_policy,
-        args.detection_playbooks,
-        *(
-            (args.investigation_skills,)
-            if hasattr(args, "investigation_skills")
-            else ()
-        ),
-    )
     try:
         alert_store_origin = urlparse(args.alert_store_url)
         alert_store_port = alert_store_origin.port
@@ -311,41 +331,155 @@ def controlled_evaluation_runtime(
             "owner-only runtime, frozen memory, a loopback alert store, "
             "an exact release ID, and an ephemeral authorization token"
         )
-    for candidate in writable_paths:
-        candidate = candidate.expanduser()
-        if not candidate.is_absolute():
-            raise SystemExit(
-                "controlled evaluation writable paths must be absolute"
-            )
-        try:
-            candidate.resolve(strict=False).relative_to(resolved_root)
-        except ValueError as exc:
-            raise SystemExit(
-                "controlled evaluation writable paths must stay inside "
-                "its runtime directory"
-            ) from exc
-    for candidate in runtime_read_paths:
+    try:
+        pin_controlled_tmpdir(resolved_root)
+    except ControlledEvaluationIsolationError as exc:
+        raise SystemExit(f"controlled evaluation {exc}") from exc
+
+    def owner_private_path(
+        candidate: Path,
+        *,
+        label: str,
+        kind: str,
+        inside_runtime: bool = True,
+    ) -> Path:
         candidate = candidate.expanduser()
         try:
             candidate_metadata = candidate.lstat()
             resolved_candidate = candidate.resolve(strict=True)
-            resolved_candidate.relative_to(resolved_root)
+            if inside_runtime:
+                resolved_candidate.relative_to(resolved_root)
         except (FileNotFoundError, OSError, ValueError) as exc:
+            location = " inside the evaluation runtime" if inside_runtime else ""
             raise SystemExit(
-                "controlled evaluation runtime configuration must stay "
-                "inside its runtime directory"
+                f"controlled evaluation {label} must be a canonical "
+                f"owner-private {kind}{location}"
             ) from exc
+        expected_kind = (
+            candidate.is_file() if kind == "file" else candidate.is_dir()
+        )
         if (
             not candidate.is_absolute()
+            or resolved_candidate != candidate
             or candidate.is_symlink()
-            or not candidate.is_file()
+            or not expected_kind
             or candidate_metadata.st_uid != os.getuid()
             or stat.S_IMODE(candidate_metadata.st_mode) & 0o077
         ):
+            location = " inside the evaluation runtime" if inside_runtime else ""
             raise SystemExit(
-                "controlled evaluation runtime configuration must be "
-                "owner-private regular files"
+                f"controlled evaluation {label} must be a canonical "
+                f"owner-private {kind}{location}"
             )
+        return resolved_candidate
+
+    def owner_private_mutable_file(candidate: Path, *, label: str) -> None:
+        candidate = candidate.expanduser()
+        try:
+            resolved_candidate = candidate.resolve(strict=False)
+            resolved_candidate.relative_to(resolved_root)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(
+                f"controlled evaluation {label} must stay inside its "
+                "runtime directory"
+            ) from exc
+        if not candidate.is_absolute() or resolved_candidate != candidate:
+            raise SystemExit(
+                f"controlled evaluation {label} must stay inside its "
+                "runtime directory"
+            )
+        if candidate.exists():
+            owner_private_path(candidate, label=label, kind="file")
+            return
+        owner_private_path(candidate.parent, label=f"{label} parent", kind="directory")
+
+    context_directories = {
+        "prompt directory": args.prompt_dir,
+        "analysis output directory": args.analysis_dir,
+        "prior-analysis directory": args.prior_analysis_dir,
+        "PCAP analysis directory": args.pcap_analysis_dir,
+        "rollup directory": args.rollup_dir,
+        "agent-memory directory": args.agent_memory_dir,
+        "incident-evidence directory": args.incident_evidence_dir,
+        "investigation-pivot directory": args.investigation_pivot_dir,
+    }
+    for label, candidate in context_directories.items():
+        owner_private_path(candidate, label=label, kind="directory")
+    if args.analysis_dir.resolve() == args.prior_analysis_dir.resolve():
+        raise SystemExit(
+            "controlled evaluation prior analysis must be frozen separately "
+            "from analysis output"
+        )
+
+    config_dir = args.ai_settings_file.parent
+    runtime_read_files = {
+        "clone database": args.db,
+        "AI settings": args.ai_settings_file,
+        "harness policy": args.investigation_harness_policy,
+        "detection playbooks": args.detection_playbooks,
+        "investigation skills": args.investigation_skills,
+        "shared memory": args.shared_memory_file,
+        "asset inventory": args.asset_inventory_file,
+        "live OSQuery config": args.live_osquery_config,
+        "disagreement prompt": args.disagreement_adjudicator_prompt_file,
+        "SOC Analyst prompt": role_prompt_file(config_dir, "soc-analyst"),
+        "SOC Analyst reviewer prompt": role_second_opinion_prompt_file(
+            config_dir,
+            "soc-analyst",
+        ),
+        "Incident Responder prompt": role_prompt_file(
+            config_dir,
+            "incident-responder",
+        ),
+        "Incident Responder reviewer prompt": role_second_opinion_prompt_file(
+            config_dir,
+            "incident-responder",
+        ),
+        "SOC Analyst frozen memory": role_memory_file(
+            args.agent_memory_dir,
+            "soc-analyst",
+        ),
+        "Incident Responder frozen memory": role_memory_file(
+            args.agent_memory_dir,
+            "incident-responder",
+        ),
+    }
+    for label, candidate in runtime_read_files.items():
+        owner_private_path(candidate, label=label, kind="file")
+
+    try:
+        validate_controlled_incident_evidence_route(
+            args.incident_evidence_config,
+            resolved_root,
+            expected_home=HOME,
+        )
+    except ControlledEvaluationIsolationError as exc:
+        raise SystemExit(
+            f"controlled evaluation {exc}"
+        ) from exc
+
+    try:
+        live_osquery_document = json.loads(
+            args.live_osquery_config.read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(
+            "controlled evaluation live OSQuery config is invalid"
+        ) from exc
+    if (
+        not isinstance(live_osquery_document, dict)
+        or live_osquery_document.get("enabled") is not False
+    ):
+        raise SystemExit(
+            "controlled evaluation requires live OSQuery to be explicitly disabled"
+        )
+
+    for label, candidate in {
+        "lock file": args.lock_file,
+        "worker wake file": args.wake_file,
+        "dashboard wake file": args.portal_wake_file,
+    }.items():
+        owner_private_mutable_file(candidate, label=label)
     return resolved_root
 
 
@@ -954,6 +1088,9 @@ def validate_controlled_recovery_payload(
         "agent_role",
         "reanalysis_attempt_id",
         "release_id",
+        "expected_assigned_route",
+        "expected_reviewer_route",
+        "reviewer_required",
     }
     if (
         not isinstance(identity, dict)
@@ -970,6 +1107,8 @@ def validate_controlled_recovery_payload(
     role = identity.get("agent_role")
     attempt_id = identity.get("reanalysis_attempt_id")
     release_id = identity.get("release_id")
+    assigned_route = identity.get("expected_assigned_route")
+    reviewer_route = identity.get("expected_reviewer_route")
     expected_role = {
         "ai_analysis": "soc-analyst",
         "incident_response_analysis": "incident-responder",
@@ -1004,6 +1143,13 @@ def validate_controlled_recovery_payload(
         or attempt_id != expected_attempt
         or not isinstance(release_id, str)
         or release_id != runtime_release_id
+        or not isinstance(assigned_route, str)
+        or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(assigned_route)
+        or not isinstance(reviewer_route, str)
+        or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(reviewer_route)
+        or assigned_route.rsplit(":", 1)[0]
+        == reviewer_route.rsplit(":", 1)[0]
+        or identity.get("reviewer_required") is not True
         or not isinstance(analysis_id, str)
         or not CONTROLLED_ANALYSIS_ID_RE.fullmatch(analysis_id)
         or payload.get("alert_id") != args.only_alert_id
@@ -1012,6 +1158,17 @@ def validate_controlled_recovery_payload(
         or response.get("_analysis_evaluation_memory_frozen") is not True
         or response.get("_analysis_controlled_claim_sha256")
         != claim_digest
+        or response.get("_analysis_model_route") != assigned_route
+        or not isinstance(response.get("_second_opinion"), dict)
+        or response["_second_opinion"].get("status") != "completed"
+        or response["_second_opinion"].get("model_route") != reviewer_route
+        or not isinstance(
+            response["_second_opinion"].get("response"),
+            dict,
+        )
+        or response["_second_opinion"]["response"].get(
+            "_analysis_model_route"
+        ) != reviewer_route
     ):
         raise RuntimeError(
             "controlled evaluation recovery identity does not match "
@@ -1418,9 +1575,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="Path to alert-store SQLite DB")
     parser.add_argument("--prompt-dir", type=Path, default=DEFAULT_PROMPT_DIR, help="Prompt package directory")
     parser.add_argument("--analysis-dir", type=Path, default=DEFAULT_ANALYSIS_DIR, help="AI analysis output directory")
+    parser.add_argument(
+        "--prior-analysis-dir",
+        type=Path,
+        default=DEFAULT_ANALYSIS_DIR,
+        help="Frozen prior AI analysis directory used as prompt context",
+    )
     parser.add_argument("--pcap-analysis-dir", type=Path, default=DEFAULT_PCAP_ANALYSIS_DIR, help="Parsed PCAP evidence directory")
+    parser.add_argument("--rollup-dir", type=Path, default=DEFAULT_ROLLUP_DIR, help="Frozen daily-rollup context directory")
+    parser.add_argument("--agent-memory-dir", type=Path, default=DEFAULT_AGENT_MEMORY_DIR, help="Frozen role-specific agent-memory directory")
+    parser.add_argument("--shared-memory-file", type=Path, default=DEFAULT_SHARED_MEMORY_FILE, help="Frozen shared agent-memory file")
+    parser.add_argument("--asset-inventory-file", type=Path, default=DEFAULT_ASSET_INVENTORY_FILE, help="Frozen asset inventory export")
     parser.add_argument("--incident-evidence-dir", type=Path, default=DEFAULT_INCIDENT_EVIDENCE_DIR, help="Restricted Security Onion incident evidence directory")
     parser.add_argument("--incident-evidence-config", type=Path, default=DEFAULT_INCIDENT_EVIDENCE_CONFIG, help="Restricted relay evidence transport config")
+    parser.add_argument(
+        "--investigation-pivot-dir",
+        type=Path,
+        default=DEFAULT_INVESTIGATION_PIVOT_DIR,
+        help="Directory for restricted dynamic-investigation pivot artifacts",
+    )
+    parser.add_argument(
+        "--live-osquery-config",
+        type=Path,
+        default=DEFAULT_LIVE_OSQUERY_CONFIG,
+        help="Live OSQuery capability configuration",
+    )
+    parser.add_argument(
+        "--disagreement-adjudicator-prompt-file",
+        type=Path,
+        default=DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT,
+        help="Bounded disagreement-adjudicator system prompt",
+    )
     parser.add_argument("--ai-settings-file", type=Path, default=DEFAULT_AI_SETTINGS, help="AI model routing settings JSON")
     parser.add_argument(
         "--investigation-harness-policy",
@@ -1803,6 +1988,9 @@ def report_ai_job_status(
     expected_representative_alert_id: str = "",
     expected_dispatch_id: str = "",
     expected_stable_group_key: str = "",
+    expected_assigned_route: str = "",
+    expected_reviewer_route: str = "",
+    reviewer_required: bool = False,
 ) -> bool | str:
     """Transition durable AI intent through a bounded local HTTP contract.
 
@@ -1824,6 +2012,9 @@ def report_ai_job_status(
         str(expected_representative_alert_id or ""),
         str(expected_dispatch_id or ""),
         str(expected_stable_group_key or ""),
+        str(expected_assigned_route or ""),
+        str(expected_reviewer_route or ""),
+        reviewer_required is True,
     )
     if any(exact_claim_values):
         if (
@@ -1838,12 +2029,25 @@ def report_ai_job_status(
             raise ControlledClaimRejected(
                 "controlled durable AI claim stable group key is invalid"
             )
+        if (
+            not CONTROLLED_MODEL_ROUTE_RE.fullmatch(exact_claim_values[4])
+            or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(exact_claim_values[5])
+            or exact_claim_values[4].rsplit(":", 1)[0]
+            == exact_claim_values[5].rsplit(":", 1)[0]
+            or exact_claim_values[6] is not True
+        ):
+            raise ControlledClaimRejected(
+                "controlled durable AI claim route identity is invalid"
+            )
         request_payload.update(
             {
                 "expected_job_id": exact_claim_values[0],
                 "expected_representative_alert_id": exact_claim_values[1],
                 "expected_dispatch_id": exact_claim_values[2],
                 "expected_stable_group_key": exact_claim_values[3],
+                "expected_assigned_route": exact_claim_values[4],
+                "expected_reviewer_route": exact_claim_values[5],
+                "reviewer_required": True,
             }
         )
     payload = json.dumps(request_payload).encode("utf-8")
@@ -2945,6 +3149,7 @@ def require_controlled_claim_identity(
             "controlled AI run stable group key is invalid"
         )
     require_controlled_release_attestation(claimed_payload)
+    controlled_job_route_contract(args, claimed_payload)
 
     if (
         int(claimed_job_id or 0) != int(expected_job_id or 0)
@@ -3004,6 +3209,122 @@ def require_controlled_claim_identity(
         )
 
 
+def _strict_ai_settings_module() -> Any:
+    """Load the analysis runner so both processes use one settings parser."""
+
+    global _STRICT_AI_SETTINGS_MODULE
+    if _STRICT_AI_SETTINGS_MODULE is not None:
+        return _STRICT_AI_SETTINGS_MODULE
+    runner_path = (BIN_DIR / "run-local-ai-analysis.py").resolve(strict=True)
+    module_name = (
+        "_onion_sentinel_strict_ai_settings_"
+        + hashlib.sha256(str(runner_path).encode("utf-8")).hexdigest()[:16]
+    )
+    module = sys.modules.get(module_name)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(module_name, runner_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("analysis runner settings loader is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(module_name, None)
+            raise
+    if not callable(getattr(module, "load_ai_settings", None)) or not callable(
+        getattr(module, "enabled_agent_model_routes", None)
+    ):
+        raise RuntimeError("analysis runner settings loader is incomplete")
+    _STRICT_AI_SETTINGS_MODULE = module
+    return module
+
+
+def _strict_controlled_ai_settings(
+    settings_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any], set[str]]:
+    """Return runner-normalized settings plus exact persisted assignments."""
+
+    if (
+        not settings_path.is_file()
+        or settings_path.stat().st_size > MAX_AI_SETTINGS_BYTES
+    ):
+        raise RuntimeError("settings file is missing or oversized")
+    runner = _strict_ai_settings_module()
+    settings = runner.load_ai_settings(settings_path)
+    raw = json.loads(
+        runner.read_bytes_bounded(
+            settings_path,
+            runner.DEFAULT_MAX_SETTINGS_BYTES,
+        ).decode("utf-8", errors="strict")
+    )
+    if not isinstance(settings, dict) or not isinstance(raw, dict):
+        raise RuntimeError("AI settings root must be an object")
+    enabled_routes = set(runner.enabled_agent_model_routes(settings))
+    return settings, raw, enabled_routes
+
+
+def controlled_job_route_contract(
+    args: argparse.Namespace,
+    job_payload: dict[str, object],
+) -> dict[str, object]:
+    """Bind a controlled job to exact canonical, enabled role assignments."""
+
+    assigned_route = job_payload.get("expected_assigned_route")
+    reviewer_route = job_payload.get("expected_reviewer_route")
+    reviewer_required = job_payload.get("reviewer_required")
+    role = str(job_payload.get("agent_role") or "").strip().lower()
+    if (
+        not isinstance(assigned_route, str)
+        or not isinstance(reviewer_route, str)
+        or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(assigned_route)
+        or not CONTROLLED_MODEL_ROUTE_RE.fullmatch(reviewer_route)
+        or assigned_route.rsplit(":", 1)[0]
+        == reviewer_route.rsplit(":", 1)[0]
+        or reviewer_required is not True
+        or role not in {"soc-analyst", "incident-responder"}
+    ):
+        raise ControlledClaimRejected(
+            "controlled durable AI job route contract is invalid"
+        )
+
+    settings_path = Path(
+        getattr(args, "ai_settings_file", DEFAULT_AI_SETTINGS)
+    )
+    try:
+        settings, raw, enabled_routes = _strict_controlled_ai_settings(
+            settings_path
+        )
+    except (OSError, UnicodeError, ValueError, TypeError, RuntimeError) as exc:
+        raise ControlledClaimRejected(
+            "controlled AI route settings are unavailable"
+        ) from exc
+    assignments = raw.get("agent_models")
+    reviewers = raw.get("agent_second_opinion_models")
+    normalized_assignments = settings.get("agent_models")
+    normalized_reviewers = settings.get("agent_second_opinion_models")
+    if (
+        not isinstance(assignments, dict)
+        or assignments.get(role) != assigned_route
+        or not isinstance(reviewers, dict)
+        or reviewers.get(role) != reviewer_route
+        or not isinstance(normalized_assignments, dict)
+        or normalized_assignments.get(role) != assigned_route
+        or not isinstance(normalized_reviewers, dict)
+        or normalized_reviewers.get(role) != reviewer_route
+        or assigned_route not in enabled_routes
+        or reviewer_route not in enabled_routes
+    ):
+        raise ControlledClaimRejected(
+            "controlled AI job routes do not exactly match enabled settings"
+        )
+    return {
+        "expected_assigned_route": assigned_route,
+        "expected_reviewer_route": reviewer_route,
+        "reviewer_required": True,
+    }
+
+
 def controlled_claim_expectations(
     args: argparse.Namespace,
     selected: sqlite3.Row,
@@ -3039,6 +3360,7 @@ def controlled_claim_expectations(
             "controlled AI run stable group key is invalid"
         )
     require_controlled_release_attestation(job_payload)
+    route_contract = controlled_job_route_contract(args, job_payload)
     try:
         expected_job_id = int(selected["durable_job_id"] or 0)
     except (IndexError, KeyError, TypeError, ValueError):
@@ -3075,6 +3397,7 @@ def controlled_claim_expectations(
         "expected_representative_alert_id": expected_alert_id,
         "expected_dispatch_id": expected_dispatch_id,
         "expected_stable_group_key": expected_stable_group_key,
+        **route_contract,
     }
 
 
@@ -3164,10 +3487,14 @@ def build_prompt(
     cmd = [
         sys.executable,
         str(builder),
+        "--db",
+        str(getattr(args, "db", DEFAULT_DB)),
         "--alert-id",
         alert_id,
         "--out-dir",
         str(args.prompt_dir),
+        "--rollup-dir",
+        str(getattr(args, "rollup_dir", DEFAULT_ROLLUP_DIR)),
         "--related-limit",
         str(related_limit),
         "--correlation-limit",
@@ -3184,6 +3511,21 @@ def build_prompt(
         str(role_prompt_file(config_dir, agent_role)),
         "--second-opinion-prompt-file",
         str(role_second_opinion_prompt_file(config_dir, agent_role)),
+        "--agent-memory-file",
+        str(
+            role_memory_file(
+                getattr(args, "agent_memory_dir", DEFAULT_AGENT_MEMORY_DIR),
+                agent_role,
+            )
+        ),
+        "--shared-memory-file",
+        str(getattr(args, "shared_memory_file", DEFAULT_SHARED_MEMORY_FILE)),
+        "--pcap-analysis-dir",
+        str(getattr(args, "pcap_analysis_dir", DEFAULT_PCAP_ANALYSIS_DIR)),
+        "--analysis-dir",
+        str(getattr(args, "prior_analysis_dir", DEFAULT_ANALYSIS_DIR)),
+        "--asset-inventory-file",
+        str(getattr(args, "asset_inventory_file", DEFAULT_ASSET_INVENTORY_FILE)),
         "--detection-playbooks",
         str(
             getattr(
@@ -3241,12 +3583,15 @@ def analysis_command(
     reanalysis_attempt_id: str = "",
     agent_role: str = "",
 ) -> list[str]:
+    agent_role = str(agent_role or "soc-analyst")
     runner = Path(__file__).with_name("run-local-ai-analysis.py")
     cmd = [
         sys.executable,
         str(runner),
         "--prompt-package",
         str(prompt_path),
+        "--prompt-dir",
+        str(getattr(args, "prompt_dir", DEFAULT_PROMPT_DIR)),
         "--out-dir",
         str(args.analysis_dir),
         "--timeout",
@@ -3268,6 +3613,46 @@ def analysis_command(
                 args,
                 "investigation_harness_policy",
                 DEFAULT_INVESTIGATION_HARNESS_POLICY,
+            )
+        ),
+        "--system-prompt-file",
+        str(
+            role_prompt_file(
+                Path(args.ai_settings_file).parent,
+                agent_role,
+            )
+        ),
+        "--second-opinion-prompt-file",
+        str(
+            role_second_opinion_prompt_file(
+                Path(args.ai_settings_file).parent,
+                agent_role,
+            )
+        ),
+        "--disagreement-adjudicator-prompt-file",
+        str(
+            getattr(
+                args,
+                "disagreement_adjudicator_prompt_file",
+                DEFAULT_DISAGREEMENT_ADJUDICATOR_PROMPT,
+            )
+        ),
+        "--live-osquery-config",
+        str(getattr(args, "live_osquery_config", DEFAULT_LIVE_OSQUERY_CONFIG)),
+        "--incident-evidence-config",
+        str(
+            getattr(
+                args,
+                "incident_evidence_config",
+                DEFAULT_INCIDENT_EVIDENCE_CONFIG,
+            )
+        ),
+        "--investigation-pivot-dir",
+        str(
+            getattr(
+                args,
+                "investigation_pivot_dir",
+                DEFAULT_INVESTIGATION_PIVOT_DIR,
             )
         ),
     ]
@@ -3320,6 +3705,16 @@ def run_analysis(
             "reanalysis_attempt_id": (
                 "ONION_SENTINEL_EVALUATION_REANALYSIS_ATTEMPT_ID"
             ),
+            "release_id": "ONION_SENTINEL_EVALUATION_RELEASE_ID",
+            "expected_assigned_route": (
+                "ONION_SENTINEL_EVALUATION_EXPECTED_ASSIGNED_ROUTE"
+            ),
+            "expected_reviewer_route": (
+                "ONION_SENTINEL_EVALUATION_EXPECTED_REVIEWER_ROUTE"
+            ),
+            "reviewer_required": (
+                "ONION_SENTINEL_EVALUATION_REVIEWER_REQUIRED"
+            ),
         }
         child_environment = dict(os.environ)
         evaluation_token = (
@@ -3333,9 +3728,12 @@ def run_analysis(
             child_environment[
                 CONTROLLED_EVALUATION_TOKEN_ENV
             ] = evaluation_token
+        child_environment["TMPDIR"] = str(os.environ["TMPDIR"])
         for field, environment_key in field_environment.items():
-            child_environment[environment_key] = str(
-                controlled_result_identity.get(field) or ""
+            value = controlled_result_identity.get(field)
+            child_environment[environment_key] = (
+                "1" if field == "reviewer_required" and value is True
+                else str(value or "")
             )
     return run_command(
         cmd,
@@ -3735,6 +4133,11 @@ def main() -> int:
 
                 incident_evidence_path = None
                 if durable_job_type == "incident_response_analysis":
+                    if controlled_identity_requested:
+                        # Re-read through the runner's strict settings loader
+                        # immediately before the first Relay request. This
+                        # closes the claim-to-collection settings drift window.
+                        controlled_job_route_contract(args, job_payload)
                     incident_evidence_path = collect_incident_evidence(
                         alert_id,
                         args,
@@ -3778,6 +4181,18 @@ def main() -> int:
                         ),
                         "agent_role": assigned_agent_role,
                         "reanalysis_attempt_id": reanalysis_attempt_id,
+                        "release_id": str(
+                            job_payload.get("release_id") or ""
+                        ),
+                        "expected_assigned_route": str(
+                            job_payload.get("expected_assigned_route") or ""
+                        ),
+                        "expected_reviewer_route": str(
+                            job_payload.get("expected_reviewer_route") or ""
+                        ),
+                        "reviewer_required": (
+                            job_payload.get("reviewer_required") is True
+                        ),
                     }
                 proc = run_analysis(
                     prompt_path,

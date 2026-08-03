@@ -17,6 +17,49 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEDULER_PATH = REPO_ROOT / "n8n" / "bin" / "auto-run-ai-analysis.py"
 DEPLOYED_RELEASE = "d" * 40
+PRIMARY_ROUTE = "codex-cli:gpt-5.5:high"
+REVIEWER_ROUTE = "codex-cli:gpt-5.6-sol:xhigh"
+CONTROLLED_ROUTE_FIELDS = {
+    "expected_assigned_route": PRIMARY_ROUTE,
+    "expected_reviewer_route": REVIEWER_ROUTE,
+    "reviewer_required": True,
+}
+
+
+def write_controlled_route_fixture(runtime: Path, home: Path) -> Path:
+    """Create a synthetic exact Relay route without live credential material."""
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ssh_dir.chmod(0o700)
+    ssh_key = ssh_dir / "onion-sentinel-incident-evidence_ed25519"
+    known_hosts = runtime / "relay_known_hosts"
+    ssh_key.write_text("synthetic-private-key-fixture\n", encoding="utf-8")
+    known_hosts.write_text("synthetic-known-host-fixture\n", encoding="utf-8")
+    ssh_key.chmod(0o600)
+    known_hosts.chmod(0o600)
+    route = runtime / "incident-evidence.json"
+    route.write_text(
+        json.dumps(
+            {
+                "investigation_query_contract": (
+                    "onion-sentinel-investigation-pivots-v2"
+                ),
+                "host": "10.88.8.8",
+                "ssh_user": "aj",
+                "ssh_key": str(ssh_key),
+                "known_hosts": str(known_hosts),
+                "connect_timeout_seconds": 20,
+                "timeout_seconds": 420,
+                "max_response_bytes": 8 * 1024 * 1024,
+                "max_stderr_bytes": 256 * 1024,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    route.chmod(0o600)
+    return route
 
 
 def load_scheduler():
@@ -379,6 +422,7 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                 expected_representative_alert_id="claimed-alert",
                 expected_dispatch_id="a" * 64,
                 expected_stable_group_key="v2|claimed-group",
+                **CONTROLLED_ROUTE_FIELDS,
             )
 
         self.assertIsInstance(claimed, self.scheduler.ClaimedAiLease)
@@ -405,6 +449,15 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             request_payload["expected_stable_group_key"],
             "v2|claimed-group",
         )
+        self.assertEqual(
+            request_payload["expected_assigned_route"],
+            PRIMARY_ROUTE,
+        )
+        self.assertEqual(
+            request_payload["expected_reviewer_route"],
+            REVIEWER_ROUTE,
+        )
+        self.assertIs(request_payload["reviewer_required"], True)
 
     def insert_alert(
         self,
@@ -543,6 +596,11 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         )
         queued_payload = dict(payload or {})
         if only_group_id:
+            controlled_agent_role = (
+                "incident-responder"
+                if job_type == "incident_response_analysis"
+                else "soc-analyst"
+            )
             queued_payload.setdefault("alert_id", alert_id)
             queued_payload.setdefault("representative_alert_id", alert_id)
             queued_payload.setdefault("group_id", group_id)
@@ -550,6 +608,9 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             queued_payload.setdefault("stable_group_key", frozen_group_key)
             queued_payload.setdefault("dispatch_id", only_dispatch_id)
             queued_payload.setdefault("release_id", DEPLOYED_RELEASE)
+            queued_payload.setdefault("agent_role", controlled_agent_role)
+            for field, value in CONTROLLED_ROUTE_FIELDS.items():
+                queued_payload.setdefault(field, value)
         self.insert_alert(alert_id, severity, "2026-07-24  12:00:00Z", 80)
         self.set_stable_group(alert_id, group_id)
         if current_alert_group_key is not None:
@@ -593,20 +654,65 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             controlled_runtime.parent.chmod(0o700)
             controlled_runtime.chmod(0o700)
         worker_root = controlled_runtime if controlled_evaluation else root
-        db_path = root / "alerts.sqlite3"
+        runtime_directories = {
+            name: worker_root / name
+            for name in (
+                "prompts",
+                "analysis",
+                "prior-analysis",
+                "pcap-analysis",
+                "rollups",
+                "agent-memory",
+                "incident-evidence",
+                "investigation-pivots",
+                "tmp",
+            )
+        }
+        for path in runtime_directories.values():
+            path.mkdir(mode=0o700, exist_ok=True)
+            path.chmod(0o700)
+        db_path = worker_root / "alerts.sqlite3"
         disk_conn = sqlite3.connect(db_path)
         try:
             self.conn.backup(disk_conn)
         finally:
             disk_conn.close()
+        db_path.chmod(0o600)
 
         settings_path = worker_root / "ai_model_settings.json"
-        settings_path.write_text(
-            json.dumps(
+        settings = {
+            "soc_analyst_analysis_min_severity": analysis_threshold,
+        }
+        if controlled_evaluation:
+            controlled_agent_role = (
+                "incident-responder"
+                if job_type == "incident_response_analysis"
+                else "soc-analyst"
+            )
+            settings.update(
                 {
-                    "soc_analyst_analysis_min_severity": analysis_threshold,
+                    "agent_models": {
+                        controlled_agent_role: PRIMARY_ROUTE,
+                    },
+                    "agent_second_opinion_models": {
+                        controlled_agent_role: REVIEWER_ROUTE,
+                    },
+                    "codex_cli_models": [
+                        {
+                            "model": "gpt-5.5",
+                            "reasoning_effort": "high",
+                            "enabled": True,
+                        },
+                        {
+                            "model": "gpt-5.6-sol",
+                            "reasoning_effort": "xhigh",
+                            "enabled": True,
+                        },
+                    ],
                 }
-            ),
+            )
+        settings_path.write_text(
+            json.dumps(settings),
             encoding="utf-8",
         )
         settings_path.chmod(0o600)
@@ -616,16 +722,58 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         detection_playbooks_path = worker_root / "detection_playbooks.json"
         detection_playbooks_path.write_text("{}\n", encoding="utf-8")
         detection_playbooks_path.chmod(0o600)
+        investigation_skills_path = worker_root / "investigation_skills.json"
+        investigation_skills_path.write_text("{}\n", encoding="utf-8")
+        investigation_skills_path.chmod(0o600)
+        shared_memory_path = worker_root / "shared-agent-memory.md"
+        shared_memory_path.write_text("\n", encoding="utf-8")
+        shared_memory_path.chmod(0o600)
+        asset_inventory_path = worker_root / "asset-inventory.json"
+        asset_inventory_path.write_text("{}\n", encoding="utf-8")
+        asset_inventory_path.chmod(0o600)
+        live_osquery_path = worker_root / "live-osquery.json"
+        live_osquery_path.write_text(
+            '{"enabled":false}\n',
+            encoding="utf-8",
+        )
+        live_osquery_path.chmod(0o600)
+        disagreement_prompt_path = worker_root / "disagreement.md"
+        disagreement_prompt_path.write_text("\n", encoding="utf-8")
+        disagreement_prompt_path.chmod(0o600)
+        for role_name in ("soc_analyst", "incident_responder"):
+            for suffix in ("system_prompt.md", "second_opinion_prompt.md"):
+                prompt = worker_root / f"{role_name}_{suffix}"
+                prompt.write_text("\n", encoding="utf-8")
+                prompt.chmod(0o600)
+        for role_name in ("soc-analyst", "incident-responder"):
+            memory = runtime_directories["agent-memory"] / f"{role_name}-memory.md"
+            memory.write_text("\n", encoding="utf-8")
+            memory.chmod(0o600)
+        relay_config_path = write_controlled_route_fixture(
+            worker_root,
+            controlled_home,
+        )
         args = SimpleNamespace(
             db=db_path,
-            prompt_dir=worker_root / "prompts",
-            analysis_dir=worker_root / "analysis",
-            pcap_analysis_dir=worker_root / "pcap-analysis",
-            incident_evidence_dir=worker_root / "incident-evidence",
-            incident_evidence_config=root / "incident-evidence.json",
+            prompt_dir=runtime_directories["prompts"],
+            analysis_dir=runtime_directories["analysis"],
+            prior_analysis_dir=runtime_directories["prior-analysis"],
+            pcap_analysis_dir=runtime_directories["pcap-analysis"],
+            rollup_dir=runtime_directories["rollups"],
+            agent_memory_dir=runtime_directories["agent-memory"],
+            shared_memory_file=shared_memory_path,
+            asset_inventory_file=asset_inventory_path,
+            incident_evidence_dir=runtime_directories["incident-evidence"],
+            incident_evidence_config=relay_config_path,
+            investigation_pivot_dir=runtime_directories[
+                "investigation-pivots"
+            ],
+            live_osquery_config=live_osquery_path,
+            disagreement_adjudicator_prompt_file=disagreement_prompt_path,
             ai_settings_file=settings_path,
             investigation_harness_policy=harness_policy_path,
             detection_playbooks=detection_playbooks_path,
+            investigation_skills=investigation_skills_path,
             provider_lane="any",
             lock_file=worker_root / "worker.lock",
             wake_file=worker_root / "worker.wake",
@@ -667,6 +815,9 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             expected_representative_alert_id: str = "",
             expected_dispatch_id: str = "",
             expected_stable_group_key: str = "",
+            expected_assigned_route: str = "",
+            expected_reviewer_route: str = "",
+            reviewer_required: bool = False,
         ) -> bool | str:
             del lease_token, retryable
             if status != "processing":
@@ -711,6 +862,22 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                 authoritative_payload.setdefault(
                     "release_id",
                     DEPLOYED_RELEASE,
+                )
+                authoritative_payload.setdefault(
+                    "agent_role",
+                    queued_payload["agent_role"],
+                )
+                authoritative_payload.setdefault(
+                    "expected_assigned_route",
+                    expected_assigned_route,
+                )
+                authoritative_payload.setdefault(
+                    "expected_reviewer_route",
+                    expected_reviewer_route,
+                )
+                authoritative_payload.setdefault(
+                    "reviewer_required",
+                    reviewer_required,
                 )
             return self.scheduler.ClaimedAiLease(
                 "threshold-test-lease",
@@ -767,11 +934,13 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                     ),
                     "ONION_SENTINEL_EVALUATION_FREEZE_MEMORY": "1",
                     "ONION_SENTINEL_EVALUATION_TOKEN": "f" * 64,
+                    "TMPDIR": str(runtime_directories["tmp"]),
                 }
             )
         with (
             mock.patch.object(self.scheduler, "parse_args", return_value=args),
             mock.patch.object(self.scheduler, "HOME", controlled_home),
+            mock.patch.object(self.scheduler.tempfile, "tempdir", None),
             mock.patch.object(self.scheduler, "require_runtime_capacity"),
             mock.patch.object(self.scheduler, "consume_wake_marker"),
             mock.patch.object(self.scheduler, "flush_deferred_analysis_results"),

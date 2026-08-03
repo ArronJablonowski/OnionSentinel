@@ -44,6 +44,54 @@ SCHEDULER_PATH = BIN_DIR / "auto-run-ai-analysis.py"
 RELEASE_ID = "c" * 40
 REPLACEMENT_RELEASE_ID = "f" * 40
 EVALUATION_TOKEN = "9" * 64
+PRIMARY_ROUTE = "codex-cli:gpt-5.5:high"
+REVIEWER_ROUTE = "codex-cli:gpt-5.6-sol:xhigh"
+CONTROLLED_ROUTE_FIELDS = {
+    "expected_assigned_route": PRIMARY_ROUTE,
+    "expected_reviewer_route": REVIEWER_ROUTE,
+    "reviewer_required": True,
+}
+
+
+def write_controlled_route_fixture(
+    runtime: Path,
+    home: Path,
+    *,
+    name: str = "incident-evidence.json",
+) -> tuple[Path, Path, Path]:
+    """Create a synthetic exact Relay route without copying live key data."""
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ssh_dir.chmod(0o700)
+    ssh_key = ssh_dir / "onion-sentinel-incident-evidence_ed25519"
+    known_hosts = runtime / "relay_known_hosts"
+    ssh_key.write_text("synthetic-private-key-fixture\n", encoding="utf-8")
+    known_hosts.write_text("synthetic-known-host-fixture\n", encoding="utf-8")
+    ssh_key.chmod(0o600)
+    known_hosts.chmod(0o600)
+    route = runtime / name
+    route.write_text(
+        json.dumps(
+            {
+                "investigation_query_contract": (
+                    "onion-sentinel-investigation-pivots-v2"
+                ),
+                "host": "10.88.8.8",
+                "ssh_user": "aj",
+                "ssh_key": str(ssh_key),
+                "known_hosts": str(known_hosts),
+                "connect_timeout_seconds": 20,
+                "timeout_seconds": 420,
+                "max_response_bytes": 8 * 1024 * 1024,
+                "max_stderr_bytes": 256 * 1024,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    route.chmod(0o600)
+    return route, ssh_key, known_hosts
 
 CONTROLLED_CREDENTIAL_KEYS = {
     "TELEGRAM_BOT_TOKEN",
@@ -515,6 +563,7 @@ class ControlledAlertStoreTests(unittest.TestCase):
             "cohort_id": cohort_id,
             "dispatch_id": dispatch_id,
             "release_id": RELEASE_ID,
+            **CONTROLLED_ROUTE_FIELDS,
         }
         if agent_role is not None:
             job_payload["agent_role"] = agent_role
@@ -668,6 +717,7 @@ class ControlledAlertStoreTests(unittest.TestCase):
                 "cohort_id": cohort_id,
                 "dispatch_id": dispatch_id,
                 "release_id": RELEASE_ID,
+                **CONTROLLED_ROUTE_FIELDS,
                 "requested_by": "controlled-retirement-test",
                 "reason": (
                     "Complete a real controlled claim/result lifecycle."
@@ -700,6 +750,7 @@ class ControlledAlertStoreTests(unittest.TestCase):
                 "expected_representative_alert_id": alert_id,
                 "expected_dispatch_id": dispatch_id,
                 "expected_stable_group_key": stable_group_key,
+                **CONTROLLED_ROUTE_FIELDS,
             },
         )
         self.assertEqual(status, 200, claim)
@@ -765,6 +816,7 @@ class ControlledAlertStoreTests(unittest.TestCase):
             "cohort_id": cohort_id,
             "dispatch_id": dispatch_id,
             "release_id": retired_release_id,
+            **CONTROLLED_ROUTE_FIELDS,
             "requested_by": "controlled-retirement-test",
             "reason": "Create one exact failed controlled attempt.",
         }
@@ -799,6 +851,7 @@ class ControlledAlertStoreTests(unittest.TestCase):
                 "expected_representative_alert_id": alert_id,
                 "expected_dispatch_id": dispatch_id,
                 "expected_stable_group_key": stable_group_key,
+                **CONTROLLED_ROUTE_FIELDS,
             },
         )
         self.assertEqual(status, 200, claim)
@@ -911,6 +964,7 @@ class ControlledAlertStoreTests(unittest.TestCase):
                 "expected_representative_alert_id": alert_id,
                 "expected_dispatch_id": dispatch_id,
                 "expected_stable_group_key": stable_group_key,
+                **CONTROLLED_ROUTE_FIELDS,
             },
         )
 
@@ -936,6 +990,7 @@ class ControlledAlertStoreTests(unittest.TestCase):
             "agent_role": "soc-analyst",
             "reanalysis_attempt_id": "",
             "release_id": RELEASE_ID,
+            **CONTROLLED_ROUTE_FIELDS,
         }
         claim_digest = hashlib.sha256(
             json.dumps(
@@ -952,6 +1007,12 @@ class ControlledAlertStoreTests(unittest.TestCase):
             "confidence": "low",
             "_analysis_evaluation_memory_frozen": True,
             "_analysis_controlled_claim_sha256": claim_digest,
+            "_analysis_model_route": PRIMARY_ROUTE,
+            "_second_opinion": {
+                "status": "completed",
+                "model_route": REVIEWER_ROUTE,
+                "response": {"_analysis_model_route": REVIEWER_ROUTE},
+            },
         }
         return {
             "analysis_id": analysis_id,
@@ -991,6 +1052,7 @@ class ControlledAlertStoreTests(unittest.TestCase):
                 "reanalysis_attempt_id"
             ],
             "release_id": RELEASE_ID,
+            **CONTROLLED_ROUTE_FIELDS,
         }
         claim_digest = hashlib.sha256(
             json.dumps(
@@ -1011,11 +1073,13 @@ class ControlledAlertStoreTests(unittest.TestCase):
             ),
             "confidence": "low",
             "_analysis_provider": "codex-cli",
+            "_analysis_model_route": PRIMARY_ROUTE,
             "_analysis_evaluation_memory_frozen": True,
             "_analysis_controlled_claim_sha256": claim_digest,
             "_second_opinion": {
                 "trigger": "required",
                 "status": "completed",
+                "model_route": REVIEWER_ROUTE,
                 "error": "",
                 "runtime_seconds": 0.25,
                 "response": {
@@ -1025,6 +1089,7 @@ class ControlledAlertStoreTests(unittest.TestCase):
                         "synthetic-controlled-reviewer"
                     ),
                     "_analysis_model_path": "frontier-codex-cli",
+                    "_analysis_model_route": REVIEWER_ROUTE,
                 },
                 "comparison": {
                     "agreement": "agree",
@@ -2302,6 +2367,7 @@ class ControlledAlertStoreTests(unittest.TestCase):
             "cohort_id": "controlled-cohort-ir-replay",
             "dispatch_id": dispatch_id,
             "release_id": RELEASE_ID,
+            **CONTROLLED_ROUTE_FIELDS,
             "requested_by": "controlled-runtime-test",
             "reason": "Prove exact controlled dispatch replay.",
         }
@@ -2479,6 +2545,7 @@ class ControlledAlertStoreTests(unittest.TestCase):
             "cohort_id": "controlled-cohort-soc-dispatch",
             "dispatch_id": dispatch_id,
             "release_id": RELEASE_ID,
+            **CONTROLLED_ROUTE_FIELDS,
             "requested_by": "controlled-runtime-test",
             "reason": "Prove controlled SOC dispatch role survives heartbeat.",
         }
@@ -2582,6 +2649,108 @@ class ControlledAlertStoreTests(unittest.TestCase):
                 ).fetchone(),
                 ("pending", 0, None, None),
             )
+
+    def test_controlled_dispatch_rejects_same_model_different_effort(self) -> None:
+        case_id = "ir-controlled-same-model-dispatch"
+        group_id = "29292929292929292929"
+        alert_id = "controlled-alert-same-model-dispatch"
+        stable_key = "v2|controlled|same-model-dispatch"
+        self.seed_controlled_incident_case(
+            case_id=case_id,
+            group_id=group_id,
+            alert_id=alert_id,
+            stable_group_key=stable_key,
+        )
+        self.start_controlled()
+        status, rejected = request_json(
+            f"{self.base_url}/incidents/reanalyze",
+            "POST",
+            {
+                "case_id": case_id,
+                "representative_alert_id": alert_id,
+                "stable_group_id": group_id,
+                "stable_group_key": stable_key,
+                "cohort_id": "controlled-same-model-dispatch",
+                "dispatch_id": "2" * 63 + "9",
+                "release_id": RELEASE_ID,
+                "expected_assigned_route": PRIMARY_ROUTE,
+                "expected_reviewer_route": "codex-cli:gpt-5.5:xhigh",
+                "reviewer_required": True,
+                "requested_by": "controlled-runtime-test",
+                "reason": "Reject a reviewer using the primary model base.",
+            },
+        )
+        self.assertEqual(status, 409, rejected)
+        with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM durable_jobs WHERE dedupe_key = ?",
+                    (group_id,),
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT agent_status FROM incident_response_cases "
+                    "WHERE case_id = ?",
+                    (case_id,),
+                ).fetchone()[0],
+                "analyzed",
+            )
+
+    def test_exact_claim_requires_all_seven_route_bound_fields(self) -> None:
+        frozen = {
+            "group_id": "30303030303030303030",
+            "alert_id": "controlled-alert-seven-field-claim",
+            "stable_group_key": "v2|controlled|seven-field-claim",
+            "dispatch_id": "3" * 64,
+        }
+        job_id = self.seed_controlled_job(**frozen)
+        self.start_controlled()
+        base = {
+            "job_type": "ai_analysis",
+            "dedupe_key": frozen["group_id"],
+            "status": "processing",
+            "error": "",
+            "lease_token": "",
+            "retryable": True,
+            "expected_job_id": job_id,
+            "expected_representative_alert_id": frozen["alert_id"],
+            "expected_dispatch_id": frozen["dispatch_id"],
+            "expected_stable_group_key": frozen["stable_group_key"],
+            **CONTROLLED_ROUTE_FIELDS,
+        }
+        mutations = {
+            "missing-reviewer-route": lambda item: item.pop(
+                "expected_reviewer_route"
+            ),
+            "drifted-reviewer-route": lambda item: item.__setitem__(
+                "expected_reviewer_route", "codex-cli:gpt-5.6-terra:xhigh"
+            ),
+            "same-model-different-effort": lambda item: item.__setitem__(
+                "expected_reviewer_route", "codex-cli:gpt-5.5:xhigh"
+            ),
+            "reviewer-not-required": lambda item: item.__setitem__(
+                "reviewer_required", False
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                request = dict(base)
+                mutate(request)
+                status, rejected = request_json(
+                    f"{self.base_url}/jobs/status", "POST", request
+                )
+                self.assertEqual(status, 409, rejected)
+                with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT status, attempt_count, lease_token "
+                            "FROM durable_jobs WHERE id = ?",
+                            (job_id,),
+                        ).fetchone(),
+                        ("pending", 0, None),
+                    )
 
     def test_claimed_job_rejects_role_drift_before_heartbeat_or_result(
         self,
@@ -2695,6 +2864,9 @@ class ControlledAlertStoreTests(unittest.TestCase):
                 expected_representative_alert_id=frozen["alert_id"],
                 expected_dispatch_id=frozen["dispatch_id"],
                 expected_stable_group_key=frozen["stable_group_key"],
+                expected_assigned_route=PRIMARY_ROUTE,
+                expected_reviewer_route=REVIEWER_ROUTE,
+                reviewer_required=True,
             )
             self.assertIsInstance(
                 claim,
@@ -3121,6 +3293,72 @@ class ControlledAlertStoreTests(unittest.TestCase):
                 ).fetchone()[0],
                 "processing",
             )
+
+    def test_controlled_result_requires_exact_primary_and_reviewer_routes(
+        self,
+    ) -> None:
+        frozen = {
+            "group_id": "69696969696969696969",
+            "alert_id": "controlled-alert-route-result",
+            "stable_group_key": "v2|controlled|route-result",
+            "dispatch_id": "6" * 63 + "9",
+        }
+        job_id = self.seed_controlled_job(**frozen)
+        self.start_controlled()
+        status, claim = self.claim_controlled_job(job_id=job_id, **frozen)
+        self.assertEqual(status, 200, claim)
+        base = self.controlled_result_payload(
+            analysis_id="controlled-route-result",
+            claim=claim,
+        )
+        mutations = {
+            "primary-route": lambda item: item["response"].__setitem__(
+                "_analysis_model_route", "codex-cli:gpt-5.6-terra:high"
+            ),
+            "reviewer-route": lambda item: item["response"][
+                "_second_opinion"
+            ].__setitem__(
+                "model_route", "codex-cli:gpt-5.6-terra:xhigh"
+            ),
+            "nested-reviewer-route": lambda item: item["response"][
+                "_second_opinion"
+            ]["response"].__setitem__(
+                "_analysis_model_route", "codex-cli:gpt-5.6-terra:xhigh"
+            ),
+            "same-model-different-effort": lambda item: item["response"][
+                "_second_opinion"
+            ].__setitem__(
+                "model_route", "codex-cli:gpt-5.5:xhigh"
+            ),
+        }
+        for index, (label, mutate) in enumerate(mutations.items(), start=1):
+            with self.subTest(label=label):
+                candidate = json.loads(json.dumps(base))
+                candidate["analysis_id"] = f"controlled-route-result-{index}"
+                mutate(candidate)
+                result_status, rejected = request_json(
+                    f"{self.base_url}/analysis/result",
+                    "POST",
+                    candidate,
+                )
+                self.assertEqual(result_status, 409, rejected)
+                with closing(sqlite3.connect(self.db, timeout=5)) as connection:
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT status, attempt_count, lease_token "
+                            "FROM durable_jobs WHERE id = ?",
+                            (job_id,),
+                        ).fetchone(),
+                        ("processing", 1, claim["lease_token"]),
+                    )
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM ai_analysis_runs "
+                            "WHERE analysis_id = ?",
+                            (candidate["analysis_id"],),
+                        ).fetchone()[0],
+                        0,
+                    )
 
     def test_committed_result_replay_rejects_response_content_change(
         self,
@@ -4520,6 +4758,14 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
             ),
             "ONION_SENTINEL_EVALUATION_AGENT_ROLE": "soc-analyst",
             "ONION_SENTINEL_EVALUATION_REANALYSIS_ATTEMPT_ID": "",
+            "ONION_SENTINEL_EVALUATION_RELEASE_ID": RELEASE_ID,
+            "ONION_SENTINEL_EVALUATION_EXPECTED_ASSIGNED_ROUTE": (
+                "codex-cli:gpt-5.5:high"
+            ),
+            "ONION_SENTINEL_EVALUATION_EXPECTED_REVIEWER_ROUTE": (
+                "codex-cli:gpt-5.6-sol:xhigh"
+            ),
+            "ONION_SENTINEL_EVALUATION_REVIEWER_REQUIRED": "1",
             "ONION_SENTINEL_RELEASE_ID": RELEASE_ID,
         }
         result_keys = tuple(
@@ -4554,13 +4800,18 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
             runtime.mkdir(parents=True, mode=0o700)
             parent.chmod(0o700)
             runtime.chmod(0o700)
+            controlled_tmp = runtime / "tmp"
+            controlled_tmp.mkdir(mode=0o700)
+            controlled_tmp.chmod(0o700)
             environment = {
                 "ONION_SENTINEL_EVALUATION_MODE": "1",
                 "ONION_SENTINEL_EVALUATION_RUNTIME_DIR": str(runtime),
                 "ONION_SENTINEL_EVALUATION_TOKEN": EVALUATION_TOKEN,
+                "TMPDIR": str(controlled_tmp),
             }
             with (
                 mock.patch.object(self.runner, "HOME", home),
+                mock.patch.object(self.runner.tempfile, "tempdir", None),
                 mock.patch.dict(os.environ, environment, clear=False),
             ):
                 self.assertEqual(
@@ -4599,12 +4850,264 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
             ] = str(outside)
             with (
                 mock.patch.object(self.runner, "HOME", home),
+                mock.patch.object(self.runner.tempfile, "tempdir", None),
                 mock.patch.dict(os.environ, environment, clear=False),
             ):
                 with self.assertRaisesRegex(SystemExit, "is unsafe"):
                     self.runner.controlled_evaluation_runtime(
                         "http://127.0.0.1:18787"
                     )
+
+    def test_controlled_tmpdir_rejects_unisolated_paths_and_pins_valid_path(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            runtime = root / "evaluation"
+            controlled_tmp = runtime / "tmp"
+            outside = root / "outside"
+            permissive = runtime / "permissive"
+            runtime.mkdir(mode=0o700)
+            controlled_tmp.mkdir(mode=0o700)
+            outside.mkdir(mode=0o700)
+            permissive.mkdir(mode=0o755)
+            linked = runtime / "linked"
+            linked.symlink_to(controlled_tmp, target_is_directory=True)
+            failures = (
+                ("", "explicit canonical"),
+                (str(outside), "inside the evaluation runtime"),
+                (str(linked), "canonical owner-private"),
+                (str(permissive), "canonical owner-private"),
+            )
+            for module in (self.scheduler, self.runner):
+                for supplied, expected in failures:
+                    with self.subTest(
+                        module=module.__name__,
+                        tmpdir=supplied or "missing",
+                    ):
+                        with (
+                            mock.patch.object(module.tempfile, "tempdir", None),
+                            mock.patch.dict(
+                                os.environ,
+                                {"TMPDIR": supplied},
+                                clear=False,
+                            ),
+                        ):
+                            with self.assertRaisesRegex(ValueError, expected):
+                                module.pin_controlled_tmpdir(runtime)
+                with (
+                    mock.patch.object(module.tempfile, "tempdir", None),
+                    mock.patch.dict(
+                        os.environ,
+                        {"TMPDIR": str(controlled_tmp)},
+                        clear=False,
+                    ),
+                ):
+                    self.assertEqual(
+                        module.pin_controlled_tmpdir(runtime),
+                        controlled_tmp,
+                    )
+                    self.assertEqual(module.tempfile.tempdir, str(controlled_tmp))
+                    self.assertEqual(os.environ["TMPDIR"], str(controlled_tmp))
+
+    def test_controlled_relay_route_is_exact_bounded_and_runtime_owned(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            home = root / "home"
+            runtime = root / "evaluation"
+            runtime.mkdir(mode=0o700)
+            route, _, _ = write_controlled_route_fixture(runtime, home)
+            baseline = json.loads(route.read_text(encoding="utf-8"))
+            outside_route = root / "outside-incident-evidence.json"
+            outside_route.write_text(
+                json.dumps(baseline) + "\n",
+                encoding="utf-8",
+            )
+            outside_route.chmod(0o600)
+            rogue_key_dir = root / "rogue-key"
+            rogue_key_dir.mkdir(mode=0o700)
+            rogue_key = (
+                rogue_key_dir
+                / "onion-sentinel-incident-evidence_ed25519"
+            )
+            rogue_key.write_text("synthetic-rogue-key\n", encoding="utf-8")
+            rogue_key.chmod(0o600)
+            outside_known_hosts = home / ".ssh" / "known_hosts"
+            outside_known_hosts.write_text(
+                "synthetic-global-known-host\n",
+                encoding="utf-8",
+            )
+            outside_known_hosts.chmod(0o600)
+            wrong_known_hosts = runtime / "known_hosts"
+            wrong_known_hosts.write_text(
+                "synthetic-wrong-known-host-name\n",
+                encoding="utf-8",
+            )
+            wrong_known_hosts.chmod(0o600)
+            nested_known_hosts_dir = runtime / "nested"
+            nested_known_hosts_dir.mkdir(mode=0o700)
+            nested_known_hosts = nested_known_hosts_dir / "relay_known_hosts"
+            nested_known_hosts.write_text(
+                "synthetic-nested-known-host\n",
+                encoding="utf-8",
+            )
+            nested_known_hosts.chmod(0o600)
+            for module in (self.scheduler, self.runner):
+                route.write_text(
+                    json.dumps(baseline) + "\n",
+                    encoding="utf-8",
+                )
+                route.chmod(0o600)
+                with self.subTest(module=module.__name__, case="valid"):
+                    self.assertEqual(
+                        module.validate_controlled_incident_evidence_route(
+                            route,
+                            runtime,
+                            expected_home=home,
+                        ),
+                        baseline,
+                    )
+                with self.subTest(module=module.__name__, case="outside"):
+                    with self.assertRaisesRegex(ValueError, "must stay inside"):
+                        module.validate_controlled_incident_evidence_route(
+                            outside_route,
+                            runtime,
+                            expected_home=home,
+                        )
+                for field, value, expected in (
+                    ("host", "10.88.8.9", "exact read-only route"),
+                    ("ssh_user", "root", "exact read-only route"),
+                    (
+                        "investigation_query_contract",
+                        "onion-sentinel-investigation-pivots-v1",
+                        "exact read-only route",
+                    ),
+                    (
+                        "max_response_bytes",
+                        (8 * 1024 * 1024) + 1,
+                        "bounded transport limit",
+                    ),
+                    ("ssh_key", str(rogue_key), "path is not approved"),
+                    (
+                        "known_hosts",
+                        str(outside_known_hosts),
+                        "path is not approved",
+                    ),
+                    (
+                        "known_hosts",
+                        str(wrong_known_hosts),
+                        "path is not approved",
+                    ),
+                    (
+                        "known_hosts",
+                        str(nested_known_hosts),
+                        "path is not approved",
+                    ),
+                ):
+                    with self.subTest(
+                        module=module.__name__,
+                        case=f"tampered-{field}",
+                    ):
+                        tampered = dict(baseline)
+                        tampered[field] = value
+                        route.write_text(
+                            json.dumps(tampered) + "\n",
+                            encoding="utf-8",
+                        )
+                        route.chmod(0o600)
+                        with self.assertRaisesRegex(ValueError, expected):
+                            module.validate_controlled_incident_evidence_route(
+                                route,
+                                runtime,
+                                expected_home=home,
+                            )
+            route.write_text(
+                json.dumps(baseline) + "\n",
+                encoding="utf-8",
+            )
+            route.chmod(0o600)
+
+    def test_controlled_codex_primary_and_reviewer_use_explicit_tmp_parent(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary).resolve()
+            controlled_tmp = runtime / "tmp"
+            controlled_tmp.mkdir(mode=0o700)
+            invocations: list[dict[str, object]] = []
+
+            def fake_run(command, **kwargs):
+                final_path = Path(
+                    command[command.index("--output-last-message") + 1]
+                )
+                final_path.write_text("{}\n", encoding="utf-8")
+                invocations.append({"command": command, **kwargs})
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            args = SimpleNamespace(
+                timeout=30,
+                max_response_bytes=1024 * 1024,
+            )
+            transport = (
+                {"prompt_package": {"response_schema": {}}},
+                "{}",
+            )
+            with (
+                mock.patch.object(
+                    self.runner,
+                    "_CONTROLLED_EVALUATION_TMPDIR",
+                    controlled_tmp,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "resolve_codex_cli",
+                    return_value="/usr/bin/true",
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "prepare_codex_cli_transport",
+                    return_value=transport,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "run_bounded_command",
+                    side_effect=fake_run,
+                ),
+                mock.patch.dict(
+                    os.environ,
+                    {"TMPDIR": str(controlled_tmp)},
+                    clear=False,
+                ),
+            ):
+                self.runner.cloud_cli_chat(
+                    {},
+                    args,
+                    {},
+                    model="gpt-5.5",
+                    reasoning_effort="high",
+                )
+                self.runner.cloud_cli_chat(
+                    {},
+                    args,
+                    {},
+                    model="gpt-5.6-sol",
+                    reasoning_effort="xhigh",
+                    independent_review=True,
+                )
+
+            self.assertEqual(len(invocations), 2)
+            for invocation in invocations:
+                cwd = Path(invocation["cwd"])
+                cwd.relative_to(controlled_tmp)
+                environment = invocation["env"]
+                self.assertEqual(environment["TMPDIR"], str(controlled_tmp))
+                command = invocation["command"]
+                self.assertEqual(
+                    Path(command[command.index("-C") + 1]),
+                    cwd,
+                )
 
     def test_direct_controlled_run_local_requires_isolated_out_dir(
         self,
@@ -4899,6 +5402,9 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
                 ),
                 expected_dispatch_id="7" * 64,
                 expected_stable_group_key="v2|controlled|claim-retry",
+                expected_assigned_route="codex-cli:gpt-5.5:high",
+                expected_reviewer_route="codex-cli:gpt-5.6-sol:xhigh",
+                reviewer_required=True,
             )
         self.assertEqual(
             claim,
@@ -4910,6 +5416,282 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
             urlopen.call_args_list[1].args[0].data,
         )
 
+    def test_controlled_route_contract_rejects_before_transport_or_analysis(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings_path = Path(temporary) / "ai-settings.json"
+            assigned = "codex-cli:gpt-5.5:high"
+            reviewer = "codex-cli:gpt-5.6-sol:xhigh"
+            settings = {
+                "agent_models": {"soc-analyst": assigned},
+                "agent_second_opinion_models": {"soc-analyst": reviewer},
+                "codex_cli_models": [
+                    {"model": "gpt-5.5", "reasoning_effort": "high", "enabled": True},
+                    {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh", "enabled": True},
+                ],
+            }
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
+            args = SimpleNamespace(
+                only_group_id="7" * 20,
+                only_alert_id="controlled-alert-route",
+                only_stable_group_key="v2|controlled|route",
+                only_dispatch_id="7" * 64,
+                ai_settings_file=settings_path,
+            )
+            base_payload = {
+                "alert_id": args.only_alert_id,
+                "representative_alert_id": args.only_alert_id,
+                "group_id": args.only_group_id,
+                "stable_group_id": args.only_group_id,
+                "stable_group_key": args.only_stable_group_key,
+                "dispatch_id": args.only_dispatch_id,
+                "release_id": RELEASE_ID,
+                "agent_role": "soc-analyst",
+                "expected_assigned_route": assigned,
+                "expected_reviewer_route": reviewer,
+                "reviewer_required": True,
+            }
+            selected = {"durable_job_id": 17}
+            environment = {"ONION_SENTINEL_RELEASE_ID": RELEASE_ID}
+            with mock.patch.dict(os.environ, environment, clear=False):
+                exact = self.scheduler.controlled_claim_expectations(
+                    args, selected, dict(base_payload)
+                )
+            self.assertEqual(exact["expected_assigned_route"], assigned)
+            self.assertEqual(exact["expected_reviewer_route"], reviewer)
+            self.assertIs(exact["reviewer_required"], True)
+
+            mutations = {
+                "missing": lambda value: value.pop("expected_reviewer_route"),
+                "tampered": lambda value: value.__setitem__(
+                    "expected_reviewer_route", "codex-cli:gpt-5.6-terra:xhigh"
+                ),
+                "alias": lambda value: value.__setitem__(
+                    "expected_assigned_route", "codex-cli"
+                ),
+                "hermes": lambda value: value.__setitem__(
+                    "expected_assigned_route", "hermes-agent:gpt-5.5:high"
+                ),
+                "openclaw": lambda value: value.__setitem__(
+                    "expected_assigned_route", "openclaw:gpt-5.5:high"
+                ),
+                "reviewer-false": lambda value: value.__setitem__(
+                    "reviewer_required", False
+                ),
+                "same-model-different-effort": lambda value: value.__setitem__(
+                    "expected_reviewer_route", "codex-cli:gpt-5.5:xhigh"
+                ),
+            }
+            for label, mutate in mutations.items():
+                with self.subTest(label=label):
+                    candidate = dict(base_payload)
+                    mutate(candidate)
+                    with (
+                        mock.patch.object(self.scheduler.urllib.request, "urlopen") as transport,
+                        mock.patch.object(self.scheduler, "collect_incident_evidence") as collector,
+                        mock.patch.object(self.scheduler, "run_analysis") as model,
+                        mock.patch.dict(os.environ, environment, clear=False),
+                    ):
+                        with self.assertRaises(self.scheduler.ControlledClaimRejected):
+                            self.scheduler.controlled_claim_expectations(
+                                args, selected, candidate
+                            )
+                    transport.assert_not_called()
+                    collector.assert_not_called()
+                    model.assert_not_called()
+
+    def test_runner_route_recheck_precedes_relay_and_model_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings_path = Path(temporary) / "ai-settings.json"
+            assigned = "codex-cli:gpt-5.5:high"
+            reviewer = "codex-cli:gpt-5.6-sol:xhigh"
+            settings = {
+                "agent_models": {"incident-responder": assigned},
+                "agent_second_opinion_models": {"incident-responder": reviewer},
+                "codex_cli_models": [
+                    {"model": "gpt-5.5", "reasoning_effort": "high", "enabled": True},
+                    {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh", "enabled": True},
+                ],
+            }
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
+            args = SimpleNamespace(ai_settings_file=settings_path)
+            identity = {
+                "agent_role": "incident-responder",
+                "expected_assigned_route": assigned,
+                "expected_reviewer_route": reviewer,
+                "reviewer_required": True,
+            }
+            self.runner.require_controlled_evaluation_routes(
+                identity, args, settings, "incident-responder"
+            )
+            tampered = dict(identity)
+            tampered["expected_assigned_route"] = "codex-cli:gpt-5.6-terra:high"
+            with (
+                mock.patch.object(self.runner, "prepare_live_osquery_context") as relay,
+                mock.patch.object(self.runner, "analyze_model_route") as model,
+            ):
+                with self.assertRaises(SystemExit):
+                    self.runner.require_controlled_evaluation_routes(
+                        tampered, args, settings, "incident-responder"
+                    )
+            relay.assert_not_called()
+            model.assert_not_called()
+            same_model = dict(identity)
+            same_model["expected_reviewer_route"] = "codex-cli:gpt-5.5:xhigh"
+            with (
+                mock.patch.object(self.runner, "prepare_live_osquery_context") as relay,
+                mock.patch.object(self.runner, "analyze_model_route") as model,
+            ):
+                with self.assertRaises(SystemExit):
+                    self.runner.require_controlled_evaluation_routes(
+                        same_model, args, settings, "incident-responder"
+                    )
+            relay.assert_not_called()
+            model.assert_not_called()
+
+    def test_scheduler_strict_settings_rejection_precedes_transport_and_analysis(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings_path = Path(temporary) / "ai-settings.json"
+            args = SimpleNamespace(
+                only_group_id="8" * 20,
+                only_alert_id="controlled-alert-strict-settings",
+                only_stable_group_key="v2|controlled|strict-settings",
+                only_dispatch_id="8" * 64,
+                ai_settings_file=settings_path,
+            )
+            payload = {
+                "alert_id": args.only_alert_id,
+                "representative_alert_id": args.only_alert_id,
+                "group_id": args.only_group_id,
+                "stable_group_id": args.only_group_id,
+                "stable_group_key": args.only_stable_group_key,
+                "dispatch_id": args.only_dispatch_id,
+                "release_id": RELEASE_ID,
+                "agent_role": "incident-responder",
+                **CONTROLLED_ROUTE_FIELDS,
+            }
+            base = {
+                "agent_models": {"incident-responder": PRIMARY_ROUTE},
+                "agent_second_opinion_models": {
+                    "incident-responder": REVIEWER_ROUTE
+                },
+                "codex_cli_models": [
+                    {
+                        "model": "gpt-5.5",
+                        "reasoning_effort": "high",
+                        "enabled": True,
+                    },
+                    {
+                        "model": "gpt-5.6-sol",
+                        "reasoning_effort": "xhigh",
+                        "enabled": True,
+                    },
+                ],
+            }
+            invalid_settings = {
+                "duplicate-roster": {
+                    **base,
+                    "codex_cli_models": base["codex_cli_models"]
+                    + [dict(base["codex_cli_models"][0])],
+                },
+                "malformed-roster": {
+                    **base,
+                    "codex_cli_models": ["not-an-object"],
+                },
+                "unsupported-model": {
+                    **base,
+                    "codex_cli_models": [
+                        {
+                            "model": "unsupported-model",
+                            "reasoning_effort": "high",
+                            "enabled": True,
+                        }
+                    ],
+                },
+                "mismatched-assignment": {
+                    **base,
+                    "agent_models": {
+                        "incident-responder": "codex-cli:gpt-5.6-terra:high"
+                    },
+                },
+            }
+            environment = {"ONION_SENTINEL_RELEASE_ID": RELEASE_ID}
+            for label, document in invalid_settings.items():
+                with self.subTest(label=label):
+                    settings_path.write_text(
+                        json.dumps(document), encoding="utf-8"
+                    )
+                    with (
+                        mock.patch.object(
+                            self.scheduler.urllib.request, "urlopen"
+                        ) as transport,
+                        mock.patch.object(
+                            self.scheduler, "collect_incident_evidence"
+                        ) as collector,
+                        mock.patch.object(
+                            self.scheduler, "run_analysis"
+                        ) as model,
+                        mock.patch.dict(os.environ, environment, clear=False),
+                    ):
+                        with self.assertRaises(
+                            self.scheduler.ControlledClaimRejected
+                        ):
+                            self.scheduler.controlled_claim_expectations(
+                                args, {"durable_job_id": 18}, payload
+                            )
+                    transport.assert_not_called()
+                    collector.assert_not_called()
+                    model.assert_not_called()
+
+    def test_controlled_model_override_fails_before_any_work(self) -> None:
+        args = SimpleNamespace(model="override-model")
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"ONION_SENTINEL_EVALUATION_MODE": "1"},
+                clear=False,
+            ),
+            mock.patch.object(self.scheduler.urllib.request, "urlopen") as transport,
+            mock.patch.object(self.scheduler, "collect_incident_evidence") as collector,
+            mock.patch.object(self.scheduler, "run_analysis") as model,
+        ):
+            with self.assertRaisesRegex(SystemExit, "forbids --model"):
+                self.scheduler.controlled_evaluation_runtime(args)
+        transport.assert_not_called()
+        collector.assert_not_called()
+        model.assert_not_called()
+        with mock.patch.dict(
+            os.environ,
+            {"ONION_SENTINEL_EVALUATION_MODE": "0"},
+            clear=False,
+        ):
+            self.assertIsNone(self.scheduler.controlled_evaluation_runtime(args))
+
+    def test_controlled_generate_prompt_fails_before_any_work(self) -> None:
+        args = SimpleNamespace(
+            model="",
+            generate_prompt=True,
+            alert_store_url="http://127.0.0.1:18787",
+        )
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"ONION_SENTINEL_EVALUATION_MODE": "1"},
+                clear=False,
+            ),
+            mock.patch.object(self.runner, "generate_prompt") as generate,
+            mock.patch.object(self.runner, "prepare_live_osquery_context") as relay,
+            mock.patch.object(self.runner, "analyze_model_route") as model,
+        ):
+            with self.assertRaisesRegex(SystemExit, "forbids --generate-prompt"):
+                self.runner.controlled_evaluation_runtime(args)
+        generate.assert_not_called()
+        relay.assert_not_called()
+        model.assert_not_called()
+
     def test_scheduler_requires_exact_frozen_owner_only_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             temporary_root = Path(temporary).resolve()
@@ -4919,16 +5701,74 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
             runtime.mkdir(parents=True, mode=0o700)
             parent.chmod(0o700)
             runtime.chmod(0o700)
-            settings = runtime / "ai-model-settings.json"
-            harness_policy = runtime / "investigation-harness-policy.json"
-            detection_playbooks = runtime / "detection-playbooks.json"
-            for path in (settings, harness_policy, detection_playbooks):
+            directories = {
+                name: runtime / name
+                for name in (
+                    "prompts",
+                    "analysis",
+                    "prior-analysis",
+                    "pcap-analysis",
+                    "rollups",
+                    "agent-memory",
+                    "incident-evidence",
+                    "investigation-pivots",
+                    "tmp",
+                )
+            }
+            for path in directories.values():
+                path.mkdir(mode=0o700)
+            settings = runtime / "ai_model_settings.json"
+            harness_policy = runtime / "investigation_harness_policy.json"
+            detection_playbooks = runtime / "detection_playbooks.json"
+            investigation_skills = runtime / "investigation_skills.json"
+            shared_memory = runtime / "shared-agent-memory.md"
+            asset_inventory = runtime / "asset_inventory.database-export.json"
+            live_osquery = runtime / "live-osquery.json"
+            disagreement_prompt = runtime / "disagreement_adjudicator_system_prompt.md"
+            database = runtime / "alerts.sqlite3"
+            runtime_files = (
+                settings,
+                harness_policy,
+                detection_playbooks,
+                investigation_skills,
+                shared_memory,
+                asset_inventory,
+                disagreement_prompt,
+                database,
+                runtime / "soc_analyst_system_prompt.md",
+                runtime / "soc_analyst_second_opinion_prompt.md",
+                runtime / "incident_responder_system_prompt.md",
+                runtime / "incident_responder_second_opinion_prompt.md",
+                directories["agent-memory"] / "soc-analyst-memory.md",
+                directories["agent-memory"] / "incident-responder-memory.md",
+            )
+            for path in runtime_files:
                 path.write_text("{}\n", encoding="utf-8")
                 path.chmod(0o600)
+            live_osquery.write_text(
+                '{"enabled":false}\n',
+                encoding="utf-8",
+            )
+            live_osquery.chmod(0o600)
+            relay_config, _, _ = write_controlled_route_fixture(
+                runtime,
+                home,
+            )
             args = SimpleNamespace(
-                prompt_dir=runtime / "prompts",
-                analysis_dir=runtime / "analysis",
-                incident_evidence_dir=runtime / "incident-evidence",
+                db=database,
+                prompt_dir=directories["prompts"],
+                analysis_dir=directories["analysis"],
+                prior_analysis_dir=directories["prior-analysis"],
+                pcap_analysis_dir=directories["pcap-analysis"],
+                rollup_dir=directories["rollups"],
+                agent_memory_dir=directories["agent-memory"],
+                shared_memory_file=shared_memory,
+                asset_inventory_file=asset_inventory,
+                incident_evidence_dir=directories["incident-evidence"],
+                incident_evidence_config=relay_config,
+                investigation_pivot_dir=directories["investigation-pivots"],
+                live_osquery_config=live_osquery,
+                disagreement_adjudicator_prompt_file=disagreement_prompt,
                 lock_file=runtime / "worker.lock",
                 wake_file=runtime / "worker.wake",
                 portal_wake_file=runtime / "dashboard.wake",
@@ -4941,6 +5781,7 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
                 ai_settings_file=settings,
                 investigation_harness_policy=harness_policy,
                 detection_playbooks=detection_playbooks,
+                investigation_skills=investigation_skills,
             )
             environment = {
                 "ONION_SENTINEL_EVALUATION_MODE": "1",
@@ -4948,9 +5789,11 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
                 "ONION_SENTINEL_EVALUATION_FREEZE_MEMORY": "1",
                 "ONION_SENTINEL_RELEASE_ID": RELEASE_ID,
                 "ONION_SENTINEL_EVALUATION_TOKEN": EVALUATION_TOKEN,
+                "TMPDIR": str(directories["tmp"]),
             }
             with (
                 mock.patch.object(self.scheduler, "HOME", home),
+                mock.patch.object(self.scheduler.tempfile, "tempdir", None),
                 mock.patch.dict(os.environ, environment, clear=False),
             ):
                 self.assertEqual(
@@ -4960,11 +5803,11 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
                 args.analysis_dir = temporary_root / "global-analysis"
                 with self.assertRaisesRegex(
                     SystemExit,
-                    "must stay inside",
+                    "analysis output directory",
                 ):
                     self.scheduler.controlled_evaluation_runtime(args)
 
-            args.analysis_dir = runtime / "analysis"
+            args.analysis_dir = directories["analysis"]
             args.investigation_harness_policy = (
                 temporary_root / "global-harness-policy.json"
             )
@@ -4975,11 +5818,12 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
             args.investigation_harness_policy.chmod(0o600)
             with (
                 mock.patch.object(self.scheduler, "HOME", home),
+                mock.patch.object(self.scheduler.tempfile, "tempdir", None),
                 mock.patch.dict(os.environ, environment, clear=False),
             ):
                 with self.assertRaisesRegex(
                     SystemExit,
-                    "runtime configuration must stay inside",
+                    "harness policy",
                 ):
                     self.scheduler.controlled_evaluation_runtime(args)
 
@@ -4987,6 +5831,7 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
             environment["ONION_SENTINEL_EVALUATION_FREEZE_MEMORY"] = "0"
             with (
                 mock.patch.object(self.scheduler, "HOME", home),
+                mock.patch.object(self.scheduler.tempfile, "tempdir", None),
                 mock.patch.dict(os.environ, environment, clear=False),
             ):
                 with self.assertRaisesRegex(
@@ -5023,6 +5868,258 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
                     controlled_evaluation=True,
                 ),
                 0,
+            )
+
+    def test_scheduler_propagates_every_frozen_context_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            prompt_path = root / "prompts" / "prompt.json"
+            prompt_path.parent.mkdir(mode=0o700)
+            prompt_path.write_text("{}\n", encoding="utf-8")
+            args = SimpleNamespace(
+                db=root / "alerts.sqlite3",
+                prompt_dir=root / "prompts",
+                analysis_dir=root / "analysis-output",
+                prior_analysis_dir=root / "prior-analysis",
+                pcap_analysis_dir=root / "pcap-analysis",
+                rollup_dir=root / "rollups",
+                agent_memory_dir=root / "agent-memory",
+                shared_memory_file=root / "shared-agent-memory.md",
+                asset_inventory_file=root / "asset-inventory.json",
+                incident_evidence_config=root / "incident-evidence.json",
+                investigation_pivot_dir=root / "investigation-pivots",
+                live_osquery_config=root / "live-osquery.json",
+                disagreement_adjudicator_prompt_file=root / "disagreement.md",
+                ai_settings_file=root / "config" / "ai_model_settings.json",
+                investigation_harness_policy=root / "harness-policy.json",
+                detection_playbooks=root / "detection-playbooks.json",
+                investigation_skills=root / "investigation-skills.json",
+                related_limit=8,
+                correlation_limit=8,
+                correlation_min_score=15,
+                timeout=900,
+                max_prompt_bytes=1024 * 1024,
+                model="",
+                include_tests=False,
+                alert_store_url="http://127.0.0.1:18787",
+            )
+            completed = SimpleNamespace(
+                returncode=0,
+                stdout=f"{prompt_path}\n",
+                stderr="",
+            )
+            with (
+                mock.patch.object(
+                    self.scheduler,
+                    "effective_initial_prompt_package_limit",
+                    return_value=384 * 1024,
+                ),
+                mock.patch.object(
+                    self.scheduler,
+                    "run_command",
+                    return_value=completed,
+                ) as run_command,
+            ):
+                self.scheduler.build_prompt(
+                    "alert-1",
+                    args,
+                    {"agent_role": "incident-responder"},
+                )
+            builder_command = run_command.call_args.args[0]
+
+            def command_value(command: list[str], flag: str) -> str:
+                return command[command.index(flag) + 1]
+
+            expected_builder_paths = {
+                "--db": args.db,
+                "--rollup-dir": args.rollup_dir,
+                "--agent-memory-file": (
+                    args.agent_memory_dir / "incident-responder-memory.md"
+                ),
+                "--shared-memory-file": args.shared_memory_file,
+                "--pcap-analysis-dir": args.pcap_analysis_dir,
+                "--analysis-dir": args.prior_analysis_dir,
+                "--asset-inventory-file": args.asset_inventory_file,
+            }
+            for flag, expected in expected_builder_paths.items():
+                with self.subTest(builder_flag=flag):
+                    self.assertEqual(
+                        command_value(builder_command, flag),
+                        str(expected),
+                    )
+
+            analysis_command = self.scheduler.analysis_command(
+                prompt_path,
+                args,
+                agent_role="incident-responder",
+            )
+            expected_runner_paths = {
+                "--prompt-dir": args.prompt_dir,
+                "--live-osquery-config": args.live_osquery_config,
+                "--incident-evidence-config": args.incident_evidence_config,
+                "--investigation-pivot-dir": args.investigation_pivot_dir,
+                "--disagreement-adjudicator-prompt-file": (
+                    args.disagreement_adjudicator_prompt_file
+                ),
+                "--system-prompt-file": (
+                    args.ai_settings_file.parent
+                    / "incident_responder_system_prompt.md"
+                ),
+                "--second-opinion-prompt-file": (
+                    args.ai_settings_file.parent
+                    / "incident_responder_second_opinion_prompt.md"
+                ),
+            }
+            for flag, expected in expected_runner_paths.items():
+                with self.subTest(runner_flag=flag):
+                    self.assertEqual(
+                        command_value(analysis_command, flag),
+                        str(expected),
+                    )
+
+    def test_run_local_controlled_paths_never_fall_back_to_home(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary).resolve()
+            home = temporary_root / "home"
+            parent = home / "n8n-local" / "harness-evaluations"
+            runtime = parent / "test-run"
+            runtime.mkdir(parents=True, mode=0o700)
+            parent.chmod(0o700)
+            runtime.chmod(0o700)
+            directories = {
+                name: runtime / name
+                for name in (
+                    "prompts",
+                    "analysis",
+                    "investigation-pivots",
+                    "tmp",
+                )
+            }
+            for path in directories.values():
+                path.mkdir(mode=0o700)
+            files = {
+                name: runtime / name
+                for name in (
+                    "prompt.json",
+                    "ai-settings.json",
+                    "harness-policy.json",
+                    "system.md",
+                    "reviewer.md",
+                    "disagreement.md",
+                    "live-osquery.json",
+                )
+            }
+            for path in files.values():
+                path.write_text("{}\n", encoding="utf-8")
+                path.chmod(0o600)
+            files["live-osquery.json"].write_text(
+                '{"enabled":false}\n',
+                encoding="utf-8",
+            )
+            relay_config, _, _ = write_controlled_route_fixture(
+                runtime,
+                home,
+            )
+            args = SimpleNamespace(
+                alert_store_url="http://127.0.0.1:18787",
+                prompt_dir=directories["prompts"],
+                out_dir=directories["analysis"],
+                investigation_pivot_dir=directories["investigation-pivots"],
+                prompt_package=files["prompt.json"],
+                ai_settings_file=files["ai-settings.json"],
+                investigation_harness_policy=files["harness-policy.json"],
+                system_prompt_file=files["system.md"],
+                second_opinion_prompt_file=files["reviewer.md"],
+                disagreement_adjudicator_prompt_file=files["disagreement.md"],
+                live_osquery_config=files["live-osquery.json"],
+                incident_evidence_config=relay_config,
+                response_json=None,
+            )
+            environment = {
+                "ONION_SENTINEL_EVALUATION_MODE": "1",
+                "ONION_SENTINEL_EVALUATION_RUNTIME_DIR": str(runtime),
+                "ONION_SENTINEL_EVALUATION_TOKEN": EVALUATION_TOKEN,
+                "TMPDIR": str(directories["tmp"]),
+            }
+            with (
+                mock.patch.object(self.runner, "HOME", home),
+                mock.patch.object(self.runner.tempfile, "tempdir", None),
+                mock.patch.dict(os.environ, environment, clear=False),
+            ):
+                self.assertEqual(
+                    self.runner.controlled_evaluation_runtime(args),
+                    (True, runtime),
+                )
+                production_config = (
+                    home / "n8n-local" / "config" / "live-osquery.json"
+                )
+                production_config.parent.mkdir(parents=True, mode=0o700)
+                production_config.write_text(
+                    '{"enabled":true}\n',
+                    encoding="utf-8",
+                )
+                production_config.chmod(0o600)
+                args.live_osquery_config = production_config
+                with self.assertRaisesRegex(
+                    SystemExit,
+                    "live OSQuery config",
+                ):
+                    self.runner.controlled_evaluation_runtime(args)
+
+            with mock.patch.object(
+                self.runner,
+                "load_live_osquery_config",
+                return_value={"enabled": False, "allowed_agent_roles": []},
+            ) as loader:
+                self.runner.prepare_live_osquery_context(
+                    {},
+                    "incident-responder",
+                    files["live-osquery.json"],
+                )
+            loader.assert_called_once_with(files["live-osquery.json"])
+
+    def test_controlled_enrichment_never_reads_production_env_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary).resolve()
+            production_env = home / "n8n-local" / ".env"
+            production_env.parent.mkdir(parents=True, mode=0o700)
+            production_env.write_text(
+                "N8N_POST_COMMIT_TOKEN=" + ("p" * 64) + "\n",
+                encoding="utf-8",
+            )
+            production_env.chmod(0o600)
+            prompt_package = {
+                "investigation_query_capability": {
+                    "enabled": False,
+                    "backends": {"enrichment": {"enabled": False}},
+                }
+            }
+            environment = {
+                "ONION_SENTINEL_EVALUATION_MODE": "1",
+                "N8N_POST_COMMIT_TOKEN": "",
+            }
+            with (
+                mock.patch.dict(os.environ, environment, clear=False),
+                mock.patch.object(self.runner.Path, "home", return_value=home),
+                mock.patch.object(
+                    self.runner.Path,
+                    "read_text",
+                    side_effect=AssertionError(
+                        "controlled evaluation read production .env"
+                    ),
+                ),
+            ):
+                config = self.runner.prepare_investigation_enrichment_context(
+                    prompt_package,
+                    "incident-responder",
+                    "http://127.0.0.1:18787",
+                )
+            self.assertFalse(config["enabled"])
+            self.assertEqual(config["token"], "")
+            self.assertFalse(
+                prompt_package["investigation_query_capability"][
+                    "backends"
+                ]["enrichment"]["enabled"]
             )
 
     def test_mode_off_exact_target_still_reconciles_global_jobs(self) -> None:
