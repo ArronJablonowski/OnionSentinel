@@ -13281,6 +13281,10 @@ def run_bounded_disagreement_adjudication(
             )
             try:
                 result = validate_disagreement_adjudication(candidate, package)
+                result = reconcile_supplied_endpoint_evidence_gaps(
+                    result,
+                    package,
+                )
                 if harness_runtime is not None:
                     harness_runtime.model_call(
                         call_id=call_id,
@@ -15036,6 +15040,193 @@ def _has_trusted_endpoint_evidence(prompt_package: dict[str, Any] | None) -> boo
         if endpoint_collection_has_evidence(evidence):
             return True
     return False
+
+
+def _trusted_endpoint_evidence_fields(
+    prompt_package: dict[str, Any] | None,
+) -> set[str]:
+    """Return endpoint fields actually present in trusted pivot result rows.
+
+    Query definitions can name ``process.executable`` even when no event was
+    returned, so this deliberately inspects only successful, read-only result
+    bodies.  It currently exposes the one field needed by the deterministic
+    evidence-gap reconciler and can be extended as other grounded-field
+    contradictions are observed.
+    """
+    if not isinstance(prompt_package, dict):
+        return set()
+    iterative = prompt_package.get("investigation_query_results")
+    if not isinstance(iterative, dict):
+        return set()
+    rounds = iterative.get("rounds")
+    if not isinstance(rounds, list):
+        return set()
+
+    supplied: set[str] = set()
+
+    def record_source(source: Any) -> None:
+        if not isinstance(source, dict):
+            return
+        process = source.get("process")
+        if (
+            isinstance(process, dict)
+            and isinstance(process.get("executable"), str)
+            and process["executable"].strip()
+        ):
+            supplied.add("process.executable")
+        direct = source.get("process.executable")
+        if isinstance(direct, str) and direct.strip():
+            supplied.add("process.executable")
+
+    for round_item in rounds:
+        if not isinstance(round_item, dict):
+            continue
+        results = round_item.get("results")
+        if not isinstance(results, list):
+            continue
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            if result.get("read_only") is not True:
+                continue
+            if str(result.get("status") or "").strip().lower() not in (
+                INVESTIGATION_QUERY_SUCCESS_STATUSES
+            ):
+                continue
+            evidence = result.get("evidence")
+            if (
+                not isinstance(evidence, dict)
+                or evidence.get("controls_valid") is False
+                or evidence.get("partial") is True
+                or evidence.get("complete") is False
+            ):
+                continue
+            evidence_results = evidence.get("results")
+            if not isinstance(evidence_results, list):
+                continue
+            for evidence_result in evidence_results:
+                if not isinstance(evidence_result, dict):
+                    continue
+                if str(
+                    evidence_result.get("status") or ""
+                ).strip().lower() not in INVESTIGATION_QUERY_SUCCESS_STATUSES:
+                    continue
+                if (
+                    evidence_result.get("semantic_valid") is False
+                    or evidence_result.get("truncated") is True
+                    or evidence_result.get("model_projection_truncated") is True
+                    or evidence_result.get("hits_prompt_truncated") is True
+                    or evidence_result.get("rows_prompt_truncated") is True
+                ):
+                    continue
+                hits = evidence_result.get("hits")
+                if isinstance(hits, list):
+                    for hit in hits:
+                        if not isinstance(hit, dict):
+                            continue
+                        source = hit.get("_source")
+                        if not isinstance(source, dict):
+                            source = hit.get("source")
+                        if not isinstance(source, dict):
+                            source = hit
+                        record_source(source)
+                rows = evidence_result.get("rows")
+                if isinstance(rows, list):
+                    for row in rows:
+                        record_source(row)
+    return supplied
+
+
+def _remove_supplied_executable_path_gap(text: Any) -> tuple[str, bool]:
+    """Remove only a false executable-path absence from one gap string."""
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value:
+        return "", False
+    if not re.search(
+        r"\b(?:process\.)?executable path(?:s)?\b",
+        value,
+        re.IGNORECASE,
+    ):
+        return value, False
+
+    rewritten = re.sub(
+        r"\b(?:process\.)?executable path(?:s)?\s*,\s*",
+        "",
+        value,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    if rewritten != value:
+        rewritten = re.sub(r"\s+", " ", rewritten).strip()
+        return rewritten, True
+
+    # A standalone assertion that the path is absent is wholly contradicted
+    # by the trusted row and has no remaining gap to preserve.
+    absence_markers = (
+        "missing",
+        "absent",
+        "unavailable",
+        "not supplied",
+        "not provided",
+        "not present",
+        "not available",
+        "required",
+        "needed",
+        "obtain",
+        "collect",
+    )
+    if any(marker in value.lower() for marker in absence_markers):
+        return "", True
+    return value, False
+
+
+def reconcile_supplied_endpoint_evidence_gaps(
+    response: dict[str, Any],
+    prompt_package: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Prevent model-authored gap lists from denying supplied endpoint facts."""
+    supplied = _trusted_endpoint_evidence_fields(prompt_package)
+    if "process.executable" not in supplied:
+        return response
+
+    rewritten_count = 0
+    removed_count = 0
+
+    def reconcile_list(container: dict[str, Any], key: str) -> None:
+        nonlocal rewritten_count, removed_count
+        values = container.get(key)
+        if not isinstance(values, list):
+            return
+        normalized: list[Any] = []
+        for item in values:
+            if not isinstance(item, str):
+                normalized.append(item)
+                continue
+            rewritten, changed = _remove_supplied_executable_path_gap(item)
+            if not changed:
+                normalized.append(item)
+            elif rewritten:
+                normalized.append(rewritten)
+                rewritten_count += 1
+            else:
+                removed_count += 1
+        container[key] = normalized
+
+    reconcile_list(response, "evidence_gaps")
+    reconcile_list(response, "additional_evidence_needed")
+    report = response.get("incident_response_report")
+    if isinstance(report, dict):
+        reconcile_list(report, "evidence_gaps")
+        reconcile_list(report, "constraints")
+
+    if rewritten_count or removed_count:
+        response["_endpoint_evidence_gap_reconciliation"] = {
+            "schema": "onion-sentinel-endpoint-evidence-gap-reconciliation-v1",
+            "executable_path_supplied": True,
+            "rewritten_gap_count": rewritten_count,
+            "removed_gap_count": removed_count,
+        }
+    return response
 
 
 def _consequential_model_conclusion(response: dict[str, Any]) -> bool:
@@ -17324,6 +17515,10 @@ def validate_response(
         prompt_package,
     )
     normalized = apply_incident_evidence_completeness_guard(
+        normalized,
+        prompt_package,
+    )
+    normalized = reconcile_supplied_endpoint_evidence_gaps(
         normalized,
         prompt_package,
     )

@@ -110,6 +110,135 @@ class AiModelRoutingTests(unittest.TestCase):
         prompt.update(overrides)
         return prompt
 
+    def trusted_endpoint_executable_prompt(self):
+        return {
+            "investigation_query_results": {
+                "rounds": [
+                    {
+                        "results": [
+                            {
+                                "backend": "security_onion",
+                                "status": "ok",
+                                "read_only": True,
+                                "evidence": {
+                                    "controls_valid": True,
+                                    "complete": True,
+                                    "partial": False,
+                                    "results": [
+                                        {
+                                            "query_id": (
+                                                "deterministic-osquery-history-attribution"
+                                            ),
+                                            "pack": "osquery_history",
+                                            "status": "ok",
+                                            "semantic_valid": True,
+                                            "truncated": False,
+                                            "hits": [
+                                                {
+                                                    "_source": {
+                                                        "process": {
+                                                            "name": (
+                                                                "Microsoft Update Assistant"
+                                                            ),
+                                                            "executable": (
+                                                                "/Applications/Microsoft "
+                                                                "Update Assistant"
+                                                            ),
+                                                        }
+                                                    }
+                                                }
+                                            ],
+                                        }
+                                    ],
+                                },
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+
+    def test_supplied_endpoint_path_is_removed_from_gap_lists(self) -> None:
+        prompt = self.trusted_endpoint_executable_prompt()
+        response = {
+            "evidence_gaps": [
+                (
+                    "Endpoint process executable path, code-signing status, "
+                    "command line, and parent lineage are not supplied."
+                ),
+                "Structured authorization is not supplied.",
+            ],
+            "additional_evidence_needed": [
+                (
+                    "Microsoft Update Assistant executable path, signing "
+                    "status, hash, and command line."
+                )
+            ],
+            "incident_response_report": {
+                "evidence_gaps": ["The executable path is missing."],
+                "constraints": ["PCAP is unavailable."],
+            },
+        }
+
+        reconciled = self.runner.reconcile_supplied_endpoint_evidence_gaps(
+            response,
+            prompt,
+        )
+
+        self.assertEqual(
+            reconciled["evidence_gaps"][0],
+            (
+                "Endpoint process code-signing status, command line, and "
+                "parent lineage are not supplied."
+            ),
+        )
+        self.assertEqual(
+            reconciled["additional_evidence_needed"][0],
+            "Microsoft Update Assistant signing status, hash, and command line.",
+        )
+        self.assertEqual(
+            reconciled["incident_response_report"]["evidence_gaps"],
+            [],
+        )
+        self.assertEqual(
+            reconciled["incident_response_report"]["constraints"],
+            ["PCAP is unavailable."],
+        )
+        self.assertEqual(
+            reconciled["_endpoint_evidence_gap_reconciliation"],
+            {
+                "schema": (
+                    "onion-sentinel-endpoint-evidence-gap-reconciliation-v1"
+                ),
+                "executable_path_supplied": True,
+                "rewritten_gap_count": 2,
+                "removed_gap_count": 1,
+            },
+        )
+
+    def test_truncated_endpoint_result_does_not_reconcile_gap(self) -> None:
+        prompt = self.trusted_endpoint_executable_prompt()
+        prompt["investigation_query_results"]["rounds"][0]["results"][0][
+            "evidence"
+        ]["results"][0]["truncated"] = True
+        response = {
+            "evidence_gaps": ["The executable path is missing."],
+        }
+
+        reconciled = self.runner.reconcile_supplied_endpoint_evidence_gaps(
+            response,
+            prompt,
+        )
+
+        self.assertEqual(
+            reconciled["evidence_gaps"],
+            ["The executable path is missing."],
+        )
+        self.assertNotIn(
+            "_endpoint_evidence_gap_reconciliation",
+            reconciled,
+        )
+
     def canonical_authorization_prompt(self, **overrides):
         alert = {
             "alert_id": "synthetic-authorized-alert",
@@ -2933,7 +3062,12 @@ class AiModelRoutingTests(unittest.TestCase):
                 "remaining_disagreements": ["detection_outcome"],
                 "evidence_used": ["alert:synthetic-adjudication"],
                 "rationale": "The bounded alert evidence does not distinguish the positions.",
-                "additional_evidence_needed": ["Collect endpoint process evidence."],
+                "additional_evidence_needed": [
+                    (
+                        "Microsoft Update Assistant executable path, signing "
+                        "status, hash, and command line."
+                    )
+                ],
             }
 
         with mock.patch.object(
@@ -2941,8 +3075,12 @@ class AiModelRoutingTests(unittest.TestCase):
             "analyze_model_route",
             side_effect=adjudicated,
         ) as analyze:
+            prompt_package = {
+                "alert": {"alert_id": "synthetic-adjudication"},
+                **self.trusted_endpoint_executable_prompt(),
+            }
             result = self.runner.run_bounded_disagreement_adjudication(
-                {"alert": {"alert_id": "synthetic-adjudication"}},
+                prompt_package,
                 self.complete_response(),
                 self.complete_response(),
                 comparison,
@@ -2960,6 +3098,15 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(result["mode"], "shadow")
         self.assertFalse(result["automation_authorized"])
         self.assertTrue(result["human_adjudication_required"])
+        self.assertEqual(
+            result["response"]["additional_evidence_needed"],
+            [
+                (
+                    "Microsoft Update Assistant signing status, hash, and "
+                    "command line."
+                )
+            ],
+        )
         self.assertEqual(analyze.call_args.args[0], "ollama:adjudicator:latest")
         self.assertTrue(analyze.call_args.kwargs["independent_review"])
         self.assertEqual(analyze.call_args.kwargs["system_prompt_file"], prompt_file)
