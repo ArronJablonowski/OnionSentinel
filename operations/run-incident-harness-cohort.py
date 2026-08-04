@@ -4180,6 +4180,9 @@ def _harness_execution_proof(
     exact_reviewer_repair_count = int(
         models.get("exact_reviewer_repair_count") or 0
     )
+    exact_adjudication_repair_count = int(
+        models.get("exact_adjudication_repair_count") or 0
+    )
     superseded_validation_failure_count = int(
         models.get("superseded_validation_failure_count") or 0
     )
@@ -4195,6 +4198,12 @@ def _harness_execution_proof(
     reviewer_completed_model_call_count = int(
         reviewer.get("completed_model_call_count") or 0
     )
+    reviewer_supplemental_model_call_count = int(
+        reviewer.get("supplemental_model_call_count") or 0
+    )
+    reviewer_supplemental_completed_model_call_count = int(
+        reviewer.get("supplemental_completed_model_call_count") or 0
+    )
     reviewer_primary_decision_count = int(
         reviewer.get("primary_decision_count") or 0
     )
@@ -4207,14 +4216,23 @@ def _harness_execution_proof(
     ):
         failures.append("harness-required-reviewer-call-missing")
     if reviewer_model_call_count > 0 and (
-        reviewer_completed_model_call_count != 1
+        reviewer_completed_model_call_count
+        != 1 + reviewer_supplemental_model_call_count
         or reviewer_primary_decision_count != 1
         or reviewer_decision_count != 1
         or reviewer.get("has_primary_decision") is not True
         or reviewer.get("has_reviewer_decision") is not True
         or reviewer.get("decision_comparable") is not True
         or reviewer.get("missing_reviewer_decision") is not False
-        or reviewer_model_call_count != 1 + exact_reviewer_repair_count
+        or reviewer_model_call_count
+        != (
+            1
+            + exact_reviewer_repair_count
+            + reviewer_supplemental_model_call_count
+        )
+        or reviewer_supplemental_model_call_count not in {0, 1}
+        or reviewer_supplemental_completed_model_call_count
+        != reviewer_supplemental_model_call_count
         or reviewer.get("completion_contract_required") is not True
         or reviewer.get("completion_contract_satisfied") is not True
         or reviewer.get("completion_contract_failure_reasons") != []
@@ -4273,9 +4291,13 @@ def _harness_execution_proof(
             successful_model_call_count
             + superseded_validation_failure_count
         )
-        or exact_reviewer_repair_count
+        or (
+            exact_reviewer_repair_count
+            + exact_adjudication_repair_count
+        )
         != superseded_validation_failure_count
         or exact_reviewer_repair_count not in {0, 1}
+        or exact_adjudication_repair_count not in {0, 1}
         or unexpected_unsuccessful_model_call_count != 0
         or malformed_model_purpose_sequence_count != 0
     ):
@@ -4482,6 +4504,9 @@ def _harness_execution_proof(
             "exact_reviewer_repair_count": (
                 exact_reviewer_repair_count
             ),
+            "exact_adjudication_repair_count": (
+                exact_adjudication_repair_count
+            ),
             "superseded_validation_failure_count": (
                 superseded_validation_failure_count
             ),
@@ -4527,6 +4552,10 @@ def _harness_execution_proof(
                     model_call_contract.get("reviewer_model_call_count")
                     or 0
                 ),
+                "adjudicator_model_call_count": int(
+                    model_call_contract.get("adjudicator_model_call_count")
+                    or 0
+                ),
                 "facts": list(model_call_facts or []),
                 "facts_sha256": str(
                     model_call_contract.get("facts_sha256") or ""
@@ -4545,6 +4574,12 @@ def _harness_execution_proof(
                 "model_call_count": reviewer_model_call_count,
                 "completed_model_call_count": (
                     reviewer_completed_model_call_count
+                ),
+                "supplemental_model_call_count": (
+                    reviewer_supplemental_model_call_count
+                ),
+                "supplemental_completed_model_call_count": (
+                    reviewer_supplemental_completed_model_call_count
                 ),
                 "primary_decision_count": reviewer_primary_decision_count,
                 "reviewer_decision_count": reviewer_decision_count,

@@ -118,6 +118,15 @@ QUERY_PLANNING_REPAIR_PURPOSE = "primary query-planning repair 1 of 1"
 FOLLOWUP_CALL_RE = re.compile(r"primary-followup-([1-3])")
 REVIEWER_CALL_IDS = ("independent-review-1", "independent-review-2")
 REVIEWER_PURPOSE = "independent second-opinion review"
+SUPPLEMENTAL_REVIEW_CALL_ID = "independent-review-supplemental-1"
+SUPPLEMENTAL_REVIEW_PURPOSE = (
+    "independent reviewer supplemental reconciliation round 1"
+)
+ADJUDICATION_CALL_IDS = (
+    "disagreement-adjudication-1",
+    "disagreement-adjudication-2",
+)
+ADJUDICATION_PURPOSE = "independent disagreement adjudication"
 
 RUBRIC_WEIGHTS = {
     "occurrence_validity": 14,
@@ -324,6 +333,8 @@ def _bounded_model_call_proof_valid(harness: Mapping[str, Any]) -> bool:
     followup_rounds: list[int] = []
     query_planning_repair_rounds: list[int] = []
     reviewer_facts: list[Mapping[str, Any]] = []
+    supplemental_reviewer_facts: list[Mapping[str, Any]] = []
+    adjudicator_facts: list[Mapping[str, Any]] = []
     purpose_keys: set[tuple[bool, str, str]] = set()
     completed_count = 0
     completed_primary_count = 0
@@ -388,6 +399,34 @@ def _bounded_model_call_proof_valid(harness: Mapping[str, Any]) -> bool:
                 return False
             next_primary_round += 1
             continue
+        if call_id == SUPPLEMENTAL_REVIEW_CALL_ID:
+            supplemental_reviewer_facts.append(fact)
+            if (
+                independent is not True
+                or purpose
+                != SUPPLEMENTAL_REVIEW_PURPOSE
+                or status != "completed"
+                or not reviewer_route
+                or route != reviewer_route
+            ):
+                return False
+            continue
+        if call_id in ADJUDICATION_CALL_IDS:
+            adjudicator_facts.append(fact)
+            allowed_statuses = (
+                {"completed", "validation-failed"}
+                if call_id == ADJUDICATION_CALL_IDS[0]
+                else {"completed"}
+            )
+            if (
+                independent is not True
+                or purpose != ADJUDICATION_PURPOSE
+                or status not in allowed_statuses
+                or not reviewer_route
+                or route != reviewer_route
+            ):
+                return False
+            continue
         if call_id not in REVIEWER_CALL_IDS:
             return False
         reviewer_facts.append(fact)
@@ -442,6 +481,27 @@ def _bounded_model_call_proof_valid(harness: Mapping[str, Any]) -> bool:
             exact_repair_count = 1
         else:
             return False
+    if len(supplemental_reviewer_facts) not in {0, 1}:
+        return False
+    adjudicator_ids = [
+        str(fact["call_id"]) for fact in adjudicator_facts
+    ]
+    adjudicator_statuses = [
+        str(fact["status"]) for fact in adjudicator_facts
+    ]
+    exact_adjudication_repair_count = 0
+    if adjudicator_facts:
+        if adjudicator_ids == [ADJUDICATION_CALL_IDS[0]] and (
+            adjudicator_statuses == ["completed"]
+        ):
+            pass
+        elif adjudicator_ids == list(ADJUDICATION_CALL_IDS) and (
+            adjudicator_statuses == ["validation-failed", "completed"]
+        ):
+            exact_adjudication_repair_count = 1
+        else:
+            return False
+    all_reviewer_facts = reviewer_facts + supplemental_reviewer_facts
 
     if (
         int(contract.get("primary_initial_call_count") or 0) != 1
@@ -452,7 +512,9 @@ def _bounded_model_call_proof_valid(harness: Mapping[str, Any]) -> bool:
         or int(contract.get("primary_followup_call_count") or 0)
         != len(followup_rounds)
         or int(contract.get("reviewer_model_call_count") or 0)
-        != len(reviewer_facts)
+        != len(all_reviewer_facts)
+        or int(contract.get("adjudicator_model_call_count") or 0)
+        != len(adjudicator_facts)
         or int(harness.get("model_call_count") or 0) != len(facts)
         or int(harness.get("successful_model_call_count") or 0)
         != completed_count
@@ -462,23 +524,33 @@ def _bounded_model_call_proof_valid(harness: Mapping[str, Any]) -> bool:
         != len(purpose_keys)
         or int(harness.get("exact_reviewer_repair_count") or 0)
         != exact_repair_count
+        or int(harness.get("exact_adjudication_repair_count") or 0)
+        != exact_adjudication_repair_count
         or int(
             harness.get("superseded_validation_failure_count") or 0
         )
-        != exact_repair_count
+        != exact_repair_count + exact_adjudication_repair_count
     ):
         return False
 
     reviewer_call_count = int(reviewer.get("model_call_count") or 0)
+    supplemental_call_count = len(supplemental_reviewer_facts)
     if (
-        reviewer_call_count != len(reviewer_facts)
+        reviewer_call_count != len(all_reviewer_facts)
         or int(reviewer.get("completed_model_call_count") or 0)
-        != len(reviewer_facts) - exact_repair_count
+        != len(all_reviewer_facts) - exact_repair_count
+        or int(reviewer.get("supplemental_model_call_count") or 0)
+        != supplemental_call_count
+        or int(
+            reviewer.get("supplemental_completed_model_call_count") or 0
+        )
+        != supplemental_call_count
     ):
         return False
     if reviewer_call_count:
         return bool(
-            int(reviewer.get("completed_model_call_count") or 0) == 1
+            int(reviewer.get("completed_model_call_count") or 0)
+            == 1 + supplemental_call_count
             and int(reviewer.get("primary_decision_count") or 0) == 1
             and int(reviewer.get("reviewer_decision_count") or 0) == 1
             and reviewer.get("has_primary_decision") is True
@@ -488,7 +560,8 @@ def _bounded_model_call_proof_valid(harness: Mapping[str, Any]) -> bool:
             and reviewer.get("completion_contract_required") is True
             and reviewer.get("completion_contract_satisfied") is True
             and reviewer.get("completion_contract_failure_reasons") == []
-            and reviewer_call_count == 1 + exact_repair_count
+            and reviewer_call_count
+            == 1 + exact_repair_count + supplemental_call_count
         )
     return bool(
         reviewer.get("completion_contract_required") is False

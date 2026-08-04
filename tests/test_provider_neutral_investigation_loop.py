@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import argparse
 import copy
 import hashlib
 import importlib.util
@@ -57,12 +58,32 @@ class RecordingHarness:
         tool_allowed: bool = True,
         tool_requires_approval: bool = False,
         fail_authorization: bool = False,
+        remaining_model_calls: int = 6,
+        query_rounds_used: int = 0,
+        remaining_query_rounds: int = 3,
+        remaining_queries: int = 12,
     ) -> None:
         self.events = events
         self.policy = self._Policy(mode)
         self.tool_allowed = tool_allowed
         self.tool_requires_approval = tool_requires_approval
         self.fail_authorization = fail_authorization
+        self._remaining_model_calls = remaining_model_calls
+        self._query_rounds_used = query_rounds_used
+        self._remaining_query_rounds = remaining_query_rounds
+        self._remaining_queries = remaining_queries
+
+    def remaining_model_calls(self) -> int:
+        return self._remaining_model_calls
+
+    def query_rounds_used(self) -> int:
+        return self._query_rounds_used
+
+    def remaining_query_rounds(self) -> int:
+        return self._remaining_query_rounds
+
+    def remaining_queries(self) -> int:
+        return self._remaining_queries
 
     def phase(self, phase: str, route: str = "", reason: str = "") -> None:
         self.events.append(("phase", phase, route, reason))
@@ -2192,6 +2213,8 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         invalid = self.elastic_request("repair-contract")
         invalid["parameters"]["query_dsl"] = {"match_all": {}}
         model_calls: list[str] = []
+        events: list[tuple] = []
+        harness = RecordingHarness(events)
 
         def model_executor(_route, package, *_args):
             if "investigation_query_planning_repair" in package:
@@ -2225,6 +2248,7 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             object(),
             {"agent_models": {"soc-analyst": route}},
             "soc-analyst",
+            harness_runtime=harness,
             model_executor=model_executor,
             query_executor=query_executor,
         )
@@ -2235,6 +2259,16 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             2,
         )
         self.assertEqual(model_calls, ["synthesis"])
+        self.assertIn(
+            ("model_call", "primary-followup-1", False),
+            events,
+        )
+        self.assertFalse(
+            any(
+                event[:2] == ("model_call", "primary-followup-2")
+                for event in events
+            )
+        )
         audit = response["_investigation_query_audit"]
         self.assertTrue(audit["planning_repair_attempted"])
         self.assertTrue(audit["planning_repair_produced_requests"])
@@ -2261,6 +2295,221 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             audit["query_planning_repair"]["candidates"][0]["trigger"],
             "contract_rejection",
         )
+
+    def test_reviewer_gets_one_bounded_supplemental_pivot(self) -> None:
+        route = "codex-cli:gpt-5.6-sol:xhigh"
+        request = self.elastic_request("reviewer-pivot-1")
+        prompt_package = {
+            "investigation_query_capability": {
+                "enabled": True,
+                "backends": {"elastic": {"enabled": True}},
+            },
+            "_local_investigation_query_context": {
+                "case_id": "case-reviewer-pivot",
+                "anchor": {
+                    "index": ".ds-logs-suricata.alerts-so-2026.07.24-000001",
+                    "id": "alert-reviewer-pivot",
+                },
+                "permitted_observables": {
+                    "ips": ["192.0.2.10"],
+                    "domains": [],
+                    "hosts": [],
+                    "users": [],
+                },
+            },
+        }
+        initial_review = {
+            "summary": "One material discriminator remains unresolved.",
+            "evidence_gaps": [
+                "Determine whether the destination recurred in the alert window."
+            ],
+            "investigation_query_requests": [request],
+        }
+        events: list[tuple] = []
+        harness = RecordingHarness(
+            events,
+            remaining_model_calls=1,
+            query_rounds_used=2,
+            remaining_query_rounds=1,
+            remaining_queries=4,
+        )
+        query_executor = mock.Mock(
+            side_effect=lambda _package, requests, **kwargs: (
+                self.successful_security_onion_round(
+                    requests,
+                    round_number=kwargs["round_number"],
+                )
+            )
+        )
+        final_review = {
+            "summary": "Supplemental evidence reconciled the discriminator.",
+            "evidence_gaps": [],
+            "investigation_query_requests": [
+                self.elastic_request("forbidden-recursive-reviewer-pivot")
+            ],
+        }
+
+        with (
+            mock.patch.object(
+                self.runner,
+                "execute_investigation_query_batch",
+                query_executor,
+            ),
+            mock.patch.object(
+                self.runner,
+                "analyze_model_route",
+                return_value=final_review,
+            ) as model_executor,
+            mock.patch.object(
+                self.runner,
+                "independent_reviewer_package",
+                side_effect=lambda package, **_kwargs: {
+                    "case_id": "case-reviewer-pivot",
+                    "supplemental": package.get(
+                        "reviewer_supplemental_context"
+                    ),
+                    "evidence": package.get(
+                        "investigation_query_results"
+                    ),
+                },
+            ),
+            mock.patch.object(
+                self.runner,
+                "validate_reviewer_response",
+                side_effect=lambda response, _package: response,
+            ),
+            mock.patch.object(
+                self.runner,
+                "validate_response",
+                side_effect=lambda response, _package: response,
+            ),
+        ):
+            response, audit = self.runner.apply_reviewer_supplemental_pivot(
+                prompt_package,
+                initial_review,
+                argparse.Namespace(max_prompt_bytes=1_000_000),
+                {"agent_models": {"incident-responder": route}},
+                "incident-responder",
+                route,
+                Path("reviewer-prompt.md"),
+                live_osquery_config=None,
+                enrichment_config=None,
+                security_onion_config_path=Path("security-onion.json"),
+                investigation_pivot_dir=Path("pivots"),
+                harness_runtime=harness,
+            )
+
+        self.assertTrue(audit["executed"])
+        self.assertEqual(audit["request_count"], 1)
+        self.assertEqual(
+            audit["query_audit"]["limits"]["max_rounds"], 1
+        )
+        self.assertEqual(
+            audit["query_audit"]["limits"]["max_queries_total"], 4
+        )
+        query_executor.assert_called_once()
+        self.assertEqual(
+            query_executor.call_args.kwargs["round_number"], 3
+        )
+        model_executor.assert_called_once()
+        self.assertEqual(
+            response["summary"],
+            "Supplemental evidence reconciled the discriminator.",
+        )
+        self.assertIn(
+            (
+                "model_call",
+                "independent-review-supplemental-1",
+                True,
+            ),
+            events,
+        )
+        self.assertNotIn("investigation_query_requests", response)
+        self.assertEqual(audit["recursive_requests_ignored"], 1)
+
+    def test_reviewer_supplemental_pivot_requires_discriminator(self) -> None:
+        response, audit = self.runner.apply_reviewer_supplemental_pivot(
+            {},
+            {
+                "summary": "No material gap remains.",
+                "investigation_query_requests": [
+                    self.elastic_request("unjustified-reviewer-pivot")
+                ],
+            },
+            argparse.Namespace(),
+            {},
+            "incident-responder",
+            "codex-cli:gpt-5.6-sol:xhigh",
+            Path("reviewer-prompt.md"),
+            live_osquery_config=None,
+            enrichment_config=None,
+            security_onion_config_path=Path("security-onion.json"),
+            investigation_pivot_dir=Path("pivots"),
+            harness_runtime=RecordingHarness([]),
+        )
+
+        self.assertFalse(audit["executed"])
+        self.assertIn("material unresolved discriminator", audit["reason"])
+        self.assertNotIn("investigation_query_requests", response)
+
+    def test_reviewer_supplemental_pivot_respects_model_budget(self) -> None:
+        response, audit = self.runner.apply_reviewer_supplemental_pivot(
+            {},
+            {
+                "evidence_gaps": ["A material discriminator remains."],
+                "investigation_query_requests": [
+                    self.elastic_request("budgeted-reviewer-pivot")
+                ],
+            },
+            argparse.Namespace(),
+            {},
+            "incident-responder",
+            "codex-cli:gpt-5.6-sol:xhigh",
+            Path("reviewer-prompt.md"),
+            live_osquery_config=None,
+            enrichment_config=None,
+            security_onion_config_path=Path("security-onion.json"),
+            investigation_pivot_dir=Path("pivots"),
+            harness_runtime=RecordingHarness(
+                [], remaining_model_calls=0
+            ),
+        )
+
+        self.assertFalse(audit["executed"])
+        self.assertIn("no model-call budget", audit["reason"])
+        self.assertNotIn("investigation_query_requests", response)
+
+    def test_reviewer_supplemental_pivot_respects_query_round_budget(
+        self,
+    ) -> None:
+        response, audit = self.runner.apply_reviewer_supplemental_pivot(
+            {},
+            {
+                "evidence_gaps": ["A material discriminator remains."],
+                "investigation_query_requests": [
+                    self.elastic_request("round-budget-reviewer-pivot")
+                ],
+            },
+            argparse.Namespace(),
+            {},
+            "incident-responder",
+            "codex-cli:gpt-5.6-sol:xhigh",
+            Path("reviewer-prompt.md"),
+            live_osquery_config=None,
+            enrichment_config=None,
+            security_onion_config_path=Path("security-onion.json"),
+            investigation_pivot_dir=Path("pivots"),
+            harness_runtime=RecordingHarness(
+                [],
+                remaining_model_calls=1,
+                query_rounds_used=3,
+                remaining_query_rounds=0,
+            ),
+        )
+
+        self.assertFalse(audit["executed"])
+        self.assertIn("no query-round budget", audit["reason"])
+        self.assertNotIn("investigation_query_requests", response)
 
     def test_malformed_observables_get_trusted_non_widening_repair(
         self,

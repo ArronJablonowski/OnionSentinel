@@ -922,6 +922,70 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         )
         self.assertFalse(evaluator._bounded_model_call_proof_valid(harness))
 
+    def test_offline_gate_accepts_canonical_adjudication_and_repair(
+        self,
+    ) -> None:
+        harness = self._result_export(
+            "soc-analyst",
+            "cohort-adjudicator-proof",
+            expected_count=1,
+        )["members"][0]["execution_proof"]["harness"]
+        contract = harness["model_call_contract"]
+        adjudicator = {
+            "call_id": "disagreement-adjudication-1",
+            "purpose": "independent disagreement adjudication",
+            "requested_route": harness["assigned_reviewer_route"],
+            "independent_review": True,
+            "status": "completed",
+        }
+        facts = [*contract["facts"], adjudicator]
+        harness.update(
+            {
+                "model_call_count": 3,
+                "successful_model_call_count": 3,
+                "model_purpose_count": 3,
+                "terminally_successful_model_purpose_count": 3,
+                "exact_adjudication_repair_count": 0,
+            }
+        )
+        contract.update(
+            {
+                "model_call_count": 3,
+                "canonical_model_call_count": 3,
+                "adjudicator_model_call_count": 1,
+                "facts": facts,
+                "facts_sha256": evaluator.sha256_value(facts),
+            }
+        )
+        self.assertTrue(evaluator._bounded_model_call_proof_valid(harness))
+
+        repaired_facts = [
+            *facts[:-1],
+            {**adjudicator, "status": "validation-failed"},
+            {
+                **adjudicator,
+                "call_id": "disagreement-adjudication-2",
+            },
+        ]
+        harness.update(
+            {
+                "model_call_count": 4,
+                "successful_model_call_count": 3,
+                "exact_adjudication_repair_count": 1,
+                "superseded_validation_failure_count": 1,
+            }
+        )
+        contract.update(
+            {
+                "model_call_count": 4,
+                "canonical_model_call_count": 4,
+                "adjudicator_model_call_count": 2,
+                "facts": repaired_facts,
+                "facts_sha256": evaluator.sha256_value(repaired_facts),
+            }
+        )
+        self.assertTrue(evaluator._bounded_model_call_proof_valid(harness))
+
     def test_offline_gate_recomputes_call_grammar_and_reviewer_facts(
         self,
     ) -> None:

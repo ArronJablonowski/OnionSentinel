@@ -70,6 +70,10 @@ QUERY_PLANNING_PURPOSE = "evaluation query-planning retry 1 of 1"
 QUERY_PLANNING_REPAIR_CALL_ID = "primary-query-planning-repair-1"
 QUERY_PLANNING_REPAIR_PURPOSE = "primary query-planning repair 1 of 1"
 FOLLOWUP_CALL_RE = re.compile(r"primary-followup-([1-3])")
+SUPPLEMENTAL_REVIEW_CALL_ID = "independent-review-supplemental-1"
+SUPPLEMENTAL_REVIEW_PURPOSE = (
+    "independent reviewer supplemental reconciliation round 1"
+)
 REJECTION_STATUSES = frozenset(
     {"rejected", "denied", "blocked", "unauthorized", "forbidden"}
 )
@@ -791,6 +795,15 @@ def reviewer_result(
         and str(row.get("purpose") or "") == REVIEWER_REPAIR_PURPOSE
         and str(row.get("call_id") or "") in REVIEWER_REPAIR_CALL_IDS
     ]
+    supplemental_calls = [
+        row
+        for row in model_calls
+        if int(row.get("independent_review") or 0) == 1
+        and str(row.get("purpose") or "")
+        == SUPPLEMENTAL_REVIEW_PURPOSE
+        and str(row.get("call_id") or "")
+        == SUPPLEMENTAL_REVIEW_CALL_ID
+    ]
     payloads = decision_payloads(decisions, malformed)
     primary = payloads.get("primary")
     reviewer = payloads.get("independent-review")
@@ -812,10 +825,15 @@ def reviewer_result(
             if primary.get(field) != reviewer.get(field)
         ]
     return {
-        "model_call_count": len(reviewer_calls),
+        "model_call_count": len(reviewer_calls) + len(supplemental_calls),
         "completed_model_call_count": sum(
             normalize_status(row.get("status")) == "completed"
-            for row in reviewer_calls
+            for row in reviewer_calls + supplemental_calls
+        ),
+        "supplemental_model_call_count": len(supplemental_calls),
+        "supplemental_completed_model_call_count": sum(
+            normalize_status(row.get("status")) == "completed"
+            for row in supplemental_calls
         ),
         "primary_decision_count": primary_decision_count,
         "reviewer_decision_count": reviewer_decision_count,
@@ -846,11 +864,16 @@ def reviewer_completion_contract(
     exact_repair_count = nonnegative_int(
         purpose_completion.get("exact_reviewer_repair_count")
     )
+    supplemental_count = nonnegative_int(
+        reviewer.get("supplemental_model_call_count")
+    )
     required = call_count > 0
     failures: list[str] = []
     if required:
-        if nonnegative_int(reviewer.get("completed_model_call_count")) != 1:
-            failures.append("completed-reviewer-call-count-not-one")
+        if nonnegative_int(reviewer.get("completed_model_call_count")) != (
+            1 + supplemental_count
+        ):
+            failures.append("completed-reviewer-call-count-invalid")
         if nonnegative_int(reviewer.get("primary_decision_count")) != 1:
             failures.append("primary-decision-count-not-one")
         if nonnegative_int(reviewer.get("reviewer_decision_count")) != 1:
@@ -863,8 +886,14 @@ def reviewer_completion_contract(
             failures.append("reviewer-decision-not-comparable")
         if reviewer.get("missing_reviewer_decision") is not False:
             failures.append("reviewer-decision-marked-missing")
-        if call_count != 1 + exact_repair_count:
+        if call_count != 1 + exact_repair_count + supplemental_count:
             failures.append("reviewer-call-count-does-not-match-repair")
+        if supplemental_count not in {0, 1}:
+            failures.append("supplemental-reviewer-call-count-invalid")
+        if nonnegative_int(
+            reviewer.get("supplemental_completed_model_call_count")
+        ) != supplemental_count:
+            failures.append("supplemental-reviewer-call-not-completed")
     return {
         "completion_contract_required": required,
         "completion_contract_satisfied": not failures,
@@ -924,9 +953,9 @@ def canonical_model_call_contract(
                 reasons.append("query-planning-status-not-completed")
         elif call_id == QUERY_PLANNING_REPAIR_CALL_ID:
             query_planning_repair_count += 1
-            # The runtime intentionally spends the current follow-up round on
-            # this bounded repair. Its next ordinary call therefore retains
-            # the following round number (repair-1, then followup-2).
+            # Legacy traces may contain a model-authored repair call. Current
+            # runtime repair is deterministic and therefore emits no model
+            # call or model-call round slot.
             query_planning_repair_rounds.append(next_primary_round)
             next_primary_round += 1
             if purpose != QUERY_PLANNING_REPAIR_PURPOSE:
@@ -962,6 +991,13 @@ def canonical_model_call_contract(
             )
             if status not in allowed_statuses:
                 reasons.append("reviewer-status-not-canonical")
+        elif call_id == SUPPLEMENTAL_REVIEW_CALL_ID:
+            if purpose != SUPPLEMENTAL_REVIEW_PURPOSE:
+                reasons.append("supplemental-reviewer-purpose-mismatch")
+            if not independent_review:
+                reasons.append("supplemental-reviewer-call-not-independent")
+            if status != "completed":
+                reasons.append("supplemental-reviewer-status-not-completed")
         elif call_id in ADJUDICATION_CALL_IDS:
             attempt = ADJUDICATION_CALL_IDS.index(call_id) + 1
             if purpose != ADJUDICATION_PURPOSE:
@@ -1035,7 +1071,14 @@ def canonical_model_call_contract(
         "query_planning_repair_call_count": query_planning_repair_count,
         "primary_followup_call_count": len(followup_rounds),
         "reviewer_model_call_count": sum(
-            int(row.get("independent_review") or 0) == 1
+            str(row.get("call_id") or "") in {
+                *REVIEWER_REPAIR_CALL_IDS,
+                SUPPLEMENTAL_REVIEW_CALL_ID,
+            }
+            for _ordinal, row in ordered_calls
+        ),
+        "adjudicator_model_call_count": sum(
+            str(row.get("call_id") or "") in ADJUDICATION_CALL_IDS
             for _ordinal, row in ordered_calls
         ),
         "facts": facts,
@@ -1138,6 +1181,11 @@ def model_purpose_completion(
                     independent_review
                     and purpose == ADJUDICATION_PURPOSE
                     and call_ids == [ADJUDICATION_CALL_IDS[0]]
+                )
+                or (
+                    independent_review
+                    and purpose == SUPPLEMENTAL_REVIEW_PURPOSE
+                    and call_ids == [SUPPLEMENTAL_REVIEW_CALL_ID]
                 )
             )
         )

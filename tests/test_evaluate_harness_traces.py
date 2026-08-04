@@ -1190,6 +1190,68 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
         )
         self.assertTrue(completion["completion_contract_satisfied"])
 
+    def test_supplemental_reviewer_call_is_bounded_and_canonical(self):
+        primary_route = "codex-cli:gpt-5.5:high"
+        reviewer_route = "codex-cli:gpt-5.6-sol:xhigh"
+        calls = [
+            {
+                "call_id": evaluator.PRIMARY_INITIAL_CALL_ID,
+                "purpose": evaluator.PRIMARY_INITIAL_PURPOSE,
+                "requested_route": primary_route,
+                "independent_review": 0,
+                "status": "completed",
+                "created_at": "2026-07-25T00:00:10Z",
+            },
+            {
+                "call_id": "independent-review-1",
+                "purpose": evaluator.REVIEWER_REPAIR_PURPOSE,
+                "requested_route": reviewer_route,
+                "independent_review": 1,
+                "status": "completed",
+                "created_at": "2026-07-25T00:00:20Z",
+            },
+            {
+                "call_id": evaluator.SUPPLEMENTAL_REVIEW_CALL_ID,
+                "purpose": evaluator.SUPPLEMENTAL_REVIEW_PURPOSE,
+                "requested_route": reviewer_route,
+                "independent_review": 1,
+                "status": "completed",
+                "created_at": "2026-07-25T00:00:30Z",
+            },
+        ]
+        contract = evaluator.canonical_model_call_contract(calls)
+
+        self.assertTrue(contract["valid"])
+        self.assertEqual(contract["reviewer_model_call_count"], 2)
+        self.assertEqual(contract["adjudicator_model_call_count"], 0)
+
+        decisions = [
+            {
+                "decision_id": "primary",
+                "decision_type": "primary-analysis",
+                "payload_json": json.dumps(
+                    {"detection_outcome": "inconclusive"}
+                ),
+            },
+            {
+                "decision_id": "independent-review",
+                "decision_type": "independent-review",
+                "payload_json": json.dumps(
+                    {"detection_outcome": "informational_no_action"}
+                ),
+            },
+        ]
+        reviewer = evaluator.reviewer_result(
+            calls, decisions, collections.Counter()
+        )
+        self.assertEqual(reviewer["model_call_count"], 2)
+        self.assertEqual(reviewer["supplemental_model_call_count"], 1)
+        purpose = evaluator.model_purpose_completion(calls, reviewer)
+        completion = evaluator.reviewer_completion_contract(
+            reviewer, purpose
+        )
+        self.assertTrue(completion["completion_contract_satisfied"])
+
     def test_model_call_contract_treats_planning_repair_as_followup_round(
         self,
     ):

@@ -9390,6 +9390,16 @@ def apply_investigation_query_loop(
     model_executor: Callable[[str, dict[str, Any], argparse.Namespace, dict[str, Any]], dict[str, Any]]
     | None = None,
     query_executor: Callable[..., dict[str, Any]] | None = None,
+    route_override: str = "",
+    max_rounds_override: int | None = None,
+    max_queries_total_override: int | None = None,
+    include_deterministic_requests: bool = True,
+    model_input_builder: Callable[[dict[str, Any], int], dict[str, Any]]
+    | None = None,
+    model_call_id_prefix: str = "primary-followup",
+    model_call_purpose_prefix: str = "primary investigation follow-up round",
+    model_call_independent_review: bool = False,
+    query_round_offset: int = 0,
 ) -> dict[str, Any]:
     """Run a strictly bounded inspect/query/pivot loop for any model provider."""
     model_executor = model_executor or (
@@ -9402,15 +9412,20 @@ def apply_investigation_query_loop(
     )
     configured_query_executor = query_executor is None
     query_executor = query_executor or execute_investigation_query_batch
-    route = canonical_model_route((settings.get("agent_models") or {}).get(agent_role))
+    route = canonical_model_route(
+        route_override
+        or (settings.get("agent_models") or {}).get(agent_role)
+    )
     response = primary_response
     rounds: list[dict[str, Any]] = []
     total_requests = 0
     ignored_requests = 0
+    terminal_ignored_requests = 0
     seen_semantic_requests: set[str] = set()
     evaluation_query_guarantee = bool(
         harness_runtime is not None
         and boolean_setting(os.environ.get(EVALUATION_FREEZE_MEMORY_ENV))
+        and not model_call_independent_review
     )
     query_planning_retry_attempted = False
     query_planning_repair_attempted = False
@@ -9420,8 +9435,21 @@ def apply_investigation_query_loop(
     query_planning_repair_candidates: list[dict[str, Any]] = []
     query_planning_repair_not_attempted_reason = ""
     pending_repair_scopes: dict[str, dict[str, Any]] = {}
-    effective_max_rounds = MAX_INVESTIGATION_QUERY_ROUNDS
-    effective_max_queries = MAX_INVESTIGATION_QUERIES_TOTAL
+    primary_followup_call_number = 0
+    effective_max_rounds = min(
+        MAX_INVESTIGATION_QUERY_ROUNDS,
+        max(1, int(max_rounds_override or MAX_INVESTIGATION_QUERY_ROUNDS)),
+    )
+    effective_max_queries = min(
+        MAX_INVESTIGATION_QUERIES_TOTAL,
+        max(
+            1,
+            int(
+                max_queries_total_override
+                or MAX_INVESTIGATION_QUERIES_TOTAL
+            ),
+        ),
+    )
 
     def observe_harness(call: Callable[[], Any]) -> Any:
         if harness_runtime is None:
@@ -9442,8 +9470,10 @@ def apply_investigation_query_loop(
             return None
 
     model_initial_requests = pop_investigation_query_requests(response)
-    deterministic_requests = deterministic_incident_pivot_requests(
-        prompt_package
+    deterministic_requests = (
+        deterministic_incident_pivot_requests(prompt_package)
+        if include_deterministic_requests
+        else []
     )
     initial_requests = deterministic_requests + model_initial_requests
     if evaluation_query_guarantee and not initial_requests:
@@ -9587,6 +9617,7 @@ def apply_investigation_query_loop(
             )
 
     for round_number in range(1, effective_max_rounds + 1):
+        harness_round_number = query_round_offset + round_number
         raw_requests = (
             initial_requests
             if round_number == 1
@@ -9601,7 +9632,7 @@ def apply_investigation_query_loop(
             lambda: harness_runtime.phase(
                 "investigation_query_planning",
                 route,
-                f"round {round_number}",
+                f"round {harness_round_number}",
             )
             if harness_runtime is not None
             else None
@@ -9635,7 +9666,7 @@ def apply_investigation_query_loop(
                         )
                 request = normalize_investigation_query_request(
                     raw,
-                    round_number=round_number,
+                    round_number=harness_round_number,
                     position=position,
                     time_envelope=trusted_time_envelope,
                     authorization_context=local_context,
@@ -9651,7 +9682,7 @@ def apply_investigation_query_loop(
                             "query repair repeated a rejected query_id"
                         )
                     request["query_id"] = (
-                        f"round-{round_number}-query-{position}"
+                        f"round-{harness_round_number}-query-{position}"
                     )
                 seen_ids.add(request["query_id"])
                 if not investigation_backend_available(
@@ -9691,7 +9722,7 @@ def apply_investigation_query_loop(
                     continue
                 tool_decision = observe_harness(
                     lambda: harness_runtime.authorize_tool(
-                        round_number=round_number,
+                        round_number=harness_round_number,
                         query_id=request["query_id"],
                         backend=request["backend"],
                         approved=(
@@ -9760,7 +9791,7 @@ def apply_investigation_query_loop(
                 )
                 if not INVESTIGATION_QUERY_ID_RE.fullmatch(rejected_query_id):
                     rejected_query_id = (
-                        f"round-{round_number}-query-{position}"
+                        f"round-{harness_round_number}-query-{position}"
                     )
                 rejected.append(
                     {
@@ -9774,7 +9805,7 @@ def apply_investigation_query_loop(
                 if not repair_round:
                     repair_scope = investigation_query_repair_scope(
                         raw,
-                        round_number=round_number,
+                        round_number=harness_round_number,
                         position=position,
                         time_envelope=trusted_time_envelope,
                         authorization_context=local_context,
@@ -9790,7 +9821,7 @@ def apply_investigation_query_loop(
         if normalized:
             observe_harness(
                 lambda: harness_runtime.preflight_query_batch(
-                    round_number=round_number,
+                    round_number=harness_round_number,
                     request_count=len(normalized),
                 )
                 if harness_runtime is not None
@@ -9800,13 +9831,13 @@ def apply_investigation_query_loop(
                 lambda: harness_runtime.phase(
                     "investigation_query_execution",
                     route,
-                    f"round {round_number}; {len(normalized)} admitted request(s)",
+                    f"round {harness_round_number}; {len(normalized)} admitted request(s)",
                 )
                 if harness_runtime is not None
                 else None
             )
             query_kwargs = {
-                "round_number": round_number,
+                "round_number": harness_round_number,
                 "live_osquery_config": live_osquery_config,
             }
             if configured_query_executor:
@@ -9830,7 +9861,7 @@ def apply_investigation_query_loop(
             ):
                 round_result = {
                     "schema": INVESTIGATION_QUERY_RESULT_SCHEMA,
-                    "round": round_number,
+                    "round": harness_round_number,
                     "generated_at": project_now(),
                     "requests": copy.deepcopy(normalized),
                     "results": [
@@ -9851,7 +9882,7 @@ def apply_investigation_query_loop(
         else:
             round_result = {
                 "schema": INVESTIGATION_QUERY_RESULT_SCHEMA,
-                "round": round_number,
+                "round": harness_round_number,
                 "generated_at": project_now(),
                 "requests": [],
                 "results": [],
@@ -9871,7 +9902,7 @@ def apply_investigation_query_loop(
                     continue
                 repair_scope = investigation_query_repair_scope(
                     request,
-                    round_number=round_number,
+                    round_number=harness_round_number,
                     position=1,
                     time_envelope=trusted_time_envelope,
                     authorization_context=local_context,
@@ -10077,34 +10108,50 @@ def apply_investigation_query_loop(
             maximum_prompt_bytes=maximum_prompt_bytes,
             hosted=hosted_route,
         )
-        observe_harness(
-            lambda: harness_runtime.catalogue_prompt_evidence(prompt_package)
-            if harness_runtime is not None
-            else None
-        )
+        primary_followup_call_number += 1
         model_call_id = (
             "primary-query-planning-repair-1"
             if repair_scheduled
-            else f"primary-followup-{round_number}"
+            else (
+                f"{model_call_id_prefix}-"
+                f"{primary_followup_call_number}"
+            )
         )
         model_call_purpose = (
             "primary query-planning repair 1 of 1"
             if repair_scheduled
-            else f"primary investigation follow-up round {round_number}"
+            else (
+                f"{model_call_purpose_prefix} "
+                f"{primary_followup_call_number}"
+            )
+        )
+        model_input = (
+            model_input_builder(
+                prompt_package,
+                primary_followup_call_number,
+            )
+            if model_input_builder is not None
+            else prompt_package
+        )
+        observe_harness(
+            lambda: harness_runtime.catalogue_prompt_evidence(model_input)
+            if harness_runtime is not None
+            else None
         )
         observe_harness(
             lambda: harness_runtime.preflight_model_call(
                 call_id=model_call_id,
-                input_value=prompt_package,
+                input_value=model_input,
                 requested_route=route,
                 purpose=model_call_purpose,
+                independent_review=model_call_independent_review,
             )
             if harness_runtime is not None
             else None
         )
         model_started = time.monotonic()
         try:
-            response = model_executor(route, prompt_package, args, settings)
+            response = model_executor(route, model_input, args, settings)
         except (Exception, SystemExit) as exc:
             observe_harness(
                 lambda: harness_runtime.model_call(
@@ -10112,8 +10159,9 @@ def apply_investigation_query_loop(
                     purpose=model_call_purpose,
                     requested_route=route,
                     response={},
-                    input_value=prompt_package,
+                    input_value=model_input,
                     duration_seconds=time.monotonic() - model_started,
+                    independent_review=model_call_independent_review,
                     status=f"failed:{type(exc).__name__}",
                 )
                 if harness_runtime is not None
@@ -10126,8 +10174,9 @@ def apply_investigation_query_loop(
                 purpose=model_call_purpose,
                 requested_route=route,
                 response=response,
-                input_value=prompt_package,
+                input_value=model_input,
                 duration_seconds=time.monotonic() - model_started,
+                independent_review=model_call_independent_review,
             )
             if harness_runtime is not None
             else None
@@ -10147,16 +10196,21 @@ def apply_investigation_query_loop(
             lambda: harness_runtime.phase(
                 "evidence_synthesis",
                 route,
-                f"round {round_number} evidence assimilated",
+                f"round {harness_round_number} evidence assimilated",
             )
             if harness_runtime is not None
             else None
         )
         if remaining_rounds <= 0 or remaining_queries <= 0:
-            ignored_requests += len(pop_investigation_query_requests(response))
+            terminal_count = len(
+                pop_investigation_query_requests(response)
+            )
+            terminal_ignored_requests += terminal_count
+            ignored_requests += terminal_count
             break
 
     repeated = pop_investigation_query_requests(response)
+    terminal_ignored_requests += len(repeated)
     ignored_requests += len(repeated)
     if rounds or ignored_requests:
         outcomes = investigation_query_outcome_summary(
@@ -10180,6 +10234,7 @@ def apply_investigation_query_loop(
             "rounds_completed": len(rounds),
             "queries_admitted": total_requests,
             "requests_ignored_or_over_budget": ignored_requests,
+            "terminal_requests_ignored": terminal_ignored_requests,
             "planning_retry_attempted": query_planning_retry_attempted,
             "planning_retry_produced_requests": bool(
                 query_planning_retry_attempted and initial_requests
@@ -12056,6 +12111,17 @@ def independent_reviewer_package(
             "prior model correlation hypotheses",
             "unconfirmed model-observed memory",
         ],
+        "supplemental_pivot_policy": {
+            "allowed": True,
+            "maximum_rounds": 1,
+            "maximum_queries": MAX_INVESTIGATION_QUERIES_PER_ROUND,
+            "requirements": [
+                "Request supplemental evidence only for a material unresolved discriminator.",
+                "Use only investigation_query_requests and the advertised read-only capabilities.",
+                "Do not widen the supplied authorization envelope or introduce a new observable.",
+                "Do not request supplemental evidence when the current evidence already resolves the conclusion.",
+            ],
+        },
     }
     review_package["review_contract"] = {
         "schema": "onion-sentinel-independent-review-v1",
@@ -12089,6 +12155,28 @@ def independent_reviewer_package(
     review_package["review_contract"]["evidence_hash"] = (
         reviewer_evidence_hash(review_package)
     )
+    supplemental_context = prompt_package.get(
+        "reviewer_supplemental_context"
+    )
+    if isinstance(supplemental_context, dict):
+        review_package["reviewer_supplemental_reconciliation"] = {
+            "schema": "onion-sentinel-reviewer-supplemental-reconciliation-v1",
+            "round": 1,
+            "maximum_rounds": 1,
+            "maximum_queries": MAX_INVESTIGATION_QUERIES_PER_ROUND,
+            "instruction": (
+                "Reassess the case using the complete blind evidence package, "
+                "including the newly returned supplemental query evidence. "
+                "Return a final independent conclusion and do not request "
+                "another query round. Preserve unresolved gaps explicitly."
+            ),
+            "initial_review_sha256": str(
+                supplemental_context.get("initial_review_sha256") or ""
+            ),
+        }
+        review_package["review_contract"]["evidence_hash"] = (
+            reviewer_evidence_hash(review_package)
+        )
     return review_package
 
 
@@ -12458,6 +12546,181 @@ def validate_reviewer_response(
         "corroborating_evidence_count": len(corroborating_evidence),
     }
     return validated
+
+
+def reviewer_supplemental_pivot_reason(
+    reviewer_response: dict[str, Any],
+) -> str:
+    """Return the bounded unresolved discriminator that permits one pivot."""
+    requests = reviewer_response.get("investigation_query_requests")
+    if not isinstance(requests, list) or not requests:
+        return ""
+    evidence_gaps = reviewer_response.get("evidence_gaps")
+    if isinstance(evidence_gaps, list):
+        for gap in evidence_gaps:
+            text = str(gap or "").strip()
+            if text:
+                return text[:500]
+    hypotheses = reviewer_response.get("hypotheses")
+    if isinstance(hypotheses, list):
+        for item in hypotheses:
+            if not isinstance(item, dict):
+                continue
+            discriminator = str(
+                item.get("next_discriminator") or ""
+            ).strip()
+            if discriminator:
+                return discriminator[:500]
+    return ""
+
+
+def apply_reviewer_supplemental_pivot(
+    prompt_package: dict[str, Any],
+    reviewer_response: dict[str, Any],
+    args: argparse.Namespace,
+    settings: dict[str, Any],
+    agent_role: str,
+    route: str,
+    reviewer_prompt: Path,
+    *,
+    live_osquery_config: dict[str, Any] | None,
+    enrichment_config: dict[str, Any] | None,
+    security_onion_config_path: Path,
+    investigation_pivot_dir: Path,
+    harness_runtime: OnionSentinelHarnessRun | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Execute at most one reviewer-requested read-only pivot round."""
+    requests = pop_investigation_query_requests(reviewer_response)
+    audit: dict[str, Any] = {
+        "schema": "onion-sentinel-reviewer-supplemental-pivot-v1",
+        "requested": bool(requests),
+        "executed": False,
+        "maximum_rounds": 1,
+        "maximum_queries": MAX_INVESTIGATION_QUERIES_PER_ROUND,
+        "request_count": len(requests),
+        "reason": "",
+    }
+    if not requests:
+        audit["reason"] = "reviewer requested no supplemental pivot"
+        return reviewer_response, audit
+    discriminator = reviewer_supplemental_pivot_reason(
+        {
+            **reviewer_response,
+            "investigation_query_requests": requests,
+        }
+    )
+    if not discriminator:
+        audit["reason"] = (
+            "supplemental requests lacked a material unresolved discriminator"
+        )
+        return reviewer_response, audit
+    if harness_runtime is None:
+        audit["reason"] = "Onion Sentinel harness is not active"
+        return reviewer_response, audit
+    if harness_runtime.remaining_model_calls() < 1:
+        audit["reason"] = "no model-call budget remains for reconciliation"
+        return reviewer_response, audit
+    if harness_runtime.remaining_query_rounds() < 1:
+        audit["reason"] = "no query-round budget remains for reconciliation"
+        return reviewer_response, audit
+    remaining_queries = harness_runtime.remaining_queries()
+    if remaining_queries < 1:
+        audit["reason"] = "no query budget remains for reconciliation"
+        return reviewer_response, audit
+    query_round_offset = harness_runtime.query_rounds_used()
+
+    initial_review_sha256 = canonical_payload_digest(reviewer_response)
+    prompt_package["reviewer_supplemental_context"] = {
+        "schema": "onion-sentinel-reviewer-supplemental-context-v1",
+        "initial_review_sha256": initial_review_sha256,
+        "material_discriminator": discriminator,
+    }
+
+    def build_review_input(
+        package: dict[str, Any],
+        _call_number: int,
+    ) -> dict[str, Any]:
+        return independent_reviewer_package(
+            package,
+            hosted=model_route_is_hosted(route, settings),
+        )
+
+    def execute_review(
+        requested_route: str,
+        review_package: dict[str, Any],
+        model_args: argparse.Namespace,
+        model_settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        candidate = analyze_model_route(
+            requested_route,
+            review_package,
+            model_args,
+            model_settings,
+            system_prompt_file=reviewer_prompt,
+            independent_review=True,
+        )
+        validated = validate_reviewer_response(
+            candidate,
+            review_package,
+        )
+        validated = validate_response(validated, review_package)
+        validated["second_opinion_recommended"] = False
+        validated["hosted_second_opinion_recommended"] = False
+        return validated
+
+    final_response = apply_investigation_query_loop(
+        prompt_package,
+        {"investigation_query_requests": requests},
+        args,
+        settings,
+        agent_role,
+        live_osquery_config=live_osquery_config,
+        enrichment_config=enrichment_config,
+        security_onion_config_path=security_onion_config_path,
+        investigation_pivot_dir=investigation_pivot_dir,
+        harness_runtime=harness_runtime,
+        model_executor=execute_review,
+        route_override=route,
+        max_rounds_override=1,
+        max_queries_total_override=min(
+            MAX_INVESTIGATION_QUERIES_PER_ROUND,
+            remaining_queries,
+        ),
+        include_deterministic_requests=False,
+        model_input_builder=build_review_input,
+        model_call_id_prefix="independent-review-supplemental",
+        model_call_purpose_prefix=(
+            "independent reviewer supplemental reconciliation round"
+        ),
+        model_call_independent_review=True,
+        query_round_offset=query_round_offset,
+    )
+    ignored_recursive_requests = pop_investigation_query_requests(
+        final_response
+    )
+    query_audit = final_response.get("_investigation_query_audit")
+    terminal_ignored_requests = (
+        int(query_audit.get("terminal_requests_ignored") or 0)
+        if isinstance(query_audit, dict)
+        else 0
+    )
+    audit.update(
+        {
+            "executed": True,
+            "reason": discriminator,
+            "initial_review_sha256": initial_review_sha256,
+            "final_review_sha256": canonical_payload_digest(
+                final_response
+            ),
+            "query_audit": final_response.get(
+                "_investigation_query_audit"
+            ),
+            "recursive_requests_ignored": len(
+                ignored_recursive_requests
+            ) + terminal_ignored_requests,
+        }
+    )
+    return final_response, audit
 
 
 def second_opinion_trigger(
@@ -13649,6 +13912,10 @@ def apply_configured_second_opinion(
     phase_callback: Callable[[str, str, str], None] | None = None,
     harness_runtime: OnionSentinelHarnessRun | None = None,
     force_review_reason: str = "",
+    live_osquery_config: dict[str, Any] | None = None,
+    enrichment_config: dict[str, Any] | None = None,
+    security_onion_config_path: Path = DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE,
+    investigation_pivot_dir: Path = DEFAULT_INVESTIGATION_PIVOT_DIR,
 ) -> dict[str, Any]:
     """Run an optional independent reviewer while preserving primary success.
 
@@ -13865,6 +14132,24 @@ def apply_configured_second_opinion(
         # A reviewer cannot recursively trigger more model calls.
         secondary["second_opinion_recommended"] = False
         secondary["hosted_second_opinion_recommended"] = False
+        secondary, supplemental_pivot = (
+            apply_reviewer_supplemental_pivot(
+                prompt_package,
+                secondary,
+                args,
+                settings,
+                agent_role,
+                route,
+                reviewer_prompt,
+                live_osquery_config=live_osquery_config,
+                enrichment_config=enrichment_config,
+                security_onion_config_path=(
+                    security_onion_config_path
+                ),
+                investigation_pivot_dir=investigation_pivot_dir,
+                harness_runtime=harness_runtime,
+            )
+        )
         comparison = compare_analysis_results(primary_response, secondary)
         automation_authorization = reviewer_automation_authorization(
             primary_response,
@@ -13879,6 +14164,7 @@ def apply_configured_second_opinion(
             "runtime_seconds": round(time.monotonic() - started_monotonic, 3),
             "attempts": attempts_started,
             "validation_failures": validation_failures,
+            "supplemental_pivot": supplemental_pivot,
             "comparison": comparison,
             "response": secondary,
             "automation_authorization": automation_authorization,
@@ -17866,6 +18152,18 @@ def main() -> int:
                 phase_callback=update_current_phase,
                 harness_runtime=harness_runtime,
                 force_review_reason=controlled_reviewer_trigger,
+                live_osquery_config=live_osquery_config,
+                enrichment_config=enrichment_config,
+                security_onion_config_path=getattr(
+                    args,
+                    "incident_evidence_config",
+                    DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE,
+                ),
+                investigation_pivot_dir=getattr(
+                    args,
+                    "investigation_pivot_dir",
+                    DEFAULT_INVESTIGATION_PIVOT_DIR,
+                ),
             )
         else:
             response = apply_saved_response_review_gate(

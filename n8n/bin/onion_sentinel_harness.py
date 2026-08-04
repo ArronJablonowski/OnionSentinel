@@ -3322,6 +3322,34 @@ class HarnessRun:
     def run_id(self) -> str:
         return self.envelope.run_id
 
+    def remaining_model_calls(self) -> int:
+        """Return the hard remaining call budget for bounded orchestration."""
+        return max(
+            0,
+            int(self.policy.budgets["max_model_calls"])
+            - int(self._model_calls),
+        )
+
+    def query_rounds_used(self) -> int:
+        """Return the highest globally reserved query-round ordinal."""
+        return max(0, int(self._query_rounds))
+
+    def remaining_query_rounds(self) -> int:
+        """Return the hard remaining global query-round budget."""
+        return max(
+            0,
+            int(self.policy.budgets["max_query_rounds"])
+            - self.query_rounds_used(),
+        )
+
+    def remaining_queries(self) -> int:
+        """Return the hard remaining admitted-query budget."""
+        return max(
+            0,
+            int(self.policy.budgets["max_queries_total"])
+            - int(self._queries_total),
+        )
+
     def trace_context(self) -> dict[str, Any]:
         return {
             "schema": HARNESS_SCHEMA,
