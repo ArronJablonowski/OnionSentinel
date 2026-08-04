@@ -12,6 +12,8 @@ REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 STACK_DIR="${STACK_DIR:-$HOME/n8n-local}"
 LAUNCHD_DIR="${HOME}/Library/LaunchAgents"
 DASHBOARD_RUNTIME_DIR="${STACK_DIR}/onion-sentinel-dashboard"
+AI_DEPLOYMENT_GUARD_PID=""
+AI_DEPLOYMENT_GUARD_DIR=""
 
 # Every deployed runtime must carry the exact code release that produced its
 # reports and reanalysis ledger. A commit-less disaster recovery is allowed
@@ -29,6 +31,95 @@ fi
 /usr/bin/python3 "$REPO_DIR/n8n/bin/set-runtime-release-id.py" \
   --release-id "$RUNTIME_RELEASE_ID" \
   --validate-only
+
+# Take the same advisory locks used by both AI scheduler lanes before touching
+# launchd or runtime files. A nonblocking failure means an investigation is in
+# flight, so leave every service running and ask the operator to retry. Holding
+# both locks across the install also closes the check/unload race: WatchPath or
+# timer activity cannot start a new inference while code is being replaced.
+start_ai_deployment_guard() {
+  mkdir -p "$STACK_DIR/run"
+  AI_DEPLOYMENT_GUARD_DIR="$(/usr/bin/mktemp -d "$STACK_DIR/run/.deployment-ai-guard.XXXXXX")"
+  chmod 0700 "$AI_DEPLOYMENT_GUARD_DIR"
+  /usr/bin/python3 - \
+    "$STACK_DIR/run/ai-analysis-ollama-worker.lock" \
+    "$STACK_DIR/run/ai-analysis-cli-worker.lock" \
+    "$AI_DEPLOYMENT_GUARD_DIR/status" <<'PY' &
+import fcntl
+from pathlib import Path
+import signal
+import sys
+import time
+
+lock_paths = [Path(value) for value in sys.argv[1:3]]
+status_path = Path(sys.argv[3])
+handles = []
+
+
+def raise_exit():
+    raise SystemExit(0)
+
+
+try:
+    for lock_path in lock_paths:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+")
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            status_path.write_text("busy\n", encoding="utf-8")
+            raise SystemExit(3)
+        handles.append(handle)
+    status_path.write_text("ready\n", encoding="utf-8")
+    signal.signal(signal.SIGTERM, lambda *_: raise_exit())
+    signal.signal(signal.SIGINT, lambda *_: raise_exit())
+    while True:
+        time.sleep(60)
+finally:
+    for handle in reversed(handles):
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        handle.close()
+PY
+  AI_DEPLOYMENT_GUARD_PID=$!
+  local guard_status=""
+  for attempt in {1..50}; do
+    if [[ -f "$AI_DEPLOYMENT_GUARD_DIR/status" ]]; then
+      guard_status="$(<"$AI_DEPLOYMENT_GUARD_DIR/status")"
+      break
+    fi
+    if ! kill -0 "$AI_DEPLOYMENT_GUARD_PID" >/dev/null 2>&1; then
+      break
+    fi
+    /bin/sleep 0.1
+  done
+  if [[ "$guard_status" != "ready" ]]; then
+    kill -TERM "$AI_DEPLOYMENT_GUARD_PID" >/dev/null 2>&1 || true
+    wait "$AI_DEPLOYMENT_GUARD_PID" >/dev/null 2>&1 || true
+    /bin/rm -f "$AI_DEPLOYMENT_GUARD_DIR/status"
+    /bin/rmdir "$AI_DEPLOYMENT_GUARD_DIR" >/dev/null 2>&1 || true
+    AI_DEPLOYMENT_GUARD_PID=""
+    AI_DEPLOYMENT_GUARD_DIR=""
+    echo "Refusing install: an Onion Sentinel AI investigation is active; retry after it completes." >&2
+    return 1
+  fi
+}
+
+release_ai_deployment_guard() {
+  if [[ -n "$AI_DEPLOYMENT_GUARD_PID" ]]; then
+    kill -TERM "$AI_DEPLOYMENT_GUARD_PID" >/dev/null 2>&1 || true
+    wait "$AI_DEPLOYMENT_GUARD_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$AI_DEPLOYMENT_GUARD_DIR" ]]; then
+    /bin/rm -f "$AI_DEPLOYMENT_GUARD_DIR/status"
+    /bin/rmdir "$AI_DEPLOYMENT_GUARD_DIR" >/dev/null 2>&1 || true
+  fi
+  AI_DEPLOYMENT_GUARD_PID=""
+  AI_DEPLOYMENT_GUARD_DIR=""
+}
+
+if ! start_ai_deployment_guard; then
+  exit 3
+fi
 
 # These jobs execute files replaced below. Stop only those code consumers
 # before the first runtime copy; unrelated monitoring, PCAP, dashboard, backup,
@@ -57,12 +148,14 @@ critical_launch_agents_down() {
     launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
   done
   # A worker can be inside a model subprocess when launchd is unloaded. On
-  # macOS that subprocess may be reparented to PID 1 and keep the old Python
-  # modules mapped while the installer replaces them. Stop only the two exact
-  # AI runtime entry points after their owning LaunchAgents are gone. Durable
-  # leases recover interrupted work; allowing old code to finish after a wire
-  # contract cutover would produce an incorrectly attributed analysis.
+  # macOS that subprocess may be reparented to PID 1 and continue consuming a
+  # prompt even though its Python owner and durable lease are gone. Stop only
+  # the two exact AI runtime entry points and Codex subprocesses carrying the
+  # runner-owned isolated-workspace marker. Durable leases recover interrupted
+  # work; allowing old code to finish after a wire-contract cutover would
+  # produce an incorrectly attributed analysis.
   local runtime_ai_pids
+  local runtime_codex_pids
   runtime_ai_pids="$(
     /bin/ps -axo pid=,command= \
       | /usr/bin/awk \
@@ -74,6 +167,21 @@ critical_launch_agents_down() {
     for pid in ${(f)runtime_ai_pids}; do
       kill -TERM "$pid" >/dev/null 2>&1 || true
     done
+  fi
+  runtime_codex_pids="$(
+    /bin/ps -axo pid=,command= \
+      | /usr/bin/awk '
+        index($0, "/onion-sentinel-codex-") \
+        && index($0, "codex exec") \
+        && index($0, "--ignore-user-config") \
+        && index($0, "--ignore-rules") {print $1}'
+  )"
+  if [[ -n "$runtime_codex_pids" ]]; then
+    for pid in ${(f)runtime_codex_pids}; do
+      kill -TERM "$pid" >/dev/null 2>&1 || true
+    done
+  fi
+  if [[ -n "$runtime_ai_pids" || -n "$runtime_codex_pids" ]]; then
     for attempt in {1..10}; do
       runtime_ai_pids="$(
         /bin/ps -axo pid=,command= \
@@ -82,7 +190,15 @@ critical_launch_agents_down() {
             -v runner="$STACK_DIR/bin/run-local-ai-analysis.py" \
             '$2 ~ /[Pp]ython/ && (index($0, scheduler) || index($0, runner)) {print $1}'
       )"
-      [[ -z "$runtime_ai_pids" ]] && break
+      runtime_codex_pids="$(
+        /bin/ps -axo pid=,command= \
+          | /usr/bin/awk '
+            index($0, "/onion-sentinel-codex-") \
+            && index($0, "codex exec") \
+            && index($0, "--ignore-user-config") \
+            && index($0, "--ignore-rules") {print $1}'
+      )"
+      [[ -z "$runtime_ai_pids" && -z "$runtime_codex_pids" ]] && break
       /bin/sleep 1
     done
   fi
@@ -110,6 +226,15 @@ critical_launch_agents_are_down() {
   then
     return 1
   fi
+  if /bin/ps -axo pid=,command= \
+    | /usr/bin/awk '
+      index($0, "/onion-sentinel-codex-") \
+      && index($0, "codex exec") \
+      && index($0, "--ignore-user-config") \
+      && index($0, "--ignore-rules") {found=1} END {exit !found}'
+  then
+    return 1
+  fi
   return 0
 }
 
@@ -121,6 +246,7 @@ keep_critical_agents_down_on_failure() {
     echo "The DHCP asset-discovery LaunchAgent also remains stopped." >&2
     echo "The software-inventory LaunchAgent also remains stopped." >&2
   fi
+  release_ai_deployment_guard
   return $exit_code
 }
 

@@ -83,6 +83,56 @@ class ArchitectureHardeningTest(unittest.TestCase):
             installer,
         )
 
+    def test_installer_stops_runner_owned_orphan_codex_subprocesses(self):
+        installer = (
+            ROOT / "n8n/bin/install-macstudio-stack.zsh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('local runtime_codex_pids', installer)
+        self.assertGreaterEqual(
+            installer.count('index($0, "/onion-sentinel-codex-")'),
+            3,
+        )
+        self.assertGreaterEqual(
+            installer.count('index($0, "--ignore-user-config")'),
+            3,
+        )
+        self.assertGreaterEqual(
+            installer.count('index($0, "--ignore-rules")'),
+            3,
+        )
+        self.assertIn(
+            'kill -TERM "$pid" >/dev/null 2>&1 || true',
+            installer,
+        )
+        self.assertIn(
+            '[[ -z "$runtime_ai_pids" && -z "$runtime_codex_pids" ]]',
+            installer,
+        )
+
+    def test_installer_holds_both_ai_worker_locks_across_deployment(self):
+        installer = (
+            ROOT / "n8n/bin/install-macstudio-stack.zsh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("start_ai_deployment_guard", installer)
+        self.assertIn("release_ai_deployment_guard", installer)
+        self.assertIn("ai-analysis-ollama-worker.lock", installer)
+        self.assertIn("ai-analysis-cli-worker.lock", installer)
+        self.assertIn("fcntl.LOCK_EX | fcntl.LOCK_NB", installer)
+        self.assertIn(
+            "an Onion Sentinel AI investigation is active",
+            installer,
+        )
+        self.assertLess(
+            installer.index("if ! start_ai_deployment_guard"),
+            installer.index("critical_launch_agents_down\n"),
+        )
+        self.assertIn(
+            "release_ai_deployment_guard\n  return $exit_code",
+            installer,
+        )
+
     def test_local_analysis_workers_are_event_driven_with_timer_fallbacks(self):
         ollama_plist = (ROOT / "n8n/launchd/com.arron.soc.ai-analysis.plist").read_text(encoding="utf-8")
         cli_plist = (ROOT / "n8n/launchd/com.arron.soc.ai-analysis-cli.plist").read_text(encoding="utf-8")
