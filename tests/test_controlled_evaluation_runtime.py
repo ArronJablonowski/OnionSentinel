@@ -41,6 +41,7 @@ DASHBOARD_SERVER = (
 BIN_DIR = ROOT / "n8n" / "bin"
 RUNNER_PATH = BIN_DIR / "run-local-ai-analysis.py"
 SCHEDULER_PATH = BIN_DIR / "auto-run-ai-analysis.py"
+INSTALLER_PATH = BIN_DIR / "install-macstudio-stack.zsh"
 RELEASE_ID = "c" * 40
 REPLACEMENT_RELEASE_ID = "f" * 40
 EVALUATION_TOKEN = "9" * 64
@@ -4659,6 +4660,16 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
         cls.scheduler = load_python_module(
             "controlled_evaluation_scheduler_tests",
             SCHEDULER_PATH,
+        )
+
+    def test_installer_copies_controlled_evaluation_runtime_dependency(
+        self,
+    ) -> None:
+        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            'cp "$REPO_DIR/n8n/bin/controlled_evaluation_isolation.py" '
+            '"$STACK_DIR/bin/controlled_evaluation_isolation.py"',
+            installer,
         )
 
     def test_run_local_requires_memory_freeze_before_any_result_identity(
