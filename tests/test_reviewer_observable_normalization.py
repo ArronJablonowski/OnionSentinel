@@ -209,6 +209,43 @@ class ReviewerObservableNormalizationTests(unittest.TestCase):
                 review_package,
             )
 
+    def test_known_suricata_field_path_is_not_mistaken_for_fqdn(self) -> None:
+        review_package = self.review_package(
+            {
+                "alert": {
+                    "alert_id": "suricata-field-path-case",
+                    "event_dataset": "suricata.alert",
+                }
+            }
+        )
+
+        validated = self.runner.validate_reviewer_response(
+            self.response(
+                review_package,
+                summary=(
+                    "The supplied evidence referenced the suricata.flags "
+                    "field, not a network domain."
+                ),
+            ),
+            review_package,
+        )
+        self.assertEqual(validated["observables_used"], [])
+
+        with self.assertRaisesRegex(
+            self.runner.ReviewerValidationError,
+            r"foreign domain or FQDN value\(s\): foreign\.example",
+        ):
+            self.runner.validate_reviewer_response(
+                self.response(
+                    review_package,
+                    summary=(
+                        "The suricata.flags field allegedly referenced "
+                        "foreign.example."
+                    ),
+                ),
+                review_package,
+            )
+
     def test_typed_correlation_community_id_is_allowlisted(self) -> None:
         community_id = "1:8nfubnGW7A3sCNxytkJZfrhhsE4="
         review_package = self.review_package(

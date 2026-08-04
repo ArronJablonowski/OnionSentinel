@@ -4010,6 +4010,7 @@ def _review_known_field_paths() -> frozenset[str]:
         "rule.id",
         "rule.name",
         "rule.uuid",
+        "suricata.flags",
         "source.ip",
         "destination.ip",
         "user.name",
