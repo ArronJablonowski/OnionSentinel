@@ -101,6 +101,10 @@ class ArchitectureHardeningTest(unittest.TestCase):
             installer.count('index($0, "--ignore-rules")'),
             3,
         )
+        self.assertGreaterEqual(
+            installer.count('$2 ~ /(^|\\/)codex$/'),
+            3,
+        )
         self.assertIn(
             'kill -TERM "$pid" >/dev/null 2>&1 || true',
             installer,
@@ -132,6 +136,7 @@ class ArchitectureHardeningTest(unittest.TestCase):
             "release_ai_deployment_guard\n  return $exit_code",
             installer,
         )
+        self.assertIn("for attempt in {1..20}", installer)
 
     def test_local_analysis_workers_are_event_driven_with_timer_fallbacks(self):
         ollama_plist = (ROOT / "n8n/launchd/com.arron.soc.ai-analysis.plist").read_text(encoding="utf-8")

@@ -171,7 +171,8 @@ critical_launch_agents_down() {
   runtime_codex_pids="$(
     /bin/ps -axo pid=,command= \
       | /usr/bin/awk '
-        index($0, "/onion-sentinel-codex-") \
+        $2 ~ /(^|\/)codex$/ \
+        && index($0, "/onion-sentinel-codex-") \
         && index($0, "codex exec") \
         && index($0, "--ignore-user-config") \
         && index($0, "--ignore-rules") {print $1}'
@@ -193,7 +194,8 @@ critical_launch_agents_down() {
       runtime_codex_pids="$(
         /bin/ps -axo pid=,command= \
           | /usr/bin/awk '
-            index($0, "/onion-sentinel-codex-") \
+            $2 ~ /(^|\/)codex$/ \
+            && index($0, "/onion-sentinel-codex-") \
             && index($0, "codex exec") \
             && index($0, "--ignore-user-config") \
             && index($0, "--ignore-rules") {print $1}'
@@ -228,7 +230,8 @@ critical_launch_agents_are_down() {
   fi
   if /bin/ps -axo pid=,command= \
     | /usr/bin/awk '
-      index($0, "/onion-sentinel-codex-") \
+      $2 ~ /(^|\/)codex$/ \
+      && index($0, "/onion-sentinel-codex-") \
       && index($0, "codex exec") \
       && index($0, "--ignore-user-config") \
       && index($0, "--ignore-rules") {found=1} END {exit !found}'
@@ -252,6 +255,10 @@ keep_critical_agents_down_on_failure() {
 
 trap keep_critical_agents_down_on_failure EXIT
 critical_launch_agents_down
+for attempt in {1..20}; do
+  critical_launch_agents_are_down && break
+  /bin/sleep 1
+done
 if ! critical_launch_agents_are_down; then
   echo "Refusing install: could not stop alert-store and both AI LaunchAgents." >&2
   exit 1
