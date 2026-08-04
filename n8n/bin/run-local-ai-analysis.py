@@ -4200,6 +4200,21 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
             source_class="alert",
         )
 
+    # Authorization is decision evidence only when the complete canonical
+    # envelope covers the selected event. Export its immutable digest-bound
+    # entry refs rather than the generic container name so a model cannot cite
+    # campaign membership, prose, or a malformed authorization as proof.
+    if _has_structured_authorization_evidence(prompt_package):
+        authorization = prompt_package.get("authorization_evidence")
+        assert isinstance(authorization, dict)
+        for entry in authorization["entries"]:
+            add(
+                entry["evidence_ref"],
+                source="authorization_evidence.entries",
+                source_class="authorization_evidence",
+                status="operator_authorized",
+            )
+
     def visit(value: Any, path: tuple[str, ...] = ()) -> None:
         if isinstance(value, dict):
             if (
@@ -17320,6 +17335,37 @@ def _human_review_incident_actions(response: dict[str, Any]) -> dict[str, list[s
     }
 
 
+def _incident_report_requests_containment(report: dict[str, Any]) -> bool:
+    """Return whether report prose recommends a positive containment action."""
+    for item in bounded_text_list(
+        report.get("containment_recommendations"),
+        limit=20,
+        item_limit=1000,
+    ):
+        text = re.sub(r"\s+", " ", item.strip().lower())
+        if not text:
+            continue
+        if any(
+            marker in text
+            for marker in (
+                "no containment",
+                "do not ",
+                "does not justify",
+                "not justified",
+                "not indicated",
+                "defer containment",
+                "containment is unnecessary",
+            )
+        ):
+            continue
+        if re.search(
+            r"\b(contain|isolate|quarantine|block|disable|revoke|terminate)\b",
+            text,
+        ):
+            return True
+    return False
+
+
 def reconcile_incident_response_report(
     response: dict[str, Any],
     prompt_package: dict[str, Any] | None,
@@ -17365,7 +17411,10 @@ def reconcile_incident_response_report(
         "review_required_"
     ):
         reconciliation_reason = "the required independent review was unavailable or invalid"
-    elif automation_controls.get("containment_blocked"):
+    elif (
+        automation_controls.get("containment_blocked")
+        and _incident_report_requests_containment(report)
+    ):
         reconciliation_reason = "runtime safety controls blocked model-authored containment"
 
     if reconciliation_reason:

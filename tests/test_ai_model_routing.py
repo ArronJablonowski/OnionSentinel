@@ -5258,6 +5258,43 @@ class AiModelRoutingTests(unittest.TestCase):
             response["_confidence_calibration"]["limiters"],
         )
 
+    def test_evidence_contract_exports_only_valid_exact_authorization_ref(
+        self,
+    ) -> None:
+        prompt = self.canonical_authorization_prompt()
+        expected = prompt["authorization_evidence"]["entries"][0][
+            "evidence_ref"
+        ]
+
+        contract = self.runner.evidence_reference_contract(prompt)
+        catalog = {item["ref"]: item for item in contract["references"]}
+
+        self.assertIn(expected, catalog)
+        self.assertTrue(catalog[expected]["corroborating"])
+        self.assertEqual(
+            catalog[expected]["source_class"],
+            "authorization_evidence",
+        )
+        self.assertNotIn("authorization_evidence", catalog)
+
+        tampered = copy.deepcopy(prompt)
+        tampered["authorization_evidence"]["entries"][0][
+            "evidence_ref"
+        ] = "authorized-activity:sha256:" + "f" * 64
+        tampered_catalog = {
+            item["ref"]: item
+            for item in self.runner.evidence_reference_contract(tampered)[
+                "references"
+            ]
+        }
+        self.assertNotIn(
+            tampered["authorization_evidence"]["entries"][0][
+                "evidence_ref"
+            ],
+            tampered_catalog,
+        )
+        self.assertNotIn("authorization_evidence", tampered_catalog)
+
     def test_two_citations_from_one_source_cannot_reach_high_confidence(self) -> None:
         prompt = {"alert": {"alert_id": "same-source-alert"}}
         self.runner.attach_evidence_reference_contract(prompt)
@@ -6122,6 +6159,90 @@ class AiModelRoutingTests(unittest.TestCase):
                 "2026-08-04T14:36:00-06:00",
                 "2026-08-04T14:44:00-06:00",
             ],
+        )
+
+    def test_containment_block_does_not_erase_explicit_no_action_report(
+        self,
+    ) -> None:
+        report = self.runner.normalize_incident_response_report(
+            self.complete_incident_report(
+                executive_bluf="Selected event is authorized benign SSH.",
+                conclusion=(
+                    "No containment is justified for the selected event; "
+                    "monitor broader history."
+                ),
+                containment_recommendations=[
+                    "No containment for the selected event.",
+                    "Do not block TCP/22 without operator approval.",
+                ],
+            )
+        )
+        response = self.complete_response(
+            detection_outcome="inconclusive",
+            event_status="observed",
+            detection_validity="unknown",
+            activity_disposition="authorized_benign",
+            handling="no_action",
+            duplicate_of=None,
+            confidence="low",
+            confidence_score=0.39,
+            incident_response_report=report,
+            _incident_response_report_validation=(
+                self.runner.validate_incident_response_report_shape(report)
+            ),
+            _verdict_validation={"material_contradiction": False},
+            _automation_controls={"containment_blocked": True},
+        )
+
+        result = self.runner.reconcile_incident_response_report(
+            response,
+            {"agent_role": "incident-responder"},
+        )
+
+        validation = result["_incident_response_report_validation"]
+        self.assertFalse(validation["narrative_reconciled"])
+        self.assertEqual(
+            result["incident_response_report"]["executive_bluf"],
+            "Selected event is authorized benign SSH.",
+        )
+
+    def test_containment_block_replaces_positive_containment_report(
+        self,
+    ) -> None:
+        report = self.runner.normalize_incident_response_report(
+            self.complete_incident_report(
+                containment_recommendations=[
+                    "Isolate the endpoint and block the relay immediately."
+                ],
+            )
+        )
+        response = self.complete_response(
+            detection_outcome="inconclusive",
+            event_status="observed",
+            detection_validity="unknown",
+            activity_disposition="unknown",
+            handling="monitor",
+            duplicate_of=None,
+            confidence="low",
+            confidence_score=0.39,
+            incident_response_report=report,
+            _incident_response_report_validation=(
+                self.runner.validate_incident_response_report_shape(report)
+            ),
+            _verdict_validation={"material_contradiction": False},
+            _automation_controls={"containment_blocked": True},
+        )
+
+        result = self.runner.reconcile_incident_response_report(
+            response,
+            {"agent_role": "incident-responder"},
+        )
+
+        validation = result["_incident_response_report_validation"]
+        self.assertTrue(validation["narrative_reconciled"])
+        self.assertEqual(
+            validation["reconciliation_reason"],
+            "runtime safety controls blocked model-authored containment",
         )
 
     def test_guarded_incident_verdict_reconciles_contradictory_report_narrative(self) -> None:
