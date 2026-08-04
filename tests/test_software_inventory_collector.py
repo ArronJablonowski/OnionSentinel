@@ -693,6 +693,12 @@ class SoftwareInventoryCollectorTests(unittest.TestCase):
             "software-inventory.example.json",
             "com.arron.soc.software-inventory.plist",
             "onion-sentinel-dashboard/software_inventory.py",
+            'software_snapshot_complete=',
+            'software-inventory?limit=1',
+            'value.get("storage_backend") == "postgresql"',
+            'value.get("collection", {}).get("complete") is True',
+            'int(value.get("summary", {}).get("records") or 0) > 0',
+            "neither the local nor PostgreSQL Software Inventory is complete",
         ):
             self.assertIn(required, installer)
 

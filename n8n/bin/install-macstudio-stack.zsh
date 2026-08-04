@@ -721,8 +721,49 @@ if [[ -s "$STACK_DIR/software-inventory/software-inventory.json" ]]; then
     echo "Alert store did not become ready for Software Inventory migration." >&2
     exit 1
   fi
-  /usr/bin/python3 \
-    "$STACK_DIR/bin/migrate-software-inventory-to-postgres.py"
+  software_snapshot_complete="$(/usr/bin/python3 - \
+    "$STACK_DIR/software-inventory/software-inventory.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+try:
+    value = json.loads(Path(sys.argv[1]).read_text())
+except (OSError, ValueError, TypeError):
+    value = {}
+print("true" if value.get("records") and value.get("collection", {}).get("complete") is True else "false")
+PY
+)"
+  if [[ "$software_snapshot_complete" == "true" ]]; then
+    /usr/bin/python3 \
+      "$STACK_DIR/bin/migrate-software-inventory-to-postgres.py"
+  elif /usr/bin/python3 - <<'PY'
+import json
+import urllib.request
+
+limit = 1024 * 1024
+with urllib.request.urlopen(
+    "http://127.0.0.1:8787/software-inventory?limit=1",
+    timeout=5,
+) as response:
+    raw = response.read(limit + 1)
+if len(raw) > limit:
+    raise SystemExit("Software Inventory preflight response exceeded its bound")
+value = json.loads(raw)
+if not (
+    value.get("ok") is True
+    and value.get("storage_backend") == "postgresql"
+    and value.get("collection", {}).get("complete") is True
+    and int(value.get("summary", {}).get("records") or 0) > 0
+):
+    raise SystemExit("existing PostgreSQL Software Inventory is incomplete")
+PY
+  then
+    echo "Preserving the existing complete PostgreSQL Software Inventory; the latest local collection is incomplete."
+  else
+    echo "Refusing install: neither the local nor PostgreSQL Software Inventory is complete." >&2
+    exit 1
+  fi
 fi
 launchctl load "$LAUNCHD_DIR/com.arron.soc.alert-store-maintenance.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.pcap-analysis.plist"
