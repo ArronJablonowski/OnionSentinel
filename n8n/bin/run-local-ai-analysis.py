@@ -9372,6 +9372,72 @@ def deterministic_incident_pivot_requests(
                 },
             }
         )
+
+    # Network detections commonly carry an ephemeral source port that is too
+    # narrow for historical endpoint attribution.  Add one deterministic,
+    # exact-pair endpoint-history pivot over a bounded day only when the
+    # deployment advertises that fixed pack.  The request deliberately keeps
+    # the source/destination roles, destination service port, and transport,
+    # while omitting the ephemeral source port, rule identifier, and protocol
+    # label.  This remains a subset of the collector-authorized event tuple and
+    # cannot introduce a new observable or widen beyond the trusted envelope.
+    if (
+        protocol in {"http", "tls", "ssl", "dns"}
+        and "osquery_history" in advertised_packs
+        and trusted_tuple.get("source_ip") not in (None, "")
+        and trusted_tuple.get("destination_ip") not in (None, "")
+    ):
+        attribution_start = anchor - dt.timedelta(hours=12)
+        attribution_end = anchor + dt.timedelta(hours=12)
+        envelope = local.get("time_envelope")
+        if isinstance(envelope, dict):
+            try:
+                attribution_start = max(
+                    attribution_start,
+                    _query_utc(
+                        envelope.get("start"),
+                        "authorization envelope start",
+                    ),
+                )
+                attribution_end = min(
+                    attribution_end,
+                    _query_utc(
+                        envelope.get("end"),
+                        "authorization envelope end",
+                    ),
+                )
+            except InvestigationQueryError:
+                attribution_start = anchor - dt.timedelta(hours=12)
+                attribution_end = anchor + dt.timedelta(hours=12)
+        attribution_tuple = {
+            key: trusted_tuple[key]
+            for key in (
+                "source_ip",
+                "destination_ip",
+                "destination_port",
+                "transport",
+            )
+            if trusted_tuple.get(key) not in (None, "")
+        }
+        if attribution_end > attribution_start:
+            output.append(
+                {
+                    "query_id": "deterministic-osquery-history-attribution",
+                    "backend": "elastic",
+                    "purpose": "test_benign_hypothesis",
+                    "parameters": {
+                        "pack": "osquery_history",
+                        "window": {
+                            "start": _query_utc_text(attribution_start),
+                            "end": _query_utc_text(attribution_end),
+                        },
+                        "observables": copy.deepcopy(observables),
+                        "event_tuple": attribution_tuple,
+                        "size": 100,
+                        "aggregation": "anchor_nearest",
+                    },
+                }
+            )
     return output
 
 
@@ -10763,7 +10829,10 @@ def cli_analysis_payload(
         "Do not run tools, commands, browse, or read files. Independently analyze the supplied evidence as a "
         "second-opinion security analyst. Return one valid JSON object "
         "matching response_schema exactly. The primary conclusion is intentionally withheld to prevent anchoring. "
-        "Resolve uncertainty using only supplied evidence and do not request another opinion. Echo the exact "
+        "Resolve uncertainty using supplied evidence and do not request another opinion. When the advertised "
+        "second_opinion_review supplemental_pivot_policy allows it, you may request at most one narrow read-only "
+        "investigation_query_requests batch for a material unresolved discriminator; do not widen the authorization "
+        "envelope or introduce a new observable. A supplemental reconciliation must not request another pivot. Echo the exact "
         "review_contract case_id and evidence_hash, list every material observable in observables_used, and cite "
         "only exact evidence_reference_contract refs."
         if independent_review

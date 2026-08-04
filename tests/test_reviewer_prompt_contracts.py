@@ -62,6 +62,27 @@ class ReviewerPromptContractTests(unittest.TestCase):
                 for phrase in required:
                     self.assertIn(phrase, prompt)
 
+    def test_soc_and_ir_reviewers_allow_only_one_bounded_supplemental_pivot(
+        self,
+    ) -> None:
+        for name in (
+            "soc_analyst_second_opinion_prompt.md",
+            "incident_responder_second_opinion_prompt.md",
+        ):
+            with self.subTest(prompt=name):
+                prompt = (CONFIG / name).read_text(encoding="utf-8")
+                self.assertIn(
+                    "second_opinion_review.supplemental_pivot_policy.allowed",
+                    prompt,
+                )
+                self.assertIn("at most one narrow read-only", prompt)
+                self.assertIn("authorization envelope", prompt)
+                self.assertIn("must not request another pivot", prompt)
+                self.assertNotIn(
+                    "Do not request additional investigation pivots.",
+                    prompt,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

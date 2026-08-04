@@ -235,7 +235,8 @@ done
   --source "$REPO_DIR/n8n/config/incident_responder_second_opinion_prompt.md" \
   --destination "$STACK_DIR/config/incident_responder_second_opinion_prompt.md" \
   --accepted-prior-sha256 "c13d5fcd90644db6fcd745fdc5c6ce978ccdd62a3f3e115dfce0aec634f77421" \
-  --accepted-prior-sha256 "71400cd9a6826be6b23a2cfa3cdacbada21ff6ef16d0093dac49c13dcf63d646"
+  --accepted-prior-sha256 "71400cd9a6826be6b23a2cfa3cdacbada21ff6ef16d0093dac49c13dcf63d646" \
+  --accepted-prior-sha256 "eb0ee3c7a4109088036e2447d1693733dea86944b62437ac75140ddf9f688c1f"
 /usr/bin/python3 "$REPO_DIR/n8n/bin/upgrade-runtime-policy.py" \
   --source "$REPO_DIR/n8n/config/siem_engineer_second_opinion_prompt.md" \
   --destination "$STACK_DIR/config/siem_engineer_second_opinion_prompt.md" \
@@ -243,7 +244,8 @@ done
 /usr/bin/python3 "$REPO_DIR/n8n/bin/upgrade-runtime-policy.py" \
   --source "$REPO_DIR/n8n/config/soc_analyst_second_opinion_prompt.md" \
   --destination "$STACK_DIR/config/soc_analyst_second_opinion_prompt.md" \
-  --accepted-prior-sha256 "db79fa2ac912b7227e4889626d853eca28a950966b93acd822582b0468dcc5ff"
+  --accepted-prior-sha256 "db79fa2ac912b7227e4889626d853eca28a950966b93acd822582b0468dcc5ff" \
+  --accepted-prior-sha256 "b979deea89cc1914b81c363563ed245f854660db799e773a52842da6ca2f22e5"
 /usr/bin/python3 "$REPO_DIR/n8n/bin/upgrade-runtime-policy.py" \
   --source "$REPO_DIR/n8n/config/threat_hunter_second_opinion_prompt.md" \
   --destination "$STACK_DIR/config/threat_hunter_second_opinion_prompt.md" \

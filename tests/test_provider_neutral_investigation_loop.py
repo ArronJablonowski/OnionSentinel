@@ -521,6 +521,96 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
             },
         )
 
+    def test_protocol_plan_adds_bounded_exact_pair_endpoint_attribution(
+        self,
+    ) -> None:
+        package = {
+            "agent_role": "incident-responder",
+            "alert": {
+                "timestamp": "2026-07-24T18:30:00Z",
+                "rule_name": "Synthetic TLS SNI detection",
+                "source_ip": "192.0.2.10",
+                "destination_ip": "198.51.100.20",
+                "rule_context": {
+                    "deployed_rule": {"protocol": "tls"},
+                },
+            },
+            "investigation_query_capability": {
+                "enabled": True,
+                "anchor_time": "2026-07-24T18:30:00Z",
+                "backends": {
+                    "elastic": {
+                        "enabled": True,
+                        "packs": [
+                            "zeek_tls",
+                            "zeek_anomalies",
+                            "osquery_history",
+                        ],
+                    },
+                },
+            },
+            "_local_investigation_query_context": {
+                "anchor_time": "2026-07-24T18:30:00Z",
+                "time_envelope": {
+                    "start": "2026-07-24T12:00:00Z",
+                    "end": "2026-07-25T00:00:00Z",
+                },
+                "permitted_event_tuples": [
+                    {
+                        "event_tuple": {
+                            "source_ip": "192.0.2.10",
+                            "destination_ip": "198.51.100.20",
+                            "source_port": 49152,
+                            "destination_port": 443,
+                            "transport": "tcp",
+                            "protocol": "tls",
+                            "community_id": "1:exact-flow=",
+                            "rule_id": "2026001",
+                        },
+                        "role_semantics": "packet_direction",
+                    }
+                ],
+            },
+        }
+
+        plan = self.runner.deterministic_incident_pivot_requests(package)
+
+        self.assertEqual(
+            [item["query_id"] for item in plan],
+            [
+                "deterministic-zeek_tls",
+                "deterministic-zeek_anomalies",
+                "deterministic-osquery-history-attribution",
+            ],
+        )
+        attribution = plan[-1]
+        self.assertEqual(attribution["parameters"]["pack"], "osquery_history")
+        self.assertEqual(
+            attribution["parameters"]["aggregation"],
+            "anchor_nearest",
+        )
+        self.assertEqual(
+            attribution["parameters"]["window"],
+            {
+                "start": "2026-07-24T12:00:00.000Z",
+                "end": "2026-07-25T00:00:00.000Z",
+            },
+        )
+        self.assertEqual(
+            attribution["parameters"]["event_tuple"],
+            {
+                "source_ip": "192.0.2.10",
+                "destination_ip": "198.51.100.20",
+                "destination_port": 443,
+                "transport": "tcp",
+            },
+        )
+        self.assertNotIn(
+            "source_port",
+            attribution["parameters"]["event_tuple"],
+        )
+
+
     @staticmethod
     def elastic_request(query_id: str = "pivot-1") -> dict:
         return {
