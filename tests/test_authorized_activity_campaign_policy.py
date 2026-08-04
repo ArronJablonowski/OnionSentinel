@@ -10,9 +10,40 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "n8n/alert_store/lib/authorized_activity_policy.js"
 POLICY = ROOT / "n8n/config/authorized_activity_campaigns.json"
+ALERT_STORE = ROOT / "n8n/alert_store/alert_store.js"
 
 
 class AuthorizedActivityCampaignPolicyTests(unittest.TestCase):
+    def test_startup_backfill_is_bounded_and_keyset_paginated(self) -> None:
+        code = ALERT_STORE.read_text()
+        start = code.index("async function backfillAuthorizedActivityCampaigns()")
+        end = code.index("\nasync function authorizedCampaignForAlertId", start)
+        backfill = code[start:end]
+
+        self.assertNotIn("SELECT * FROM alerts", backfill)
+        self.assertIn("const pageSize = 128", backfill)
+        self.assertIn("WHERE rowid > ?", backfill)
+        self.assertIn("ORDER BY rowid ASC", backfill)
+        self.assertIn("LIMIT ?", backfill)
+        self.assertIn("NOT EXISTS", backfill)
+        self.assertIn("earliestAuthorization", backfill)
+        self.assertIn("latestAuthorization", backfill)
+
+    def test_campaign_representative_is_recomputed_from_earliest_member(self) -> None:
+        code = ALERT_STORE.read_text()
+        self.assertIn(
+            "SELECT alert_id FROM authorized_activity_campaign_members\n"
+            "           WHERE campaign_id = ?\n"
+            "           ORDER BY observed_at ASC, alert_id ASC LIMIT 1",
+            code,
+        )
+        self.assertIn(
+            "SELECT stable_group_id FROM authorized_activity_campaign_members\n"
+            "           WHERE campaign_id = ?\n"
+            "           ORDER BY observed_at ASC, alert_id ASC LIMIT 1",
+            code,
+        )
+
     def run_node(self, source: str) -> dict:
         result = subprocess.run(
             ["node", "-e", source],

@@ -3736,7 +3736,17 @@ async function recordAuthorizedActivityCampaign(alert, row, inserted = true) {
   );
   await run(
     `UPDATE authorized_activity_campaigns
-     SET first_seen = (
+     SET representative_alert_id = (
+           SELECT alert_id FROM authorized_activity_campaign_members
+           WHERE campaign_id = ?
+           ORDER BY observed_at ASC, alert_id ASC LIMIT 1
+         ),
+         representative_group_id = (
+           SELECT stable_group_id FROM authorized_activity_campaign_members
+           WHERE campaign_id = ?
+           ORDER BY observed_at ASC, alert_id ASC LIMIT 1
+         ),
+         first_seen = (
            SELECT MIN(observed_at) FROM authorized_activity_campaign_members
            WHERE campaign_id = ?
          ),
@@ -3755,6 +3765,8 @@ async function recordAuthorizedActivityCampaign(alert, row, inserted = true) {
          updated_at = ?
      WHERE campaign_id = ?`,
     [
+      policy.campaign_id,
+      policy.campaign_id,
       policy.campaign_id,
       policy.campaign_id,
       policy.campaign_id,
@@ -3792,20 +3804,58 @@ async function recordAuthorizedActivityCampaign(alert, row, inserted = true) {
 }
 
 async function backfillAuthorizedActivityCampaigns() {
-  const rows = await all(
-    `SELECT * FROM alerts
-     WHERE stable_group_id IS NOT NULL AND stable_group_id <> ''
-       AND COALESCE(filter_status, 'accepted') IN ('accepted', 'escalated', 'duplicate')
-     ORDER BY datetime(replace(COALESCE(timestamp, first_seen), '  ', 'T')) ASC,
-              alert_id ASC`,
+  const enabledPolicies = (authorizedActivityPolicy?.policies || []).filter(
+    (policy) => policy.enabled === true,
   );
+  if (!enabledPolicies.length) return 0;
+  const authorizationStarts = enabledPolicies
+    .map((policy) => Date.parse(policy.authorization_start))
+    .filter(Number.isFinite);
+  const authorizationEnds = enabledPolicies
+    .map((policy) => Date.parse(policy.authorization_end))
+    .filter(Number.isFinite);
+  if (!authorizationStarts.length || !authorizationEnds.length) return 0;
+  const earliestAuthorization = new Date(Math.min(...authorizationStarts)).toISOString();
+  const latestAuthorization = new Date(Math.max(...authorizationEnds)).toISOString();
+  const pageSize = 128;
+  let lastRowId = 0;
   let matched = 0;
-  await withImmediateTransaction(async () => {
-    for (const row of rows) {
-      const alert = parseJsonObject(row.alert_json);
-      if (await recordAuthorizedActivityCampaign(alert, row, true)) matched += 1;
-    }
-  });
+  while (true) {
+    // alert_json can exceed a megabyte. Loading the whole alert table here
+    // exhausted the production Node heap before the health endpoint became
+    // ready. Rowid keyset pages keep memory bounded, while the authorization
+    // window and existing-membership predicate avoid replaying irrelevant
+    // history on every restart.
+    const rows = await all(
+      `SELECT rowid AS backfill_rowid,
+              alert_id, first_seen, last_seen, timestamp, rule_id,
+              source_ip, source_port, destination_ip, destination_port,
+              network_protocol, transport_protocol, stable_group_id,
+              alert_json
+       FROM alerts
+       WHERE rowid > ?
+         AND stable_group_id IS NOT NULL AND stable_group_id <> ''
+         AND COALESCE(filter_status, 'accepted') IN ('accepted', 'escalated', 'duplicate')
+         AND julianday(replace(COALESCE(timestamp, first_seen), '  ', 'T'))
+             BETWEEN julianday(?) AND julianday(?)
+         AND NOT EXISTS (
+           SELECT 1 FROM authorized_activity_campaign_members AS member
+           WHERE member.alert_id = alerts.alert_id
+         )
+       ORDER BY rowid ASC
+       LIMIT ?`,
+      [lastRowId, earliestAuthorization, latestAuthorization, pageSize],
+    );
+    if (!rows.length) break;
+    lastRowId = Number(rows[rows.length - 1].backfill_rowid || lastRowId);
+    await withImmediateTransaction(async () => {
+      for (const row of rows) {
+        const alert = parseJsonObject(row.alert_json);
+        if (await recordAuthorizedActivityCampaign(alert, row, true)) matched += 1;
+      }
+    });
+    if (rows.length < pageSize) break;
+  }
   return matched;
 }
 
