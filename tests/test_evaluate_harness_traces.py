@@ -551,6 +551,63 @@ def replace_terminal_manifest(
 
 
 class HarnessTraceEvaluatorTests(unittest.TestCase):
+    def test_resolved_repair_is_not_reported_as_tool_coverage_gap(self) -> None:
+        calls = [
+            {
+                "call_id": "round-1-exact-ssh",
+                "round_number": 1,
+                "status": "rejected",
+                "coverage": "evidence-gap",
+            },
+            {
+                "call_id": "round-2-exact-ssh",
+                "round_number": 2,
+                "status": "ok",
+                "coverage": "exact-zero",
+            },
+        ]
+
+        self.assertEqual(
+            evaluator.unresolved_tool_coverage_gaps(calls),
+            [],
+        )
+
+    def test_unrepaired_tool_failure_remains_a_coverage_gap(self) -> None:
+        calls = [
+            {
+                "call_id": "round-1-exact-ssh",
+                "round_number": 1,
+                "status": "rejected",
+                "coverage": "evidence-gap",
+            },
+        ]
+
+        self.assertEqual(
+            evaluator.unresolved_tool_coverage_gaps(calls),
+            ["round-1-exact-ssh"],
+        )
+
+    def test_terminal_repair_failure_remains_a_coverage_gap(self) -> None:
+        calls = [
+            {
+                "call_id": "round-1-exact-ssh",
+                "round_number": 1,
+                "status": "rejected",
+                "coverage": "evidence-gap",
+            },
+            {
+                "call_id": "round-2-exact-ssh",
+                "round_number": 2,
+                "status": "error",
+                "coverage": "evidence-gap",
+            },
+        ]
+
+        self.assertEqual(
+            evaluator.unresolved_tool_coverage_gaps(calls),
+            ["round-2-exact-ssh"],
+        )
+
     def test_reports_requested_metrics_and_leaves_database_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "harness.sqlite3"

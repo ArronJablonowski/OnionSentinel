@@ -83,6 +83,54 @@ FAILURE_STATUSES = frozenset(
 GAP_COVERAGE = frozenset(
     {"", "unknown", "evidence-gap", "missing", "unavailable", "not-collected"}
 )
+
+
+def tool_query_id(row: Mapping[str, Any]) -> str:
+    """Return the logical query id encoded in a collector-owned call id."""
+    call_id = str(row.get("call_id") or "")
+    round_number = nonnegative_int(row.get("round_number"))
+    prefix = f"round-{round_number}-"
+    return call_id[len(prefix) :] if call_id.startswith(prefix) else ""
+
+
+def unresolved_tool_coverage_gaps(
+    tool_calls: Iterable[Mapping[str, Any]],
+) -> list[str]:
+    """Keep failed attempts auditable while grading their terminal outcome.
+
+    The runtime permits a single deterministic repair only under the original
+    query id and validates that it cannot widen scope.  Therefore an earlier
+    gap for that id is resolved only when a later ledger row is successful;
+    an unrepaired or terminally failed id remains a coverage gap.
+    """
+    ordered = sorted(
+        tool_calls,
+        key=lambda row: (
+            nonnegative_int(row.get("round_number")),
+            str(row.get("call_id") or ""),
+        ),
+    )
+    terminal_by_query_id: dict[str, Mapping[str, Any]] = {}
+    standalone_gaps: list[str] = []
+    for row in ordered:
+        query_id = tool_query_id(row)
+        if query_id:
+            terminal_by_query_id[query_id] = row
+        elif (
+            normalize_status(row.get("coverage")) in GAP_COVERAGE
+            or normalize_status(row.get("status"))
+            not in (SUCCESS_STATUSES | REJECTION_STATUSES)
+        ):
+            standalone_gaps.append(str(row.get("call_id") or ""))
+    unresolved = list(standalone_gaps)
+    for row in terminal_by_query_id.values():
+        if (
+            normalize_status(row.get("coverage")) in GAP_COVERAGE
+            or normalize_status(row.get("status"))
+            not in SUCCESS_STATUSES
+        ):
+            unresolved.append(str(row.get("call_id") or ""))
+    return unresolved
 MATERIAL_REVIEW_FIELDS = (
     "detection_outcome",
     "event_status",
@@ -1759,13 +1807,7 @@ def evaluate_run(
         for row in tool_calls
         if normalize_status(row.get("status")) in FAILURE_STATUSES
     ]
-    coverage_gaps = [
-        str(row.get("call_id") or "")
-        for row in tool_calls
-        if normalize_status(row.get("coverage")) in GAP_COVERAGE
-        or normalize_status(row.get("status"))
-        not in (SUCCESS_STATUSES | REJECTION_STATUSES)
-    ]
+    coverage_gaps = unresolved_tool_coverage_gaps(tool_calls)
     truncated_tools = [
         str(row.get("call_id") or "")
         for row in tool_calls

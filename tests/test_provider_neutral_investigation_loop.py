@@ -1833,6 +1833,40 @@ class ProviderNeutralInvestigationLoopTests(unittest.TestCase):
         self.assertEqual(summary["unresolved_non_success_attempts"], 0)
         self.assertEqual(summary["evidence_gaps"], [])
 
+    def test_binding_summary_marks_successful_bounded_repair_complete(self) -> None:
+        summary = self.runner.investigation_query_binding_summary(
+            [
+                {
+                    "query_id": "repaired-query",
+                    "normalized_status": "rejected",
+                    "read_only": True,
+                },
+                {
+                    "query_id": "repaired-query",
+                    "normalized_status": "ok",
+                    "read_only": True,
+                },
+            ],
+            queries_admitted=2,
+        )
+
+        self.assertTrue(summary["complete"])
+        self.assertTrue(summary["evaluation_requirement_satisfied"])
+
+    def test_binding_summary_keeps_unrepaired_rejection_incomplete(self) -> None:
+        summary = self.runner.investigation_query_binding_summary(
+            [
+                {
+                    "query_id": "unrepaired-query",
+                    "normalized_status": "rejected",
+                    "read_only": True,
+                },
+            ],
+            queries_admitted=1,
+        )
+
+        self.assertFalse(summary["complete"])
+
     def test_mixed_batch_uses_injected_read_only_brokers(self) -> None:
         prompt_package = {
             "_local_investigation_query_context": {

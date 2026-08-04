@@ -8372,11 +8372,30 @@ def investigation_query_binding_summary(
     executed_read_only = bool(executed) and all(
         item.get("read_only") is True for item in executed
     )
-    complete = bool(bindings) and all_bindings_read_only and all(
-        str(item.get("normalized_status") or "")
-        in INVESTIGATION_QUERY_SUCCESS_STATUSES
-        for item in bindings
-    ) and len(bindings) >= max(1, int(queries_admitted))
+    status_history: dict[str, list[str]] = {}
+    for item in bindings:
+        query_id = str(item.get("query_id") or "").strip()
+        if not query_id:
+            continue
+        status_history.setdefault(query_id, []).append(
+            str(item.get("normalized_status") or "").strip().lower()
+        )
+    # A rejected/failed proposal remains in the immutable tool ledger, but it
+    # is not an unresolved evidence gap when the broker's one-shot,
+    # non-widening repair for the same query_id subsequently succeeds.  The
+    # repair admission path validates the fixed scope before this summary is
+    # built; this only corrects terminal-outcome accounting.
+    terminal_queries_succeeded = bool(status_history) and all(
+        statuses
+        and statuses[-1] in INVESTIGATION_QUERY_SUCCESS_STATUSES
+        for statuses in status_history.values()
+    )
+    complete = (
+        bool(bindings)
+        and all_bindings_read_only
+        and terminal_queries_succeeded
+        and len(bindings) >= max(1, int(queries_admitted))
+    )
     return {
         "read_only": executed_read_only,
         "all_tool_call_bindings_read_only": all_bindings_read_only,
