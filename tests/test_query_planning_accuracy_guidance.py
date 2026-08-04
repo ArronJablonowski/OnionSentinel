@@ -31,6 +31,9 @@ class QueryPlanningAccuracyGuidanceTests(unittest.TestCase):
             "broad timeline sample from a high-volume endpoint index is context, not causal process attribution",
             self.source,
         )
+        self.assertIn("network source port as ephemeral", self.source)
+        self.assertIn("process.executable", self.source)
+        self.assertIn("not proof of trust or authorization", self.source)
 
     def test_episode_correlation_requires_exact_join_evidence(self) -> None:
         self.assertIn("Correlate DNS resolution followed by TLS", self.source)
