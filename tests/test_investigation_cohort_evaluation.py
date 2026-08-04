@@ -933,7 +933,7 @@ class InvestigationCohortEvaluationTests(unittest.TestCase):
         contract = harness["model_call_contract"]
         adjudicator = {
             "call_id": "disagreement-adjudication-1",
-            "purpose": "independent disagreement adjudication",
+            "purpose": "bounded disagreement adjudication",
             "requested_route": harness["assigned_reviewer_route"],
             "independent_review": True,
             "status": "completed",

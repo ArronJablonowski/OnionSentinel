@@ -126,7 +126,7 @@ ADJUDICATION_CALL_IDS = (
     "disagreement-adjudication-1",
     "disagreement-adjudication-2",
 )
-ADJUDICATION_PURPOSE = "independent disagreement adjudication"
+ADJUDICATION_PURPOSE = "bounded disagreement adjudication"
 
 RUBRIC_WEIGHTS = {
     "occurrence_validity": 14,
