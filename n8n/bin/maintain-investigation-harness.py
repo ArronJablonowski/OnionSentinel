@@ -149,6 +149,20 @@ def _owner_only_regular_file(path: Path) -> bool:
     )
 
 
+def _owner_readable_regular_file(path: Path) -> bool:
+    """Accept read-only source databases that only their owner may modify."""
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and stat.S_IMODE(metadata.st_mode) & 0o022 == 0
+        and metadata.st_uid == os.getuid()
+    )
+
+
 def _owner_only_directory(path: Path) -> bool:
     try:
         metadata = path.lstat()
@@ -554,9 +568,10 @@ def select_stale_running_reconciliations(
     limit: int,
 ) -> list[dict[str, Any]]:
     """Select stale runs whose durable owner can no longer be executing."""
-    if not _owner_only_regular_file(alert_db):
+    if not _owner_readable_regular_file(alert_db):
         raise MaintenanceError(
-            "alert-store SQLite database must be an owner-only regular file"
+            "alert-store SQLite database must be an owner-owned regular "
+            "file without group/world write access"
         )
     cutoff = timestamp_text(
         now - dt.timedelta(seconds=stale_running_seconds)

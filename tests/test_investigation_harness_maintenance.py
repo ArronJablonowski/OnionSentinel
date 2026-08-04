@@ -470,6 +470,23 @@ class InvestigationHarnessMaintenanceTests(unittest.TestCase):
             "running",
         )
 
+    def test_read_only_alert_store_may_be_group_world_readable(self) -> None:
+        self.add_run("run-readable", terminal=False, age_days=1)
+        alert_db = self.make_alert_store_job(
+            "run-readable", status="completed"
+        )
+        os.chmod(alert_db, 0o644)
+        result = MAINTENANCE.reconcile_stale_running_runs(
+            self.db,
+            alert_db,
+            worker_lock_paths=self.worker_locks(),
+            now=self.now,
+            stale_running_seconds=3600,
+            limit=10,
+            apply=False,
+        )
+        self.assertEqual(result["selected"], 1)
+
     def test_active_worker_lock_blocks_stale_run_reconciliation(self) -> None:
         self.add_run("run-locked", terminal=False, age_days=1)
         alert_db = self.make_alert_store_job(
