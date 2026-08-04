@@ -11,14 +11,18 @@ import json
 import os
 import sys
 import datetime as dt
+import hashlib
 import ipaddress
 import re
+import syslog
+import uuid
 from pathlib import Path
 
 from process_io import BoundedProcessError, run_bounded_command
 
 
 MAX_REQUEST_BYTES = 16 * 1024
+MAX_TRANSPORT_REQUEST_BYTES = 20 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_ERROR_FIELD_BYTES = 500
 DEFAULT_CONFIG = Path("/etc/so-alert-relay/incident-evidence.json")
@@ -113,6 +117,153 @@ UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
     re.IGNORECASE,
 )
+TRANSPORT_AUDIT_CONTRACT = "onion-sentinel-evidence-transport-v1"
+TRANSPORT_RECEIPT_CONTRACT = "onion-sentinel-evidence-receipt-v1"
+CORRELATION_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+AUDIT_OPERATIONS = {
+    "incident_evidence",
+    "investigation_pivots",
+    DHCP_DISCOVERY_OPERATION,
+    SOFTWARE_INVENTORY_OPERATION,
+}
+
+
+def _canonical_digest(value: object) -> str:
+    encoded = json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _audit_value(value: object) -> str:
+    text = str(value if value is not None else "")[:160]
+    return re.sub(r"[^A-Za-z0-9_.:@+-]", "_", text)
+
+
+def _audit_log(event: str, audit: dict, **fields: object) -> None:
+    if "operation" in fields and fields["operation"] not in AUDIT_OPERATIONS:
+        fields["operation"] = "unknown"
+    allowed = {
+        "event": event,
+        "correlation_id": audit.get("correlation_id", ""),
+        "request_digest": audit.get("request_digest", ""),
+        **fields,
+    }
+    message = " ".join(
+        f"{key}={_audit_value(value)}" for key, value in allowed.items()
+    )
+    try:
+        syslog.syslog(syslog.LOG_INFO, "onion-sentinel-evidence " + message)
+    except OSError:
+        pass
+
+
+def _transport_envelope(value: object) -> tuple[dict, dict]:
+    if not isinstance(value, dict):
+        raise ValueError("request root must be an object")
+    if value.get("transport_contract") == TRANSPORT_AUDIT_CONTRACT:
+        if set(value) != {
+            "transport_contract", "correlation_id", "request_digest", "payload"
+        }:
+            raise ValueError("transport envelope fields are invalid")
+        payload = value.get("payload")
+        correlation_id = value.get("correlation_id")
+        request_digest = value.get("request_digest")
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(correlation_id, str)
+            or not CORRELATION_ID_RE.fullmatch(correlation_id)
+            or not isinstance(request_digest, str)
+            or not HEX_64_RE.fullmatch(request_digest)
+            or request_digest != _canonical_digest(payload)
+        ):
+            raise ValueError("transport envelope failed validation")
+    else:
+        payload = value
+        correlation_id = uuid.uuid4().hex
+        request_digest = _canonical_digest(payload)
+    if len(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()) > MAX_REQUEST_BYTES:
+        raise ValueError("request payload exceeds the broker byte limit")
+    audit = {
+        "transport_contract": TRANSPORT_AUDIT_CONTRACT,
+        "correlation_id": correlation_id,
+        "request_digest": request_digest,
+    }
+    return payload, {**audit, "payload": payload}
+
+
+def _validate_receipt(response: dict, audit: dict, request: dict) -> dict:
+    receipt = response.get("audit_receipt")
+    if not isinstance(receipt, dict) or set(receipt) != {
+        "receipt_contract",
+        "correlation_id",
+        "request_digest",
+        "response_payload_digest",
+        "elastic_search_count",
+        "osquery_query_count",
+        "helper_invocation_count",
+        "read_only",
+        "terminal_status",
+    }:
+        raise ValueError("Security Onion response omitted its audit receipt")
+    without_receipt = {
+        key: value for key, value in response.items() if key != "audit_receipt"
+    }
+    if (
+        receipt.get("receipt_contract") != TRANSPORT_RECEIPT_CONTRACT
+        or receipt.get("correlation_id") != audit["correlation_id"]
+        or receipt.get("request_digest") != audit["request_digest"]
+        or receipt.get("response_payload_digest") != _canonical_digest(without_receipt)
+        or receipt.get("read_only") is not True
+        or receipt.get("terminal_status")
+        != ("complete" if response.get("complete") is True else "partial")
+        or any(
+            not isinstance(receipt.get(field), int)
+            or isinstance(receipt.get(field), bool)
+            or receipt.get(field) < 0
+            for field in (
+                "elastic_search_count",
+                "osquery_query_count",
+                "helper_invocation_count",
+            )
+        )
+    ):
+        raise ValueError("Security Onion audit receipt failed validation")
+    if request.get("operation") == "investigation_pivots":
+        expected = len(request.get("queries") or []) + 2
+        if (
+            receipt.get("elastic_search_count") != expected
+            or receipt.get("osquery_query_count") != 0
+            or receipt.get("helper_invocation_count") != 0
+        ):
+            raise ValueError("Security Onion search accounting is inconsistent")
+    elif (
+        request.get("contract") == DHCP_DISCOVERY_CONTRACT
+        or request.get("operation") == DHCP_DISCOVERY_OPERATION
+        or request.get("contract") == SOFTWARE_INVENTORY_CONTRACT
+        or request.get("operation") == SOFTWARE_INVENTORY_OPERATION
+    ):
+        if (
+            receipt.get("elastic_search_count") != 0
+            or receipt.get("osquery_query_count") != 0
+            or receipt.get("helper_invocation_count") != 1
+        ):
+            raise ValueError("Security Onion helper accounting is inconsistent")
+    else:
+        controls = response.get("controls") if isinstance(response.get("controls"), dict) else {}
+        expected_control_searches = sum(
+            1
+            for name in ("positive_anchor", "negative_filter")
+            if isinstance(controls.get(name), dict)
+            and controls[name].get("status") != "not_requested"
+        )
+        if (
+            receipt.get("elastic_search_count")
+            != len(response.get("results") or []) + expected_control_searches
+            or receipt.get("osquery_query_count")
+            != len(response.get("osquery_results") or [])
+            or receipt.get("helper_invocation_count") != 0
+        ):
+            raise ValueError("Security Onion evidence accounting is inconsistent")
+    return receipt
 
 
 def _parse_dhcp_timestamp(value: object) -> dt.datetime:
@@ -472,15 +623,22 @@ def _failed_command_payload(
 def main() -> int:
     if os.environ.get("SSH_ORIGINAL_COMMAND", "").strip():
         return emit({"ok": False, "error": "commands are not accepted by this forced endpoint"}, 2)
-    raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
-    if len(raw) > MAX_REQUEST_BYTES:
-        return emit({"ok": False, "error": "request exceeds the broker byte limit"}, 2)
+    raw = sys.stdin.buffer.read(MAX_TRANSPORT_REQUEST_BYTES + 1)
+    if len(raw) > MAX_TRANSPORT_REQUEST_BYTES:
+        return emit({"ok": False, "error": "request exceeds the transport byte limit"}, 2)
     try:
-        request = json.loads(raw.decode("utf-8"))
+        received = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         return emit({"ok": False, "error": f"invalid JSON request: {exc}"}, 2)
-    if not isinstance(request, dict):
-        return emit({"ok": False, "error": "request root must be an object"}, 2)
+    try:
+        request, envelope = _transport_envelope(received)
+    except ValueError as exc:
+        return emit({"ok": False, "error": str(exc)}, 2)
+    audit = {
+        "correlation_id": envelope["correlation_id"],
+        "request_digest": envelope["request_digest"],
+    }
+    _audit_log("relay_start", audit, operation=request.get("operation", "incident_evidence"))
     is_dhcp_request = (
         request.get("contract") == DHCP_DISCOVERY_CONTRACT
         or request.get("operation") == DHCP_DISCOVERY_OPERATION
@@ -493,11 +651,13 @@ def main() -> int:
         try:
             validate_dhcp_request(request)
         except ValueError as exc:
+            _audit_log("relay_terminal", audit, status="invalid_dhcp_request")
             return emit({"ok": False, "error": f"invalid DHCP discovery request: {exc}"}, 2)
     if is_software_request:
         try:
             validate_software_request(request)
         except ValueError as exc:
+            _audit_log("relay_terminal", audit, status="invalid_software_request")
             return emit(
                 {"ok": False, "error": f"invalid software inventory request: {exc}"},
                 2,
@@ -506,6 +666,7 @@ def main() -> int:
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
+        _audit_log("relay_terminal", audit, status="configuration_error")
         return emit({"ok": False, "error": f"broker configuration unavailable: {exc}"}, 3)
     command = [
         "/usr/bin/ssh", "-T", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
@@ -517,7 +678,7 @@ def main() -> int:
     try:
         proc = run_bounded_command(
             command,
-            input_bytes=json.dumps(request, separators=(",", ":")).encode(),
+            input_bytes=json.dumps(envelope, separators=(",", ":"), sort_keys=True).encode(),
             timeout_seconds=float(config.get("timeout_seconds", 400)),
             max_stdout_bytes=min(
                 int(config.get("max_response_bytes", MAX_RESPONSE_BYTES)),
@@ -530,21 +691,39 @@ def main() -> int:
             max_stderr_bytes=int(config.get("max_stderr_bytes", 256 * 1024)),
         )
     except (BoundedProcessError, OSError, ValueError, KeyError) as exc:
+        _audit_log("relay_terminal", audit, status="transport_error")
         return emit({"ok": False, "error": f"restricted Security Onion evidence transport failed: {exc}"}, 4)
     if proc.returncode != 0:
+        _audit_log("relay_terminal", audit, status="upstream_error")
         return emit(_failed_command_payload(proc), 4)
     try:
         response = json.loads(proc.stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _audit_log("relay_terminal", audit, status="invalid_json")
         return emit({"ok": False, "error": f"invalid Security Onion evidence response: {exc}"}, 4)
     if not isinstance(response, dict):
+        _audit_log("relay_terminal", audit, status="invalid_root")
         return emit({"ok": False, "error": "Security Onion evidence response root was not an object"}, 4)
+    try:
+        receipt = _validate_receipt(response, audit, request)
+    except ValueError as exc:
+        _audit_log("relay_terminal", audit, status="invalid_receipt")
+        return emit({"ok": False, "error": str(exc)}, 4)
     if is_dhcp_request and response.get("contract") != DHCP_DISCOVERY_CONTRACT:
+        _audit_log("relay_terminal", audit, status="invalid_dhcp_contract")
         return emit({"ok": False, "error": "Security Onion DHCP response failed contract validation"}, 4)
     if is_software_request:
         try:
-            validate_software_response(response, request)
+            validate_software_response(
+                {
+                    key: value
+                    for key, value in response.items()
+                    if key != "audit_receipt"
+                },
+                request,
+            )
         except ValueError:
+            _audit_log("relay_terminal", audit, status="invalid_software_contract")
             return emit(
                 {
                     "ok": False,
@@ -552,6 +731,13 @@ def main() -> int:
                 },
                 4,
             )
+    _audit_log(
+        "relay_terminal",
+        audit,
+        status=("complete" if response.get("complete") is True else "partial"),
+        elastic_search_count=receipt.get("elastic_search_count", 0),
+        response_payload_digest=receipt.get("response_payload_digest", ""),
+    )
     return emit(response, 0 if response.get("ok") else 5)
 
 

@@ -23,12 +23,15 @@ import re
 import selectors
 import signal
 import subprocess
+import syslog
 import sys
 import time
+import uuid
 from pathlib import Path
 
 
 MAX_REQUEST_BYTES = 16 * 1024
+MAX_TRANSPORT_REQUEST_BYTES = 20 * 1024
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 MAX_STDERR_BYTES = 256 * 1024
 MAX_HITS = 200
@@ -499,9 +502,55 @@ SAFE_DOMAIN = re.compile(
 SAFE_EVIDENCE_REF = re.compile(r"^[A-Za-z0-9_.:@/+=#-]{1,256}$")
 SAFE_COMMUNITY_ID = re.compile(r"^[A-Za-z0-9_:+/=-]{1,256}$")
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
+TRANSPORT_AUDIT_CONTRACT = "onion-sentinel-evidence-transport-v1"
+TRANSPORT_RECEIPT_CONTRACT = "onion-sentinel-evidence-receipt-v1"
+CORRELATION_ID = re.compile(r"^[a-f0-9]{32}$")
+AUDIT_CONTEXT: dict[str, object] = {}
+AUDIT_OPERATIONS = {
+    "incident_evidence",
+    "investigation_pivots",
+    DHCP_DISCOVERY_OPERATION,
+    SOFTWARE_INVENTORY_OPERATION,
+}
+
+
+def audit_value(value: object) -> str:
+    text = str(value if value is not None else "")[:160]
+    return re.sub(r"[^A-Za-z0-9_.:@+-]", "_", text)
+
+
+def audit_log(event: str, **fields: object) -> None:
+    if not AUDIT_CONTEXT:
+        return
+    if "operation" in fields and fields["operation"] not in AUDIT_OPERATIONS:
+        fields["operation"] = "unknown"
+    allowed = {
+        "event": event,
+        "correlation_id": AUDIT_CONTEXT.get("correlation_id", ""),
+        "request_digest": AUDIT_CONTEXT.get("request_digest", ""),
+        **fields,
+    }
+    try:
+        syslog.syslog(
+            syslog.LOG_INFO,
+            "onion-sentinel-evidence "
+            + " ".join(
+                f"{key}={audit_value(value)}"
+                for key, value in allowed.items()
+            ),
+        )
+    except OSError:
+        pass
 
 
 def fail(message: str, code: int = 2) -> None:
+    audit_log(
+        "security_onion_terminal",
+        status="error",
+        elastic_search_count=AUDIT_CONTEXT.get("elastic_search_count", 0),
+        osquery_query_count=AUDIT_CONTEXT.get("osquery_query_count", 0),
+        helper_invocation_count=AUDIT_CONTEXT.get("helper_invocation_count", 0),
+    )
     print(json.dumps({"ok": False, "error": message}, separators=(",", ":")))
     raise SystemExit(code)
 
@@ -521,16 +570,90 @@ def iso_utc(value: dt.datetime) -> str:
 
 
 def read_request() -> dict:
-    raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
-    if len(raw) > MAX_REQUEST_BYTES:
-        fail("request exceeds the 16384-byte limit")
+    raw = sys.stdin.buffer.read(MAX_TRANSPORT_REQUEST_BYTES + 1)
+    if len(raw) > MAX_TRANSPORT_REQUEST_BYTES:
+        fail("request exceeds the transport byte limit")
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         fail(f"invalid JSON request: {exc}")
     if not isinstance(data, dict):
         fail("request root must be an object")
-    return data
+    if data.get("transport_contract") == TRANSPORT_AUDIT_CONTRACT:
+        if set(data) != {
+            "transport_contract", "correlation_id", "request_digest", "payload"
+        }:
+            fail("request transport envelope is invalid")
+        payload = data.get("payload")
+        correlation_id = data.get("correlation_id")
+        request_digest = data.get("request_digest")
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(correlation_id, str)
+            or not CORRELATION_ID.fullmatch(correlation_id)
+            or not isinstance(request_digest, str)
+            or not SHA256.fullmatch(request_digest)
+            or request_digest != canonical_digest(payload)
+        ):
+            fail("request transport envelope failed validation")
+    else:
+        # Transitional compatibility lets the Security Onion wrapper be
+        # deployed before the Relay without interrupting the forced lane.
+        payload = data
+        correlation_id = uuid.uuid4().hex
+        request_digest = canonical_digest(payload)
+    if (
+        len(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
+        > MAX_REQUEST_BYTES
+    ):
+        fail("request payload exceeds the 16384-byte limit")
+    AUDIT_CONTEXT.update({
+        "correlation_id": correlation_id,
+        "request_digest": request_digest,
+        "elastic_search_count": 0,
+        "osquery_query_count": 0,
+        "helper_invocation_count": 0,
+    })
+    audit_log(
+        "security_onion_start",
+        operation=payload.get("operation", "incident_evidence"),
+    )
+    return payload
+
+
+def emit_response(
+    response: dict,
+    *,
+    maximum_bytes: int = MAX_OUTPUT_BYTES,
+    output_error: str = "bounded evidence response exceeded the output contract",
+) -> int:
+    payload_digest = canonical_digest(response)
+    terminal_status = "complete" if response.get("complete") is True else "partial"
+    receipt = {
+        "receipt_contract": TRANSPORT_RECEIPT_CONTRACT,
+        "correlation_id": AUDIT_CONTEXT["correlation_id"],
+        "request_digest": AUDIT_CONTEXT["request_digest"],
+        "response_payload_digest": payload_digest,
+        "elastic_search_count": AUDIT_CONTEXT["elastic_search_count"],
+        "osquery_query_count": AUDIT_CONTEXT["osquery_query_count"],
+        "helper_invocation_count": AUDIT_CONTEXT["helper_invocation_count"],
+        "read_only": True,
+        "terminal_status": terminal_status,
+    }
+    emitted = {**response, "audit_receipt": receipt}
+    output = json.dumps(emitted, separators=(",", ":"), sort_keys=True).encode()
+    if len(output) > maximum_bytes:
+        fail(output_error, 4)
+    audit_log(
+        "security_onion_terminal",
+        status=terminal_status,
+        elastic_search_count=receipt["elastic_search_count"],
+        osquery_query_count=receipt["osquery_query_count"],
+        helper_invocation_count=receipt["helper_invocation_count"],
+        response_payload_digest=payload_digest,
+    )
+    sys.stdout.buffer.write(output + b"\n")
+    return 0
 
 
 def index_matches_scope(index_name: str, index_scope: list[str]) -> bool:
@@ -1387,6 +1510,9 @@ def parse_shards(value: object) -> dict:
 
 
 def execute_search(body: dict, index_scope: list[str]) -> dict:
+    AUDIT_CONTEXT["elastic_search_count"] = int(
+        AUDIT_CONTEXT.get("elastic_search_count", 0)
+    ) + 1
     audit = search_audit(body, index_scope)
     encoded = json.dumps(body, separators=(",", ":"), sort_keys=True)
     started = time.monotonic()
@@ -2131,6 +2257,9 @@ def osquery_binary() -> Path | None:
 
 def execute_osquery_pack(binary: Path, pack_name: str) -> dict:
     """Run one reviewed query as ephemeral osqueryi and preserve its exact audit."""
+    AUDIT_CONTEXT["osquery_query_count"] = int(
+        AUDIT_CONTEXT.get("osquery_query_count", 0)
+    ) + 1
     query = OSQUERY_PACKS[pack_name]
     digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
     started = time.monotonic()
@@ -2242,11 +2371,10 @@ def execute_pivot_batch(data: dict) -> int:
         "controls": controls,
         "semantic_validity": validity,
     }
-    output = json.dumps(response, separators=(",", ":"), sort_keys=True).encode()
-    if len(output) > MAX_OUTPUT_BYTES:
-        fail("bounded investigation pivot response exceeded the output contract", 4)
-    sys.stdout.buffer.write(output + b"\n")
-    return 0
+    return emit_response(
+        response,
+        output_error="bounded investigation pivot response exceeded the output contract",
+    )
 
 
 def execute_dhcp_discovery(data: dict) -> int:
@@ -2269,11 +2397,12 @@ def execute_dhcp_discovery(data: dict) -> int:
         fail(f"invalid DHCP discovery request: {exc}")
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         fail(f"DHCP discovery query failed: {exc}", 3)
-    output = json.dumps(response, separators=(",", ":"), sort_keys=True).encode()
-    if len(output) > 4 * 1024 * 1024:
-        fail("bounded DHCP discovery response exceeded the output contract", 4)
-    sys.stdout.buffer.write(output + b"\n")
-    return 0
+    AUDIT_CONTEXT["helper_invocation_count"] = 1
+    return emit_response(
+        response,
+        maximum_bytes=4 * 1024 * 1024,
+        output_error="bounded DHCP discovery response exceeded the output contract",
+    )
 
 
 def execute_software_inventory(data: dict) -> int:
@@ -2298,11 +2427,12 @@ def execute_software_inventory(data: dict) -> int:
         fail(f"invalid software inventory request: {exc}")
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         fail(f"software inventory query failed: {exc}", 3)
-    output = json.dumps(response, separators=(",", ":"), sort_keys=True).encode()
-    if len(output) > 4 * 1024 * 1024:
-        fail("bounded software inventory response exceeded the output contract", 4)
-    sys.stdout.buffer.write(output + b"\n")
-    return 0
+    AUDIT_CONTEXT["helper_invocation_count"] = 1
+    return emit_response(
+        response,
+        maximum_bytes=4 * 1024 * 1024,
+        output_error="bounded software inventory response exceeded the output contract",
+    )
 
 
 def main() -> int:
@@ -2365,11 +2495,7 @@ def main() -> int:
         "controls": controls,
         "semantic_validity": validity,
     }
-    output = json.dumps(response, separators=(",", ":"), sort_keys=True).encode()
-    if len(output) > MAX_OUTPUT_BYTES:
-        fail("bounded evidence response exceeded the output contract", 4)
-    sys.stdout.buffer.write(output + b"\n")
-    return 0
+    return emit_response(response)
 
 
 if __name__ == "__main__":
