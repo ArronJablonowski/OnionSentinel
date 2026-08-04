@@ -14,11 +14,13 @@ from contextlib import closing
 import datetime as dt
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import sqlite3
 import stat
+import sys
 import tempfile
 from typing import Any
 
@@ -30,6 +32,8 @@ DEFAULT_MAX_DELETE_RUNS = 1_000
 DEFAULT_MAX_LIVE_BYTES = 2 * 1024**3
 DEFAULT_INCREMENTAL_VACUUM_PAGES = 4_096
 DEFAULT_MAX_BACKUP_AGE_SECONDS = 26 * 60 * 60
+DEFAULT_STALE_RUNNING_SECONDS = 60 * 60
+DEFAULT_MAX_RECONCILE_RUNS = 100
 TERMINAL_STATUSES = ("succeeded", "failed", "cancelled")
 REQUIRED_TABLES = frozenset(
     {
@@ -45,10 +49,41 @@ REQUIRED_TABLES = frozenset(
     }
 )
 MAX_BACKUP_MANIFEST_BYTES = 1024 * 1024
+RECONCILABLE_JOB_TYPES = {
+    "soc-analyst": "ai_analysis",
+    "incident-responder": "incident_response_analysis",
+}
 
 
 class MaintenanceError(RuntimeError):
     """A safe, concise maintenance failure."""
+
+
+def load_harness_runtime():
+    """Load the sibling harness API without depending on the caller's cwd."""
+    module_name = "onion_sentinel_harness_maintenance_runtime"
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    module_path = Path(__file__).with_name("onion_sentinel_harness.py")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise MaintenanceError("could not load the harness runtime API")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    script_dir = str(module_path.parent)
+    inserted = script_dir not in sys.path
+    if inserted:
+        sys.path.insert(0, script_dir)
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    finally:
+        if inserted:
+            sys.path.remove(script_dir)
+    return module
 
 
 def utc_now() -> dt.datetime:
@@ -510,6 +545,194 @@ def verify_recent_harness_backup(
     )
 
 
+def select_stale_running_reconciliations(
+    harness_db: Path,
+    alert_db: Path,
+    *,
+    now: dt.datetime,
+    stale_running_seconds: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Select stale runs whose durable owner can no longer be executing."""
+    if not _owner_only_regular_file(alert_db):
+        raise MaintenanceError(
+            "alert-store SQLite database must be an owner-only regular file"
+        )
+    cutoff = timestamp_text(
+        now - dt.timedelta(seconds=stale_running_seconds)
+    )
+    harness_uri = f"{harness_db.resolve().as_uri()}?mode=ro"
+    alert_uri = f"{alert_db.resolve().as_uri()}?mode=ro"
+    try:
+        with closing(
+            sqlite3.connect(harness_uri, uri=True, timeout=10.0)
+        ) as harness_connection, closing(
+            sqlite3.connect(alert_uri, uri=True, timeout=10.0)
+        ) as alert_connection:
+            harness_connection.row_factory = sqlite3.Row
+            alert_connection.row_factory = sqlite3.Row
+            harness_connection.execute("PRAGMA query_only = ON")
+            alert_connection.execute("PRAGMA query_only = ON")
+            if "durable_jobs" not in _table_names(alert_connection):
+                raise MaintenanceError(
+                    "alert-store SQLite is missing durable_jobs"
+                )
+            candidates = harness_connection.execute(
+                """
+                SELECT run_id, correlation_id, case_id, role, started_at,
+                       updated_at
+                FROM harness_runs
+                WHERE status = 'running'
+                  AND role IN ('soc-analyst', 'incident-responder')
+                  AND datetime(replace(updated_at, '  ', 'T')) <= datetime(?)
+                ORDER BY datetime(replace(updated_at, '  ', 'T')), run_id
+                LIMIT ?
+                """,
+                (cutoff, limit),
+            ).fetchall()
+            selected: list[dict[str, Any]] = []
+            for candidate in candidates:
+                job_type = RECONCILABLE_JOB_TYPES[str(candidate["role"])]
+                durable = alert_connection.execute(
+                    """
+                    SELECT id, status, attempt_count, updated_at
+                    FROM durable_jobs
+                    WHERE job_type = ? AND dedupe_key = ?
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (job_type, str(candidate["correlation_id"])),
+                ).fetchone()
+                if durable is None or str(durable["status"]) == "processing":
+                    continue
+                successor = harness_connection.execute(
+                    """
+                    SELECT run_id, status, started_at
+                    FROM harness_runs
+                    WHERE correlation_id = ? AND case_id = ? AND run_id != ?
+                      AND datetime(replace(started_at, '  ', 'T')) >
+                          datetime(replace(?, '  ', 'T'))
+                    ORDER BY datetime(replace(started_at, '  ', 'T')) DESC,
+                             run_id DESC
+                    LIMIT 1
+                    """,
+                    (
+                        str(candidate["correlation_id"]),
+                        str(candidate["case_id"]),
+                        str(candidate["run_id"]),
+                        str(candidate["started_at"]),
+                    ),
+                ).fetchone()
+                selected.append(
+                    {
+                        "run_id": str(candidate["run_id"]),
+                        "durable_job_id": int(durable["id"]),
+                        "durable_job_type": job_type,
+                        "durable_status": str(durable["status"]),
+                        "durable_attempt_count": int(
+                            durable["attempt_count"] or 0
+                        ),
+                        "successor_run_id": (
+                            str(successor["run_id"]) if successor else ""
+                        ),
+                        "successor_status": (
+                            str(successor["status"]) if successor else ""
+                        ),
+                    }
+                )
+            return selected
+    except sqlite3.Error as exc:
+        raise MaintenanceError(
+            f"stale harness reconciliation query failed: {exc}"
+        ) from None
+
+
+def reconcile_stale_running_runs(
+    harness_db: Path,
+    alert_db: Path,
+    *,
+    worker_lock_paths: tuple[Path, Path],
+    now: dt.datetime,
+    stale_running_seconds: int,
+    limit: int,
+    apply: bool,
+) -> dict[str, Any]:
+    """Terminalize stale ledgers only while both inference lanes are idle."""
+    result: dict[str, Any] = {
+        "enabled": True,
+        "applied": apply,
+        "status": "preview",
+        "selected": 0,
+        "reconciled": 0,
+        "runs": [],
+    }
+    if not harness_db.exists():
+        result["status"] = "absent"
+        return result
+    if not alert_db.exists():
+        result["status"] = "alert-store-absent"
+        return result
+    handles = []
+    try:
+        if apply:
+            for lock_path in worker_lock_paths:
+                lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                handle = lock_path.open("a+", encoding="utf-8")
+                os.chmod(lock_path, 0o600)
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    handle.close()
+                    result["status"] = "active-worker"
+                    return result
+                handles.append(handle)
+        selected = select_stale_running_reconciliations(
+            harness_db,
+            alert_db,
+            now=now,
+            stale_running_seconds=stale_running_seconds,
+            limit=limit,
+        )
+        result["selected"] = len(selected)
+        result["runs"] = selected
+        if not apply:
+            result["status"] = "preview"
+            return result
+        harness_runtime = load_harness_runtime()
+        store = harness_runtime.HarnessStore(harness_db)
+        reconciled = 0
+        for item in selected:
+            current = store.snapshot(item["run_id"])
+            if str(current.get("status") or "") != "running":
+                continue
+            store.finish(
+                item["run_id"],
+                status=harness_runtime.RunStatus.FAILED.value,
+                reason=(
+                    "stale harness run recovered after its durable owner "
+                    "stopped processing"
+                ),
+                summary={
+                    "recovery": "stale_durable_owner_reconciled",
+                    "durable_job_id": item["durable_job_id"],
+                    "durable_job_type": item["durable_job_type"],
+                    "durable_status": item["durable_status"],
+                    "durable_attempt_count": item[
+                        "durable_attempt_count"
+                    ],
+                    "successor_run_id": item["successor_run_id"],
+                    "successor_status": item["successor_status"],
+                },
+            )
+            reconciled += 1
+        result["reconciled"] = reconciled
+        result["status"] = "ok"
+        return result
+    finally:
+        for handle in reversed(handles):
+            fcntl.flock(handle, fcntl.LOCK_UN)
+            handle.close()
+
+
 def maintain_database(
     db_path: Path,
     *,
@@ -693,6 +916,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stack-dir", type=Path, default=Path.home() / "n8n-local")
     parser.add_argument("--db", type=Path)
+    parser.add_argument("--alert-db", type=Path)
     parser.add_argument("--backup-root", type=Path)
     parser.add_argument("--report", type=Path)
     parser.add_argument("--retention-days", type=int, default=DEFAULT_RETENTION_DAYS)
@@ -726,6 +950,16 @@ def main() -> int:
         type=int,
         default=DEFAULT_MAX_BACKUP_AGE_SECONDS,
     )
+    parser.add_argument(
+        "--stale-running-seconds",
+        type=int,
+        default=DEFAULT_STALE_RUNNING_SECONDS,
+    )
+    parser.add_argument(
+        "--max-reconcile-runs",
+        type=int,
+        default=DEFAULT_MAX_RECONCILE_RUNS,
+    )
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
@@ -734,6 +968,11 @@ def main() -> int:
         args.db.expanduser()
         if args.db
         else stack_dir / "alert_store_data/investigation-harness.sqlite3"
+    )
+    alert_db_path = (
+        args.alert_db.expanduser()
+        if args.alert_db
+        else stack_dir / "alert_store_data/alerts.sqlite3"
     )
     backup_root = (
         args.backup_root.expanduser()
@@ -794,11 +1033,37 @@ def main() -> int:
             minimum=60,
             maximum=7 * 24 * 60 * 60,
         )
+        stale_running_seconds = bounded_int(
+            args.stale_running_seconds,
+            name="stale running seconds",
+            minimum=30 * 60,
+            maximum=7 * 24 * 60 * 60,
+        )
+        max_reconcile_runs = bounded_int(
+            args.max_reconcile_runs,
+            name="maximum stale run reconciliations",
+            minimum=1,
+            maximum=1_000,
+        )
         lock_path = db_path.parent / ".investigation-harness-maintenance.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with lock_path.open("w", encoding="utf-8") as lock:
             os.chmod(lock_path, 0o600)
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            report["stale_run_reconciliation"] = (
+                reconcile_stale_running_runs(
+                    db_path,
+                    alert_db_path,
+                    worker_lock_paths=(
+                        stack_dir / "run/ai-analysis-ollama-worker.lock",
+                        stack_dir / "run/ai-analysis-cli-worker.lock",
+                    ),
+                    now=utc_now(),
+                    stale_running_seconds=stale_running_seconds,
+                    limit=max_reconcile_runs,
+                    apply=args.apply,
+                )
+            )
             # Determine candidates first. If apply mode discovers destructive
             # work, verify backup and repeat selection under the write lock.
             preview = maintain_database(

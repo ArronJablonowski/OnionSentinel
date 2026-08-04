@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import closing
 import datetime as dt
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -84,6 +85,50 @@ class InvestigationHarnessMaintenanceTests(unittest.TestCase):
                 """,
                 (when, when, when, run_id),
             )
+
+    def make_alert_store_job(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        job_type: str = "ai_analysis",
+    ) -> Path:
+        alert_db = self.root / "alert_store_data/alerts.sqlite3"
+        with closing(sqlite3.connect(alert_db)) as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS durable_jobs (
+                  id INTEGER PRIMARY KEY,
+                  job_type TEXT NOT NULL,
+                  dedupe_key TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  attempt_count INTEGER NOT NULL DEFAULT 0,
+                  updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO durable_jobs (
+                  job_type, dedupe_key, status, attempt_count, updated_at
+                ) VALUES (?, ?, ?, 1, ?)
+                """,
+                (
+                    job_type,
+                    f"group-{run_id}",
+                    status,
+                    MAINTENANCE.timestamp_text(self.now),
+                ),
+            )
+            connection.commit()
+        os.chmod(alert_db, 0o600)
+        return alert_db
+
+    def worker_locks(self) -> tuple[Path, Path]:
+        return (
+            self.root / "run/ai-analysis-ollama-worker.lock",
+            self.root / "run/ai-analysis-cli-worker.lock",
+        )
 
     @staticmethod
     def digest(path: Path) -> str:
@@ -355,6 +400,99 @@ class InvestigationHarnessMaintenanceTests(unittest.TestCase):
             "must not be a symlink",
         ):
             self.maintenance(apply=False)
+
+    def test_stale_run_is_hash_chain_reconciled_after_durable_retry(self) -> None:
+        self.add_run("run-crashed", terminal=False, age_days=1)
+        self.add_run("run-successor", terminal=True)
+        with HARNESS._connect(self.db) as connection:
+            connection.execute(
+                """
+                UPDATE harness_runs
+                SET correlation_id = 'group-run-crashed',
+                    case_id = (SELECT case_id FROM harness_runs
+                               WHERE run_id = 'run-crashed'),
+                    started_at = ?, updated_at = ?, completed_at = ?
+                WHERE run_id = 'run-successor'
+                """,
+                (
+                    MAINTENANCE.timestamp_text(
+                        self.now - dt.timedelta(hours=1)
+                    ),
+                    MAINTENANCE.timestamp_text(self.now),
+                    MAINTENANCE.timestamp_text(self.now),
+                ),
+            )
+        alert_db = self.make_alert_store_job(
+            "run-crashed", status="completed"
+        )
+        result = MAINTENANCE.reconcile_stale_running_runs(
+            self.db,
+            alert_db,
+            worker_lock_paths=self.worker_locks(),
+            now=self.now,
+            stale_running_seconds=3600,
+            limit=10,
+            apply=True,
+        )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["reconciled"], 1)
+        store = HARNESS.HarnessStore(self.db)
+        snapshot = store.snapshot("run-crashed")
+        self.assertEqual(snapshot["status"], "failed")
+        summary = json.loads(snapshot["summary_json"])
+        self.assertEqual(summary["durable_status"], "completed")
+        self.assertEqual(summary["successor_run_id"], "run-successor")
+        with HARNESS._connect(self.db) as connection:
+            self.assertTrue(
+                MAINTENANCE.verify_event_chains(
+                    connection,
+                    ("run-crashed",),
+                )
+            )
+
+    def test_processing_durable_owner_is_never_reconciled(self) -> None:
+        self.add_run("run-active", terminal=False, age_days=1)
+        alert_db = self.make_alert_store_job(
+            "run-active", status="processing"
+        )
+        result = MAINTENANCE.reconcile_stale_running_runs(
+            self.db,
+            alert_db,
+            worker_lock_paths=self.worker_locks(),
+            now=self.now,
+            stale_running_seconds=3600,
+            limit=10,
+            apply=True,
+        )
+        self.assertEqual(result["reconciled"], 0)
+        self.assertEqual(
+            HARNESS.HarnessStore(self.db).snapshot("run-active")["status"],
+            "running",
+        )
+
+    def test_active_worker_lock_blocks_stale_run_reconciliation(self) -> None:
+        self.add_run("run-locked", terminal=False, age_days=1)
+        alert_db = self.make_alert_store_job(
+            "run-locked", status="pending"
+        )
+        first_lock, second_lock = self.worker_locks()
+        first_lock.parent.mkdir(parents=True)
+        with first_lock.open("a+") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = MAINTENANCE.reconcile_stale_running_runs(
+                self.db,
+                alert_db,
+                worker_lock_paths=(first_lock, second_lock),
+                now=self.now,
+                stale_running_seconds=3600,
+                limit=10,
+                apply=True,
+            )
+        self.assertEqual(result["status"], "active-worker")
+        self.assertEqual(
+            HARNESS.HarnessStore(self.db).snapshot("run-locked")["status"],
+            "running",
+        )
 
 
 if __name__ == "__main__":
