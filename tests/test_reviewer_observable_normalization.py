@@ -246,6 +246,84 @@ class ReviewerObservableNormalizationTests(unittest.TestCase):
                 review_package,
             )
 
+    def test_current_rule_shorthand_is_not_mistaken_for_fqdn(self) -> None:
+        review_package = self.review_package(
+            {
+                "alert": {
+                    "alert_id": "bpfdoor-rule-shorthand-case",
+                    "rule_name": (
+                        "ET MALWARE BPFDoor ICMP Echo Reply, Heartbeat "
+                        "(Outbound)"
+                    ),
+                }
+            }
+        )
+        shorthands = review_package["review_contract"][
+            "allowed_non_domain_rule_shorthand_tokens"
+        ]
+        self.assertIn("et.bpfdoor", shorthands)
+
+        validated = self.runner.validate_reviewer_response(
+            self.response(
+                review_package,
+                summary=(
+                    "The current ET.BPFDoor rule intent was reviewed; no "
+                    "malware conclusion follows from the signature alone."
+                ),
+            ),
+            review_package,
+        )
+        self.assertEqual(validated["observables_used"], [])
+        self.assertGreater(
+            validated["_review_contract_validation"][
+                "observable_normalization"
+            ]["allowed_non_domain_rule_shorthand_count"],
+            0,
+        )
+
+        with self.assertRaisesRegex(
+            self.runner.ReviewerValidationError,
+            r"foreign domain or FQDN value\(s\): foreign\.example",
+        ):
+            self.runner.validate_reviewer_response(
+                self.response(
+                    review_package,
+                    summary=(
+                        "The ET.BPFDoor rule allegedly contacted "
+                        "foreign.example."
+                    ),
+                ),
+                review_package,
+            )
+
+    def test_exact_dotted_rule_value_is_not_exempted_as_shorthand(self) -> None:
+        review_package = self.review_package(
+            {
+                "alert": {
+                    "alert_id": "dotted-rule-domain-case",
+                    "rule_name": "ET DNS Query for ET.com",
+                }
+            }
+        )
+
+        self.assertNotIn(
+            "et.com",
+            review_package["review_contract"][
+                "allowed_non_domain_rule_shorthand_tokens"
+            ],
+        )
+        with self.assertRaisesRegex(
+            self.runner.ReviewerValidationError,
+            r"foreign domain or FQDN value\(s\): et\.com",
+        ):
+            self.runner.validate_reviewer_response(
+                self.response(
+                    review_package,
+                    summary="The rule referenced ET.com.",
+                ),
+                review_package,
+            )
+
     def test_typed_correlation_community_id_is_allowlisted(self) -> None:
         community_id = "1:8nfubnGW7A3sCNxytkJZfrhhsE4="
         review_package = self.review_package(

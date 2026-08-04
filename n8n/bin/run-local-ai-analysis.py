@@ -4044,6 +4044,13 @@ REVIEW_ARTIFACT_FIELD_PATHS = frozenset(
     }
 )
 REVIEW_ARTIFACT_SUFFIXES = frozenset({"sh"})
+REVIEW_RULE_LABEL_FIELD_PATHS = frozenset(
+    {
+        "alert_signature",
+        "rule_name",
+        "signature",
+    }
+)
 
 
 def _bounded_reference(value: Any) -> str:
@@ -4886,6 +4893,75 @@ def reviewer_non_domain_artifact_catalog(
         "incident_response_evidence",
         "investigation_query_results",
         "live_osquery_evidence",
+    ):
+        visit(prompt_package.get(section))
+    return sorted(found)
+
+
+def reviewer_non_domain_rule_shorthand_catalog(
+    prompt_package: dict[str, Any],
+) -> list[str]:
+    """Return bounded detector-rule shorthands such as ``ET.BPFDoor``.
+
+    Review prose sometimes joins the uppercase detector namespace and a rule
+    token with a dot.  That looks like an FQDN lexically, but it is not a
+    foreign network observable when both components came from the current,
+    semantically typed rule label.  Only an uppercase 2-8 character namespace
+    at the start of that label may create these shorthands, and an exact dotted
+    value already present in the label is deliberately excluded so real DNS
+    names continue through the domain-observable validator.
+    """
+    found: set[str] = set()
+
+    def field_segment(value: Any) -> str:
+        return re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            str(value or "").strip().lower(),
+        ).strip("_")
+
+    def add(value: Any) -> None:
+        raw = _bounded_reference(value)
+        tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{1,62}", raw)
+        if len(tokens) < 2 or not re.fullmatch(r"[A-Z0-9]{2,8}", tokens[0]):
+            return
+        namespace = tokens[0].lower()
+        raw_lower = raw.lower()
+        for token in tokens[1:32]:
+            candidate = f"{namespace}.{token.lower()}"
+            if (
+                candidate not in raw_lower
+                and REVIEW_DOMAIN_RE.fullmatch(candidate)
+            ):
+                found.add(candidate)
+
+    def visit(value: Any, path: tuple[str, ...] = ()) -> None:
+        if isinstance(value, dict):
+            for raw_key, child in value.items():
+                segment = field_segment(raw_key)
+                child_path = path + ((segment,) if segment else ())
+                semantic_path = "_".join(child_path[-2:])
+                if (
+                    isinstance(child, str)
+                    and (
+                        segment in REVIEW_RULE_LABEL_FIELD_PATHS
+                        or semantic_path in REVIEW_RULE_LABEL_FIELD_PATHS
+                    )
+                ):
+                    add(child)
+                else:
+                    visit(child, child_path)
+        elif isinstance(value, list):
+            for child in value[:1000]:
+                visit(child, path)
+
+    for section in (
+        "alert",
+        "grouped_alert_context",
+        "correlated_alert_context",
+        "detection_validation",
+        "incident_response_evidence",
+        "investigation_query_results",
     ):
         visit(prompt_package.get(section))
     return sorted(found)
@@ -12172,6 +12248,9 @@ def independent_reviewer_package(
     observables = reviewer_observable_catalog(review_package)
     non_domain_taxonomy = reviewer_non_domain_taxonomy_catalog(review_package)
     non_domain_artifacts = reviewer_non_domain_artifact_catalog(review_package)
+    non_domain_rule_shorthands = (
+        reviewer_non_domain_rule_shorthand_catalog(review_package)
+    )
     response_schema = (
         dict(review_package.get("response_schema"))
         if isinstance(review_package.get("response_schema"), dict)
@@ -12218,6 +12297,9 @@ def independent_reviewer_package(
         "allowed_observables": observables,
         "allowed_non_domain_taxonomy_tokens": non_domain_taxonomy,
         "allowed_non_domain_artifact_tokens": non_domain_artifacts,
+        "allowed_non_domain_rule_shorthand_tokens": (
+            non_domain_rule_shorthands
+        ),
         "requirements": [
             "Echo case_id and evidence_hash exactly in review_case_id and review_evidence_hash.",
             (
@@ -12237,6 +12319,10 @@ def independent_reviewer_package(
             (
                 "Treat exact allowed_non_domain_taxonomy_tokens as dataset or "
                 "module labels, not domain observables."
+            ),
+            (
+                "Treat exact allowed_non_domain_rule_shorthand_tokens as "
+                "current detection-rule labels, not domain observables."
             ),
             "Do not repeat boilerplate or introduce facts from another case.",
         ],
@@ -12448,12 +12534,38 @@ def validate_reviewer_response(
             "review contract non-domain artifact catalog did not match "
             "collector-owned evidence"
         )
+    contracted_non_domain_rule_shorthands = {
+        str(value).strip().lower()
+        for value in (
+            contract.get("allowed_non_domain_rule_shorthand_tokens")
+            if isinstance(
+                contract.get(
+                    "allowed_non_domain_rule_shorthand_tokens"
+                ),
+                list,
+            )
+            else []
+        )
+        if str(value).strip()
+    }
+    allowed_non_domain_rule_shorthands = set(
+        reviewer_non_domain_rule_shorthand_catalog(review_package)
+    )
+    if (
+        contracted_non_domain_rule_shorthands
+        != allowed_non_domain_rule_shorthands
+    ):
+        errors.append(
+            "review contract non-domain rule shorthand catalog did not "
+            "match collector-owned evidence"
+        )
     narrative_domains = {
         candidate.lower()
         for candidate in REVIEW_DOMAIN_RE.findall(response_text)
         if candidate.lower() not in REVIEW_KNOWN_FIELD_PATHS
         and candidate.lower() not in allowed_non_domain_taxonomy
         and candidate.lower() not in allowed_non_domain_artifacts
+        and candidate.lower() not in allowed_non_domain_rule_shorthands
         and candidate.rsplit(".", 1)[-1].lower() not in REVIEW_NON_DOMAIN_SUFFIXES
     }
     foreign_domains = sorted(narrative_domains.difference(allowed_domains))
@@ -12629,6 +12741,9 @@ def validate_reviewer_response(
             ),
             "allowed_non_domain_artifact_count": len(
                 allowed_non_domain_artifacts
+            ),
+            "allowed_non_domain_rule_shorthand_count": len(
+                allowed_non_domain_rule_shorthands
             ),
         },
         "evidence_reference_count": len(cited_evidence),
