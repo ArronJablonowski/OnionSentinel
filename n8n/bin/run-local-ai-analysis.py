@@ -12857,9 +12857,23 @@ def run_bounded_disagreement_adjudication(
     harness_runtime: OnionSentinelHarnessRun | None = None,
 ) -> dict[str, Any]:
     """Run at most two validation-bounded adjudicator calls in shadow mode."""
-    route = str(
+    configured_route = str(
         (settings.get("agent_adjudicator_models") or {}).get(agent_role) or ""
     ).strip()
+    frozen_reviewer_route = str(
+        harness_runtime.envelope.assigned_reviewer_route
+        if harness_runtime is not None
+        else ""
+    ).strip()
+    # A harness run has an immutable two-route execution contract. Reuse its
+    # already-authorized reviewer for bounded reconsideration instead of
+    # silently invoking a third model that the run envelope cannot attest.
+    route = frozen_reviewer_route or configured_route
+    route_source = (
+        "frozen_reviewer_route"
+        if frozen_reviewer_route
+        else "configured_adjudicator_route"
+    )
     if not route:
         return {
             "status": "not_configured",
@@ -12867,17 +12881,26 @@ def run_bounded_disagreement_adjudication(
             "automation_authorized": False,
             "error": "No independent disagreement adjudicator is configured.",
         }
-    identities = {
-        model_route_identity((settings.get("agent_models") or {}).get(agent_role), settings),
-        model_route_identity((settings.get("agent_second_opinion_models") or {}).get(agent_role), settings),
-    }
-    if model_route_identity(route, settings) in identities:
+    primary_identity = model_route_identity(
+        (settings.get("agent_models") or {}).get(agent_role), settings
+    )
+    reviewer_identity = model_route_identity(
+        (settings.get("agent_second_opinion_models") or {}).get(agent_role),
+        settings,
+    )
+    route_identity = model_route_identity(route, settings)
+    if route_identity == primary_identity or (
+        route_identity == reviewer_identity and not frozen_reviewer_route
+    ):
         return {
             "status": "not_independent",
             "mode": "shadow",
             "model_route": route,
             "automation_authorized": False,
-            "error": "The adjudicator resolves to a primary or reviewer provider/model identity.",
+            "error": (
+                "The configured adjudicator resolves to a primary or reviewer "
+                "provider/model identity."
+            ),
         }
     notify_analysis_phase(
         phase_callback,
@@ -12971,6 +12994,7 @@ def run_bounded_disagreement_adjudication(
             "status": "completed",
             "mode": "shadow",
             "model_route": route,
+            "route_source": route_source,
             "system_prompt_file": str(prompt_file),
             "runtime_seconds": round(time.monotonic() - started, 3),
             "attempts": attempts,
@@ -12985,6 +13009,7 @@ def run_bounded_disagreement_adjudication(
             "status": "failed",
             "mode": "shadow",
             "model_route": route,
+            "route_source": route_source,
             "system_prompt_file": str(prompt_file),
             "runtime_seconds": round(time.monotonic() - started, 3),
             "attempts": attempts,
@@ -13238,6 +13263,19 @@ def apply_material_disagreement_gate(
     if notice not in evidence_gaps:
         evidence_gaps.append(notice)
     primary_response["evidence_gaps"] = evidence_gaps
+    if guarded_handling == "investigate":
+        guarded_next_steps = [
+            "Preserve the current evidence and continue a bounded human investigation.",
+            "Resolve the material primary/reviewer disagreements with the specific additional evidence listed in the adjudication record.",
+            "Do not close, contain, tune, or write durable memory until a human reviewer records the adjudicated disposition.",
+        ]
+    else:
+        guarded_next_steps = [
+            "Continue monitoring while a human reviewer resolves the material primary/reviewer disagreements.",
+            "Collect only the bounded additional evidence listed in the adjudication record if the activity recurs.",
+            "Do not close, contain, tune, or write durable memory until a human reviewer records the adjudicated disposition.",
+        ]
+    primary_response["recommended_next_steps"] = guarded_next_steps
 
     report = primary_response.get("incident_response_report")
     if isinstance(report, dict):
@@ -14191,7 +14229,11 @@ def coerce_list(value: Any) -> list[str]:
 def normalize_correlation_assessment(value: Any) -> dict[str, Any]:
     assessment = value if isinstance(value, dict) else {}
     related_groups = []
-    for item in assessment.get("related_groups", []) if isinstance(assessment.get("related_groups"), list) else []:
+    for item in (
+        assessment.get("related_groups", [])[:20]
+        if isinstance(assessment.get("related_groups"), list)
+        else []
+    ):
         if isinstance(item, str):
             group_id, reason = item, ""
         elif isinstance(item, dict):
@@ -14204,9 +14246,28 @@ def normalize_correlation_assessment(value: Any) -> dict[str, Any]:
     confidence = str(assessment.get("confidence") or "low").lower()
     if confidence not in CONFIDENCE_VALUES:
         confidence = "low"
+    unique_group_ids = sorted(
+        {item["group_id"] for item in related_groups if item.get("group_id")}
+    )
+    episode_id = (
+        "episode-"
+        + hashlib.sha256(
+            json.dumps(
+                unique_group_ids,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:20]
+        if unique_group_ids
+        else ""
+    )
     return {
         "correlation_found": bool(assessment.get("correlation_found")) and bool(related_groups),
         "confidence": confidence,
+        "episode_id": episode_id,
+        "episode_basis": [
+            f"related_group:{group_id}" for group_id in unique_group_ids
+        ],
         "related_groups": related_groups[:20],
         "shared_evidence": coerce_list(assessment.get("shared_evidence"))[:20],
         "contradicting_evidence": coerce_list(assessment.get("contradicting_evidence"))[:20],

@@ -2969,6 +2969,108 @@ class AiModelRoutingTests(unittest.TestCase):
         )
         self.assertEqual(phases[0][0], "disagreement_adjudication")
 
+    def test_harnessed_adjudicator_reuses_frozen_reviewer_route(self) -> None:
+        prompt_file = Path("/tmp/synthetic-disagreement-adjudicator.md")
+        args = type(
+            "Args",
+            (),
+            {"disagreement_adjudicator_prompt_file": prompt_file},
+        )()
+        settings = self.runner.default_ai_settings()
+        settings["enabled_ollama_models"] = [
+            "primary:latest",
+            "reviewer:latest",
+            "adjudicator:latest",
+        ]
+        settings["agent_models"]["incident-responder"] = (
+            "ollama:primary:latest"
+        )
+        settings["agent_second_opinion_models"]["incident-responder"] = (
+            "ollama:reviewer:latest"
+        )
+        settings["agent_adjudicator_models"]["incident-responder"] = (
+            "ollama:adjudicator:latest"
+        )
+        comparison = {
+            "primary": {"detection_outcome": "inconclusive"},
+            "reviewer": {"detection_outcome": "true_positive_suspicious"},
+            "disputed_fields": [
+                {
+                    "field": "detection_outcome",
+                    "primary": "inconclusive",
+                    "reviewer": "true_positive_suspicious",
+                    "material": True,
+                }
+            ],
+            "material_disagreement": True,
+        }
+
+        class Harness:
+            envelope = type(
+                "Envelope",
+                (),
+                {"assigned_reviewer_route": "ollama:reviewer:latest"},
+            )()
+
+            def __init__(self) -> None:
+                self.preflights = []
+                self.calls = []
+
+            def preflight_model_call(self, **kwargs) -> None:
+                self.preflights.append(kwargs)
+
+            def model_call(self, **kwargs) -> None:
+                self.calls.append(kwargs)
+
+        harness = Harness()
+
+        def adjudicated(route, package, *unused_args, **unused_kwargs):
+            contract = package["adjudication_contract"]
+            return {
+                "_analysis_model_route": route,
+                "adjudication_case_id": contract["case_id"],
+                "adjudication_evidence_hash": contract["evidence_hash"],
+                "decision": "unresolved",
+                "confidence": "medium",
+                "confidence_score": 0.55,
+                "resolved_fields": [],
+                "remaining_disagreements": ["detection_outcome"],
+                "evidence_used": ["alert:synthetic-harness-adjudication"],
+                "rationale": "The bounded evidence does not resolve the disagreement.",
+                "additional_evidence_needed": ["Collect endpoint evidence."],
+            }
+
+        with mock.patch.object(
+            self.runner,
+            "analyze_model_route",
+            side_effect=adjudicated,
+        ) as analyze:
+            result = self.runner.run_bounded_disagreement_adjudication(
+                {"alert": {"alert_id": "synthetic-harness-adjudication"}},
+                self.complete_response(),
+                self.complete_response(),
+                comparison,
+                args,
+                settings,
+                "incident-responder",
+                harness_runtime=harness,
+            )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["route_source"], "frozen_reviewer_route")
+        self.assertEqual(
+            analyze.call_args.args[0], "ollama:reviewer:latest"
+        )
+        self.assertEqual(
+            harness.preflights[0]["requested_route"],
+            "ollama:reviewer:latest",
+        )
+        self.assertTrue(harness.preflights[0]["independent_review"])
+        self.assertEqual(
+            harness.calls[0]["purpose"],
+            "bounded disagreement adjudication",
+        )
+
     def test_adjudicator_rejects_a_synthetic_compromise_position(self) -> None:
         package = {
             "adjudication_contract": {
@@ -4556,6 +4658,33 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertTrue(
             result["_material_disagreement_gate"]["verdict_preserved"]
         )
+
+    def test_case_disagreement_replaces_contradictory_action_text(self) -> None:
+        primary = self.complete_response(
+            detection_outcome="inconclusive",
+            activity_disposition="unknown",
+            handling="monitor",
+            recommended_next_steps=[
+                "Close as informational/no-action.",
+                "Suppress the rule immediately.",
+            ],
+        )
+        reviewer = self.complete_response(
+            detection_outcome="true_positive_suspicious",
+            activity_disposition="suspicious",
+            handling="investigate",
+        )
+        comparison = self.runner.compare_analysis_results(primary, reviewer)
+
+        result = self.runner.apply_material_disagreement_gate(
+            primary, reviewer, comparison
+        )
+
+        self.assertEqual(result["handling"], "investigate")
+        joined = " ".join(result["recommended_next_steps"]).lower()
+        self.assertNotIn("close as informational", joined)
+        self.assertNotIn("suppress the rule", joined)
+        self.assertIn("do not close, contain, tune", joined)
 
     def test_reviewer_memory_requires_high_confidence_full_agreement(self) -> None:
         completed = {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import collections
 import hashlib
 import importlib.util
 import io
@@ -1113,6 +1114,81 @@ class HarnessTraceEvaluatorTests(unittest.TestCase):
         )
         self.assertTrue(completion["completion_contract_required"])
         self.assertFalse(completion["completion_contract_satisfied"])
+
+    def test_adjudication_is_canonical_but_not_a_second_reviewer(self):
+        route = "codex-cli:gpt-5.6-sol:xhigh"
+        reviewer_call = {
+            "call_id": "independent-review-1",
+            "purpose": evaluator.REVIEWER_REPAIR_PURPOSE,
+            "requested_route": route,
+            "independent_review": 1,
+            "status": "completed",
+            "created_at": "2026-07-25T00:00:20Z",
+        }
+        adjudication_call = {
+            "call_id": "disagreement-adjudication-1",
+            "purpose": evaluator.ADJUDICATION_PURPOSE,
+            "requested_route": route,
+            "independent_review": 1,
+            "status": "completed",
+            "created_at": "2026-07-25T00:00:30Z",
+        }
+        contract = evaluator.canonical_model_call_contract(
+            [reviewer_call, adjudication_call]
+        )
+        self.assertFalse(contract["valid"])
+        self.assertEqual(contract["noncanonical_model_call_count"], 0)
+        self.assertIn(
+            "primary-initial-count-not-one", contract["global_reasons"]
+        )
+        primary_call = {
+            "call_id": evaluator.PRIMARY_INITIAL_CALL_ID,
+            "purpose": evaluator.PRIMARY_INITIAL_PURPOSE,
+            "requested_route": "codex-cli:gpt-5.5:high",
+            "independent_review": 0,
+            "status": "completed",
+            "created_at": "2026-07-25T00:00:10Z",
+        }
+        complete_contract = evaluator.canonical_model_call_contract(
+            [primary_call, reviewer_call, adjudication_call]
+        )
+        self.assertTrue(complete_contract["valid"])
+        self.assertEqual(
+            complete_contract["noncanonical_model_call_count"], 0
+        )
+
+        purpose = evaluator.model_purpose_completion(
+            [reviewer_call, adjudication_call],
+            {"has_reviewer_decision": True},
+        )
+        self.assertEqual(purpose["malformed_purpose_sequence_count"], 0)
+        self.assertEqual(purpose["exact_reviewer_repair_count"], 0)
+        self.assertEqual(purpose["exact_adjudication_repair_count"], 0)
+
+        decisions = [
+            {
+                "decision_id": "primary",
+                "decision_type": "primary-analysis",
+                "payload_json": json.dumps(
+                    {"detection_outcome": "inconclusive"}
+                ),
+            },
+            {
+                "decision_id": "independent-review",
+                "decision_type": "independent-review",
+                "payload_json": json.dumps(
+                    {"detection_outcome": "informational_no_action"}
+                ),
+            },
+        ]
+        reviewer = evaluator.reviewer_result(
+            [reviewer_call, adjudication_call], decisions, collections.Counter()
+        )
+        self.assertEqual(reviewer["model_call_count"], 1)
+        completion = evaluator.reviewer_completion_contract(
+            reviewer, purpose
+        )
+        self.assertTrue(completion["completion_contract_satisfied"])
 
     def test_model_call_contract_treats_planning_repair_as_followup_round(
         self,

@@ -55,6 +55,11 @@ REVIEWER_REPAIR_CALL_IDS = (
     "independent-review-1",
     "independent-review-2",
 )
+ADJUDICATION_PURPOSE = "bounded disagreement adjudication"
+ADJUDICATION_CALL_IDS = (
+    "disagreement-adjudication-1",
+    "disagreement-adjudication-2",
+)
 VALIDATION_FAILED_STATUS = "validation-failed"
 MODEL_CALL_CONTRACT_SCHEMA = "onion-sentinel-model-call-contract-v1"
 MAX_RUNTIME_MODEL_CALLS = 6
@@ -780,7 +785,11 @@ def reviewer_result(
     malformed: collections.Counter[str],
 ) -> dict[str, Any]:
     reviewer_calls = [
-        row for row in model_calls if int(row.get("independent_review") or 0) == 1
+        row
+        for row in model_calls
+        if int(row.get("independent_review") or 0) == 1
+        and str(row.get("purpose") or "") == REVIEWER_REPAIR_PURPOSE
+        and str(row.get("call_id") or "") in REVIEWER_REPAIR_CALL_IDS
     ]
     payloads = decision_payloads(decisions, malformed)
     primary = payloads.get("primary")
@@ -953,6 +962,19 @@ def canonical_model_call_contract(
             )
             if status not in allowed_statuses:
                 reasons.append("reviewer-status-not-canonical")
+        elif call_id in ADJUDICATION_CALL_IDS:
+            attempt = ADJUDICATION_CALL_IDS.index(call_id) + 1
+            if purpose != ADJUDICATION_PURPOSE:
+                reasons.append("adjudication-purpose-mismatch")
+            if not independent_review:
+                reasons.append("adjudication-call-not-marked-independent")
+            allowed_statuses = (
+                {"completed", VALIDATION_FAILED_STATUS}
+                if attempt == 1
+                else {"completed"}
+            )
+            if status not in allowed_statuses:
+                reasons.append("adjudication-status-not-canonical")
         else:
             reasons.append("unknown-model-call-id")
         if not requested_route:
@@ -1067,6 +1089,7 @@ def model_purpose_completion(
 
     terminally_successful = 0
     exact_reviewer_repairs = 0
+    exact_adjudication_repairs = 0
     superseded_validation_failures = 0
     malformed_sequences = 0
     purpose_summaries: list[dict[str, Any]] = []
@@ -1083,8 +1106,15 @@ def model_purpose_completion(
         if terminal_success:
             terminally_successful += 1
 
+        adjudication_like = bool(
+            purpose == ADJUDICATION_PURPOSE
+            or any(
+                call_id.startswith("disagreement-adjudication-")
+                for call_id in call_ids
+            )
+        )
         reviewer_like = bool(
-            independent_review
+            (independent_review and not adjudication_like)
             or purpose == REVIEWER_REPAIR_PURPOSE
             or any(
                 call_id.startswith("independent-review-")
@@ -1097,12 +1127,17 @@ def model_purpose_completion(
             and bool(purpose)
             and bool(requested_route)
             and (
-                not reviewer_like
+                not reviewer_like and not adjudication_like
                 or (
                     independent_review
                     and purpose == REVIEWER_REPAIR_PURPOSE
                     and call_ids == [REVIEWER_REPAIR_CALL_IDS[0]]
                     and reviewer.get("has_reviewer_decision") is True
+                )
+                or (
+                    independent_review
+                    and purpose == ADJUDICATION_PURPOSE
+                    and call_ids == [ADJUDICATION_CALL_IDS[0]]
                 )
             )
         )
@@ -1116,13 +1151,29 @@ def model_purpose_completion(
             and statuses[1] in SUCCESS_STATUSES
             and reviewer.get("has_reviewer_decision") is True
         )
-        if exact_repair:
-            exact_reviewer_repairs += 1
+        exact_adjudication_repair = bool(
+            adjudication_like
+            and independent_review
+            and purpose == ADJUDICATION_PURPOSE
+            and bool(requested_route)
+            and call_ids == list(ADJUDICATION_CALL_IDS)
+            and statuses[0] == VALIDATION_FAILED_STATUS
+            and statuses[1] in SUCCESS_STATUSES
+        )
+        if exact_repair or exact_adjudication_repair:
+            if exact_repair:
+                exact_reviewer_repairs += 1
+            else:
+                exact_adjudication_repairs += 1
             superseded_validation_failures += 1
             call_classifications[call_ids[0]] = (
                 "superseded-validation-failure"
             )
-            sequence_classification = "exact-reviewer-repair"
+            sequence_classification = (
+                "exact-reviewer-repair"
+                if exact_repair
+                else "exact-adjudication-repair"
+            )
         elif valid_single:
             sequence_classification = "single-success"
         else:
@@ -1158,6 +1209,7 @@ def model_purpose_completion(
         "terminally_successful_purpose_count": terminally_successful,
         "incomplete_purpose_count": len(groups) - terminally_successful,
         "exact_reviewer_repair_count": exact_reviewer_repairs,
+        "exact_adjudication_repair_count": exact_adjudication_repairs,
         "superseded_validation_failure_count": (
             superseded_validation_failures
         ),

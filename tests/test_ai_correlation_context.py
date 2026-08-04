@@ -343,6 +343,36 @@ class AiCorrelationContextTests(unittest.TestCase):
 
         self.assertFalse(normalized["correlation_assessment"]["correlation_found"])
         self.assertEqual(normalized["correlation_assessment"]["related_groups"], [])
+        self.assertEqual(normalized["correlation_assessment"]["episode_id"], "")
+        self.assertEqual(normalized["correlation_assessment"]["episode_basis"], [])
+
+    def test_runner_derives_stable_episode_id_from_related_groups(self) -> None:
+        first = self.runner.normalize_correlation_assessment(
+            {
+                "correlation_found": True,
+                "related_groups": [
+                    {"group_id": "group-b", "reason": "same process"},
+                    {"group_id": "group-a", "reason": "same process"},
+                ],
+            }
+        )
+        second = self.runner.normalize_correlation_assessment(
+            {
+                "correlation_found": True,
+                "episode_id": "model-controlled-value-is-ignored",
+                "related_groups": [
+                    {"group_id": "group-a", "reason": "same process"},
+                    {"group_id": "group-b", "reason": "same process"},
+                ],
+            }
+        )
+
+        self.assertEqual(first["episode_id"], second["episode_id"])
+        self.assertRegex(first["episode_id"], r"^episode-[a-f0-9]{20}$")
+        self.assertEqual(
+            first["episode_basis"],
+            ["related_group:group-a", "related_group:group-b"],
+        )
 
     def test_alert_store_owns_correlation_writes(self) -> None:
         source = ALERT_STORE.read_text(encoding="utf-8")
