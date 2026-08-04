@@ -521,9 +521,11 @@ def resolve_query_binding(
 
     The Security Onion broker returns one envelope for a batch. A mixed batch
     is correctly marked ``partial`` even when some nested queries succeeded.
-    Copying that coarse status to every tool row loses the successful pivots
-    and can incorrectly fail a controlled evaluation. Only unwrap an
-    individual status when the trusted response digest, semantic controls,
+    A successful batch may likewise contain one model-projected result that
+    was truncated while its other query results were complete. Copying either
+    coarse status to every tool row loses per-query semantics and can
+    incorrectly fail a controlled evaluation. Only unwrap an individual
+    observation when the trusted response digest, semantic controls,
     per-query audit, and both query/result digests agree exactly.
 
     The caller must continue hashing the full outer result for durable result
@@ -532,7 +534,7 @@ def resolve_query_binding(
     """
     outer_status = str(result.get("status") or "missing").strip().lower()[:40]
     if (
-        outer_status != "partial"
+        outer_status not in {"ok", "partial"}
         or str(result.get("backend") or "") != "security_onion"
         or result.get("read_only") is not True
     ):
@@ -555,8 +557,8 @@ def resolve_query_binding(
         not DIGEST_RE.fullmatch(response_digest)
         or not isinstance(evidence, Mapping)
         or evidence.get("read_only") is not True
-        or evidence.get("partial") is not True
-        or evidence.get("complete") is not False
+        or evidence.get("partial") is not (outer_status == "partial")
+        or evidence.get("complete") is not (outer_status == "ok")
         or evidence.get("controls_valid") is not True
         or not query_ids
         or len(query_ids) != len(set(query_ids))

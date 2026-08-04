@@ -226,7 +226,8 @@ done
 # Upgrade each reviewer only when its live file still matches an exact
 # previously shipped baseline. Any operator edit changes the digest, so the
 # helper preserves that file and reports the decision instead of silently
-# overwriting it. The Incident Responder has two reviewed predecessor releases.
+# overwriting it. Reviewer prompts with multiple shipped baselines retain each
+# exact predecessor digest so an unmodified runtime can advance safely.
 /usr/bin/python3 "$REPO_DIR/n8n/bin/upgrade-runtime-policy.py" \
   --source "$REPO_DIR/n8n/config/cyber_threat_intel_second_opinion_prompt.md" \
   --destination "$STACK_DIR/config/cyber_threat_intel_second_opinion_prompt.md" \
@@ -236,7 +237,8 @@ done
   --destination "$STACK_DIR/config/incident_responder_second_opinion_prompt.md" \
   --accepted-prior-sha256 "c13d5fcd90644db6fcd745fdc5c6ce978ccdd62a3f3e115dfce0aec634f77421" \
   --accepted-prior-sha256 "71400cd9a6826be6b23a2cfa3cdacbada21ff6ef16d0093dac49c13dcf63d646" \
-  --accepted-prior-sha256 "eb0ee3c7a4109088036e2447d1693733dea86944b62437ac75140ddf9f688c1f"
+  --accepted-prior-sha256 "eb0ee3c7a4109088036e2447d1693733dea86944b62437ac75140ddf9f688c1f" \
+  --accepted-prior-sha256 "3b84b2972bbe7a447e5a981ac63669b538e944c91d0f089715cdcd04414b156e"
 /usr/bin/python3 "$REPO_DIR/n8n/bin/upgrade-runtime-policy.py" \
   --source "$REPO_DIR/n8n/config/siem_engineer_second_opinion_prompt.md" \
   --destination "$STACK_DIR/config/siem_engineer_second_opinion_prompt.md" \
@@ -245,7 +247,8 @@ done
   --source "$REPO_DIR/n8n/config/soc_analyst_second_opinion_prompt.md" \
   --destination "$STACK_DIR/config/soc_analyst_second_opinion_prompt.md" \
   --accepted-prior-sha256 "db79fa2ac912b7227e4889626d853eca28a950966b93acd822582b0468dcc5ff" \
-  --accepted-prior-sha256 "b979deea89cc1914b81c363563ed245f854660db799e773a52842da6ca2f22e5"
+  --accepted-prior-sha256 "b979deea89cc1914b81c363563ed245f854660db799e773a52842da6ca2f22e5" \
+  --accepted-prior-sha256 "42e45f57ab6a802eaa8e383b7eba82780c2ade58d99e06ef041912fa01ce2af9"
 /usr/bin/python3 "$REPO_DIR/n8n/bin/upgrade-runtime-policy.py" \
   --source "$REPO_DIR/n8n/config/threat_hunter_second_opinion_prompt.md" \
   --destination "$STACK_DIR/config/threat_hunter_second_opinion_prompt.md" \

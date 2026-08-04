@@ -82,6 +82,11 @@ class ReviewerPromptContractTests(unittest.TestCase):
                     "Do not request additional investigation pivots.",
                     prompt,
                 )
+                self.assertIn("network source port as ephemeral", prompt)
+                self.assertIn(
+                    "Never report an executable path as missing",
+                    prompt,
+                )
 
 
 if __name__ == "__main__":

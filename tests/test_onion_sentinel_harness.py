@@ -2165,6 +2165,78 @@ class OnionSentinelHarnessTests(unittest.TestCase):
         self.assertEqual(status, "ok")
         self.assertIs(observation, ordinary)
 
+    def test_query_round_scopes_truncation_within_complete_batch(self) -> None:
+        run = self.make_run("query-complete-batch-truncation-semantics")
+        query_digests = ["a" * 64, "c" * 64]
+        result_digests = ["b" * 64, "d" * 64]
+        query_ids = ["complete-pivot", "projected-pivot"]
+        nested_results = []
+        trusted_audits = []
+        for index, query_id in enumerate(query_ids):
+            projection_truncated = query_id == "projected-pivot"
+            nested_results.append(
+                {
+                    "query_id": query_id,
+                    "status": "ok",
+                    "semantic_valid": True,
+                    "query_digest": query_digests[index],
+                    "result_digest": result_digests[index],
+                    "returned_hits": 22 if projection_truncated else 1,
+                    "model_projection_truncated": projection_truncated,
+                }
+            )
+            trusted_audits.append(
+                {
+                    **nested_results[-1],
+                    "timed_out": False,
+                    "shards": {
+                        "total": 2,
+                        "successful": 2,
+                        "skipped": 0,
+                        "failed": 0,
+                        "failures": [],
+                    },
+                }
+            )
+        batch_result = {
+            "backend": "security_onion",
+            "query_ids": query_ids,
+            "status": "ok",
+            "read_only": True,
+            "security_onion_response_digest": "e" * 64,
+            "evidence": {
+                "complete": True,
+                "partial": False,
+                "read_only": True,
+                "controls_valid": True,
+                "results": nested_results,
+            },
+            "trusted_query_audit": trusted_audits,
+        }
+        run.query_round(
+            {
+                "round": 1,
+                "requests": [
+                    {
+                        "query_id": query_id,
+                        "backend": "elastic",
+                        "purpose": "Test per-query truncation semantics.",
+                    }
+                    for query_id in query_ids
+                ],
+                "results": [batch_result],
+            }
+        )
+
+        calls = {
+            item["call_id"]: item
+            for item in run.store.export_trace(run.run_id)["tool_calls"]
+        }
+        self.assertEqual(calls["round-1-complete-pivot"]["status"], "ok")
+        self.assertEqual(calls["round-1-complete-pivot"]["truncated"], 0)
+        self.assertEqual(calls["round-1-projected-pivot"]["status"], "ok")
+        self.assertEqual(calls["round-1-projected-pivot"]["truncated"], 1)
+
     def test_changed_evidence_manifest_can_be_recatalogued_idempotently(
         self,
     ) -> None:

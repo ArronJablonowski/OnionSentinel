@@ -36,6 +36,14 @@ PRIOR_REVIEWER_PROMPT_SHA256 = {
 OLDER_INCIDENT_RESPONDER_PROMPT_SHA256 = (
     "c13d5fcd90644db6fcd745fdc5c6ce978ccdd62a3f3e115dfce0aec634f77421"
 )
+ENDPOINT_ATTRIBUTION_REVIEWER_PROMPT_SHA256 = {
+    "incident_responder_second_opinion_prompt.md": (
+        "3b84b2972bbe7a447e5a981ac63669b538e944c91d0f089715cdcd04414b156e"
+    ),
+    "soc_analyst_second_opinion_prompt.md": (
+        "42e45f57ab6a802eaa8e383b7eba82780c2ade58d99e06ef041912fa01ce2af9"
+    ),
+}
 
 
 def load_module():
@@ -269,6 +277,22 @@ class RuntimePolicyUpgradeTests(unittest.TestCase):
             '"',
             incident_block,
         )
+
+    def test_installer_accepts_endpoint_attribution_reviewer_baselines(
+        self,
+    ) -> None:
+        installer = INSTALLER.read_text(encoding="utf-8")
+        for prompt_name, prior_digest in (
+            ENDPOINT_ATTRIBUTION_REVIEWER_PROMPT_SHA256.items()
+        ):
+            with self.subTest(prompt=prompt_name):
+                migration_index = installer.index(
+                    f'--source "$REPO_DIR/n8n/config/{prompt_name}"'
+                )
+                self.assertIn(
+                    f'--accepted-prior-sha256 "{prior_digest}"',
+                    installer[migration_index:],
+                )
 
 
 if __name__ == "__main__":
