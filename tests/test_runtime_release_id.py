@@ -106,9 +106,12 @@ class RuntimeReleaseIdTests(unittest.TestCase):
         quiesce = source.index(
             "trap keep_critical_agents_down_on_failure EXIT\n"
             "critical_launch_agents_down\n"
-            "if ! critical_launch_agents_are_down"
+            "for attempt in {1..20}"
         )
+        guard = source.index("if ! start_ai_deployment_guard")
         first_mutation = source.index('mkdir -p "$STACK_DIR/alert_store/config"')
+        self.assertLess(validation, guard)
+        self.assertLess(guard, quiesce)
         self.assertLess(validation, quiesce)
         self.assertLess(quiesce, first_mutation)
         self.assertIn(
@@ -128,7 +131,7 @@ class RuntimeReleaseIdTests(unittest.TestCase):
         early_quiesce = source.index(
             "trap keep_critical_agents_down_on_failure EXIT\n"
             "critical_launch_agents_down\n"
-            "if ! critical_launch_agents_are_down"
+            "for attempt in {1..20}"
         )
         first_copy = source.index(
             'cp "$REPO_DIR/n8n/docker-compose.yml"'
