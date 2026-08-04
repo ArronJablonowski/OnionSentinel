@@ -3297,6 +3297,7 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
                 "Do not claim correlation from a common port, protocol, ASN, CDN, public resolver, or rule name alone. State evidence for and against every proposed relationship.",
                 "Start the assessment with a BLUF classification. Classify whether the detection outcome is true-positive malicious, true-positive suspicious, true-positive authorized/benign, false positive, duplicate, informational/no-action, or inconclusive based on whether the rule correctly identified the intended behavior and whether the behavior appears malicious, suspicious, authorized, benign, or unknown.",
                 "Apply the SIEM Detection Outcome decision tree in order: first decide whether the reported event actually occurred and the telemetry is valid; next decide whether the observed event matches the detection rule's intended behavior; then decide whether the matched behavior is authorized/expected, suspicious, or malicious; finally use inconclusive when the available evidence cannot support one of those conclusions.",
+                "Treat the top-level factored verdict as the disposition of the exact selected event. Separately classify scope_dispositions.group_history for the broader grouped history. Authorization covering the selected tuple and time window must not automatically authorize earlier, later, or differently scoped group observations; leave broader history unknown/monitor when its authorization or attribution is incomplete.",
                 "Use false_positive_data_parser when invalid, malformed, or mistranslated telemetry caused the detection; false_positive_logic_rule when the event occurred but did not match the rule's intended behavior; false_positive_bad_intel_ioc when stale or incorrect intelligence caused the match; true_positive_authorized_benign when the intended behavior occurred but was authorized or expected; true_positive_suspicious when it occurred and is concerning but malicious intent is unproven; true_positive_malicious only when supplied evidence supports malicious behavior.",
                 "Use false_negative only when supplied evidence proves malicious or policy-violating behavior that an applicable detection failed to identify. Use duplicate for a redundant detection of the same already-recorded event, informational_no_action for correctly observed activity requiring no response, and inconclusive when evidence is insufficient.",
                 "Do not invent packet contents, hostnames, users, process names, files, commands, or malware family names.",
@@ -3317,6 +3318,18 @@ def build_package(conn: sqlite3.Connection, selected: sqlite3.Row, args: argpars
             "activity_disposition": "malicious|suspicious|authorized_benign|benign|unknown",
             "handling": "contain|escalate|investigate|monitor|no_action",
             "duplicate_of": "string alert/group identifier or null",
+            "scope_dispositions": {
+                "selected_event": {
+                    "activity_disposition": "must match the top-level activity_disposition",
+                    "handling": "must match the top-level handling",
+                    "evidence_basis": ["brief selected-event evidence statement"],
+                },
+                "group_history": {
+                    "activity_disposition": "malicious|suspicious|authorized_benign|benign|unknown",
+                    "handling": "contain|escalate|investigate|monitor|no_action",
+                    "evidence_basis": ["brief group-history evidence or limitation"],
+                },
+            },
             "detection_outcome": "true_positive_malicious|true_positive_suspicious|true_positive_authorized_benign|false_positive_logic_rule|false_positive_data_parser|false_positive_bad_intel_ioc|false_negative|duplicate|informational_no_action|inconclusive",
             "bluf": "Bottom-line sentence that starts with the classification and briefly states why.",
             "summary": "string",

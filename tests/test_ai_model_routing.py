@@ -4806,6 +4806,102 @@ class AiModelRoutingTests(unittest.TestCase):
             result["_material_disagreement_gate"]["verdict_preserved"]
         )
 
+    def test_monitor_vs_no_action_is_advisory_for_authorized_activity(
+        self,
+    ) -> None:
+        primary = self.complete_response(
+            detection_outcome="inconclusive",
+            event_status="observed",
+            detection_validity="unknown",
+            activity_disposition="authorized_benign",
+            handling="monitor",
+            duplicate_of=None,
+            escalation_needed=False,
+        )
+        reviewer = {**primary, "handling": "no_action"}
+
+        comparison = self.runner.compare_analysis_results(
+            primary,
+            reviewer,
+        )
+
+        self.assertEqual(comparison["agreement"], "partial_disagreement")
+        self.assertFalse(comparison["material_disagreement"])
+        handling = next(
+            item
+            for item in comparison["disputed_fields"]
+            if item["field"] == "handling"
+        )
+        self.assertFalse(handling["material"])
+
+    def test_monitor_vs_no_action_remains_material_for_suspicious_activity(
+        self,
+    ) -> None:
+        primary = self.complete_response(
+            detection_outcome="true_positive_suspicious",
+            event_status="observed",
+            detection_validity="matched_intent",
+            activity_disposition="suspicious",
+            handling="monitor",
+            duplicate_of=None,
+            escalation_needed=False,
+        )
+        reviewer = {**primary, "handling": "no_action"}
+
+        comparison = self.runner.compare_analysis_results(
+            primary,
+            reviewer,
+        )
+
+        self.assertTrue(comparison["material_disagreement"])
+
+    def test_valid_shadow_adjudication_projects_truth_but_not_authority(
+        self,
+    ) -> None:
+        primary = self.complete_response(
+            detection_outcome="inconclusive",
+            event_status="observed",
+            detection_validity="unknown",
+            activity_disposition="authorized_benign",
+            handling="monitor",
+            duplicate_of=None,
+            escalation_needed=False,
+        )
+        reviewer = {
+            **primary,
+            "activity_disposition": "unknown",
+            "handling": "investigate",
+        }
+        adjudication = {
+            "status": "completed",
+            "mode": "shadow",
+            "automation_authorized": False,
+            "response": {
+                "decision": "primary_supported",
+                "resolved_fields": [
+                    "activity_disposition",
+                    "handling",
+                ],
+                "remaining_disagreements": [],
+                "_adjudication_contract_validation": {
+                    "valid": True,
+                    "automation_authorized": False,
+                },
+            },
+        }
+
+        applied = self.runner.apply_analytical_adjudication_projection(
+            primary,
+            reviewer,
+            adjudication,
+        )
+
+        self.assertTrue(applied)
+        self.assertEqual(primary["activity_disposition"], "authorized_benign")
+        projection = primary["_analytical_adjudication_projection"]
+        self.assertFalse(projection["automation_authorized"])
+        self.assertTrue(projection["human_adjudication_required"])
+
     def test_case_disagreement_replaces_contradictory_action_text(self) -> None:
         primary = self.complete_response(
             detection_outcome="inconclusive",
@@ -5047,7 +5143,7 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(response["confidence"], "high")
         self.assertEqual(response["confidence_score"], 0.92)
 
-    def test_factored_verdict_mismatch_is_canonicalized_and_confidence_capped(self) -> None:
+    def test_complete_factored_verdict_supersedes_stale_legacy_label(self) -> None:
         response = self.runner.validate_response(self.complete_response(
             confidence="high",
             confidence_score=0.95,
@@ -5062,18 +5158,26 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(response["detection_outcome"], "true_positive_suspicious")
         validation = response["_verdict_validation"]
         self.assertEqual(validation["source"], "model_factored")
+        self.assertFalse(validation["material_contradiction"])
+        self.assertEqual(validation["contradictions"], [])
+        self.assertIn("factored verdict derives", validation["warnings"][0])
+        self.assertEqual(response["activity_disposition"], "suspicious")
+        self.assertEqual(response["confidence"], "high")
+        self.assertEqual(response["confidence_score"], 0.95)
+
+    def test_partial_factored_legacy_mismatch_remains_material(self) -> None:
+        response = self.runner.validate_response(self.complete_response(
+            confidence="high",
+            confidence_score=0.95,
+            detection_outcome="true_positive_authorized_benign",
+            activity_disposition="suspicious",
+        ))
+
+        validation = response["_verdict_validation"]
         self.assertTrue(validation["material_contradiction"])
         self.assertIn("factored verdict derives", validation["contradictions"][0])
         self.assertEqual(response["confidence"], "low")
         self.assertEqual(response["confidence_score"], 0.39)
-        self.assertIn(
-            "material_verdict_contradiction",
-            response["_confidence_calibration"]["limiters"],
-        )
-        self.assertEqual(
-            self.runner.second_opinion_trigger(response),
-            "Runtime verdict checks found a material contradiction.",
-        )
 
     def test_confidence_calibration_uses_evidence_caps(self) -> None:
         uncited = self.runner.validate_response(self.complete_response(
@@ -5909,6 +6013,115 @@ class AiModelRoutingTests(unittest.TestCase):
         self.assertEqual(
             response["incident_response_report"]["confidence_score"],
             0.65,
+        )
+
+    def test_scope_disposition_separates_selected_event_from_group_history(
+        self,
+    ) -> None:
+        incident_prompt = self.complete_incident_prompt()
+        prompt = self.canonical_authorization_prompt(
+            agent_role="incident-responder",
+            incident_response_evidence=incident_prompt[
+                "incident_response_evidence"
+            ],
+            grouped_alert_context={"total_observations": 560},
+        )
+        response = self.runner.validate_response(
+            self.complete_response(
+                detection_outcome="inconclusive",
+                event_status="observed",
+                detection_validity="unknown",
+                activity_disposition="authorized_benign",
+                handling="no_action",
+                duplicate_of=None,
+                hypotheses=[],
+                scope_dispositions={
+                    "selected_event": {
+                        "evidence_basis": [
+                            "Structured authorization covers the selected tuple."
+                        ],
+                    },
+                    "group_history": {
+                        "activity_disposition": "unknown",
+                        "handling": "monitor",
+                        "evidence_basis": [
+                            "Earlier group observations predate authorization."
+                        ],
+                    },
+                },
+                incident_response_report=self.complete_incident_report(),
+            ),
+            prompt,
+        )
+
+        scopes = response["scope_dispositions"]
+        self.assertEqual(
+            scopes["selected_event"]["activity_disposition"],
+            "authorized_benign",
+        )
+        self.assertEqual(scopes["selected_event"]["handling"], "no_action")
+        self.assertEqual(
+            scopes["group_history"]["activity_disposition"],
+            "unknown",
+        )
+        self.assertEqual(scopes["group_history"]["handling"], "monitor")
+        self.assertEqual(
+            response["_scope_disposition_validation"][
+                "group_observation_count"
+            ],
+            560,
+        )
+
+    def test_incident_timeline_is_audited_and_sorted_chronologically(
+        self,
+    ) -> None:
+        report = self.complete_incident_report(
+            factual_timeline=[
+                {
+                    "timestamp": "2026-08-04T14:44:00-06:00",
+                    "event": "Later authentication observation.",
+                    "source_pack": "system_auth",
+                    "query_digest": "a" * 64,
+                    "confidence": "high",
+                },
+                {
+                    "timestamp": "2026-08-04T14:36:00-06:00",
+                    "event": "Earlier grouped observation.",
+                    "source_pack": "alert_context",
+                    "query_digest": "b" * 64,
+                    "confidence": "high",
+                },
+            ],
+        )
+
+        response = self.runner.validate_response(
+            self.complete_response(
+                event_status="unknown",
+                detection_validity="unknown",
+                activity_disposition="unknown",
+                handling="investigate",
+                duplicate_of=None,
+                hypotheses=[],
+                incident_response_report=report,
+            ),
+            self.complete_incident_prompt(),
+        )
+
+        validation = response["_incident_response_report_validation"]
+        self.assertTrue(validation["valid"])
+        self.assertTrue(validation["timeline_out_of_order"])
+        timestamps = [
+            item["timestamp"]
+            for item in response["incident_response_report"][
+                "factual_timeline"
+            ]
+        ]
+        self.assertEqual(
+            timestamps,
+            [
+                "2026-08-04T14:36:00-06:00",
+                "2026-08-04T14:44:00-06:00",
+            ],
         )
 
     def test_guarded_incident_verdict_reconciles_contradictory_report_narrative(self) -> None:

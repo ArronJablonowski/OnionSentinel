@@ -514,6 +514,7 @@ ACTIVITY_DISPOSITION_VALUES = {
     "unknown",
 }
 HANDLING_VALUES = {"contain", "escalate", "investigate", "monitor", "no_action"}
+NON_ESCALATORY_HANDLING_VALUES = {"monitor", "no_action"}
 FACTORED_VERDICT_KEYS = {
     "event_status",
     "detection_validity",
@@ -13055,6 +13056,35 @@ def compare_analysis_results(
         reviewer_value = _nested_value(reviewer_response, field)
         if _comparison_value(primary_value) == _comparison_value(reviewer_value):
             continue
+        if field == "handling":
+            handling_pair = {
+                _comparison_value(primary_value),
+                _comparison_value(reviewer_value),
+            }
+            dispositions = {
+                _comparison_value(
+                    primary_response.get("activity_disposition")
+                ),
+                _comparison_value(
+                    reviewer_response.get("activity_disposition")
+                ),
+            }
+            escalations = {
+                boolean_setting(primary_response.get("escalation_needed")),
+                boolean_setting(reviewer_response.get("escalation_needed")),
+            }
+            if (
+                handling_pair.issubset(NON_ESCALATORY_HANDLING_VALUES)
+                and True not in escalations
+                and not dispositions.intersection(
+                    {"malicious", "suspicious"}
+                )
+            ):
+                # Monitoring and no-action are analytically distinct, but the
+                # difference is not a contested consequential action when both
+                # positions are non-escalatory and agree the activity is not
+                # malicious or suspicious. Keep it visible as advisory context.
+                material = False
         disputed_fields.append(
             {
                 "field": field,
@@ -13806,6 +13836,88 @@ def apply_material_disagreement_gate(
     return primary_response
 
 
+def apply_analytical_adjudication_projection(
+    primary_response: dict[str, Any],
+    reviewer_response: dict[str, Any],
+    adjudication: Any,
+) -> bool:
+    """Project a validated shadow decision without authorizing automation.
+
+    The adjudicator is allowed to choose one immutable analytical position; it
+    is never allowed to synthesize a third verdict or authorize an operational
+    action. Returning ``True`` means the analyst-facing factored conclusion can
+    show the supported position while the caller retains the independent human
+    and automation gates.
+    """
+    if not isinstance(adjudication, dict):
+        return False
+    result = adjudication.get("response")
+    if (
+        adjudication.get("status") != "completed"
+        or adjudication.get("mode") != "shadow"
+        or adjudication.get("automation_authorized") is not False
+        or not isinstance(result, dict)
+    ):
+        return False
+    validation = result.get("_adjudication_contract_validation")
+    decision = str(result.get("decision") or "").strip().lower()
+    remaining = {
+        str(item or "").strip()
+        for item in (
+            result.get("remaining_disagreements")
+            if isinstance(result.get("remaining_disagreements"), list)
+            else []
+        )
+        if str(item or "").strip()
+    }
+    if (
+        not isinstance(validation, dict)
+        or validation.get("valid") is not True
+        or validation.get("automation_authorized") is not False
+        or decision not in {"primary_supported", "reviewer_supported"}
+        or remaining
+    ):
+        return False
+
+    chosen = (
+        primary_response
+        if decision == "primary_supported"
+        else reviewer_response
+    )
+    analytical_fields = (
+        "event_status",
+        "detection_validity",
+        "activity_disposition",
+        "handling",
+        "duplicate_of",
+        "detection_outcome",
+        "escalation_needed",
+    )
+    before = {
+        key: primary_response.get(key) for key in analytical_fields
+    }
+    for key in analytical_fields:
+        primary_response[key] = chosen.get(key)
+    if isinstance(chosen.get("scope_dispositions"), dict):
+        primary_response["scope_dispositions"] = dict(
+            chosen["scope_dispositions"]
+        )
+    primary_response["_analytical_adjudication_projection"] = {
+        "schema": "onion-sentinel-analytical-adjudication-projection-v1",
+        "applied": True,
+        "selected_position": decision,
+        "resolved_fields": list(result.get("resolved_fields") or [])[:16],
+        "remaining_disagreements": [],
+        "before": before,
+        "after": {
+            key: primary_response.get(key) for key in analytical_fields
+        },
+        "automation_authorized": False,
+        "human_adjudication_required": True,
+    }
+    return True
+
+
 def memory_writeback_plan(
     candidates: Any,
     *,
@@ -14395,12 +14507,30 @@ def apply_configured_second_opinion(
                     harness_runtime,
                 )
             )
-            apply_material_disagreement_gate(
-                primary_response,
-                secondary,
-                comparison,
+            analytical_projection_applied = (
+                apply_analytical_adjudication_projection(
+                    primary_response,
+                    secondary,
+                    primary_response["_disagreement_adjudication"],
+                )
             )
-            primary_response["final_disposition_status"] = "disputed_pending_human"
+            if analytical_projection_applied:
+                reconcile_incident_response_report(
+                    primary_response,
+                    prompt_package,
+                )
+                primary_response["final_disposition_status"] = (
+                    "adjudicated_analytical_pending_human"
+                )
+            else:
+                apply_material_disagreement_gate(
+                    primary_response,
+                    secondary,
+                    comparison,
+                )
+                primary_response["final_disposition_status"] = (
+                    "disputed_pending_human"
+                )
             primary_response["tuning_recommendation"] = "needs_more_data"
             primary_response["tuning_reason"] = (
                 "Automatic tuning is blocked because the primary and independent reviewer "
@@ -14414,7 +14544,12 @@ def apply_configured_second_opinion(
                 "tuning_blocked": True,
                 "memory_writeback_blocked": True,
                 "requires_human_review": True,
-                "reason": "material second-opinion disagreement",
+                "reason": (
+                    "shadow adjudication resolved the analytical display but "
+                    "cannot authorize automation"
+                    if analytical_projection_applied
+                    else "material second-opinion disagreement"
+                ),
             }
         elif not automation_authorization["authorized"]:
             apply_review_completed_automation_gate(
@@ -14974,9 +15109,20 @@ def normalize_factored_verdict(response: dict[str, Any]) -> dict[str, Any]:
     contradictions: list[str] = []
     warnings: list[str] = []
     if supplied_fields and derived_outcome != canonical_legacy:
-        contradictions.append(
-            f"factored verdict derives {derived_outcome}, but model supplied {canonical_legacy}"
+        mismatch = (
+            f"factored verdict derives {derived_outcome}, but model supplied "
+            f"{canonical_legacy}"
         )
+        if (
+            len(supplied_fields) == len(FACTORED_VERDICT_KEYS)
+            and not invalid_fields
+        ):
+            # The orthogonal fields are the authoritative analytical contract.
+            # A stale combined label is canonicalized for compatibility but
+            # must not erase independently supported disposition evidence.
+            warnings.append(mismatch)
+        else:
+            contradictions.append(mismatch)
     if factors["event_status"] == "not_observed" and factors["detection_validity"] == "matched_intent":
         contradictions.append("an unobserved event cannot be a validated detection-intent match")
     if factors["activity_disposition"] == "malicious" and factors["handling"] in {"monitor", "no_action"}:
@@ -15012,6 +15158,107 @@ def normalize_factored_verdict(response: dict[str, Any]) -> dict[str, Any]:
         "contradictions": contradictions,
         "warnings": warnings,
         "material_contradiction": bool(contradictions or invalid_fields),
+    }
+    return response
+
+
+def normalize_scope_dispositions(
+    response: dict[str, Any],
+    prompt_package: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep the selected event distinct from broader grouped history."""
+    raw = (
+        response.get("scope_dispositions")
+        if isinstance(response.get("scope_dispositions"), dict)
+        else {}
+    )
+    raw_group = (
+        raw.get("group_history")
+        if isinstance(raw.get("group_history"), dict)
+        else {}
+    )
+    grouped = (
+        prompt_package.get("grouped_alert_context")
+        if isinstance(prompt_package, dict)
+        and isinstance(prompt_package.get("grouped_alert_context"), dict)
+        else {}
+    )
+    try:
+        observation_count = max(
+            1,
+            int(grouped.get("total_observations") or 1),
+        )
+    except (TypeError, ValueError, OverflowError):
+        observation_count = 1
+
+    group_disposition = re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        str(raw_group.get("activity_disposition") or "").lower(),
+    ).strip("_")
+    group_handling = re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        str(raw_group.get("handling") or "").lower(),
+    ).strip("_")
+    invalid_fields: list[str] = []
+    if group_disposition not in ACTIVITY_DISPOSITION_VALUES:
+        if group_disposition:
+            invalid_fields.append(
+                "scope_dispositions.group_history.activity_disposition"
+            )
+        group_disposition = (
+            str(response.get("activity_disposition") or "unknown")
+            if observation_count == 1
+            else "unknown"
+        )
+    if group_handling not in HANDLING_VALUES:
+        if group_handling:
+            invalid_fields.append(
+                "scope_dispositions.group_history.handling"
+            )
+        group_handling = (
+            str(response.get("handling") or "investigate")
+            if observation_count == 1
+            else "monitor"
+        )
+
+    supplied_group = bool(raw_group)
+    response["scope_dispositions"] = {
+        "selected_event": {
+            "activity_disposition": str(
+                response.get("activity_disposition") or "unknown"
+            ),
+            "handling": str(response.get("handling") or "investigate"),
+            "evidence_basis": bounded_text_list(
+                (
+                    raw.get("selected_event") or {}
+                ).get("evidence_basis")
+                if isinstance(raw.get("selected_event"), dict)
+                else [],
+                limit=20,
+                item_limit=1000,
+            ),
+        },
+        "group_history": {
+            "activity_disposition": group_disposition,
+            "handling": group_handling,
+            "evidence_basis": bounded_text_list(
+                raw_group.get("evidence_basis"),
+                limit=20,
+                item_limit=1000,
+            ),
+        },
+    }
+    response["_scope_disposition_validation"] = {
+        "schema": "onion-sentinel-scope-disposition-v1",
+        "selected_event_is_top_level_verdict": True,
+        "group_observation_count": observation_count,
+        "group_history_model_supplied": supplied_group,
+        "group_history_defaulted_to_unresolved": bool(
+            observation_count > 1 and not supplied_group
+        ),
+        "invalid_fields": invalid_fields,
     }
     return response
 
@@ -16567,6 +16814,22 @@ def apply_policy_sensitive_activity_guard(
     return response
 
 
+def _incident_timeline_timestamp(value: Any) -> dt.datetime | None:
+    """Parse a timeline timestamp for deterministic ordering."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(dt.timezone.utc)
+
+
 def validate_incident_response_report_shape(value: Any) -> dict[str, Any]:
     """Describe missing or malformed responder fields without trusting prose.
 
@@ -16601,6 +16864,8 @@ def validate_incident_response_report_shape(value: Any) -> dict[str, Any]:
 
     timeline = report.get("factual_timeline")
     invalid_timeline_entries = 0
+    unparseable_timeline_entries = 0
+    timeline_instants: list[dt.datetime] = []
     if isinstance(timeline, list):
         for item in timeline[:200]:
             if not isinstance(item, dict):
@@ -16616,6 +16881,19 @@ def validate_incident_response_report_shape(value: Any) -> dict[str, Any]:
             item_confidence = str(item.get("confidence") or "").strip().lower()
             if item_confidence not in CONFIDENCE_VALUES:
                 invalid_timeline_entries += 1
+            instant = _incident_timeline_timestamp(item.get("timestamp"))
+            if instant is None:
+                unparseable_timeline_entries += 1
+            else:
+                timeline_instants.append(instant)
+
+    timeline_out_of_order = any(
+        later < earlier
+        for earlier, later in zip(
+            timeline_instants,
+            timeline_instants[1:],
+        )
+    )
 
     report_confidence = str(report.get("confidence") or "").strip().lower()
     if "confidence" in report and report_confidence not in CONFIDENCE_VALUES:
@@ -16632,11 +16910,19 @@ def validate_incident_response_report_shape(value: Any) -> dict[str, Any]:
     return {
         "required": True,
         "model_report_present": isinstance(value, dict),
-        "valid": not missing_fields and not invalid_fields and invalid_timeline_entries == 0,
+        "valid": bool(
+            not missing_fields
+            and not invalid_fields
+            and invalid_timeline_entries == 0
+            and unparseable_timeline_entries == 0
+        ),
         "missing_fields": missing_fields,
         "invalid_fields": invalid_fields,
         "timeline_entries_received": len(timeline) if isinstance(timeline, list) else 0,
         "invalid_timeline_entries": invalid_timeline_entries,
+        "unparseable_timeline_entries": unparseable_timeline_entries,
+        "timeline_out_of_order": timeline_out_of_order,
+        "timeline_reordering_required": timeline_out_of_order,
     }
 
 
@@ -16674,6 +16960,19 @@ def normalize_incident_response_report(value: Any) -> dict[str, Any]:
                 "query_digest": bounded_text(item.get("query_digest"), 128),
                 "confidence": item_confidence,
             })
+    timeline = [
+        item
+        for _, item in sorted(
+            enumerate(timeline),
+            key=lambda pair: (
+                _incident_timeline_timestamp(pair[1].get("timestamp"))
+                is None,
+                _incident_timeline_timestamp(pair[1].get("timestamp"))
+                or dt.datetime.max.replace(tzinfo=dt.timezone.utc),
+                pair[0],
+            ),
+        )
+    ]
 
     methodology = report.get("methodology")
     if not methodology and report.get("confirmed_facts"):
@@ -17659,6 +17958,10 @@ def validate_response(
     )
     normalized = validate_evidence_references(normalized, prompt_package)
     normalized = apply_tuning_coherence_guard(
+        normalized,
+        prompt_package,
+    )
+    normalized = normalize_scope_dispositions(
         normalized,
         prompt_package,
     )
