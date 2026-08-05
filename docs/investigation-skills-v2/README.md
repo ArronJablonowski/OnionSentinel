@@ -1,0 +1,97 @@
+# ARR-18: Versioned investigation skill framework v2
+
+Status: non-production proposal; v1 remains authoritative in the frozen source.
+
+## Purpose
+
+Turn investigation guidance into governed, reviewable skill packs without
+allowing a skill or model to expand authority. A skill is declarative advice
+plus typed broker templates. It is not executable code, a credential holder,
+an arbitrary query, or a permission grant.
+
+## Registry model
+
+Each immutable manifest conforms to
+`schemas/investigation-skill-manifest-v2.schema.json` and is content-addressed.
+The artifact digest is SHA-256 of canonical JSON after replacing the
+`artifact_digest` value with 64 ASCII zeroes; this avoids a self-referential
+digest while keeping the entire remaining manifest bound.
+The registry separately records lifecycle state: `candidate`, `shadow`,
+`active`, `deprecated`, or `revoked`. Changing content creates a new semantic
+version and digest; it never edits an active artifact in place.
+
+Structural validity is not promotion. Candidate manifests may honestly record
+incomplete verification. The registry's activation validator requires every
+verification flag to be true, at least one replay case, a non-placeholder
+reviewer, a matching artifact digest, compatibility, and explicit human
+approval before `active` status is possible.
+
+Required lineage includes skill ID, semantic version, predecessor digest,
+compatible harness/policy/evidence-contract versions, source revision,
+maintainer, review record, and promotion evidence. Registry and selected-skill
+digests are pinned into every job envelope and trace.
+
+## Selection
+
+Selection is deterministic and collector-owned:
+
+1. Match normalized role, task, telemetry, protocol, alert family, and data
+   source using exact registered values.
+2. Check preconditions and backend availability.
+3. Intersect requested capabilities with the envelope's permitted set.
+4. Resolve dependencies, conflicts, and maximum selected-skill budget.
+5. Return selected IDs/versions/digests plus rejection reasons.
+
+Model text, evidence text, memory, and skills cannot activate a skill or alter
+selection. Candidate, deprecated, revoked, incompatible, unsigned (when
+signing is enforced), or digest-mismatched skills are unavailable.
+
+## Execution boundary
+
+- `query_templates` contain typed parameters, never shell, HTTP, credentials,
+  target addresses, index wildcards, or query-language fallback.
+- The broker compiles and validates templates using its deployed field catalog.
+- Every skill declares read capabilities, sensitivity, active-operation flag,
+  row/byte/time budgets, expected result schema, coverage semantics, and safe
+  stop conditions.
+- A live OSQuery skill is approval-gated and distinct from a historical-results
+  skill. Remote PCAP creation is not a derived-PCAP read skill.
+- Failure, unavailable telemetry, partial capture, truncation, and field drift
+  become explicit gaps.
+
+## Result contract
+
+A skill result contains execution status, selected manifest digest, validated
+request/result digests, evidence references, coverage, truncation, findings,
+contradictions, gaps, confidence limiters, and next discriminators. Skills do
+not emit a final malware verdict or perform persistence. The harness reconciles
+skill outputs into its evidence and hypothesis ledgers.
+
+## Promotion and rollback
+
+Promotion requires schema validation, unit tests, replay corpus results,
+independent query review, false-positive analysis, adversarial evidence tests,
+documentation citations pinned to product/release versions, and human approval.
+Start candidate-only, then shadow. Active use requires measured improvement
+without safety or resource regression. Rollback revokes the exact digest and
+pins the previous approved registry; existing traces retain their original
+artifact identities.
+
+## Initial pack boundaries (ARR-19)
+
+- Network protocols: DNS, TLS, HTTP, SSH, SMTP, SMB, RDP, ICMP.
+- Security Onion sources: Suricata alert/flow, Zeek conn/dns/http/ssl/files,
+  Elastic event search, OQL.
+- Endpoint: historical OSQuery results first; separately approved live packs.
+- Artifacts: existing bounded PCAP/Zeek derivations only.
+- Context: CTI lookups and AC Hunter are behavioral context, not proof.
+
+## Acceptance criteria
+
+- Schema and digest validation is fail closed.
+- Exact deterministic selection and explainable rejection tests.
+- Capability intersection prevents self-expansion.
+- No arbitrary query-language, target, or executor fallback.
+- Compatibility, dependency, conflict, budget, and revocation tests.
+- Replay demonstrates citation precision and outcome improvement by skill.
+- Adversarial evidence cannot select, modify, or authorize a skill.

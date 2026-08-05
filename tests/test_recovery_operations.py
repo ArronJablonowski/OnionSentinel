@@ -75,6 +75,39 @@ class RecoveryOperationTests(unittest.TestCase):
             self.assertEqual(result["quick_check"], "ok")
             self.assertEqual(result["alert_rows"], 1)
 
+    def test_newest_bundle_ignores_newer_unrelated_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            eligible = root / "recovery-20260804T220000Z"
+            eligible.mkdir()
+            (eligible / "manifest.json").write_text("{}", encoding="utf-8")
+            (root / "zzz-unrelated-cutover").mkdir()
+            self.assertEqual(self.restore.newest_bundle(root), eligible)
+
+    def test_newest_bundle_ignores_symlinked_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            external_manifest = root / "external-manifest.json"
+            external_manifest.write_text("{}", encoding="utf-8")
+            candidate = root / "recovery-20260804T230000Z"
+            candidate.mkdir()
+            (candidate / "manifest.json").symlink_to(external_manifest)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "no eligible recovery bundle",
+            ):
+                self.restore.newest_bundle(root)
+
+    def test_newest_bundle_requires_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "recovery-20260804T230000Z").mkdir()
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "no eligible recovery bundle",
+            ):
+                self.restore.newest_bundle(root)
+
     def test_optional_harness_restore_validates_integrity_and_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

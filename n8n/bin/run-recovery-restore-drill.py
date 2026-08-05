@@ -41,9 +41,19 @@ def sha256_file(path: Path) -> str:
 
 
 def newest_bundle(root: Path) -> Path:
-    bundles = sorted(path for path in root.iterdir() if path.is_dir() and not path.name.startswith("."))
+    bundles = sorted(
+        path
+        for path in root.iterdir()
+        if (
+            not path.name.startswith(".")
+            and not path.is_symlink()
+            and path.is_dir()
+            and (path / "manifest.json").is_file()
+            and not (path / "manifest.json").is_symlink()
+        )
+    )
     if not bundles:
-        raise RuntimeError("no recovery bundle exists")
+        raise RuntimeError("no eligible recovery bundle exists")
     return bundles[-1]
 
 
