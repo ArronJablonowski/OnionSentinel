@@ -17,6 +17,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -32,6 +33,8 @@ DEFAULT_PORT = 8766
 DEFAULT_LABEL = "com.arron.onion-sentinel.web"
 DEFAULT_HEALTH_URL = "http://127.0.0.1:8766/healthz"
 DEFAULT_HOLD_MAX_AGE_SECONDS = 15 * 60
+DEFAULT_RESTART_WINDOW_SECONDS = 15 * 60
+DEFAULT_MAX_RESTARTS = 3
 MAX_HEALTH_RESPONSE_BYTES = 64 * 1024
 
 
@@ -175,7 +178,76 @@ def ensure_started(label: str, plist_path: Path) -> bool:
     return not registered
 
 
-def recover(port: int, label: str, health_url: str, plist_path: Path) -> dict[str, object]:
+def authorize_restart(
+    state_path: Path,
+    *,
+    now: float | None = None,
+    window_seconds: int = DEFAULT_RESTART_WINDOW_SECONDS,
+    max_restarts: int = DEFAULT_MAX_RESTARTS,
+) -> tuple[bool, dict[str, object]]:
+    """Persist a bounded restart attempt or fail closed into quarantine."""
+
+    current = time.time() if now is None else now
+    path = state_path.expanduser()
+    if window_seconds < 1 or max_restarts < 1:
+        raise RuntimeError("restart budget is invalid")
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        value: object = {}
+    else:
+        if path.is_symlink() or not path.is_file() or metadata.st_uid != os.getuid():
+            raise RuntimeError("restart state file is unsafe")
+        if metadata.st_mode & 0o077:
+            raise RuntimeError("restart state file permissions are too open")
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise RuntimeError("restart state file is invalid") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("restart state file is invalid")
+    attempts = [
+        float(item)
+        for item in value.get("attempts", [])
+        if isinstance(item, (int, float))
+        and 0 <= current - float(item) <= window_seconds
+    ]
+    allowed = len(attempts) < max_restarts
+    if allowed:
+        attempts.append(current)
+    state = {
+        "schema": "onion-sentinel-web-restart-budget-v1",
+        "attempts": attempts,
+        "window_seconds": window_seconds,
+        "max_restarts": max_restarts,
+        "quarantined": not allowed,
+        "updated_at": current,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        delete=False,
+    ) as handle:
+        json.dump(state, handle, sort_keys=True, separators=(",", ":"))
+        handle.write("\n")
+        temporary = Path(handle.name)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+    return allowed, state
+
+
+def recover(
+    port: int,
+    label: str,
+    health_url: str,
+    plist_path: Path,
+    restart_state_path: Path | None = None,
+    restart_window_seconds: int = DEFAULT_RESTART_WINDOW_SECONDS,
+    max_restarts: int = DEFAULT_MAX_RESTARTS,
+) -> dict[str, object]:
     healthy, detail = probe_health(health_url)
     if healthy:
         return {"ok": True, "state": "healthy", "recovered": False, "detail": detail}
@@ -202,6 +274,22 @@ def recover(port: int, label: str, health_url: str, plist_path: Path) -> dict[st
             "recovered": False,
             "detail": "multiple listeners require operator review",
         }
+
+    if restart_state_path is not None:
+        allowed, budget = authorize_restart(
+            restart_state_path,
+            window_seconds=restart_window_seconds,
+            max_restarts=max_restarts,
+        )
+        if not allowed:
+            return {
+                "ok": False,
+                "state": "quarantined",
+                "recovered": False,
+                "detail": "automatic restart budget exhausted",
+                "restart_attempts": len(budget["attempts"]),
+                "restart_window_seconds": budget["window_seconds"],
+            }
 
     if pids and kinds == ["unsafe-simple-http"]:
         terminate_known_simple_server(pids[0])
@@ -231,6 +319,13 @@ def main() -> int:
     parser.add_argument("--health-url", default=DEFAULT_HEALTH_URL)
     parser.add_argument("--plist")
     parser.add_argument("--maintenance-hold")
+    parser.add_argument("--restart-state")
+    parser.add_argument(
+        "--restart-window-seconds",
+        type=int,
+        default=DEFAULT_RESTART_WINDOW_SECONDS,
+    )
+    parser.add_argument("--max-restarts", type=int, default=DEFAULT_MAX_RESTARTS)
     parser.add_argument("--check-only", action="store_true")
     args = parser.parse_args()
 
@@ -243,6 +338,11 @@ def main() -> int:
         Path(args.maintenance_hold)
         if args.maintenance_hold
         else Path.home() / "n8n-local" / "logs" / "onion-sentinel-web-maintenance.hold"
+    )
+    restart_state_path = (
+        Path(args.restart_state)
+        if args.restart_state
+        else Path.home() / "n8n-local" / "logs" / "onion-sentinel-web-restart-budget.json"
     )
 
     if maintenance_hold_active(hold_path):
@@ -257,7 +357,15 @@ def main() -> int:
         result = {"ok": healthy, "state": "healthy" if healthy else "failed", "detail": detail}
     else:
         try:
-            result = recover(args.port, args.label, args.health_url, plist_path)
+            result = recover(
+                args.port,
+                args.label,
+                args.health_url,
+                plist_path,
+                restart_state_path,
+                args.restart_window_seconds,
+                args.max_restarts,
+            )
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             result = {"ok": False, "state": "failed", "recovered": False, "detail": str(exc)}
     print(json.dumps(result, sort_keys=True))

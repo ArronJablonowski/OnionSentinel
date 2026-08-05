@@ -1,0 +1,174 @@
+{
+  "schema": "onion-sentinel-investigation-skill-manifest-v2",
+  "id": "network.ssh.triage",
+  "version": "2.0.0-candidate.1",
+  "artifact_digest": "ce4a47bfea1b8862a1415be83be84a05c256176b3f8f9e77a3f8bf09241ee445",
+  "lineage": {
+    "source_revision": "9aa2404",
+    "predecessor_digest": ""
+  },
+  "compatibility": {
+    "harness_contract": "onion-sentinel-harness-job-envelope-v1",
+    "policy_schema": "onion-sentinel-investigation-harness-policy-v1",
+    "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"
+  },
+  "maintainer": {
+    "owner": "Onion Sentinel",
+    "reviewed_at": "2026-08-05T07:00:00Z",
+    "reviewer": "pending"
+  },
+  "roles": [
+    "soc-analyst",
+    "incident-responder",
+    "threat-hunter"
+  ],
+  "match": {
+    "tasks": [
+      "alert-triage",
+      "incident-response",
+      "reanalysis",
+      "threat-hunt"
+    ],
+    "protocols": [
+      "ssh"
+    ],
+    "alert_families": [
+      "ssh",
+      "remote-access"
+    ],
+    "data_sources": [
+      "suricata",
+      "zeek.ssh",
+      "zeek.conn",
+      "elastic",
+      "oql"
+    ]
+  },
+  "objective": "Establish SSH direction, session behavior, authentication visibility, duration, and peer history without treating a connection alone as proof of compromise.",
+  "capabilities": [
+    "security-onion.events.query",
+    "security-onion.oql.query",
+    "suricata.events.read",
+    "zeek.derived.query",
+    "osquery.historical.read"
+  ],
+  "safety": {
+    "read_only": true,
+    "active_operation": false,
+    "sensitivity": "moderate",
+    "requires_approval": false
+  },
+  "budgets": {
+    "max_queries": 4,
+    "max_rows": 1000,
+    "max_bytes": 1048576,
+    "timeout_seconds": 90
+  },
+  "preconditions": [
+    "bounded event time exists",
+    "at least one endpoint or DNS identifier exists",
+    "deployed field catalog is available"
+  ],
+  "required_evidence": [
+    "alert identity",
+    "bounded SSH flow and time scope",
+    "direction and session coverage"
+  ],
+  "query_templates": [
+    {
+      "id": "ssh-flow-context",
+      "backend": "elastic",
+      "language": "query-dsl",
+      "purpose": "Retrieve bounded SSH, connection, and alert observations for the exact endpoints.",
+      "parameters": [
+        "source_alias",
+        "destination_alias",
+        "start_time",
+        "end_time"
+      ],
+      "expected_fields": [
+        "@timestamp",
+        "source.ip",
+        "destination.ip",
+        "destination.port",
+        "network.direction",
+        "network.community_id",
+        "event.dataset"
+      ]
+    },
+    {
+      "id": "ssh-zeek-context",
+      "backend": "zeek",
+      "language": "broker-parameters",
+      "purpose": "Correlate Zeek SSH and connection metadata for duration, bytes, and authentication fields.",
+      "parameters": [
+        "community_id",
+        "source_alias",
+        "start_time",
+        "end_time"
+      ],
+      "expected_fields": [
+        "ts",
+        "uid",
+        "id.orig_h",
+        "id.resp_h",
+        "duration",
+        "orig_bytes",
+        "resp_bytes",
+        "auth_success",
+        "client",
+        "server"
+      ]
+    }
+  ],
+  "output_contract": {
+    "schema": "onion-sentinel-skill-result-v1",
+    "coverage_required": true,
+    "truncation_required": true,
+    "evidence_refs_required": true
+  },
+  "alternative_hypotheses": [
+    "authorized administration",
+    "backup or automation",
+    "scanner or inventory activity",
+    "credential attack or unauthorized access"
+  ],
+  "stop_conditions": [
+    "the discriminating question is answered with corroborated evidence",
+    "the next pivot has low expected information value",
+    "a budget or deadline is exhausted"
+  ],
+  "confidence_limiters": [
+    "missing endpoint authentication telemetry",
+    "NAT or bastion attribution",
+    "encrypted session content",
+    "retention gap"
+  ],
+  "known_false_positive_patterns": [
+    "approved administration",
+    "configuration management",
+    "backup jobs",
+    "authorized scanning"
+  ],
+  "verification": {
+    "unit_tests": false,
+    "replay_cases": 0,
+    "independent_query_review": false,
+    "adversarial_tests": false,
+    "human_approved": false
+  },
+  "references": [
+    {
+      "title": "Security Onion 2.4 Zeek",
+      "url": "https://docs.securityonion.net/en/2.4/zeek.html",
+      "product_version": "2.4",
+      "retrieved_at": "2026-08-05T07:00:00Z"
+    },
+    {
+      "title": "Zeek SSH log",
+      "url": "https://docs.zeek.org/en/current/logs/ssh.html",
+      "product_version": "current as reviewed",
+      "retrieved_at": "2026-08-05T07:00:00Z"
+    }
+  ]
+}

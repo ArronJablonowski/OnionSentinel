@@ -117,6 +117,72 @@ class WebServiceGuardTests(unittest.TestCase):
             hold.write_text("maintenance\n")
             self.assertTrue(WEB_GUARD.maintenance_hold_active(hold))
 
+    def test_restart_budget_quarantines_after_bounded_attempts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "restart-budget.json"
+            for second in (100.0, 110.0, 120.0):
+                allowed, value = WEB_GUARD.authorize_restart(
+                    state,
+                    now=second,
+                    window_seconds=60,
+                    max_restarts=3,
+                )
+                self.assertTrue(allowed)
+                self.assertFalse(value["quarantined"])
+            allowed, value = WEB_GUARD.authorize_restart(
+                state,
+                now=130.0,
+                window_seconds=60,
+                max_restarts=3,
+            )
+            self.assertFalse(allowed)
+            self.assertTrue(value["quarantined"])
+            self.assertEqual(len(value["attempts"]), 3)
+            self.assertEqual(state.stat().st_mode & 0o777, 0o600)
+
+    def test_restart_budget_recovers_after_window_expires(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "restart-budget.json"
+            for second in (100.0, 110.0, 120.0):
+                WEB_GUARD.authorize_restart(
+                    state,
+                    now=second,
+                    window_seconds=60,
+                    max_restarts=3,
+                )
+            allowed, value = WEB_GUARD.authorize_restart(
+                state,
+                now=200.0,
+                window_seconds=60,
+                max_restarts=3,
+            )
+            self.assertTrue(allowed)
+            self.assertEqual(value["attempts"], [200.0])
+
+    @mock.patch.object(WEB_GUARD, "ensure_started")
+    @mock.patch.object(WEB_GUARD, "authorize_restart", return_value=(
+        False,
+        {"attempts": [1.0, 2.0, 3.0], "window_seconds": 900},
+    ))
+    @mock.patch.object(WEB_GUARD, "listener_pids", return_value=[])
+    @mock.patch.object(WEB_GUARD, "probe_health", return_value=(False, "offline"))
+    def test_exhausted_budget_refuses_restart(
+        self,
+        _probe,
+        _pids,
+        _authorize,
+        ensure_started,
+    ):
+        result = WEB_GUARD.recover(
+            8766,
+            WEB_GUARD.DEFAULT_LABEL,
+            WEB_GUARD.DEFAULT_HEALTH_URL,
+            Path("/unused.plist"),
+            Path("/restart-budget.json"),
+        )
+        self.assertEqual(result["state"], "quarantined")
+        ensure_started.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

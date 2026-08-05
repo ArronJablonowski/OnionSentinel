@@ -290,6 +290,21 @@ and completion rates, pressure ratio, and count- and byte-based drain ETAs.
 completion rate exists and must be treated as stalled or not yet measurable,
 not as healthy. Unknown-size items remain explicit rather than being guessed.
 
+Generate a content-free harness observability view from the owner-only trace
+database and current SLO snapshot:
+
+```bash
+python3 "$HOME/n8n-local/bin/report-harness-observability.py"
+```
+
+The report contains aggregate status, stage and event counts; active age and
+terminal/model latency; failure classes; model/provider routes; tool status and
+truncation; evidence/hypothesis/decision counts; and the current queue and disk
+signals. It never emits case or alert identifiers, queries, evidence values,
+terminal reasons, or transcript content. Token and retry fields explicitly say
+`available: false` when the selected provider/runtime did not supply durable
+usage metadata; absence must not be represented as zero usage.
+
 Disk samples are captured at most every five minutes. After sufficient history,
 the snapshot reports net byte growth and a projected time to the 75-percent
 start limit. It also projects utilization after the known byte backlog lands;

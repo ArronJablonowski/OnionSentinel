@@ -1,0 +1,172 @@
+{
+  "schema": "onion-sentinel-investigation-skill-manifest-v2",
+  "id": "network.http.triage",
+  "version": "2.0.0-candidate.1",
+  "artifact_digest": "31225aa0dde0283f7dda8307106b2a0afdb58640d82cde85539965fc777daa9b",
+  "lineage": {
+    "source_revision": "9aa2404",
+    "predecessor_digest": ""
+  },
+  "compatibility": {
+    "harness_contract": "onion-sentinel-harness-job-envelope-v1",
+    "policy_schema": "onion-sentinel-investigation-harness-policy-v1",
+    "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"
+  },
+  "maintainer": {
+    "owner": "Onion Sentinel",
+    "reviewed_at": "2026-08-05T07:00:00Z",
+    "reviewer": "pending"
+  },
+  "roles": [
+    "soc-analyst",
+    "incident-responder",
+    "threat-hunter"
+  ],
+  "match": {
+    "tasks": [
+      "alert-triage",
+      "incident-response",
+      "reanalysis",
+      "threat-hunt"
+    ],
+    "protocols": [
+      "http"
+    ],
+    "alert_families": [
+      "http",
+      "web",
+      "user-agent"
+    ],
+    "data_sources": [
+      "suricata",
+      "zeek.http",
+      "elastic",
+      "oql"
+    ]
+  },
+  "objective": "Establish the bounded HTTP transaction and determine whether host, URI, method, user agent, response, and file context support a benign or harmful explanation.",
+  "capabilities": [
+    "security-onion.events.query",
+    "security-onion.oql.query",
+    "suricata.events.read",
+    "zeek.derived.query"
+  ],
+  "safety": {
+    "read_only": true,
+    "active_operation": false,
+    "sensitivity": "moderate",
+    "requires_approval": false
+  },
+  "budgets": {
+    "max_queries": 4,
+    "max_rows": 1000,
+    "max_bytes": 1048576,
+    "timeout_seconds": 90
+  },
+  "preconditions": [
+    "bounded event time exists",
+    "at least one endpoint or DNS identifier exists",
+    "deployed field catalog is available"
+  ],
+  "required_evidence": [
+    "alert identity",
+    "bounded HTTP flow and time scope",
+    "request and response coverage"
+  ],
+  "query_templates": [
+    {
+      "id": "http-event-context",
+      "backend": "elastic",
+      "language": "query-dsl",
+      "purpose": "Retrieve bounded HTTP request, response, file, and alert observations.",
+      "parameters": [
+        "source_alias",
+        "destination_alias",
+        "start_time",
+        "end_time"
+      ],
+      "expected_fields": [
+        "@timestamp",
+        "source.ip",
+        "destination.ip",
+        "http.request.method",
+        "url.full",
+        "user_agent.original",
+        "http.response.status_code",
+        "network.community_id"
+      ]
+    },
+    {
+      "id": "http-zeek-context",
+      "backend": "zeek",
+      "language": "broker-parameters",
+      "purpose": "Correlate Zeek HTTP and file metadata using bounded identifiers.",
+      "parameters": [
+        "community_id",
+        "source_alias",
+        "start_time",
+        "end_time"
+      ],
+      "expected_fields": [
+        "ts",
+        "uid",
+        "host",
+        "uri",
+        "method",
+        "user_agent",
+        "status_code",
+        "resp_mime_types"
+      ]
+    }
+  ],
+  "output_contract": {
+    "schema": "onion-sentinel-skill-result-v1",
+    "coverage_required": true,
+    "truncation_required": true,
+    "evidence_refs_required": true
+  },
+  "alternative_hypotheses": [
+    "software update or telemetry",
+    "authorized automation or scanner",
+    "user browsing",
+    "malicious download or callback"
+  ],
+  "stop_conditions": [
+    "the discriminating question is answered with corroborated evidence",
+    "the next pivot has low expected information value",
+    "a budget or deadline is exhausted"
+  ],
+  "confidence_limiters": [
+    "encrypted HTTPS without HTTP visibility",
+    "missing response body metadata",
+    "proxy or NAT attribution",
+    "retention gap"
+  ],
+  "known_false_positive_patterns": [
+    "update and telemetry traffic",
+    "browser prefetch",
+    "authorized vulnerability scanning",
+    "package repository access"
+  ],
+  "verification": {
+    "unit_tests": false,
+    "replay_cases": 0,
+    "independent_query_review": false,
+    "adversarial_tests": false,
+    "human_approved": false
+  },
+  "references": [
+    {
+      "title": "Security Onion 2.4 Zeek",
+      "url": "https://docs.securityonion.net/en/2.4/zeek.html",
+      "product_version": "2.4",
+      "retrieved_at": "2026-08-05T07:00:00Z"
+    },
+    {
+      "title": "Zeek HTTP log",
+      "url": "https://docs.zeek.org/en/current/logs/http.html",
+      "product_version": "current as reviewed",
+      "retrieved_at": "2026-08-05T07:00:00Z"
+    }
+  ]
+}

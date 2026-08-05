@@ -53,6 +53,8 @@ class ReadinessTests(unittest.TestCase):
             }
             with mock.patch.object(READINESS, "check_services", return_value={
                 "component": "services", "state": "ready", "reason_code": "test", "duration_ms": 0
+            }), mock.patch.object(READINESS, "check_supervision", return_value={
+                "component": "supervision", "state": "ready", "reason_code": "test", "duration_ms": 0
             }):
                 value = READINESS.snapshot(stack, network=False, minimum_free_bytes=0)
             serialized = json.dumps(value)
@@ -121,6 +123,34 @@ class ReadinessTests(unittest.TestCase):
             with mock.patch.object(READINESS.shutil, "which", return_value=None):
                 value = READINESS.check_providers(stack)
             self.assertEqual(value["state"], "ready")
+
+    def test_supervision_surfaces_active_restart_quarantine(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stack = self.make_stack(Path(directory))
+            state = stack / "logs" / "onion-sentinel-web-restart-budget.json"
+            state.write_text(json.dumps({
+                "quarantined": True,
+                "updated_at": READINESS.time.time(),
+                "window_seconds": 900,
+            }))
+            os.chmod(state, 0o600)
+            value = READINESS.check_supervision(stack)
+            self.assertEqual(value["state"], "failed")
+            self.assertEqual(value["reason_code"], "web_restart_quarantined")
+
+    def test_supervision_detects_duplicate_workers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stack = self.make_stack(Path(directory))
+            registered = mock.MagicMock(returncode=0, stdout="")
+            duplicate = mock.MagicMock(returncode=0, stdout="41\n42\n")
+            with mock.patch.object(
+                READINESS.subprocess,
+                "run",
+                side_effect=[registered] * 6 + [duplicate],
+            ):
+                value = READINESS.check_supervision(stack)
+            self.assertEqual(value["state"], "failed")
+            self.assertEqual(value["reason_code"], "duplicate_ollama_workers")
 
 
 if __name__ == "__main__":

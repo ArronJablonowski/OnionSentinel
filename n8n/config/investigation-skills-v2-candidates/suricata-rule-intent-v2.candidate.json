@@ -1,0 +1,169 @@
+{
+  "schema": "onion-sentinel-investigation-skill-manifest-v2",
+  "id": "source.suricata.rule-intent",
+  "version": "2.0.0-candidate.1",
+  "artifact_digest": "39b4f200ff555f046a5bc8bb6722864949657dfa29a9f297d27f78230c5332ce",
+  "lineage": {
+    "source_revision": "9aa2404",
+    "predecessor_digest": ""
+  },
+  "compatibility": {
+    "harness_contract": "onion-sentinel-harness-job-envelope-v1",
+    "policy_schema": "onion-sentinel-investigation-harness-policy-v1",
+    "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"
+  },
+  "maintainer": {
+    "owner": "Onion Sentinel",
+    "reviewed_at": "2026-08-05T07:00:00Z",
+    "reviewer": "pending"
+  },
+  "roles": [
+    "soc-analyst",
+    "incident-responder",
+    "threat-hunter"
+  ],
+  "match": {
+    "tasks": [
+      "alert-triage",
+      "incident-response",
+      "reanalysis",
+      "threat-hunt"
+    ],
+    "protocols": [
+      "any"
+    ],
+    "alert_families": [
+      "suricata-alert"
+    ],
+    "data_sources": [
+      "suricata",
+      "elastic",
+      "oql"
+    ]
+  },
+  "objective": "Validate the exact Suricata SID and revision, determine which rule conditions were observed, and separate syntactic rule truth from malicious intent.",
+  "capabilities": [
+    "security-onion.events.query",
+    "security-onion.oql.query",
+    "suricata.events.read"
+  ],
+  "safety": {
+    "read_only": true,
+    "active_operation": false,
+    "sensitivity": "moderate",
+    "requires_approval": false
+  },
+  "budgets": {
+    "max_queries": 4,
+    "max_rows": 1000,
+    "max_bytes": 1048576,
+    "timeout_seconds": 90
+  },
+  "preconditions": [
+    "bounded event time exists",
+    "at least one endpoint or DNS identifier exists",
+    "deployed field catalog is available"
+  ],
+  "required_evidence": [
+    "exact SID revision and event identity",
+    "bounded triggering flow",
+    "rule metadata provenance"
+  ],
+  "query_templates": [
+    {
+      "id": "suricata-alert-context",
+      "backend": "suricata",
+      "language": "broker-parameters",
+      "purpose": "Retrieve the exact alert fields and active rule metadata for the triggering SID and revision.",
+      "parameters": [
+        "alert_id",
+        "sid",
+        "revision",
+        "start_time",
+        "end_time"
+      ],
+      "expected_fields": [
+        "timestamp",
+        "alert.signature_id",
+        "alert.rev",
+        "alert.signature",
+        "src_ip",
+        "dest_ip",
+        "src_port",
+        "dest_port",
+        "proto"
+      ]
+    },
+    {
+      "id": "suricata-flow-context",
+      "backend": "elastic",
+      "language": "query-dsl",
+      "purpose": "Correlate bounded flow and protocol observations around the exact Suricata event.",
+      "parameters": [
+        "source_alias",
+        "destination_alias",
+        "start_time",
+        "end_time"
+      ],
+      "expected_fields": [
+        "@timestamp",
+        "source.ip",
+        "destination.ip",
+        "network.community_id",
+        "network.bytes",
+        "event.dataset",
+        "rule.id"
+      ]
+    }
+  ],
+  "output_contract": {
+    "schema": "onion-sentinel-skill-result-v1",
+    "coverage_required": true,
+    "truncation_required": true,
+    "evidence_refs_required": true
+  },
+  "alternative_hypotheses": [
+    "rule accurately matched benign activity",
+    "policy violation without compromise",
+    "scanner or test activity",
+    "malicious activity matching rule intent"
+  ],
+  "stop_conditions": [
+    "the discriminating question is answered with corroborated evidence",
+    "the next pivot has low expected information value",
+    "a budget or deadline is exhausted"
+  ],
+  "confidence_limiters": [
+    "rule text or revision unavailable",
+    "flow metadata incomplete",
+    "payload encrypted or truncated",
+    "environment authorization unknown"
+  ],
+  "known_false_positive_patterns": [
+    "authorized testing",
+    "known scanner behavior",
+    "software update signatures",
+    "protocol quirks matching broad content"
+  ],
+  "verification": {
+    "unit_tests": false,
+    "replay_cases": 0,
+    "independent_query_review": false,
+    "adversarial_tests": false,
+    "human_approved": false
+  },
+  "references": [
+    {
+      "title": "Security Onion 2.4 Suricata",
+      "url": "https://docs.securityonion.net/en/2.4/suricata.html",
+      "product_version": "2.4",
+      "retrieved_at": "2026-08-05T07:00:00Z"
+    },
+    {
+      "title": "Suricata rules format",
+      "url": "https://docs.suricata.io/en/latest/rules/intro.html",
+      "product_version": "latest as reviewed",
+      "retrieved_at": "2026-08-05T07:00:00Z"
+    }
+  ]
+}

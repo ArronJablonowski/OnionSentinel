@@ -1,0 +1,172 @@
+{
+  "schema": "onion-sentinel-investigation-skill-manifest-v2",
+  "id": "source.zeek.correlation",
+  "version": "2.0.0-candidate.1",
+  "artifact_digest": "cfbba2b0dddd2bffc0e30802fb52b1d6cfd7b8eb1eff6821066695244bdfcdab",
+  "lineage": {
+    "source_revision": "9aa2404",
+    "predecessor_digest": ""
+  },
+  "compatibility": {
+    "harness_contract": "onion-sentinel-harness-job-envelope-v1",
+    "policy_schema": "onion-sentinel-investigation-harness-policy-v1",
+    "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"
+  },
+  "maintainer": {
+    "owner": "Onion Sentinel",
+    "reviewed_at": "2026-08-05T07:00:00Z",
+    "reviewer": "pending"
+  },
+  "roles": [
+    "soc-analyst",
+    "incident-responder",
+    "threat-hunter"
+  ],
+  "match": {
+    "tasks": [
+      "alert-triage",
+      "incident-response",
+      "reanalysis",
+      "threat-hunt"
+    ],
+    "protocols": [
+      "any"
+    ],
+    "alert_families": [
+      "network-correlation"
+    ],
+    "data_sources": [
+      "zeek.conn",
+      "zeek.dns",
+      "zeek.http",
+      "zeek.ssl",
+      "zeek.files",
+      "elastic",
+      "oql"
+    ]
+  },
+  "objective": "Correlate a bounded network event through Zeek connection and protocol logs using trusted identifiers, while surfacing parser, retention, and routing gaps.",
+  "capabilities": [
+    "security-onion.events.query",
+    "security-onion.oql.query",
+    "zeek.derived.query"
+  ],
+  "safety": {
+    "read_only": true,
+    "active_operation": false,
+    "sensitivity": "moderate",
+    "requires_approval": false
+  },
+  "budgets": {
+    "max_queries": 4,
+    "max_rows": 1000,
+    "max_bytes": 1048576,
+    "timeout_seconds": 90
+  },
+  "preconditions": [
+    "bounded event time exists",
+    "at least one endpoint or DNS identifier exists",
+    "deployed field catalog is available"
+  ],
+  "required_evidence": [
+    "bounded time and endpoint scope",
+    "UID community ID or five tuple",
+    "sensor and parser coverage"
+  ],
+  "query_templates": [
+    {
+      "id": "zeek-connection-anchor",
+      "backend": "zeek",
+      "language": "broker-parameters",
+      "purpose": "Anchor correlation in the Zeek connection record using UID, community ID, or bounded five tuple.",
+      "parameters": [
+        "community_id",
+        "source_alias",
+        "destination_alias",
+        "start_time",
+        "end_time"
+      ],
+      "expected_fields": [
+        "ts",
+        "uid",
+        "id.orig_h",
+        "id.orig_p",
+        "id.resp_h",
+        "id.resp_p",
+        "proto",
+        "service",
+        "duration",
+        "conn_state"
+      ]
+    },
+    {
+      "id": "zeek-protocol-pivots",
+      "backend": "zeek",
+      "language": "broker-parameters",
+      "purpose": "Retrieve only protocol records linked to the validated Zeek connection anchors.",
+      "parameters": [
+        "uid",
+        "community_id",
+        "start_time",
+        "end_time"
+      ],
+      "expected_fields": [
+        "ts",
+        "uid",
+        "event_dataset",
+        "protocol_fields",
+        "sensor_name"
+      ]
+    }
+  ],
+  "output_contract": {
+    "schema": "onion-sentinel-skill-result-v1",
+    "coverage_required": true,
+    "truncation_required": true,
+    "evidence_refs_required": true
+  },
+  "alternative_hypotheses": [
+    "normal protocol activity",
+    "parser or retention gap",
+    "asymmetric routing",
+    "malicious behavior corroborated across logs"
+  ],
+  "stop_conditions": [
+    "the discriminating question is answered with corroborated evidence",
+    "the next pivot has low expected information value",
+    "a budget or deadline is exhausted"
+  ],
+  "confidence_limiters": [
+    "missing UID or community ID",
+    "asymmetric visibility",
+    "parser failure",
+    "retention mismatch"
+  ],
+  "known_false_positive_patterns": [
+    "ordinary client-server sessions",
+    "service discovery",
+    "shared proxy traffic",
+    "expected application protocol behavior"
+  ],
+  "verification": {
+    "unit_tests": false,
+    "replay_cases": 0,
+    "independent_query_review": false,
+    "adversarial_tests": false,
+    "human_approved": false
+  },
+  "references": [
+    {
+      "title": "Security Onion 2.4 Zeek",
+      "url": "https://docs.securityonion.net/en/2.4/zeek.html",
+      "product_version": "2.4",
+      "retrieved_at": "2026-08-05T07:00:00Z"
+    },
+    {
+      "title": "Zeek logging framework",
+      "url": "https://docs.zeek.org/en/current/frameworks/logging.html",
+      "product_version": "current as reviewed",
+      "retrieved_at": "2026-08-05T07:00:00Z"
+    }
+  ]
+}

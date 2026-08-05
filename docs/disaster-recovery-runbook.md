@@ -733,6 +733,42 @@ bundle hashes; and confirms the archive contains the n8n encryption
 configuration. The production containers, databases, keys, and workflows are
 not modified.
 
+### Mac Studio supervision readiness and restart quarantine
+
+Run the non-mutating readiness check before and after a deployment or recovery:
+
+```bash
+python3 "$HOME/n8n-local/bin/check-onion-sentinel-readiness.py" --network
+```
+
+The check validates release configuration, read-only database integrity,
+storage capacity, provider configuration, service identity, required launchd
+registration, duplicate AI workers, web restart quarantine, and Relay TCP
+reachability. It does not execute a Security Onion evidence query or a model
+inference.
+
+The web identity guard permits at most three automatic restart attempts within
+15 minutes. When that budget is exhausted it records an owner-only quarantine
+at `~/n8n-local/logs/onion-sentinel-web-restart-budget.json` and refuses further
+automatic restarts. Do not simply erase the quarantine. First collect the web,
+guard, monitor, and readiness logs; resolve any port conflict, invalid release,
+or repeated process failure; then preserve the state for review before moving
+it aside and starting the allowlisted launchd job:
+
+```bash
+mkdir -p "$HOME/n8n-local/logs/restart-budget-history"
+mv "$HOME/n8n-local/logs/onion-sentinel-web-restart-budget.json" \
+  "$HOME/n8n-local/logs/restart-budget-history/web-$(date -u +%Y%m%dT%H%M%SZ).json"
+launchctl kickstart -k "gui/$(id -u)/com.arron.onion-sentinel.web"
+python3 "$HOME/n8n-local/bin/check-onion-sentinel-readiness.py" --network
+```
+
+An unknown or duplicate listener remains a manual incident: the guard never
+terminates an unrecognized process. Provider workers are scheduled jobs and
+may legitimately be absent when idle, but more than one worker in the same
+provider lane fails readiness. Their durable job and harness state must be
+inspected before restarting a scheduler.
+
 Harness trace retention is a separate hourly job. It preserves active runs,
 deletes no more than 1,000 terminal traces per pass, and refuses every
 destructive pass unless a hash-verified harness snapshot exists in a recovery

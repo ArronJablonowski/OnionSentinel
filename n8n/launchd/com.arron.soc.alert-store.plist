@@ -17,6 +17,8 @@
 
   <key>RunAtLoad</key>
   <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
 
   <key>KeepAlive</key>
   <true/>

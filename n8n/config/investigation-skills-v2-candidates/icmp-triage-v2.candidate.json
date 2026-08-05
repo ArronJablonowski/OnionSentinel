@@ -1,0 +1,171 @@
+{
+  "schema": "onion-sentinel-investigation-skill-manifest-v2",
+  "id": "network.icmp.triage",
+  "version": "2.0.0-candidate.1",
+  "artifact_digest": "d3bec1ade636204994c847e58264361c957ef5fede25cb1bd4ae9fc754a069c5",
+  "lineage": {
+    "source_revision": "9aa2404",
+    "predecessor_digest": ""
+  },
+  "compatibility": {
+    "harness_contract": "onion-sentinel-harness-job-envelope-v1",
+    "policy_schema": "onion-sentinel-investigation-harness-policy-v1",
+    "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"
+  },
+  "maintainer": {
+    "owner": "Onion Sentinel",
+    "reviewed_at": "2026-08-05T07:00:00Z",
+    "reviewer": "pending"
+  },
+  "roles": [
+    "soc-analyst",
+    "incident-responder",
+    "threat-hunter"
+  ],
+  "match": {
+    "tasks": [
+      "alert-triage",
+      "incident-response",
+      "reanalysis",
+      "threat-hunt"
+    ],
+    "protocols": [
+      "icmp"
+    ],
+    "alert_families": [
+      "icmp",
+      "tunnel",
+      "heartbeat"
+    ],
+    "data_sources": [
+      "suricata",
+      "zeek.conn",
+      "pcap-derived",
+      "elastic",
+      "oql"
+    ]
+  },
+  "objective": "Validate ICMP type, code, direction, size, cadence, rule intent, and peer history while separating diagnostics and monitoring from tunneling hypotheses.",
+  "capabilities": [
+    "security-onion.events.query",
+    "security-onion.oql.query",
+    "suricata.events.read",
+    "pcap.derived.read",
+    "zeek.derived.query"
+  ],
+  "safety": {
+    "read_only": true,
+    "active_operation": false,
+    "sensitivity": "moderate",
+    "requires_approval": false
+  },
+  "budgets": {
+    "max_queries": 4,
+    "max_rows": 1000,
+    "max_bytes": 1048576,
+    "timeout_seconds": 90
+  },
+  "preconditions": [
+    "bounded event time exists",
+    "at least one endpoint or DNS identifier exists",
+    "deployed field catalog is available"
+  ],
+  "required_evidence": [
+    "exact alert and rule identity",
+    "bounded ICMP time and peer scope",
+    "type code size and cadence coverage"
+  ],
+  "query_templates": [
+    {
+      "id": "icmp-event-context",
+      "backend": "elastic",
+      "language": "query-dsl",
+      "purpose": "Retrieve bounded ICMP alert and flow observations for exact peers and time.",
+      "parameters": [
+        "source_alias",
+        "destination_alias",
+        "start_time",
+        "end_time"
+      ],
+      "expected_fields": [
+        "@timestamp",
+        "source.ip",
+        "destination.ip",
+        "icmp.type",
+        "icmp.code",
+        "network.bytes",
+        "rule.id",
+        "event.dataset"
+      ]
+    },
+    {
+      "id": "icmp-pcap-summary",
+      "backend": "pcap-derived",
+      "language": "broker-parameters",
+      "purpose": "Read an existing bounded capture summary for packet sizes, direction, type, code, and timing.",
+      "parameters": [
+        "capture_digest",
+        "source_alias",
+        "destination_alias"
+      ],
+      "expected_fields": [
+        "packet_count",
+        "icmp_types",
+        "icmp_codes",
+        "size_distribution",
+        "timing_summary",
+        "capture_limits"
+      ]
+    }
+  ],
+  "output_contract": {
+    "schema": "onion-sentinel-skill-result-v1",
+    "coverage_required": true,
+    "truncation_required": true,
+    "evidence_refs_required": true
+  },
+  "alternative_hypotheses": [
+    "network diagnostics",
+    "availability monitoring",
+    "appliance heartbeat",
+    "ICMP tunnel or covert channel"
+  ],
+  "stop_conditions": [
+    "the discriminating question is answered with corroborated evidence",
+    "the next pivot has low expected information value",
+    "a budget or deadline is exhausted"
+  ],
+  "confidence_limiters": [
+    "partial capture",
+    "snap length limitation",
+    "missing payload visibility",
+    "asymmetric routing"
+  ],
+  "known_false_positive_patterns": [
+    "ping and path diagnostics",
+    "network monitoring",
+    "router or appliance health checks",
+    "MTU discovery"
+  ],
+  "verification": {
+    "unit_tests": false,
+    "replay_cases": 0,
+    "independent_query_review": false,
+    "adversarial_tests": false,
+    "human_approved": false
+  },
+  "references": [
+    {
+      "title": "Security Onion 2.4 Suricata",
+      "url": "https://docs.securityonion.net/en/2.4/suricata.html",
+      "product_version": "2.4",
+      "retrieved_at": "2026-08-05T07:00:00Z"
+    },
+    {
+      "title": "Suricata rules format",
+      "url": "https://docs.suricata.io/en/latest/rules/intro.html",
+      "product_version": "latest as reviewed",
+      "retrieved_at": "2026-08-05T07:00:00Z"
+    }
+  ]
+}

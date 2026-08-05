@@ -1,0 +1,174 @@
+{
+  "schema": "onion-sentinel-investigation-skill-manifest-v2",
+  "id": "network.tls.triage",
+  "version": "2.0.0-candidate.1",
+  "artifact_digest": "efb0a1f6c23785212f55957af2316c7c24afc507f1f91387faef87a4a510bb25",
+  "lineage": {
+    "source_revision": "9aa2404",
+    "predecessor_digest": ""
+  },
+  "compatibility": {
+    "harness_contract": "onion-sentinel-harness-job-envelope-v1",
+    "policy_schema": "onion-sentinel-investigation-harness-policy-v1",
+    "evidence_contract": "onion-sentinel-evidence-reference-contract-v1"
+  },
+  "maintainer": {
+    "owner": "Onion Sentinel",
+    "reviewed_at": "2026-08-05T07:00:00Z",
+    "reviewer": "pending"
+  },
+  "roles": [
+    "soc-analyst",
+    "incident-responder",
+    "threat-hunter"
+  ],
+  "match": {
+    "tasks": [
+      "alert-triage",
+      "incident-response",
+      "reanalysis",
+      "threat-hunt"
+    ],
+    "protocols": [
+      "tls"
+    ],
+    "alert_families": [
+      "tls",
+      "certificate",
+      "encrypted-traffic"
+    ],
+    "data_sources": [
+      "suricata",
+      "zeek.ssl",
+      "elastic",
+      "oql"
+    ]
+  },
+  "objective": "Establish the observed TLS session, certificate, SNI, flow, and DNS context and test malicious, suspicious, and benign infrastructure explanations.",
+  "capabilities": [
+    "security-onion.events.query",
+    "security-onion.oql.query",
+    "suricata.events.read",
+    "zeek.derived.query",
+    "threat-intel.lookup"
+  ],
+  "safety": {
+    "read_only": true,
+    "active_operation": false,
+    "sensitivity": "moderate",
+    "requires_approval": false
+  },
+  "budgets": {
+    "max_queries": 4,
+    "max_rows": 1000,
+    "max_bytes": 1048576,
+    "timeout_seconds": 90
+  },
+  "preconditions": [
+    "bounded event time exists",
+    "at least one endpoint or DNS identifier exists",
+    "deployed field catalog is available"
+  ],
+  "required_evidence": [
+    "alert identity",
+    "bounded flow and time scope",
+    "TLS identity fields and query coverage"
+  ],
+  "query_templates": [
+    {
+      "id": "tls-flow-context",
+      "backend": "elastic",
+      "language": "query-dsl",
+      "purpose": "Retrieve bounded TLS, certificate, and flow events using trusted endpoint and time scope.",
+      "parameters": [
+        "source_alias",
+        "destination_alias",
+        "start_time",
+        "end_time"
+      ],
+      "expected_fields": [
+        "@timestamp",
+        "source.ip",
+        "destination.ip",
+        "destination.port",
+        "tls.server.name",
+        "tls.server.hash.sha256",
+        "network.community_id",
+        "event.dataset"
+      ]
+    },
+    {
+      "id": "tls-zeek-context",
+      "backend": "zeek",
+      "language": "broker-parameters",
+      "purpose": "Correlate Zeek SSL and connection observations using bounded flow identifiers.",
+      "parameters": [
+        "community_id",
+        "source_alias",
+        "start_time",
+        "end_time"
+      ],
+      "expected_fields": [
+        "ts",
+        "uid",
+        "id.orig_h",
+        "id.resp_h",
+        "server_name",
+        "subject",
+        "issuer",
+        "ja3",
+        "ja3s"
+      ]
+    }
+  ],
+  "output_contract": {
+    "schema": "onion-sentinel-skill-result-v1",
+    "coverage_required": true,
+    "truncation_required": true,
+    "evidence_refs_required": true
+  },
+  "alternative_hypotheses": [
+    "shared CDN or cloud service",
+    "TLS interception",
+    "normal client signature diversity",
+    "malicious encrypted command and control"
+  ],
+  "stop_conditions": [
+    "the discriminating question is answered with corroborated evidence",
+    "the next pivot has low expected information value",
+    "a budget or deadline is exhausted"
+  ],
+  "confidence_limiters": [
+    "missing SNI or certificate telemetry",
+    "shared infrastructure attribution",
+    "retention or asymmetric routing gap",
+    "encrypted application content"
+  ],
+  "known_false_positive_patterns": [
+    "browser and operating-system traffic",
+    "shared CDN endpoints",
+    "enterprise TLS interception",
+    "software update services"
+  ],
+  "verification": {
+    "unit_tests": false,
+    "replay_cases": 0,
+    "independent_query_review": false,
+    "adversarial_tests": false,
+    "human_approved": false
+  },
+  "references": [
+    {
+      "title": "Security Onion 2.4 Zeek",
+      "url": "https://docs.securityonion.net/en/2.4/zeek.html",
+      "product_version": "2.4",
+      "retrieved_at": "2026-08-05T07:00:00Z"
+    },
+    {
+      "title": "Zeek SSL log",
+      "url": "https://docs.zeek.org/en/current/logs/ssl.html",
+      "product_version": "current as reviewed",
+      "retrieved_at": "2026-08-05T07:00:00Z"
+    }
+  ]
+}

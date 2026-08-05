@@ -13,6 +13,7 @@ import shutil
 import socket
 import sqlite3
 import stat
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -215,6 +216,63 @@ def check_services() -> dict[str, Any]:
     return result("services", "ready", "identity_health_ready", started)
 
 
+def check_supervision(stack: Path) -> dict[str, Any]:
+    started = time.monotonic()
+    budget_path = stack / "logs" / "onion-sentinel-web-restart-budget.json"
+    if budget_path.exists():
+        try:
+            budget = read_json(budget_path, owner_only=True)
+            updated_at = float(budget.get("updated_at") or 0)
+            window = int(budget.get("window_seconds") or 0)
+            quarantined = budget.get("quarantined") is True
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return result("supervision", "failed", "restart_budget_invalid", started)
+        if quarantined and 0 <= time.time() - updated_at <= window:
+            return result("supervision", "failed", "web_restart_quarantined", started)
+
+    labels = (
+        "com.arron.onion-sentinel.web",
+        "com.arron.soc.alert-store",
+        "com.arron.soc.ai-analysis",
+        "com.arron.soc.ai-analysis-cli",
+        "com.arron.n8n.ensure-stack",
+        "com.arron.n8n.monitor-stack",
+    )
+    for label in labels:
+        try:
+            completed = subprocess.run(
+                ["/bin/launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return result("supervision", "failed", "launchd_check_failed", started)
+        if completed.returncode != 0:
+            return result("supervision", "failed", "required_job_unregistered", started)
+
+    for lane in ("ollama", "cli"):
+        try:
+            completed = subprocess.run(
+                [
+                    "/usr/bin/pgrep",
+                    "-f",
+                    f"auto-run-ai-analysis.py --provider-lane {lane}",
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return result("supervision", "failed", "worker_check_failed", started)
+        count = len([line for line in completed.stdout.splitlines() if line.isdigit()])
+        if count > 1:
+            return result("supervision", "failed", f"duplicate_{lane}_workers", started)
+    return result("supervision", "ready", "jobs_registered_no_duplicates", started)
+
+
 def relay_endpoint(stack: Path) -> tuple[str, int]:
     config = read_json(stack / "config" / "incident-evidence.json", owner_only=True)
     host = str(config.get("host") or "").strip()
@@ -248,6 +306,7 @@ def snapshot(stack: Path, *, network: bool, minimum_free_bytes: int) -> dict[str
         lambda: check_storage(stack, minimum_free_bytes),
         lambda: check_providers(stack),
         check_services,
+        lambda: check_supervision(stack),
         lambda: check_relay(stack, network),
     ]
     components = [check() for check in checks]
