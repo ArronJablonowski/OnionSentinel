@@ -243,6 +243,23 @@ class AiSchedulerPriorityTest(unittest.TestCase):
             args = self.scheduler.parse_args()
         self.assertEqual(args.drain_file, marker)
 
+    def test_maintenance_drain_exits_before_controlled_token_or_database(self) -> None:
+        marker = Path(self.tempdir.name) / "maintenance-drain"
+        marker.write_text("deployment\n", encoding="utf-8")
+        marker.chmod(0o600)
+        args = SimpleNamespace(drain_file=marker)
+        with mock.patch.object(
+            self.scheduler,
+            "parse_args",
+            return_value=args,
+        ), mock.patch.object(
+            self.scheduler,
+            "controlled_evaluation_runtime",
+            side_effect=AssertionError("drain must precede controlled token use"),
+        ), mock.patch("sys.stdout", io.StringIO()) as stdout:
+            self.assertEqual(self.scheduler.main(), 0)
+        self.assertIn("no additional AI work will be claimed", stdout.getvalue())
+
     def test_controlled_run_arguments_reject_unbounded_or_noncanonical_ids(
         self,
     ) -> None:
