@@ -81,6 +81,7 @@ DEFAULT_INVESTIGATION_SKILLS = (
     HOME / "n8n-local" / "config" / "investigation_skills.json"
 )
 DEFAULT_LOCK = HOME / "n8n-local" / "run" / "ai-analysis.lock"
+DEFAULT_DRAIN = HOME / "n8n-local" / "run" / "ai-analysis-maintenance-drain"
 DEFAULT_WAKE = Path(os.environ.get(
     "AI_ANALYSIS_WAKE_PATH",
     HOME / "n8n-local" / "run" / "ai-analysis.wake",
@@ -1632,6 +1633,15 @@ def parse_args() -> argparse.Namespace:
         help="Only claim jobs assigned to this inference provider",
     )
     parser.add_argument("--lock-file", type=Path, default=DEFAULT_LOCK, help="Non-overlap lock file")
+    parser.add_argument(
+        "--drain-file",
+        type=Path,
+        default=DEFAULT_DRAIN,
+        help=(
+            "Owner-only regular-file maintenance marker; when present, finish "
+            "the current durable job and claim no additional work"
+        ),
+    )
     parser.add_argument("--wake-file", type=Path, default=DEFAULT_WAKE, help="Consumable launchd wake marker")
     parser.add_argument("--levels", default=DEFAULT_LEVELS, help="Comma-separated triage levels to analyze")
     parser.add_argument("--hours", type=int, default=87600, help="Lookback window for eligible alerts")
@@ -3805,6 +3815,39 @@ def consume_wake_marker(path: Path) -> None:
         print(f"AI wake marker could not be consumed: {error}", file=sys.stderr)
 
 
+def maintenance_drain_active(path: Path) -> tuple[bool, str]:
+    """Fail closed when a maintenance marker exists but is not trustworthy.
+
+    The marker is an operator control, not job input.  Requiring an owner-only
+    regular file prevents another local account, directory swap, or symlink
+    from silently controlling scheduler availability.  An unsafe marker still
+    drains the worker so an operator can repair it without new claims racing
+    the maintenance window.
+    """
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False, ""
+    except OSError as error:
+        return True, f"maintenance drain marker cannot be inspected: {error}"
+    if not stat.S_ISREG(metadata.st_mode):
+        return True, "maintenance drain marker is not a regular file"
+    if metadata.st_uid != os.getuid():
+        return True, "maintenance drain marker is not owned by the worker account"
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        return True, "maintenance drain marker is not owner-only"
+    if metadata.st_size > 4096:
+        return True, "maintenance drain marker exceeds its byte limit"
+    return True, "maintenance drain requested"
+
+
+def stop_for_maintenance_drain(path: Path) -> bool:
+    active, detail = maintenance_drain_active(path)
+    if active:
+        print(f"{project_now()} {detail}; no additional AI work will be claimed", flush=True)
+    return active
+
+
 def reconcile_worker_state(
     args: argparse.Namespace,
     indexed_mode: bool,
@@ -3838,6 +3881,8 @@ def reconcile_worker_state(
 
 def main() -> int:
     args = parse_args()
+    if stop_for_maintenance_drain(getattr(args, "drain_file", DEFAULT_DRAIN)):
+        return 0
     controlled_evaluation_dir = controlled_evaluation_runtime(args)
     consume_controlled_evaluation_token(
         controlled_evaluation_dir is not None
@@ -3910,6 +3955,13 @@ def main() -> int:
         controlled_failure_detail = ""
         controlled_failure_group_id = ""
         while args.max_per_run == 0 or attempted_count < args.max_per_run:
+            # The check belongs inside the drain loop, immediately before the
+            # next durable selection.  A marker created during inference lets
+            # that owned job complete but prevents a subsequent claim.
+            if stop_for_maintenance_drain(
+                getattr(args, "drain_file", DEFAULT_DRAIN)
+            ):
+                break
             allowed_analysis_levels = configured_analysis_levels(
                 args.ai_settings_file,
                 launch_levels,

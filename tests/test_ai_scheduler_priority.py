@@ -210,6 +210,39 @@ class AiSchedulerPriorityTest(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     self.scheduler.parse_args()
 
+    def test_maintenance_drain_marker_requires_owner_only_regular_file(self) -> None:
+        marker = Path(self.tempdir.name) / "maintenance-drain"
+        self.assertEqual(
+            self.scheduler.maintenance_drain_active(marker),
+            (False, ""),
+        )
+
+        marker.write_text("operator maintenance\n", encoding="utf-8")
+        marker.chmod(0o600)
+        active, detail = self.scheduler.maintenance_drain_active(marker)
+        self.assertTrue(active)
+        self.assertEqual(detail, "maintenance drain requested")
+
+        marker.chmod(0o644)
+        active, detail = self.scheduler.maintenance_drain_active(marker)
+        self.assertTrue(active)
+        self.assertIn("not owner-only", detail)
+
+        marker.unlink()
+        marker.mkdir()
+        active, detail = self.scheduler.maintenance_drain_active(marker)
+        self.assertTrue(active)
+        self.assertIn("not a regular file", detail)
+
+    def test_drain_file_cli_override_is_parsed(self) -> None:
+        marker = Path(self.tempdir.name) / "custom-maintenance-drain"
+        with mock.patch(
+            "sys.argv",
+            [str(SCHEDULER_PATH), "--drain-file", str(marker)],
+        ):
+            args = self.scheduler.parse_args()
+        self.assertEqual(args.drain_file, marker)
+
     def test_controlled_run_arguments_reject_unbounded_or_noncanonical_ids(
         self,
     ) -> None:

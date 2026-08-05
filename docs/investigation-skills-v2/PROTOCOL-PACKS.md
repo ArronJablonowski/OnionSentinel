@@ -39,6 +39,26 @@ results are never generalized beyond their exact successful scope.
 4. Keep live OSQuery and remote PCAP creation separate and approval-gated.
 5. Add CTI and AC Hunter only as contextual sources, never verdict authorities.
 
+## Offline replay checkpoint
+
+The seven first-wave candidates now have a synthetic, non-production replay
+corpus at
+`n8n/config/investigation-skills-v2-candidates/offline-replay-fixtures.json`.
+Run the deterministic identity-routing and expected-field contract check with:
+
+```bash
+python3 n8n/bin/evaluate-investigation-skills-v2.py
+```
+
+The evaluator executes no query and cannot activate a candidate. It satisfies
+promotion attestations only in an in-memory copy, exercises the same
+identity-only resolver used by the framework, checks each selected template's
+expected fields against the frozen fixture catalog, and includes an
+adversarial capability-expansion case. A passing synthetic replay is only the
+start of verification. It does not replace version-pinned Security Onion,
+Elastic, Zeek, Suricata, or PCAP field review; representative sanitized result
+replay; independent query review; shadow measurement; or human approval.
+
 `skill-packs/dns-triage-v2.example.json` demonstrates the v2 boundary. Its
 verification flags are deliberately false because this package has not passed
 the required replay, review, or human promotion gates. It is structurally

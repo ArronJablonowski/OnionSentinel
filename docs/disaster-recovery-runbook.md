@@ -769,6 +769,33 @@ may legitimately be absent when idle, but more than one worker in the same
 provider lane fails readiness. Their durable job and harness state must be
 inspected before restarting a scheduler.
 
+For a graceful deployment window, create an owner-only maintenance drain
+marker. A running inference retains its durable lease and finishes normally;
+the scheduler checks the marker immediately before every subsequent selection
+and claims no new work. An unsafe marker (symlink, non-regular file, wrong
+owner, group/world permissions, or oversized content) also fails closed.
+
+```bash
+mkdir -p "$HOME/n8n-local/run"
+umask 077
+printf '%s\n' "operator deployment drain $(date -u +%FT%TZ)" \
+  > "$HOME/n8n-local/run/ai-analysis-maintenance-drain"
+chmod 600 "$HOME/n8n-local/run/ai-analysis-maintenance-drain"
+```
+
+After the deployment and readiness checks pass, preserve the marker in an
+owner-only history directory instead of deleting the operator record, then
+kickstart both provider lanes:
+
+```bash
+mkdir -p "$HOME/n8n-local/run/maintenance-drain-history"
+chmod 700 "$HOME/n8n-local/run/maintenance-drain-history"
+mv "$HOME/n8n-local/run/ai-analysis-maintenance-drain" \
+  "$HOME/n8n-local/run/maintenance-drain-history/ai-analysis-$(date -u +%Y%m%dT%H%M%SZ)"
+launchctl kickstart "gui/$(id -u)/com.arron.soc.ai-analysis"
+launchctl kickstart "gui/$(id -u)/com.arron.soc.ai-analysis-cli"
+```
+
 Harness trace retention is a separate hourly job. It preserves active runs,
 deletes no more than 1,000 terminal traces per pass, and refuses every
 destructive pass unless a hash-verified harness snapshot exists in a recovery

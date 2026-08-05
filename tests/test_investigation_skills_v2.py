@@ -2,12 +2,15 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
+import sys
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "n8n/bin/investigation_skills_v2.py"
 CANDIDATE = ROOT / "n8n/config/investigation-skills-v2-candidates/dns-triage-v2.candidate.json"
+EVALUATOR = ROOT / "n8n/bin/evaluate-investigation-skills-v2.py"
 SPEC = importlib.util.spec_from_file_location("investigation_skills_v2", MODULE)
 SKILLS = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
@@ -121,6 +124,23 @@ class InvestigationSkillsV2Tests(unittest.TestCase):
         value["artifact_digest"] = SKILLS.artifact_digest(value)
         with self.assertRaisesRegex(ValueError, "must require approval"):
             SKILLS.validate_manifest(value)
+
+    def test_offline_replay_routes_all_candidates_without_activation(self):
+        completed = subprocess.run(
+            [sys.executable, str(EVALUATOR)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["candidate_count"], 7)
+        self.assertEqual(result["passed_count"], 8)
+        self.assertFalse(result["query_execution"])
+        self.assertFalse(result["candidate_activation"])
 
 
 if __name__ == "__main__":
