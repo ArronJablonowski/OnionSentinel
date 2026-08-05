@@ -122,6 +122,209 @@ class AiSchedulerPriorityTest(unittest.TestCase):
         self.conn.close()
         self.tempdir.cleanup()
 
+    def recovery_databases(
+        self,
+        alert_path: Path | None = None,
+        harness_path: Path | None = None,
+    ) -> tuple[sqlite3.Connection, sqlite3.Connection]:
+        alert_conn = sqlite3.connect(str(alert_path) if alert_path else ":memory:")
+        harness_conn = sqlite3.connect(
+            str(harness_path) if harness_path else ":memory:"
+        )
+        alert_conn.row_factory = sqlite3.Row
+        harness_conn.row_factory = sqlite3.Row
+        alert_conn.executescript(
+            """
+            CREATE TABLE durable_jobs (
+                id INTEGER PRIMARY KEY,
+                job_type TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                lease_token TEXT,
+                processing_started_at TEXT
+            );
+            CREATE TABLE ai_analysis_runs (
+                analysis_id TEXT PRIMARY KEY,
+                group_id TEXT NOT NULL,
+                alert_id TEXT NOT NULL,
+                agent_role TEXT NOT NULL,
+                generated_at TEXT NOT NULL
+            );
+            CREATE TABLE incident_response_cases (
+                case_id TEXT PRIMARY KEY,
+                group_id TEXT NOT NULL,
+                agent_status TEXT NOT NULL,
+                latest_analysis_id TEXT,
+                latest_error TEXT
+            );
+            """
+        )
+        harness_conn.executescript(
+            """
+            CREATE TABLE harness_runs (
+                run_id TEXT PRIMARY KEY,
+                correlation_id TEXT NOT NULL,
+                case_id TEXT NOT NULL,
+                alert_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                status TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                assigned_route TEXT NOT NULL,
+                completed_at TEXT
+            );
+            """
+        )
+        return alert_conn, harness_conn
+
+    def insert_terminal_recovery_fixture(
+        self,
+        alert_conn: sqlite3.Connection,
+        harness_conn: sqlite3.Connection,
+        *,
+        job_type: str = "incident_response_analysis",
+        route: str = PRIMARY_ROUTE,
+        generated_at: str = "2026-08-05T14:05:00Z",
+    ) -> None:
+        role = (
+            "incident-responder"
+            if job_type == "incident_response_analysis"
+            else "soc-analyst"
+        )
+        group_id = "recovery-group"
+        alert_id = "recovery-alert"
+        run_id = "recovery-analysis"
+        case_id = "ir-recovery" if job_type == "incident_response_analysis" else ""
+        payload = {
+            "agent_role": role,
+            "group_id": group_id,
+            "alert_id": alert_id,
+            "expected_assigned_route": route,
+        }
+        if case_id:
+            payload["case_id"] = case_id
+        alert_conn.execute(
+            "INSERT INTO durable_jobs VALUES (1, ?, ?, 'processing', ?, ?, ?)",
+            (
+                job_type,
+                group_id,
+                json.dumps(payload),
+                "exact-recovery-lease",
+                "2026-08-05T14:00:00Z",
+            ),
+        )
+        alert_conn.execute(
+            "INSERT INTO ai_analysis_runs VALUES (?, ?, ?, ?, ?)",
+            (run_id, group_id, alert_id, role, generated_at),
+        )
+        if case_id:
+            alert_conn.execute(
+                "INSERT INTO incident_response_cases VALUES (?, ?, 'analyzed', ?, NULL)",
+                (case_id, group_id, run_id),
+            )
+        harness_conn.execute(
+            "INSERT INTO harness_runs VALUES (?, ?, ?, ?, ?, 'succeeded', 'complete', ?, ?)",
+            (
+                run_id,
+                group_id,
+                case_id,
+                alert_id,
+                role,
+                route,
+                "2026-08-05T14:06:00Z",
+            ),
+        )
+        alert_conn.commit()
+        harness_conn.commit()
+
+    def test_terminal_success_recovery_proves_exact_ir_commit(self) -> None:
+        alert_conn, harness_conn = self.recovery_databases()
+        try:
+            self.insert_terminal_recovery_fixture(alert_conn, harness_conn)
+            candidates = self.scheduler.terminal_success_recovery_candidates(
+                alert_conn,
+                harness_conn,
+                "cli",
+            )
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0]["job_type"], "incident_response_analysis")
+            self.assertEqual(candidates[0]["lease_token"], "exact-recovery-lease")
+
+            alert_conn.execute(
+                "UPDATE incident_response_cases SET latest_analysis_id = 'different-analysis'"
+            )
+            alert_conn.commit()
+            self.assertEqual(
+                self.scheduler.terminal_success_recovery_candidates(
+                    alert_conn,
+                    harness_conn,
+                    "cli",
+                ),
+                [],
+            )
+        finally:
+            harness_conn.close()
+            alert_conn.close()
+
+    def test_terminal_success_recovery_enforces_lane_and_attempt_time(self) -> None:
+        for route, lane, generated_at, expected_count in (
+            (PRIMARY_ROUTE, "cli", "2026-08-05T14:05:00Z", 1),
+            (PRIMARY_ROUTE, "ollama", "2026-08-05T14:05:00Z", 0),
+            ("ollama:gemma4:31b", "ollama", "2026-08-05T13:59:59Z", 0),
+        ):
+            with self.subTest(route=route, lane=lane, generated_at=generated_at):
+                alert_conn, harness_conn = self.recovery_databases()
+                try:
+                    self.insert_terminal_recovery_fixture(
+                        alert_conn,
+                        harness_conn,
+                        job_type="ai_analysis",
+                        route=route,
+                        generated_at=generated_at,
+                    )
+                    candidates = self.scheduler.terminal_success_recovery_candidates(
+                        alert_conn,
+                        harness_conn,
+                        lane,
+                    )
+                    self.assertEqual(len(candidates), expected_count)
+                finally:
+                    harness_conn.close()
+                    alert_conn.close()
+
+    def test_terminal_success_recovery_reports_exact_owned_lease(self) -> None:
+        root = Path(self.tempdir.name)
+        alert_path = root / "alerts-recovery.sqlite3"
+        harness_path = root / "harness-recovery.sqlite3"
+        alert_conn, harness_conn = self.recovery_databases(
+            alert_path,
+            harness_path,
+        )
+        self.insert_terminal_recovery_fixture(alert_conn, harness_conn)
+        harness_conn.close()
+        alert_conn.close()
+        args = SimpleNamespace(
+            db=alert_path,
+            harness_db=harness_path,
+            provider_lane="cli",
+            alert_store_url="http://127.0.0.1:8787",
+        )
+        with mock.patch.object(
+            self.scheduler,
+            "report_ai_job_status",
+            return_value=True,
+        ) as report_status:
+            recovered = self.scheduler.reconcile_terminal_success_durable_jobs(args)
+
+        self.assertEqual(recovered, 1)
+        report_status.assert_called_once_with(
+            "http://127.0.0.1:8787",
+            "recovery-group",
+            "completed",
+            lease_token="exact-recovery-lease",
+            job_type="incident_response_analysis",
+        )
+
     def test_deterministic_context_and_prompt_size_failures_are_not_retried(self) -> None:
         for detail in (
             "Codex CLI analysis failed: model context window exhausted",

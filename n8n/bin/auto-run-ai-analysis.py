@@ -48,6 +48,9 @@ from controlled_evaluation_isolation import (
 
 HOME = Path.home()
 DEFAULT_DB = HOME / "n8n-local" / "alert_store_data" / "alerts.sqlite3"
+DEFAULT_HARNESS_DB = (
+    HOME / "n8n-local" / "alert_store_data" / "investigation-harness.sqlite3"
+)
 DEFAULT_PROMPT_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-prompts"
 DEFAULT_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-analysis"
 DEFAULT_PCAP_ANALYSIS_DIR = HOME / "n8n-local" / "soc-alerts" / "pcap-analysis"
@@ -1574,6 +1577,12 @@ def severity_priority_sql(column: str = "triage_level") -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze the next eligible SOC alert using local AI")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="Path to alert-store SQLite DB")
+    parser.add_argument(
+        "--harness-db",
+        type=Path,
+        default=DEFAULT_HARNESS_DB,
+        help="Path to the investigation-harness SQLite DB used for crash reconciliation",
+    )
     parser.add_argument("--prompt-dir", type=Path, default=DEFAULT_PROMPT_DIR, help="Prompt package directory")
     parser.add_argument("--analysis-dir", type=Path, default=DEFAULT_ANALYSIS_DIR, help="AI analysis output directory")
     parser.add_argument(
@@ -3879,6 +3888,220 @@ def reconcile_worker_state(
     return reconcile_completed_ai_jobs(args.alert_store_url, completed_group_ids)
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {
+        str(row[1])
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+
+
+def _route_matches_provider_lane(route: str, provider_lane: str) -> bool:
+    normalized = str(route or "").strip().lower()
+    if provider_lane == "cli":
+        return normalized.startswith("codex-cli:")
+    if provider_lane == "ollama":
+        return normalized.startswith("ollama:")
+    return False
+
+
+def terminal_success_recovery_candidates(
+    alert_conn: sqlite3.Connection,
+    harness_conn: sqlite3.Connection,
+    provider_lane: str,
+    *,
+    limit: int = 32,
+) -> list[dict[str, object]]:
+    """Prove terminal harness success before completing a stranded lease.
+
+    This is deliberately narrower than ordinary pending-job reconciliation.
+    It only covers a scheduler crash after the harness committed its exact
+    analysis but before the parent scheduler delivered the completed callback.
+    The caller must already own the matching provider-lane lock.
+    """
+    if provider_lane not in {"cli", "ollama"}:
+        return []
+    durable_columns = _table_columns(alert_conn, "durable_jobs")
+    analysis_columns = _table_columns(alert_conn, "ai_analysis_runs")
+    harness_columns = _table_columns(harness_conn, "harness_runs")
+    if not {
+        "id", "job_type", "dedupe_key", "status", "payload_json",
+        "lease_token", "processing_started_at",
+    }.issubset(durable_columns):
+        return []
+    if not {
+        "analysis_id", "group_id", "alert_id", "agent_role", "generated_at",
+    }.issubset(analysis_columns):
+        return []
+    if not {
+        "run_id", "correlation_id", "case_id", "alert_id", "role",
+        "status", "stage", "assigned_route", "completed_at",
+    }.issubset(harness_columns):
+        return []
+
+    incident_columns = _table_columns(alert_conn, "incident_response_cases")
+    recoveries: list[dict[str, object]] = []
+    jobs = alert_conn.execute(
+        """
+        SELECT id, job_type, dedupe_key, payload_json, lease_token,
+               processing_started_at
+        FROM durable_jobs
+        WHERE status = 'processing'
+          AND job_type IN ('ai_analysis', 'incident_response_analysis')
+          AND lease_token IS NOT NULL AND TRIM(lease_token) != ''
+          AND processing_started_at IS NOT NULL
+        ORDER BY processing_started_at ASC, id ASC
+        LIMIT ?
+        """,
+        (max(1, min(int(limit), 128)),),
+    ).fetchall()
+    for job in jobs:
+        job_type = str(job["job_type"] or "").strip()
+        group_id = str(job["dedupe_key"] or "").strip()
+        lease_token = str(job["lease_token"] or "").strip()
+        expected_role = (
+            "incident-responder"
+            if job_type == "incident_response_analysis"
+            else "soc-analyst"
+        )
+        try:
+            payload = json.loads(str(job["payload_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payload_role = str(payload.get("agent_role") or expected_role).strip()
+        if payload_role != expected_role:
+            continue
+        for identity_key in ("group_id", "stable_group_id"):
+            payload_group = str(payload.get(identity_key) or "").strip()
+            if payload_group and payload_group != group_id:
+                break
+        else:
+            case_id = str(payload.get("case_id") or "").strip()
+            if job_type == "incident_response_analysis" and not case_id:
+                continue
+            runs = harness_conn.execute(
+                """
+                SELECT run_id, case_id, alert_id, assigned_route
+                FROM harness_runs
+                WHERE correlation_id = ? AND role = ?
+                  AND status = 'succeeded' AND stage = 'complete'
+                  AND completed_at IS NOT NULL
+                ORDER BY completed_at DESC, run_id DESC
+                LIMIT 8
+                """,
+                (group_id, expected_role),
+            ).fetchall()
+            for run in runs:
+                run_id = str(run["run_id"] or "").strip()
+                alert_id = str(run["alert_id"] or "").strip()
+                assigned_route = str(run["assigned_route"] or "").strip()
+                if not run_id or not alert_id:
+                    continue
+                if not _route_matches_provider_lane(assigned_route, provider_lane):
+                    continue
+                expected_route = str(
+                    payload.get("expected_assigned_route")
+                    or payload.get("assigned_route")
+                    or ""
+                ).strip()
+                if expected_route and expected_route != assigned_route:
+                    continue
+                payload_alerts = [
+                    str(payload.get(key) or "").strip()
+                    for key in ("alert_id", "representative_alert_id")
+                    if str(payload.get(key) or "").strip()
+                ]
+                if any(value != alert_id for value in payload_alerts):
+                    continue
+                if job_type == "incident_response_analysis":
+                    if str(run["case_id"] or "").strip() != case_id:
+                        continue
+                    if not {
+                        "case_id", "group_id", "agent_status",
+                        "latest_analysis_id", "latest_error",
+                    }.issubset(incident_columns):
+                        continue
+                    committed_case = alert_conn.execute(
+                        """
+                        SELECT 1 FROM incident_response_cases
+                        WHERE case_id = ? AND group_id = ?
+                          AND agent_status = 'analyzed'
+                          AND latest_analysis_id = ?
+                          AND latest_error IS NULL
+                        """,
+                        (case_id, group_id, run_id),
+                    ).fetchone()
+                    if committed_case is None:
+                        continue
+                analysis = alert_conn.execute(
+                    """
+                    SELECT 1 FROM ai_analysis_runs
+                    WHERE analysis_id = ? AND group_id = ? AND alert_id = ?
+                      AND agent_role = ?
+                      AND julianday(replace(generated_at, '  ', 'T')) >=
+                          julianday(replace(?, '  ', 'T'))
+                    """,
+                    (
+                        run_id,
+                        group_id,
+                        alert_id,
+                        expected_role,
+                        str(job["processing_started_at"] or ""),
+                    ),
+                ).fetchone()
+                if analysis is None:
+                    continue
+                recoveries.append(
+                    {
+                        "job_id": int(job["id"]),
+                        "job_type": job_type,
+                        "group_id": group_id,
+                        "lease_token": lease_token,
+                        "analysis_id": run_id,
+                    }
+                )
+                break
+    return recoveries
+
+
+def reconcile_terminal_success_durable_jobs(args: argparse.Namespace) -> int:
+    """Complete exact stranded leases without issuing duplicate inference."""
+    provider_lane = str(getattr(args, "provider_lane", "any") or "any")
+    if provider_lane not in {"cli", "ollama"}:
+        return 0
+    harness_db = Path(
+        getattr(args, "harness_db", args.db.parent / "investigation-harness.sqlite3")
+    )
+    if not harness_db.exists():
+        return 0
+    alert_conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+    harness_conn = sqlite3.connect(f"file:{harness_db}?mode=ro", uri=True)
+    alert_conn.row_factory = sqlite3.Row
+    harness_conn.row_factory = sqlite3.Row
+    try:
+        candidates = terminal_success_recovery_candidates(
+            alert_conn,
+            harness_conn,
+            provider_lane,
+        )
+    finally:
+        harness_conn.close()
+        alert_conn.close()
+    completed = 0
+    for candidate in candidates:
+        transitioned = report_ai_job_status(
+            args.alert_store_url,
+            str(candidate["group_id"]),
+            "completed",
+            lease_token=str(candidate["lease_token"]),
+            job_type=str(candidate["job_type"]),
+        )
+        if transitioned:
+            completed += 1
+    return completed
+
+
 def main() -> int:
     args = parse_args()
     if stop_for_maintenance_drain(getattr(args, "drain_file", DEFAULT_DRAIN)):
@@ -3941,6 +4164,20 @@ def main() -> int:
             # indexed through alert-store. Publish any result left behind by a
             # transient callback failure before considering another inference.
             flush_deferred_analysis_results(args)
+            try:
+                recovered = reconcile_terminal_success_durable_jobs(args)
+            except (OSError, sqlite3.Error, RuntimeError) as error:
+                print(
+                    f"{project_now()} terminal harness recovery deferred: {error}",
+                    file=sys.stderr,
+                )
+            else:
+                if recovered:
+                    print(
+                        f"{project_now()} recovered {recovered} terminal-success "
+                        "durable AI job(s) without duplicate inference",
+                        flush=True,
+                    )
         reconciled = reconcile_worker_state(
             args,
             indexed_mode,
