@@ -51,13 +51,15 @@ python3 n8n/bin/evaluate-investigation-skills-v2.py
 ```
 
 The evaluator executes no query and cannot activate a candidate. It satisfies
-promotion attestations only in an in-memory copy, exercises the same
-identity-only resolver used by the framework, checks each selected template's
-expected fields against the frozen fixture catalog, and includes an
-adversarial capability-expansion case. A passing synthetic replay is only the
-start of verification. It does not replace version-pinned Security Onion,
-Elastic, Zeek, Suricata, or PCAP field review; representative sanitized result
-replay; independent query review; shadow measurement; or human approval.
+promotion attestations only in an in-memory copy and exercises the same
+identity-only resolver used by the framework. Security Onion, Elastic, Zeek,
+and Suricata template fields are checked against the exact allowlisted field
+projections in `security-onion/bin/export-incident-evidence`; only the
+not-yet-integrated derived-PCAP result contract remains synthetic. The replay
+also includes an adversarial capability-expansion case. A passing offline
+replay is only the start of verification. It does not replace deployed-version
+mapping comparison, representative sanitized result replay, independent query
+review, shadow measurement, or human approval.
 
 `skill-packs/dns-triage-v2.example.json` demonstrates the v2 boundary. Its
 verification flags are deliberately false because this package has not passed

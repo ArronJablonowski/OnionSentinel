@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "source.zeek.correlation",
-  "version": "2.0.0-candidate.1",
-  "artifact_digest": "cfbba2b0dddd2bffc0e30802fb52b1d6cfd7b8eb1eff6821066695244bdfcdab",
+  "version": "2.0.0-candidate.2",
+  "artifact_digest": "2f7ab156abae080a684d6127dc0535e6794e5652d2e5713bf2303da924b2b3ce",
   "lineage": {
-    "source_revision": "9aa2404",
-    "predecessor_digest": ""
+    "source_revision": "59ef4ad",
+    "predecessor_digest": "cfbba2b0dddd2bffc0e30802fb52b1d6cfd7b8eb1eff6821066695244bdfcdab"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -87,16 +87,16 @@
         "end_time"
       ],
       "expected_fields": [
-        "ts",
-        "uid",
-        "id.orig_h",
-        "id.orig_p",
-        "id.resp_h",
-        "id.resp_p",
-        "proto",
-        "service",
-        "duration",
-        "conn_state"
+        "@timestamp",
+        "event.dataset",
+        "source.ip",
+        "source.port",
+        "destination.ip",
+        "destination.port",
+        "network.transport",
+        "network.protocol",
+        "network.community_id",
+        "event.duration"
       ]
     },
     {
@@ -111,11 +111,13 @@
         "end_time"
       ],
       "expected_fields": [
-        "ts",
-        "uid",
-        "event_dataset",
-        "protocol_fields",
-        "sensor_name"
+        "@timestamp",
+        "event.dataset",
+        "source.ip",
+        "destination.ip",
+        "network.transport",
+        "network.protocol",
+        "network.community_id"
       ]
     }
   ],

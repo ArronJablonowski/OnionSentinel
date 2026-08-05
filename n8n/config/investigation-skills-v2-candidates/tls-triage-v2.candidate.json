@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.tls.triage",
-  "version": "2.0.0-candidate.1",
-  "artifact_digest": "efb0a1f6c23785212f55957af2316c7c24afc507f1f91387faef87a4a510bb25",
+  "version": "2.0.0-candidate.2",
+  "artifact_digest": "f3945eaf26f6f146b42df03ca036908e17afbd6029556e1479a8f77f04465dee",
   "lineage": {
-    "source_revision": "9aa2404",
-    "predecessor_digest": ""
+    "source_revision": "59ef4ad",
+    "predecessor_digest": "efb0a1f6c23785212f55957af2316c7c24afc507f1f91387faef87a4a510bb25"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -91,7 +91,8 @@
         "source.ip",
         "destination.ip",
         "destination.port",
-        "tls.server.name",
+        "ssl.server_name",
+        "ssl.validation_status",
         "tls.server.hash.sha256",
         "network.community_id",
         "event.dataset"
@@ -109,15 +110,15 @@
         "end_time"
       ],
       "expected_fields": [
-        "ts",
-        "uid",
-        "id.orig_h",
-        "id.resp_h",
-        "server_name",
-        "subject",
-        "issuer",
-        "ja3",
-        "ja3s"
+        "@timestamp",
+        "log.id.uid",
+        "source.ip",
+        "destination.ip",
+        "ssl.server_name",
+        "ssl.validation_status",
+        "hash.ja3",
+        "hash.ja3s",
+        "tls.server.hash.sha256"
       ]
     }
   ],

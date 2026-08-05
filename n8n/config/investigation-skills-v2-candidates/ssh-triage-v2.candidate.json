@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.ssh.triage",
-  "version": "2.0.0-candidate.1",
-  "artifact_digest": "ce4a47bfea1b8862a1415be83be84a05c256176b3f8f9e77a3f8bf09241ee445",
+  "version": "2.0.0-candidate.2",
+  "artifact_digest": "616e2f099089dbc2360d92313ef9b8562ffd71e2422e3c229fb48010495baf56",
   "lineage": {
-    "source_revision": "9aa2404",
-    "predecessor_digest": ""
+    "source_revision": "59ef4ad",
+    "predecessor_digest": "ce4a47bfea1b8862a1415be83be84a05c256176b3f8f9e77a3f8bf09241ee445"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -108,16 +108,15 @@
         "end_time"
       ],
       "expected_fields": [
-        "ts",
-        "uid",
-        "id.orig_h",
-        "id.resp_h",
-        "duration",
-        "orig_bytes",
-        "resp_bytes",
-        "auth_success",
-        "client",
-        "server"
+        "@timestamp",
+        "log.id.uid",
+        "source.ip",
+        "destination.ip",
+        "event.duration",
+        "network.bytes",
+        "ssh.authentication.success",
+        "ssh.client",
+        "ssh.server"
       ]
     }
   ],

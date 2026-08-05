@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.icmp.triage",
-  "version": "2.0.0-candidate.1",
-  "artifact_digest": "d3bec1ade636204994c847e58264361c957ef5fede25cb1bd4ae9fc754a069c5",
+  "version": "2.0.0-candidate.2",
+  "artifact_digest": "b8ea5179f150af99f680b135c02cb7b0604efc09c345a0243b1ebda7b5ab3527",
   "lineage": {
-    "source_revision": "9aa2404",
-    "predecessor_digest": ""
+    "source_revision": "59ef4ad",
+    "predecessor_digest": "d3bec1ade636204994c847e58264361c957ef5fede25cb1bd4ae9fc754a069c5"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -91,8 +91,9 @@
         "@timestamp",
         "source.ip",
         "destination.ip",
-        "icmp.type",
-        "icmp.code",
+        "source.port",
+        "destination.port",
+        "network.transport",
         "network.bytes",
         "rule.id",
         "event.dataset"

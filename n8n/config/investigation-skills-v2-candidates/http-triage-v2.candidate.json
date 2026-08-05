@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.http.triage",
-  "version": "2.0.0-candidate.1",
-  "artifact_digest": "31225aa0dde0283f7dda8307106b2a0afdb58640d82cde85539965fc777daa9b",
+  "version": "2.0.0-candidate.2",
+  "artifact_digest": "30560faa9e9bc61c18a61e1f3154a11180b41bbe1057ce9b51498a72063f4ce9",
   "lineage": {
-    "source_revision": "9aa2404",
-    "predecessor_digest": ""
+    "source_revision": "59ef4ad",
+    "predecessor_digest": "31225aa0dde0283f7dda8307106b2a0afdb58640d82cde85539965fc777daa9b"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -89,10 +89,10 @@
         "@timestamp",
         "source.ip",
         "destination.ip",
-        "http.request.method",
-        "url.full",
-        "user_agent.original",
-        "http.response.status_code",
+        "http.method",
+        "http.uri",
+        "http.useragent",
+        "http.status_code",
         "network.community_id"
       ]
     },
@@ -108,14 +108,16 @@
         "end_time"
       ],
       "expected_fields": [
-        "ts",
-        "uid",
-        "host",
-        "uri",
-        "method",
-        "user_agent",
-        "status_code",
-        "resp_mime_types"
+        "@timestamp",
+        "log.id.uid",
+        "source.ip",
+        "destination.ip",
+        "http.virtual_host",
+        "http.uri",
+        "http.method",
+        "http.useragent",
+        "http.status_code",
+        "file.resp_mime_types"
       ]
     }
   ],

@@ -1,9 +1,9 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "network.dns.triage",
-  "version": "2.0.0-candidate.1",
-  "artifact_digest": "77b794032b151502accc553d2c3af4810f0db58dfbd32b2787a7ce36d0e1e59a",
-  "lineage": {"source_revision": "d2f8c704", "predecessor_digest": ""},
+  "version": "2.0.0-candidate.2",
+  "artifact_digest": "81a87dc6efb9966d840098815abf93405a2fa66aae20252b95551435d86f0ca3",
+  "lineage": {"source_revision": "59ef4ad", "predecessor_digest": "77b794032b151502accc553d2c3af4810f0db58dfbd32b2787a7ce36d0e1e59a"},
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
     "policy_schema": "onion-sentinel-investigation-harness-policy-v1",
@@ -30,7 +30,7 @@
       "language": "query-dsl",
       "purpose": "Retrieve bounded DNS and alert events correlated by trusted time and endpoint scope.",
       "parameters": ["source_alias", "destination_alias", "start_time", "end_time"],
-      "expected_fields": ["@timestamp", "source.ip", "destination.ip", "dns.question.name", "dns.question.type", "dns.answers", "network.community_id", "event.dataset"]
+      "expected_fields": ["@timestamp", "source.ip", "destination.ip", "dns.query.name", "dns.query.type", "dns.response.code_name", "dns.resolved_ip", "network.community_id", "event.dataset"]
     },
     {
       "id": "dns-zeek-context",
@@ -38,7 +38,7 @@
       "language": "broker-parameters",
       "purpose": "Correlate Zeek DNS observations using bounded flow and time identifiers.",
       "parameters": ["community_id", "source_alias", "start_time", "end_time"],
-      "expected_fields": ["ts", "uid", "id.orig_h", "id.resp_h", "query", "qtype_name", "rcode_name", "answers"]
+      "expected_fields": ["@timestamp", "source.ip", "destination.ip", "network.community_id", "dns.query.name", "dns.query.type", "dns.response.code_name", "dns.resolved_ip"]
     }
   ],
   "output_contract": {"schema": "onion-sentinel-skill-result-v1", "coverage_required": true, "truncation_required": true, "evidence_refs_required": true},

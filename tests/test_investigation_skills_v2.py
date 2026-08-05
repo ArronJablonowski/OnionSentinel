@@ -2,8 +2,10 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 
@@ -141,6 +143,64 @@ class InvestigationSkillsV2Tests(unittest.TestCase):
         self.assertEqual(result["passed_count"], 8)
         self.assertFalse(result["query_execution"])
         self.assertFalse(result["candidate_activation"])
+
+    def test_synthetic_catalog_cannot_mask_governed_wrapper_field_gap(self):
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            candidates = root / "candidates"
+            shutil.copytree(CANDIDATE.parent, candidates)
+            dns_path = candidates / CANDIDATE.name
+            dns = json.loads(dns_path.read_text(encoding="utf-8"))
+            dns["query_templates"][0]["expected_fields"].append(
+                "synthetic.only.field"
+            )
+            dns["artifact_digest"] = SKILLS.artifact_digest(dns)
+            dns_path.write_text(
+                json.dumps(dns, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            fixtures = json.loads(
+                (candidates / "offline-replay-fixtures.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            fixtures["field_catalog"]["elastic"].append(
+                "synthetic.only.field"
+            )
+            fixture_path = root / "fixtures.json"
+            fixture_path.write_text(
+                json.dumps(fixtures, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(EVALUATOR),
+                    "--candidate-dir",
+                    str(candidates),
+                    "--fixtures",
+                    str(fixture_path),
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        result = json.loads(completed.stdout)
+        dns_case = next(
+            item for item in result["results"] if item["id"] == "dns-elastic-soc"
+        )
+        self.assertEqual(
+            dns_case["mapping_gaps"][0]["catalog"],
+            "security-onion-wrapper:dns_activity",
+        )
+        self.assertIn(
+            "synthetic.only.field",
+            dns_case["mapping_gaps"][0]["missing_fields"],
+        )
 
 
 if __name__ == "__main__":

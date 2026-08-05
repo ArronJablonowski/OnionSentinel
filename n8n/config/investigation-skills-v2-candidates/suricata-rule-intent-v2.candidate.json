@@ -1,11 +1,11 @@
 {
   "schema": "onion-sentinel-investigation-skill-manifest-v2",
   "id": "source.suricata.rule-intent",
-  "version": "2.0.0-candidate.1",
-  "artifact_digest": "39b4f200ff555f046a5bc8bb6722864949657dfa29a9f297d27f78230c5332ce",
+  "version": "2.0.0-candidate.2",
+  "artifact_digest": "5fb8c6ff017a3426b47c68ef79f25b1ca223573687b5399e57d4a70e17900ae8",
   "lineage": {
-    "source_revision": "9aa2404",
-    "predecessor_digest": ""
+    "source_revision": "59ef4ad",
+    "predecessor_digest": "39b4f200ff555f046a5bc8bb6722864949657dfa29a9f297d27f78230c5332ce"
   },
   "compatibility": {
     "harness_contract": "onion-sentinel-harness-job-envelope-v1",
@@ -74,24 +74,23 @@
       "id": "suricata-alert-context",
       "backend": "suricata",
       "language": "broker-parameters",
-      "purpose": "Retrieve the exact alert fields and active rule metadata for the triggering SID and revision.",
+      "purpose": "Retrieve the bounded ECS alert identity and tuple; exact deployed-rule predicate validation remains separate runtime-owned evidence.",
       "parameters": [
         "alert_id",
-        "sid",
-        "revision",
         "start_time",
         "end_time"
       ],
       "expected_fields": [
-        "timestamp",
-        "alert.signature_id",
-        "alert.rev",
-        "alert.signature",
-        "src_ip",
-        "dest_ip",
-        "src_port",
-        "dest_port",
-        "proto"
+        "@timestamp",
+        "event.dataset",
+        "rule.id",
+        "rule.uuid",
+        "rule.name",
+        "source.ip",
+        "destination.ip",
+        "source.port",
+        "destination.port",
+        "network.transport"
       ]
     },
     {
