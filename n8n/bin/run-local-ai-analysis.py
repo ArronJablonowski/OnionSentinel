@@ -1660,6 +1660,25 @@ def _conclusion_authorization():
     return authorization
 
 
+def _conclusion_evidence_guard():
+    _provider_routing()
+    from onion_sentinel.analysis.conclusions import evidence_guard
+    return evidence_guard
+
+
+def _evidence_guard_dependencies():
+    module = _conclusion_evidence_guard()
+    return module.Dependencies(
+        bounded_text=bounded_text,
+        bounded_text_list=bounded_text_list,
+        normalized_outcome=normalized_detection_outcome,
+        has_trusted_endpoint_evidence=_has_trusted_endpoint_evidence,
+        derive_legacy_outcome=derive_legacy_detection_outcome,
+        control_tuning_values=frozenset(CONTROL_TUNING_VALUES),
+        factored_verdict_keys=frozenset(FACTORED_VERDICT_KEYS),
+    )
+
+
 def _authorization_guard_dependencies():
     module = _conclusion_authorization()
     return module.Dependencies(
@@ -13033,14 +13052,8 @@ def reconcile_supplied_endpoint_evidence_gaps(
 
 
 def _consequential_model_conclusion(response: dict[str, Any]) -> bool:
-    outcome = normalized_detection_outcome(response.get("detection_outcome"))
-    handling = str(response.get("handling") or "").strip().lower()
-    tuning = str(response.get("tuning_recommendation") or "").strip().lower()
-    return (
-        outcome != "inconclusive"
-        or handling in {"contain", "escalate"}
-        or bool(response.get("escalation_needed"))
-        or tuning in CONTROL_TUNING_VALUES
+    return _conclusion_evidence_guard().consequential(
+        response, _evidence_guard_dependencies(),
     )
 
 
@@ -13048,213 +13061,10 @@ def apply_deterministic_evidence_guard(
     response: dict[str, Any],
     prompt_package: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Reconcile model verdicts with collector-owned detection validation.
-
-    Rule-intent validation can establish whether observed packet semantics match
-    the deployed detection's intended threat behavior. It cannot establish
-    maliciousness by itself. The guard therefore overrides an invalid rule
-    match, preserves the model's original values for audit, and records an
-    explicit confidence cap for the later calibration pass.
-    """
-    if not isinstance(prompt_package, dict):
-        return response
-    detection_validation = prompt_package.get("detection_validation")
-    if not isinstance(detection_validation, dict):
-        return response
-
-    raw_intent_match = str(
-        detection_validation.get("rule_intent_match") or "unknown"
-    ).strip().lower()
-    intent_match = (
-        raw_intent_match
-        if raw_intent_match in {"match", "mismatch", "unknown"}
-        else "unknown"
+    """Reconcile model conclusions with collector-owned rule-intent evidence."""
+    return _conclusion_evidence_guard().apply(
+        response, prompt_package, _evidence_guard_dependencies(),
     )
-    raw_event_status = str(
-        detection_validation.get("event_status") or ""
-    ).strip().lower()
-    # ``event_observed`` was emitted by the first contract revision. True is
-    # useful positive evidence; false never means the event was not observed.
-    event_status = (
-        raw_event_status
-        if raw_event_status in {"observed", "unknown"}
-        else (
-            "observed"
-            if detection_validation.get("event_observed") is True
-            else "unknown"
-        )
-    )
-    confidence_limiters = bounded_text_list(
-        detection_validation.get("confidence_limiters"),
-        limit=20,
-        item_limit=1000,
-    )
-    rule = (
-        detection_validation.get("rule")
-        if isinstance(detection_validation.get("rule"), dict)
-        else {}
-    )
-    original = {
-        "detection_outcome": response.get("detection_outcome"),
-        "event_status": response.get("event_status"),
-        "detection_validity": response.get("detection_validity"),
-        "activity_disposition": response.get("activity_disposition"),
-        "handling": response.get("handling"),
-        "duplicate_of": response.get("duplicate_of"),
-        "escalation_needed": response.get("escalation_needed"),
-        "tuning_recommendation": response.get("tuning_recommendation"),
-        "recommended_tuning_actions": list(
-            response.get("recommended_tuning_actions")
-            if isinstance(response.get("recommended_tuning_actions"), list)
-            else []
-        ),
-    }
-    audit: dict[str, Any] = {
-        "schema": str(detection_validation.get("schema") or "")[:200],
-        "rule_intent_match": intent_match,
-        "event_status": event_status,
-        "rule": {
-            "sid": bounded_text(rule.get("sid"), 100),
-            "revision": rule.get("revision"),
-            "rule_sha256": bounded_text(rule.get("rule_sha256"), 128),
-        },
-        "confidence_limiters": confidence_limiters,
-        "model_verdict_before_guard": original,
-        "override_applied": False,
-        "blocked_controls": [],
-        "confidence_cap": None,
-        "confidence_cap_reasons": [],
-    }
-    verdict_validation = (
-        dict(response.get("_verdict_validation"))
-        if isinstance(response.get("_verdict_validation"), dict)
-        else {}
-    )
-    warnings = list(
-        verdict_validation.get("warnings")
-        if isinstance(verdict_validation.get("warnings"), list)
-        else []
-    )
-    contradictions = list(
-        verdict_validation.get("contradictions")
-        if isinstance(verdict_validation.get("contradictions"), list)
-        else []
-    )
-
-    if intent_match == "mismatch":
-        response["event_status"] = event_status
-        response["detection_validity"] = "logic_error"
-        if str(response.get("activity_disposition") or "").lower() in {
-            "malicious",
-            "suspicious",
-        }:
-            response["activity_disposition"] = "unknown"
-        response["duplicate_of"] = None
-        response["detection_outcome"] = "false_positive_logic_rule"
-        audit["confidence_cap"] = 0.79
-        audit["confidence_cap_reasons"].append(
-            "deterministic_rule_intent_mismatch"
-        )
-
-        original_handling = str(original.get("handling") or "").strip().lower()
-        if original_handling == "contain":
-            response["handling"] = "investigate"
-            response["escalation_needed"] = False
-            audit["blocked_controls"].append("contain")
-
-        original_tuning = str(
-            original.get("tuning_recommendation") or ""
-        ).strip().lower()
-        if original_tuning in CONTROL_TUNING_VALUES:
-            response["tuning_recommendation"] = "needs_more_data"
-            response["tuning_reason"] = (
-                "Automatic suppress/drop tuning is blocked because deterministic "
-                "rule-intent validation found a mismatch. Review the rule predicates "
-                "and supporting evidence before changing signal collection."
-            )
-            response["recommended_tuning_actions"] = []
-            audit["blocked_controls"].append(original_tuning)
-
-        original_outcome = normalized_detection_outcome(
-            original.get("detection_outcome")
-        )
-        unsupported_malicious = (
-            str(original.get("activity_disposition") or "").strip().lower()
-            == "malicious"
-            or original_outcome
-            in {"true_positive_malicious", "false_negative"}
-        ) and not _has_trusted_endpoint_evidence(prompt_package)
-        if unsupported_malicious:
-            audit["confidence_cap"] = 0.39
-            audit["confidence_cap_reasons"].append(
-                "malicious_attribution_without_trusted_endpoint_evidence"
-            )
-            contradiction = (
-                "model malicious attribution conflicts with deterministic "
-                "rule-intent mismatch and lacks trusted endpoint evidence"
-            )
-            if contradiction not in contradictions:
-                contradictions.append(contradiction)
-        warning = (
-            "collector-owned detection validation overrode the model verdict "
-            "because required rule-intent predicates mismatched"
-        )
-        if warning not in warnings:
-            warnings.append(warning)
-        controls = (
-            dict(response.get("_automation_controls"))
-            if isinstance(response.get("_automation_controls"), dict)
-            else {}
-        )
-        if audit["blocked_controls"]:
-            controls["requires_human_review"] = True
-            controls["reason"] = "deterministic rule-intent mismatch"
-        if original_tuning in CONTROL_TUNING_VALUES:
-            controls["tuning_blocked"] = True
-        if original_handling == "contain":
-            controls["containment_blocked"] = True
-        if controls:
-            response["_automation_controls"] = controls
-
-        guarded = {
-            key: response.get(key)
-            for key in (
-                "detection_outcome",
-                "event_status",
-                "detection_validity",
-                "activity_disposition",
-                "handling",
-                "duplicate_of",
-                "escalation_needed",
-                "tuning_recommendation",
-                "recommended_tuning_actions",
-            )
-        }
-        audit["guarded_verdict"] = guarded
-        audit["override_applied"] = guarded != original
-    elif intent_match == "unknown" and _consequential_model_conclusion(response):
-        audit["confidence_cap"] = 0.79
-        audit["confidence_cap_reasons"].append(
-            "deterministic_rule_intent_unknown_for_consequential_conclusion"
-        )
-
-    verdict_validation["warnings"] = warnings
-    verdict_validation["contradictions"] = contradictions
-    verdict_validation["material_contradiction"] = bool(
-        verdict_validation.get("material_contradiction") or contradictions
-    )
-    verdict_validation["deterministic_evidence_guard"] = audit
-    verdict_validation["canonical_legacy_outcome"] = response.get(
-        "detection_outcome"
-    )
-    verdict_validation["derived_legacy_outcome"] = derive_legacy_detection_outcome(
-        {
-            key: response.get(key)
-            for key in FACTORED_VERDICT_KEYS
-        }
-    )
-    response["_verdict_validation"] = verdict_validation
-    return response
 
 
 def confidence_label_for_score(score: float) -> str:
