@@ -40,7 +40,7 @@
       "max_lines": 2018
     },
     "n8n/bin/run-local-ai-analysis.py": {
-      "max_lines": 17211
+      "max_lines": 17037
     },
     "onion-sentinel-dashboard/ac_hunter_review.py": {
       "max_lines": 2225
@@ -660,9 +660,6 @@
       "max_complexity": 38,
       "max_lines": 105
     },
-    "n8n/bin/run-local-ai-analysis.py::compare_analysis_results": {
-      "max_lines": 109
-    },
     "n8n/bin/run-local-ai-analysis.py::controlled_evaluation_result_identity": {
       "max_complexity": 35,
       "max_lines": 101
@@ -777,9 +774,6 @@
     "n8n/bin/run-local-ai-analysis.py::run_bounded_disagreement_adjudication": {
       "max_complexity": 20,
       "max_lines": 177
-    },
-    "n8n/bin/run-local-ai-analysis.py::second_opinion_trigger": {
-      "max_complexity": 34
     },
     "n8n/bin/run-local-ai-analysis.py::validate_disagreement_adjudication": {
       "max_complexity": 63,
@@ -1453,5 +1447,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "9aacdbe739bfff07c8250babab3eacdf147aef46"
+  "source_release": "5c895381e4374647f0fbc706d368d5a2105b6d65"
 }

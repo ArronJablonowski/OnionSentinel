@@ -1654,6 +1654,12 @@ def _conclusion_confidence():
     return confidence
 
 
+def _review_comparison():
+    _provider_routing()
+    from onion_sentinel.analysis.review import comparison
+    return comparison
+
+
 def normalized_model_roster(value: Any) -> list[str]:
     return _provider_routing().normalized_model_roster(value)
 
@@ -11558,205 +11564,25 @@ def second_opinion_trigger(
     prompt_package: dict[str, Any] | None = None,
 ) -> str:
     """Return the deterministic reason an independent review is warranted."""
-    explicit_reason = str(response.get("second_opinion_reason") or "").strip()[:1000]
-    if bool(response.get("second_opinion_recommended")) or bool(response.get("hosted_second_opinion_recommended")):
-        return explicit_reason or "The primary model explicitly requested another opinion."
-    if (
-        isinstance(prompt_package, dict)
-        and prompt_package.get("manual_reanalysis") is True
-        and str(prompt_package.get("agent_role") or "").strip()
-        == "incident-responder"
-    ):
-        return (
-            "Manual Incident Responder reanalysis requires an independent "
-            "second opinion."
-        )
-    verdict_validation = (
-        response.get("_verdict_validation")
-        if isinstance(response.get("_verdict_validation"), dict)
-        else {}
+    return _review_comparison().trigger(
+        response, prompt_package,
+        control_tuning_values=CONTROL_TUNING_VALUES,
+        consequential_outcomes=CONSEQUENTIAL_CLOSURE_OUTCOMES,
     )
-    if verdict_validation.get("material_contradiction"):
-        return "Runtime verdict checks found a material contradiction."
-    deterministic_guard = (
-        verdict_validation.get("deterministic_evidence_guard")
-        if isinstance(
-            verdict_validation.get("deterministic_evidence_guard"),
-            dict,
-        )
-        else {}
-    )
-    if (
-        deterministic_guard.get("rule_intent_match") == "mismatch"
-        and deterministic_guard.get("override_applied")
-    ):
-        return "Deterministic rule-intent validation overrode the model verdict."
-    if (
-        deterministic_guard.get("rule_intent_match") == "unknown"
-        and deterministic_guard.get("confidence_cap") is not None
-    ):
-        return (
-            "Deterministic evidence could not establish rule intent for a "
-            "consequential conclusion."
-        )
-    if str(response.get("confidence") or "").strip().lower() == "low":
-        return "The primary model reported low confidence."
-    outcome_key = re.sub(r"[^a-z0-9]+", "_", str(response.get("detection_outcome") or "").lower()).strip("_")
-    if outcome_key == "inconclusive":
-        return "The primary model classified the detection as inconclusive."
-    calibration = (
-        response.get("_confidence_calibration")
-        if isinstance(response.get("_confidence_calibration"), dict)
-        else {}
-    )
-    calibration_limiters = (
-        calibration.get("limiters")
-        if isinstance(calibration.get("limiters"), list)
-        else []
-    )
-    if any(
-        str(item).startswith(("critical_schema_repair", "invalid_", "material_verdict_contradiction"))
-        for item in calibration_limiters
-    ):
-        return "Runtime evidence checks capped confidence because decisive output was invalid or incomplete."
-    handling = str(response.get("handling") or "").strip().lower()
-    if handling in {"contain", "escalate"} or bool(response.get("escalation_needed")):
-        return "The primary model recommended a consequential response action."
-    tuning = str(response.get("tuning_recommendation") or "").strip().lower()
-    if tuning in CONTROL_TUNING_VALUES:
-        return "The primary model recommended suppressing or dropping detection signal."
-    alert = prompt_package.get("alert") if isinstance(prompt_package, dict) else {}
-    triage_level = str(alert.get("triage_level") or "").strip().lower() if isinstance(alert, dict) else ""
-    if triage_level in {"critical", "high"} and outcome_key in CONSEQUENTIAL_CLOSURE_OUTCOMES:
-        return "A high-severity detection received a consequential closure disposition."
-    return ""
-
-
-def _comparison_value(value: Any) -> Any:
-    """Normalize bounded model fields before deterministic comparison."""
-    if isinstance(value, bool):
-        return value
-    return re.sub(r"[^a-z0-9]+", "_", str(value or "").lower()).strip("_")
-
-
-def _nested_value(payload: dict[str, Any], dotted_key: str) -> Any:
-    value: Any = payload
-    for key in dotted_key.split("."):
-        if not isinstance(value, dict):
-            return None
-        value = value.get(key)
-    return value
 
 
 def compare_analysis_results(
     primary_response: dict[str, Any],
     reviewer_response: dict[str, Any],
 ) -> dict[str, Any]:
-    """Compare independent conclusions without asking either model to arbitrate.
-
-    Detection outcome and escalation decisions are material because a mismatch
-    can change analyst handling. Correlation and tuning differences remain
-    visible but advisory so nuanced reviewer output does not create false alarms.
-    """
-    tuning_is_material = any(
-        str(response.get("tuning_recommendation") or "").strip().lower() in CONTROL_TUNING_VALUES
-        for response in (primary_response, reviewer_response)
+    """Compare independent conclusions without model self-arbitration."""
+    return _review_comparison().compare(
+        primary_response, reviewer_response,
+        control_tuning_values=CONTROL_TUNING_VALUES,
+        non_escalatory_values=NON_ESCALATORY_HANDLING_VALUES,
+        boolean_setting=boolean_setting,
     )
-    checks = (
-        ("detection_outcome", True),
-        ("event_status", True),
-        ("detection_validity", True),
-        ("activity_disposition", True),
-        ("handling", True),
-        ("duplicate_of", True),
-        ("escalation_needed", True),
-        ("correlation_assessment.correlation_found", False),
-        ("confidence", False),
-        ("confidence_score", False),
-        ("tuning_recommendation", tuning_is_material),
-    )
-    disputed_fields: list[dict[str, Any]] = []
-    for field, material in checks:
-        primary_value = _nested_value(primary_response, field)
-        reviewer_value = _nested_value(reviewer_response, field)
-        if _comparison_value(primary_value) == _comparison_value(reviewer_value):
-            continue
-        if field == "handling":
-            handling_pair = {
-                _comparison_value(primary_value),
-                _comparison_value(reviewer_value),
-            }
-            dispositions = {
-                _comparison_value(
-                    primary_response.get("activity_disposition")
-                ),
-                _comparison_value(
-                    reviewer_response.get("activity_disposition")
-                ),
-            }
-            escalations = {
-                boolean_setting(primary_response.get("escalation_needed")),
-                boolean_setting(reviewer_response.get("escalation_needed")),
-            }
-            if (
-                handling_pair.issubset(NON_ESCALATORY_HANDLING_VALUES)
-                and True not in escalations
-                and not dispositions.intersection(
-                    {"malicious", "suspicious"}
-                )
-            ):
-                # Monitoring and no-action are analytically distinct, but the
-                # difference is not a contested consequential action when both
-                # positions are non-escalatory and agree the activity is not
-                # malicious or suspicious. Keep it visible as advisory context.
-                material = False
-        disputed_fields.append(
-            {
-                "field": field,
-                "primary": primary_value,
-                "reviewer": reviewer_value,
-                "material": material,
-            }
-        )
 
-    material_disagreement = any(item["material"] for item in disputed_fields)
-    if not disputed_fields:
-        agreement = "agreement"
-        summary = "Primary and reviewer agree on all compared disposition fields."
-    elif material_disagreement:
-        agreement = "material_disagreement"
-        summary = "Primary and reviewer disagree on an analyst-handling decision."
-    else:
-        agreement = "partial_disagreement"
-        summary = "Primary and reviewer agree on disposition but differ on advisory context."
-    return {
-        "agreement": agreement,
-        "material_disagreement": material_disagreement,
-        "disputed_fields": disputed_fields,
-        "summary": summary,
-        "primary": {
-            "detection_outcome": primary_response.get("detection_outcome"),
-            "event_status": primary_response.get("event_status"),
-            "detection_validity": primary_response.get("detection_validity"),
-            "activity_disposition": primary_response.get("activity_disposition"),
-            "handling": primary_response.get("handling"),
-            "duplicate_of": primary_response.get("duplicate_of"),
-            "confidence": primary_response.get("confidence"),
-            "confidence_score": primary_response.get("confidence_score"),
-            "escalation_needed": primary_response.get("escalation_needed"),
-        },
-        "reviewer": {
-            "detection_outcome": reviewer_response.get("detection_outcome"),
-            "event_status": reviewer_response.get("event_status"),
-            "detection_validity": reviewer_response.get("detection_validity"),
-            "activity_disposition": reviewer_response.get("activity_disposition"),
-            "handling": reviewer_response.get("handling"),
-            "duplicate_of": reviewer_response.get("duplicate_of"),
-            "confidence": reviewer_response.get("confidence"),
-            "confidence_score": reviewer_response.get("confidence_score"),
-            "escalation_needed": reviewer_response.get("escalation_needed"),
-        },
-    }
 
 
 class DisagreementAdjudicationValidationError(ValueError):
