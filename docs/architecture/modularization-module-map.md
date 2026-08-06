@@ -259,6 +259,12 @@ stops consumers. Runtime backup/restore, secret scanning, release identity, and
 readiness must include the new trees. A failed package validation leaves the
 old tree and services untouched.
 
+Independent-review package construction, text/repetition policy, and
+fail-closed response validation live under `onion_sentinel.analysis.review`.
+The legacy runner functions remain compatibility delegates and inject runtime
+policy explicitly, preserving existing test seams while keeping review-package
+mutation and reviewer-output admission out of the composition root.
+
 ## Characterization Matrix
 
 ARR-72 must cover at least these seams before extraction:

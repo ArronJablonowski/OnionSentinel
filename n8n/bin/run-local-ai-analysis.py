@@ -1672,6 +1672,18 @@ def _review_package():
     return package
 
 
+def _review_text():
+    _provider_routing()
+    from onion_sentinel.analysis.review import text
+    return text
+
+
+def _review_validation():
+    _provider_routing()
+    from onion_sentinel.analysis.review import validation
+    return validation
+
+
 def normalized_model_roster(value: Any) -> list[str]:
     return _provider_routing().normalized_model_roster(value)
 
@@ -10715,43 +10727,12 @@ def independent_reviewer_package(
 
 
 def _response_strings(value: Any) -> list[str]:
-    output: list[str] = []
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if str(key).startswith("_"):
-                continue
-            output.extend(_response_strings(child))
-    elif isinstance(value, list):
-        for child in value:
-            output.extend(_response_strings(child))
-    elif isinstance(value, str):
-        text = re.sub(r"\s+", " ", value).strip()
-        if text:
-            output.append(text)
-    return output
+    return _review_text().response_strings(value)
 
 
 def _review_repetition_reasons(response: dict[str, Any]) -> list[str]:
     """Detect repeated unrelated boilerplate without policing ordinary prose."""
-    strings = _response_strings(response)
-    normalized = [
-        re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
-        for text in strings
-        if len(text) >= 80
-    ]
-    counts = collections.Counter(normalized)
-    reasons: list[str] = []
-    if any(count >= 3 for count in counts.values()):
-        reasons.append("the same long passage was repeated across three or more fields")
-    for text in normalized:
-        words = text.split()
-        if len(words) < 40:
-            continue
-        grams = [" ".join(words[index:index + 6]) for index in range(len(words) - 5)]
-        if grams and (len(grams) - len(set(grams))) / len(grams) > 0.35:
-            reasons.append("one response field contains excessive repeated six-word sequences")
-            break
-    return reasons
+    return _review_text().repetition_reasons(response)
 
 
 def validate_reviewer_response(
@@ -10759,356 +10740,27 @@ def validate_reviewer_response(
     review_package: dict[str, Any],
 ) -> dict[str, Any]:
     """Fail closed on stale, foreign, repetitive, or ungrounded reviewer output."""
-    if not isinstance(response, dict):
-        raise ReviewerValidationError("reviewer response must be an object")
-    contract = review_package.get("review_contract")
-    if not isinstance(contract, dict):
-        raise ReviewerValidationError("review contract is unavailable")
-    errors: list[str] = []
-    if str(contract.get("evidence_hash") or "") != reviewer_evidence_hash(
-        review_package
-    ):
-        errors.append(
-            "review contract evidence hash did not match the current review package"
-        )
-    if str(response.get("review_case_id") or "") != str(contract.get("case_id") or ""):
-        errors.append("review_case_id did not echo the current case")
-    if str(response.get("review_evidence_hash") or "") != str(contract.get("evidence_hash") or ""):
-        errors.append("review_evidence_hash did not echo the current evidence")
-
-    required = set(REQUIRED_KEYS).union(STRICT_FACTORED_REQUIRED_KEYS)
-    missing = sorted(required.difference(response))
-    if missing:
-        errors.append("missing required reviewer fields: " + ",".join(missing))
-
-    allowed = {
-        (str(item.get("kind") or ""), str(item.get("value") or ""))
-        for item in (
-            contract.get("allowed_observables")
-            if isinstance(contract.get("allowed_observables"), list)
-            else []
-        )
-        if isinstance(item, dict)
-    }
-    observables = response.get("observables_used")
-    if not isinstance(observables, list):
-        errors.append("observables_used must be an array")
-        observables = []
-    elif len(observables) > REVIEW_OBSERVABLE_MAX:
-        raise ReviewerValidationError(
-            "observables_used exceeds the maximum of "
-            f"{REVIEW_OBSERVABLE_MAX} entries"
-        )
-    foreign_observables: list[str] = []
-    for item in observables:
-        if (
-            not isinstance(item, dict)
-            or set(item) != {"kind", "value"}
-            or not isinstance(item.get("kind"), str)
-            or not isinstance(item.get("value"), str)
-        ):
-            foreign_observables.append("malformed observable")
-            continue
-        key = (str(item.get("kind") or ""), str(item.get("value") or ""))
-        if key not in allowed:
-            foreign_observables.append(f"{key[0]}:{key[1]}"[:300])
-    if foreign_observables:
-        errors.append(
-            "reviewer used foreign observables: " + ",".join(foreign_observables[:10])
-        )
-
-    supplied_observable_sequence = [
-        (str(item.get("kind") or ""), str(item.get("value") or ""))
-        for item in observables
-        if isinstance(item, dict)
-        and set(item) == {"kind", "value"}
-        and isinstance(item.get("kind"), str)
-        and isinstance(item.get("value"), str)
-        and (
-            str(item.get("kind") or ""),
-            str(item.get("value") or ""),
-        )
-        in allowed
-    ]
-    used_observables = set(supplied_observable_sequence)
-    allowed_ips = {value for kind, value in allowed if kind == "ip"}
-    narrative_response = {
-        key: value
-        for key, value in response.items()
-        if key not in {
-            "evidence_used",
-            "observables_used",
-            "review_case_id",
-            "review_evidence_hash",
-        }
-    }
-    response_text = "\n".join(_response_strings(narrative_response))
-    narrative_ips = set(REVIEW_IPV4_RE.findall(response_text))
-    foreign_ips = sorted(narrative_ips.difference(allowed_ips))
-    if foreign_ips:
-        errors.append("reviewer introduced foreign IP address(es): " + ",".join(foreign_ips[:10]))
-
-    allowed_domains = {
-        value.lower()
-        for kind, value in allowed
-        if kind == "domain" or (kind == "host" and "." in value)
-    }
-    contracted_non_domain_taxonomy = {
-        str(value).strip().lower()
-        for value in (
-            contract.get("allowed_non_domain_taxonomy_tokens")
-            if isinstance(
-                contract.get("allowed_non_domain_taxonomy_tokens"),
-                list,
-            )
-            else []
-        )
-        if str(value).strip()
-    }
-    allowed_non_domain_taxonomy = set(
-        reviewer_non_domain_taxonomy_catalog(review_package)
+    module = _review_validation()
+    dependencies = module.Dependencies(
+        error_type=ReviewerValidationError,
+        evidence_hash=reviewer_evidence_hash,
+        taxonomy_catalog=reviewer_non_domain_taxonomy_catalog,
+        artifact_catalog=reviewer_non_domain_artifact_catalog,
+        rule_shorthand_catalog=reviewer_non_domain_rule_shorthand_catalog,
+        bounded_reference=_bounded_reference,
+        response_strings=_response_strings,
+        repetition_reasons=_review_repetition_reasons,
+        ipv4_re=REVIEW_IPV4_RE,
+        domain_re=REVIEW_DOMAIN_RE,
+        community_id_re=REVIEW_COMMUNITY_ID_RE,
+        known_field_paths=REVIEW_KNOWN_FIELD_PATHS,
+        non_domain_suffixes=REVIEW_NON_DOMAIN_SUFFIXES,
+        required_keys=frozenset(REQUIRED_KEYS).union(STRICT_FACTORED_REQUIRED_KEYS),
+        observable_max=REVIEW_OBSERVABLE_MAX,
+        evidence_used_max=REVIEW_EVIDENCE_USED_MAX,
+        hypotheses_max=REVIEW_HYPOTHESES_MAX,
     )
-    if contracted_non_domain_taxonomy != allowed_non_domain_taxonomy:
-        errors.append(
-            "review contract non-domain taxonomy catalog did not match "
-            "collector-owned evidence"
-        )
-    contracted_non_domain_artifacts = {
-        str(value).strip().lower()
-        for value in (
-            contract.get("allowed_non_domain_artifact_tokens")
-            if isinstance(
-                contract.get("allowed_non_domain_artifact_tokens"),
-                list,
-            )
-            else []
-        )
-        if str(value).strip()
-    }
-    allowed_non_domain_artifacts = set(
-        reviewer_non_domain_artifact_catalog(review_package)
-    )
-    if contracted_non_domain_artifacts != allowed_non_domain_artifacts:
-        errors.append(
-            "review contract non-domain artifact catalog did not match "
-            "collector-owned evidence"
-        )
-    contracted_non_domain_rule_shorthands = {
-        str(value).strip().lower()
-        for value in (
-            contract.get("allowed_non_domain_rule_shorthand_tokens")
-            if isinstance(
-                contract.get(
-                    "allowed_non_domain_rule_shorthand_tokens"
-                ),
-                list,
-            )
-            else []
-        )
-        if str(value).strip()
-    }
-    allowed_non_domain_rule_shorthands = set(
-        reviewer_non_domain_rule_shorthand_catalog(review_package)
-    )
-    if (
-        contracted_non_domain_rule_shorthands
-        != allowed_non_domain_rule_shorthands
-    ):
-        errors.append(
-            "review contract non-domain rule shorthand catalog did not "
-            "match collector-owned evidence"
-        )
-    narrative_domains = {
-        candidate.lower()
-        for candidate in REVIEW_DOMAIN_RE.findall(response_text)
-        if candidate.lower() not in REVIEW_KNOWN_FIELD_PATHS
-        and candidate.lower() not in allowed_non_domain_taxonomy
-        and candidate.lower() not in allowed_non_domain_artifacts
-        and candidate.lower() not in allowed_non_domain_rule_shorthands
-        and candidate.rsplit(".", 1)[-1].lower() not in REVIEW_NON_DOMAIN_SUFFIXES
-    }
-    foreign_domains = sorted(narrative_domains.difference(allowed_domains))
-    if foreign_domains:
-        errors.append(
-            "reviewer introduced foreign domain or FQDN value(s): "
-            + ",".join(foreign_domains[:10])
-        )
-
-    allowed_community_ids = {
-        value for kind, value in allowed if kind == "community_id"
-    }
-    narrative_community_ids = set(REVIEW_COMMUNITY_ID_RE.findall(response_text))
-    foreign_community_ids = sorted(
-        narrative_community_ids.difference(allowed_community_ids)
-    )
-    if foreign_community_ids:
-        errors.append(
-            "reviewer introduced foreign community ID value(s): "
-            + ",".join(foreign_community_ids[:10])
-        )
-
-    narrative_material_observables: set[tuple[str, str]] = {
-        ("ip", value)
-        for value in narrative_ips.intersection(allowed_ips)
-    }
-    for value in narrative_domains.intersection(allowed_domains):
-        narrative_material_observables.update(
-            (kind, allowed_value)
-            for kind, allowed_value in allowed
-            if kind in {"domain", "host"}
-            and allowed_value.lower() == value
-            and (kind == "domain" or "." in allowed_value)
-        )
-    narrative_material_observables.update(
-        ("community_id", value)
-        for value in narrative_community_ids.intersection(
-            allowed_community_ids
-        )
-    )
-    bounded_model_supplied_observables = {
-        (kind, value)
-        for kind, value in used_observables
-        if kind in {"ip", "domain", "community_id"}
-        or (kind == "host" and "." in value)
-    }
-    discarded_unused_observables = sorted(
-        bounded_model_supplied_observables.difference(
-            narrative_material_observables
-        )
-    )
-    explicit_bare_model_observables = sorted(
-        used_observables.difference(
-            bounded_model_supplied_observables
-        )
-    )
-    used_observables.difference_update(discarded_unused_observables)
-    derived_observables = sorted(
-        narrative_material_observables.difference(used_observables)
-    )
-    used_observables.update(derived_observables)
-    if len(used_observables) > REVIEW_OBSERVABLE_MAX:
-        raise ReviewerValidationError(
-            "canonical observables_used exceeds the maximum of "
-            f"{REVIEW_OBSERVABLE_MAX} entries"
-        )
-
-    evidence_contract = review_package.get("evidence_reference_contract")
-    evidence_catalog = {
-        str(item.get("ref") or ""): item
-        for item in (
-            evidence_contract.get("references")
-            if isinstance(evidence_contract, dict)
-            and isinstance(evidence_contract.get("references"), list)
-            else []
-        )
-        if isinstance(item, dict) and str(item.get("ref") or "")
-    }
-    cited_evidence = response.get("evidence_used")
-    if not isinstance(cited_evidence, list):
-        errors.append("evidence_used must be an array")
-        cited_evidence = []
-    elif len(cited_evidence) > REVIEW_EVIDENCE_USED_MAX:
-        raise ReviewerValidationError(
-            "evidence_used exceeds the maximum of "
-            f"{REVIEW_EVIDENCE_USED_MAX} entries"
-        )
-    invalid_evidence: list[str] = []
-    corroborating_evidence: list[str] = []
-    for raw in cited_evidence:
-        reference = _bounded_reference(raw)
-        item = evidence_catalog.get(reference)
-        if item is None:
-            invalid_evidence.append(reference or "empty reference")
-            continue
-        if item.get("corroborating") is True and reference not in corroborating_evidence:
-            corroborating_evidence.append(reference)
-    if invalid_evidence:
-        errors.append(
-            "reviewer cited evidence outside the current contract: "
-            + ",".join(invalid_evidence[:10])
-        )
-    if not corroborating_evidence:
-        errors.append(
-            "reviewer cited no current corroborating collector-owned evidence"
-        )
-
-    hypotheses = response.get("hypotheses")
-    if not isinstance(hypotheses, list):
-        errors.append("hypotheses must be an array")
-    elif len(hypotheses) > REVIEW_HYPOTHESES_MAX:
-        errors.append(
-            "hypotheses exceeds the maximum of "
-            f"{REVIEW_HYPOTHESES_MAX} entries"
-        )
-    elif any(not isinstance(item, dict) for item in hypotheses):
-        errors.append("every hypotheses entry must be an object")
-
-    errors.extend(_review_repetition_reasons(response))
-    if errors:
-        raise ReviewerValidationError("; ".join(errors)[:2000])
-    validated = dict(response)
-    normalized_observables = [
-        {"kind": kind, "value": value}
-        for kind, value in sorted(used_observables)
-    ]
-    validated["observables_used"] = normalized_observables
-    validated["_review_contract_validation"] = {
-        "schema": "onion-sentinel-independent-review-validation-v1",
-        "valid": True,
-        "case_id": contract.get("case_id"),
-        "evidence_hash": contract.get("evidence_hash"),
-        "observable_count": len(normalized_observables),
-        "observable_normalization": {
-            "schema": "onion-sentinel-reviewer-observable-normalization-v1",
-            "model_supplied_count": len(observables),
-            "canonical_model_supplied_count": len(
-                set(supplied_observable_sequence)
-            ),
-            "retained_model_supplied_count": len(
-                set(supplied_observable_sequence).difference(
-                    discarded_unused_observables
-                )
-            ),
-            "duplicate_count": (
-                len(supplied_observable_sequence)
-                - len(set(supplied_observable_sequence))
-            ),
-            "discarded_unused_bounded_count": len(
-                discarded_unused_observables
-            ),
-            "discarded_unused_bounded_observables": [
-                {"kind": kind, "value": value}
-                for kind, value in discarded_unused_observables
-            ],
-            "explicit_bare_model_observable_count": len(
-                explicit_bare_model_observables
-            ),
-            "explicit_bare_model_observables": [
-                {"kind": kind, "value": value}
-                for kind, value in explicit_bare_model_observables
-            ],
-            "derived_count": len(derived_observables),
-            "derived_observables": [
-                {"kind": kind, "value": value}
-                for kind, value in derived_observables
-            ],
-            "normalization_applied": (
-                normalized_observables != observables
-            ),
-            "allowed_non_domain_taxonomy_count": len(
-                allowed_non_domain_taxonomy
-            ),
-            "allowed_non_domain_artifact_count": len(
-                allowed_non_domain_artifacts
-            ),
-            "allowed_non_domain_rule_shorthand_count": len(
-                allowed_non_domain_rule_shorthands
-            ),
-        },
-        "evidence_reference_count": len(cited_evidence),
-        "corroborating_evidence_count": len(corroborating_evidence),
-    }
-    return validated
+    return module.validate(response, review_package, dependencies)
 
 
 def reviewer_supplemental_pivot_reason(
