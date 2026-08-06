@@ -1,6 +1,8 @@
 import ast
+import importlib
 import json
 from pathlib import Path
+import sys
 import unittest
 
 
@@ -69,6 +71,38 @@ class ModularizationCompatibilityContractTests(unittest.TestCase):
         )
         self.assertIn("validate_hardened_builder", installer)
         self.assertIn("_atomic_install", installer)
+
+    def test_python_package_tree_is_complete_importable_and_installed(self) -> None:
+        contract = load_contract()
+        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        original_path = list(sys.path)
+        try:
+            sys.path.insert(0, str(ROOT / "n8n"))
+            for tree in contract["python_package_trees"]:
+                self.assertTrue((ROOT / tree["path"] / "__init__.py").is_file())
+                self.assertIn(f'$REPO_DIR/{tree["path"]}', installer)
+                self.assertIn(tree["runtime_path"], installer)
+                self.assertIn(f'$REPO_DIR/{tree["installer"]}', installer)
+                for module in tree["required_modules"]:
+                    imported = importlib.import_module(module)
+                    self.assertIsNotNone(imported)
+        finally:
+            sys.path[:] = original_path
+
+    def test_ai_runner_delegates_through_package_composition_root(self) -> None:
+        runner = (ROOT / "n8n/bin/run-local-ai-analysis.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "from onion_sentinel.composition import invoke_legacy_entrypoint",
+            runner,
+        )
+        self.assertIn("invoke_legacy_entrypoint(globals())", runner)
+        package_sources = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (ROOT / "n8n/onion_sentinel").rglob("*.py")
+        )
+        self.assertNotIn("run-local-ai-analysis", package_sources)
 
     def test_node_entry_point_matches_package_and_production_installer(self) -> None:
         installer = INSTALLER_PATH.read_text(encoding="utf-8")

@@ -564,6 +564,10 @@ cp "$REPO_DIR/n8n/bin/onion_sentinel_harness.py" "$STACK_DIR/bin/onion_sentinel_
 cp "$REPO_DIR/n8n/bin/security_jsonl_log.py" "$STACK_DIR/bin/security_jsonl_log.py"
 cp "$REPO_DIR/operations/evaluate-harness-traces.py" "$STACK_DIR/bin/evaluate-harness-traces.py"
 cp "$REPO_DIR/n8n/bin/controlled_evaluation_isolation.py" "$STACK_DIR/bin/controlled_evaluation_isolation.py"
+/usr/bin/python3 "$REPO_DIR/n8n/bin/install-ai-runtime-package.py" \
+  --source "$REPO_DIR/n8n/onion_sentinel" \
+  --destination "$STACK_DIR/onion_sentinel"
+cp "$REPO_DIR/n8n/bin/install-ai-runtime-package.py" "$STACK_DIR/bin/install-ai-runtime-package.py"
 cp "$REPO_DIR/n8n/bin/run-local-ai-analysis.py" "$STACK_DIR/bin/run-local-ai-analysis.py"
 cp "$REPO_DIR/n8n/bin/export-adjudicated-analysis-replays.py" "$STACK_DIR/bin/export-adjudicated-analysis-replays.py"
 cp "$REPO_DIR/n8n/bin/bounded_http.py" "$STACK_DIR/bin/bounded_http.py"

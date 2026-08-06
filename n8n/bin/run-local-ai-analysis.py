@@ -31,8 +31,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, NoReturn
 from urllib.parse import urlparse
-
-
 BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
@@ -125,8 +123,6 @@ from onion_sentinel_harness import (  # noqa: E402
     should_start_onion_sentinel_harness,
     start_harness_run,
 )
-
-
 HOME = Path.home()
 DEFAULT_PROMPT_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-prompts"
 DEFAULT_OUT_DIR = HOME / "n8n-local" / "soc-alerts" / "ai-analysis"
@@ -383,8 +379,6 @@ DEFAULT_SYSTEM_PROMPT = (
     "You are a careful SOC analyst. Use only the supplied evidence. "
     "Return one valid JSON object and no prose outside JSON."
 )
-
-
 class RuntimeArtifactError(RuntimeError):
     """A local runtime artifact violated its type, size, or encoding contract."""
 
@@ -19459,4 +19453,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if str(BIN_DIR.parent) not in sys.path:
+        sys.path.insert(0, str(BIN_DIR.parent))
+    from onion_sentinel.composition import invoke_legacy_entrypoint
+
+    raise SystemExit(invoke_legacy_entrypoint(globals()))

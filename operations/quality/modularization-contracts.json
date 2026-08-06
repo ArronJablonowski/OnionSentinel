@@ -73,6 +73,21 @@
       ]
     }
   ],
+  "python_package_trees": [
+    {
+      "path": "n8n/onion_sentinel",
+      "runtime_path": "$STACK_DIR/onion_sentinel",
+      "installer": "n8n/bin/install-ai-runtime-package.py",
+      "required_modules": [
+        "onion_sentinel",
+        "onion_sentinel.composition",
+        "onion_sentinel.contracts.errors",
+        "onion_sentinel.contracts.models",
+        "onion_sentinel.contracts.ports",
+        "onion_sentinel.runtime"
+      ]
+    }
+  ],
   "node_entry_points": [
     {
       "path": "n8n/alert_store/alert_store.js",
