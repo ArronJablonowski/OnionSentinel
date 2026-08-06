@@ -32,6 +32,7 @@ from security_jsonl_log import SecurityJsonlLogger
 CONTRACT = "onion-sentinel-software-inventory-v1"
 STATE_SCHEMA = "onion-sentinel-software-inventory-state-v1"
 OPERATION = "software_observations"
+TRANSPORT_RECEIPT_CONTRACT = "onion-sentinel-evidence-receipt-v1"
 SOURCES = ("osquery_apps", "zeek_software", "http_user_agent")
 SOURCE_POLICY = {
     "osquery_apps": {
@@ -71,6 +72,21 @@ RESPONSE_KEYS = {
     "after",
     "records",
     "query_audit",
+}
+RESPONSE_KEY_SETS = {
+    frozenset(RESPONSE_KEYS),
+    frozenset(RESPONSE_KEYS | {"audit_receipt"}),
+}
+AUDIT_RECEIPT_KEYS = {
+    "receipt_contract",
+    "correlation_id",
+    "request_digest",
+    "response_payload_digest",
+    "elastic_search_count",
+    "osquery_query_count",
+    "helper_invocation_count",
+    "read_only",
+    "terminal_status",
 }
 RECORD_KEYS = {
     "evidence_id",
@@ -138,6 +154,7 @@ _SAFE_HOST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$")
 _SAFE_USER = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 _HEX_24 = re.compile(r"^[0-9a-f]{24}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
+_CORRELATION_ID = re.compile(r"^[0-9a-f]{32}$")
 _UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
     r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -1099,7 +1116,7 @@ def validate_response(
     requested_page_size: int,
     previous_after: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != RESPONSE_KEYS:
+    if not isinstance(value, dict) or frozenset(value) not in RESPONSE_KEY_SETS:
         raise ValueError("relay response has an invalid software inventory shape")
     if (
         value.get("ok") is not True
@@ -1111,6 +1128,61 @@ def validate_response(
     window = _normalize_window(value.get("window"))
     if window != _normalize_window(expected_window):
         raise ValueError("relay response window does not match the request")
+    receipt = value.get("audit_receipt")
+    if receipt is not None:
+        response_without_receipt = {
+            key: item for key, item in value.items() if key != "audit_receipt"
+        }
+        expected_request = build_request(
+            expected_source,
+            expected_window,
+            requested_page_size,
+            previous_after,
+        )
+        if (
+            not isinstance(receipt, dict)
+            or set(receipt) != AUDIT_RECEIPT_KEYS
+            or receipt.get("receipt_contract") != TRANSPORT_RECEIPT_CONTRACT
+            or not _CORRELATION_ID.fullmatch(
+                str(receipt.get("correlation_id") or "")
+            )
+            or receipt.get("request_digest")
+            != hashlib.sha256(
+                json.dumps(
+                    expected_request,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            or receipt.get("response_payload_digest")
+            != hashlib.sha256(
+                json.dumps(
+                    response_without_receipt,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            or receipt.get("read_only") is not True
+            or receipt.get("terminal_status")
+            != ("complete" if value.get("complete") is True else "partial")
+            or any(
+                isinstance(receipt.get(field), bool)
+                or not isinstance(receipt.get(field), int)
+                for field in (
+                    "elastic_search_count",
+                    "osquery_query_count",
+                    "helper_invocation_count",
+                )
+            )
+            or (
+                receipt.get("elastic_search_count"),
+                receipt.get("osquery_query_count"),
+                receipt.get("helper_invocation_count"),
+            ) != (0, 0, 1)
+        ):
+            raise ValueError(
+                "relay response audit receipt failed validation"
+            )
     records = value.get("records")
     returned = value.get("returned")
     if (

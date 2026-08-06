@@ -182,6 +182,74 @@ class SoftwareInventoryCollectorTests(unittest.TestCase):
             },
         }
 
+    def with_audit_receipt(self, response: dict, request: dict) -> dict:
+        payload = json.loads(json.dumps(response))
+        payload["audit_receipt"] = {
+            "receipt_contract": self.collector.TRANSPORT_RECEIPT_CONTRACT,
+            "correlation_id": "c" * 32,
+            "request_digest": hashlib.sha256(
+                json.dumps(
+                    request,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "response_payload_digest": hashlib.sha256(
+                json.dumps(
+                    response,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "elastic_search_count": 0,
+            "osquery_query_count": 0,
+            "helper_invocation_count": 1,
+            "read_only": True,
+            "terminal_status": (
+                "complete" if response["complete"] else "partial"
+            ),
+        }
+        return payload
+
+    def test_accepts_and_validates_relay_audit_receipt(self) -> None:
+        window = self.collector.collection_window(self.now)
+        request = self.collector.build_request(
+            "zeek_software",
+            window,
+            2,
+            None,
+        )
+        response = self.response(
+            "zeek_software",
+            window,
+            [],
+            complete=True,
+        )
+        received = self.with_audit_receipt(response, request)
+
+        normalized = self.collector.validate_response(
+            received,
+            expected_source="zeek_software",
+            expected_window=window,
+            requested_page_size=2,
+            previous_after=None,
+        )
+
+        self.assertEqual(
+            normalized["audit_receipt"]["receipt_contract"],
+            self.collector.TRANSPORT_RECEIPT_CONTRACT,
+        )
+        tampered = json.loads(json.dumps(received))
+        tampered["audit_receipt"]["helper_invocation_count"] = 0
+        with self.assertRaisesRegex(ValueError, "audit receipt"):
+            self.collector.validate_response(
+                tampered,
+                expected_source="zeek_software",
+                expected_window=window,
+                requested_page_size=2,
+                previous_after=None,
+            )
+
     def test_database_publish_is_chunked_and_committed_last(self) -> None:
         records = [
             self.record(

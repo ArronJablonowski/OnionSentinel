@@ -407,6 +407,54 @@ class OperationalSloTests(unittest.TestCase):
             snapshot["advisories"],
         )
 
+    def test_fresh_software_inventory_is_healthy(self):
+        now = dt.datetime(2026, 8, 6, 13, tzinfo=dt.timezone.utc)
+        failures, snapshot = self.slo.evaluate(
+            {"metrics": {"process": {"ingest_errors": 0}}},
+            {"summary": {"latest": {"timestamp_utc": "2026-08-06T12:59:30Z"}}},
+            now=now,
+            disk_used_percent=55,
+            sqlite_backup_age=60,
+            postgres_backup_age=60,
+            previous_ingest_errors=0,
+            software_inventory_health={
+                "enabled": True,
+                "available": True,
+                "records": 1478,
+                "updated_at": "2026-08-06T12:00:00Z",
+            },
+        )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            snapshot["signals"]["software_inventory_updated_age_seconds"],
+            3600,
+        )
+
+    def test_stale_software_inventory_fails_soak(self):
+        now = dt.datetime(2026, 8, 6, 13, tzinfo=dt.timezone.utc)
+        failures, snapshot = self.slo.evaluate(
+            {"metrics": {"process": {"ingest_errors": 0}}},
+            {"summary": {"latest": {"timestamp_utc": "2026-08-06T12:59:30Z"}}},
+            now=now,
+            disk_used_percent=55,
+            sqlite_backup_age=60,
+            postgres_backup_age=60,
+            previous_ingest_errors=0,
+            software_inventory_health={
+                "enabled": True,
+                "available": True,
+                "records": 1478,
+                "updated_at": "2026-08-06T09:59:59Z",
+            },
+        )
+
+        self.assertIn("Software Inventory snapshot is stale", failures[0])
+        self.assertEqual(
+            snapshot["signals"]["software_inventory_record_count"],
+            1478,
+        )
+
     def test_inactive_capture_protection_does_not_hide_stale_backlog(self):
         now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
         metrics = {"metrics": {

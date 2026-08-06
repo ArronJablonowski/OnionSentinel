@@ -24,6 +24,7 @@ MAX_PROBE_RESPONSE_BYTES = 8 * 1024 * 1024
 DEFAULT_PROBE_ATTEMPTS = 2
 DEFAULT_PROBE_RETRY_DELAY_SECONDS = 0.2
 CAPTURE_TELEMETRY_UNAVAILABLE_GRACE_SECONDS = 3 * 60
+SOFTWARE_INVENTORY_MAX_AGE_SECONDS = 3 * 60 * 60
 
 
 class ProbeError(RuntimeError):
@@ -120,6 +121,7 @@ def evaluate(
     alert_store_postgres_backup_age: int | None = None,
     previous_capture_telemetry_unavailable_since: object = None,
     capture_telemetry_unavailable_grace_seconds: int = CAPTURE_TELEMETRY_UNAVAILABLE_GRACE_SECONDS,
+    software_inventory_health: dict[str, object] | None = None,
 ) -> tuple[list[str], dict[str, object]]:
     metrics = dict(metrics_payload.get("metrics") or {})
     process = dict(metrics.get("process") or {})
@@ -135,6 +137,23 @@ def evaluate(
     }
     failures: list[str] = []
     advisories: list[str] = []
+    software_inventory = dict(software_inventory_health or {})
+    software_inventory_enabled = bool(software_inventory.get("enabled"))
+    software_inventory_available = bool(software_inventory.get("available"))
+    software_inventory_updated_age = age_seconds(
+        software_inventory.get("updated_at"),
+        now,
+    )
+    if software_inventory_enabled:
+        if not software_inventory_available:
+            failures.append("Software Inventory database is unavailable")
+        elif software_inventory_updated_age is None:
+            failures.append("Software Inventory has no successful snapshot")
+        elif software_inventory_updated_age > SOFTWARE_INVENTORY_MAX_AGE_SECONDS:
+            failures.append(
+                "Software Inventory snapshot is stale "
+                f"({software_inventory_updated_age}s old)"
+            )
     pending_job_ages = {
         str(item.get("job_type") or ""): int(item.get("seconds") or 0)
         for item in (metrics.get("oldest_pending_jobs") or [])
@@ -418,6 +437,10 @@ def evaluate(
             "pcap_capture_telemetry_unavailable_age_seconds": capture_telemetry_unavailable_age_seconds,
             "pcap_capture_telemetry_unavailable_grace_seconds": capture_grace,
             "pcap_last_progress_age_seconds": pcap.get("last_progress_age_seconds"),
+            "software_inventory_enabled": software_inventory_enabled,
+            "software_inventory_available": software_inventory_available,
+            "software_inventory_updated_age_seconds": software_inventory_updated_age,
+            "software_inventory_record_count": software_inventory.get("records"),
             "ingest_errors": ingest_errors,
             "disk_used_percent": round(disk_used_percent, 1),
             "disk_new_work_limit_percent": 75,
@@ -489,6 +512,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stack-dir", type=Path, default=Path.home() / "n8n-local")
     parser.add_argument("--metrics-url", default="http://127.0.0.1:8787/metrics")
+    parser.add_argument("--alert-store-health-url", default="http://127.0.0.1:8787/health")
     parser.add_argument("--health-url", default="http://127.0.0.1:8766/api/system-health/beacons?hours=1")
     args = parser.parse_args()
     log_dir = args.stack_dir / "logs"
@@ -511,6 +535,10 @@ def main() -> int:
     disk_percent = (usage.used / usage.total * 100) if usage.total else 100.0
     try:
         metrics_payload = fetch_json(args.metrics_url, "alert-store metrics")
+        alert_store_health = fetch_json(
+            args.alert_store_health_url,
+            "alert-store health",
+        )
         health_payload = fetch_json(args.health_url, "Onion Sentinel health")
     except ProbeError as exc:
         print(str(exc))
@@ -543,6 +571,9 @@ def main() -> int:
         ),
         previous_capture_telemetry_unavailable_since=previous.get(
             "capture_telemetry_unavailable_since"
+        ),
+        software_inventory_health=dict(
+            alert_store_health.get("software_inventory") or {}
         ),
     )
     # A sustained or threshold-triggered capture-protection hold is not a stack
