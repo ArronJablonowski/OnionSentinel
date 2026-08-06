@@ -96,6 +96,9 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
   comparison now live in `analysis.review.comparison`. Consequential verdict,
   handling, escalation, and control-tuning differences remain material;
   non-escalatory context differences remain visible but advisory.
+- Reviewer case precedence, blind-package evidence hashing, bounded validation
+  telemetry, field-specific repair guidance, and rejected-observable-safe error
+  categories now live in `analysis.review.contracts`.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports

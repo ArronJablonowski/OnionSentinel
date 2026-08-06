@@ -1660,6 +1660,12 @@ def _review_comparison():
     return comparison
 
 
+def _review_contracts():
+    _provider_routing()
+    from onion_sentinel.analysis.review import contracts
+    return contracts
+
+
 def normalized_model_roster(value: Any) -> list[str]:
     return _provider_routing().normalized_model_roster(value)
 
@@ -10640,111 +10646,30 @@ class ReviewerValidationError(ValueError):
 
 
 def reviewer_validation_failure(
-    *,
-    attempt: int,
-    call_id: str,
-    error: ReviewerValidationError,
-    input_value: Any,
-    response: dict[str, Any],
+    *, attempt: int, call_id: str, error: ReviewerValidationError,
+    input_value: Any, response: dict[str, Any],
 ) -> dict[str, Any]:
     """Return bounded validator telemetry without retaining model output."""
-    message = str(error).strip()[:REVIEW_VALIDATION_MESSAGE_MAX]
-    return {
-        "schema": REVIEW_VALIDATION_FAILURE_SCHEMA,
-        "attempt": int(attempt),
-        "call_id": str(call_id)[:128],
-        "status": "validation-failed",
-        "message": message or "reviewer validation failed",
-        "input_digest": harness_digest_json(input_value),
-        "output_digest": harness_digest_json(response),
-    }
+    return _review_contracts().validation_failure(
+        attempt=attempt, call_id=call_id, error=error, input_value=input_value,
+        response=response, schema=REVIEW_VALIDATION_FAILURE_SCHEMA,
+        message_max=REVIEW_VALIDATION_MESSAGE_MAX, digest_json=harness_digest_json,
+    )
 
 
 def reviewer_repair_guidance(validation_message: str) -> list[str]:
-    """Translate validator output into bounded, field-specific repair steps."""
-    message = str(validation_message or "")[:REVIEW_VALIDATION_MESSAGE_MAX]
-    guidance = [
-        (
-            "Return a fresh complete object and correct only against "
-            "response_schema, review_contract, and evidence_reference_contract."
-        )
-    ]
-    if "foreign community ID value(s)" in message:
-        guidance.append(
-            "Community ID correction: use only exact values whose kind is "
-            "community_id in review_contract.allowed_observables. Elastic "
-            "index/document identifiers, including rollover-number and "
-            "document-ID text separated by a colon, are record identifiers, "
-            "not Community IDs; do not add them to observables_used or describe "
-            "them as Community IDs. Cite the matching evidence reference instead."
-        )
-    if (
-        "foreign observables" in message
-        or "omitted from observables_used" in message
-        or "foreign domain or FQDN" in message
-        or "foreign IP address" in message
-        or "foreign community ID" in message
-    ):
-        guidance.append(
-            "Observable correction: enumerate each material IP, domain, FQDN, "
-            "or Community ID exactly once using its exact kind and value from "
-            "review_contract.allowed_observables; omit every other value. Do "
-            "not repeat, quote, negate, or discuss any rejected observable."
-        )
-    if "outside the current contract" in message or "no current corroborating" in message:
-        guidance.append(
-            "Evidence correction: evidence_used may contain only exact refs from "
-            "evidence_reference_contract and must include current corroborating "
-            "collector-owned evidence."
-        )
-    if "review_case_id" in message or "review_evidence_hash" in message:
-        guidance.append(
-            "Identity correction: copy review_contract.case_id and "
-            "review_contract.evidence_hash byte-for-byte into their matching "
-            "response fields."
-        )
-    return guidance[:4]
+    """Translate validator output into bounded field-specific repair steps."""
+    return _review_contracts().repair_guidance(
+        validation_message, message_max=REVIEW_VALIDATION_MESSAGE_MAX,
+    )
 
 
 def reviewer_repair_error_category(validation_message: str) -> str:
-    """Describe a validator failure without echoing rejected observables.
-
-    The deterministic validator message is retained in bounded harness
-    telemetry, but it may contain the exact foreign value. Sending that value
-    back to the model can cause a repair response to quote it and fail again.
-    """
-    message = str(validation_message or "")[:REVIEW_VALIDATION_MESSAGE_MAX]
-    if (
-        "foreign observables" in message
-        or "foreign domain or FQDN" in message
-        or "foreign IP address" in message
-        or "foreign community ID" in message
-    ):
-        return (
-            "The response referenced one or more observables outside "
-            "review_contract.allowed_observables. Use only exact allowlisted "
-            "kind/value pairs and do not quote or discuss rejected values."
-        )
-    if "omitted from observables_used" in message:
-        return (
-            "The response omitted one or more material allowlisted observables "
-            "from observables_used. Rebuild the ledger only from "
-            "review_contract.allowed_observables."
-        )
-    if "outside the current contract" in message or "no current corroborating" in message:
-        return (
-            "The response referenced evidence outside the current "
-            "evidence_reference_contract. Use only exact current evidence refs."
-        )
-    if "review_case_id" in message or "review_evidence_hash" in message:
-        return (
-            "The response identity fields did not exactly match review_contract."
-        )
-    return (
-        "The response failed deterministic validation. Rebuild one complete "
-        "object using only response_schema, review_contract, and "
-        "evidence_reference_contract."
+    """Classify a validator failure without echoing rejected observables."""
+    return _review_contracts().repair_error_category(
+        validation_message, message_max=REVIEW_VALIDATION_MESSAGE_MAX,
     )
+
 
 
 class ControlledEvaluationReviewerGateError(RuntimeError):
@@ -10752,50 +10677,17 @@ class ControlledEvaluationReviewerGateError(RuntimeError):
 
 
 def reviewer_case_id(prompt_package: dict[str, Any]) -> str:
-    local = prompt_package.get("_local_investigation_query_context")
-    incident = prompt_package.get("incident_response_evidence")
-    alert = prompt_package.get("alert")
-    for value in (
-        local.get("case_id") if isinstance(local, dict) else "",
-        incident.get("case_id") if isinstance(incident, dict) else "",
-        alert.get("alert_id") if isinstance(alert, dict) else "",
-    ):
-        text = _bounded_reference(value)
-        if text:
-            return text
-    seed = json.dumps(
-        model_safe_copy(prompt_package, reviewer_safe=True),
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
+    return _review_contracts().case_id(
+        prompt_package, bounded_reference=_bounded_reference,
+        model_safe_copy=model_safe_copy,
     )
-    return "review-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
 
 
 def reviewer_evidence_hash(review_package: dict[str, Any]) -> str:
-    """Bind the reviewer response to its exact blind, model-visible package."""
-    payload: dict[str, Any] = {}
-    for key, value in review_package.items():
-        if key == "review_contract_repair":
-            continue
-        if key == "review_contract":
-            if isinstance(value, dict):
-                bound_contract = dict(value)
-                # Avoid a circular digest while binding every other
-                # collector-owned contract field, including the observable
-                # and telemetry-taxonomy catalogs.
-                bound_contract.pop("evidence_hash", None)
-                payload[key] = bound_contract
-            continue
-        payload[key] = value
-    return hashlib.sha256(
-        json.dumps(
-            model_safe_copy(payload, reviewer_safe=True),
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()
+    """Bind the reviewer response to its blind model-visible package."""
+    return _review_contracts().evidence_hash(
+        review_package, model_safe_copy=model_safe_copy,
+    )
 
 
 def independent_reviewer_package(
