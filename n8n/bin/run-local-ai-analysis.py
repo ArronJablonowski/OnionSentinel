@@ -1660,6 +1660,12 @@ def _review_comparison():
     return comparison
 
 
+def _review_adjudication():
+    _provider_routing()
+    from onion_sentinel.analysis.review import adjudication
+    return adjudication
+
+
 def _review_contracts():
     _provider_routing()
     from onion_sentinel.analysis.review import contracts
@@ -10977,82 +10983,16 @@ def disagreement_adjudication_package(
     hosted: bool,
 ) -> dict[str, Any]:
     """Build a route-safe package containing two immutable disputed positions."""
-    package = independent_reviewer_package(prompt_package, hosted=hosted)
-    package.pop("second_opinion_review", None)
-    package.pop("review_contract", None)
-    disputed = [
-        item
-        for item in comparison.get("disputed_fields", [])
-        if isinstance(item, dict) and str(item.get("field") or "")
-    ][:16]
-    package["adjudication_positions"] = {
-        "primary": {
-            **dict(comparison.get("primary") or {}),
-            "bluf": str(primary_response.get("bluf") or "")[:4000],
-            "summary": str(primary_response.get("summary") or "")[:8000],
-            "evidence_used": list(primary_response.get("evidence_used") or [])[:100],
-            "evidence_gaps": list(primary_response.get("evidence_gaps") or [])[:50],
-        },
-        "reviewer": {
-            **dict(comparison.get("reviewer") or {}),
-            "bluf": str(reviewer_response.get("bluf") or "")[:4000],
-            "summary": str(reviewer_response.get("summary") or "")[:8000],
-            "evidence_used": list(reviewer_response.get("evidence_used") or [])[:100],
-            "evidence_gaps": list(reviewer_response.get("evidence_gaps") or [])[:50],
-        },
-        "disputed_fields": disputed,
-    }
-    package["response_schema"] = {
-        "adjudication_case_id": "exact adjudication_contract.case_id",
-        "adjudication_evidence_hash": "exact adjudication_contract.evidence_hash",
-        "decision": "primary_supported|reviewer_supported|unresolved",
-        "confidence": "low|medium|high",
-        "confidence_score": "number from 0.0 through 1.0",
-        "resolved_fields": ["exact field names from adjudication_contract.disputed_fields"],
-        "remaining_disagreements": ["exact field names from adjudication_contract.disputed_fields"],
-        "evidence_used": ["exact evidence_reference_contract ref strings"],
-        "rationale": "bounded explanation tied to cited evidence",
-        "additional_evidence_needed": ["bounded evidence needed to resolve remaining disagreement"],
-    }
-    contract = {
-        "schema": "onion-sentinel-disagreement-adjudication-v1",
-        "mode": "shadow",
-        "case_id": reviewer_case_id(package),
-        "disputed_fields": [str(item["field"]) for item in disputed],
-        "material_fields": [
-            str(item["field"])
-            for item in disputed
-            if item.get("material") is True
-        ],
-        "allowed_decisions": [
-            "primary_supported",
-            "reviewer_supported",
-            "unresolved",
-        ],
-        "maximum_model_calls": 2,
-        "automation_authorized": False,
-        "requirements": [
-            "Choose one allowed decision; never synthesize a third position.",
-            "Use only exact disputed field names and evidence refs.",
-            "A supported decision must resolve every material field.",
-            "Unresolved must retain at least one material disagreement.",
-            "Shadow adjudication never authorizes an operational action.",
-        ],
-    }
-    package["adjudication_contract"] = contract
-    digest_payload = model_safe_copy(package, reviewer_safe=True)
-    digest_contract = dict(digest_payload.get("adjudication_contract") or {})
-    digest_contract.pop("evidence_hash", None)
-    digest_payload["adjudication_contract"] = digest_contract
-    contract["evidence_hash"] = hashlib.sha256(
-        json.dumps(
-            digest_payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()
-    return package
+    module = _review_adjudication()
+    dependencies = module.PackageDependencies(
+        independent_package=independent_reviewer_package,
+        case_id=reviewer_case_id,
+        model_safe_copy=model_safe_copy,
+    )
+    return module.build_package(
+        prompt_package, primary_response, reviewer_response, comparison,
+        hosted=hosted, deps=dependencies,
+    )
 
 
 def validate_disagreement_adjudication(
@@ -11060,116 +11000,12 @@ def validate_disagreement_adjudication(
     package: dict[str, Any],
 ) -> dict[str, Any]:
     """Validate identity, closed choices, disputed fields, and evidence citations."""
-    if not isinstance(response, dict):
-        raise DisagreementAdjudicationValidationError(
-            "adjudicator response must be an object"
-        )
-    contract = package.get("adjudication_contract")
-    if not isinstance(contract, dict):
-        raise DisagreementAdjudicationValidationError(
-            "adjudication contract is missing"
-        )
-    errors: list[str] = []
-    if str(response.get("adjudication_case_id") or "") != str(contract.get("case_id") or ""):
-        errors.append("adjudication_case_id does not match the contract")
-    if str(response.get("adjudication_evidence_hash") or "") != str(contract.get("evidence_hash") or ""):
-        errors.append("adjudication_evidence_hash does not match the contract")
-    decision = str(response.get("decision") or "").strip().lower()
-    allowed_decisions = set(contract.get("allowed_decisions") or [])
-    if decision not in allowed_decisions:
-        errors.append("decision is outside the closed vocabulary")
-    confidence = str(response.get("confidence") or "").strip().lower()
-    if confidence not in {"low", "medium", "high"}:
-        errors.append("confidence is outside the closed vocabulary")
-    try:
-        confidence_score = float(response.get("confidence_score"))
-    except (TypeError, ValueError, OverflowError):
-        confidence_score = -1.0
-    if not 0.0 <= confidence_score <= 1.0:
-        errors.append("confidence_score must be between 0 and 1")
-
-    allowed_fields = set(str(item) for item in contract.get("disputed_fields") or [])
-    material_fields = set(str(item) for item in contract.get("material_fields") or [])
-    normalized_field_lists: dict[str, list[str]] = {}
-    for key in ("resolved_fields", "remaining_disagreements"):
-        value = response.get(key)
-        if not isinstance(value, list) or len(value) > 16:
-            errors.append(f"{key} must be a bounded array")
-            normalized_field_lists[key] = []
-            continue
-        normalized = list(dict.fromkeys(str(item or "").strip() for item in value))
-        if any(not item or item not in allowed_fields for item in normalized):
-            errors.append(f"{key} contains a field outside the contract")
-        normalized_field_lists[key] = normalized
-    resolved = set(normalized_field_lists["resolved_fields"])
-    remaining = set(normalized_field_lists["remaining_disagreements"])
-    if resolved.intersection(remaining):
-        errors.append("a field cannot be both resolved and remaining")
-    if resolved.union(remaining) != allowed_fields:
-        errors.append("resolved and remaining fields must partition every disagreement")
-    if decision in {"primary_supported", "reviewer_supported"} and material_fields.intersection(remaining):
-        errors.append("a supported position must resolve every material field")
-    if decision == "unresolved" and material_fields and not material_fields.intersection(remaining):
-        errors.append("unresolved must retain at least one material field")
-
-    evidence_contract = package.get("evidence_reference_contract")
-    catalog = {
-        str(item.get("ref") or ""): item
-        for item in (
-            evidence_contract.get("references")
-            if isinstance(evidence_contract, dict)
-            and isinstance(evidence_contract.get("references"), list)
-            else []
-        )
-        if isinstance(item, dict) and str(item.get("ref") or "")
-    }
-    cited = response.get("evidence_used")
-    if not isinstance(cited, list) or len(cited) > 100:
-        errors.append("evidence_used must be a bounded array")
-        valid_evidence: list[str] = []
-    else:
-        valid_evidence = list(dict.fromkeys(_bounded_reference(item) for item in cited))
-        if any(not item or item not in catalog for item in valid_evidence):
-            errors.append("evidence_used contains a reference outside the contract")
-    if decision in {"primary_supported", "reviewer_supported"} and not any(
-        catalog.get(item, {}).get("corroborating") is True
-        for item in valid_evidence
-    ):
-        errors.append("a supported position requires current corroborating evidence")
-
-    rationale = re.sub(r"\s+", " ", str(response.get("rationale") or "")).strip()
-    if not rationale or len(rationale) > 4000:
-        errors.append("rationale must be a non-empty bounded string")
-    needed = response.get("additional_evidence_needed")
-    if not isinstance(needed, list) or len(needed) > 16:
-        errors.append("additional_evidence_needed must be a bounded array")
-        normalized_needed: list[str] = []
-    else:
-        normalized_needed = [
-            re.sub(r"\s+", " ", str(item or "")).strip()[:1000]
-            for item in needed
-            if str(item or "").strip()
-        ]
-    if errors:
-        raise DisagreementAdjudicationValidationError("; ".join(errors)[:2000])
-    return {
-        "adjudication_case_id": str(contract.get("case_id") or ""),
-        "adjudication_evidence_hash": str(contract.get("evidence_hash") or ""),
-        "decision": decision,
-        "confidence": confidence,
-        "confidence_score": round(confidence_score, 3),
-        "resolved_fields": normalized_field_lists["resolved_fields"],
-        "remaining_disagreements": normalized_field_lists["remaining_disagreements"],
-        "evidence_used": valid_evidence,
-        "rationale": rationale,
-        "additional_evidence_needed": normalized_needed,
-        "_adjudication_contract_validation": {
-            "schema": "onion-sentinel-disagreement-adjudication-validation-v1",
-            "valid": True,
-            "mode": "shadow",
-            "automation_authorized": False,
-        },
-    }
+    module = _review_adjudication()
+    dependencies = module.ValidationDependencies(
+        error_type=DisagreementAdjudicationValidationError,
+        bounded_reference=_bounded_reference,
+    )
+    return module.validate(response, package, dependencies)
 
 
 def run_bounded_disagreement_adjudication(

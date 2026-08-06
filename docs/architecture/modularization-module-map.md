@@ -261,6 +261,8 @@ old tree and services untouched.
 
 Independent-review package construction, text/repetition policy, and
 fail-closed response validation live under `onion_sentinel.analysis.review`.
+The same package owns bounded shadow-adjudication package and validation
+policy, while model execution and retry orchestration remain outside it.
 The legacy runner functions remain compatibility delegates and inject runtime
 policy explicitly, preserving existing test seams while keeping review-package
 mutation and reviewer-output admission out of the composition root.
