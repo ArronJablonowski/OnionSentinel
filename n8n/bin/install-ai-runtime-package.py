@@ -22,6 +22,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.providers.registry",
     "onion_sentinel.analysis.providers.routing",
     "onion_sentinel.analysis.persistence.analysis_index",
+    "onion_sentinel.analysis.persistence.memory_journal",
     "onion_sentinel.analysis.reporting.incident",
     "onion_sentinel.analysis.reporting.markdown",
     "onion_sentinel.analysis.reporting.publication",

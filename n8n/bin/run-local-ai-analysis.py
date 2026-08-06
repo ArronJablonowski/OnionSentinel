@@ -1218,62 +1218,19 @@ def stage_memory_writeback_task(
     pending_dir: Path = DEFAULT_MEMORY_WRITEBACK_PENDING_DIR,
 ) -> Path | None:
     """Durably stage eligible memory intent before the authoritative commit."""
-    analysis_identity = str(analysis_id)
-    if not analysis_identity or len(analysis_identity) > 128:
-        raise RuntimeError("memory writeback analysis identity is invalid")
-    normalized_response_digest = str(response_digest).lower()
-    if not re.fullmatch(r"[a-f0-9]{64}", normalized_response_digest):
-        raise RuntimeError("memory writeback response digest is invalid")
-    primary = (
-        normalize_memory_candidates(primary_candidates)
-        if primary_allowed
-        else []
+    return _memory_journal_persistence().stage(
+        analysis_id=analysis_id, response_digest=response_digest,
+        agent_role=agent_role, role_memory_file=role_memory_file,
+        shared_memory_file=shared_memory_file, source_artifact=source_artifact,
+        primary_candidates=primary_candidates, primary_allowed=primary_allowed,
+        primary_reason=primary_reason, reviewer_candidates=reviewer_candidates,
+        reviewer_allowed=reviewer_allowed, reviewer_reason=reviewer_reason,
+        pending_dir=pending_dir, schema=MEMORY_WRITEBACK_TASK_SCHEMA,
+        max_bytes=MAX_MEMORY_WRITEBACK_TASK_BYTES,
+        normalize_candidates=normalize_memory_candidates,
+        canonical_digest=canonical_payload_digest, safe_filename=safe_filename,
+        load_json=load_json, atomic_write_private_json=atomic_write_private_json,
     )
-    reviewer = (
-        normalize_memory_candidates(reviewer_candidates)
-        if reviewer_allowed
-        else []
-    )
-    if not primary and not reviewer:
-        return None
-    task = {
-        "schema": MEMORY_WRITEBACK_TASK_SCHEMA,
-        "analysis_id": analysis_identity,
-        "submitted_response_sha256": normalized_response_digest,
-        "agent_role": str(agent_role),
-        "role_memory_file": str(role_memory_file),
-        "shared_memory_file": str(shared_memory_file),
-        "source_artifact": str(source_artifact),
-        "primary": {
-            "allowed": bool(primary_allowed),
-            "reason": str(primary_reason or "")[:500],
-            "candidates": primary,
-            "candidate_manifest_digest": canonical_payload_digest(primary),
-        },
-        "reviewer": {
-            "allowed": bool(reviewer_allowed),
-            "reason": str(reviewer_reason or "")[:500],
-            "candidates": reviewer,
-            "candidate_manifest_digest": canonical_payload_digest(reviewer),
-        },
-    }
-    encoded = json.dumps(
-        task,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    if len(encoded) > MAX_MEMORY_WRITEBACK_TASK_BYTES:
-        raise RuntimeError("memory writeback task exceeds its byte limit")
-    path = pending_dir / f"{safe_filename(analysis_id)}.json"
-    if path.exists():
-        existing = load_json(path, MAX_MEMORY_WRITEBACK_TASK_BYTES)
-        if canonical_payload_digest(existing) != canonical_payload_digest(task):
-            raise RuntimeError(
-                "memory writeback task identity collides with different content"
-            )
-        return path
-    atomic_write_private_json(path, task)
-    return path
 
 
 def mark_memory_writeback_committed(
@@ -1284,67 +1241,12 @@ def mark_memory_writeback_committed(
     committed_dir: Path = DEFAULT_MEMORY_WRITEBACK_COMMITTED_DIR,
 ) -> Path | None:
     """Move a staged task across the commit boundary atomically."""
-    expected_digest = str(expected_response_digest or "").lower()
-    if expected_digest and not re.fullmatch(r"[a-f0-9]{64}", expected_digest):
-        raise RuntimeError("expected memory response digest is invalid")
-
-    def validate_binding(task: dict[str, Any]) -> None:
-        if str(task.get("analysis_id") or "") != str(analysis_id):
-            raise RuntimeError("memory task analysis identity is invalid")
-        if (
-            expected_digest
-            and str(task.get("submitted_response_sha256") or "").lower()
-            != expected_digest
-        ):
-            raise RuntimeError(
-                "memory task is not bound to the committed response"
-            )
-
-    name = f"{safe_filename(analysis_id)}.json"
-    pending_path = pending_dir / name
-    committed_path = committed_dir / name
-    if committed_path.exists():
-        committed = load_json(
-            committed_path,
-            MAX_MEMORY_WRITEBACK_TASK_BYTES,
-        )
-        validate_binding(committed)
-        if pending_path.exists():
-            pending = load_json(
-                pending_path,
-                MAX_MEMORY_WRITEBACK_TASK_BYTES,
-            )
-            validate_binding(pending)
-            if canonical_payload_digest(pending) != canonical_payload_digest(
-                committed
-            ):
-                raise RuntimeError(
-                    "pending and committed memory tasks disagree"
-                )
-            pending_path.unlink()
-        return committed_path
-    if not pending_path.exists():
-        return None
-    pending = load_json(
-        pending_path,
-        MAX_MEMORY_WRITEBACK_TASK_BYTES,
+    return _memory_journal_persistence().mark_committed(
+        analysis_id, expected_response_digest=expected_response_digest,
+        pending_dir=pending_dir, committed_dir=committed_dir,
+        max_bytes=MAX_MEMORY_WRITEBACK_TASK_BYTES, safe_filename=safe_filename,
+        load_json=load_json, canonical_digest=canonical_payload_digest,
     )
-    validate_binding(pending)
-    committed_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(committed_dir, stat.S_IRWXU)
-    os.replace(pending_path, committed_path)
-    os.chmod(committed_path, stat.S_IRUSR | stat.S_IWUSR)
-    directory_fd = os.open(committed_dir, os.O_RDONLY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
-    pending_directory_fd = os.open(pending_dir, os.O_RDONLY)
-    try:
-        os.fsync(pending_directory_fd)
-    finally:
-        os.close(pending_directory_fd)
-    return committed_path
 
 
 def process_committed_memory_writeback(
@@ -1353,52 +1255,12 @@ def process_committed_memory_writeback(
     receipt_dir: Path = DEFAULT_MEMORY_WRITEBACK_RECEIPT_DIR,
 ) -> tuple[dict[str, Any], Path | None]:
     """Replay one post-commit task; successful lanes are analysis-idempotent."""
-    if task_path.is_symlink() or not task_path.is_file():
-        raise RuntimeError("committed memory task must be a regular file")
-    task = load_json(task_path, MAX_MEMORY_WRITEBACK_TASK_BYTES)
-    if task.get("schema") != MEMORY_WRITEBACK_TASK_SCHEMA:
-        raise RuntimeError("committed memory task schema is invalid")
-    analysis_id = str(task.get("analysis_id") or "")
-    if task_path.name != f"{safe_filename(analysis_id)}.json":
-        raise RuntimeError("committed memory task identity is invalid")
-    response_digest = str(
-        task.get("submitted_response_sha256") or ""
-    ).lower()
-    if not re.fullmatch(r"[a-f0-9]{64}", response_digest):
-        raise RuntimeError("committed memory task response digest is invalid")
-    primary = task.get("primary")
-    reviewer = task.get("reviewer")
-    if not isinstance(primary, dict) or not isinstance(reviewer, dict):
-        raise RuntimeError("committed memory task lanes are invalid")
-    for lane in (primary, reviewer):
-        candidates = lane.get("candidates")
-        if (
-            not isinstance(candidates, list)
-            or canonical_payload_digest(candidates)
-            != str(lane.get("candidate_manifest_digest") or "")
-        ):
-            raise RuntimeError("committed memory candidate manifest is invalid")
-    receipt, receipt_path = persist_postcommit_memory_writeback(
-        analysis_id=analysis_id,
-        agent_role=str(task.get("agent_role") or ""),
-        role_memory_file=Path(
-            str(task.get("role_memory_file") or "")
-        ).expanduser(),
-        shared_memory_file=Path(
-            str(task.get("shared_memory_file") or "")
-        ).expanduser(),
-        source_artifact=str(task.get("source_artifact") or ""),
-        primary_candidates=primary["candidates"],
-        primary_allowed=bool(primary.get("allowed")),
-        primary_reason=str(primary.get("reason") or ""),
-        reviewer_candidates=reviewer["candidates"],
-        reviewer_allowed=bool(reviewer.get("allowed")),
-        reviewer_reason=str(reviewer.get("reason") or ""),
-        receipt_dir=receipt_dir,
+    return _memory_journal_persistence().process_committed(
+        task_path, receipt_dir=receipt_dir, schema=MEMORY_WRITEBACK_TASK_SCHEMA,
+        max_bytes=MAX_MEMORY_WRITEBACK_TASK_BYTES, safe_filename=safe_filename,
+        load_json=load_json, canonical_digest=canonical_payload_digest,
+        persist=persist_postcommit_memory_writeback,
     )
-    if receipt.get("ok") is True and receipt_path is not None:
-        task_path.unlink()
-    return receipt, receipt_path
 
 
 def resume_committed_memory_writebacks(
@@ -1407,23 +1269,10 @@ def resume_committed_memory_writebacks(
     receipt_dir: Path = DEFAULT_MEMORY_WRITEBACK_RECEIPT_DIR,
     limit: int = 100,
 ) -> tuple[int, int]:
-    if not committed_dir.exists():
-        return 0, 0
-    completed = 0
-    failed = 0
-    for task_path in sorted(committed_dir.glob("*.json"))[:limit]:
-        try:
-            receipt, receipt_path = process_committed_memory_writeback(
-                task_path,
-                receipt_dir=receipt_dir,
-            )
-            if receipt.get("ok") is True and receipt_path is not None:
-                completed += 1
-            else:
-                failed += 1
-        except Exception:
-            failed += 1
-    return completed, failed
+    return _memory_journal_persistence().resume(
+        committed_dir=committed_dir, receipt_dir=receipt_dir, limit=limit,
+        process=process_committed_memory_writeback,
+    )
 
 
 def discard_pending_memory_writeback(
@@ -1431,8 +1280,8 @@ def discard_pending_memory_writeback(
     *,
     pending_dir: Path = DEFAULT_MEMORY_WRITEBACK_PENDING_DIR,
 ) -> None:
-    (pending_dir / f"{safe_filename(analysis_id)}.json").unlink(
-        missing_ok=True
+    _memory_journal_persistence().discard(
+        analysis_id, pending_dir=pending_dir, safe_filename=safe_filename,
     )
 
 
@@ -1785,6 +1634,12 @@ def _analysis_index_persistence():
     _provider_routing()
     from onion_sentinel.analysis.persistence import analysis_index
     return analysis_index
+
+
+def _memory_journal_persistence():
+    _provider_routing()
+    from onion_sentinel.analysis.persistence import memory_journal
+    return memory_journal
 
 
 def normalized_model_roster(value: Any) -> list[str]:
@@ -12683,32 +12538,10 @@ def memory_writeback_plan(
     eligibility_reason: str,
 ) -> dict[str, Any]:
     """Describe a commit-gated memory operation without changing memory."""
-    submitted = len(candidates) if isinstance(candidates, list) else 0
-    normalized = normalize_memory_candidates(candidates)
-    plan = {
-        "submitted": submitted,
-        "accepted": len(normalized),
-        "rejected": max(0, submitted - len(normalized)),
-        "commit_gated": True,
-        "eligibility_reason": str(eligibility_reason or "")[:500],
-    }
-    if not allowed:
-        return {
-            **plan,
-            "skipped": True,
-            "persistence_status": "blocked_before_commit",
-        }
-    if not normalized:
-        return {
-            **plan,
-            "skipped": True,
-            "persistence_status": "no_candidates",
-        }
-    return {
-        **plan,
-        "skipped": False,
-        "persistence_status": "pending_authoritative_commit",
-    }
+    return _memory_journal_persistence().plan(
+        candidates, allowed=allowed, eligibility_reason=eligibility_reason,
+        normalize_candidates=normalize_memory_candidates,
+    )
 
 
 def persist_postcommit_memory_writeback(
@@ -12733,98 +12566,18 @@ def persist_postcommit_memory_writeback(
     analysis or cause the model job to be retried.
     """
 
-    def persist_lane(
-        *,
-        lane: str,
-        candidates: Any,
-        allowed: bool,
-        reason: str,
-        lane_analysis_id: str,
-    ) -> dict[str, Any]:
-        normalized = normalize_memory_candidates(candidates)
-        lane_receipt: dict[str, Any] = {
-            "lane": lane,
-            "candidate_count": len(normalized),
-            "candidate_manifest_digest": canonical_payload_digest(normalized),
-            "eligibility_reason": str(reason or "")[:500],
-        }
-        if not allowed:
-            return {**lane_receipt, "status": "blocked"}
-        if not normalized:
-            return {**lane_receipt, "status": "no_candidates"}
-        if not str(role_memory_file) or not str(shared_memory_file):
-            return {
-                **lane_receipt,
-                "status": "failed",
-                "error_type": "MissingMemoryTarget",
-                "error_digest": canonical_payload_digest(
-                    "memory target path is missing"
-                ),
-            }
-        try:
-            result = persist_memory_candidates(
-                agent_role=agent_role,
-                role_memory_file=role_memory_file,
-                shared_memory_file=shared_memory_file,
-                candidates=normalized,
-                analysis_id=lane_analysis_id,
-                source_artifact=source_artifact,
-            )
-        except Exception as exc:
-            return {
-                **lane_receipt,
-                "status": "failed",
-                "error_type": type(exc).__name__,
-                "error_digest": canonical_payload_digest(str(exc)),
-            }
-        return {
-            **lane_receipt,
-            "status": "persisted",
-            "result": result,
-        }
-
-    receipt: dict[str, Any] = {
-        "schema": "onion-sentinel-memory-writeback-receipt-v1",
-        "analysis_id": str(analysis_id)[:128],
-        "authoritative_analysis_committed": True,
-        "committed_memory_at": project_now(),
-        "primary": persist_lane(
-            lane="primary",
-            candidates=primary_candidates,
-            allowed=primary_allowed,
-            reason=primary_reason,
-            lane_analysis_id=analysis_id,
-        ),
-        "reviewer": persist_lane(
-            lane="reviewer",
-            candidates=reviewer_candidates,
-            allowed=reviewer_allowed,
-            reason=reviewer_reason,
-            lane_analysis_id=f"{analysis_id}-reviewer",
-        ),
-    }
-    receipt["ok"] = all(
-        receipt[lane]["status"] != "failed"
-        for lane in ("primary", "reviewer")
+    return _memory_journal_persistence().persist_postcommit(
+        analysis_id=analysis_id, agent_role=agent_role,
+        role_memory_file=role_memory_file, shared_memory_file=shared_memory_file,
+        source_artifact=source_artifact, primary_candidates=primary_candidates,
+        primary_allowed=primary_allowed, primary_reason=primary_reason,
+        reviewer_candidates=reviewer_candidates,
+        reviewer_allowed=reviewer_allowed, reviewer_reason=reviewer_reason,
+        receipt_dir=receipt_dir, normalize_candidates=normalize_memory_candidates,
+        canonical_digest=canonical_payload_digest,
+        persist_candidates=persist_memory_candidates, safe_filename=safe_filename,
+        atomic_write_private_json=atomic_write_private_json, now=project_now,
     )
-    receipt_path = receipt_dir / f"{safe_filename(analysis_id)}.json"
-    receipt["receipt_storage"] = {
-        "status": "stored",
-        # This binds the privacy-preserving receipt payload. The storage
-        # envelope itself is intentionally excluded to avoid a self-hash.
-        "receipt_payload_digest": canonical_payload_digest(receipt),
-    }
-    try:
-        atomic_write_private_json(receipt_path, receipt)
-    except Exception as exc:
-        receipt["ok"] = False
-        receipt["receipt_storage"] = {
-            "status": "failed",
-            "error_type": type(exc).__name__,
-            "error_digest": canonical_payload_digest(str(exc)),
-        }
-        return receipt, None
-    return receipt, receipt_path
 
 
 def apply_review_required_gate(
