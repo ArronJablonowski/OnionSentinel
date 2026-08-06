@@ -1,0 +1,66 @@
+{
+  "schema": "onion-sentinel-module-quality-policy-v1",
+  "module_target_lines": 600,
+  "new_module_max_lines": 800,
+  "absolute_new_file_max_lines": 1200,
+  "function_target_lines": 50,
+  "new_function_max_lines": 100,
+  "complexity_target": 10,
+  "new_complexity_max": 15,
+  "include": [
+    "n8n/bin/*.py",
+    "n8n/onion_sentinel/**/*.py",
+    "n8n/alert_store/*.js",
+    "n8n/alert_store/lib/*.js",
+    "n8n/alert_store/routes/**/*.js",
+    "n8n/alert_store/services/**/*.js",
+    "n8n/alert_store/repositories/**/*.js",
+    "n8n/alert_store/jobs/**/*.js",
+    "onion-sentinel-dashboard/*.py",
+    "onion-sentinel-dashboard/scripts/*.py",
+    "onion-sentinel-dashboard/portal/**/*.py",
+    "onion-sentinel-dashboard/pages/**/*.py",
+    "onion-sentinel-dashboard/components/**/*.py",
+    "relay/app/*.py",
+    "security-onion/bin/*.py",
+    "operations/*.py",
+    "operations/onion_sentinel_eval/**/*.py"
+  ],
+  "exclude": [
+    "n8n/compat/**",
+    "operations/fixtures/**",
+    "**/__pycache__/**"
+  ],
+  "python_import_roots": [
+    "n8n/bin",
+    "n8n",
+    "onion-sentinel-dashboard",
+    "onion-sentinel-dashboard/scripts",
+    "relay/app",
+    "security-onion/bin",
+    "operations",
+    "operations/onion_sentinel_eval"
+  ],
+  "forbidden_dependencies": [
+    {
+      "from": "n8n/onion_sentinel/contracts/**",
+      "to": "n8n/onion_sentinel/analysis/providers/**"
+    },
+    {
+      "from": "n8n/onion_sentinel/contracts/**",
+      "to": "n8n/bin/**"
+    },
+    {
+      "from": "n8n/onion_sentinel/analysis/**",
+      "to": "n8n/bin/**"
+    },
+    {
+      "from": "onion-sentinel-dashboard/portal/services/**",
+      "to": "onion-sentinel-dashboard/portal/routes/**"
+    },
+    {
+      "from": "onion-sentinel-dashboard/portal/renderers/**",
+      "to": "onion-sentinel-dashboard/portal/routes/**"
+    }
+  ]
+}

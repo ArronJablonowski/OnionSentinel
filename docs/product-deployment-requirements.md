@@ -188,6 +188,7 @@ n8n webhook path, alert-store logs, and the SQLite `notification_log` table.
 Before commit and push, run:
 
 ```bash
+python3 operations/check-module-quality.py
 ./operations/secret-scan.zsh
 git diff --check
 zsh -n n8n/bin/*.zsh operations/*.zsh

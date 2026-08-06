@@ -208,6 +208,7 @@ Never commit these live files:
 Before pushing:
 
 ```bash
+python3 operations/check-module-quality.py
 operations/secret-scan.zsh
 git status --short
 git diff --cached --stat
@@ -224,6 +225,7 @@ open README.md
 open docs/disaster-recovery-runbook.md
 
 # Run local secret scan before first push or commit.
+python3 operations/check-module-quality.py
 operations/secret-scan.zsh
 ```
 

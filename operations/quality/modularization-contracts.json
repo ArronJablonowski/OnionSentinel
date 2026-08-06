@@ -1,0 +1,93 @@
+{
+  "schema": "onion-sentinel-modularization-contracts-v1",
+  "baseline_release": "3eec576a59b51b74badcc042de2e3418fca9c867",
+  "python_entry_points": [
+    {
+      "path": "n8n/bin/run-local-ai-analysis.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/run-local-ai-analysis.py",
+      "required_symbols": [
+        "SystemResourceMonitor",
+        "analyze_with_config",
+        "apply_investigation_query_loop",
+        "main",
+        "parse_args",
+        "render_markdown",
+        "validate_response",
+        "write_outputs"
+      ]
+    },
+    {
+      "path": "n8n/bin/auto-run-ai-analysis.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/auto-run-ai-analysis.py",
+      "required_symbols": [
+        "main",
+        "parse_args",
+        "reconcile_terminal_success_durable_jobs",
+        "run_analysis"
+      ]
+    },
+    {
+      "path": "n8n/bin/onion_sentinel_harness.py",
+      "deployment": "direct-copy",
+      "runtime_path": "$STACK_DIR/bin/onion_sentinel_harness.py",
+      "required_symbols": [
+        "HarnessPolicy",
+        "HarnessRun",
+        "HarnessStore",
+        "start_harness_run"
+      ]
+    },
+    {
+      "path": "n8n/bin/build-ai-investigation-prompt.py",
+      "deployment": "versioned-query-runtime",
+      "runtime_path": "$STACK_DIR/bin/build-ai-investigation-prompt.py",
+      "required_symbols": [
+        "build_package",
+        "compact_package_to_budget",
+        "investigation_query_context",
+        "main"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/report_portal.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/report_portal.py",
+      "required_symbols": [
+        "PortalHandler",
+        "main",
+        "render_incident_response_report_html",
+        "soc_incidents_query_response"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/build_soc_alerts_dashboard.py",
+      "required_symbols": [
+        "build_html",
+        "main",
+        "render_static_page",
+        "settings_page_section"
+      ]
+    }
+  ],
+  "node_entry_points": [
+    {
+      "path": "n8n/alert_store/alert_store.js",
+      "deployment": "alert-store-direct-copy",
+      "runtime_path": "$STACK_DIR/alert_store/alert_store.js",
+      "package": "n8n/alert_store/package.json",
+      "package_main": "alert_store.js",
+      "package_start": "node alert_store.js"
+    }
+  ],
+  "stable_service_contracts": [
+    "Security Onion and Relay investigation evidence remains read-only",
+    "legacy CLI paths, arguments, and exit semantics remain compatible",
+    "HTTP route method/path, authorization, status, and schema remain compatible",
+    "launchd labels and runtime paths remain compatible",
+    "database and investigation-query wire contracts require separate versioned migrations"
+  ]
+}

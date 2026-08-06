@@ -2,6 +2,12 @@
 
 Important documents:
 
+- `architecture/modularization-adr.md`: accepted modularization decision,
+  dependency rules, compatibility constraints, engineering budgets, and
+  migration gates for decomposing the largest production files.
+- `architecture/modularization-module-map.md`: current-to-target responsibility
+  map, stable interfaces, side-effect ownership, deployment changes, and
+  extraction sequence.
 - `disaster-recovery-runbook.md`: end-to-end restore.
 - `security-onion-relay-architecture.md`: full system architecture.
 - `soc-alert-storage-ui-scaling-architecture.md`: SQLite-backed dashboard/API design.

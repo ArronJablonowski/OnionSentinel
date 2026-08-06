@@ -2,6 +2,30 @@
 
 Cross-node checks and operator workflows live here.
 
+## Module Quality Gate
+
+```bash
+python3 operations/check-module-quality.py
+```
+
+The gate enforces the modularization policy in `quality/` without adding a
+runtime dependency. Existing oversized modules and functions are recorded in a
+ratcheting baseline: they may shrink but may not grow. New production modules,
+new functions, complexity regressions, import cycles, and forbidden dependency
+directions fail. Human-readable output reports the warning count; use `--json`
+for detailed measurements.
+
+After a reviewed refactor reduces existing debt, update the baseline with:
+
+```bash
+python3 operations/check-module-quality.py --update-baseline
+```
+
+The update refuses to run if any current measurement exceeds its existing
+allowance. Review the baseline diff before commit. Do not use the baseline to
+approve new debt; exceptions require the architecture review described in
+`../docs/architecture/modularization-adr.md`.
+
 ## Verify Stack
 
 ```bash
