@@ -14,6 +14,7 @@ import tempfile
 
 REQUIRED_MODULES = (
     "onion_sentinel",
+    "onion_sentinel.analysis.providers.ollama",
     "onion_sentinel.analysis.providers.routing",
     "onion_sentinel.composition",
     "onion_sentinel.contracts.errors",

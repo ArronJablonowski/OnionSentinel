@@ -1,5 +1,5 @@
 """Provider adapters and exact model-routing policy."""
 
-from . import routing
+from . import ollama, routing
 
-__all__ = ["routing"]
+__all__ = ["ollama", "routing"]

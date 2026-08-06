@@ -50,6 +50,9 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
   metadata, external-harness route handling, and reviewer model identity now
   live in `onion_sentinel.analysis.providers.routing`. The legacy runner keeps
   thin symbol delegates for dynamic-import compatibility.
+- The bounded Ollama HTTP request, task selection, host-wide inference lock,
+  best-effort unload, ordered enabled-model failover, and observed-model
+  mismatch guard now live in `onion_sentinel.analysis.providers.ollama`.
 - Provider-specific Ollama, Codex, Hermes, and OpenClaw transports remain in
   the legacy runner until their bounded process/HTTP, identity-attestation,
   malformed-output, timeout, missing-binary, and credential-isolation tests
