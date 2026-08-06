@@ -1654,6 +1654,24 @@ def _conclusion_confidence():
     return confidence
 
 
+def _conclusion_authorization():
+    _provider_routing()
+    from onion_sentinel.analysis.conclusions import authorization
+    return authorization
+
+
+def _authorization_guard_dependencies():
+    module = _conclusion_authorization()
+    return module.Dependencies(
+        is_incident_responder=_is_incident_responder_package,
+        has_authorization_evidence=_has_structured_authorization_evidence,
+        has_trusted_endpoint_evidence=_has_trusted_endpoint_evidence,
+        derive_legacy_outcome=derive_legacy_detection_outcome,
+        control_tuning_values=frozenset(CONTROL_TUNING_VALUES),
+        factored_verdict_keys=frozenset(FACTORED_VERDICT_KEYS),
+    )
+
+
 def _review_comparison():
     _provider_routing()
     from onion_sentinel.analysis.review import comparison
@@ -13818,249 +13836,19 @@ def apply_authorized_benign_evidence_guard(
     prompt_package: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Remove unsupported authorization and no-action claims from IR cases."""
-    if (
-        not _is_incident_responder_package(prompt_package)
-        or str(response.get("activity_disposition") or "").strip().lower()
-        != "authorized_benign"
-    ):
-        return response
-    supported = _has_structured_authorization_evidence(prompt_package)
-    audit = {
-        "version": 1,
-        "authorization_supported": supported,
-        "override_applied": False,
-        "required_sources": [
-            "approved_change",
-            "human_adjudication",
-            "operator_assertion",
-            "policy_exception",
-        ],
-    }
-    if supported:
-        response["_authorization_evidence_guard"] = audit
-        return response
-
-    original = {
-        key: response.get(key)
-        for key in (
-            "detection_outcome",
-            "activity_disposition",
-            "handling",
-            "tuning_recommendation",
-        )
-    }
-    response["activity_disposition"] = "benign"
-    if str(response.get("handling") or "").strip().lower() == "no_action":
-        response["handling"] = "monitor"
-    if (
-        str(response.get("tuning_recommendation") or "").strip().lower()
-        in CONTROL_TUNING_VALUES
-    ):
-        response["tuning_recommendation"] = "needs_more_data"
-        response["recommended_tuning_actions"] = []
-        response["tuning_reason"] = (
-            "Suppress/drop tuning is blocked because no structured operator "
-            "authorization evidence covers the selected activity."
-        )
-    response["detection_outcome"] = derive_legacy_detection_outcome(
-        {
-            key: response.get(key)
-            for key in FACTORED_VERDICT_KEYS
-        }
+    return _conclusion_authorization().apply_authorized_benign(
+        response, prompt_package, _authorization_guard_dependencies(),
     )
-    evidence_gaps = (
-        list(response.get("evidence_gaps"))
-        if isinstance(response.get("evidence_gaps"), list)
-        else []
-    )
-    gap = (
-        "No structured operator authorization evidence covers the selected "
-        "activity; benign context cannot establish authorized_benign."
-    )
-    if gap not in evidence_gaps:
-        evidence_gaps.append(gap)
-    response["evidence_gaps"] = evidence_gaps
-    verdict_validation = (
-        dict(response.get("_verdict_validation"))
-        if isinstance(response.get("_verdict_validation"), dict)
-        else {}
-    )
-    warnings = (
-        list(verdict_validation.get("warnings"))
-        if isinstance(verdict_validation.get("warnings"), list)
-        else []
-    )
-    warning = "unsupported authorized_benign claim was downgraded to benign/monitor"
-    if warning not in warnings:
-        warnings.append(warning)
-    verdict_validation["warnings"] = warnings
-    verdict_validation["canonical_legacy_outcome"] = response[
-        "detection_outcome"
-    ]
-    verdict_validation["derived_legacy_outcome"] = response[
-        "detection_outcome"
-    ]
-    response["_verdict_validation"] = verdict_validation
-    audit.update(
-        {
-            "override_applied": True,
-            "original_verdict": original,
-            "guarded_verdict": {
-                key: response.get(key)
-                for key in (
-                    "detection_outcome",
-                    "activity_disposition",
-                    "handling",
-                    "tuning_recommendation",
-                )
-            },
-        }
-    )
-    response["_authorization_evidence_guard"] = audit
-    return response
 
 
 def apply_policy_sensitive_activity_guard(
     response: dict[str, Any],
     prompt_package: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Keep policy-sensitive application detections unresolved when unattributed.
-
-    A real DoH or Discord match proves application/domain use, not that the
-    initiating endpoint process is benign or that local policy permits the
-    activity. Without either trusted endpoint attribution or a structured
-    authorization record, ``benign/no_action`` would overstate the evidence.
-    """
-    if not _is_incident_responder_package(prompt_package):
-        return response
-    alert = (
-        prompt_package.get("alert")
-        if isinstance(prompt_package.get("alert"), dict)
-        else {}
+    """Keep unattributed policy-sensitive application detections unresolved."""
+    return _conclusion_authorization().apply_policy_sensitive(
+        response, prompt_package, _authorization_guard_dependencies(),
     )
-    rule_name = str(alert.get("rule_name") or "").strip().lower()
-    policy_class = next(
-        (
-            marker
-            for marker in ("dns over https", "discord")
-            if marker in rule_name
-        ),
-        "",
-    )
-    if (
-        not policy_class
-        or str(response.get("activity_disposition") or "").strip().lower()
-        != "benign"
-    ):
-        return response
-
-    authorization_supported = _has_structured_authorization_evidence(
-        prompt_package
-    )
-    endpoint_attribution_supported = _has_trusted_endpoint_evidence(
-        prompt_package
-    )
-    audit = {
-        "version": 1,
-        "policy_class": policy_class,
-        "authorization_supported": authorization_supported,
-        "endpoint_attribution_supported": endpoint_attribution_supported,
-        "override_applied": False,
-    }
-    if authorization_supported:
-        response["_policy_sensitive_activity_guard"] = audit
-        return response
-
-    original = {
-        key: response.get(key)
-        for key in (
-            "detection_outcome",
-            "activity_disposition",
-            "handling",
-            "tuning_recommendation",
-        )
-    }
-    if not endpoint_attribution_supported:
-        response["activity_disposition"] = "unknown"
-    if str(response.get("handling") or "").strip().lower() == "no_action":
-        response["handling"] = "monitor"
-    if (
-        str(response.get("tuning_recommendation") or "").strip().lower()
-        in CONTROL_TUNING_VALUES
-    ):
-        response["tuning_recommendation"] = "needs_more_data"
-        response["recommended_tuning_actions"] = []
-        response["tuning_reason"] = (
-            "Suppress/drop tuning is blocked because the policy-sensitive "
-            "activity lacks structured local authorization evidence."
-        )
-    response["detection_outcome"] = derive_legacy_detection_outcome(
-        {
-            key: response.get(key)
-            for key in FACTORED_VERDICT_KEYS
-        }
-    )
-
-    evidence_gaps = (
-        list(response.get("evidence_gaps"))
-        if isinstance(response.get("evidence_gaps"), list)
-        else []
-    )
-    gap = (
-        "Policy-sensitive application activity lacks trusted endpoint "
-        "attribution and structured local authorization evidence; "
-        "benign/no-action is not established."
-        if not endpoint_attribution_supported
-        else (
-            "Policy-sensitive application activity has endpoint attribution "
-            "but no structured local authorization evidence; no-action is "
-            "not established."
-        )
-    )
-    if gap not in evidence_gaps:
-        evidence_gaps.append(gap)
-    response["evidence_gaps"] = evidence_gaps
-
-    verdict_validation = (
-        dict(response.get("_verdict_validation"))
-        if isinstance(response.get("_verdict_validation"), dict)
-        else {}
-    )
-    warnings = (
-        list(verdict_validation.get("warnings"))
-        if isinstance(verdict_validation.get("warnings"), list)
-        else []
-    )
-    warning = (
-        "unsupported policy-sensitive benign/no_action claim was downgraded"
-    )
-    if warning not in warnings:
-        warnings.append(warning)
-    verdict_validation["warnings"] = warnings
-    verdict_validation["canonical_legacy_outcome"] = response[
-        "detection_outcome"
-    ]
-    verdict_validation["derived_legacy_outcome"] = response[
-        "detection_outcome"
-    ]
-    response["_verdict_validation"] = verdict_validation
-    audit.update(
-        {
-            "override_applied": True,
-            "original_verdict": original,
-            "guarded_verdict": {
-                key: response.get(key)
-                for key in (
-                    "detection_outcome",
-                    "activity_disposition",
-                    "handling",
-                    "tuning_recommendation",
-                )
-            },
-        }
-    )
-    response["_policy_sensitive_activity_guard"] = audit
-    return response
 
 
 def _incident_timeline_timestamp(value: Any) -> dt.datetime | None:
