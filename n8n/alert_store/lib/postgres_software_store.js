@@ -149,7 +149,8 @@ function publicRow(row) {
   result.asset_label = '';
   result.operating_system_observed_at = (
     result.source === 'osquery_apps'
-    && result.operating_system_source === 'osquery_manager.result:host.os'
+    && ['osquery_manager.result:host.os', 'osquery.live:os_version']
+      .includes(result.operating_system_source)
     && (result.operating_system_type || result.operating_system_version)
   ) ? result.last_seen : '';
   result.operating_system_freshness = result.operating_system_observed_at
@@ -467,6 +468,17 @@ function createPostgresSoftwareStore({pool, schemaPath, logger = console}) {
     if (Number(coverageRows.fresh_endpoint_inventories) === 0) {
       warnings.push('No current endpoint-reported inventory is visible; passive network evidence cannot prove software is absent.');
     }
+    const sourceStatuses = collection.source_statuses && typeof collection.source_statuses === 'object'
+      && !Array.isArray(collection.source_statuses) ? collection.source_statuses : {};
+    for (const [source, status] of Object.entries(sourceStatuses)) {
+      if (!status || typeof status !== 'object' || Array.isArray(status)) continue;
+      const freshness = String(status.freshness || 'unknown').toLowerCase();
+      if (['stale', 'expired'].includes(freshness)) {
+        const latest = status.latest_observation_at
+          ? `; latest observation ${String(status.latest_observation_at)}` : '';
+        warnings.push(`${source.replaceAll('_', ' ')} evidence is ${freshness}${latest}.`);
+      }
+    }
     return {
       ok: true,
       schema: 'onion-sentinel-software-inventory-api-v1',
@@ -502,9 +514,10 @@ function createPostgresSoftwareStore({pool, schemaPath, logger = console}) {
 
   async function stats() {
     const result = await pool.query(
-      `SELECT snapshot_id, expected_records, updated_at, activated_at
+      `SELECT snapshot_id, expected_records, updated_at, activated_at, collection
        FROM onion_sentinel_software.snapshots WHERE status = 'active'`,
     );
+    const collection = result.rows[0]?.collection;
     return {
       enabled: true,
       available: true,
@@ -514,6 +527,11 @@ function createPostgresSoftwareStore({pool, schemaPath, logger = console}) {
       records: Number(result.rows[0]?.expected_records || 0),
       updated_at: result.rows[0]?.updated_at
         ? new Date(result.rows[0].updated_at).toISOString() : null,
+      source_statuses: collection && typeof collection === 'object'
+        && !Array.isArray(collection)
+        && collection.source_statuses && typeof collection.source_statuses === 'object'
+        && !Array.isArray(collection.source_statuses)
+        ? collection.source_statuses : {},
     };
   }
 

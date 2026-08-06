@@ -270,6 +270,27 @@ def load_live_osquery_config(path: Path = DEFAULT_CONFIG_FILE) -> dict[str, Any]
             else ""
         ),
     }
+    scheduled_source = source.get("scheduled_inventory_approval") or {}
+    if not isinstance(scheduled_source, dict):
+        raise LiveOsqueryClientError(
+            "scheduled_inventory_approval must be an object"
+        )
+    scheduled_approved = scheduled_source.get("approved", False)
+    if not isinstance(scheduled_approved, bool):
+        raise LiveOsqueryClientError(
+            "scheduled_inventory_approval.approved must be boolean"
+        )
+    scheduled_aliases = normalize_target_aliases(
+        scheduled_source.get("target_aliases") or []
+    )
+    if any(alias not in aliases for alias in scheduled_aliases):
+        raise LiveOsqueryClientError(
+            "scheduled inventory approval contains an unconfigured target alias"
+        )
+    config["scheduled_inventory_approval"] = {
+        "approved": scheduled_approved,
+        "target_aliases": scheduled_aliases,
+    }
     if not enabled:
         return config
     host = str(source.get("relay_host") or "").strip()
@@ -342,6 +363,20 @@ def harness_operator_approved(
     return current.astimezone(dt.timezone.utc) < expiration.astimezone(
         dt.timezone.utc
     )
+
+
+def scheduled_inventory_approved(
+    config: dict[str, Any] | None,
+    target_alias: Any,
+) -> bool:
+    """Authorize only the fixed, operator-installed inventory scheduler."""
+    if not isinstance(config, dict) or config.get("enabled") is not True:
+        return False
+    approval = config.get("scheduled_inventory_approval")
+    if not isinstance(approval, dict) or approval.get("approved") is not True:
+        return False
+    alias = str(target_alias or "").strip().lower()
+    return alias in (approval.get("target_aliases") or [])
 
 
 def capability_descriptor(config: dict[str, Any]) -> dict[str, Any]:
@@ -556,6 +591,7 @@ def collect_live_osquery(
     requests: Any,
     config: dict[str, Any],
     persist: bool = True,
+    approval_scope: str = "harness",
 ) -> dict[str, Any]:
     """Submit and validate one bounded live-query batch through the relay."""
     if config.get("enabled") is not True:
@@ -566,11 +602,17 @@ def collect_live_osquery(
     )
     if not normalized:
         raise LiveOsqueryClientError("no valid live-host OSQuery requests were supplied")
+    if approval_scope == "harness":
+        approval_check = harness_operator_approved
+    elif approval_scope == "scheduled_inventory":
+        approval_check = scheduled_inventory_approved
+    else:
+        raise LiveOsqueryClientError("live-host OSQuery approval scope is invalid")
     unapproved_aliases = sorted(
         {
             item["target_alias"]
             for item in normalized
-            if not harness_operator_approved(config, item["target_alias"])
+            if not approval_check(config, item["target_alias"])
         }
     )
     if unapproved_aliases:

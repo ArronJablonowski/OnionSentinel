@@ -455,6 +455,77 @@ class OperationalSloTests(unittest.TestCase):
             1478,
         )
 
+    def test_expired_osquery_source_fails_even_when_snapshot_is_fresh(self):
+        now = dt.datetime(2026, 8, 6, 13, tzinfo=dt.timezone.utc)
+        failures, snapshot = self.slo.evaluate(
+            {"metrics": {"process": {"ingest_errors": 0}}},
+            {"summary": {"latest": {"timestamp_utc": "2026-08-06T12:59:30Z"}}},
+            now=now,
+            disk_used_percent=55,
+            sqlite_backup_age=60,
+            postgres_backup_age=60,
+            previous_ingest_errors=0,
+            software_inventory_health={
+                "enabled": True,
+                "available": True,
+                "records": 1486,
+                "updated_at": "2026-08-06T12:59:00Z",
+                "source_statuses": {
+                    "osquery_apps": {
+                        "status": "ok",
+                        "freshness": "expired",
+                        "returned": 1106,
+                    },
+                    "zeek_software": {
+                        "status": "ok",
+                        "freshness": "fresh",
+                        "returned": 203,
+                    },
+                },
+            },
+        )
+
+        self.assertIn(
+            "Software Inventory OSQuery endpoint evidence is expired",
+            failures,
+        )
+        self.assertEqual(
+            snapshot["signals"]["software_inventory_source_statuses"]
+            ["osquery_apps"]["freshness"],
+            "expired",
+        )
+
+    def test_empty_osquery_source_is_an_advisory(self):
+        now = dt.datetime(2026, 8, 6, 13, tzinfo=dt.timezone.utc)
+        failures, snapshot = self.slo.evaluate(
+            {"metrics": {"process": {"ingest_errors": 0}}},
+            {"summary": {"latest": {"timestamp_utc": "2026-08-06T12:59:30Z"}}},
+            now=now,
+            disk_used_percent=55,
+            sqlite_backup_age=60,
+            postgres_backup_age=60,
+            previous_ingest_errors=0,
+            software_inventory_health={
+                "enabled": True,
+                "available": True,
+                "records": 300,
+                "updated_at": "2026-08-06T12:59:00Z",
+                "source_statuses": {
+                    "osquery_apps": {
+                        "status": "ok",
+                        "freshness": "empty",
+                        "returned": 0,
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(failures, [])
+        self.assertIn(
+            "Software Inventory has no OSQuery endpoint evidence",
+            snapshot["advisories"],
+        )
+
     def test_inactive_capture_protection_does_not_hide_stale_backlog(self):
         now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
         metrics = {"metrics": {

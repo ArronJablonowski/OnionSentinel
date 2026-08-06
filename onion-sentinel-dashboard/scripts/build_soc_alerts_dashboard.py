@@ -7446,11 +7446,11 @@ def software_inventory_page_section() -> str:
         const collectionWindow=collection.window&&typeof collection.window==='object'?collection.window:{};
         if(collectionWindow.start&&collectionWindow.end)parts.push(`window ${String(collectionWindow.start).replace('T','  ')} to ${String(collectionWindow.end).replace('T','  ')}`);
         const sourceStatuses=collection.source_statuses&&typeof collection.source_statuses==='object'?Object.entries(collection.source_statuses):[];
-        sourceStatuses.forEach(([source,value])=>parts.push(`${words(source)} ${words(first(value?.status,'unknown'))}`));
+        sourceStatuses.forEach(([source,value])=>{const sourceParts=[`${words(source)} ${words(first(value?.status,'unknown'))}`];if(value?.freshness)sourceParts.push(words(value.freshness));if(value?.latest_observation_at)sourceParts.push(`latest ${String(value.latest_observation_at).replace('T','  ')}`);parts.push(sourceParts.join(' · '))});
         const last=first(collection.last_success_at,collection.collected_at,collection.observed_at);
         if(last)parts.push(`last success ${String(last).replace('T','  ')}`);
         collectionStatus.textContent=parts.join(' · ');
-        const sourceProblem=sourceStatuses.some(([,value])=>{const sourceState=token(first(value?.status,'unknown'));return Boolean(value?.error)||!['ok','complete','success','successful'].includes(sourceState)});
+        const sourceProblem=sourceStatuses.some(([,value])=>{const sourceState=token(first(value?.status,'unknown')),sourceFreshness=token(first(value?.freshness,'unknown'));return Boolean(value?.error)||!['ok','complete','success','successful'].includes(sourceState)||['stale','expired'].includes(sourceFreshness)});
         collectionStatus.dataset.state=state.includes('fail')||state.includes('error')||state.includes('unavailable')||state.includes('missing')?'failed':state.includes('partial')||collection.complete===false||sourceProblem?'partial':state.includes('stale')?'stale':'ok';
         const warnings=Array.isArray(payload.warnings)?payload.warnings.filter(value=>String(value||'').trim()).slice(0,20):[];
         warningList.innerHTML=warnings.map(value=>`<li>${esc(value)}</li>`).join('');

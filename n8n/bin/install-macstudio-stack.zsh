@@ -132,6 +132,7 @@ critical_launch_agents_down() {
     com.arron.soc.ai-analysis.plist \
     com.arron.soc.ai-analysis-cli.plist \
     com.arron.soc.dhcp-asset-discovery.plist \
+    com.arron.soc.endpoint-software-inventory.plist \
     com.arron.soc.software-inventory.plist \
     com.arron.soc.ac-hunter.plist
   do
@@ -142,6 +143,7 @@ critical_launch_agents_down() {
     com.arron.soc.ai-analysis \
     com.arron.soc.ai-analysis-cli \
     com.arron.soc.dhcp-asset-discovery \
+    com.arron.soc.endpoint-software-inventory \
     com.arron.soc.software-inventory \
     com.arron.soc.ac-hunter
   do
@@ -213,6 +215,7 @@ critical_launch_agents_are_down() {
     com.arron.soc.ai-analysis \
     com.arron.soc.ai-analysis-cli \
     com.arron.soc.dhcp-asset-discovery \
+    com.arron.soc.endpoint-software-inventory \
     com.arron.soc.software-inventory \
     com.arron.soc.ac-hunter
   do
@@ -534,6 +537,7 @@ cp "$REPO_DIR/n8n/bin/detection_validation.py" "$STACK_DIR/bin/detection_validat
 cp "$REPO_DIR/n8n/bin/investigation_skills.py" "$STACK_DIR/bin/investigation_skills.py"
 cp "$REPO_DIR/n8n/bin/asset_inventory.py" "$STACK_DIR/bin/asset_inventory.py"
 cp "$REPO_DIR/n8n/bin/collect-dhcp-asset-discovery.py" "$STACK_DIR/bin/collect-dhcp-asset-discovery.py"
+cp "$REPO_DIR/n8n/bin/collect-endpoint-software-inventory.py" "$STACK_DIR/bin/collect-endpoint-software-inventory.py"
 cp "$REPO_DIR/n8n/bin/collect-software-inventory.py" "$STACK_DIR/bin/collect-software-inventory.py"
 cp "$REPO_DIR/n8n/bin/collect-ac-hunter.py" "$STACK_DIR/bin/collect-ac-hunter.py"
 cp "$REPO_DIR/n8n/bin/migrate-software-inventory-to-postgres.py" "$STACK_DIR/bin/migrate-software-inventory-to-postgres.py"
@@ -793,6 +797,7 @@ for plist in \
   com.arron.soc.dashboard-refresh.plist \
   com.arron.soc.daily-rollup.plist \
   com.arron.soc.dhcp-asset-discovery.plist \
+  com.arron.soc.endpoint-software-inventory.plist \
   com.arron.soc.software-inventory.plist \
   com.arron.soc.ac-hunter.plist \
   com.arron.onion-sentinel.web.plist \
@@ -831,6 +836,7 @@ launchctl unload "$LAUNCHD_DIR/com.arron.soc.pcap-retention.plist" >/dev/null 2>
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.dashboard-refresh.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.dhcp-asset-discovery.plist" >/dev/null 2>&1 || true
+launchctl unload "$LAUNCHD_DIR/com.arron.soc.endpoint-software-inventory.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.software-inventory.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.soc.ac-hunter.plist" >/dev/null 2>&1 || true
 launchctl unload "$LAUNCHD_DIR/com.arron.onion-sentinel.web-guard.plist" >/dev/null 2>&1 || true
@@ -909,6 +915,7 @@ launchctl load "$LAUNCHD_DIR/com.arron.soc.ai-analysis-cli.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.dashboard-refresh.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.daily-rollup.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.dhcp-asset-discovery.plist"
+launchctl load "$LAUNCHD_DIR/com.arron.soc.endpoint-software-inventory.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.software-inventory.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.soc.ac-hunter.plist"
 launchctl load "$LAUNCHD_DIR/com.arron.onion-sentinel.web.plist"

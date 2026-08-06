@@ -52,6 +52,7 @@ from live_osquery_client import (  # noqa: E402
     collect_live_osquery,
     harness_operator_approved,
     load_live_osquery_config,
+    scheduled_inventory_approved,
 )
 
 
@@ -1223,6 +1224,8 @@ class LiveOsqueryClientConfigTests(unittest.TestCase):
         )
         self.assertIn("osquery_info", descriptor["allowed_tables"])
         self.assertIn("os_version", descriptor["allowed_tables"])
+        self.assertIn("apps", descriptor["allowed_tables"])
+        self.assertIn("bundle_identifier", descriptor["table_schemas"]["apps"])
         for unsafe_or_non_darwin in ("deb_packages", "rpm_packages", "suid_bin"):
             self.assertNotIn(unsafe_or_non_darwin, descriptor["allowed_tables"])
         self.assertIn("SELECT * is forbidden", descriptor["restrictions"])
@@ -1288,6 +1291,17 @@ class LiveOsqueryClientConfigTests(unittest.TestCase):
                 now=dt.datetime(2100, 1, 1, tzinfo=dt.timezone.utc),
             )
         )
+
+    def test_scheduled_inventory_approval_is_independent_and_alias_scoped(self):
+        config = {
+            "enabled": True,
+            "scheduled_inventory_approval": {
+                "approved": True,
+                "target_aliases": ["endpoint-a"],
+            },
+        }
+        self.assertTrue(scheduled_inventory_approved(config, "endpoint-a"))
+        self.assertFalse(scheduled_inventory_approved(config, "endpoint-b"))
 
     def test_enabled_config_requires_safe_target_asset_bindings(self):
         with tempfile.TemporaryDirectory() as temp_name:

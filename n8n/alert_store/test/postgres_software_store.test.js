@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
+  createPostgresSoftwareStore,
   normalizeRecord,
   parseQuery,
 } = require('../lib/postgres_software_store');
@@ -87,4 +88,26 @@ test('alert-store route serializes the default observation time', () => {
     source,
     /parsedUrl\.searchParams\.get\('observed_at'\)[\s\S]{0,100}new Date\(\)\.toISOString\(\)/,
   );
+});
+
+test('health stats preserve per-source freshness without exposing records', async () => {
+  const pool = {
+    async query() {
+      return {rows: [{
+        snapshot_id: 'a'.repeat(64),
+        expected_records: 12,
+        updated_at: new Date('2026-08-06T13:00:00Z'),
+        collection: {
+          source_statuses: {
+            osquery_apps: {status: 'ok', freshness: 'expired', returned: 10},
+          },
+        },
+      }]};
+    },
+  };
+  const store = createPostgresSoftwareStore({pool, schemaPath: '/unused'});
+  const result = await store.stats();
+  assert.equal(result.source_statuses.osquery_apps.freshness, 'expired');
+  assert.equal(result.records, 12);
+  assert.equal(result.collection, undefined);
 });

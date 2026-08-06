@@ -34,11 +34,14 @@ SOURCES = {
     "http_user_agent": ("inferred", "low"),
 }
 SOURCE_DATASETS = {
-    "osquery_apps": "osquery_manager.result",
-    "zeek_software": "zeek.software",
-    "http_user_agent": "zeek.http",
+    "osquery_apps": {"osquery_manager.result", "osquery.live.software_inventory"},
+    "zeek_software": {"zeek.software"},
+    "http_user_agent": {"zeek.http"},
 }
-ENDPOINT_OS_SOURCE = "osquery_manager.result:host.os"
+ENDPOINT_OS_SOURCES = {
+    "osquery_manager.result:host.os",
+    "osquery.live:os_version",
+}
 ASSET_OS_ASSOCIATION = "asset_inventory:unique-host-static-ip"
 LAN_NETWORKS = tuple(
     ipaddress.ip_network(value)
@@ -380,7 +383,7 @@ def _sanitize_record(raw: object) -> dict[str, object]:
         maximum=160,
         required=True,
     )
-    if source_dataset != SOURCE_DATASETS[source]:
+    if source_dataset not in SOURCE_DATASETS[source]:
         raise InventoryStateError("source_dataset does not match its source")
     version = _safe_text(raw.get("version"), "version", maximum=1024)
     if source == "http_user_agent" and version:
@@ -412,7 +415,7 @@ def _sanitize_record(raw: object) -> dict[str, object]:
         )
     if source == "osquery_apps":
         if os_present and (
-            operating_system_source != "osquery_manager.result:host.os"
+            operating_system_source not in ENDPOINT_OS_SOURCES
             or operating_system_confidence != "high"
         ):
             raise InventoryStateError(
@@ -604,7 +607,7 @@ def _public_record(
     }
     if (
         record["source"] == "osquery_apps"
-        and record["operating_system_source"] == ENDPOINT_OS_SOURCE
+        and record["operating_system_source"] in ENDPOINT_OS_SOURCES
         and (
             record["operating_system_type"]
             or record["operating_system_version"]
@@ -802,7 +805,7 @@ def correlate_asset_operating_systems(
         if (
             not asset_label
             or item.get("source") != "osquery_apps"
-            or item.get("operating_system_source") != ENDPOINT_OS_SOURCE
+            or item.get("operating_system_source") not in ENDPOINT_OS_SOURCES
             or item.get("operating_system_confidence") != "high"
             or not os_type
             or not os_version
@@ -826,6 +829,7 @@ def correlate_asset_operating_systems(
         candidate = {
             "operating_system_type": os_type,
             "operating_system_version": os_version,
+            "operating_system_source": str(item["operating_system_source"]),
             "operating_system_observed_at": _utc_iso(last_seen),
             "operating_system_freshness": _freshness(item, now),
         }
@@ -851,7 +855,7 @@ def correlate_asset_operating_systems(
         current_source = str(
             item.get("operating_system_source") or ""
         ).strip()
-        if current_source == ENDPOINT_OS_SOURCE:
+        if current_source in ENDPOINT_OS_SOURCES:
             continue
         if item.get("source") not in {"zeek_software", "http_user_agent"}:
             continue
@@ -898,7 +902,6 @@ def correlate_asset_operating_systems(
         ):
             continue
         item.update(candidate)
-        item["operating_system_source"] = ENDPOINT_OS_SOURCE
         item["operating_system_confidence"] = "high"
         item["operating_system_association"] = ASSET_OS_ASSOCIATION
         correlated += 1

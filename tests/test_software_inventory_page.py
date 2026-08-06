@@ -228,6 +228,9 @@ class SoftwareInventoryPageTests(unittest.TestCase):
             "metric(coverage.coverage_gaps,'Unknown')",
             self.page,
         )
+        self.assertIn("value?.freshness", self.page)
+        self.assertIn("value?.latest_observation_at", self.page)
+        self.assertIn("['stale','expired'].includes(sourceFreshness)", self.page)
         self.assertIn(
             "const userAgentEvidence=item=>",
             self.page,

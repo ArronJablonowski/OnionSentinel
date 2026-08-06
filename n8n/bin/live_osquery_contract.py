@@ -28,6 +28,18 @@ MAX_REPORTED_ROWS = 1_000_000
 TARGET_PLATFORM = "darwin"
 TARGET_OSQUERY_VERSION = "5.15.0"
 ALLOWED_TABLE_COLUMNS = {
+    "apps": frozenset(
+        {
+            "name",
+            "path",
+            "bundle_executable",
+            "bundle_identifier",
+            "bundle_name",
+            "bundle_short_version",
+            "bundle_version",
+            "bundle_package_type",
+        }
+    ),
     "arp_cache": frozenset({"address", "mac", "interface", "permanent"}),
     "crontab": frozenset(
         {

@@ -23,6 +23,8 @@ ROOT = Path(__file__).resolve().parents[1]
 COLLECTOR = ROOT / "n8n" / "bin" / "collect-software-inventory.py"
 CONFIG_EXAMPLE = ROOT / "n8n" / "config" / "software-inventory.example.json"
 PLIST = ROOT / "n8n" / "launchd" / "com.arron.soc.software-inventory.plist"
+ENDPOINT_PLIST = ROOT / "n8n" / "launchd" / "com.arron.soc.endpoint-software-inventory.plist"
+ENDPOINT_COLLECTOR = ROOT / "n8n" / "bin" / "collect-endpoint-software-inventory.py"
 INSTALLER = ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
 
 
@@ -746,6 +748,7 @@ class SoftwareInventoryCollectorTests(unittest.TestCase):
 
     def test_python39_launchd_and_installer_contracts(self) -> None:
         ast.parse(COLLECTOR.read_text(encoding="utf-8"), feature_version=(3, 9))
+        ast.parse(ENDPOINT_COLLECTOR.read_text(encoding="utf-8"), feature_version=(3, 9))
         example = json.loads(CONFIG_EXAMPLE.read_text(encoding="utf-8"))
         self.assertFalse(example["enabled"])
         self.assertEqual(example["page_size"], 500)
@@ -755,9 +758,17 @@ class SoftwareInventoryCollectorTests(unittest.TestCase):
         self.assertEqual(plist["Label"], "com.arron.soc.software-inventory")
         self.assertEqual(plist["StartInterval"], 3600)
         self.assertTrue(plist["RunAtLoad"])
+        endpoint_plist = plistlib.loads(ENDPOINT_PLIST.read_bytes())
+        self.assertEqual(
+            endpoint_plist["Label"],
+            "com.arron.soc.endpoint-software-inventory",
+        )
+        self.assertEqual(endpoint_plist["StartCalendarInterval"]["Hour"], 3)
         installer = INSTALLER.read_text(encoding="utf-8")
         for required in (
             "collect-software-inventory.py",
+            "collect-endpoint-software-inventory.py",
+            "com.arron.soc.endpoint-software-inventory.plist",
             "software-inventory.example.json",
             "com.arron.soc.software-inventory.plist",
             "onion-sentinel-dashboard/software_inventory.py",

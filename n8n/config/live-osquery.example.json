@@ -26,6 +26,10 @@
     "expires_at": "",
     "target_aliases": []
   },
+  "scheduled_inventory_approval": {
+    "approved": false,
+    "target_aliases": []
+  },
   "connect_timeout_seconds": 10,
   "timeout_seconds": 240,
   "artifact_dir": "~/n8n-local/soc-alerts/incident-evidence/live-osquery",

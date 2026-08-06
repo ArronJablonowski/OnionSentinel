@@ -144,6 +144,13 @@ def evaluate(
         software_inventory.get("updated_at"),
         now,
     )
+    software_inventory_source_statuses = {
+        str(source): dict(status)
+        for source, status in dict(
+            software_inventory.get("source_statuses") or {}
+        ).items()
+        if isinstance(status, dict)
+    }
     if software_inventory_enabled:
         if not software_inventory_available:
             failures.append("Software Inventory database is unavailable")
@@ -153,6 +160,25 @@ def evaluate(
             failures.append(
                 "Software Inventory snapshot is stale "
                 f"({software_inventory_updated_age}s old)"
+            )
+        osquery_status = software_inventory_source_statuses.get(
+            "osquery_apps", {}
+        )
+        osquery_freshness = str(
+            osquery_status.get("freshness") or "unknown"
+        ).lower()
+        osquery_returned = int(osquery_status.get("returned") or 0)
+        if (
+            osquery_returned > 0
+            and osquery_freshness in {"stale", "expired"}
+        ):
+            failures.append(
+                "Software Inventory OSQuery endpoint evidence is "
+                f"{osquery_freshness}"
+            )
+        elif osquery_freshness == "empty":
+            advisories.append(
+                "Software Inventory has no OSQuery endpoint evidence"
             )
     pending_job_ages = {
         str(item.get("job_type") or ""): int(item.get("seconds") or 0)
@@ -441,6 +467,7 @@ def evaluate(
             "software_inventory_available": software_inventory_available,
             "software_inventory_updated_age_seconds": software_inventory_updated_age,
             "software_inventory_record_count": software_inventory.get("records"),
+            "software_inventory_source_statuses": software_inventory_source_statuses,
             "ingest_errors": ingest_errors,
             "disk_used_percent": round(disk_used_percent, 1),
             "disk_new_work_limit_percent": 75,

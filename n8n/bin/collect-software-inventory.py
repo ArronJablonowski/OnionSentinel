@@ -42,6 +42,11 @@ SOURCE_POLICY = {
         "confidence": "high",
         "platform": "darwin",
         "asset_ref_type": "host",
+        "additional_datasets": {"osquery.live.software_inventory"},
+        "operating_system_sources": {
+            "osquery_manager.result:host.os",
+            "osquery.live:os_version",
+        },
     },
     "zeek_software": {
         "index": "logs-zeek-so",
@@ -130,6 +135,10 @@ COLLECTION_KEYS = {
     "source_statuses",
     "complete",
 }
+COLLECTION_KEY_SETS = {
+    frozenset(COLLECTION_KEYS),
+    frozenset(COLLECTION_KEYS | {"osquery_ready"}),
+}
 SOURCE_STATUS_KEYS = {
     "status",
     "complete",
@@ -194,6 +203,9 @@ DEFAULT_STATE = (
     / "software-inventory.json"
 )
 DEFAULT_LOG = HOME / "n8n-local" / "logs" / "software-inventory.jsonl"
+DEFAULT_ENDPOINT_CACHE = (
+    HOME / "n8n-local" / "software-inventory" / "endpoint-cache.json"
+)
 DEFAULT_ENV = HOME / "n8n-local" / ".env"
 DEFAULT_DATABASE_API_URL = "http://127.0.0.1:8787"
 DATABASE_CHUNK_SIZE = 500
@@ -626,7 +638,11 @@ def _normalize_record(
         maximum=100,
         required=True,
     )
-    if dataset != policy["dataset"]:
+    allowed_datasets = {
+        policy["dataset"],
+        *policy.get("additional_datasets", set()),
+    }
+    if dataset not in allowed_datasets:
         raise ValueError("software inventory record dataset is invalid")
     tier = _bounded_text(
         value.get("tier"),
@@ -723,7 +739,8 @@ def _normalize_record(
     os_present = bool(operating_system_type or operating_system_version)
     if source == "osquery_apps":
         if os_present and (
-            operating_system_source != "osquery_manager.result:host.os"
+            operating_system_source
+            not in policy.get("operating_system_sources", set())
             or operating_system_confidence != "high"
         ):
             raise ValueError(
@@ -885,7 +902,10 @@ def validate_state(value: object) -> Dict[str, Any]:
     if updated_at:
         updated_at = format_timestamp(parse_timestamp(updated_at))
     collection = value.get("collection")
-    if not isinstance(collection, dict) or set(collection) != COLLECTION_KEYS:
+    if (
+        not isinstance(collection, dict)
+        or frozenset(collection) not in COLLECTION_KEY_SETS
+    ):
         raise ValueError("software inventory collection metadata is invalid")
     status = _bounded_text(
         collection.get("status"),
@@ -934,7 +954,7 @@ def validate_state(value: object) -> Dict[str, Any]:
             raise ValueError("software inventory state contains duplicate evidence")
         evidence_ids.add(record["evidence_id"])
         normalized_records.append(record)
-    return {
+    normalized = {
         "schema": STATE_SCHEMA,
         "version": 1,
         "updated_at": updated_at,
@@ -949,6 +969,14 @@ def validate_state(value: object) -> Dict[str, Any]:
         },
         "records": normalized_records,
     }
+    if "osquery_ready" in collection:
+        normalized["collection"]["osquery_ready"] = _bounded_integer(
+            collection["osquery_ready"],
+            field="software inventory OSQuery-ready endpoint count",
+            minimum=0,
+            maximum=MAX_TOTAL_RECORDS,
+        )
+    return normalized
 
 
 def load_state(path: Path) -> Dict[str, Any]:
@@ -957,6 +985,64 @@ def load_state(path: Path) -> Dict[str, Any]:
     except FileNotFoundError:
         return empty_state()
     return validate_state(value)
+
+
+def load_endpoint_cache(
+    path: Path,
+    now: dt.datetime,
+    *,
+    maximum_age: dt.timedelta = dt.timedelta(hours=36),
+) -> Optional[Dict[str, Any]]:
+    """Return one complete, fresh, owner-controlled endpoint cache."""
+    try:
+        value = _read_json_file(path, MAX_STATE_BYTES, exact_mode=0o600)
+    except FileNotFoundError:
+        return None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {
+            "schema", "version", "updated_at", "complete", "targets", "records"
+        }
+        or value.get("schema") != "onion-sentinel-endpoint-software-cache-v1"
+        or value.get("version") != 1
+        or value.get("complete") is not True
+    ):
+        raise ValueError("endpoint software inventory cache is invalid")
+    updated = parse_timestamp(value.get("updated_at"))
+    current = now.astimezone(dt.timezone.utc)
+    if updated > current + dt.timedelta(minutes=5) or current - updated > maximum_age:
+        return None
+    targets = value.get("targets")
+    records = value.get("records")
+    if (
+        not isinstance(targets, list)
+        or not targets
+        or len(targets) > 64
+        or not isinstance(records, list)
+        or len(records) > MAX_TOTAL_RECORDS
+    ):
+        raise ValueError("endpoint software inventory cache is out of bounds")
+    assets: Set[str] = set()
+    for target in targets:
+        if (
+            not isinstance(target, dict)
+            or set(target) != {"asset_ref", "status", "records", "observed_at"}
+            or target.get("status") != "ok"
+            or not _HEX_24.fullmatch(str(target.get("asset_ref") or ""))
+        ):
+            raise ValueError("endpoint software inventory target status is invalid")
+        assets.add(str(target["asset_ref"]))
+    normalized = [
+        _normalize_record(record, expected_source="osquery_apps")
+        for record in records
+    ]
+    if any(record["asset_ref"] not in assets for record in normalized):
+        raise ValueError("endpoint software inventory record has no target coverage")
+    return {
+        "updated_at": format_timestamp(updated),
+        "targets": len(assets),
+        "records": normalized,
+    }
 
 
 def _prepare_private_directory(path: Path) -> None:
@@ -1449,6 +1535,7 @@ def collect_snapshot(
     previous_state: Dict[str, Any],
     now: dt.datetime,
     page_fetcher: PageFetcher = query_page,
+    endpoint_cache: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     del previous_state  # A complete collection is a replacement, not a merge.
     window = collection_window(now)
@@ -1460,19 +1547,31 @@ def collect_snapshot(
     records: List[Dict[str, Any]] = []
     evidence_ids: Set[str] = set()
     for source in SOURCES:
-        try:
-            source_records, source_status = collect_source(
-                config,
-                source,
-                window,
-                now,
-                deadline,
-                page_fetcher=page_fetcher,
+        if source == "osquery_apps" and endpoint_cache is not None:
+            source_records = list(endpoint_cache["records"])
+            latest = str(endpoint_cache["updated_at"])
+            source_status = _source_status(
+                status="ok",
+                complete=True,
+                pages=1,
+                returned=len(source_records),
+                latest=latest,
+                now=now,
             )
-        except SoftwareInventoryError as exc:
-            if exc.source_statuses:
-                statuses.update(exc.source_statuses)
-            raise SoftwareInventoryError(str(exc), statuses) from exc
+        else:
+            try:
+                source_records, source_status = collect_source(
+                    config,
+                    source,
+                    window,
+                    now,
+                    deadline,
+                    page_fetcher=page_fetcher,
+                )
+            except SoftwareInventoryError as exc:
+                if exc.source_statuses:
+                    statuses.update(exc.source_statuses)
+                raise SoftwareInventoryError(str(exc), statuses) from exc
         statuses[source] = source_status
         for record in source_records:
             if record["evidence_id"] in evidence_ids:
@@ -1497,8 +1596,7 @@ def collect_snapshot(
         )
     )
     stamp = format_timestamp(now)
-    return validate_state(
-        {
+    payload = {
             "schema": STATE_SCHEMA,
             "version": 1,
             "updated_at": stamp,
@@ -1513,7 +1611,9 @@ def collect_snapshot(
             },
             "records": records,
         }
-    )
+    if endpoint_cache is not None:
+        payload["collection"]["osquery_ready"] = endpoint_cache["targets"]
+    return validate_state(payload)
 
 
 def failed_state(
@@ -1616,6 +1716,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
     parser.add_argument("--env", type=Path, default=DEFAULT_ENV)
     parser.add_argument(
+        "--endpoint-cache", type=Path, default=DEFAULT_ENDPOINT_CACHE
+    )
+    parser.add_argument(
         "--database-api-url",
         default=DEFAULT_DATABASE_API_URL,
     )
@@ -1636,7 +1739,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                     retained=len(updated["records"]),
                 )
                 return 0
-            updated = collect_snapshot(config, previous, attempted_at)
+            endpoint_cache = load_endpoint_cache(args.endpoint_cache, attempted_at)
+            updated = collect_snapshot(
+                config,
+                previous,
+                attempted_at,
+                endpoint_cache=endpoint_cache,
+            )
             database_result = publish_database_snapshot(
                 updated,
                 api_url=args.database_api_url,
