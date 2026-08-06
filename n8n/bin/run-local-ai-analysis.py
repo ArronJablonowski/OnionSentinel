@@ -1916,6 +1916,12 @@ def _cli_common_provider():
     return cli_common
 
 
+def _openclaw_provider():
+    _provider_routing()
+    from onion_sentinel.analysis.providers import openclaw
+    return openclaw
+
+
 def normalized_model_roster(value: Any) -> list[str]:
     return _provider_routing().normalized_model_roster(value)
 
@@ -2401,24 +2407,15 @@ def validate_isolated_openclaw_route(
     model: str,
     settings: dict[str, Any],
 ) -> None:
-    """Admit only credential-free loopback Ollama into isolated OpenClaw."""
-    if (
-        not CLI_HARNESS_MODEL_PATTERN.fullmatch(model)
-        or not openclaw_model_uses_ollama_runtime(model)
-        or len(model) <= len(OPENCLAW_OLLAMA_PROVIDER_PREFIX)
-    ):
-        raise SystemExit(
-            "OpenClaw currently supports explicit ollama/<model> routes only; "
-            "hosted OpenClaw credentials are not admitted into the isolated runtime"
-        )
-    ollama_url = str(
-        settings.get("ollama_url") or DEFAULT_OLLAMA_URL
-    ).strip().rstrip("/")
-    if ollama_url not in OPENCLAW_SUPPORTED_OLLAMA_URLS:
-        raise SystemExit(
-            "OpenClaw's isolated runtime supports only the loopback Ollama "
-            "endpoint http://127.0.0.1:11434"
-        )
+    return _openclaw_provider().validate_route(
+        model,
+        settings,
+        model_pattern=CLI_HARNESS_MODEL_PATTERN,
+        uses_ollama_runtime=openclaw_model_uses_ollama_runtime,
+        provider_prefix=OPENCLAW_OLLAMA_PROVIDER_PREFIX,
+        supported_urls=OPENCLAW_SUPPORTED_OLLAMA_URLS,
+        default_url=DEFAULT_OLLAMA_URL,
+    )
 
 
 def model_route_is_hosted(route: str, settings: dict[str, Any]) -> bool:
@@ -11076,51 +11073,14 @@ def hermes_agent_chat(
 
 
 def _openclaw_output_text(envelope: dict[str, Any]) -> str:
-    """Extract only text outputs from OpenClaw's documented JSON envelope."""
-    outputs = envelope.get("outputs")
-    if isinstance(outputs, list):
-        texts = [
-            str(item.get("text") or "")
-            for item in outputs
-            if isinstance(item, dict) and item.get("text") is not None
-        ]
-        if any(texts):
-            return "\n".join(text for text in texts if text)
-    for key in ("text", "output", "response"):
-        if isinstance(envelope.get(key), str) and envelope[key].strip():
-            return envelope[key]
-    raise SystemExit("OpenClaw completed without a text model output")
+    return _openclaw_provider().output_text(envelope)
 
 
 def _verified_openclaw_observation(
     envelope: dict[str, Any],
     expected_model: str,
 ) -> tuple[str, str]:
-    """Verify and return OpenClaw's observed provider/model identity."""
-    provider = str(envelope.get("provider") or "").strip()
-    observed_model = str(envelope.get("model") or "").strip()
-    if not provider or not observed_model:
-        raise SystemExit("OpenClaw response omitted observed provider/model provenance")
-    expected_provider, separator, expected_name = expected_model.partition("/")
-    observed_name = observed_model
-    observed_prefix, observed_separator, namespaced_name = observed_model.partition("/")
-    if observed_separator:
-        if observed_prefix.lower() != "ollama":
-            raise SystemExit(
-                "OpenClaw executed a different provider/model than the assigned route"
-            )
-        observed_name = namespaced_name
-    if (
-        provider.lower() != "ollama"
-        or separator != "/"
-        or expected_provider.lower() != "ollama"
-        or not expected_name
-        or observed_name.lower() != expected_name.lower()
-    ):
-        raise SystemExit(
-            "OpenClaw executed a different provider/model than the assigned route"
-        )
-    return "ollama", f"ollama/{observed_name}"
+    return _openclaw_provider().verified_observation(envelope, expected_model)
 
 
 def _openclaw_infer_unlocked(
@@ -11133,136 +11093,31 @@ def _openclaw_infer_unlocked(
     system_prompt_file: Path | None = None,
     independent_review: bool = False,
 ) -> dict[str, Any]:
-    validate_isolated_openclaw_route(model, settings)
-    executable = resolve_cli_harness(
-        settings,
-        setting_key="openclaw_path",
-        basename="openclaw",
-        label="OpenClaw",
-    )
-    payload = cli_analysis_payload(
+    return _openclaw_provider().infer_unlocked(
         prompt_package,
         args,
-        # OpenClaw remains a hosted-harness trust boundary even when it
-        # dispatches to Ollama on this host.
-        hosted=True,
+        settings,
+        model=model,
+        reasoning_effort=reasoning_effort,
         system_prompt_file=system_prompt_file,
         independent_review=independent_review,
+        validate=validate_isolated_openclaw_route,
+        resolve_executable=lambda configured: resolve_cli_harness(
+            configured,
+            setting_key="openclaw_path",
+            basename="openclaw",
+            label="OpenClaw",
+        ),
+        build_payload=cli_analysis_payload,
+        atomic_write_json=atomic_write_json,
+        run_command=run_bounded_command,
+        sanitized_env=sanitized_cli_harness_env,
+        process_error=BoundedProcessError,
+        summarize_failure=summarize_cli_harness_failure,
+        extract_json=extract_json_object,
+        max_prompt_bytes=OPENCLAW_MAX_PROMPT_ARGUMENT_BYTES,
+        max_stderr_bytes=DEFAULT_CLOUD_MAX_STDERR_BYTES,
     )
-    serialized = json.dumps(payload, separators=(",", ":"))
-    if len(serialized.encode("utf-8")) > OPENCLAW_MAX_PROMPT_ARGUMENT_BYTES:
-        raise SystemExit(
-            "OpenClaw analysis request exceeds the installed CLI's safe prompt argument limit"
-        )
-    with tempfile.TemporaryDirectory(prefix="onion-sentinel-openclaw-") as temp_name:
-        work_dir = Path(temp_name)
-        isolated_home = work_dir / "home"
-        codex_home = isolated_home / ".codex"
-        state_dir = work_dir / "state"
-        oauth_dir = state_dir / "oauth"
-        agent_dir = state_dir / "agents" / "main" / "agent"
-        workspace_dir = work_dir / "workspace"
-        xdg_config = work_dir / "xdg-config"
-        xdg_cache = work_dir / "xdg-cache"
-        xdg_data = work_dir / "xdg-data"
-        xdg_state = work_dir / "xdg-state"
-        xdg_runtime = work_dir / "xdg-runtime"
-        isolated_tmp = work_dir / "tmp"
-        for directory in (
-            isolated_home,
-            codex_home,
-            state_dir,
-            oauth_dir,
-            agent_dir,
-            workspace_dir,
-            xdg_config,
-            xdg_cache,
-            xdg_data,
-            xdg_state,
-            xdg_runtime,
-            isolated_tmp,
-        ):
-            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-            directory.chmod(0o700)
-        config_path = state_dir / "openclaw.json"
-        atomic_write_json(config_path, {})
-        config_path.chmod(0o600)
-        cmd = [
-            executable,
-            "infer",
-            "model",
-            "run",
-            "--local",
-            "--model",
-            model,
-            "--thinking",
-            reasoning_effort,
-            "--prompt",
-            serialized,
-            "--json",
-        ]
-        try:
-            proc = run_bounded_command(
-                cmd,
-                timeout_seconds=args.timeout,
-                max_stdout_bytes=args.max_response_bytes,
-                max_stderr_bytes=DEFAULT_CLOUD_MAX_STDERR_BYTES,
-                cwd=work_dir,
-                env=sanitized_cli_harness_env(
-                    executable,
-                    extra={
-                        "HOME": str(isolated_home),
-                        "CODEX_HOME": str(codex_home),
-                        "OPENCLAW_HOME": str(isolated_home),
-                        "OPENCLAW_STATE_DIR": str(state_dir),
-                        "OPENCLAW_CONFIG_PATH": str(config_path),
-                        "OPENCLAW_OAUTH_DIR": str(oauth_dir),
-                        "OPENCLAW_AGENT_DIR": str(agent_dir),
-                        "OPENCLAW_WORKSPACE_DIR": str(workspace_dir),
-                        "XDG_CONFIG_HOME": str(xdg_config),
-                        "XDG_CACHE_HOME": str(xdg_cache),
-                        "XDG_DATA_HOME": str(xdg_data),
-                        "XDG_STATE_HOME": str(xdg_state),
-                        "XDG_RUNTIME_DIR": str(xdg_runtime),
-                        "TMPDIR": str(isolated_tmp),
-                        "OPENCLAW_OFFLINE": "1",
-                        # The documented marker enables implicit discovery of
-                        # the loopback-only Ollama catalog without importing
-                        # any operator OpenClaw profile or provider secret.
-                        "OLLAMA_API_KEY": "ollama-local",
-                        "HTTP_PROXY": "",
-                        "HTTPS_PROXY": "",
-                        "http_proxy": "",
-                        "https_proxy": "",
-                        "NO_PROXY": "127.0.0.1,localhost,::1",
-                        "no_proxy": "127.0.0.1,localhost,::1",
-                    },
-                ),
-            )
-        except FileNotFoundError as exc:
-            raise SystemExit(f"OpenClaw executable was not found: {executable}") from exc
-        except BoundedProcessError as exc:
-            raise SystemExit(f"OpenClaw analysis failed: {exc}") from exc
-    if proc.returncode != 0:
-        detail = summarize_cli_harness_failure(
-            "OpenClaw",
-            proc.stderr,
-            proc.returncode,
-        )
-        raise SystemExit(f"OpenClaw analysis failed: {detail}")
-    try:
-        envelope = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        raise SystemExit("OpenClaw returned an invalid JSON execution envelope") from exc
-    if not isinstance(envelope, dict) or envelope.get("ok") is not True:
-        raise SystemExit("OpenClaw reported an unsuccessful model invocation")
-    provider, observed_model = _verified_openclaw_observation(envelope, model)
-    response = extract_json_object(_openclaw_output_text(envelope))
-    response["_analysis_model"] = observed_model
-    response["_analysis_model_path"] = "openclaw"
-    response["_analysis_provider"] = provider
-    response["_analysis_harness"] = "openclaw"
-    return response
 
 
 def openclaw_infer_chat(
@@ -11275,44 +11130,25 @@ def openclaw_infer_chat(
     system_prompt_file: Path | None = None,
     independent_review: bool = False,
 ) -> dict[str, Any]:
-    """Run OpenClaw statelessly; serialize only explicit Ollama-backed routes."""
-    if not boolean_setting(settings.get("openclaw_enabled")):
-        raise SystemExit("OpenClaw is disabled in AI Analysis Model Selection")
-    if (
-        model != str(settings.get("openclaw_model") or "")
-        or reasoning_effort
-        != str(settings.get("openclaw_reasoning_effort") or "").lower()
-    ):
-        raise SystemExit("OpenClaw route is not the enabled configured route")
-    if not CLI_HARNESS_MODEL_PATTERN.fullmatch(model):
-        raise SystemExit("OpenClaw model is invalid")
-    if reasoning_effort not in CODEX_CLI_REASONING_EFFORTS:
-        raise SystemExit("OpenClaw reasoning effort is invalid")
-    validate_isolated_openclaw_route(model, settings)
-    DEFAULT_OLLAMA_INFERENCE_LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with DEFAULT_OLLAMA_INFERENCE_LOCK.open("a+", encoding="utf-8") as lock_handle:
-        DEFAULT_OLLAMA_INFERENCE_LOCK.chmod(0o600)
-        fcntl.flock(lock_handle, fcntl.LOCK_EX)
-        try:
-            return _openclaw_infer_unlocked(
-                prompt_package,
-                args,
-                settings,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                system_prompt_file=system_prompt_file,
-                independent_review=independent_review,
-            )
-        finally:
-            try:
-                ollama_model = model.split("/", 1)[1]
-                _unload_ollama_model(
-                    settings,
-                    ollama_model,
-                    timeout=float(getattr(args, "timeout", 30) or 30),
-                )
-            finally:
-                fcntl.flock(lock_handle, fcntl.LOCK_UN)
+    return _openclaw_provider().locked_chat(
+        prompt_package,
+        args,
+        settings,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        system_prompt_file=system_prompt_file,
+        independent_review=independent_review,
+        boolean_setting=boolean_setting,
+        model_pattern=CLI_HARNESS_MODEL_PATTERN,
+        reasoning_efforts=CODEX_CLI_REASONING_EFFORTS,
+        validate=validate_isolated_openclaw_route,
+        lock_path=DEFAULT_OLLAMA_INFERENCE_LOCK,
+        flock=fcntl.flock,
+        lock_exclusive=fcntl.LOCK_EX,
+        lock_unlock=fcntl.LOCK_UN,
+        infer=_openclaw_infer_unlocked,
+        unload=_unload_ollama_model,
+    )
 
 
 def analyze_model_route(

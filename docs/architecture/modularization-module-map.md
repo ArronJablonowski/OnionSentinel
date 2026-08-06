@@ -58,10 +58,14 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
   and secret-safe failure classification now live in
   `onion_sentinel.analysis.providers.codex`. Shared minimal CLI environment and
   third-party harness error classification live in `providers.cli_common`.
-- Provider-specific Ollama, Codex, Hermes, and OpenClaw transports remain in
-  the legacy runner until their bounded process/HTTP, identity-attestation,
-  malformed-output, timeout, missing-binary, and credential-isolation tests
-  can migrate with them.
+- OpenClaw loopback-route admission, isolated ephemeral profile construction,
+  fixed inference argv, bounded execution, response-envelope parsing, exact
+  provider/model attestation, serialized Ollama use, and guaranteed unload now
+  live in `onion_sentinel.analysis.providers.openclaw`.
+- The provider-specific Hermes transport remains in the legacy runner until
+  its bounded process, identity-attestation, malformed-output, timeout,
+  missing-binary, credential-rotation, and credential-isolation tests migrate
+  with it.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports

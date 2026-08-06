@@ -17,6 +17,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.providers.cli_common",
     "onion_sentinel.analysis.providers.codex",
     "onion_sentinel.analysis.providers.ollama",
+    "onion_sentinel.analysis.providers.openclaw",
     "onion_sentinel.analysis.providers.routing",
     "onion_sentinel.composition",
     "onion_sentinel.contracts.errors",
