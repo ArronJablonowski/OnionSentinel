@@ -1142,29 +1142,15 @@ def analysis_index_payload(
     generated_at: str,
     artifact_path: Path,
 ) -> dict[str, Any]:
-    alert = prompt_package.get("alert") if isinstance(prompt_package.get("alert"), dict) else {}
-    correlation = prompt_package.get("correlated_alert_context")
-    candidates = correlation.get("candidates", []) if isinstance(correlation, dict) else []
-    evidence_hash = hashlib.sha256(
-        json.dumps(prompt_package, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    return {
-        "analysis_id": analysis_id,
-        "alert_id": alert.get("alert_id"),
-        "agent_role": prompt_package.get("agent_role") or "soc-analyst",
-        "reanalysis_attempt_id": reanalysis_attempt_id or None,
-        "analysis_started_at": analysis_started_at,
-        "generated_at": generated_at,
-        "model": response.get("_analysis_model"),
-        "model_path": response.get("_analysis_model_path"),
-        "provider": response.get("_analysis_provider"),
-        "harness": response.get("_analysis_harness"),
-        "input_mode": response.get("_analysis_input_mode"),
-        "artifact_path": str(artifact_path),
-        "evidence_hash": evidence_hash,
-        "response": response,
-        "correlation_candidates": candidates,
-    }
+    return _analysis_index_persistence().build_payload(
+        analysis_id,
+        prompt_package,
+        response,
+        reanalysis_attempt_id,
+        analysis_started_at,
+        generated_at,
+        artifact_path,
+    )
 
 
 def post_analysis_index(
@@ -1172,100 +1158,20 @@ def post_analysis_index(
     alert_store_url: str,
     timeout: int = 10,
 ) -> dict[str, Any]:
-    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    submission_sha256 = hashlib.sha256(body).hexdigest()
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "Onion-Sentinel-AI/1.0",
-    }
-    supplied_token = str(
-        os.environ.get(CONTROLLED_EVALUATION_TOKEN_ENV) or ""
-    ).strip()
-    evaluation_token = (
-        supplied_token
-        if CONTROLLED_EVALUATION_TOKEN_RE.fullmatch(supplied_token)
-        else _CONTROLLED_EVALUATION_TOKEN
+    return _analysis_index_persistence().post(
+        payload,
+        alert_store_url,
+        timeout=timeout,
+        max_response_bytes=ANALYSIS_INDEX_MAX_RESPONSE_BYTES,
+        read_bounded_json=read_bounded_json,
+        submission_error=AnalysisIndexSubmissionError,
+        environment=os.environ,
+        evaluation_mode_env=CONTROLLED_EVALUATION_MODE_ENV,
+        evaluation_token_env=CONTROLLED_EVALUATION_TOKEN_ENV,
+        evaluation_token_header=CONTROLLED_EVALUATION_TOKEN_HEADER,
+        evaluation_token_pattern=CONTROLLED_EVALUATION_TOKEN_RE,
+        fallback_evaluation_token=_CONTROLLED_EVALUATION_TOKEN,
     )
-    if (
-        str(
-            os.environ.get(CONTROLLED_EVALUATION_MODE_ENV) or ""
-        ).strip()
-        == "1"
-        and CONTROLLED_EVALUATION_TOKEN_RE.fullmatch(evaluation_token)
-    ):
-        headers[CONTROLLED_EVALUATION_TOKEN_HEADER] = evaluation_token
-    request = urllib.request.Request(
-        alert_store_url.rstrip("/") + "/analysis/result",
-        data=body,
-        headers=headers,
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            result = read_bounded_json(
-                response,
-                max_bytes=ANALYSIS_INDEX_MAX_RESPONSE_BYTES,
-            )
-    except urllib.error.HTTPError as exc:
-        response_body = exc.read(ANALYSIS_INDEX_MAX_RESPONSE_BYTES + 1)
-        status_code = int(exc.code)
-        retryable = (
-            status_code >= 500
-            or status_code in {408, 425, 429}
-        )
-        raise AnalysisIndexSubmissionError(
-            f"analysis index HTTP {status_code}",
-            retryable=retryable,
-            status_code=status_code,
-            response_sha256=hashlib.sha256(response_body).hexdigest(),
-        ) from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise AnalysisIndexSubmissionError(
-            "analysis index transport failed",
-            retryable=True,
-        ) from exc
-    if not result.get("ok"):
-        response_body = json.dumps(
-            result,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        raise AnalysisIndexSubmissionError(
-            "alert-store rejected analysis index response",
-            retryable=False,
-            status_code=200,
-            response_sha256=hashlib.sha256(response_body).hexdigest(),
-        )
-    expected_analysis_id = str(payload.get("analysis_id") or "").lower()
-    stored_response_sha256 = str(
-        result.get("stored_response_sha256") or ""
-    ).lower()
-    if (
-        str(result.get("analysis_id") or "").lower() != expected_analysis_id
-        or str(result.get("submission_sha256") or "").lower()
-        != submission_sha256
-        or not re.fullmatch(r"[a-f0-9]{64}", stored_response_sha256)
-    ):
-        response_body = json.dumps(
-            result,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        raise AnalysisIndexSubmissionError(
-            "alert-store commit receipt did not bind the submitted analysis",
-            # A malformed success receipt is indeterminate: the transaction
-            # may already have committed. Retain the exact payload for an
-            # idempotent replay instead of quarantining it or promoting memory.
-            retryable=True,
-            status_code=200,
-            response_sha256=hashlib.sha256(response_body).hexdigest(),
-        )
-    return {
-        "analysis_id": expected_analysis_id,
-        "submission_sha256": submission_sha256,
-        "stored_response_sha256": stored_response_sha256,
-        "idempotent": bool(result.get("idempotent")),
-    }
 
 
 def post_controlled_analysis_index(
@@ -1275,38 +1181,24 @@ def post_controlled_analysis_index(
     attempts: int = CONTROLLED_RESULT_SUBMISSION_ATTEMPTS,
 ) -> dict[str, Any]:
     """Retry one immutable controlled result while its exact lease is live."""
-    bounded_attempts = max(1, min(int(attempts), 5))
-    last_error: AnalysisIndexSubmissionError | None = None
-    for attempt_index in range(bounded_attempts):
-        if attempt_index:
-            time.sleep(0.05 * attempt_index)
-        try:
-            return post_analysis_index(payload, alert_store_url)
-        except AnalysisIndexSubmissionError as exc:
-            if not exc.retryable:
-                raise
-            last_error = exc
-    if last_error is None:
-        raise RuntimeError("controlled result retry invariant failed")
-    raise last_error
+    return _analysis_index_persistence().post_with_retry(
+        payload,
+        alert_store_url,
+        post_result=post_analysis_index,
+        submission_error=AnalysisIndexSubmissionError,
+        attempts=attempts,
+    )
 
 
 def queue_analysis_index(payload: dict[str, Any], queue_dir: Path = DEFAULT_ANALYSIS_INDEX_QUEUE_DIR) -> Path:
-    analysis_id = str(payload.get("analysis_id") or "")
-    if not analysis_id or len(analysis_id) > 128:
-        raise RuntimeError("analysis index spool identity is invalid")
-    path = queue_dir / f"{safe_filename(analysis_id)}.json"
-    if path.exists():
-        existing = load_json(path)
-        if canonical_payload_digest(existing) != canonical_payload_digest(
-            payload
-        ):
-            raise RuntimeError(
-                "analysis index spool identity collides with different content"
-            )
-        return path
-    atomic_write_private_json(path, payload)
-    return path
+    return _analysis_index_persistence().queue(
+        payload,
+        queue_dir,
+        safe_filename=safe_filename,
+        load_json=load_json,
+        canonical_digest=canonical_payload_digest,
+        atomic_write_private_json=atomic_write_private_json,
+    )
 
 
 def stage_memory_writeback_task(
@@ -1552,38 +1444,14 @@ def quarantine_analysis_index(
     quarantine_dir: Path = DEFAULT_ANALYSIS_INDEX_QUARANTINE_DIR,
 ) -> Path:
     """Atomically remove one deterministic rejection from the ordered spool."""
-    canonical_payload = json.dumps(
+    return _analysis_index_persistence().quarantine(
+        path,
         payload,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    payload_sha256 = hashlib.sha256(canonical_payload).hexdigest()
-    source_name_sha256 = hashlib.sha256(path.name.encode("utf-8")).hexdigest()
-    quarantine_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(quarantine_dir, 0o700)
-    stem = f"{int(time.time_ns())}-{payload_sha256[:24]}"
-    rejected_path = quarantine_dir / f"{stem}.rejected.json"
-    metadata_path = quarantine_dir / f"{stem}.metadata.json"
-    os.replace(path, rejected_path)
-    try:
-        os.chmod(rejected_path, 0o600)
-        atomic_write_json(
-            metadata_path,
-            {
-                "schema": "onion-sentinel-analysis-index-quarantine-v1",
-                "quarantined_at": project_now(),
-                "classification": "deterministic_submission_rejection",
-                "http_status": error.status_code,
-                "payload_sha256": payload_sha256,
-                "source_name_sha256": source_name_sha256,
-                "response_sha256": error.response_sha256,
-            },
-        )
-    except Exception:
-        metadata_path.unlink(missing_ok=True)
-        os.replace(rejected_path, path)
-        raise
-    return rejected_path
+        error,
+        quarantine_dir=quarantine_dir,
+        atomic_write_json=atomic_write_json,
+        now=project_now,
+    )
 
 
 def flush_analysis_index_queue(
@@ -1596,64 +1464,25 @@ def flush_analysis_index_queue(
     limit: int = 100,
     memory_writeback_enabled: bool = True,
 ) -> tuple[int, int, int]:
-    # A previous process may have crashed after the authoritative commit. These
-    # tasks are safe to replay because memory reinforcement is analysis-id
-    # idempotent.
-    if memory_writeback_enabled:
-        resume_committed_memory_writebacks(
-            committed_dir=memory_committed_dir,
-            receipt_dir=memory_receipt_dir,
-            limit=limit,
-        )
-    if not queue_dir.exists():
-        return 0, 0, 0
-    completed = 0
-    failed = 0
-    quarantined = 0
-    for path in sorted(queue_dir.glob("*.json"))[:limit]:
-        try:
-            payload = load_json(path)
-            post_analysis_index(payload, alert_store_url)
-            committed_task = mark_memory_writeback_committed(
-                str(payload.get("analysis_id") or ""),
-                expected_response_digest=canonical_payload_digest(
-                    payload.get("response")
-                ),
-                pending_dir=memory_pending_dir,
-                committed_dir=memory_committed_dir,
-            )
-            path.unlink(missing_ok=True)
-            completed += 1
-            if committed_task is not None and memory_writeback_enabled:
-                # Memory is supplemental. A recoverable lane or receipt failure
-                # keeps the committed task for the next startup but does not
-                # reclassify the already-committed analysis index as failed.
-                try:
-                    process_committed_memory_writeback(
-                        committed_task,
-                        receipt_dir=memory_receipt_dir,
-                    )
-                except Exception:
-                    pass
-        except AnalysisIndexSubmissionError as exc:
-            if exc.retryable:
-                failed += 1
-                break
-            quarantine_analysis_index(
-                path,
-                payload,
-                exc,
-                quarantine_dir=quarantine_dir,
-            )
-            discard_pending_memory_writeback(
-                str(payload.get("analysis_id") or ""),
-                pending_dir=memory_pending_dir,
-            )
-            quarantined += 1
-        except Exception:
-            failed += 1
-            break
-    return completed, failed, quarantined
+    return _analysis_index_persistence().flush(
+        alert_store_url,
+        queue_dir=queue_dir,
+        quarantine_dir=quarantine_dir,
+        memory_pending_dir=memory_pending_dir,
+        memory_committed_dir=memory_committed_dir,
+        memory_receipt_dir=memory_receipt_dir,
+        limit=limit,
+        memory_writeback_enabled=memory_writeback_enabled,
+        submission_error=AnalysisIndexSubmissionError,
+        load_json=load_json,
+        post_result=post_analysis_index,
+        canonical_digest=canonical_payload_digest,
+        mark_memory_committed=mark_memory_writeback_committed,
+        process_committed_memory=process_committed_memory_writeback,
+        resume_committed_memory=resume_committed_memory_writebacks,
+        quarantine_result=quarantine_analysis_index,
+        discard_pending_memory=discard_pending_memory_writeback,
+    )
 
 
 def build_llm_log_record(
@@ -1950,6 +1779,12 @@ def _reporting_publication():
     _provider_routing()
     from onion_sentinel.analysis.reporting import publication
     return publication
+
+
+def _analysis_index_persistence():
+    _provider_routing()
+    from onion_sentinel.analysis.persistence import analysis_index
+    return analysis_index
 
 
 def normalized_model_roster(value: Any) -> list[str]:
