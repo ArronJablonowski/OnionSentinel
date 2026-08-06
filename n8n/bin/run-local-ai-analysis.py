@@ -1642,6 +1642,12 @@ def _memory_journal_persistence():
     return memory_journal
 
 
+def _conclusion_verdict():
+    _provider_routing()
+    from onion_sentinel.analysis.conclusions import verdict
+    return verdict
+
+
 def normalized_model_roster(value: Any) -> list[str]:
     return _provider_routing().normalized_model_roster(value)
 
@@ -13477,16 +13483,9 @@ def safe_nonnegative_int(value: Any) -> int:
 
 def normalized_detection_outcome(value: Any) -> str:
     """Return the canonical legacy outcome code or ``inconclusive``."""
-    outcome = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
-    aliases = {
-        "true_positive_benign": "true_positive_authorized_benign",
-        "authorized_benign": "true_positive_authorized_benign",
-        "false_positive_rule_logic": "false_positive_logic_rule",
-        "false_positive_parser": "false_positive_data_parser",
-        "false_positive_intel": "false_positive_bad_intel_ioc",
-    }
-    outcome = aliases.get(outcome, outcome)
-    return outcome if outcome in DETECTION_OUTCOME_VALUES else "inconclusive"
+    return _conclusion_verdict().normalize_outcome(
+        value, allowed=DETECTION_OUTCOME_VALUES,
+    )
 
 
 def legacy_verdict_factors(
@@ -13495,182 +13494,28 @@ def legacy_verdict_factors(
     escalation_needed: bool = False,
 ) -> dict[str, Any]:
     """Map a legacy disposition into the orthogonal verdict dimensions."""
-    handling_for_risk = "escalate" if escalation_needed else "investigate"
-    mapping: dict[str, tuple[str, str, str, str]] = {
-        "true_positive_malicious": ("observed", "matched_intent", "malicious", "contain"),
-        "true_positive_suspicious": (
-            "observed",
-            "matched_intent",
-            "suspicious",
-            handling_for_risk,
-        ),
-        "true_positive_authorized_benign": (
-            "observed",
-            "matched_intent",
-            "authorized_benign",
-            "no_action",
-        ),
-        "false_positive_logic_rule": ("observed", "logic_error", "unknown", "monitor"),
-        "false_positive_data_parser": ("unknown", "parser_error", "unknown", "investigate"),
-        "false_positive_bad_intel_ioc": ("observed", "intel_error", "unknown", "monitor"),
-        "false_negative": ("observed", "not_applicable", "malicious", "escalate"),
-        "duplicate": ("observed", "unknown", "unknown", "no_action"),
-        "informational_no_action": ("observed", "not_applicable", "benign", "no_action"),
-        "inconclusive": ("unknown", "unknown", "unknown", "investigate"),
-    }
-    event_status, detection_validity, activity_disposition, handling = mapping.get(
-        outcome,
-        mapping["inconclusive"],
+    return _conclusion_verdict().legacy_factors(
+        outcome, escalation_needed=escalation_needed,
     )
-    return {
-        "event_status": event_status,
-        "detection_validity": detection_validity,
-        "activity_disposition": activity_disposition,
-        "handling": handling,
-        "duplicate_of": None,
-    }
 
 
 def derive_legacy_detection_outcome(factors: dict[str, Any]) -> str:
     """Derive the compatibility outcome from normalized verdict dimensions."""
-    duplicate_of = str(factors.get("duplicate_of") or "").strip()
-    validity = str(factors.get("detection_validity") or "unknown")
-    event_status = str(factors.get("event_status") or "unknown")
-    disposition = str(factors.get("activity_disposition") or "unknown")
-    handling = str(factors.get("handling") or "investigate")
-
-    if duplicate_of:
-        return "duplicate"
-    if validity == "parser_error":
-        return "false_positive_data_parser"
-    if validity == "logic_error":
-        return "false_positive_logic_rule"
-    if validity == "intel_error":
-        return "false_positive_bad_intel_ioc"
-    if validity == "matched_intent" and event_status == "observed":
-        if disposition == "malicious":
-            return "true_positive_malicious"
-        if disposition == "suspicious":
-            return "true_positive_suspicious"
-        if disposition == "authorized_benign":
-            return "true_positive_authorized_benign"
-        if disposition == "benign" and handling == "no_action":
-            return "informational_no_action"
-    if validity == "not_applicable" and event_status == "observed":
-        if disposition == "malicious":
-            return "false_negative"
-        if disposition in {"benign", "authorized_benign"} and handling == "no_action":
-            return "informational_no_action"
-    return "inconclusive"
+    return _conclusion_verdict().derive_outcome(factors)
 
 
 def normalize_factored_verdict(response: dict[str, Any]) -> dict[str, Any]:
     """Normalize factored verdict fields and reconcile the legacy outcome."""
-    raw_outcome = response.get("detection_outcome")
-    canonical_legacy = normalized_detection_outcome(raw_outcome)
-    invalid_fields: dict[str, Any] = {}
-    if re.sub(r"[^a-z0-9]+", "_", str(raw_outcome or "").strip().lower()).strip("_") not in (
-        DETECTION_OUTCOME_VALUES
-        | {
-            "true_positive_benign",
-            "authorized_benign",
-            "false_positive_rule_logic",
-            "false_positive_parser",
-            "false_positive_intel",
-        }
-    ):
-        invalid_fields["detection_outcome"] = raw_outcome
-
-    factors = legacy_verdict_factors(
-        canonical_legacy,
-        escalation_needed=boolean_setting(response.get("escalation_needed")),
+    return _conclusion_verdict().normalize(
+        response,
+        outcome_values=DETECTION_OUTCOME_VALUES,
+        event_status_values=EVENT_STATUS_VALUES,
+        validity_values=DETECTION_VALIDITY_VALUES,
+        disposition_values=ACTIVITY_DISPOSITION_VALUES,
+        handling_values=HANDLING_VALUES,
+        factored_keys=FACTORED_VERDICT_KEYS,
+        boolean_setting=boolean_setting,
     )
-    supplied_fields: list[str] = []
-    enum_fields = (
-        ("event_status", EVENT_STATUS_VALUES),
-        ("detection_validity", DETECTION_VALIDITY_VALUES),
-        ("activity_disposition", ACTIVITY_DISPOSITION_VALUES),
-        ("handling", HANDLING_VALUES),
-    )
-    for key, allowed in enum_fields:
-        if key not in response:
-            continue
-        supplied_fields.append(key)
-        normalized = re.sub(
-            r"[^a-z0-9]+",
-            "_",
-            str(response.get(key) or "").strip().lower(),
-        ).strip("_")
-        if normalized in allowed:
-            factors[key] = normalized
-        else:
-            invalid_fields[key] = response.get(key)
-
-    if "duplicate_of" in response:
-        supplied_fields.append("duplicate_of")
-        duplicate_of = response.get("duplicate_of")
-        if duplicate_of in (None, ""):
-            factors["duplicate_of"] = None
-        elif isinstance(duplicate_of, (str, int)):
-            factors["duplicate_of"] = str(duplicate_of).strip()[:256] or None
-        else:
-            invalid_fields["duplicate_of"] = duplicate_of
-
-    derived_outcome = derive_legacy_detection_outcome(factors)
-    contradictions: list[str] = []
-    warnings: list[str] = []
-    if supplied_fields and derived_outcome != canonical_legacy:
-        mismatch = (
-            f"factored verdict derives {derived_outcome}, but model supplied "
-            f"{canonical_legacy}"
-        )
-        if (
-            len(supplied_fields) == len(FACTORED_VERDICT_KEYS)
-            and not invalid_fields
-        ):
-            # The orthogonal fields are the authoritative analytical contract.
-            # A stale combined label is canonicalized for compatibility but
-            # must not erase independently supported disposition evidence.
-            warnings.append(mismatch)
-        else:
-            contradictions.append(mismatch)
-    if factors["event_status"] == "not_observed" and factors["detection_validity"] == "matched_intent":
-        contradictions.append("an unobserved event cannot be a validated detection-intent match")
-    if factors["activity_disposition"] == "malicious" and factors["handling"] in {"monitor", "no_action"}:
-        contradictions.append("malicious activity cannot use monitor/no_action handling")
-    if (
-        factors["activity_disposition"] in {"authorized_benign", "benign"}
-        and factors["handling"] == "contain"
-    ):
-        contradictions.append("benign or authorized activity cannot use contain handling")
-    if factors["duplicate_of"] and factors["handling"] in {"contain", "escalate"}:
-        contradictions.append("a duplicate record cannot independently authorize containment or escalation")
-    if canonical_legacy == "duplicate" and not factors["duplicate_of"]:
-        contradictions.append(
-            "a duplicate outcome must identify the canonical alert or group in duplicate_of"
-        )
-
-    source = (
-        "legacy_derived"
-        if not supplied_fields
-        else ("model_factored" if len(supplied_fields) == len(FACTORED_VERDICT_KEYS) else "hybrid")
-    )
-    canonical_outcome = derived_outcome if supplied_fields else canonical_legacy
-    response.update(factors)
-    response["detection_outcome"] = canonical_outcome
-    response["_verdict_validation"] = {
-        "version": 1,
-        "source": source,
-        "model_detection_outcome": raw_outcome,
-        "canonical_legacy_outcome": canonical_outcome,
-        "derived_legacy_outcome": derived_outcome,
-        "supplied_factored_fields": sorted(supplied_fields),
-        "invalid_fields": invalid_fields,
-        "contradictions": contradictions,
-        "warnings": warnings,
-        "material_contradiction": bool(contradictions or invalid_fields),
-    }
-    return response
 
 
 def normalize_scope_dispositions(
