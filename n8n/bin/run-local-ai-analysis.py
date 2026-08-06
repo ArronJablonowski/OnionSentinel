@@ -1934,6 +1934,18 @@ def _provider_registry():
     return registry
 
 
+def _reporting_incident():
+    _provider_routing()
+    from onion_sentinel.analysis.reporting import incident
+    return incident
+
+
+def _reporting_markdown():
+    _provider_routing()
+    from onion_sentinel.analysis.reporting import markdown
+    return markdown
+
+
 def normalized_model_roster(value: Any) -> list[str]:
     return _provider_routing().normalized_model_roster(value)
 
@@ -16914,470 +16926,43 @@ def validate_response(
 
 
 def markdown_list(items: list[str]) -> str:
-    if not items:
-        return "- n/a"
-    return "\n".join(f"- {item}" for item in items)
+    return _reporting_incident().markdown_list(items)
 
 
 def render_incident_response_markdown(response: dict[str, Any]) -> list[str]:
-    report = response.get("incident_response_report")
-    if not isinstance(report, dict):
-        return []
-    timeline = report.get("factual_timeline") if isinstance(report.get("factual_timeline"), list) else []
-    lines = [
-        "## Incident Response Investigation",
-        "",
-        "### Executive BLUF",
-        "",
-        str(report.get("executive_bluf") or "n/a"),
-        "",
-        "### Detection Outcome Reasoning",
-        "",
-        str(report.get("detection_outcome_reasoning") or "n/a"),
-        "",
-        "### Scope",
-        "",
-        str(report.get("scope") or "n/a"),
-        "",
-        "### Affected Systems",
-        "",
-        markdown_list(bounded_text_list(report.get("affected_systems"))),
-        "",
-        "### Methodology",
-        "",
-        markdown_list(bounded_text_list(report.get("methodology"))),
-        "",
-        "### Factual Timeline",
-        "",
-    ]
-    if timeline:
-        for event in timeline:
-            if not isinstance(event, dict):
-                continue
-            source = str(event.get("source_pack") or "supplied evidence")
-            digest = str(event.get("query_digest") or "n/a")
-            confidence = str(event.get("confidence") or "low")
-            lines.append(
-                f"- **{event.get('timestamp') or 'Time unavailable'}** - "
-                f"{event.get('event') or 'n/a'} "
-                f"(source: {source}; query: {digest}; confidence: {confidence})"
-            )
-    else:
-        lines.append("- n/a")
-    for title, key in (
-        ("Security Onion Findings", "security_onion_findings"),
-        ("OSquery Findings", "osquery_findings"),
-        ("PCAP Findings", "pcap_findings"),
-        ("Host Findings", "host_findings"),
-        ("Correlation Findings", "correlation_findings"),
-        ("Containment Recommendations", "containment_recommendations"),
-        ("Eradication Recommendations", "eradication_recommendations"),
-        ("Recovery Recommendations", "recovery_recommendations"),
-        ("Follow-up Queries", "follow_up_queries"),
-        ("Evidence Gaps", "evidence_gaps"),
-    ):
-        lines.extend(["", f"### {title}", "", markdown_list(bounded_text_list(report.get(key)))])
-    lines.extend([
-        "",
-        "### Conclusion",
-        "",
-        str(report.get("conclusion") or "n/a"),
-        "",
-        f"- **Confidence:** {report.get('confidence') or 'low'}",
-        "",
-    ])
-    return lines
+    return _reporting_incident().render_incident_response(
+        response,
+        bounded_text_list=bounded_text_list,
+    )
 
 
 def render_incident_query_audit_markdown(response: dict[str, Any]) -> list[str]:
-    audit = response.get("_incident_query_audit")
-    if not isinstance(audit, dict):
-        return []
-    lines = [
-        "## Security Onion Query Audit",
-        "",
-        f"- **Trusted source:** {audit.get('trusted_source', 'n/a')}",
-        f"- **Read only:** {audit.get('read_only', True)}",
-        f"- **Complete:** {audit.get('complete', False)}",
-        f"- **Partial:** {audit.get('partial', True)}",
-        "",
-    ]
-    queries = audit.get("queries") if isinstance(audit.get("queries"), list) else []
-    if not queries:
-        lines.append("No restricted Security Onion queries were recorded.")
-        return lines
-    for index, query in enumerate(queries, 1):
-        if not isinstance(query, dict):
-            continue
-        lines.extend([
-            f"### Query {index}: {query.get('pack') or 'evidence pack'}",
-            "",
-            f"- **Status:** {query.get('status') or 'unknown'}",
-            f"- **Digest:** `{query.get('query_digest') or 'n/a'}`",
-            f"- **Window:** {query.get('window', {}).get('start', '')} to {query.get('window', {}).get('end', '')}",
-            f"- **Hits:** {query.get('total_hits', 0)} total; {query.get('returned_hits', 0)} returned",
-            "",
-            "#### KQL (analyst-readable equivalent)",
-            "",
-            "```kql",
-            str(query.get("kql_equivalent") or "n/a"),
-            "```",
-            "",
-            "#### Elasticsearch Query DSL (exact executed request)",
-            "",
-            "```json",
-            json.dumps(query.get("query_dsl") or {}, indent=2, sort_keys=True),
-            "```",
-            "",
-        ])
-    return lines
+    return _reporting_incident().render_security_onion_query_audit(response)
 
 
 def render_incident_osquery_audit_markdown(response: dict[str, Any]) -> list[str]:
-    audit = response.get("_incident_osquery_audit")
-    if not isinstance(audit, dict):
-        return []
-    lines = [
-        "## Security Onion Appliance OSQuery Snapshot Audit",
-        "",
-        f"- **Trusted source:** {audit.get('trusted_source', 'n/a')}",
-        f"- **Read only:** {audit.get('read_only', True)}",
-        "",
-    ]
-    queries = audit.get("queries") if isinstance(audit.get("queries"), list) else []
-    if not queries:
-        lines.append("No validated Security Onion appliance OSQuery snapshots were recorded.")
-        return lines
-    for index, query in enumerate(queries, 1):
-        if not isinstance(query, dict):
-            continue
-        lines.extend([
-            f"### OSquery {index}: {query.get('pack') or 'reviewed pack'}",
-            "",
-            f"- **Target:** {query.get('target') or 'n/a'}",
-            f"- **Status:** {query.get('status') or 'unknown'}",
-            f"- **Digest:** `{query.get('query_digest') or 'n/a'}`",
-            f"- **Rows:** {query.get('total_rows', 0)} total; {query.get('returned_rows', 0)} returned",
-            f"- **Collector-owned alert bindings:** {query.get('support_binding_count', 0)}",
-            f"- **Duration:** {query.get('duration_ms', 0)} ms",
-            "",
-            "#### OSquery SQL (exact executed command)",
-            "",
-            "```sql",
-            str(query.get("query") or "n/a"),
-            "```",
-            "",
-        ])
-        rows = query.get("rows_preview") if isinstance(query.get("rows_preview"), list) else []
-        if rows:
-            lines.extend([
-                "#### Bounded Result Preview",
-                "",
-                "```json",
-                json.dumps(rows, indent=2, sort_keys=True),
-                "```",
-                "",
-            ])
-        if query.get("error"):
-            lines.extend([f"- **Error:** {query.get('error')}", ""])
-    return lines
+    return _reporting_incident().render_appliance_osquery_audit(response)
 
 
 def render_incident_live_osquery_audit_markdown(response: dict[str, Any]) -> list[str]:
-    audit = response.get("_incident_live_osquery_audit")
-    if not isinstance(audit, dict):
-        return []
-    lines = [
-        "## Endpoint Live OSQuery Audit",
-        "",
-        f"- **Trusted source:** {audit.get('trusted_source', 'n/a')}",
-        f"- **Endpoint SQL read only:** {audit.get('endpoint_read_only', audit.get('read_only', True))}",
-        f"- **Security Onion control-plane write status:** {audit.get('control_plane_write_status', 'confirmed' if audit.get('control_plane_writes', True) else 'none')}",
-        f"- **Attempted batches:** {audit.get('batches', 0)}",
-        f"- **Validated batches:** {audit.get('validated_batches', audit.get('batches', 0))}",
-        f"- **Failed batches:** {audit.get('failed_batches', 0)}",
-        f"- **Complete:** {audit.get('complete', False)}",
-        "",
-    ]
-    if audit.get("preview_truncated"):
-        lines.extend([
-            "- **Preview note:** Endpoint result previews were bounded to 100 rows and 256 KiB across the report.",
-            "",
-        ])
-    if audit.get("error"):
-        lines.extend([f"- **Collection note:** {audit.get('error')}", ""])
-    queries = audit.get("queries") if isinstance(audit.get("queries"), list) else []
-    if not queries:
-        lines.append("No endpoint live OSQuery batch was executed for this investigation.")
-        return lines
-    for index, query in enumerate(queries, 1):
-        if not isinstance(query, dict):
-            continue
-        lines.extend([
-            f"### Endpoint Query {index}: {query.get('target_alias') or 'configured endpoint'}",
-            "",
-            f"- **Purpose:** {query.get('purpose') or 'n/a'}",
-            f"- **Status:** {query.get('status') or 'unknown'}",
-            f"- **Digest:** `{query.get('query_digest') or 'n/a'}`",
-            f"- **Rows:** {query.get('total_rows', 0)} total; {query.get('returned_rows', 0)} returned",
-            f"- **Duration:** {query.get('duration_ms', 0)} ms",
-            "",
-            "#### OSQuery SQL (exact executed live query)",
-            "",
-            "```sql",
-            str(query.get("query") or "n/a"),
-            "```",
-            "",
-        ])
-        rows = query.get("rows_preview") if isinstance(query.get("rows_preview"), list) else []
-        if rows:
-            lines.extend([
-                "#### Bounded Result Preview",
-                "",
-                "```json",
-                json.dumps(rows, indent=2, sort_keys=True),
-                "```",
-                "",
-            ])
-        if query.get("rows_preview_truncated"):
-            lines.extend([
-                "Result preview truncated by the per-query or report-wide audit bound.",
-                "",
-            ])
-        if query.get("error"):
-            lines.extend([f"- **Error:** {query.get('error')}", ""])
-    return lines
+    return _reporting_incident().render_live_osquery_audit(response)
 
 
-def render_markdown(prompt_package: dict[str, Any], response: dict[str, Any], generated_at: str, json_path: Path) -> str:
-    alert = prompt_package.get("alert", {})
-    policy = prompt_package.get("analysis_policy", {})
-    alert_id = alert.get("alert_id", "")
-    rule_name = alert.get("rule_name", "Security Onion Alert")
-    level = str(alert.get("triage_level", "unknown")).lower()
-    score = alert.get("triage_score", "")
-    source_ip = alert.get("source_ip", "")
-    destination_ip = alert.get("destination_ip", "")
-    grouped_context = prompt_package.get("grouped_alert_context") if isinstance(prompt_package.get("grouped_alert_context"), dict) else {}
-    total_observations = grouped_context.get("total_observations", alert.get("seen_count", ""))
-    raw_alert_rows = grouped_context.get("raw_alert_rows", 1)
-    first_seen = grouped_context.get("first_seen", alert.get("first_seen", ""))
-    last_seen = grouped_context.get("last_seen", alert.get("last_seen", ""))
-    correlation = normalize_correlation_assessment(response.get("correlation_assessment"))
-    correlation_groups = [
-        f"{item['group_id']}: {item['reason'] or 'relationship requires analyst validation'}"
-        for item in correlation["related_groups"]
-    ]
-    second_opinion = response.get("_second_opinion") if isinstance(response.get("_second_opinion"), dict) else {}
-    secondary_response = (
-        second_opinion.get("response")
-        if isinstance(second_opinion.get("response"), dict)
-        else {}
+def render_markdown(
+    prompt_package: dict[str, Any],
+    response: dict[str, Any],
+    generated_at: str,
+    json_path: Path,
+) -> str:
+    return _reporting_markdown().render(
+        prompt_package,
+        response,
+        generated_at,
+        json_path,
+        normalize_correlation=normalize_correlation_assessment,
+        safe_filename=safe_filename,
+        bounded_text_list=bounded_text_list,
     )
-    comparison = (
-        second_opinion.get("comparison")
-        if isinstance(second_opinion.get("comparison"), dict)
-        else {}
-    )
-    reviewer_authorization = (
-        second_opinion.get("automation_authorization")
-        if isinstance(
-            second_opinion.get("automation_authorization"),
-            dict,
-        )
-        else {}
-    )
-    adjudication = (
-        response.get("_disagreement_adjudication")
-        if isinstance(response.get("_disagreement_adjudication"), dict)
-        else {}
-    )
-    adjudication_response = (
-        adjudication.get("response")
-        if isinstance(adjudication.get("response"), dict)
-        else {}
-    )
-    disputed_fields = [
-        (
-            f"{item.get('field', 'unknown')}: primary={item.get('primary', 'n/a')!s}; "
-            f"reviewer={item.get('reviewer', 'n/a')!s}"
-            + (" (material)" if item.get("material") else "")
-        )
-        for item in comparison.get("disputed_fields", [])
-        if isinstance(item, dict)
-    ]
-    analysis_input_mode = str(response.get("_analysis_input_mode") or "")
-    analysis_model_path = str(response.get("_analysis_model_path") or "")
-    analysis_model = str(response.get("_analysis_model") or "")
-    analysis_tag = safe_filename(
-        analysis_model_path or analysis_input_mode or "no-model-started"
-    )
-
-    lines = [
-        "---",
-        "type: soc-ai-analysis",
-        f"analysis_input_mode: {json.dumps(analysis_input_mode)}",
-        f"analysis_model_path: {json.dumps(analysis_model_path)}",
-        f"analysis_model: {json.dumps(analysis_model)}",
-        f"generated_at: {json.dumps(generated_at)}",
-        f"alert_id: {json.dumps(alert_id)}",
-        f"triage_level: {json.dumps(level)}",
-        f"triage_score: {json.dumps(score)}",
-        f"source_ip: {json.dumps(source_ip)}",
-        f"destination_ip: {json.dumps(destination_ip)}",
-        "tags:",
-        "  - security-onion",
-        "  - soc-ai-analysis",
-        f"  - {analysis_tag}",
-        "---",
-        "",
-        f"# Local AI Analysis - {rule_name}",
-        "",
-        f"- **Generated:** {generated_at}",
-        f"- **Alert ID:** {alert_id}",
-        f"- **Triage:** {level} / {score}",
-        f"- **Traffic:** {source_ip} -> {destination_ip}",
-        f"- **Grouped observations:** {total_observations} observation(s) across {raw_alert_rows} alert row(s)",
-        f"- **Grouped first/last seen:** {first_seen} -> {last_seen}",
-        f"- **Hosted second opinion allowed:** {policy.get('hosted_second_opinion_allowed')}",
-        f"- **Machine JSON:** `{json_path.name}`",
-        "",
-    ]
-    lines.extend(render_incident_response_markdown(response))
-    lines.extend(render_incident_query_audit_markdown(response))
-    lines.extend(render_incident_osquery_audit_markdown(response))
-    lines.extend(render_incident_live_osquery_audit_markdown(response))
-    lines.extend([
-        "## BLUF",
-        "",
-        f"- **Detection outcome:** {response['detection_outcome']}",
-        f"- **Bottom line:** {response['bluf']}",
-        "",
-        "## Summary",
-        "",
-        response["summary"],
-        "",
-        "## Likely Meaning",
-        "",
-        response["likely_meaning"],
-        "",
-        "## Severity Reasoning",
-        "",
-        response["severity_reasoning"],
-        "",
-        "## Alert Frequency Assessment",
-        "",
-        response["alert_frequency_assessment"],
-        "",
-        "## Correlation Assessment",
-        "",
-        f"- **Correlation found:** {correlation['correlation_found']}",
-        f"- **Confidence:** {correlation['confidence']}",
-        f"- **Attack-chain hypothesis:** {correlation['attack_chain_hypothesis'] or 'n/a'}",
-        "",
-        "### Related Alert Groups",
-        "",
-        markdown_list(correlation_groups),
-        "",
-        "### Shared Evidence",
-        "",
-        markdown_list(correlation["shared_evidence"]),
-        "",
-        "### Contradicting Evidence",
-        "",
-        markdown_list(correlation["contradicting_evidence"]),
-        "",
-        "### Recommended Correlation Pivots",
-        "",
-        markdown_list(correlation["recommended_pivots"]),
-        "",
-        "## Public Enrichment Findings",
-        "",
-        markdown_list(response["public_enrichment_findings"]),
-        "",
-        "## PCAP Analysis Findings",
-        "",
-        markdown_list(response["pcap_analysis_findings"]),
-        "",
-        "## False Positive Possibilities",
-        "",
-        markdown_list(response["false_positive_possibilities"]),
-        "",
-        "## Recommended Next Steps",
-        "",
-        markdown_list(response["recommended_next_steps"]),
-        "",
-        "## Evidence Used",
-        "",
-        markdown_list(response["evidence_used"]),
-        "",
-        "## Evidence Gaps",
-        "",
-        markdown_list(response["evidence_gaps"]),
-        "",
-        "## Tuning Recommendation",
-        "",
-        f"- **Recommendation:** {response['tuning_recommendation']}",
-        f"- **Reason:** {response['tuning_reason']}",
-        "",
-        "### Recommended Tuning Actions",
-        "",
-        markdown_list(response["recommended_tuning_actions"]),
-        "",
-        "## Escalation",
-        "",
-        f"- **Confidence:** {response['confidence']}",
-        f"- **Escalation needed:** {response['escalation_needed']}",
-        f"- **Hosted second opinion recommended:** {response['hosted_second_opinion_recommended']}",
-        "",
-        "## Second Opinion",
-        "",
-        f"- **Status:** {second_opinion.get('status', 'not requested')}",
-        f"- **Trigger:** {second_opinion.get('trigger', 'n/a')}",
-        f"- **Model route:** {second_opinion.get('model_route', 'n/a') or 'n/a'}",
-        f"- **Runtime:** {second_opinion.get('runtime_seconds', 'n/a')} second(s)",
-        f"- **Agreement:** {comparison.get('agreement', 'n/a')}",
-        f"- **Comparison:** {comparison.get('summary', 'n/a')}",
-        (
-            "- **Automation authorized by review:** "
-            f"{reviewer_authorization.get('authorized', 'n/a')}"
-        ),
-        (
-            "- **Automation authorization reason:** "
-            f"{reviewer_authorization.get('reason', 'n/a')}"
-        ),
-        f"- **Detection outcome:** {secondary_response.get('detection_outcome', 'n/a')}",
-        f"- **Confidence:** {secondary_response.get('confidence', 'n/a')}",
-        f"- **BLUF:** {secondary_response.get('bluf', 'n/a')}",
-        f"- **Summary:** {secondary_response.get('summary', second_opinion.get('error', 'n/a'))}",
-        "",
-        "### Disputed Fields",
-        "",
-        markdown_list(disputed_fields),
-        "",
-        "## Bounded Disagreement Adjudication",
-        "",
-        f"- **Status:** {adjudication.get('status', 'not required')}",
-        f"- **Mode:** {adjudication.get('mode', 'shadow')}",
-        f"- **Model route:** {adjudication.get('model_route', 'n/a') or 'n/a'}",
-        f"- **Runtime:** {adjudication.get('runtime_seconds', 'n/a')} second(s)",
-        f"- **Decision:** {adjudication_response.get('decision', adjudication.get('decision', 'n/a'))}",
-        f"- **Confidence:** {adjudication_response.get('confidence', 'n/a')}",
-        f"- **Confidence score:** {adjudication_response.get('confidence_score', 'n/a')}",
-        f"- **Rationale:** {adjudication_response.get('rationale', adjudication.get('error', 'n/a'))}",
-        f"- **Automation authorized:** {adjudication.get('automation_authorized', False)}",
-        f"- **Human adjudication required:** {adjudication.get('human_adjudication_required', True)}",
-        "",
-        "### Remaining Disagreements",
-        "",
-        markdown_list(adjudication_response.get("remaining_disagreements", [])),
-        "",
-        "### Additional Evidence Needed",
-        "",
-        markdown_list(adjudication_response.get("additional_evidence_needed", [])),
-        "",
-    ])
-    return "\n".join(lines)
 
 
 def write_outputs(

@@ -40,7 +40,7 @@
       "max_lines": 2018
     },
     "n8n/bin/run-local-ai-analysis.py": {
-      "max_lines": 18356
+      "max_lines": 17941
     },
     "onion-sentinel-dashboard/ac_hunter_review.py": {
       "max_lines": 2225
@@ -791,16 +791,6 @@
     "n8n/bin/run-local-ai-analysis.py::recover_repair_observables_from_trusted_catalog": {
       "max_complexity": 17
     },
-    "n8n/bin/run-local-ai-analysis.py::render_incident_live_osquery_audit_markdown": {
-      "max_complexity": 18
-    },
-    "n8n/bin/run-local-ai-analysis.py::render_incident_response_markdown": {
-      "max_complexity": 17
-    },
-    "n8n/bin/run-local-ai-analysis.py::render_markdown": {
-      "max_complexity": 21,
-      "max_lines": 229
-    },
     "n8n/bin/run-local-ai-analysis.py::require_controlled_evaluation_routes": {
       "max_complexity": 24
     },
@@ -1483,5 +1473,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "4e56f47007b2e652f424c1fa0e86d192be110657"
+  "source_release": "6485de514cf6c06902a838a1ae78b2e8d31651b5"
 }
