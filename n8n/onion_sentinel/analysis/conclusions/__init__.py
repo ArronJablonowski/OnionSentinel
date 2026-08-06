@@ -1,5 +1,5 @@
 """Deterministic conclusion normalization and guard stages."""
 
-from . import verdict
+from . import confidence, verdict
 
-__all__ = ["verdict"]
+__all__ = ["confidence", "verdict"]

@@ -1648,6 +1648,12 @@ def _conclusion_verdict():
     return verdict
 
 
+def _conclusion_confidence():
+    _provider_routing()
+    from onion_sentinel.analysis.conclusions import confidence
+    return confidence
+
+
 def normalized_model_roster(value: Any) -> list[str]:
     return _provider_routing().normalized_model_roster(value)
 
@@ -14193,177 +14199,23 @@ def apply_deterministic_evidence_guard(
 
 
 def confidence_label_for_score(score: float) -> str:
-    if score < CONFIDENCE_LOW_THRESHOLD:
-        return "low"
-    if score < CONFIDENCE_HIGH_THRESHOLD:
-        return "medium"
-    return "high"
+    return _conclusion_confidence().label(
+        score, low_threshold=CONFIDENCE_LOW_THRESHOLD,
+        high_threshold=CONFIDENCE_HIGH_THRESHOLD,
+    )
 
 
 def calibrate_response_confidence(response: dict[str, Any]) -> dict[str, Any]:
-    """Apply deterministic evidence caps to the model's confidence claim."""
-    raw_label = str(response.get("confidence") or "low").strip().lower()
-    if raw_label not in CONFIDENCE_VALUES:
-        raw_label = "low"
-    invalid_score = False
-    supplied_score = response.get("confidence_score")
-    if supplied_score in (None, ""):
-        raw_score = CONFIDENCE_SCORE_BY_LABEL[raw_label]
-        score_source = "legacy_label_mapping"
-    else:
-        try:
-            raw_score = float(supplied_score)
-        except (TypeError, ValueError, OverflowError):
-            raw_score = CONFIDENCE_SCORE_BY_LABEL[raw_label]
-            invalid_score = True
-        if not 0.0 <= raw_score <= 1.0:
-            raw_score = CONFIDENCE_SCORE_BY_LABEL[raw_label]
-            invalid_score = True
-        score_source = "model_score" if not invalid_score else "invalid_model_score_fallback"
-
-    evidence_used = response.get("evidence_used") if isinstance(response.get("evidence_used"), list) else []
-    reference_validation = (
-        response.get("_evidence_reference_validation")
-        if isinstance(response.get("_evidence_reference_validation"), dict)
-        else {}
+    """Apply deterministic evidence caps to the model confidence claim."""
+    return _conclusion_confidence().calibrate(
+        response, confidence_values=CONFIDENCE_VALUES,
+        score_by_label=CONFIDENCE_SCORE_BY_LABEL,
+        calibration_version=CONFIDENCE_CALIBRATION_VERSION,
+        critical_keys=DECISION_CRITICAL_KEYS,
+        consequential_outcomes=CONSEQUENTIAL_CLOSURE_OUTCOMES,
+        outcome_normalizer=normalized_detection_outcome,
+        label_for_score=confidence_label_for_score,
     )
-    corroborating_evidence = (
-        reference_validation.get("corroborating_refs")
-        if isinstance(reference_validation.get("corroborating_refs"), list)
-        else evidence_used
-    )
-    corroborating_source_classes = (
-        reference_validation.get("corroborating_source_classes")
-        if isinstance(
-            reference_validation.get("corroborating_source_classes"),
-            list,
-        )
-        else corroborating_evidence
-    )
-    invalid_evidence_refs = (
-        reference_validation.get("invalid_refs")
-        if isinstance(reference_validation.get("invalid_refs"), list)
-        else []
-    )
-    evidence_gaps = response.get("evidence_gaps") if isinstance(response.get("evidence_gaps"), list) else []
-    correlation = (
-        response.get("correlation_assessment")
-        if isinstance(response.get("correlation_assessment"), dict)
-        else {}
-    )
-    contradicting_evidence = (
-        correlation.get("contradicting_evidence")
-        if isinstance(correlation.get("contradicting_evidence"), list)
-        else []
-    )
-    verdict_validation = (
-        response.get("_verdict_validation")
-        if isinstance(response.get("_verdict_validation"), dict)
-        else {}
-    )
-    schema_repair = (
-        response.get("_schema_repair")
-        if isinstance(response.get("_schema_repair"), dict)
-        else {}
-    )
-    missing_keys = {
-        str(item)
-        for item in schema_repair.get("missing_keys", [])
-        if isinstance(schema_repair.get("missing_keys"), list)
-    }
-
-    maximum_score = 1.0
-    limiters: list[str] = []
-
-    def cap(value: float, reason: str) -> None:
-        nonlocal maximum_score
-        maximum_score = min(maximum_score, value)
-        if reason not in limiters:
-            limiters.append(reason)
-
-    if "_invalid_confidence" in response:
-        cap(0.39, "invalid_confidence_label")
-    if invalid_score:
-        cap(0.39, "invalid_confidence_score")
-    critical_missing = sorted(missing_keys & DECISION_CRITICAL_KEYS)
-    if critical_missing:
-        cap(0.39, "critical_schema_repair:" + ",".join(critical_missing))
-    if verdict_validation.get("material_contradiction"):
-        cap(0.39, "material_verdict_contradiction")
-    if verdict_validation.get("invalid_fields"):
-        cap(0.39, "invalid_factored_verdict")
-    if invalid_evidence_refs:
-        cap(0.39, "invalid_evidence_references")
-    deterministic_guard = (
-        verdict_validation.get("deterministic_evidence_guard")
-        if isinstance(
-            verdict_validation.get("deterministic_evidence_guard"),
-            dict,
-        )
-        else {}
-    )
-    deterministic_cap = deterministic_guard.get("confidence_cap")
-    if isinstance(deterministic_cap, (int, float)):
-        deterministic_reasons = deterministic_guard.get(
-            "confidence_cap_reasons"
-        )
-        if not isinstance(deterministic_reasons, list) or not deterministic_reasons:
-            deterministic_reasons = ["deterministic_evidence_guard"]
-        for reason in deterministic_reasons:
-            cap(float(deterministic_cap), str(reason)[:200])
-    incident_completeness = (
-        response.get("_incident_evidence_completeness")
-        if isinstance(response.get("_incident_evidence_completeness"), dict)
-        else {}
-    )
-    incident_cap = incident_completeness.get("confidence_cap")
-    if isinstance(incident_cap, (int, float)):
-        incident_reasons = incident_completeness.get("limiters")
-        if not isinstance(incident_reasons, list) or not incident_reasons:
-            incident_reasons = ["incident_evidence_incomplete"]
-        for reason in incident_reasons:
-            cap(float(incident_cap), str(reason)[:200])
-    if not corroborating_source_classes:
-        cap(0.69, "no_valid_corroborating_evidence")
-    elif len(set(corroborating_source_classes)) == 1:
-        cap(0.79, "single_valid_corroborating_evidence_source")
-    if contradicting_evidence:
-        cap(0.69, "unresolved_contradicting_evidence")
-    outcome = normalized_detection_outcome(response.get("detection_outcome"))
-    if evidence_gaps and outcome in (
-        CONSEQUENTIAL_CLOSURE_OUTCOMES
-        | {"true_positive_malicious", "false_negative"}
-    ):
-        cap(0.79, "consequential_outcome_with_evidence_gaps")
-    if confidence_label_for_score(raw_score) != raw_label:
-        cap(0.79, "model_confidence_label_score_mismatch")
-
-    calibrated_score = round(min(max(raw_score, 0.0), maximum_score), 3)
-    calibrated_label = confidence_label_for_score(calibrated_score)
-    response["confidence_score"] = calibrated_score
-    response["confidence"] = calibrated_label
-    response["_confidence_calibration"] = {
-        "version": CONFIDENCE_CALIBRATION_VERSION,
-        "score_source": score_source,
-        "model_confidence": raw_label,
-        "model_confidence_score": round(raw_score, 3),
-        "calibrated_confidence": calibrated_label,
-        "calibrated_confidence_score": calibrated_score,
-        "maximum_confidence_score": round(maximum_score, 3),
-        "limiters": limiters,
-        "evidence_signals": {
-            "cited_evidence_count": len(evidence_used),
-            "corroborating_evidence_count": len(corroborating_evidence),
-            "corroborating_evidence_source_count": len(
-                set(corroborating_source_classes)
-            ),
-            "invalid_evidence_reference_count": len(invalid_evidence_refs),
-            "evidence_gap_count": len(evidence_gaps),
-            "contradicting_evidence_count": len(contradicting_evidence),
-            "critical_schema_repair_keys": critical_missing,
-        },
-    }
-    return response
 
 
 def _is_incident_responder_package(prompt_package: dict[str, Any] | None) -> bool:
