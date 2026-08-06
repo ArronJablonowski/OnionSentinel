@@ -1666,6 +1666,21 @@ def _conclusion_evidence_guard():
     return evidence_guard
 
 
+def _conclusion_tuning():
+    _provider_routing()
+    from onion_sentinel.analysis.conclusions import tuning
+    return tuning
+
+
+def _tuning_guard_dependencies():
+    module = _conclusion_tuning()
+    return module.Dependencies(
+        bounded_text_list=bounded_text_list,
+        has_authorization_evidence=_has_structured_authorization_evidence,
+        control_tuning_values=frozenset(CONTROL_TUNING_VALUES),
+    )
+
+
 def _evidence_guard_dependencies():
     module = _conclusion_evidence_guard()
     return module.Dependencies(
@@ -13443,202 +13458,25 @@ def _has_structured_authorization_evidence(
 def _tuning_material_evidence_gap_signals(
     response: dict[str, Any],
 ) -> list[str]:
-    """Return bounded, non-sensitive signals that make control tuning unsafe."""
-    signals: list[str] = []
-
-    def add(signal: str) -> None:
-        if signal not in signals and len(signals) < 12:
-            signals.append(signal)
-
-    if bounded_text_list(response.get("evidence_gaps"), limit=1):
-        add("reported_evidence_gaps")
-    report = response.get("incident_response_report")
-    if isinstance(report, dict) and (
-        bounded_text_list(report.get("evidence_gaps"), limit=1)
-        or bounded_text_list(report.get("constraints"), limit=1)
-    ):
-        add("incident_report_evidence_gaps")
-    completeness = response.get("_incident_evidence_completeness")
-    if isinstance(completeness, dict) and (
-        completeness.get("complete_for_high_confidence") is False
-        or bool(completeness.get("limiters"))
-    ):
-        add("incident_evidence_incomplete")
-    reference_validation = response.get("_evidence_reference_validation")
-    if isinstance(reference_validation, dict) and bool(
-        reference_validation.get("invalid_refs")
-    ):
-        add("invalid_evidence_references")
-    verdict_validation = response.get("_verdict_validation")
-    if isinstance(verdict_validation, dict) and verdict_validation.get(
-        "material_contradiction"
-    ):
-        add("material_evidence_contradiction")
-    return signals
+    return _conclusion_tuning().material_evidence_gap_signals(
+        response, _tuning_guard_dependencies(),
+    )
 
 
 def _unresolved_reviewer_material_disagreement(
     response: dict[str, Any],
 ) -> bool:
-    """Treat shadow reviewer disagreement as unresolved until a human decides."""
-    second_opinion = response.get("_second_opinion")
-    comparison = (
-        second_opinion.get("comparison")
-        if isinstance(second_opinion, dict)
-        and isinstance(second_opinion.get("comparison"), dict)
-        else {}
-    )
-    return bool(comparison.get("material_disagreement"))
+    return _conclusion_tuning().unresolved_reviewer_material_disagreement(response)
 
 
 def apply_tuning_coherence_guard(
     response: dict[str, Any],
     prompt_package: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Keep suppress/drop advisory, evidence-complete, and human-controlled.
-
-    A model may recommend a detection-control change, but the runtime must not
-    preserve that recommendation as decision-ready while its factored verdict
-    is unknown, material evidence gaps remain, structured operator
-    authorization is absent, or an independent reviewer still materially
-    disagrees. Even a coherent recommendation is never authorized for
-    automatic suppress/drop execution.
-    """
-    previous = (
-        dict(response.get("_tuning_coherence_guard"))
-        if isinstance(response.get("_tuning_coherence_guard"), dict)
-        else {}
+    """Keep suppress/drop evidence-complete, advisory, and human-controlled."""
+    return _conclusion_tuning().apply(
+        response, prompt_package, _tuning_guard_dependencies(),
     )
-    current_tuning = str(
-        response.get("tuning_recommendation") or ""
-    ).strip().lower()
-    previous_requested = str(
-        previous.get("requested_tuning") or ""
-    ).strip().lower()
-    requested_tuning = (
-        current_tuning
-        if current_tuning in CONTROL_TUNING_VALUES
-        else previous_requested
-        if previous_requested in CONTROL_TUNING_VALUES
-        else ""
-    )
-    if not requested_tuning:
-        return response
-
-    detection_validity = str(
-        response.get("detection_validity") or "unknown"
-    ).strip().lower()
-    activity_disposition = str(
-        response.get("activity_disposition") or "unknown"
-    ).strip().lower()
-    evidence_gap_signals = _tuning_material_evidence_gap_signals(response)
-    structured_authorization = _has_structured_authorization_evidence(
-        prompt_package
-    )
-    reviewer_disagreement = _unresolved_reviewer_material_disagreement(
-        response
-    )
-    blocking_reasons: list[str] = []
-    if detection_validity == "unknown":
-        blocking_reasons.append("detection_validity_unknown")
-    if activity_disposition == "unknown":
-        blocking_reasons.append("activity_disposition_unknown")
-    if evidence_gap_signals:
-        blocking_reasons.append("material_evidence_gaps")
-    if not structured_authorization:
-        blocking_reasons.append("structured_authorization_missing")
-    if reviewer_disagreement:
-        blocking_reasons.append(
-            "reviewer_material_disagreement_unresolved"
-        )
-
-    downgrade_applied = bool(blocking_reasons)
-    if downgrade_applied:
-        response["tuning_recommendation"] = "needs_more_data"
-        response["recommended_tuning_actions"] = []
-        response["tuning_reason"] = (
-            "Suppress/drop tuning was downgraded because deterministic "
-            "coherence requirements were not met; resolve the recorded "
-            "evidence, authorization, and review blockers before proposing "
-            "a human-approved detection change."
-        )
-
-    controls = (
-        dict(response.get("_automation_controls"))
-        if isinstance(response.get("_automation_controls"), dict)
-        else {}
-    )
-    controls.update(
-        {
-            "tuning_blocked": True,
-            "automatic_tuning_authorized": False,
-            "tuning_requires_human_approval": True,
-            "requires_human_review": True,
-        }
-    )
-    if not str(controls.get("reason") or "").strip():
-        controls["reason"] = (
-            "suppress/drop tuning is advisory and requires explicit human "
-            "approval"
-        )
-    response["_automation_controls"] = controls
-
-    gap = (
-        "Suppress/drop tuning is not decision-ready because deterministic "
-        "coherence checks found unresolved evidence, authorization, or "
-        "independent-review requirements."
-    )
-    if downgrade_applied:
-        evidence_gaps = bounded_text_list(
-            response.get("evidence_gaps"),
-            limit=49,
-            item_limit=4000,
-        )
-        if gap not in evidence_gaps:
-            evidence_gaps.append(gap)
-        response["evidence_gaps"] = evidence_gaps[:50]
-
-    verdict_validation = (
-        dict(response.get("_verdict_validation"))
-        if isinstance(response.get("_verdict_validation"), dict)
-        else {}
-    )
-    warnings = bounded_text_list(
-        verdict_validation.get("warnings"),
-        limit=49,
-        item_limit=1000,
-    )
-    warning = (
-        "suppress/drop tuning was downgraded by the deterministic coherence guard"
-        if downgrade_applied
-        else (
-            "suppress/drop tuning remains advisory; automatic application is "
-            "blocked"
-        )
-    )
-    if warning not in warnings:
-        warnings.append(warning)
-    verdict_validation["warnings"] = warnings[:50]
-    response["_verdict_validation"] = verdict_validation
-
-    response["_tuning_coherence_guard"] = {
-        "schema": "onion-sentinel-tuning-coherence-guard-v1",
-        "version": 1,
-        "control_requested": True,
-        "requested_tuning": requested_tuning,
-        "resulting_tuning": str(
-            response.get("tuning_recommendation") or "needs_more_data"
-        )[:40],
-        "downgrade_applied": downgrade_applied,
-        "invalid_for_context": downgrade_applied,
-        "blocking_reasons": blocking_reasons[:8],
-        "material_evidence_gap_signals": evidence_gap_signals[:12],
-        "structured_authorization_present": structured_authorization,
-        "reviewer_material_disagreement_unresolved": reviewer_disagreement,
-        "automatic_tuning_authorized": False,
-        "human_approval_required": True,
-    }
-    return response
 
 
 def apply_authorized_benign_evidence_guard(

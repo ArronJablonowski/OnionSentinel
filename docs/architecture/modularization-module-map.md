@@ -269,6 +269,9 @@ order after factored-verdict normalization and deterministic rule validation.
 Collector-owned rule-intent reconciliation is isolated in the same package,
 with endpoint trust, verdict normalization, and bounded-text policy injected
 from their authoritative runtime owners.
+Advisory suppress/drop coherence is a separate conclusion policy module; it
+records deterministic blockers and always preserves explicit human approval
+as the only authority for detection-control changes.
 The legacy runner functions remain compatibility delegates and inject runtime
 policy explicitly, preserving existing test seams while keeping review-package
 mutation and reviewer-output admission out of the composition root.
