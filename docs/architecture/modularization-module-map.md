@@ -62,10 +62,12 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
   fixed inference argv, bounded execution, response-envelope parsing, exact
   provider/model attestation, serialized Ollama use, and guaranteed unload now
   live in `onion_sentinel.analysis.providers.openclaw`.
-- The provider-specific Hermes transport remains in the legacy runner until
-  its bounded process, identity-attestation, malformed-output, timeout,
-  missing-binary, credential-rotation, and credential-isolation tests migrate
-  with it.
+- Hermes dedicated-auth filtering and bounded loading, atomic credential
+  rotation, exclusive auth locking, ephemeral profile construction, tool-empty
+  fixed argv, bounded execution, and usage-sidecar identity attestation now
+  live in `onion_sentinel.analysis.providers.hermes`.
+- Provider dispatch remains in the legacy runner until the extracted adapters
+  can be registered behind one exact no-silent-fallback interface.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports

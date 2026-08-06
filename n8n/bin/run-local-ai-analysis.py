@@ -1922,6 +1922,12 @@ def _openclaw_provider():
     return openclaw
 
 
+def _hermes_provider():
+    _provider_routing()
+    from onion_sentinel.analysis.providers import hermes
+    return hermes
+
+
 def normalized_model_roster(value: Any) -> list[str]:
     return _provider_routing().normalized_model_roster(value)
 
@@ -10646,56 +10652,11 @@ def _filtered_hermes_auth_store(
     *,
     require_credentials: bool = True,
 ) -> dict[str, Any]:
-    """Keep only the dedicated OpenAI Codex provider and credential pool."""
-    providers = raw.get("providers")
-    provider_state = (
-        providers.get("openai-codex")
-        if isinstance(providers, dict)
-        else None
+    return _hermes_provider().filtered_auth_store(
+        raw,
+        error_type=RuntimeArtifactError,
+        require_credentials=require_credentials,
     )
-    credential_pool = raw.get("credential_pool")
-    pool_entries = (
-        credential_pool.get("openai-codex")
-        if isinstance(credential_pool, dict)
-        else None
-    )
-    if isinstance(pool_entries, list) and any(
-        not isinstance(entry, dict)
-        or (
-            entry.get("provider") is not None
-            and str(entry.get("provider")).strip() != "openai-codex"
-        )
-        for entry in pool_entries
-    ):
-        raise RuntimeArtifactError(
-            "dedicated Hermes openai-codex credential pool is invalid"
-        )
-    has_provider = isinstance(provider_state, dict) and bool(provider_state)
-    has_pool = isinstance(pool_entries, list) and bool(pool_entries)
-    if require_credentials and not (has_provider or has_pool):
-        raise RuntimeArtifactError(
-            "dedicated Hermes auth store does not contain openai-codex credentials"
-        )
-    raw_version = raw.get("version")
-    version = (
-        raw_version
-        if isinstance(raw_version, int)
-        and not isinstance(raw_version, bool)
-        and raw_version > 0
-        else 1
-    )
-    filtered: dict[str, Any] = {
-        "version": version,
-        "active_provider": "openai-codex",
-        "providers": {},
-    }
-    if has_provider:
-        filtered["providers"]["openai-codex"] = provider_state
-    if has_pool:
-        filtered["credential_pool"] = {
-            "openai-codex": pool_entries,
-        }
-    return filtered
 
 
 def _load_bounded_regular_json(
@@ -10766,14 +10727,11 @@ def _load_bounded_regular_json(
 
 
 def _load_dedicated_hermes_auth(path: Path) -> dict[str, Any]:
-    """Read the explicit Onion Sentinel Hermes credential store only."""
-    return _filtered_hermes_auth_store(
-        _load_bounded_regular_json(
-            path,
-            max_bytes=HERMES_MAX_AUTH_BYTES,
-            label="dedicated Hermes authentication",
-            required_mode=0o600,
-        )
+    return _hermes_provider().load_auth(
+        path,
+        read_json=_load_bounded_regular_json,
+        error_type=RuntimeArtifactError,
+        max_bytes=HERMES_MAX_AUTH_BYTES,
     )
 
 
@@ -10781,47 +10739,11 @@ def _write_dedicated_hermes_auth(
     path: Path,
     auth_store: dict[str, Any],
 ) -> None:
-    """Atomically persist a filtered, owner-only Hermes credential store."""
-    if path.is_symlink():
-        raise RuntimeArtifactError(
-            "dedicated Hermes authentication path must not be a symlink"
-        )
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if path.parent.is_symlink():
-        raise RuntimeArtifactError(
-            "dedicated Hermes authentication directory must not be a symlink"
-        )
-    path.parent.chmod(0o700)
-    filtered = _filtered_hermes_auth_store(auth_store)
-    fd, temp_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
+    return _hermes_provider().write_auth(
+        path,
+        auth_store,
+        error_type=RuntimeArtifactError,
     )
-    temporary = Path(temp_name)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            fd = -1
-            handle.write(json.dumps(filtered, indent=2, sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        path.chmod(0o600)
-        try:
-            directory_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        except OSError:
-            # Some filesystems do not support directory fsync. The auth file
-            # itself has already been fsynced and atomically replaced.
-            pass
-    finally:
-        if fd >= 0:
-            os.close(fd)
-        temporary.unlink(missing_ok=True)
 
 
 def _verified_hermes_usage(
@@ -10829,28 +10751,13 @@ def _verified_hermes_usage(
     *,
     expected_model: str,
 ) -> dict[str, Any]:
-    """Require Hermes' bounded usage sidecar to attest the exact invocation."""
-    try:
-        usage = _load_bounded_regular_json(
-            path,
-            max_bytes=HERMES_MAX_USAGE_BYTES,
-            label="Hermes Agent usage provenance artifact",
-        )
-    except RuntimeArtifactError as exc:
-        raise SystemExit(
-            "Hermes Agent returned an invalid usage provenance artifact"
-        ) from exc
-    if usage.get("completed") is not True or usage.get("failed") is not False:
-        raise SystemExit(
-            "Hermes Agent usage provenance did not attest a completed invocation"
-        )
-    provider = str(usage.get("provider") or "").strip()
-    observed_model = str(usage.get("model") or "").strip()
-    if provider != "openai-codex" or observed_model != expected_model:
-        raise SystemExit(
-            "Hermes Agent executed a different provider/model than the assigned route"
-        )
-    return usage
+    return _hermes_provider().verified_usage(
+        path,
+        expected_model=expected_model,
+        read_json=_load_bounded_regular_json,
+        error_type=RuntimeArtifactError,
+        max_bytes=HERMES_MAX_USAGE_BYTES,
+    )
 
 
 def hermes_agent_chat(
@@ -10863,213 +10770,41 @@ def hermes_agent_chat(
     system_prompt_file: Path | None = None,
     independent_review: bool = False,
 ) -> dict[str, Any]:
-    """Run Hermes as an isolated, tool-empty, one-shot OpenAI Codex harness."""
-    if not boolean_setting(settings.get("hermes_agent_enabled")):
-        raise SystemExit("Hermes Agent is disabled in AI Analysis Model Selection")
-    if (
-        model != str(settings.get("hermes_agent_model") or "")
-        or reasoning_effort
-        != str(settings.get("hermes_agent_reasoning_effort") or "").lower()
-    ):
-        raise SystemExit("Hermes Agent route is not the enabled configured route")
-    if model not in CODEX_CLI_MODEL_CATALOG:
-        raise SystemExit("Hermes Agent model is not supported")
-    if reasoning_effort != HERMES_AGENT_REASONING_EFFORT:
-        raise SystemExit(
-            "Hermes Agent one-shot runtime supports medium reasoning effort only"
-        )
-    executable = resolve_cli_harness(
-        settings,
-        setting_key="hermes_agent_path",
-        basename="hermes",
-        label="Hermes Agent",
-    )
-    payload = cli_analysis_payload(
+    return _hermes_provider().chat(
         prompt_package,
         args,
-        hosted=True,
+        settings,
+        model=model,
+        reasoning_effort=reasoning_effort,
         system_prompt_file=system_prompt_file,
         independent_review=independent_review,
+        boolean_setting=boolean_setting,
+        model_catalog=CODEX_CLI_MODEL_CATALOG,
+        required_effort=HERMES_AGENT_REASONING_EFFORT,
+        resolve_executable=lambda configured: resolve_cli_harness(
+            configured,
+            setting_key="hermes_agent_path",
+            basename="hermes",
+            label="Hermes Agent",
+        ),
+        build_payload=cli_analysis_payload,
+        auth_file=DEFAULT_HERMES_AUTH_FILE,
+        load_dedicated_auth=_load_dedicated_hermes_auth,
+        write_dedicated_auth=_write_dedicated_hermes_auth,
+        atomic_write_json=atomic_write_json,
+        run_command=run_bounded_command,
+        sanitized_env=sanitized_cli_harness_env,
+        process_error=BoundedProcessError,
+        artifact_error=RuntimeArtifactError,
+        summarize_failure=summarize_cli_harness_failure,
+        verify_usage=_verified_hermes_usage,
+        extract_json=extract_json_object,
+        max_prompt_bytes=HERMES_MAX_PROMPT_ARGUMENT_BYTES,
+        max_stderr_bytes=DEFAULT_CLOUD_MAX_STDERR_BYTES,
+        flock=fcntl.flock,
+        lock_exclusive=fcntl.LOCK_EX,
+        lock_unlock=fcntl.LOCK_UN,
     )
-    payload["reasoning_effort"] = reasoning_effort
-    serialized = json.dumps(payload, separators=(",", ":"))
-    if len(serialized.encode("utf-8")) > HERMES_MAX_PROMPT_ARGUMENT_BYTES:
-        raise SystemExit(
-            "Hermes Agent analysis request exceeds the installed CLI's safe prompt argument limit"
-        )
-    hermes_auth = DEFAULT_HERMES_AUTH_FILE
-    auth_parent = hermes_auth.parent
-    if auth_parent.is_symlink():
-        raise SystemExit(
-            "Hermes Agent dedicated authentication directory must not be a symlink"
-        )
-    auth_parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    auth_parent.chmod(0o700)
-    auth_lock = hermes_auth.with_name("auth.lock")
-    if auth_lock.is_symlink():
-        raise SystemExit(
-            "Hermes Agent dedicated authentication lock must not be a symlink"
-        )
-    lock_flags = os.O_CREAT | os.O_RDWR
-    if hasattr(os, "O_NOFOLLOW"):
-        lock_flags |= os.O_NOFOLLOW
-    try:
-        auth_lock_fd = os.open(auth_lock, lock_flags, 0o600)
-        os.fchmod(auth_lock_fd, 0o600)
-    except OSError as exc:
-        raise SystemExit(
-            "Hermes Agent dedicated authentication lock is unavailable"
-        ) from exc
-    with os.fdopen(auth_lock_fd, "a+", encoding="utf-8") as auth_lock_handle:
-        fcntl.flock(auth_lock_handle, fcntl.LOCK_EX)
-        try:
-            try:
-                dedicated_auth = _load_dedicated_hermes_auth(hermes_auth)
-            except RuntimeArtifactError as exc:
-                raise SystemExit(
-                    "Hermes Agent dedicated authentication is unavailable at "
-                    f"{hermes_auth}; provision the isolated openai-codex login "
-                    "described in the runtime roadmap"
-                ) from exc
-            with tempfile.TemporaryDirectory(
-                prefix="onion-sentinel-hermes-"
-            ) as temp_name:
-                work_dir = Path(temp_name)
-                hermes_home = work_dir / "hermes-home"
-                isolated_home = hermes_home / "home"
-                codex_home = isolated_home / ".codex"
-                xdg_config = work_dir / "xdg-config"
-                xdg_cache = work_dir / "xdg-cache"
-                xdg_data = work_dir / "xdg-data"
-                xdg_state = work_dir / "xdg-state"
-                xdg_runtime = work_dir / "xdg-runtime"
-                isolated_tmp = work_dir / "tmp"
-                for directory in (
-                    hermes_home,
-                    isolated_home,
-                    codex_home,
-                    xdg_config,
-                    xdg_cache,
-                    xdg_data,
-                    xdg_state,
-                    xdg_runtime,
-                    isolated_tmp,
-                ):
-                    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-                    directory.chmod(0o700)
-                isolated_auth = hermes_home / "auth.json"
-                atomic_write_json(isolated_auth, dedicated_auth)
-                isolated_auth.chmod(0o600)
-                config_path = hermes_home / "config.yaml"
-                config_path.write_text(
-                    "model:\n"
-                    f"  provider: openai-codex\n  default: {model}\n"
-                    "context:\n"
-                    "  engine: compressor\n"
-                    "memory:\n"
-                    "  memory_enabled: false\n"
-                    "  user_profile_enabled: false\n"
-                    "compression:\n"
-                    "  enabled: false\n"
-                    "terminal:\n"
-                    "  home_mode: profile\n",
-                    encoding="utf-8",
-                )
-                config_path.chmod(0o600)
-                usage_path = work_dir / "usage.json"
-                cmd = [
-                    executable,
-                    "--oneshot",
-                    serialized,
-                    "--model",
-                    model,
-                    "--provider",
-                    "openai-codex",
-                    "--toolsets",
-                    "context_engine",
-                    "--safe-mode",
-                    "--usage-file",
-                    str(usage_path),
-                ]
-                proc = None
-                invocation_error: BaseException | None = None
-                try:
-                    proc = run_bounded_command(
-                        cmd,
-                        timeout_seconds=args.timeout,
-                        max_stdout_bytes=args.max_response_bytes,
-                        max_stderr_bytes=DEFAULT_CLOUD_MAX_STDERR_BYTES,
-                        cwd=work_dir,
-                        env=sanitized_cli_harness_env(
-                            executable,
-                            extra={
-                                "HOME": str(isolated_home),
-                                "CODEX_HOME": str(codex_home),
-                                "HERMES_HOME": str(hermes_home),
-                                "HERMES_REAL_HOME": str(isolated_home),
-                                "XDG_CONFIG_HOME": str(xdg_config),
-                                "XDG_CACHE_HOME": str(xdg_cache),
-                                "XDG_DATA_HOME": str(xdg_data),
-                                "XDG_STATE_HOME": str(xdg_state),
-                                "XDG_RUNTIME_DIR": str(xdg_runtime),
-                                "TMPDIR": str(isolated_tmp),
-                                # Hermes 0.18.2 otherwise consults the
-                                # installed source tree's .env in addition to
-                                # HERMES_HOME. Disable python-dotenv loading;
-                                # the dedicated auth.json remains explicit.
-                                "PYTHON_DOTENV_DISABLED": "1",
-                            },
-                        ),
-                    )
-                except BaseException as exc:
-                    invocation_error = exc
-                auth_persist_error: BaseException | None = None
-                try:
-                    rotated_auth = _load_dedicated_hermes_auth(isolated_auth)
-                    _write_dedicated_hermes_auth(
-                        hermes_auth,
-                        rotated_auth,
-                    )
-                except (OSError, RuntimeArtifactError) as exc:
-                    auth_persist_error = exc
-                if auth_persist_error is not None:
-                    raise SystemExit(
-                        "Hermes Agent credential rotation could not be "
-                        "persisted to its dedicated auth store"
-                    ) from auth_persist_error
-                if isinstance(invocation_error, FileNotFoundError):
-                    raise SystemExit(
-                        f"Hermes Agent executable was not found: {executable}"
-                    ) from invocation_error
-                if isinstance(invocation_error, BoundedProcessError):
-                    raise SystemExit(
-                        f"Hermes Agent analysis failed: {invocation_error}"
-                    ) from invocation_error
-                if invocation_error is not None:
-                    raise invocation_error
-                if proc is None:
-                    raise SystemExit(
-                        "Hermes Agent analysis failed before execution completed"
-                    )
-                if proc.returncode != 0:
-                    detail = summarize_cli_harness_failure(
-                        "Hermes Agent",
-                        proc.stderr,
-                        proc.returncode,
-                    )
-                    raise SystemExit(f"Hermes Agent analysis failed: {detail}")
-                usage = _verified_hermes_usage(
-                    usage_path,
-                    expected_model=model,
-                )
-                response = extract_json_object(proc.stdout)
-        finally:
-            fcntl.flock(auth_lock_handle, fcntl.LOCK_UN)
-    response["_analysis_model"] = str(usage["model"])
-    response["_analysis_model_path"] = "hermes-agent"
-    response["_analysis_provider"] = str(usage["provider"])
-    response["_analysis_harness"] = "hermes-agent"
-    return response
 
 
 def _openclaw_output_text(envelope: dict[str, Any]) -> str:
