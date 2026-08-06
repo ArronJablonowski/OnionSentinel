@@ -80,6 +80,7 @@
       "installer": "n8n/bin/install-ai-runtime-package.py",
       "required_modules": [
         "onion_sentinel",
+        "onion_sentinel.analysis.providers.routing",
         "onion_sentinel.composition",
         "onion_sentinel.contracts.errors",
         "onion_sentinel.contracts.models",

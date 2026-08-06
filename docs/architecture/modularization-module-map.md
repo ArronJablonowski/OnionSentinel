@@ -43,6 +43,17 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
 | Verdict, confidence, and evidence guards | 14,873–17,481 | `analysis.conclusions` | factored verdict, confidence, gaps, reconciliation | none after extraction |
 | Query/OSQuery audit and follow-up | 17,484–18,023 | `analysis.reporting.audit` | audit schemas and bound references | optional governed follow-up |
 | Validation and report rendering | 18,056–18,490 | `analysis.reporting` | structured result and Markdown fields | none after extraction |
+
+### Extraction ledger
+
+- Model roster normalization, exact route construction/parsing, assigned/live
+  metadata, external-harness route handling, and reviewer model identity now
+  live in `onion_sentinel.analysis.providers.routing`. The legacy runner keeps
+  thin symbol delegates for dynamic-import compatibility.
+- Provider-specific Ollama, Codex, Hermes, and OpenClaw transports remain in
+  the legacy runner until their bounded process/HTTP, identity-attestation,
+  malformed-output, timeout, missing-binary, and credential-isolation tests
+  can migrate with them.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports
