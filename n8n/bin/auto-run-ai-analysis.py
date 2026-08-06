@@ -3577,7 +3577,19 @@ def build_prompt(
     if proc.returncode != 0:
         if proc.stderr:
             print(proc.stderr, file=sys.stderr, end="")
-        raise RuntimeError(f"prompt builder failed rc={proc.returncode}")
+        # Preserve the bounded terminal diagnostic so deterministic admission
+        # failures (especially an irreducibly oversized package) are retired
+        # instead of being retried forever under the generic wrapper error.
+        stderr_lines = [
+            line.strip()
+            for line in str(proc.stderr or "").splitlines()
+            if line.strip()
+        ]
+        detail = stderr_lines[-1][:700] if stderr_lines else ""
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(
+            f"prompt builder failed rc={proc.returncode}{suffix}"
+        )
     output_lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
     if not output_lines:
         raise RuntimeError("prompt builder returned no output path")

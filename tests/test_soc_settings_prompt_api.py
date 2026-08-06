@@ -448,6 +448,21 @@ class SocSettingsPromptApiTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("automatic AI analysis severity threshold", payload["error"])
 
+    def test_ai_settings_default_and_validate_capture_loss_threshold(self) -> None:
+        settings = self.portal.default_soc_ai_settings()
+        self.assertEqual(settings["pcap_capture_loss_threshold_percent"], 5.0)
+
+        settings["pcap_capture_loss_threshold_percent"] = "7.25"
+        ok, normalized = self.portal.normalize_soc_ai_settings(settings)
+        self.assertTrue(ok)
+        self.assertEqual(normalized["pcap_capture_loss_threshold_percent"], 7.25)
+
+        for invalid in (0, -1, 100.1, "not-a-number"):
+            settings["pcap_capture_loss_threshold_percent"] = invalid
+            ok, payload = self.portal.normalize_soc_ai_settings(settings)
+            self.assertFalse(ok)
+            self.assertIn("capture-loss threshold", payload["error"])
+
     def test_ai_settings_reject_unsafe_or_non_mmdb_geoip_paths(self) -> None:
         for database_type in ("asn", "city", "country"):
             for configured in ("relative.mmdb", "/tmp/database.dat", "/tmp/bad\nname.mmdb"):

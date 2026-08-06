@@ -11251,7 +11251,15 @@ async function listPcapRequests(query = new URLSearchParams()) {
         pcapCaptureRetentionSeconds, pcapCaptureRetentionSeconds, limit],
     )
     : await all('SELECT * FROM pcap_requests ORDER BY created_at DESC LIMIT ?', [limit]);
-  return {ok: true, status: status || 'all', requests: rows.map(pcapRequestFromRow)};
+  return {
+    ok: true,
+    status: status || 'all',
+    requests: rows.map(pcapRequestFromRow),
+    policy: {
+      capture_loss_threshold_percent:
+        socAnalysisPolicy.read().pcap_capture_loss_threshold_percent,
+    },
+  };
 }
 
 async function rejectExpiredPendingPcapRequests() {

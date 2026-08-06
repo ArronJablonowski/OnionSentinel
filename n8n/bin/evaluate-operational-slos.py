@@ -23,6 +23,7 @@ from bounded_http import BoundedHttpError, read_bounded_json
 MAX_PROBE_RESPONSE_BYTES = 8 * 1024 * 1024
 DEFAULT_PROBE_ATTEMPTS = 2
 DEFAULT_PROBE_RETRY_DELAY_SECONDS = 0.2
+CAPTURE_TELEMETRY_UNAVAILABLE_GRACE_SECONDS = 3 * 60
 
 
 class ProbeError(RuntimeError):
@@ -117,6 +118,8 @@ def evaluate(
     harness_maintenance: dict[str, object] | None = None,
     alert_store_postgres_shadow_enabled: bool = False,
     alert_store_postgres_backup_age: int | None = None,
+    previous_capture_telemetry_unavailable_since: object = None,
+    capture_telemetry_unavailable_grace_seconds: int = CAPTURE_TELEMETRY_UNAVAILABLE_GRACE_SECONDS,
 ) -> tuple[list[str], dict[str, object]]:
     metrics = dict(metrics_payload.get("metrics") or {})
     process = dict(metrics.get("process") or {})
@@ -251,8 +254,39 @@ def evaluate(
     ]
     capture_protection = dict(pcap.get("capture_protection") or {})
     capture_protection_active = bool(capture_protection.get("active"))
-    if capture_protection_active:
-        reason = str(capture_protection.get("reason") or "Security Onion capture telemetry is above threshold")
+    capture_protection_reason = str(
+        capture_protection.get("reason")
+        or "Security Onion capture telemetry is above threshold"
+    )
+    normalized_capture_reason = capture_protection_reason.strip().lower().replace("-", "_").replace(" ", "_")
+    capture_telemetry_unavailable = (
+        capture_protection_active
+        and "telemetry_unavailable" in normalized_capture_reason
+    )
+    capture_telemetry_unavailable_since = None
+    capture_telemetry_unavailable_age_seconds = 0
+    if capture_telemetry_unavailable:
+        capture_telemetry_unavailable_since = parse_timestamp(
+            previous_capture_telemetry_unavailable_since
+        ) or now
+        capture_telemetry_unavailable_age_seconds = max(
+            0,
+            int(
+                (
+                    now.astimezone(dt.timezone.utc)
+                    - capture_telemetry_unavailable_since.astimezone(dt.timezone.utc)
+                ).total_seconds()
+            ),
+        )
+    capture_grace = max(
+        0,
+        min(int(capture_telemetry_unavailable_grace_seconds), 15 * 60),
+    )
+    if capture_protection_active and (
+        not capture_telemetry_unavailable
+        or capture_telemetry_unavailable_age_seconds >= capture_grace
+    ):
+        reason = capture_protection_reason
         advisories.append(f"PCAP capture-protection hold: {reason}")
     pcap_queue_progressing = bool(pcap.get("queue_progressing")) or bool(active_pcap_transfers)
     pcap_workflow_operational = pcap_queue_progressing or capture_protection_active
@@ -373,6 +407,16 @@ def evaluate(
             "pcap_capture_protection_active": capture_protection_active,
             "pcap_capture_protection_state": capture_protection.get("state"),
             "pcap_capture_protection_report_age_seconds": capture_protection.get("report_age_seconds"),
+            "pcap_capture_telemetry_unavailable_since": (
+                capture_telemetry_unavailable_since.astimezone()
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("T", "  ")
+                if capture_telemetry_unavailable_since
+                else None
+            ),
+            "pcap_capture_telemetry_unavailable_age_seconds": capture_telemetry_unavailable_age_seconds,
+            "pcap_capture_telemetry_unavailable_grace_seconds": capture_grace,
             "pcap_last_progress_age_seconds": pcap.get("last_progress_age_seconds"),
             "ingest_errors": ingest_errors,
             "disk_used_percent": round(disk_used_percent, 1),
@@ -497,9 +541,13 @@ def main() -> int:
             "*/alert-store-postgres.dump",
             now,
         ),
+        previous_capture_telemetry_unavailable_since=previous.get(
+            "capture_telemetry_unavailable_since"
+        ),
     )
-    # A deliberate capture-protection hold is not a stack failure, but it also
-    # must not count toward the 48-hour end-to-end production qualification.
+    # A sustained or threshold-triggered capture-protection hold is not a stack
+    # failure, but it must not count toward the 48-hour qualification. Brief
+    # telemetry rollover gaps remain inside the bounded grace window above.
     snapshot["soak"] = update_soak_state(previous, failures + list(snapshot.get("advisories") or []), now)
     snapshot_path.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
     os.chmod(snapshot_path, 0o600)
@@ -511,6 +559,9 @@ def main() -> int:
             "ai_analysis": snapshot["signals"]["pending_ai_job_count"],
             "incident_response_analysis": snapshot["signals"]["pending_incident_response_job_count"],
         },
+        "capture_telemetry_unavailable_since": snapshot["signals"].get(
+            "pcap_capture_telemetry_unavailable_since"
+        ),
     }) + "\n")
     os.chmod(state_path, 0o600)
     if failures:

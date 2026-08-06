@@ -827,7 +827,7 @@ class RelayPcapBrokerTest(unittest.TestCase):
         self.assertEqual(result["artifact_cleanup_succeeded"], 0)
         self.assertNotIn("cleanup_pcap_artifact", RELAY_PATH.read_text(encoding="utf-8"))
 
-    def test_streamed_broker_does_not_stop_for_security_onion_disk_telemetry(self) -> None:
+    def test_streamed_broker_skips_security_onion_telemetry_without_pending_work(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config = {
                 "pcap_broker": {
@@ -842,7 +842,7 @@ class RelayPcapBrokerTest(unittest.TestCase):
                 "disk_read_gate_enabled": False,
                 "pcap_root_used_percent": 99.0,
             }
-            with mock.patch.object(self.relay, "security_onion_storage_status", return_value=storage):
+            with mock.patch.object(self.relay, "security_onion_storage_status", return_value=storage) as storage_status:
                 with mock.patch.object(
                     self.relay,
                     "broker_request",
@@ -852,7 +852,8 @@ class RelayPcapBrokerTest(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["processed"], 0)
-        self.assertEqual(result["security_onion_storage"], storage)
+        self.assertEqual(result["capture_protection"]["reason"], "no_pending_requests")
+        storage_status.assert_not_called()
         broker_request.assert_called_once()
 
     def test_streamed_broker_defers_when_capture_telemetry_fails(self) -> None:
@@ -873,7 +874,7 @@ class RelayPcapBrokerTest(unittest.TestCase):
                 with mock.patch.object(
                     self.relay,
                     "broker_request",
-                    return_value={"ok": True, "requests": []},
+                    return_value={"ok": True, "requests": [{"request_id": "waiting"}]},
                 ) as broker_request:
                     result = self.relay.process_pcap_requests(config)
 
@@ -883,7 +884,7 @@ class RelayPcapBrokerTest(unittest.TestCase):
         self.assertEqual(result["operational_failures"], 0)
         self.assertFalse(result["security_onion_storage"]["available"])
         self.assertIn("telemetry unavailable", result["security_onion_storage"]["error"])
-        broker_request.assert_not_called()
+        broker_request.assert_called_once()
 
     def test_streamed_broker_defers_before_claim_when_capture_loss_is_high(self) -> None:
         unhealthy = {
@@ -899,16 +900,24 @@ class RelayPcapBrokerTest(unittest.TestCase):
             }
         }
         with mock.patch.object(self.relay, "security_onion_storage_status", return_value=unhealthy):
-            with mock.patch.object(self.relay, "broker_request") as broker_request:
+            with mock.patch.object(
+                self.relay,
+                "broker_request",
+                return_value={
+                    "ok": True,
+                    "requests": [{"request_id": "waiting"}],
+                    "policy": {"capture_loss_threshold_percent": 1.0},
+                },
+            ) as broker_request:
                 result = self.relay.process_pcap_requests(config)
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["deferred"])
         self.assertIn("45.2958% exceeds 1.0000%", result["defer_reason"])
         self.assertEqual(result["operational_failures"], 0)
-        broker_request.assert_not_called()
+        broker_request.assert_called_once()
 
-    def test_capture_protection_default_allows_capture_loss_below_one_percent(self) -> None:
+    def test_capture_protection_default_is_five_percent(self) -> None:
         status = {
             **self.healthy_capture_status,
             "zeek_capture_loss_max_percent": 0.8361,
@@ -918,7 +927,23 @@ class RelayPcapBrokerTest(unittest.TestCase):
         decision = self.relay.capture_protection_decision({"pcap_broker": {}}, status)
 
         self.assertFalse(decision["deferred"])
-        self.assertEqual(decision["threshold_percent"], 1.0)
+        self.assertEqual(decision["threshold_percent"], 5.0)
+
+    def test_capture_protection_accepts_bounded_dynamic_threshold(self) -> None:
+        status = {
+            **self.healthy_capture_status,
+            "zeek_capture_loss_max_percent": 4.5,
+            "zeek_capture_loss_age_seconds": 30,
+        }
+
+        decision = self.relay.capture_protection_decision(
+            {"pcap_broker": {"capture_loss_threshold_percent": 1.0}},
+            status,
+            capture_loss_threshold_percent=5.0,
+        )
+
+        self.assertFalse(decision["deferred"])
+        self.assertEqual(decision["threshold_percent"], 5.0)
 
     def test_capture_protection_defers_on_fresh_zeek_packet_loss(self) -> None:
         status = {

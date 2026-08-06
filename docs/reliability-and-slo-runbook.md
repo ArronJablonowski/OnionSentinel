@@ -249,7 +249,7 @@ workflow log displays the elapsed time; legacy rows are backfilled from
 | Enrichment jobs | Oldest pending below 15 minutes; cache remains inside configured row/byte ceilings | Inspect provider latency, keys, cache hit/miss/error counters, stale fallbacks, worker retries, and `/metrics.enrichment_cache`. |
 | AI jobs | Active processing advances within 15 minutes; an idle worker does not leave the same pending work undrained for 30 minutes | Inspect PCAP evidence arrival, Ollama, LaunchAgent, leases, and failed jobs. Both the oldest pending job and the last completion must be older than 30 minutes before an idle-worker failure is raised; this prevents a new job after a quiet period from inheriting an old completion clock. An actively claimed job retains the tighter progress deadline. |
 | PCAP broker | No request older than 20 minutes without fresh transfer progress or a fresh capture-protection hold | Fresh 30-second transfer heartbeats receive bounded, size-aware queue grace. Byte-level request progress takes precedence over the between-run broker summary during a long transfer. A relay `capture_protection_hold` is advisory-only for three minutes and pauses soak qualification; stale hold telemetry without transfer progress, stale claimed work, or operational failures alert normally. |
-| Zeek capture loss during PCAP export | Latest worker maximum at or below 1.0 percent; Zeek/Suricata local packet loss at or below 0.1 percent | Relay defers before claim and between chunks when telemetry is missing, stale, or above threshold. Security Onion reads and relay-to-Mac rsync are both capped at 4 MiB/s by default. Keep the timer paused if a controlled export breaches the target. |
+| Zeek capture loss during PCAP export | Latest worker maximum at or below the Settings-page threshold (5.0 percent by default); Zeek/Suricata local packet loss at or below 0.1 percent | When work is pending, the relay defers before claim and between chunks when telemetry is missing, stale, or above threshold. Security Onion reads and relay-to-Mac rsync are both capped at 4 MiB/s by default. Keep the timer paused if a controlled export breaches the target. |
 | Relay SSD | Below 75 percent used with at least 200 GiB free | Stop new streams before spool exhaustion. |
 | Relay root SD card | Below 75 percent used with at least 2 GiB free | Stop new writes, prune seven-day relay-owned evidence, and alert before the 80 percent hard ceiling. |
 | Mac Studio data volume | Below 75 percent used with at least 50 GiB free after projected work | Reject new alert/enrichment writes, PCAP intake/extraction, AI work, and backups before the 80 percent hard ceiling. Heartbeats and drain/cleanup state remain available. |
@@ -478,9 +478,11 @@ time-overlapping source rotations, bounds each source to 1.1 GiB, and permits
 one low-priority stream at a time. It scans each source once with a combined
 tagged/untagged BPF and caps source reads at 4 MiB/s. `/nsm` utilization is
 telemetry only because Onion Sentinel writes no packet artifacts on Security
-Onion. Fresh Zeek capture-loss telemetry is a workload-protection gate: PCAP
-work is deferred before claim or between chunks when the latest worker maximum
-exceeds 1 percent. The broker timer uses a five-minute post-completion cooldown
+Onion. Fresh Zeek capture-loss telemetry is a workload-protection gate: pending
+PCAP work is deferred before claim or between chunks when the latest worker
+maximum exceeds the Settings-page threshold (5 percent by default). Brief
+telemetry-only gaps receive a three-minute SLO grace period; a measured threshold
+breach still pauses qualification immediately. The broker timer uses a five-minute post-completion cooldown
 and processes one request per invocation.
 Successful checksum-verified relay artifacts are deleted only after the durable
 alert-store completion acknowledgement. Retryable failures retain the relay SSD

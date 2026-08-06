@@ -883,7 +883,12 @@ def security_onion_storage_status(config: dict) -> dict:
     return payload
 
 
-def capture_protection_decision(config: dict, status: dict | None) -> dict:
+def capture_protection_decision(
+    config: dict,
+    status: dict | None,
+    *,
+    capture_loss_threshold_percent: object | None = None,
+) -> dict:
     """Decide whether the relay may start another Security Onion PCAP read.
 
     The restricted wrapper always permits valid read-only requests. Scheduling
@@ -894,7 +899,16 @@ def capture_protection_decision(config: dict, status: dict | None) -> dict:
     if not bool(broker.get("capture_protection_enabled", True)):
         return {"deferred": False, "reason": "disabled"}
     require_telemetry = bool(broker.get("capture_protection_require_telemetry", True))
-    threshold = max(0.0, min(100.0, float(broker.get("capture_loss_threshold_percent", 1.0) or 1.0)))
+    configured_threshold = (
+        broker.get("capture_loss_threshold_percent", 5.0)
+        if capture_loss_threshold_percent is None
+        else capture_loss_threshold_percent
+    )
+    try:
+        threshold = float(configured_threshold)
+    except (TypeError, ValueError):
+        threshold = 5.0
+    threshold = max(0.1, min(100.0, threshold))
     packet_loss_threshold = max(
         0.0,
         min(100.0, float(broker.get("sensor_packet_loss_threshold_percent", 0.1) or 0.1)),
@@ -1540,11 +1554,48 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
             "ok": False, "enabled": True, "processed": 0,
             "operational_failures": 1, "outcomes": {}, "spool": spool_snapshot,
         }
+    # One request per invocation is a capture-protection invariant. The timer's
+    # post-run cooldown prevents a backlog from creating continuous SO reads.
+    limit = 1
+    pending_path = f"{broker_path(config, 'requests', '/pcap/requests')}?status=pending&limit={limit}"
+    requests_method = str(broker.get("requests_method") or "GET").strip().upper()
+    if requests_method not in {"GET", "POST"}:
+        requests_method = "GET"
+    pending_payload = {"status": "pending", "limit": limit} if requests_method == "POST" else None
+    pending = broker_request(config, requests_method, pending_path, pending_payload)
+    pending_requests = pending.get("requests") or []
+    policy = pending.get("policy") if isinstance(pending.get("policy"), dict) else {}
+    dynamic_threshold = policy.get("capture_loss_threshold_percent")
+    if not pending_requests:
+        threshold = capture_protection_decision(
+            config,
+            {"zeek_capture_loss_available": True},
+            capture_loss_threshold_percent=dynamic_threshold,
+        ).get("threshold_percent")
+        return {
+            "ok": True,
+            "enabled": True,
+            "processed": 0,
+            "capture_protection": {
+                "deferred": False,
+                "reason": "no_pending_requests",
+                "threshold_percent": threshold,
+            },
+            "operational_failures": 0,
+            "outcomes": {},
+            "stale_spool_partials_removed": stale_spool_partials_removed,
+            "stale_spool_artifacts_removed": stale_spool_artifacts_removed,
+            "spool": spool_snapshot,
+        }
     try:
         security_onion_storage = security_onion_storage_status(config)
     except Exception as exc:
         security_onion_storage = {"available": False, "error": str(exc)[:300]}
-    capture_protection = capture_protection_decision(config, security_onion_storage)
+    capture_protection = capture_protection_decision(
+        config,
+        security_onion_storage,
+        capture_loss_threshold_percent=dynamic_threshold,
+    )
     if capture_protection.get("deferred"):
         return {
             "ok": True,
@@ -1560,15 +1611,6 @@ def _process_pcap_requests_unlocked(config: dict) -> dict:
             "spool": spool_snapshot,
             "security_onion_storage": security_onion_storage,
         }
-    # One request per invocation is a capture-protection invariant. The timer's
-    # post-run cooldown prevents a backlog from creating continuous SO reads.
-    limit = 1
-    pending_path = f"{broker_path(config, 'requests', '/pcap/requests')}?status=pending&limit={limit}"
-    requests_method = str(broker.get("requests_method") or "GET").strip().upper()
-    if requests_method not in {"GET", "POST"}:
-        requests_method = "GET"
-    pending_payload = {"status": "pending", "limit": limit} if requests_method == "POST" else None
-    pending = broker_request(config, requests_method, pending_path, pending_payload)
     processed = 0
     fulfilled = 0
     failed = 0

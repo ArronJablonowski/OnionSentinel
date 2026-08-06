@@ -643,6 +643,12 @@ class PromptEvidenceHardeningTests(unittest.TestCase):
                         "request_id": "exact-selected-alert",
                         "evidence_relationship": "exact_alert",
                         "generated_at": "2026-07-29T18:00:00Z",
+                        "_local_query_index": {
+                            "connections": [
+                                {"uid": f"C{value}", "detail": "x" * 120}
+                                for value in range(64)
+                            ],
+                        },
                         "zeek": {
                             "http_hosts": [
                                 {
@@ -673,6 +679,10 @@ class PromptEvidenceHardeningTests(unittest.TestCase):
         )
         self.assertEqual(pcap["exact_alert_evidence_count"], 1)
         self.assertEqual(pcap["stable_group_related_evidence_count"], 0)
+        self.assertEqual(
+            len(pcap["parsed_evidence"][0]["_local_query_index"]["connections"]),
+            8,
+        )
         self.assertTrue(
             pcap["parsed_evidence_truncated_for_package_budget"]
         )

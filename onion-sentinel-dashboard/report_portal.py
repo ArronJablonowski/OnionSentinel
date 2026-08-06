@@ -2497,6 +2497,9 @@ def default_soc_ai_settings() -> dict:
         # Preserve the deployed all-alert PCAP policy unless an operator
         # deliberately raises the floor in Settings.
         "soc_analyst_pcap_min_severity": "informational",
+        # Relay-side PCAP reads pause when the latest Zeek capture-loss sample
+        # exceeds this operator-controlled percentage.
+        "pcap_capture_loss_threshold_percent": 5.0,
         # Automatic case creation is opt-in because it changes analyst state.
         "soc_analyst_incident_min_severity": "disabled",
         "agent_models": {
@@ -3064,6 +3067,21 @@ def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
                 "error": f"SOC Analyst {label} severity threshold is invalid.",
             }
         settings[setting_key] = threshold
+    try:
+        capture_loss_threshold = float(
+            settings.get("pcap_capture_loss_threshold_percent", 5.0)
+        )
+    except (TypeError, ValueError):
+        capture_loss_threshold = math.nan
+    if not math.isfinite(capture_loss_threshold) or not 0.1 <= capture_loss_threshold <= 100.0:
+        return False, {
+            "ok": False,
+            "error": "PCAP capture-loss threshold must be between 0.1 and 100 percent.",
+        }
+    settings["pcap_capture_loss_threshold_percent"] = round(
+        capture_loss_threshold,
+        4,
+    )
     for database_type, (setting_key, _) in MAXMIND_GEOIP_DATABASE_SETTINGS.items():
         geoip_path = settings[setting_key]
         label = database_type.upper() if database_type == "asn" else database_type.title()

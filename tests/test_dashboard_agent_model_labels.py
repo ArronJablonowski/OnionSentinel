@@ -269,6 +269,8 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
 
         self.assertIn("Lowest severity for automatic AI analysis", rendered)
         self.assertIn('id="soc-analyst-analysis-min-severity"', rendered)
+        self.assertIn('id="pcap-capture-loss-threshold-percent"', rendered)
+        self.assertIn("PCAP capture-loss safety threshold", rendered)
         self.assertIn('data-soc-policy-label="analysis">Medium and higher</span>', rendered)
         analysis_select = rendered.split(
             'id="soc-analyst-analysis-min-severity"',
@@ -277,6 +279,10 @@ class DashboardAgentModelLabelTests(unittest.TestCase):
         self.assertIn('<option value="medium" selected>Medium</option>', analysis_select)
         self.assertIn(
             "soc_analyst_analysis_min_severity: socAnalysisMinSeverity?.value",
+            self.builder.SETTINGS_PAGE_JS,
+        )
+        self.assertIn(
+            "pcap_capture_loss_threshold_percent: Number",
             self.builder.SETTINGS_PAGE_JS,
         )
 

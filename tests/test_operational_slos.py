@@ -336,6 +336,77 @@ class OperationalSloTests(unittest.TestCase):
         self.assertTrue(snapshot["advisories"])
         self.assertTrue(snapshot["signals"]["pcap_workflow_operational"])
 
+    def test_brief_capture_telemetry_rollover_gap_is_inside_grace(self):
+        now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
+        metrics = {"metrics": {
+            "process": {"ingest_errors": 0},
+            "oldest_pending_job_seconds": 0,
+            "oldest_pending_jobs": [],
+            "oldest_pending_pcap_seconds": 0,
+        }}
+        health = {
+            "summary": {"latest": {"timestamp_utc": "2026-07-14T17:59:30Z"}},
+            "pcap": {
+                "warning_count": 0,
+                "capture_protection": {
+                    "active": True,
+                    "state": "capture_protection_hold",
+                    "reason": "telemetry_unavailable",
+                    "report_age_seconds": 30,
+                },
+            },
+        }
+
+        failures, snapshot = self.slo.evaluate(
+            metrics, health, now=now, disk_used_percent=55,
+            sqlite_backup_age=60, postgres_backup_age=60,
+            previous_ingest_errors=0,
+            previous_capture_telemetry_unavailable_since=(now - dt.timedelta(seconds=90)).isoformat(),
+        )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(snapshot["status"], "healthy")
+        self.assertEqual(snapshot["advisories"], [])
+        self.assertEqual(
+            snapshot["signals"]["pcap_capture_telemetry_unavailable_age_seconds"],
+            90,
+        )
+
+    def test_sustained_capture_telemetry_gap_degrades_soak(self):
+        now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
+        metrics = {"metrics": {
+            "process": {"ingest_errors": 0},
+            "oldest_pending_job_seconds": 0,
+            "oldest_pending_jobs": [],
+            "oldest_pending_pcap_seconds": 0,
+        }}
+        health = {
+            "summary": {"latest": {"timestamp_utc": "2026-07-14T17:59:30Z"}},
+            "pcap": {
+                "warning_count": 0,
+                "capture_protection": {
+                    "active": True,
+                    "state": "capture_protection_hold",
+                    "reason": "telemetry_unavailable",
+                    "report_age_seconds": 30,
+                },
+            },
+        }
+
+        failures, snapshot = self.slo.evaluate(
+            metrics, health, now=now, disk_used_percent=55,
+            sqlite_backup_age=60, postgres_backup_age=60,
+            previous_ingest_errors=0,
+            previous_capture_telemetry_unavailable_since=(now - dt.timedelta(seconds=181)).isoformat(),
+        )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(snapshot["status"], "degraded")
+        self.assertIn(
+            "PCAP capture-protection hold: telemetry_unavailable",
+            snapshot["advisories"],
+        )
+
     def test_inactive_capture_protection_does_not_hide_stale_backlog(self):
         now = dt.datetime(2026, 7, 14, 18, tzinfo=dt.timezone.utc)
         metrics = {"metrics": {

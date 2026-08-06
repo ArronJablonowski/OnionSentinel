@@ -1170,7 +1170,7 @@ The default n8n proxy configuration is:
   "security_onion_storage_telemetry": true,
   "capture_protection_enabled": true,
   "capture_protection_require_telemetry": true,
-  "capture_loss_threshold_percent": 1.0,
+  "capture_loss_threshold_percent": 5.0,
   "capture_loss_freshness_seconds": 900,
   "stream_chunk_idle_timeout_seconds": 300,
   "mac_transfer": {
@@ -1220,9 +1220,11 @@ interval lets a healthy broker recover a burst backlog without concurrent
 Security Onion reads. The old n8n inline
 upload and Security Onion tar-staging paths are absent.
 
-Keep capture protection enabled. The relay must receive a fresh latest-interval
-Zeek capture-loss sample before claiming work and uses a 1.0 percent default
-threshold unless the reviewed live configuration says otherwise. The separate
+Keep capture protection enabled. When PCAP work is pending, the relay must
+receive a fresh latest-interval Zeek capture-loss sample before claiming it.
+The authenticated broker response carries the current threshold saved on the
+Onion Sentinel Settings page; 5.0 percent is the default and relay-side fallback.
+The separate
 Zeek and Suricata packet-loss threshold remains 0.1 percent. A protected
 deferral is an intentional degraded state: it must not consume a retry attempt
 or be reported as a stack failure. Confirm the relay posts a `pcap_broker`

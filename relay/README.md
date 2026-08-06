@@ -249,7 +249,7 @@ PCAP fulfillment is disabled by default in `config/config.example.json`:
   "security_onion_storage_telemetry": true,
   "capture_protection_enabled": true,
   "capture_protection_require_telemetry": true,
-  "capture_loss_threshold_percent": 1.0,
+  "capture_loss_threshold_percent": 5.0,
   "sensor_packet_loss_threshold_percent": 0.1,
   "capture_loss_freshness_seconds": 900,
   "stream_chunk_idle_timeout_seconds": 300,
@@ -429,7 +429,11 @@ scan, caps source reads at 4 MiB/s, uses idle I/O priority, and allows one strea
 Before claiming work and between chunks, the relay requires fresh latest-interval
 Zeek capture-loss telemetry plus local Zeek and Suricata packet-loss telemetry.
 It returns a healthy protected deferral when the sample is missing, stale, or
-above its threshold. The completed relay artifact is rsynced to the Mac at no
+above its threshold. The broker response supplies the current Settings-page
+capture-loss threshold over the authenticated control plane; the relay config's
+5 percent value is the fail-safe default. When no PCAP request is pending, the
+relay does not query Security Onion capture telemetry. The completed relay
+artifact is rsynced to the Mac at no
 more than 4 MiB/s by default, with an 8 MiB/s code-enforced maximum. This
 second ceiling is mandatory because the
 relay-to-Mac VLAN flow is visible to the Security Onion mirror; an uncapped

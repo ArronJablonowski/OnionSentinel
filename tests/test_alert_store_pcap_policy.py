@@ -22,6 +22,8 @@ class AlertStorePcapPolicyTest(unittest.TestCase):
         self.assertIn("createSocAnalysisPolicy", code)
         self.assertIn("socAnalysisPolicy.matchesPcap(level)", code)
         self.assertIn("soc_analyst_pcap_min_severity", policy)
+        self.assertIn("pcap_capture_loss_threshold_percent", policy)
+        self.assertIn("capture_loss_threshold_percent", code)
         self.assertIn(
             "SEVERITY_RANK[normalizedSeverity] >= SEVERITY_RANK[normalizedThreshold]",
             policy,

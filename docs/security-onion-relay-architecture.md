@@ -1236,8 +1236,10 @@ Safety controls:
   never refuses a read. Security Onion retains ownership of native capture
   lifecycle and capacity.
 - The wrapper reports the latest Zeek capture-loss worker interval. The relay
-  requires a fresh sample and defers before claim when maximum worker loss is
-  above 1.0 percent. It also defers when fresh Zeek or Suricata local packet loss
+  requires a fresh sample for pending PCAP work and defers before claim when
+  maximum worker loss is above the Settings-page value (5.0 percent by default).
+  The authenticated broker response carries that dynamic value and relay config
+  retains 5.0 percent as its fallback. It also defers when fresh Zeek or Suricata local packet loss
   exceeds 0.1 percent. It checks again between stream chunks so packet capture
   has priority over investigation evidence. Deferral is a healthy protected
   state, not a stack failure.

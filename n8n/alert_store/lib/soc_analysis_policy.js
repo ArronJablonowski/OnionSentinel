@@ -17,6 +17,7 @@ const DEFAULT_POLICY = Object.freeze({
   soc_analyst_analysis_min_severity: 'informational',
   // Preserve the existing all-severity PCAP behavior during rolling upgrades.
   soc_analyst_pcap_min_severity: 'informational',
+  pcap_capture_loss_threshold_percent: 5,
   // Automatic incident escalation is opt-in because it creates analyst cases.
   soc_analyst_incident_min_severity: 'disabled',
 });
@@ -29,6 +30,13 @@ function normalizeSeverity(value) {
 function normalizeThreshold(value, fallback) {
   const threshold = normalizeSeverity(value);
   return THRESHOLD_VALUES.has(threshold) ? threshold : fallback;
+}
+
+function normalizeCaptureLossThreshold(value, fallback = 5) {
+  const threshold = Number(value);
+  return Number.isFinite(threshold) && threshold >= 0.1 && threshold <= 100
+    ? Math.round(threshold * 10000) / 10000
+    : fallback;
 }
 
 function matchesSeverityThreshold(severity, threshold) {
@@ -121,6 +129,10 @@ function createSocAnalysisPolicy(options = {}) {
         raw.soc_analyst_incident_min_severity,
         fallback.soc_analyst_incident_min_severity,
       ),
+      pcap_capture_loss_threshold_percent: normalizeCaptureLossThreshold(
+        raw.pcap_capture_loss_threshold_percent,
+        fallback.pcap_capture_loss_threshold_percent,
+      ),
     };
     cachedMtimeMs = mtimeMs;
     cachedAt = now;
@@ -148,6 +160,7 @@ module.exports = {
   createSocAnalysisPolicy,
   legacyPcapThreshold,
   matchesSeverityThreshold,
+  normalizeCaptureLossThreshold,
   normalizeSeverity,
   normalizeThreshold,
 };

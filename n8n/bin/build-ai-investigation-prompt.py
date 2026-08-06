@@ -3857,7 +3857,13 @@ def compact_package_to_budget(package: dict, max_bytes: int) -> tuple[dict, str]
                 if isinstance(local_index, dict):
                     for operation, values in local_index.items():
                         if isinstance(values, list):
-                            local_index[operation] = values[:32]
+                            # Keep a small, deterministic sample for each local
+                            # PCAP pivot. The complete derived artifact remains
+                            # on disk and queryable by the investigation loop;
+                            # repeating dozens of nearly identical packets in
+                            # the initial model prompt crowds out higher-value
+                            # query provenance and alert context.
+                            local_index[operation] = values[:8]
         steps.append("pcap_evidence")
     if isinstance(incident, dict):
         response = incident.get("security_onion_response")
