@@ -23,6 +23,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.providers.routing",
     "onion_sentinel.analysis.reporting.incident",
     "onion_sentinel.analysis.reporting.markdown",
+    "onion_sentinel.analysis.reporting.publication",
     "onion_sentinel.composition",
     "onion_sentinel.contracts.errors",
     "onion_sentinel.contracts.models",

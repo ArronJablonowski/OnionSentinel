@@ -1946,6 +1946,12 @@ def _reporting_markdown():
     return markdown
 
 
+def _reporting_publication():
+    _provider_routing()
+    from onion_sentinel.analysis.reporting import publication
+    return publication
+
+
 def normalized_model_roster(value: Any) -> list[str]:
     return _provider_routing().normalized_model_roster(value)
 
@@ -16973,41 +16979,20 @@ def write_outputs(
     analysis_id: str,
 ) -> tuple[Path, Path, str]:
     generated_at = project_now()
-    alert = prompt_package.get("alert", {})
-    alert_id = safe_filename(alert.get("alert_id"))
-    stamp = filename_timestamp(generated_at)
-    base = f"{stamp}-{alert_id}-local-ai-analysis"
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-    json_path = args.out_dir / f"{base}.json"
-    md_path = args.out_dir / f"{base}.md"
-
-    enriched = {
-        "analysis_id": analysis_id,
-        "analysis_type": (
-            "saved-response"
-            if response.get("_analysis_input_mode") == SAVED_RESPONSE_INPUT_MODE
-            else str(response.get("_analysis_model_path") or "unknown")
-        ),
-        "analysis_input_mode": str(
-            response.get("_analysis_input_mode") or "model_execution"
-        ),
-        "generated_at": generated_at,
-        "prompt_package": str(prompt_path),
-        "alert_id": alert.get("alert_id"),
-        "rule_name": alert.get("rule_name"),
-        "triage_level": alert.get("triage_level"),
-        "system_prompt_file": str(args.system_prompt_file),
-        "second_opinion_system_prompt_file": str(
-            prompt_package.get("second_opinion_system_prompt_file")
-            or getattr(args, "second_opinion_prompt_file", DEFAULT_SECOND_OPINION_PROMPT_FILE)
-        ),
-        "agent_memory_file": prompt_package.get("agent_memory_file"),
-        "shared_memory_file": prompt_package.get("shared_memory_file"),
-        "response": response,
-    }
-    json_path.write_text(json.dumps(enriched, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    md_path.write_text(render_markdown(prompt_package, response, generated_at, json_path), encoding="utf-8")
-    return json_path, md_path, generated_at
+    plan = _reporting_publication().build_plan(
+        prompt_path,
+        prompt_package,
+        response,
+        args,
+        analysis_id,
+        generated_at=generated_at,
+        safe_filename=safe_filename,
+        filename_timestamp=filename_timestamp,
+        render_markdown=render_markdown,
+        saved_response_input_mode=SAVED_RESPONSE_INPUT_MODE,
+        default_second_opinion_prompt_file=DEFAULT_SECOND_OPINION_PROMPT_FILE,
+    )
+    return _reporting_publication().publish(plan)
 
 
 def main() -> int:

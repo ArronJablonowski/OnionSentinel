@@ -74,6 +74,10 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
   `onion_sentinel.analysis.reporting.incident`. Deterministic top-level SOC/IR
   Markdown composition now lives in `analysis.reporting.markdown`; the legacy
   runner retains only symbol-compatible delegates.
+- Side-effect-free output metadata/path planning and owner-private,
+  path-confined atomic JSON/Markdown publication now live in
+  `analysis.reporting.publication`. A failed pair publication removes only
+  artifacts created by that attempt and existing destinations fail closed.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports
