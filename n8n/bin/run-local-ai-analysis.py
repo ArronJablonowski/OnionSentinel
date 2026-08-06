@@ -1666,6 +1666,12 @@ def _review_contracts():
     return contracts
 
 
+def _review_package():
+    _provider_routing()
+    from onion_sentinel.analysis.review import package
+    return package
+
+
 def normalized_model_roster(value: Any) -> list[str]:
     return _provider_routing().normalized_model_roster(value)
 
@@ -10692,191 +10698,20 @@ def reviewer_evidence_hash(review_package: dict[str, Any]) -> str:
 
 def independent_reviewer_package(
     prompt_package: dict[str, Any],
-    *,
-    hosted: bool = False,
+    *, hosted: bool = False,
 ) -> dict[str, Any]:
-    """Build the exact route-safe blind evidence view sent to the reviewer.
-
-    The reviewer receives the same collector-owned alert, enrichment, PCAP, and
-    incident evidence as the primary. Previous AI conclusions, model-authored
-    memory, and the embedded primary system prompt are deliberately removed so
-    agreement represents an independent conclusion rather than anchoring.
-    """
-    review_package = model_safe_copy(
-        prompt_package,
-        hosted=hosted,
-        reviewer_safe=True,
+    """Build the exact route-safe blind evidence view sent to the reviewer."""
+    return _review_package().build(
+        prompt_package, hosted=hosted,
+        max_queries=MAX_INVESTIGATION_QUERIES_PER_ROUND,
+        model_safe_copy=model_safe_copy,
+        attach_evidence_contract=attach_evidence_reference_contract,
+        case_id=reviewer_case_id, observable_catalog=reviewer_observable_catalog,
+        taxonomy_catalog=reviewer_non_domain_taxonomy_catalog,
+        artifact_catalog=reviewer_non_domain_artifact_catalog,
+        rule_shorthand_catalog=reviewer_non_domain_rule_shorthand_catalog,
+        evidence_hash=reviewer_evidence_hash,
     )
-    review_package.pop("prior_analyses", None)
-
-    instructions = review_package.get("instructions")
-    if isinstance(instructions, dict):
-        instructions.pop("role", None)
-        grounding = instructions.get("grounding")
-        if isinstance(grounding, list):
-            instructions["grounding"] = [
-                item
-                for item in grounding
-                if not any(
-                    marker in str(item).lower()
-                    for marker in ("prior_analyses", "previous_correlation", "earlier conclusion")
-                )
-            ]
-
-    correlation = review_package.get("correlated_alert_context")
-    if isinstance(correlation, dict):
-        candidates = correlation.get("candidates")
-        if isinstance(candidates, list):
-            sanitized_candidates: list[Any] = []
-            for raw_candidate in candidates:
-                if not isinstance(raw_candidate, dict):
-                    sanitized_candidates.append(raw_candidate)
-                    continue
-                candidate = dict(raw_candidate)
-                candidate.pop("prior_analysis", None)
-                candidate.pop("previous_correlation", None)
-                reasons = candidate.get("correlation_reasons")
-                if isinstance(reasons, list):
-                    candidate["correlation_reasons"] = [
-                        reason
-                        for reason in reasons
-                        if str(reason).strip().lower() != "previous correlation record exists"
-                    ]
-                sanitized_candidates.append(candidate)
-            correlation["candidates"] = sanitized_candidates
-
-    memory = review_package.get("agent_memory")
-    if isinstance(memory, dict):
-        for key in ("role_memory", "shared_memory"):
-            context = memory.get(key)
-            if not isinstance(context, dict):
-                continue
-            records = context.get("records")
-            if isinstance(records, list):
-                context["records"] = [
-                    record
-                    for record in records
-                    if isinstance(record, dict)
-                    and str(record.get("status") or "").strip().lower() == "operator-confirmed"
-                ]
-        memory["usage_guidance"] = (
-            "Use only operator-authored notes and operator-confirmed memory as context. "
-            "Corroborate every material conclusion with current collector-owned evidence."
-        )
-
-    attach_evidence_reference_contract(review_package)
-    case_id = reviewer_case_id(review_package)
-    # Generate reviewer contracts only after applying the exact transport
-    # boundary. Otherwise a forbidden hosted field could be removed while one
-    # of its values was accidentally reintroduced through allowed_observables.
-    observables = reviewer_observable_catalog(review_package)
-    non_domain_taxonomy = reviewer_non_domain_taxonomy_catalog(review_package)
-    non_domain_artifacts = reviewer_non_domain_artifact_catalog(review_package)
-    non_domain_rule_shorthands = (
-        reviewer_non_domain_rule_shorthand_catalog(review_package)
-    )
-    response_schema = (
-        dict(review_package.get("response_schema"))
-        if isinstance(review_package.get("response_schema"), dict)
-        else {}
-    )
-    response_schema.update(
-        {
-            "review_case_id": "exact string from review_contract.case_id",
-            "review_evidence_hash": "exact lowercase SHA-256 from review_contract.evidence_hash",
-            "observables_used": [
-                {
-                    "kind": "ip|domain|host|user|community_id",
-                    "value": "exact value from review_contract.allowed_observables",
-                }
-            ],
-        }
-    )
-    review_package["response_schema"] = response_schema
-    review_package["second_opinion_review"] = {
-        "mode": "blind_independent",
-        "evidence_boundary": "hosted-redacted" if hosted else "local",
-        "primary_conclusion_withheld": True,
-        "excluded_context": [
-            "current primary response",
-            "prior AI analyses",
-            "prior model correlation hypotheses",
-            "unconfirmed model-observed memory",
-        ],
-        "supplemental_pivot_policy": {
-            "allowed": True,
-            "maximum_rounds": 1,
-            "maximum_queries": MAX_INVESTIGATION_QUERIES_PER_ROUND,
-            "requirements": [
-                "Request supplemental evidence only for a material unresolved discriminator.",
-                "Use only investigation_query_requests and the advertised read-only capabilities.",
-                "Do not widen the supplied authorization envelope or introduce a new observable.",
-                "Do not request supplemental evidence when the current evidence already resolves the conclusion.",
-            ],
-        },
-    }
-    review_package["review_contract"] = {
-        "schema": "onion-sentinel-independent-review-v1",
-        "case_id": case_id,
-        "allowed_observables": observables,
-        "allowed_non_domain_taxonomy_tokens": non_domain_taxonomy,
-        "allowed_non_domain_artifact_tokens": non_domain_artifacts,
-        "allowed_non_domain_rule_shorthand_tokens": (
-            non_domain_rule_shorthands
-        ),
-        "requirements": [
-            "Echo case_id and evidence_hash exactly in review_case_id and review_evidence_hash.",
-            (
-                "List every material IPv4 address, domain, FQDN, dotted host, "
-                "and community_id used in observables_used."
-            ),
-            (
-                "List a bare host or user only when deliberately using that "
-                "exact allowed value as an identity, never because the same "
-                "word appears as ordinary prose."
-            ),
-            "Use only exact allowed_observables and exact evidence_reference_contract refs.",
-            (
-                "Treat Elastic index/document identifiers as record identifiers, "
-                "not Community IDs; never add them to observables_used as community_id."
-            ),
-            (
-                "Treat exact allowed_non_domain_taxonomy_tokens as dataset or "
-                "module labels, not domain observables."
-            ),
-            (
-                "Treat exact allowed_non_domain_rule_shorthand_tokens as "
-                "current detection-rule labels, not domain observables."
-            ),
-            "Do not repeat boilerplate or introduce facts from another case.",
-        ],
-    }
-    review_package["review_contract"]["evidence_hash"] = (
-        reviewer_evidence_hash(review_package)
-    )
-    supplemental_context = prompt_package.get(
-        "reviewer_supplemental_context"
-    )
-    if isinstance(supplemental_context, dict):
-        review_package["reviewer_supplemental_reconciliation"] = {
-            "schema": "onion-sentinel-reviewer-supplemental-reconciliation-v1",
-            "round": 1,
-            "maximum_rounds": 1,
-            "maximum_queries": MAX_INVESTIGATION_QUERIES_PER_ROUND,
-            "instruction": (
-                "Reassess the case using the complete blind evidence package, "
-                "including the newly returned supplemental query evidence. "
-                "Return a final independent conclusion and do not request "
-                "another query round. Preserve unresolved gaps explicitly."
-            ),
-            "initial_review_sha256": str(
-                supplemental_context.get("initial_review_sha256") or ""
-            ),
-        }
-        review_package["review_contract"]["evidence_hash"] = (
-            reviewer_evidence_hash(review_package)
-        )
-    return review_package
 
 
 def _response_strings(value: Any) -> list[str]:

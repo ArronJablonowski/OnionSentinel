@@ -99,6 +99,9 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
 - Reviewer case precedence, blind-package evidence hashing, bounded validation
   telemetry, field-specific repair guidance, and rejected-observable-safe error
   categories now live in `analysis.review.contracts`.
+- Blind package copying, anti-anchoring sanitization, operator-confirmed memory
+  admission, transport-before-catalog ordering, review schema/contracts, and
+  supplemental-context re-binding now live in `analysis.review.package`.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports
