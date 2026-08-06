@@ -1,5 +1,13 @@
 """Provider adapters and exact model-routing policy."""
 
-from . import cli_common, codex, hermes, ollama, openclaw, routing
+from . import cli_common, codex, hermes, ollama, openclaw, registry, routing
 
-__all__ = ["cli_common", "codex", "hermes", "ollama", "openclaw", "routing"]
+__all__ = [
+    "cli_common",
+    "codex",
+    "hermes",
+    "ollama",
+    "openclaw",
+    "registry",
+    "routing",
+]

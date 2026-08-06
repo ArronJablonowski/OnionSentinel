@@ -1928,6 +1928,12 @@ def _hermes_provider():
     return hermes
 
 
+def _provider_registry():
+    _provider_routing()
+    from onion_sentinel.analysis.providers import registry
+    return registry
+
+
 def normalized_model_roster(value: Any) -> list[str]:
     return _provider_routing().normalized_model_roster(value)
 
@@ -2514,32 +2520,12 @@ def attest_model_route_response(
     route: str,
     response: dict[str, Any],
 ) -> dict[str, Any]:
-    """Bind collector-observed adapter identity to one exact configured route."""
-    canonical, expected_model, expected_path, expected_provider = (
-        model_route_metadata(settings, route)
+    return _provider_registry().attest_response(
+        settings,
+        route,
+        response,
+        route_metadata=model_route_metadata,
     )
-    observed = {
-        "model": str(response.get("_analysis_model") or ""),
-        "model_path": str(response.get("_analysis_model_path") or ""),
-        "provider": str(response.get("_analysis_provider") or ""),
-    }
-    expected = {
-        "model": expected_model,
-        "model_path": expected_path,
-        "provider": expected_provider,
-    }
-    mismatches = [
-        key
-        for key in expected
-        if not expected[key] or observed[key] != expected[key]
-    ]
-    if mismatches:
-        raise SystemExit(
-            "Model adapter identity does not match the configured route: "
-            + ", ".join(mismatches)
-        )
-    response["_analysis_model_route"] = canonical
-    return response
 
 
 def current_analysis_phase_record(
@@ -10895,84 +10881,25 @@ def analyze_model_route(
     system_prompt_file: Path | None = None,
     independent_review: bool = False,
 ) -> dict[str, Any]:
-    """Execute one exact enabled route without implicit provider failover."""
-    enabled_routes = enabled_agent_model_routes(settings)
-    if route in {"gpt-cli", "codex-cli"}:
-        route = canonical_model_route(route, enabled_routes)
-    if route not in enabled_routes:
-        raise SystemExit(
-            f"Configured analysis model route is not enabled: {route or 'none'}"
-        )
-    if model_route_is_hosted(route, settings):
-        synchronize_hosted_investigation_contract(prompt_package)
-    if route in {"gpt-cli", "codex-cli"}:
-        response = cloud_cli_chat(
-            prompt_package,
-            args,
-            settings,
-            system_prompt_file=system_prompt_file,
-            independent_review=independent_review,
-        )
-    elif route.startswith("codex-cli:"):
-        parsed = parse_codex_cli_route(route)
-        if not parsed:
-            raise SystemExit("Configured Codex CLI route is invalid")
-        model, effort = parsed
-        response = cloud_cli_chat(
-            prompt_package,
-            args,
-            settings,
-            model=model,
-            reasoning_effort=effort,
-            system_prompt_file=system_prompt_file,
-            independent_review=independent_review,
-        )
-    elif route.startswith("hermes-agent:"):
-        parsed = parse_cli_harness_route(route, "hermes-agent")
-        if not parsed:
-            raise SystemExit("Configured Hermes Agent route is invalid")
-        model, effort = parsed
-        response = hermes_agent_chat(
-            prompt_package,
-            args,
-            settings,
-            model=model,
-            reasoning_effort=effort,
-            system_prompt_file=system_prompt_file,
-            independent_review=independent_review,
-        )
-    elif route.startswith("openclaw:"):
-        parsed = parse_cli_harness_route(route, "openclaw")
-        if not parsed:
-            raise SystemExit("Configured OpenClaw route is invalid")
-        model, effort = parsed
-        response = openclaw_infer_chat(
-            prompt_package,
-            args,
-            settings,
-            model=model,
-            reasoning_effort=effort,
-            system_prompt_file=system_prompt_file,
-            independent_review=independent_review,
-        )
-    elif route.startswith("ollama:"):
-        model = route.removeprefix("ollama:").strip()
-        if not model:
-            raise SystemExit("Configured Ollama route has an empty model name")
-        response = _ollama_chat_for_model(
-            prompt_package,
-            args,
-            settings,
-            model,
-            system_prompt_file=system_prompt_file,
-            independent_review=independent_review,
-        )
-    else:
-        raise SystemExit(
-            "Unsupported or disabled analysis model route: "
-            f"{route or 'none'}"
-        )
-    return attest_model_route_response(settings, route, response)
+    return _provider_registry().dispatch(
+        route,
+        prompt_package,
+        args,
+        settings,
+        system_prompt_file=system_prompt_file,
+        independent_review=independent_review,
+        enabled_routes=enabled_agent_model_routes,
+        canonicalize=canonical_model_route,
+        is_hosted=model_route_is_hosted,
+        synchronize_hosted=synchronize_hosted_investigation_contract,
+        parse_codex=parse_codex_cli_route,
+        parse_harness=parse_cli_harness_route,
+        codex_adapter=cloud_cli_chat,
+        hermes_adapter=hermes_agent_chat,
+        openclaw_adapter=openclaw_infer_chat,
+        ollama_adapter=_ollama_chat_for_model,
+        attest=attest_model_route_response,
+    )
 
 
 def model_route_identity(

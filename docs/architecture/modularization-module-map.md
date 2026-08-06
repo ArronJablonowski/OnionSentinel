@@ -66,8 +66,9 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
   rotation, exclusive auth locking, ephemeral profile construction, tool-empty
   fixed argv, bounded execution, and usage-sidecar identity attestation now
   live in `onion_sentinel.analysis.providers.hermes`.
-- Provider dispatch remains in the legacy runner until the extracted adapters
-  can be registered behind one exact no-silent-fallback interface.
+- Exact enabled-route admission, hosted-contract synchronization, single
+  adapter selection, no-silent-fallback errors, and final observed-identity
+  attestation now live in `onion_sentinel.analysis.providers.registry`.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports
