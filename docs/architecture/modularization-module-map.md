@@ -53,6 +53,11 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
 - The bounded Ollama HTTP request, task selection, host-wide inference lock,
   best-effort unload, ordered enabled-model failover, and observed-model
   mismatch guard now live in `onion_sentinel.analysis.providers.ollama`.
+- Codex prompt admission, canonical prompt-file validation, strict reviewer
+  schema generation, fixed read-only/ephemeral argv, bounded subprocess result,
+  and secret-safe failure classification now live in
+  `onion_sentinel.analysis.providers.codex`. Shared minimal CLI environment and
+  third-party harness error classification live in `providers.cli_common`.
 - Provider-specific Ollama, Codex, Hermes, and OpenClaw transports remain in
   the legacy runner until their bounded process/HTTP, identity-attestation,
   malformed-output, timeout, missing-binary, and credential-isolation tests
