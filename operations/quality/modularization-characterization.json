@@ -1,0 +1,124 @@
+{
+  "schema": "onion-sentinel-modularization-characterization-v1",
+  "source_release": "3eec576a59b51b74badcc042de2e3418fca9c867",
+  "requirements": {
+    "categories": [
+      "positive",
+      "negative",
+      "failure"
+    ],
+    "minimum_tests_per_category": 1
+  },
+  "seams": {
+    "provider_adapter": {
+      "positive": [
+        "tests/test_ai_model_routing.py::AiModelRoutingTests::test_codex_route_uses_fixed_ephemeral_read_only_argv"
+      ],
+      "negative": [
+        "tests/test_ai_model_routing.py::AiModelRoutingTests::test_disabled_harness_routes_cannot_dispatch"
+      ],
+      "failure": [
+        "tests/test_ai_model_routing.py::AiModelRoutingTests::test_codex_nonzero_exit_raises_only_sanitized_terminal_cause"
+      ]
+    },
+    "query_engine": {
+      "positive": [
+        "tests/test_provider_neutral_investigation_loop.py::ProviderNeutralInvestigationLoopTests::test_loop_reuses_exact_route_and_enforces_round_budget"
+      ],
+      "negative": [
+        "tests/test_provider_neutral_investigation_loop.py::ProviderNeutralInvestigationLoopTests::test_enforce_tool_denial_prevents_query_execution"
+      ],
+      "failure": [
+        "tests/test_provider_neutral_investigation_loop.py::ProviderNeutralInvestigationLoopTests::test_unavailable_security_onion_broker_becomes_evidence_gap"
+      ]
+    },
+    "review_pipeline": {
+      "positive": [
+        "tests/test_ai_model_routing.py::AiModelRoutingTests::test_low_confidence_primary_runs_configured_second_opinion"
+      ],
+      "negative": [
+        "tests/test_ai_model_routing.py::AiModelRoutingTests::test_comparison_distinguishes_full_advisory_and_material_disagreement"
+      ],
+      "failure": [
+        "tests/test_ai_model_routing.py::AiModelRoutingTests::test_second_opinion_failure_preserves_primary_analysis"
+      ]
+    },
+    "conclusion_pipeline": {
+      "positive": [
+        "tests/test_ai_model_routing.py::AiModelRoutingTests::test_complete_factored_verdict_supersedes_stale_legacy_label"
+      ],
+      "negative": [
+        "tests/test_ai_model_routing.py::AiModelRoutingTests::test_deterministic_mismatch_overrides_unsupported_malicious_controls"
+      ],
+      "failure": [
+        "tests/test_ai_model_routing.py::AiModelRoutingTests::test_incomplete_incident_report_neutralizes_all_model_actions"
+      ]
+    },
+    "result_unit_of_work": {
+      "positive": [
+        "tests/test_memory_writeback_journal.py::MemoryWritebackJournalTests::test_transient_queue_replay_commits_memory_only_after_index_receipt"
+      ],
+      "negative": [
+        "tests/test_memory_writeback_journal.py::MemoryWritebackJournalTests::test_missing_commit_receipt_cannot_promote_staged_memory"
+      ],
+      "failure": [
+        "tests/test_memory_writeback_journal.py::MemoryWritebackJournalTests::test_partial_role_shared_failure_recovers_without_reinforcement"
+      ]
+    },
+    "scheduler_job_repository": {
+      "positive": [
+        "tests/test_durable_job_queue.py::DurableJobQueueTest::test_jobs_are_deduplicated_and_priority_ordered"
+      ],
+      "negative": [
+        "tests/test_ai_scheduler_priority.py::AiSchedulerPriorityTest::test_lost_durable_claim_is_logged_as_contention_not_failure"
+      ],
+      "failure": [
+        "tests/test_ai_scheduler_priority.py::AiSchedulerPriorityTest::test_terminal_success_recovery_proves_exact_ir_commit"
+      ]
+    },
+    "harness_repository_run": {
+      "positive": [
+        "tests/test_onion_sentinel_harness.py::OnionSentinelHarnessTests::test_full_lifecycle_exports_a_complete_secret_safe_trace"
+      ],
+      "negative": [
+        "tests/test_onion_sentinel_harness.py::OnionSentinelHarnessTests::test_policy_parsing_is_default_deny_and_all_mutations_require_approval"
+      ],
+      "failure": [
+        "tests/test_onion_sentinel_harness.py::OnionSentinelHarnessTests::test_hash_chain_detects_payload_tampering"
+      ]
+    },
+    "portal_route_service": {
+      "positive": [
+        "tests/test_soc_settings_prompt_api.py::SocSettingsPromptApiTest::test_incident_responder_prompt_save_and_read"
+      ],
+      "negative": [
+        "tests/test_soc_settings_prompt_api.py::SocSettingsPromptApiTest::test_shared_handler_rejects_settings_writes_without_authorization"
+      ],
+      "failure": [
+        "tests/test_soc_settings_prompt_api.py::SocSettingsPromptApiTest::test_read_ai_settings_reports_normalization_failure_without_defaults"
+      ]
+    },
+    "dashboard_page_component": {
+      "positive": [
+        "tests/test_software_inventory_page.py::SoftwareInventoryPageTests::test_navigation_and_page_identity_are_generated"
+      ],
+      "negative": [
+        "tests/test_software_inventory_page.py::SoftwareInventoryPageTests::test_values_are_escaped_and_empty_states_preserve_uncertainty"
+      ],
+      "failure": [
+        "tests/test_dashboard_pcap_request_index.py::DashboardPcapRequestIndexTests::test_read_only_loader_handles_missing_database_and_missing_table"
+      ]
+    },
+    "alert_store_route_service": {
+      "positive": [
+        "tests/test_alert_store_post_commit.py::AlertStorePostCommitTest::test_n8n_outage_cannot_roll_back_alert_and_recovery_is_exactly_once"
+      ],
+      "negative": [
+        "tests/test_alert_store_resilience.py::AlertStoreResilienceTest::test_oversized_payload_returns_413_without_socket_destroy"
+      ],
+      "failure": [
+        "tests/test_alert_store_concurrency.py::AlertStoreConcurrencyTests::test_concurrent_duplicates_are_serialized_without_loss_or_lock_errors"
+      ]
+    }
+  }
+}

@@ -217,6 +217,14 @@ ARR-72 must cover at least these seams before extraction:
 | Dashboard page/component | escaped deterministic accessible output | hostile content, missing data, narrow viewport/long values |
 | Alert-store route/service | transactional idempotent result | duplicate command, rollback, concurrent claim, controlled-mode denial |
 
+The executable coverage index lives at
+`operations/quality/modularization-characterization.json`. Each seam is bound
+to named positive, negative, and failure-path unittests. The index is validated
+by `tests/test_modularization_characterization.py`; deleting or renaming a
+contract test without updating the reviewed seam coverage therefore fails the
+suite. The referenced tests remain the behavioral authority—the index is
+traceability metadata, not a replacement for executing them.
+
 ## Extraction Definition of Done
 
 An extraction issue is complete only when:
