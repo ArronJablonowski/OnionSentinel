@@ -46,6 +46,7 @@ import cti_program
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
+from portal_catalog_routes import classify_catalog_route
 from portal_json_body import parse_json_body
 from portal_request_routes import (
     classify_get_route,
@@ -4364,12 +4365,6 @@ def scan_reports() -> list[Report]:
         except Exception:
             continue
     return sorted(reports, key=lambda r: (r.mtime, r.title.lower()), reverse=True)
-
-
-def latest_threat_report(reports: list[Report]) -> Report | None:
-    """Return the newest real threat-intel brief, excluding the index/latest redirect shim."""
-    candidates = [r for r in reports if r.category == "Threat Intel" and not r.is_index]
-    return max(candidates, key=lambda r: (r.mtime, r.title.lower()), default=None)
 
 
 def soc_alerts_report(reports: list[Report]) -> Report | None:
@@ -14196,46 +14191,41 @@ class PortalHandler(BaseHTTPRequestHandler):
             if not status_path.exists():
                 return self._send(HTTPStatus.OK, json.dumps({"ok": True, "state": "pending"}).encode(), "application/json; charset=utf-8")
             return self._send(HTTPStatus.OK, status_path.read_bytes(), "application/json; charset=utf-8")
-        # The report catalog is unrelated to the SOC APIs above and requires a
-        # recursive filesystem walk. Defer it until a catalog/view route needs
-        # it so concurrent alert refreshes do not rescan hundreds of reports.
-        reports = scan_reports()
-        if path == "/api/reports":
+        catalog_route = classify_catalog_route(path)
+        catalog_operation = catalog_route.operation
+        if catalog_operation == "catalog_index":
+            reports = scan_reports()
             data = [{"id": r.rid, "title": r.title, "path": r.rel, "category": r.category, "mtime": r.mtime, "size": r.size} for r in reports]
             return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         metric_routes = {
-            "/metrics/system-uptime": lambda: render_system_uptime_detail(),
-            "/metrics/updates": lambda: render_prioritized_updates_detail(),
-            "/metrics/macos-updates": lambda: render_macos_updates_detail(),
-            "/metrics/hermes-backups": lambda: render_hermes_backups_detail(),
-            "/metrics/local-disk": lambda: render_local_disk_detail(),
-            "/metrics/portal-update": lambda: render_portal_update_detail(reports),
+            "metric_system_uptime": render_system_uptime_detail,
+            "metric_updates": render_prioritized_updates_detail,
+            "metric_macos_updates": render_macos_updates_detail,
+            "metric_hermes_backups": render_hermes_backups_detail,
+            "metric_local_disk": render_local_disk_detail,
         }
-        if path in metric_routes:
-            return self._send(HTTPStatus.OK, metric_routes[path]())
+        if catalog_operation in metric_routes:
+            return self._send(HTTPStatus.OK, metric_routes[catalog_operation]())
+        if catalog_operation == "metric_portal_update":
+            return self._send(HTTPStatus.OK, render_portal_update_detail(scan_reports()))
         # Backward-compatible static aliases for Forest Room 5. These make old
         # /open/<id> pages, cached pages, and direct LAN asset URLs resolve their
         # relative image/PDF links instead of showing alt-text-only blank cards.
-        asset_prefixes = ["/forest_room5_assets/", "/open/forest_room5_assets/"]
-        for ap in asset_prefixes:
-            if path.startswith(ap):
-                rel_asset = unquote(path[len(ap):])
-                base = (HOME / "report_portal" / "library" / "Prototype Web App" / "forest_room5_assets").resolve()
-                target = (base / rel_asset).resolve()
-                try:
-                    target.relative_to(base)
-                except ValueError:
-                    return self._send(HTTPStatus.FORBIDDEN, b"Forbidden", "text/plain; charset=utf-8")
-                return self._serve_file(target)
-        if path in ("/qr_landing_source.pdf", "/open/qr_landing_source.pdf"):
+        if catalog_operation == "forest_asset":
+            base = (HOME / "report_portal" / "library" / "Prototype Web App" / "forest_room5_assets").resolve()
+            target = (base / (catalog_route.asset_path or "")).resolve()
+            try:
+                target.relative_to(base)
+            except ValueError:
+                return self._send(HTTPStatus.FORBIDDEN, b"Forbidden", "text/plain; charset=utf-8")
+            return self._serve_file(target)
+        if catalog_operation == "qr_landing_source":
             return self._serve_file(HOME / "report_portal" / "library" / "Prototype Web App" / "qr_landing_source.pdf")
-        if path.startswith("/view/"):
-            parts = path[len("/view/"):].split("/", 1)
-            rid = unquote(parts[0]).strip()
-            report = self.reports_by_id().get(rid)
+        if catalog_operation == "view_report":
+            report = self.reports_by_id().get(catalog_route.report_id or "")
             if not report:
                 return self._send(HTTPStatus.NOT_FOUND, b"Report not found", "text/plain; charset=utf-8")
-            asset_rel = unquote(parts[1]) if len(parts) > 1 else ""
+            asset_rel = catalog_route.asset_path or ""
             if asset_rel in ("", "/"):
                 target = report.path
             else:
@@ -14255,30 +14245,19 @@ class PortalHandler(BaseHTTPRequestHandler):
             if target.suffix.lower() in (".html", ".htm"):
                 ctype = "text/html; charset=utf-8"
             return self._send(HTTPStatus.OK, body, ctype)
-        for prefix, download in (("/open/", False), ("/download/", True)):
-            if path.startswith(prefix):
-                rid = unquote(path[len(prefix):]).strip("/")
-                report = self.reports_by_id().get(rid)
-                if not report:
-                    return self._send(HTTPStatus.NOT_FOUND, b"Report not found", "text/plain; charset=utf-8")
-                if not download:
-                    return self._redirect(f"/view/{report.rid}/")
-                # The mirrored Threat Intel index.html is a "Latest" shim with a relative
-                # meta-refresh. When served at /open/<id>, that relative URL resolves under
-                # /open/ and breaks. For Open Report, serve the newest real brief directly.
-                if not download and report.category == "Threat Intel" and report.is_index:
-                    latest = latest_threat_report(reports)
-                    if latest:
-                        report = latest
-                try:
-                    body = report.path.read_bytes()
-                except Exception as e:
-                    return self._send(HTTPStatus.INTERNAL_SERVER_ERROR, str(e).encode(), "text/plain; charset=utf-8")
-                ctype = mimetypes.guess_type(report.path.name)[0] or "text/html; charset=utf-8"
-                extra = {}
-                if download:
-                    extra["Content-Disposition"] = f"attachment; filename={quote(report.path.name)}"
-                return self._send(HTTPStatus.OK, body, ctype, extra)
+        if catalog_operation in {"open_report", "download_report"}:
+            report = self.reports_by_id().get(catalog_route.report_id or "")
+            if not report:
+                return self._send(HTTPStatus.NOT_FOUND, b"Report not found", "text/plain; charset=utf-8")
+            if catalog_operation == "open_report":
+                return self._redirect(f"/view/{report.rid}/")
+            try:
+                body = report.path.read_bytes()
+            except Exception as e:
+                return self._send(HTTPStatus.INTERNAL_SERVER_ERROR, str(e).encode(), "text/plain; charset=utf-8")
+            ctype = mimetypes.guess_type(report.path.name)[0] or "text/html; charset=utf-8"
+            extra = {"Content-Disposition": f"attachment; filename={quote(report.path.name)}"}
+            return self._send(HTTPStatus.OK, body, ctype, extra)
         return self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain; charset=utf-8")
 
 

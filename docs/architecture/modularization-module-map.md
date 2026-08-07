@@ -305,6 +305,12 @@ malformed JSON from valid JSON `null` and does not silently coerce valid arrays
 or scalar values, allowing each endpoint to retain its existing validation
 policy while removing repeated decoder exception blocks.
 
+`portal_catalog_routes.py` owns report catalog, operational metric, legacy
+static alias, report view, open, and download path classification. It makes
+catalog-scan requirements explicit, so unrelated metrics, static files, and
+unknown requests cannot trigger an expensive recursive report-tree walk;
+filesystem resolution and traversal enforcement remain in `PortalHandler`.
+
 | Domain | Current responsibility examples | Target modules |
 | --- | --- | --- |
 | HTTP composition | server, handler, GET/POST dispatch | `portal.entrypoint`, `portal.routes.registry` |
