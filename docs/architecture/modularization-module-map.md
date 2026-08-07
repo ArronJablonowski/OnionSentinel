@@ -305,6 +305,15 @@ malformed JSON from valid JSON `null` and does not silently coerce valid arrays
 or scalar values, allowing each endpoint to retain its existing validation
 policy while removing repeated decoder exception blocks.
 
+`portal_ai_settings_normalizer.py` owns pure orchestration for editable SOC AI
+settings. It stages legacy migration, Ollama and CLI provider validation,
+provider enablement, primary/reviewer/adjudicator assignment normalization,
+automation thresholds, capture-loss policy, MaxMind paths, and safe rolling-
+deployment compatibility fields. `report_portal.py` retains the public facade
+and injects an immutable policy containing the existing model-roster, route-
+identity, executable, and assignment helpers. The normalizer has no persistence,
+HTTP, filesystem reads or writes, process execution, or network access.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and

@@ -47,6 +47,10 @@ from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
 from portal_catalog_routes import classify_catalog_route
+from portal_ai_settings_normalizer import (
+    SocAiSettingsNormalizationPolicy,
+    normalize_soc_ai_settings as normalize_ai_settings,
+)
 from portal_incident_actions import (
     IncidentStatusPayloadError,
     normalize_incident_status_payload,
@@ -2873,294 +2877,27 @@ def _normalize_agent_adjudicator_models(
 
 def normalize_soc_ai_settings(payload: dict | None) -> tuple[bool, dict]:
     """Validate and normalize editable SOC AI model routing settings."""
-    payload = payload if isinstance(payload, dict) else {}
-    settings = default_soc_ai_settings()
-    for key in settings:
-        if key in {
-            "enabled_ollama_models",
-            "codex_cli_models",
-            "gpt_cli_enabled",
-            "hermes_agent_enabled",
-            "openclaw_enabled",
-            "agent_models",
-            "agent_second_opinion_models",
-            "agent_adjudicator_models",
-        }:
-            continue
-        if key in payload:
-            settings[key] = str(payload.get(key) or "").strip()
-    # Migrate the original City-only setting without retaining an ambiguous key
-    # in newly written runtime configuration.
-    city_key = MAXMIND_GEOIP_DATABASE_SETTINGS["city"][0]
-    if city_key not in payload and payload.get("maxmind_geoip_db_path") is not None:
-        settings[city_key] = str(payload.get("maxmind_geoip_db_path") or "").strip()
-    legacy_mode = str(payload.get("mode") or settings["mode"]).strip().lower()
-    if legacy_mode not in {"ollama", "cloud", "hybrid"}:
-        legacy_mode = "ollama"
-    if "enabled_ollama_models" in payload:
-        enabled_ollama_models = _normalized_model_list(payload.get("enabled_ollama_models"))
-    else:
-        legacy_model = str(payload.get("ollama_model") or settings["ollama_model"]).strip()
-        enabled_ollama_models = [] if legacy_mode == "cloud" else _normalized_model_list([legacy_model])
-    legacy_gpt_enabled = (
-        _boolean_setting(payload.get("gpt_cli_enabled"))
-        if "gpt_cli_enabled" in payload
-        else legacy_mode in {"cloud", "hybrid"}
+    policy = SocAiSettingsNormalizationPolicy(
+        defaults=default_soc_ai_settings,
+        maxmind_databases=MAXMIND_GEOIP_DATABASE_SETTINGS,
+        codex_efforts=CODEX_CLI_REASONING_EFFORTS,
+        hermes_effort=HERMES_AGENT_REASONING_EFFORT,
+        codex_catalog=CODEX_CLI_MODEL_CATALOG,
+        severity_thresholds=SOC_ANALYSIS_SEVERITY_THRESHOLDS,
+        openclaw_ollama_urls=OPENCLAW_SUPPORTED_OLLAMA_URLS,
+        normalized_model_list=_normalized_model_list,
+        boolean_setting=_boolean_setting,
+        derive_model_mode=_derive_model_mode,
+        valid_cli_path=_valid_cli_executable_path,
+        valid_provider_model=_valid_provider_model,
+        valid_openclaw_model=_valid_openclaw_model,
+        normalize_codex_models=_normalize_codex_cli_models,
+        enabled_routes=_enabled_agent_model_routes,
+        normalize_primary_models=_normalize_agent_models,
+        normalize_reviewer_models=_normalize_agent_second_opinion_models,
+        normalize_adjudicator_models=_normalize_agent_adjudicator_models,
     )
-    if not settings["ollama_url"].startswith(("http://", "https://")):
-        return False, {"ok": False, "error": "Ollama URL must start with http:// or https://."}
-    codex_cli_path = str(settings.get("codex_cli_path") or "codex").strip()
-    codex_cli_model = str(
-        payload.get("codex_cli_model")
-        or payload.get("cloud_model")
-        or settings.get("codex_cli_model")
-        or "gpt-5.5"
-    ).strip()
-    codex_cli_effort = str(
-        settings.get("codex_cli_reasoning_effort") or "medium"
-    ).strip().lower()
-    if not _valid_cli_executable_path(codex_cli_path, "codex"):
-        return False, {
-            "ok": False,
-            "error": "Codex CLI path must be 'codex' or an absolute path ending in /codex.",
-        }
-    if not _valid_provider_model(codex_cli_model):
-        return False, {"ok": False, "error": "Codex CLI model is invalid."}
-    if codex_cli_effort not in CODEX_CLI_REASONING_EFFORTS:
-        return False, {
-            "ok": False,
-            "error": "Codex CLI reasoning effort must be low, medium, high, or xhigh.",
-        }
-    valid_codex_models, codex_cli_models = _normalize_codex_cli_models(
-        payload.get("codex_cli_models") if "codex_cli_models" in payload else None,
-        legacy_model=codex_cli_model,
-        legacy_effort=codex_cli_effort,
-        legacy_enabled=legacy_gpt_enabled,
-    )
-    if not valid_codex_models:
-        return False, {
-            "ok": False,
-            "error": (
-                "Codex CLI settings must use each supported catalog model at most "
-                "once with a valid reasoning effort."
-            ),
-        }
-    gpt_cli_enabled = any(entry["enabled"] for entry in codex_cli_models)
-    hermes_agent_enabled = _boolean_setting(payload.get("hermes_agent_enabled"))
-    hermes_agent_path = str(
-        payload.get("hermes_agent_path")
-        if "hermes_agent_path" in payload
-        else settings["hermes_agent_path"]
-    ).strip()
-    hermes_agent_model = str(
-        payload.get("hermes_agent_model")
-        if "hermes_agent_model" in payload
-        else settings["hermes_agent_model"]
-    ).strip()
-    hermes_agent_effort = str(
-        payload.get("hermes_agent_reasoning_effort")
-        if "hermes_agent_reasoning_effort" in payload
-        else settings["hermes_agent_reasoning_effort"]
-    ).strip().lower()
-    openclaw_enabled = _boolean_setting(payload.get("openclaw_enabled"))
-    openclaw_path = str(
-        payload.get("openclaw_path")
-        if "openclaw_path" in payload
-        else settings["openclaw_path"]
-    ).strip()
-    openclaw_model = str(
-        payload.get("openclaw_model")
-        if "openclaw_model" in payload
-        else settings["openclaw_model"]
-    ).strip()
-    openclaw_effort = str(
-        payload.get("openclaw_reasoning_effort")
-        if "openclaw_reasoning_effort" in payload
-        else settings["openclaw_reasoning_effort"]
-    ).strip().lower()
-    for label, executable, basename in (
-        ("Hermes Agent", hermes_agent_path, "hermes"),
-        ("OpenClaw", openclaw_path, "openclaw"),
-    ):
-        if not _valid_cli_executable_path(executable, basename):
-            return False, {
-                "ok": False,
-                "error": (
-                    f"{label} path must be '{basename}' or an absolute path "
-                    f"ending in /{basename}."
-                ),
-            }
-    if hermes_agent_model not in CODEX_CLI_MODEL_CATALOG:
-        return False, {
-            "ok": False,
-            "error": "Hermes Agent model is not in the supported Codex model catalog.",
-        }
-    if not _valid_openclaw_model(openclaw_model):
-        return False, {
-            "ok": False,
-            "error": (
-                "OpenClaw currently supports explicit ollama/<model> routes "
-                "only; hosted OpenClaw credentials are not admitted into the "
-                "isolated runtime."
-            ),
-        }
-    if (
-        openclaw_enabled
-        and settings["ollama_url"].rstrip("/")
-        not in OPENCLAW_SUPPORTED_OLLAMA_URLS
-    ):
-        return False, {
-            "ok": False,
-            "error": (
-                "OpenClaw requires the loopback Ollama endpoint "
-                "http://127.0.0.1:11434 or http://localhost:11434."
-            ),
-        }
-    if hermes_agent_effort != HERMES_AGENT_REASONING_EFFORT:
-        return False, {
-            "ok": False,
-            "error": (
-                "Hermes Agent reasoning effort must be medium because the "
-                "installed one-shot CLI does not enforce other effort values."
-            ),
-        }
-    if openclaw_effort not in CODEX_CLI_REASONING_EFFORTS:
-        return False, {
-            "ok": False,
-            "error": (
-                "OpenClaw reasoning effort must be low, medium, high, or xhigh."
-            ),
-        }
-    if (
-        not enabled_ollama_models
-        and not gpt_cli_enabled
-        and not hermes_agent_enabled
-        and not openclaw_enabled
-    ):
-        return False, {
-            "ok": False,
-            "error": (
-                "Enable at least one Ollama model, Codex CLI model, "
-                "Hermes Agent, or OpenClaw."
-            ),
-        }
-    settings["enabled_ollama_models"] = enabled_ollama_models
-    settings["codex_cli_models"] = codex_cli_models
-    settings["gpt_cli_enabled"] = gpt_cli_enabled
-    settings["hermes_agent_enabled"] = hermes_agent_enabled
-    settings["hermes_agent_path"] = hermes_agent_path
-    settings["hermes_agent_model"] = hermes_agent_model
-    settings["hermes_agent_reasoning_effort"] = hermes_agent_effort
-    settings["openclaw_enabled"] = openclaw_enabled
-    settings["openclaw_path"] = openclaw_path
-    settings["openclaw_model"] = openclaw_model
-    settings["openclaw_reasoning_effort"] = openclaw_effort
-    settings["mode"] = _derive_model_mode(
-        enabled_ollama_models + (["openclaw-local"] if openclaw_enabled else []),
-        (
-            gpt_cli_enabled
-            or hermes_agent_enabled
-        ),
-    )
-    if enabled_ollama_models:
-        settings["ollama_model"] = enabled_ollama_models[0]
-    enabled_codex = next(
-        (entry for entry in codex_cli_models if entry["enabled"]),
-        codex_cli_models[0] if codex_cli_models else {
-            "model": codex_cli_model,
-            "reasoning_effort": codex_cli_effort,
-        },
-    )
-    codex_cli_model = enabled_codex["model"]
-    codex_cli_effort = enabled_codex["reasoning_effort"]
-    settings["codex_cli_path"] = codex_cli_path
-    settings["codex_cli_model"] = codex_cli_model
-    settings["codex_cli_reasoning_effort"] = codex_cli_effort
-    settings["cloud_provider"] = "codex-cli"
-    settings["cloud_model"] = codex_cli_model
-    # Retain the key for rolling-deploy compatibility but never persist an
-    # operator-supplied command that could turn Settings into shell execution.
-    settings["cloud_command"] = ""
-    enabled_routes = _enabled_agent_model_routes(
-        enabled_ollama_models,
-        codex_cli_models,
-        hermes_agent_enabled=hermes_agent_enabled,
-        hermes_agent_model=hermes_agent_model,
-        hermes_agent_reasoning_effort=hermes_agent_effort,
-        openclaw_enabled=openclaw_enabled,
-        openclaw_model=openclaw_model,
-        openclaw_reasoning_effort=openclaw_effort,
-    )
-    settings["agent_models"] = _normalize_agent_models(
-        payload.get("agent_models"),
-        enabled_routes,
-    )
-    settings["agent_second_opinion_models"] = _normalize_agent_second_opinion_models(
-        payload.get("agent_second_opinion_models"),
-        enabled_routes,
-        settings["agent_models"],
-        settings,
-    )
-    settings["agent_adjudicator_models"] = _normalize_agent_adjudicator_models(
-        payload.get("agent_adjudicator_models"),
-        enabled_routes,
-        settings["agent_models"],
-        settings["agent_second_opinion_models"],
-        settings,
-    )
-    for setting_key, label in (
-        ("soc_analyst_analysis_min_severity", "automatic AI analysis"),
-        ("soc_analyst_pcap_min_severity", "PCAP analysis"),
-        ("soc_analyst_incident_min_severity", "incident escalation"),
-    ):
-        threshold = str(settings.get(setting_key) or "").strip().lower()
-        if threshold == "info":
-            threshold = "informational"
-        if threshold not in SOC_ANALYSIS_SEVERITY_THRESHOLDS:
-            return False, {
-                "ok": False,
-                "error": f"SOC Analyst {label} severity threshold is invalid.",
-            }
-        settings[setting_key] = threshold
-    try:
-        capture_loss_threshold = float(
-            settings.get("pcap_capture_loss_threshold_percent", 5.0)
-        )
-    except (TypeError, ValueError):
-        capture_loss_threshold = math.nan
-    if not math.isfinite(capture_loss_threshold) or not 0.1 <= capture_loss_threshold <= 100.0:
-        return False, {
-            "ok": False,
-            "error": "PCAP capture-loss threshold must be between 0.1 and 100 percent.",
-        }
-    settings["pcap_capture_loss_threshold_percent"] = round(
-        capture_loss_threshold,
-        4,
-    )
-    for database_type, (setting_key, _) in MAXMIND_GEOIP_DATABASE_SETTINGS.items():
-        geoip_path = settings[setting_key]
-        label = database_type.upper() if database_type == "asn" else database_type.title()
-        if len(geoip_path) > 1024 or re.search(r"[\x00-\x1f\x7f]", geoip_path):
-            return False, {"ok": False, "error": f"MaxMind GeoIP database path for {label} is invalid."}
-        if not geoip_path.startswith(("/", "~/")):
-            return False, {"ok": False, "error": f"MaxMind GeoIP database path for {label} must be absolute or start with ~/."}
-        if Path(geoip_path).suffix.lower() != ".mmdb":
-            return False, {"ok": False, "error": f"MaxMind GeoIP database path for {label} must end in .mmdb."}
-    for key in (
-        "ollama_model",
-        "ollama_url",
-        "cloud_provider",
-        "cloud_model",
-        "cloud_command",
-        "codex_cli_model",
-        "codex_cli_reasoning_effort",
-        "hermes_agent_model",
-        "hermes_agent_reasoning_effort",
-        "openclaw_model",
-        "openclaw_reasoning_effort",
-    ):
-        settings[key] = settings[key][:240]
-    return True, settings
+    return normalize_ai_settings(payload, policy)
 
 
 def maxmind_geoip_database_status(settings: dict, database_type: str = "city") -> dict:
