@@ -632,6 +632,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_asset_inventory_page.py
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_ac_hunter_page.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_ac_hunter_page.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_settings_assets.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_assets.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_settings_agent_card.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_agent_card.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_settings_page.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_page.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_settings_client_shell.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_client_shell.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_settings_client_model.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_client_model.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_settings_client_actions.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_client_actions.py"

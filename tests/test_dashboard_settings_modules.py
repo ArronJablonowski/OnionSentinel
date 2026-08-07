@@ -13,10 +13,12 @@ SCRIPT_DIR = ROOT / "onion-sentinel-dashboard" / "scripts"
 BUILDER_PATH = SCRIPT_DIR / "build_soc_alerts_dashboard.py"
 ASSETS_PATH = SCRIPT_DIR / "dashboard_settings_assets.py"
 AGENT_CARD_PATH = SCRIPT_DIR / "dashboard_settings_agent_card.py"
+SETTINGS_PAGE_PATH = SCRIPT_DIR / "dashboard_settings_page.py"
 INSTALLER_PATH = ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
 MODULE_NAMES = (
     "dashboard_settings_assets.py",
     "dashboard_settings_agent_card.py",
+    "dashboard_settings_page.py",
     "dashboard_settings_client_shell.py",
     "dashboard_settings_client_model.py",
     "dashboard_settings_client_actions.py",
@@ -39,6 +41,7 @@ class DashboardSettingsModuleTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.assets = load(ASSETS_PATH, "dashboard_settings_assets")
         cls.agent_card = load(AGENT_CARD_PATH, "dashboard_settings_agent_card")
+        cls.settings_page = load(SETTINGS_PAGE_PATH, "dashboard_settings_page")
         cls.builder = load(BUILDER_PATH, "dashboard_settings_builder_test")
         cls.installer = INSTALLER_PATH.read_text(encoding="utf-8")
 
@@ -122,6 +125,53 @@ class DashboardSettingsModuleTests(unittest.TestCase):
         self.assertIn('id="pcap-capture-loss-threshold-percent"', rendered)
         self.assertIn('<div id="soc-model-control"></div>', rendered)
         self.assertIn('<div id="soc-prompt-control"></div>', rendered)
+
+    def test_settings_page_renderer_escapes_provider_and_maxmind_values(self) -> None:
+        provider = self.settings_page.AiProviderSettingsViewModel(
+            ai_path="~/settings<&>.json",
+            onion_sentinel_harness_state="2 <routes>",
+            ollama_state="1 enabled",
+            ollama_url='http://localhost:11434/"unsafe',
+            ollama_model_rows_html='<label id="ollama-row"></label>',
+            codex_state="1 enabled",
+            codex_path='codex"unsafe',
+            codex_model_rows_html='<label id="codex-row"></label>',
+            skill_catalog_html='<section id="skills"></section>',
+            hermes_state="Enabled",
+            hermes_enabled=True,
+            hermes_path='hermes"unsafe',
+            hermes_model_options_html='<option>gpt</option>',
+            hermes_effort_options_html='<option>medium</option>',
+            openclaw_state="Disabled",
+            openclaw_enabled=False,
+            openclaw_path='openclaw"unsafe',
+            openclaw_model='ollama/model<&>',
+            openclaw_effort_options_html='<option>medium</option>',
+        )
+        maxmind = self.settings_page.MaxMindSettingsViewModel(
+            asn_path='~/ASN".mmdb',
+            city_path="~/City<&>.mmdb",
+            country_path="~/Country.mmdb",
+        )
+        rendered = self.settings_page.render_settings_page(
+            self.settings_page.SettingsPageViewModel(
+                providers=provider,
+                maxmind=maxmind,
+                soc_agent_card_html='<details id="soc-card"></details>',
+                agent_cards_html='<details id="agent-card"></details>',
+            )
+        )
+        self.assertIn("~/settings&lt;&amp;&gt;.json", rendered)
+        self.assertIn('codex&quot;unsafe', rendered)
+        self.assertIn('hermes&quot;unsafe', rendered)
+        self.assertIn('ollama/model&lt;&amp;&gt;', rendered)
+        self.assertIn('~/City&lt;&amp;&gt;.mmdb', rendered)
+        self.assertIn('id="ai-hermes-agent-enabled" type="checkbox"', rendered)
+        self.assertIn('aria-label="Enable Hermes Agent" checked', rendered)
+        self.assertIn('<label id="ollama-row"></label>', rendered)
+        self.assertIn('<section id="skills"></section>', rendered)
+        self.assertIn('<details id="soc-card"></details>', rendered)
+        self.assertIn('id="settings-memory-modal"', rendered)
 
     def test_settings_modules_stay_within_the_maintenance_target(self) -> None:
         for name in MODULE_NAMES:

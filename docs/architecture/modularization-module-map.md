@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (8,408
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (8,117
 lines).
 
 | Boundary | Responsibilities |
@@ -380,6 +380,15 @@ Responder, SIEM Engineer, Cyber Threat Intel, and Threat Hunter cards. A
 separate `SocAgentSettingsCardViewModel` and renderer own the SOC Analyst card
 and its automation-policy controls without moving runtime reads out of the
 composition root.
+
+`dashboard_settings_page.py` owns the complete pure Settings renderer through
+`SettingsPageViewModel`, `AiProviderSettingsViewModel`, and
+`MaxMindSettingsViewModel`. Bounded sub-renderers own the native harness,
+Hermes, OpenClaw, MaxMind databases, agent-section assembly, and memory modal.
+`settings_page_section` remains the runtime composition adapter: it reads
+prompts/configuration and discovers models, normalizes those values, produces
+trusted owned control fragments, and passes the resulting view model to the
+page renderer.
 
 ## Alert Store
 

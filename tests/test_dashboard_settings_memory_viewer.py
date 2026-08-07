@@ -9,6 +9,7 @@ DASHBOARD_BUILDER = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "build_
 SETTINGS_MODULES = (
     REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_settings_assets.py",
     REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_settings_agent_card.py",
+    REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_settings_page.py",
     REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_settings_client_shell.py",
     REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_settings_client_model.py",
     REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_settings_client_actions.py",
@@ -71,7 +72,7 @@ class DashboardSettingsMemoryViewerTest(unittest.TestCase):
             "/api/soc-settings/cyber-threat-intel-second-opinion-prompt",
             "/api/soc-settings/threat-hunter-second-opinion-prompt",
         ):
-            self.assertIn(endpoint, source)
+            self.assertIn(endpoint, rendered)
         self.assertIn("const promptConfigurations = [...document.querySelectorAll('[data-prompt-save]')]", source)
         self.assertIn("panel.open = true;", source)
         self.assertIn("promptEditor.focus({preventScroll: true});", source)

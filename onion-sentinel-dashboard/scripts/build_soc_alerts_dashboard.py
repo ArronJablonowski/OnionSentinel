@@ -81,6 +81,12 @@ from dashboard_settings_agent_card import (  # noqa: E402
     render_agent_settings_card,
     render_soc_agent_settings_card,
 )
+from dashboard_settings_page import (  # noqa: E402
+    AiProviderSettingsViewModel,
+    MaxMindSettingsViewModel,
+    SettingsPageViewModel,
+    render_settings_page,
+)
 from dashboard_software_inventory_page import software_inventory_page_section  # noqa: E402
 from dashboard_shell_components import (  # noqa: E402
     PAGE_BY_KEY,
@@ -7070,484 +7076,187 @@ def flow_page_section(reports: list[AlertReport]) -> str:
     </section>'''
 
 
-def settings_page_section() -> str:
-    prompt = html.escape(load_soc_analyst_prompt())
-    prompt_path = display_path(SOC_ANALYST_PROMPT_FILE)
-    analyst_second_opinion_prompt = html.escape(load_second_opinion_prompt(SOC_ANALYST_SECOND_OPINION_PROMPT_FILE))
-    analyst_second_opinion_prompt_path = display_path(SOC_ANALYST_SECOND_OPINION_PROMPT_FILE)
-    analyst_memory_path = display_path(SOC_ANALYST_MEMORY_FILE)
-    shared_memory_display_path = display_path(SHARED_AGENT_MEMORY_FILE)
-    engineer_prompt = html.escape(load_siem_engineer_prompt())
-    engineer_prompt_path = display_path(SIEM_ENGINEER_PROMPT_FILE)
-    engineer_second_opinion_prompt = html.escape(load_second_opinion_prompt(SIEM_ENGINEER_SECOND_OPINION_PROMPT_FILE))
-    engineer_second_opinion_prompt_path = display_path(SIEM_ENGINEER_SECOND_OPINION_PROMPT_FILE)
-    engineer_memory_path = display_path(SIEM_ENGINEER_MEMORY_FILE)
-    hunter_prompt = html.escape(load_threat_hunter_prompt())
-    hunter_prompt_path = display_path(THREAT_HUNTER_PROMPT_FILE)
-    hunter_second_opinion_prompt = html.escape(load_second_opinion_prompt(THREAT_HUNTER_SECOND_OPINION_PROMPT_FILE))
-    hunter_second_opinion_prompt_path = display_path(THREAT_HUNTER_SECOND_OPINION_PROMPT_FILE)
-    hunter_memory_path = display_path(THREAT_HUNTER_MEMORY_FILE)
-    intel_prompt = html.escape(load_cyber_threat_intel_prompt())
-    intel_prompt_path = display_path(CYBER_THREAT_INTEL_PROMPT_FILE)
-    intel_second_opinion_prompt = html.escape(load_second_opinion_prompt(CYBER_THREAT_INTEL_SECOND_OPINION_PROMPT_FILE))
-    intel_second_opinion_prompt_path = display_path(CYBER_THREAT_INTEL_SECOND_OPINION_PROMPT_FILE)
-    intel_memory_path = display_path(CYBER_THREAT_INTEL_MEMORY_FILE)
-    incident_prompt = html.escape(load_incident_responder_prompt())
-    incident_prompt_path = display_path(INCIDENT_RESPONDER_PROMPT_FILE)
-    incident_second_opinion_prompt = html.escape(load_second_opinion_prompt(INCIDENT_RESPONDER_SECOND_OPINION_PROMPT_FILE))
-    incident_second_opinion_prompt_path = display_path(INCIDENT_RESPONDER_SECOND_OPINION_PROMPT_FILE)
-    incident_memory_path = display_path(INCIDENT_RESPONDER_MEMORY_FILE)
-    ai_settings = load_soc_ai_settings()
-    agent_model_labels = {
-        role: agent_model_route_label(ai_settings, role)
+SETTINGS_AGENT_LABELS = {
+    'soc-analyst': 'SOC Analyst',
+    'incident-responder': 'Incident Responder',
+    'siem-engineer': 'SIEM Engineer',
+    'cyber-threat-intel': 'Cyber Threat Intel Analyst',
+    'threat-hunter': 'Threat Hunter',
+}
+SETTINGS_AGENT_API_NAMES = {'soc-analyst': 'analyst', **{role: role for role in CYBER_SECURITY_AGENT_ROLES if role != 'soc-analyst'}}
+SETTINGS_AGENT_PROMPT_LOADERS = {
+    'soc-analyst': load_soc_analyst_prompt,
+    'incident-responder': load_incident_responder_prompt,
+    'siem-engineer': load_siem_engineer_prompt,
+    'cyber-threat-intel': load_cyber_threat_intel_prompt,
+    'threat-hunter': load_threat_hunter_prompt,
+}
+SETTINGS_AGENT_PROMPT_FILES = {
+    'soc-analyst': SOC_ANALYST_PROMPT_FILE,
+    'incident-responder': INCIDENT_RESPONDER_PROMPT_FILE,
+    'siem-engineer': SIEM_ENGINEER_PROMPT_FILE,
+    'cyber-threat-intel': CYBER_THREAT_INTEL_PROMPT_FILE,
+    'threat-hunter': THREAT_HUNTER_PROMPT_FILE,
+}
+SETTINGS_AGENT_REVIEW_FILES = {
+    'soc-analyst': SOC_ANALYST_SECOND_OPINION_PROMPT_FILE,
+    'incident-responder': INCIDENT_RESPONDER_SECOND_OPINION_PROMPT_FILE,
+    'siem-engineer': SIEM_ENGINEER_SECOND_OPINION_PROMPT_FILE,
+    'cyber-threat-intel': CYBER_THREAT_INTEL_SECOND_OPINION_PROMPT_FILE,
+    'threat-hunter': THREAT_HUNTER_SECOND_OPINION_PROMPT_FILE,
+}
+SETTINGS_AGENT_MEMORY_FILES = {
+    'soc-analyst': SOC_ANALYST_MEMORY_FILE,
+    'incident-responder': INCIDENT_RESPONDER_MEMORY_FILE,
+    'siem-engineer': SIEM_ENGINEER_MEMORY_FILE,
+    'cyber-threat-intel': CYBER_THREAT_INTEL_MEMORY_FILE,
+    'threat-hunter': THREAT_HUNTER_MEMORY_FILE,
+}
+SETTINGS_GENERIC_AGENT_COPY = {
+    'incident-responder': ('Incident responder prompt', 'Incident Responder', 'Trigger: manual incident workflow now; external IR host collection is TODO.', 'This prompt guides senior incident response planning, evidence preservation, containment guidance, and future host artifact collection workflows.', 'assets/settings-incident-responder-prompt.png', 'TODO: connect the dedicated incident response host before allowing this agent to trigger external host artifact collection scripts. Until then, recommendations should mark those actions as pending integration.'),
+    'siem-engineer': ('SIEM engineer prompt', 'SIEM Engineer System Prompt', 'Planned trigger: cron every 6 hours after all eligible alerts are analyzed.', 'This prompt guides the SIEM Engineering review that recommends scoped tuning and new detection work after all eligible alerts have finished AI analysis.', 'assets/settings-siem-engineer-prompt.png', 'Designed cadence: every 6 hours, only when the alert analysis backlog is clear. It should review alerts, enrichments, notes, acknowledgments, suppressions, and related detection context before recommending changes.'),
+    'cyber-threat-intel': ('Cyber threat intel prompt', 'Cyber Threat Intel Analyst', 'Trigger: manual intel review from alerts, enrichments, hunts, and engineering context; scheduled briefs are future work.', 'This prompt guides intelligence briefs, indicator review, enrichment pivots, confidence scoring, and cross-agent context for SOC decisions.', 'assets/settings-cyber-threat-intel-prompt.png', ''),
+    'threat-hunter': ('Threat hunter prompt', 'Threat Hunter System Prompt', 'Trigger: manual hunt review from alert patterns; automated hunts are future work.', 'This prompt guides senior threat-hunt recommendations, including Security Onion pivots and query-ready KQL, OQL, and OSQuery hunt plans.', 'assets/settings-threat-hunter-prompt.png', ''),
+}
+
+
+def _settings_prompt_data() -> dict[str, dict[str, str]]:
+    data: dict[str, dict[str, str]] = {}
+    for role in CYBER_SECURITY_AGENT_ROLES:
+        api_name = SETTINGS_AGENT_API_NAMES[role]
+        review_file = SETTINGS_AGENT_REVIEW_FILES[role]
+        primary_id = f'{role}-prompt'
+        reviewer_id = f'{role}-second-opinion-prompt'
+        data[role] = {
+            'prompt_path': display_path(SETTINGS_AGENT_PROMPT_FILES[role]),
+            'reviewer_prompt_path': display_path(review_file),
+            'memory_path': display_path(SETTINGS_AGENT_MEMORY_FILES[role]),
+            'control_html': agent_prompt_editors(
+                role_label=SETTINGS_AGENT_LABELS[role],
+                primary_id=primary_id,
+                primary_prompt=html.escape(SETTINGS_AGENT_PROMPT_LOADERS[role]()),
+                primary_endpoint=f'/api/soc-settings/{api_name}-prompt',
+                reviewer_id=reviewer_id,
+                reviewer_prompt=html.escape(load_second_opinion_prompt(review_file)),
+                reviewer_endpoint=f'/api/soc-settings/{api_name}-second-opinion-prompt',
+            ),
+        }
+    return data
+
+
+def _settings_model_data(ai_settings: dict[str, object]) -> dict[str, dict[str, str]]:
+    return {
+        role: {
+            'label': agent_model_route_label(ai_settings, role),
+            'reviewer_label': agent_second_opinion_model_route_label(ai_settings, role),
+            'adjudicator_label': agent_adjudicator_model_route_label(ai_settings, role),
+            'control_html': agent_model_control(ai_settings, role, SETTINGS_AGENT_LABELS[role]),
+        }
         for role in CYBER_SECURITY_AGENT_ROLES
     }
-    agent_second_opinion_model_labels = {
-        role: agent_second_opinion_model_route_label(ai_settings, role)
-        for role in CYBER_SECURITY_AGENT_ROLES
-    }
-    agent_adjudicator_model_labels = {
-        role: agent_adjudicator_model_route_label(ai_settings, role)
-        for role in CYBER_SECURITY_AGENT_ROLES
-    }
-    agent_model_controls = {
-        'soc-analyst': agent_model_control(ai_settings, 'soc-analyst', 'SOC Analyst'),
-        'incident-responder': agent_model_control(ai_settings, 'incident-responder', 'Incident Responder'),
-        'siem-engineer': agent_model_control(ai_settings, 'siem-engineer', 'SIEM Engineer'),
-        'cyber-threat-intel': agent_model_control(ai_settings, 'cyber-threat-intel', 'Cyber Threat Intel Analyst'),
-        'threat-hunter': agent_model_control(ai_settings, 'threat-hunter', 'Threat Hunter'),
-    }
-    analysis_min_severity = str(
-        ai_settings.get('soc_analyst_analysis_min_severity') or 'informational'
-    )
-    pcap_min_severity = str(
-        ai_settings.get('soc_analyst_pcap_min_severity') or 'informational'
-    )
-    incident_min_severity = str(
-        ai_settings.get('soc_analyst_incident_min_severity') or 'disabled'
-    )
-    analysis_threshold_options = severity_threshold_options(analysis_min_severity)
-    pcap_threshold_options = severity_threshold_options(pcap_min_severity)
-    incident_threshold_options = severity_threshold_options(incident_min_severity)
-    analysis_threshold_label = SOC_ANALYSIS_SEVERITY_LABELS[analysis_min_severity]
-    pcap_threshold_label = SOC_ANALYSIS_SEVERITY_LABELS[pcap_min_severity]
-    incident_threshold_label = SOC_ANALYSIS_SEVERITY_LABELS[incident_min_severity]
-    agent_prompt_controls = {
-        'soc-analyst': agent_prompt_editors(
-            role_label='SOC Analyst',
-            primary_id='soc-analyst-prompt',
-            primary_prompt=prompt,
-            primary_endpoint='/api/soc-settings/analyst-prompt',
-            reviewer_id='soc-analyst-second-opinion-prompt',
-            reviewer_prompt=analyst_second_opinion_prompt,
-            reviewer_endpoint='/api/soc-settings/analyst-second-opinion-prompt',
-        ),
-        'incident-responder': agent_prompt_editors(
-            role_label='Incident Responder',
-            primary_id='incident-responder-prompt',
-            primary_prompt=incident_prompt,
-            primary_endpoint='/api/soc-settings/incident-responder-prompt',
-            reviewer_id='incident-responder-second-opinion-prompt',
-            reviewer_prompt=incident_second_opinion_prompt,
-            reviewer_endpoint='/api/soc-settings/incident-responder-second-opinion-prompt',
-        ),
-        'siem-engineer': agent_prompt_editors(
-            role_label='SIEM Engineer',
-            primary_id='siem-engineer-prompt',
-            primary_prompt=engineer_prompt,
-            primary_endpoint='/api/soc-settings/siem-engineer-prompt',
-            reviewer_id='siem-engineer-second-opinion-prompt',
-            reviewer_prompt=engineer_second_opinion_prompt,
-            reviewer_endpoint='/api/soc-settings/siem-engineer-second-opinion-prompt',
-        ),
-        'cyber-threat-intel': agent_prompt_editors(
-            role_label='Cyber Threat Intel Analyst',
-            primary_id='cyber-threat-intel-prompt',
-            primary_prompt=intel_prompt,
-            primary_endpoint='/api/soc-settings/cyber-threat-intel-prompt',
-            reviewer_id='cyber-threat-intel-second-opinion-prompt',
-            reviewer_prompt=intel_second_opinion_prompt,
-            reviewer_endpoint='/api/soc-settings/cyber-threat-intel-second-opinion-prompt',
-        ),
-        'threat-hunter': agent_prompt_editors(
-            role_label='Threat Hunter',
-            primary_id='threat-hunter-prompt',
-            primary_prompt=hunter_prompt,
-            primary_endpoint='/api/soc-settings/threat-hunter-prompt',
-            reviewer_id='threat-hunter-second-opinion-prompt',
-            reviewer_prompt=hunter_second_opinion_prompt,
-            reviewer_endpoint='/api/soc-settings/threat-hunter-second-opinion-prompt',
-        ),
-    }
-    agent_cards = ''.join(map(
-        render_agent_settings_card,
-        (
-            AgentSettingsCardViewModel(
-                role='incident-responder',
-                role_label='Incident Responder',
-                kicker='Incident responder prompt',
-                title='Incident Responder',
-                trigger='Trigger: manual incident workflow now; external IR host collection is TODO.',
-                description='This prompt guides senior incident response planning, evidence preservation, containment guidance, and future host artifact collection workflows.',
-                icon_path='assets/settings-incident-responder-prompt.png',
-                prompt_path=incident_prompt_path,
-                reviewer_prompt_path=incident_second_opinion_prompt_path,
-                memory_path=incident_memory_path,
-                shared_memory_path=shared_memory_display_path,
-                model_label=agent_model_labels['incident-responder'],
-                reviewer_model_label=agent_second_opinion_model_labels['incident-responder'],
-                adjudicator_model_label=agent_adjudicator_model_labels['incident-responder'],
-                model_control_html=agent_model_controls['incident-responder'],
-                prompt_control_html=agent_prompt_controls['incident-responder'],
-                note='TODO: connect the dedicated incident response host before allowing this agent to trigger external host artifact collection scripts. Until then, recommendations should mark those actions as pending integration.',
-            ),
-            AgentSettingsCardViewModel(
-                role='siem-engineer',
-                role_label='SIEM Engineer',
-                kicker='SIEM engineer prompt',
-                title='SIEM Engineer System Prompt',
-                trigger='Planned trigger: cron every 6 hours after all eligible alerts are analyzed.',
-                description='This prompt guides the SIEM Engineering review that recommends scoped tuning and new detection work after all eligible alerts have finished AI analysis.',
-                icon_path='assets/settings-siem-engineer-prompt.png',
-                prompt_path=engineer_prompt_path,
-                reviewer_prompt_path=engineer_second_opinion_prompt_path,
-                memory_path=engineer_memory_path,
-                shared_memory_path=shared_memory_display_path,
-                model_label=agent_model_labels['siem-engineer'],
-                reviewer_model_label=agent_second_opinion_model_labels['siem-engineer'],
-                adjudicator_model_label=agent_adjudicator_model_labels['siem-engineer'],
-                model_control_html=agent_model_controls['siem-engineer'],
-                prompt_control_html=agent_prompt_controls['siem-engineer'],
-                note='Designed cadence: every 6 hours, only when the alert analysis backlog is clear. It should review alerts, enrichments, notes, acknowledgments, suppressions, and related detection context before recommending changes.',
-            ),
-            AgentSettingsCardViewModel(
-                role='cyber-threat-intel',
-                role_label='Cyber Threat Intel Analyst',
-                kicker='Cyber threat intel prompt',
-                title='Cyber Threat Intel Analyst',
-                trigger='Trigger: manual intel review from alerts, enrichments, hunts, and engineering context; scheduled briefs are future work.',
-                description='This prompt guides intelligence briefs, indicator review, enrichment pivots, confidence scoring, and cross-agent context for SOC decisions.',
-                icon_path='assets/settings-cyber-threat-intel-prompt.png',
-                prompt_path=intel_prompt_path,
-                reviewer_prompt_path=intel_second_opinion_prompt_path,
-                memory_path=intel_memory_path,
-                shared_memory_path=shared_memory_display_path,
-                model_label=agent_model_labels['cyber-threat-intel'],
-                reviewer_model_label=agent_second_opinion_model_labels['cyber-threat-intel'],
-                adjudicator_model_label=agent_adjudicator_model_labels['cyber-threat-intel'],
-                model_control_html=agent_model_controls['cyber-threat-intel'],
-                prompt_control_html=agent_prompt_controls['cyber-threat-intel'],
-            ),
-            AgentSettingsCardViewModel(
-                role='threat-hunter',
-                role_label='Threat Hunter',
-                kicker='Threat hunter prompt',
-                title='Threat Hunter System Prompt',
-                trigger='Trigger: manual hunt review from alert patterns; automated hunts are future work.',
-                description='This prompt guides senior threat-hunt recommendations, including Security Onion pivots and query-ready KQL, OQL, and OSQuery hunt plans.',
-                icon_path='assets/settings-threat-hunter-prompt.png',
-                prompt_path=hunter_prompt_path,
-                reviewer_prompt_path=hunter_second_opinion_prompt_path,
-                memory_path=hunter_memory_path,
-                shared_memory_path=shared_memory_display_path,
-                model_label=agent_model_labels['threat-hunter'],
-                reviewer_model_label=agent_second_opinion_model_labels['threat-hunter'],
-                adjudicator_model_label=agent_adjudicator_model_labels['threat-hunter'],
-                model_control_html=agent_model_controls['threat-hunter'],
-                prompt_control_html=agent_prompt_controls['threat-hunter'],
-            ),
-        ),
+
+
+def _settings_generic_agent_cards(prompt_data: dict[str, dict[str, str]], model_data: dict[str, dict[str, str]]) -> str:
+    cards: list[str] = []
+    shared_path = display_path(SHARED_AGENT_MEMORY_FILE)
+    for role, copy in SETTINGS_GENERIC_AGENT_COPY.items():
+        kicker, title, trigger, description, icon_path, note = copy
+        prompt = prompt_data[role]
+        model = model_data[role]
+        cards.append(render_agent_settings_card(AgentSettingsCardViewModel(
+            role=role, role_label=SETTINGS_AGENT_LABELS[role], kicker=kicker,
+            title=title, trigger=trigger, description=description, icon_path=icon_path,
+            prompt_path=prompt['prompt_path'], reviewer_prompt_path=prompt['reviewer_prompt_path'],
+            memory_path=prompt['memory_path'], shared_memory_path=shared_path,
+            model_label=model['label'], reviewer_model_label=model['reviewer_label'],
+            adjudicator_model_label=model['adjudicator_label'], model_control_html=model['control_html'],
+            prompt_control_html=prompt['control_html'], note=note,
+        )))
+    return ''.join(cards)
+
+
+def _settings_soc_agent_card(ai_settings: dict[str, object], prompt: dict[str, str], model: dict[str, str]) -> str:
+    analysis = str(ai_settings.get('soc_analyst_analysis_min_severity') or 'informational')
+    pcap = str(ai_settings.get('soc_analyst_pcap_min_severity') or 'informational')
+    incident = str(ai_settings.get('soc_analyst_incident_min_severity') or 'disabled')
+    return render_soc_agent_settings_card(SocAgentSettingsCardViewModel(
+        prompt_path=prompt['prompt_path'], reviewer_prompt_path=prompt['reviewer_prompt_path'],
+        memory_path=prompt['memory_path'], shared_memory_path=display_path(SHARED_AGENT_MEMORY_FILE),
+        model_label=model['label'], reviewer_model_label=model['reviewer_label'],
+        adjudicator_model_label=model['adjudicator_label'],
+        analysis_threshold_label=SOC_ANALYSIS_SEVERITY_LABELS[analysis],
+        pcap_threshold_label=SOC_ANALYSIS_SEVERITY_LABELS[pcap],
+        incident_threshold_label=SOC_ANALYSIS_SEVERITY_LABELS[incident],
+        analysis_disabled=analysis == 'disabled', incident_disabled=incident == 'disabled',
+        analysis_threshold_options_html=severity_threshold_options(analysis),
+        pcap_threshold_options_html=severity_threshold_options(pcap),
+        incident_threshold_options_html=severity_threshold_options(incident),
+        model_control_html=model['control_html'], prompt_control_html=prompt['control_html'],
     ))
-    soc_agent_card = render_soc_agent_settings_card(SocAgentSettingsCardViewModel(
-        prompt_path=prompt_path,
-        reviewer_prompt_path=analyst_second_opinion_prompt_path,
-        memory_path=analyst_memory_path,
-        shared_memory_path=shared_memory_display_path,
-        model_label=agent_model_labels['soc-analyst'],
-        reviewer_model_label=agent_second_opinion_model_labels['soc-analyst'],
-        adjudicator_model_label=agent_adjudicator_model_labels['soc-analyst'],
-        analysis_threshold_label=analysis_threshold_label,
-        pcap_threshold_label=pcap_threshold_label,
-        incident_threshold_label=incident_threshold_label,
-        analysis_disabled=analysis_min_severity == 'disabled',
-        incident_disabled=incident_min_severity == 'disabled',
-        analysis_threshold_options_html=analysis_threshold_options,
-        pcap_threshold_options_html=pcap_threshold_options,
-        incident_threshold_options_html=incident_threshold_options,
-        model_control_html=agent_model_controls['soc-analyst'],
-        prompt_control_html=agent_prompt_controls['soc-analyst'],
-    ))
-    ai_path = html.escape(display_path(SOC_AI_SETTINGS_FILE))
-    installed_models = list_ollama_models()
-    enabled_models = _normalized_enabled_models(ai_settings.get('enabled_ollama_models'))
-    model_toggle_rows = ollama_model_toggle_rows(installed_models, enabled_models)
-    codex_models = list(ai_settings.get('codex_cli_models') or [])
-    enabled_codex_models = [entry for entry in codex_models if entry.get('enabled') is True]
-    codex_model_rows = codex_cli_model_rows(codex_models)
-    ollama_state = f'{len(enabled_models)} enabled' if enabled_models else 'Disabled'
-    hermes_agent_enabled = _boolean_setting(ai_settings.get('hermes_agent_enabled'))
-    openclaw_enabled = _boolean_setting(ai_settings.get('openclaw_enabled'))
-    onion_sentinel_route_count = len(enabled_models) + len(enabled_codex_models)
-    onion_sentinel_harness_state = (
-        f'{onion_sentinel_route_count} enabled'
-        if onion_sentinel_route_count
-        else 'Disabled'
-    )
-    gpt_cli_state = (
-        f'{len(enabled_codex_models)} enabled'
-        if enabled_codex_models
-        else 'Disabled'
-    )
-    hermes_harness_state = 'Enabled' if hermes_agent_enabled else 'Disabled'
-    openclaw_harness_state = 'Enabled' if openclaw_enabled else 'Disabled'
-    codex_cli_path = html.escape(str(ai_settings.get('codex_cli_path') or 'codex'))
-    hermes_agent_path = html.escape(
-        str(ai_settings.get('hermes_agent_path') or 'hermes'),
-        quote=True,
-    )
-    selected_hermes_agent_model = _normalized_hermes_model(
-        ai_settings.get('hermes_agent_model')
-    )
-    hermes_agent_model_options = ''.join(
+
+
+def _settings_hermes_model_options(ai_settings: dict[str, object]) -> str:
+    selected = _normalized_hermes_model(ai_settings.get('hermes_agent_model'))
+    return ''.join(
         f'<option value="{html.escape(model, quote=True)}"'
-        f'{" selected" if model == selected_hermes_agent_model else ""}>'
-        f'{html.escape(model)}</option>'
+        f'{" selected" if model == selected else ""}>{html.escape(model)}</option>'
         for model in CODEX_CLI_MODEL_CATALOG
     )
-    hermes_agent_effort_options = (
-        '<option value="medium" selected>Medium (required)</option>'
+
+
+def _settings_count_state(count: int) -> str:
+    return f'{count} enabled' if count else 'Disabled'
+
+
+def _settings_enabled_state(enabled: bool) -> str:
+    return 'Enabled' if enabled else 'Disabled'
+
+
+def _settings_provider_view(ai_settings: dict[str, object]) -> AiProviderSettingsViewModel:
+    enabled_ollama = _normalized_enabled_models(ai_settings.get('enabled_ollama_models'))
+    codex_models = list(ai_settings.get('codex_cli_models') or [])
+    enabled_codex = [entry for entry in codex_models if entry.get('enabled') is True]
+    hermes_enabled = _boolean_setting(ai_settings.get('hermes_agent_enabled'))
+    openclaw_enabled = _boolean_setting(ai_settings.get('openclaw_enabled'))
+    native_count = len(enabled_ollama) + len(enabled_codex)
+    return AiProviderSettingsViewModel(
+        ai_path=display_path(SOC_AI_SETTINGS_FILE),
+        onion_sentinel_harness_state=_settings_count_state(native_count),
+        ollama_state=_settings_count_state(len(enabled_ollama)),
+        ollama_url=str(ai_settings['ollama_url']),
+        ollama_model_rows_html=ollama_model_toggle_rows(list_ollama_models(), enabled_ollama),
+        codex_state=_settings_count_state(len(enabled_codex)),
+        codex_path=str(ai_settings.get('codex_cli_path') or 'codex'),
+        codex_model_rows_html=codex_cli_model_rows(codex_models),
+        skill_catalog_html=investigation_skill_catalog(load_dashboard_investigation_skills()),
+        hermes_state=_settings_enabled_state(hermes_enabled), hermes_enabled=hermes_enabled,
+        hermes_path=str(ai_settings.get('hermes_agent_path') or 'hermes'),
+        hermes_model_options_html=_settings_hermes_model_options(ai_settings),
+        hermes_effort_options_html='<option value="medium" selected>Medium (required)</option>',
+        openclaw_state=_settings_enabled_state(openclaw_enabled), openclaw_enabled=openclaw_enabled,
+        openclaw_path=str(ai_settings.get('openclaw_path') or 'openclaw'),
+        openclaw_model=str(ai_settings.get('openclaw_model') or 'ollama/gemma4:26b-mlx'),
+        openclaw_effort_options_html=reasoning_effort_options(str(ai_settings.get('openclaw_reasoning_effort') or 'medium')),
     )
-    openclaw_path = html.escape(
-        str(ai_settings.get('openclaw_path') or 'openclaw'),
-        quote=True,
+
+
+def _settings_page_view(ai_settings: dict[str, object]) -> SettingsPageViewModel:
+    prompt_data = _settings_prompt_data()
+    model_data = _settings_model_data(ai_settings)
+    return SettingsPageViewModel(
+        providers=_settings_provider_view(ai_settings),
+        maxmind=MaxMindSettingsViewModel(
+            asn_path=str(ai_settings['maxmind_geoip_asn_db_path']),
+            city_path=str(ai_settings['maxmind_geoip_city_db_path']),
+            country_path=str(ai_settings['maxmind_geoip_country_db_path']),
+        ),
+        soc_agent_card_html=_settings_soc_agent_card(ai_settings, prompt_data['soc-analyst'], model_data['soc-analyst']),
+        agent_cards_html=_settings_generic_agent_cards(prompt_data, model_data),
     )
-    openclaw_model = html.escape(
-        str(ai_settings.get('openclaw_model') or 'ollama/gemma4:26b-mlx'),
-        quote=True,
-    )
-    openclaw_effort_options = reasoning_effort_options(
-        str(ai_settings.get('openclaw_reasoning_effort') or 'medium')
-    )
-    skill_catalog = investigation_skill_catalog(load_dashboard_investigation_skills())
-    maxmind_asn_db_path = html.escape(ai_settings['maxmind_geoip_asn_db_path'])
-    maxmind_city_db_path = html.escape(ai_settings['maxmind_geoip_city_db_path'])
-    maxmind_country_db_path = html.escape(ai_settings['maxmind_geoip_country_db_path'])
-    return f'''
-    <section class="view-section active settings-view" aria-label="SOC workflow settings">
-      <details class="settings-panel settings-details settings-model-details" aria-labelledby="soc-ai-model-title">
-        <summary>
-          <span class="settings-summary-main">
-            <span class="settings-summary-icon" aria-hidden="true"><img src="assets/settings-ai-model-routing.png" alt=""></span>
-            <span class="settings-summary-copy">
-              <span class="settings-kicker">AI model routing</span>
-              <strong id="soc-ai-model-title">AI Analysis Model Selection</strong>
-            </span>
-          </span>
-          <code>{ai_path}</code>
-        </summary>
-        <div class="settings-panel-top">
-          <div>
-            <p>Enable the models available to Onion Sentinel, then assign exactly one enabled model to each Cyber Security Agent below.</p>
-          </div>
-        </div>
-        <div class="settings-harness-list">
-          <section class="settings-harness-section" id="onion-sentinel-harness-settings" aria-labelledby="onion-sentinel-harness-title">
-            <div class="settings-harness-heading">
-              <span class="settings-harness-heading-copy">
-                <span class="settings-kicker">Native investigation runtime</span>
-                <strong id="onion-sentinel-harness-title">Onion Sentinel Harness</strong>
-                <small>Onion Sentinel-owned model routes governed by its evidence, query, review, and audit controls.</small>
-              </span>
-              <span class="settings-provider-state" id="onion-sentinel-harness-summary">{html.escape(onion_sentinel_harness_state)}</span>
-            </div>
-            <div class="settings-provider-list settings-provider-list-nested">
-              <details class="settings-provider-details" id="ollama-provider-settings">
-            <summary>
-              <span class="settings-provider-summary-copy">
-                <span class="settings-kicker">Local inference</span>
-                <strong id="ollama-settings-title">Ollama</strong>
-                <small>Installed models available for agent assignment</small>
-              </span>
-              <span class="settings-provider-state" id="ollama-enabled-summary">{html.escape(ollama_state)}</span>
-            </summary>
-            <div class="settings-provider-body">
-              <div class="settings-provider-toolbar">
-                <label class="settings-field">Ollama URL
-                  <input id="ai-ollama-url" type="text" value="{html.escape(ai_settings['ollama_url'])}" placeholder="http://127.0.0.1:11434">
-                </label>
-                <button id="refresh-ollama-models" class="settings-secondary-button" type="button">Refresh models</button>
-              </div>
-              <div class="settings-model-list" id="ai-ollama-models" aria-label="Available Ollama models">
-                {model_toggle_rows}
-              </div>
-              <div class="settings-note">The list is refreshed from <code>ollama ls</code> every 60 seconds. Enabled models become available in each agent's single-model selector.</div>
-            </div>
-              </details>
-              <details class="settings-provider-details" id="gpt-cli-provider-settings">
-            <summary>
-              <span class="settings-provider-summary-copy">
-                <span class="settings-kicker">CLI inference</span>
-                <strong id="gpt-cli-settings-title">Codex CLI</strong>
-                <small>Fixed, ephemeral OpenAI CLI route for agent assignment</small>
-              </span>
-              <span class="settings-provider-state" id="gpt-cli-enabled-summary">{html.escape(gpt_cli_state)}</span>
-            </summary>
-            <div class="settings-provider-body">
-              <div class="settings-provider-toolbar settings-codex-toolbar">
-                <label class="settings-field">Executable
-                  <input id="ai-codex-cli-path" type="text" value="{codex_cli_path}" placeholder="codex">
-                </label>
-              </div>
-              <div class="settings-codex-model-list" id="ai-codex-cli-models" aria-label="Available Codex CLI models">
-                {codex_model_rows}
-              </div>
-              <div class="settings-note">Enable each listed Codex CLI model separately and choose its reasoning effort. Only enabled models appear in agent selectors. The adapter invokes <code>codex exec --model</code> with the selected model and reasoning override, ephemeral read-only sandbox, bounded output, and no operator-defined shell command.</div>
-            </div>
-              </details>
-            </div>
-            {skill_catalog}
-          </section>
-          <section class="settings-harness-section" id="hermes-harness-settings" aria-labelledby="hermes-harness-title">
-            <div class="settings-harness-heading">
-              <span class="settings-harness-heading-copy">
-                <span class="settings-kicker">Isolated external harness</span>
-                <strong id="hermes-harness-title">Hermes Harness</strong>
-                <small>One exact, ephemeral Hermes Agent route for primary analysis or independent review.</small>
-              </span>
-              <span class="settings-provider-state" id="hermes-harness-summary">{html.escape(hermes_harness_state)}</span>
-            </div>
-            <div class="settings-agent-runtime-card" data-hermes-agent-settings>
-              <label class="settings-provider-toggle-row" for="ai-hermes-agent-enabled">
-                <span><strong>Hermes Agent</strong><small>Enable this harness before it can be assigned to an Onion Sentinel agent duty.</small></span>
-                <span class="settings-switch">
-                  <input id="ai-hermes-agent-enabled" type="checkbox" data-hermes-agent-enabled aria-label="Enable Hermes Agent"{' checked' if hermes_agent_enabled else ''}>
-                  <span aria-hidden="true"></span>
-                </span>
-              </label>
-              <div class="settings-grid settings-runtime-grid">
-                <label class="settings-field">Executable
-                  <input id="ai-hermes-agent-path" type="text" value="{hermes_agent_path}" placeholder="hermes">
-                </label>
-                <label class="settings-field">Model
-                  <select id="ai-hermes-agent-model">{hermes_agent_model_options}</select>
-                </label>
-                <label class="settings-field">Reasoning
-                  <select id="ai-hermes-agent-reasoning-effort" disabled>{hermes_agent_effort_options}</select>
-                </label>
-              </div>
-            </div>
-            <div class="settings-note">Hermes remains isolated from direct Security Onion credentials, unrestricted tools, persistent skills, and operator profile state. Onion Sentinel supplies the bounded investigation package.</div>
-          </section>
-          <section class="settings-harness-section" id="openclaw-harness-settings" aria-labelledby="openclaw-harness-title">
-            <div class="settings-harness-heading">
-              <span class="settings-harness-heading-copy">
-                <span class="settings-kicker">Isolated external harness</span>
-                <strong id="openclaw-harness-title">OpenClaw Harness</strong>
-                <small>One isolated, explicit Ollama route for primary analysis or independent review.</small>
-              </span>
-              <span class="settings-provider-state" id="openclaw-harness-summary">{html.escape(openclaw_harness_state)}</span>
-            </div>
-            <div class="settings-agent-runtime-card" data-openclaw-settings>
-              <label class="settings-provider-toggle-row" for="ai-openclaw-enabled">
-                <span><strong>OpenClaw</strong><small>Uses this Mac's GPU and memory through its admitted loopback Ollama route.</small></span>
-                <span class="settings-switch">
-                  <input id="ai-openclaw-enabled" type="checkbox" data-openclaw-enabled aria-label="Enable OpenClaw"{' checked' if openclaw_enabled else ''}>
-                  <span aria-hidden="true"></span>
-                </span>
-              </label>
-              <div class="settings-grid settings-runtime-grid">
-                <label class="settings-field">Executable
-                  <input id="ai-openclaw-path" type="text" value="{openclaw_path}" placeholder="openclaw">
-                </label>
-                <label class="settings-field">Model (ollama/model)
-                  <input id="ai-openclaw-model" type="text" value="{openclaw_model}" placeholder="ollama/gemma4:26b-mlx">
-                </label>
-                <label class="settings-field">Reasoning
-                  <select id="ai-openclaw-reasoning-effort">{openclaw_effort_options}</select>
-                </label>
-              </div>
-            </div>
-            <div class="settings-note">OpenClaw remains an isolated harness boundary and accepts only the configured <code>ollama/&lt;model&gt;</code> route on the loopback Ollama endpoint.</div>
-          </section>
-        </div>
-        <div class="settings-actions">
-          <button id="save-ai-model-settings" class="settings-save-button" type="button">Save Model Settings</button>
-          <span id="ai-model-settings-status" class="settings-save-status" role="status" aria-live="polite"></span>
-        </div>
-      </details>
-      <section class="settings-agent-section" aria-labelledby="cyber-security-agents-title">
-        <div class="settings-agent-heading">
-          <span class="settings-kicker">Agent prompts</span>
-          <h2 id="cyber-security-agents-title">Cyber Security Agents</h2>
-        </div>
-{soc_agent_card.rstrip()}
-{agent_cards.rstrip()}
-      </section>
-      <section class="settings-maxmind-section" aria-labelledby="maxmind-geoip-title">
-        <div class="settings-agent-heading">
-          <span class="settings-kicker">Offline IP context</span>
-          <h2 id="maxmind-geoip-title">MaxMind GeoIP Databases</h2>
-        </div>
-        <section class="settings-panel settings-maxmind-panel" aria-label="MaxMind GeoIP database paths">
-          <div class="settings-panel-top">
-            <div>
-              <span class="settings-kicker">Runtime-only databases</span>
-              <h2>Configure MaxMind GeoIP</h2>
-              <p>Configure independent local GeoLite ASN, City, and Country databases. Onion Sentinel only looks up globally routable IPs and never sends these lookups to a network service.</p>
-            </div>
-          </div>
-          <div class="settings-maxmind-database-grid">
-            <section class="settings-maxmind-database" aria-labelledby="maxmind-asn-title">
-              <span class="settings-kicker">GeoLite ASN</span>
-              <h3 id="maxmind-asn-title">Network ownership</h3>
-              <label class="settings-field">Database path
-                <input id="maxmind-geoip-asn-db-path" type="text" value="{maxmind_asn_db_path}" placeholder="~/n8n-local/config/maxmind/GeoLite2-ASN.mmdb" spellcheck="false">
-              </label>
-              <p class="settings-maxmind-status">Status: <strong id="maxmind-geoip-asn-db-state">Checking configured database...</strong></p>
-            </section>
-            <section class="settings-maxmind-database" aria-labelledby="maxmind-city-title">
-              <span class="settings-kicker">GeoLite City</span>
-              <h3 id="maxmind-city-title">Approximate locality</h3>
-              <label class="settings-field">Database path
-                <input id="maxmind-geoip-city-db-path" type="text" value="{maxmind_city_db_path}" placeholder="~/n8n-local/config/maxmind/GeoLite2-City.mmdb" spellcheck="false">
-              </label>
-              <p class="settings-maxmind-status">Status: <strong id="maxmind-geoip-city-db-state">Checking configured database...</strong></p>
-            </section>
-            <section class="settings-maxmind-database" aria-labelledby="maxmind-country-title">
-              <span class="settings-kicker">GeoLite Country</span>
-              <h3 id="maxmind-country-title">Country context</h3>
-              <label class="settings-field">Database path
-                <input id="maxmind-geoip-country-db-path" type="text" value="{maxmind_country_db_path}" placeholder="~/n8n-local/config/maxmind/GeoLite2-Country.mmdb" spellcheck="false">
-              </label>
-              <p class="settings-maxmind-status">Status: <strong id="maxmind-geoip-country-db-state">Checking configured database...</strong></p>
-            </section>
-          </div>
-          <div class="settings-note">The MMDB files remain on the Mac Studio, are excluded from Git, and are treated as replaceable runtime data. GeoIP is contextual evidence rather than proof of endpoint ownership or user location.</div>
-          <div class="settings-actions">
-            <button id="save-maxmind-geoip-settings" class="settings-save-button" type="button">Save MaxMind Paths</button>
-            <span id="maxmind-geoip-settings-status" class="settings-save-status" role="status" aria-live="polite"></span>
-          </div>
-        </section>
-      </section>
-      <div id="settings-memory-modal" class="settings-memory-modal" hidden>
-        <button class="settings-memory-backdrop" type="button" data-memory-close aria-label="Close memory viewer"></button>
-        <section class="settings-memory-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-memory-title" tabindex="-1">
-          <header class="settings-memory-header">
-            <div>
-              <span class="settings-kicker">Read-only memory</span>
-              <h2 id="settings-memory-title">Agent Memory</h2>
-            </div>
-            <button class="settings-memory-close" type="button" data-memory-close aria-label="Close memory viewer" title="Close">×</button>
-          </header>
-          <div class="settings-memory-meta">
-            <code id="settings-memory-path"></code>
-            <span id="settings-memory-stats"></span>
-          </div>
-          <p id="settings-memory-status" class="settings-memory-status" role="status" aria-live="polite">Select a memory file to view it.</p>
-          <pre id="settings-memory-content" class="settings-memory-content" tabindex="0" aria-label="Read-only agent memory content"></pre>
-        </section>
-      </div>
-    </section>'''
+
+
+def settings_page_section() -> str:
+    return render_settings_page(_settings_page_view(load_soc_ai_settings()))
 
 
 EXECUTIVE_HOME_CSS = '''
