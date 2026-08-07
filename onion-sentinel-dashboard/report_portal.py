@@ -128,6 +128,12 @@ from portal_soc_pcap_status import (
     compose_pcap_status,
     load_pcap_request_statuses,
 )
+from portal_soc_pcap_artifacts import (
+    PcapArtifactSources,
+    build_pcap_analysis_index,
+    has_parsed_pcap as _modular_has_parsed_pcap,
+    newest_pcap_analysis_record,
+)
 from portal_incident_actions import (
     IncidentStatusPayloadError,
     normalize_incident_status_payload,
@@ -4879,13 +4885,8 @@ def directory_size_bytes(path: Path) -> int:
 
 
 def soc_alert_has_parsed_pcap(record: dict) -> bool:
-    """Return true only for parser artifacts that actually include captures."""
-    pcap_files = record.get("pcap_files") if isinstance(record.get("pcap_files"), list) else []
-    if not pcap_files:
-        return False
-    zeek = record.get("zeek") if isinstance(record.get("zeek"), dict) else {}
-    tshark = record.get("tshark") if isinstance(record.get("tshark"), dict) else {}
-    return bool(zeek.get("available") or tshark.get("available"))
+    """Return true only for admitted parsed capture artifacts."""
+    return _modular_has_parsed_pcap(record)
 
 
 def read_artifact_cache(name: str, path: Path) -> object | None:
@@ -4896,66 +4897,19 @@ def write_artifact_cache(name: str, path: Path, value: object) -> object:
     return SOC_ALERT_ARTIFACT_CACHE.put(name, path, value)
 
 
+def _soc_pcap_artifact_sources() -> PcapArtifactSources:
+    return PcapArtifactSources(
+        paths=lambda: SOC_ALERT_PCAP_ANALYSIS_DIR.glob("*-pcap-analysis.json"),
+        read_record=lambda path: json.loads(path.read_text(encoding="utf-8")),
+        modified_time=lambda path: path.stat().st_mtime,
+    )
+
+
 def soc_alert_pcap_analysis_index() -> dict[str, object]:
     """Index parsed Zeek/TShark artifacts once per API response."""
-    def build_index() -> dict[str, object]:
-        index: dict[str, object] = {
-            "request_ids": set(),
-            "alert_ids": set(),
-            "group_ids": set(),
-            "size_by_alert_id": {},
-            "size_by_group_id": {},
-        }
-        seen_sizes: dict[str, set[tuple[str, str]]] = {
-            "size_by_alert_id": set(),
-            "size_by_group_id": set(),
-        }
-        if not SOC_ALERT_PCAP_ANALYSIS_DIR.exists():
-            return index
-        for path in SOC_ALERT_PCAP_ANALYSIS_DIR.glob("*-pcap-analysis.json"):
-            try:
-                record = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if not isinstance(record, dict) or not soc_alert_has_parsed_pcap(record):
-                continue
-            request = record.get("request") if isinstance(record.get("request"), dict) else {}
-            for key, bucket in (("request_id", "request_ids"), ("alert_id", "alert_ids"), ("group_id", "group_ids")):
-                value = str(request.get(key) or "").strip()
-                if value:
-                    index[bucket].add(value)
-            pcap_files = record.get("pcap_files") if isinstance(record.get("pcap_files"), list) else []
-            request_id = str(request.get("request_id") or "").strip()
-            for position, item in enumerate(pcap_files):
-                if not isinstance(item, dict):
-                    continue
-                try:
-                    capture_bytes = max(0, int(item.get("size_bytes") or 0))
-                except (TypeError, ValueError):
-                    # A malformed historical artifact must not break the alert
-                    # list API; valid files in the same analysis still count.
-                    continue
-                if capture_bytes <= 0:
-                    continue
-                identity = str(
-                    item.get("sha256")
-                    or item.get("artifact_sha256")
-                    or item.get("path")
-                    or item.get("file")
-                    or f"{request_id}:{position}"
-                ).strip()
-                for request_key, size_key in (("alert_id", "size_by_alert_id"), ("group_id", "size_by_group_id")):
-                    value = str(request.get(request_key) or "").strip()
-                    artifact_key = (value, identity)
-                    if not value or artifact_key in seen_sizes[size_key]:
-                        continue
-                    seen_sizes[size_key].add(artifact_key)
-                    sizes = index[size_key]
-                    sizes[value] = int(sizes.get(value, 0)) + capture_bytes
-        return index
-
     return SOC_ALERT_ARTIFACT_CACHE.get_or_compute(
-        "pcap-analysis-index", SOC_ALERT_PCAP_ANALYSIS_DIR, build_index
+        "pcap-analysis-index", SOC_ALERT_PCAP_ANALYSIS_DIR,
+        lambda: build_pcap_analysis_index(_soc_pcap_artifact_sources()),
     )
 
 
@@ -4975,25 +4929,9 @@ def soc_alert_pcap_status(group_id: str, alert_id: str, analysis_index: dict[str
 
 def soc_alert_pcap_analysis_record(group_id: str) -> dict | None:
     """Return newest parsed PCAP evidence for a grouped alert detail fragment."""
-    group_id = str(group_id or "").strip()
-    if not group_id or not SOC_ALERT_PCAP_ANALYSIS_DIR.exists():
+    if not SOC_ALERT_PCAP_ANALYSIS_DIR.exists():
         return None
-    matches: list[tuple[float, dict]] = []
-    for path in SOC_ALERT_PCAP_ANALYSIS_DIR.glob("*-pcap-analysis.json"):
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if not isinstance(record, dict) or not soc_alert_has_parsed_pcap(record):
-            continue
-        request = record.get("request") if isinstance(record.get("request"), dict) else {}
-        if str(request.get("group_id") or "").strip() != group_id:
-            continue
-        record["_analysis_path"] = str(path)
-        matches.append((path.stat().st_mtime, record))
-    if not matches:
-        return None
-    return sorted(matches, key=lambda item: item[0])[-1][1]
+    return newest_pcap_analysis_record(group_id, _soc_pcap_artifact_sources())
 
 
 def soc_alert_pcap_summary_html(record: dict) -> str:

@@ -692,6 +692,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_incident_metadata.py" "$DASHBO
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_alert_presenter.py" "$DASHBOARD_RUNTIME_DIR/portal_soc_alert_presenter.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_ai_status.py" "$DASHBOARD_RUNTIME_DIR/portal_soc_ai_status.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_pcap_status.py" "$DASHBOARD_RUNTIME_DIR/portal_soc_pcap_status.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_pcap_artifacts.py" "$DASHBOARD_RUNTIME_DIR/portal_soc_pcap_artifacts.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_ai_model_policy.py" "$DASHBOARD_RUNTIME_DIR/portal_ai_model_policy.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_ai_settings_normalizer.py" "$DASHBOARD_RUNTIME_DIR/portal_ai_settings_normalizer.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_catalog_routes.py" "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py"

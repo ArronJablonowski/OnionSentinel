@@ -405,6 +405,13 @@ results; distinguishes retryable legacy requests, parser-pending work, hard
 failures, and parsed Zeek/TShark evidence. `report_portal.py` retains the public
 facades and injects table discovery and group identity policy.
 
+`portal_soc_pcap_artifacts.py` owns parsed-artifact admission, de-duplicated
+capture identity and byte indexing, and newest group-record selection. Its
+filesystem operations are injected through `PcapArtifactSources`, malformed or
+unparsed historical artifacts remain isolated, and the shared admission rule
+requires capture files plus Zeek or TShark output. `report_portal.py` retains
+the cache boundary and concrete runtime-directory adapters.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and
