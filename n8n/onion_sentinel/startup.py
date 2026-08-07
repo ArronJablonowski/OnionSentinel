@@ -3,9 +3,99 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
-from .pipeline import RuntimeContext, Stage
+from .pipeline import RuntimeContext, RuntimePathDefaults, RuntimePaths, Stage
+
+
+@dataclass(frozen=True)
+class BootstrapPolicy:
+    freeze_memory_env: str
+    path_defaults: RuntimePathDefaults
+
+
+@dataclass(frozen=True)
+class BootstrapPorts:
+    controlled_runtime: Callable[[Any], tuple[bool, Path | None]]
+    controlled_output_dir: Callable[[Path, Path], Path]
+    consume_token: Callable[[bool], None]
+    result_identity: Callable[[bool, str], dict[str, Any] | None]
+    boolean_setting: Callable[[Any], bool]
+    flush_queue: Callable[[str, bool], tuple[int, int, int]]
+    emit: Callable[[dict[str, Any]], None]
+
+
+@dataclass(frozen=True)
+class BootstrapResult:
+    controlled: bool
+    runtime_dir: Path | None
+    runtime_paths: RuntimePaths
+    memory_frozen: bool
+    controlled_identity: dict[str, Any] | None
+    exit_code: int | None = None
+
+
+def bootstrap(
+    args: Any,
+    *,
+    environment: Mapping[str, str],
+    policy: BootstrapPolicy,
+    ports: BootstrapPorts,
+) -> BootstrapResult:
+    controlled, runtime_dir = ports.controlled_runtime(args)
+    freeze_value = environment.get(policy.freeze_memory_env)
+    if controlled and str(freeze_value or "").strip() != "1":
+        raise SystemExit(
+            f"controlled evaluation requires {policy.freeze_memory_env}=1"
+        )
+    if runtime_dir is not None:
+        args.out_dir = ports.controlled_output_dir(args.out_dir, runtime_dir)
+    ports.consume_token(controlled)
+    identity = ports.result_identity(
+        controlled, str(getattr(args, "reanalysis_attempt_id", "") or "")
+    )
+    if runtime_dir is not None:
+        args.investigation_harness_db = runtime_dir / "investigation-harness.sqlite3"
+    paths = RuntimePaths.resolve(runtime_dir, policy.path_defaults)
+    memory_frozen = ports.boolean_setting(freeze_value)
+    exit_code: int | None = None
+    if bool(getattr(args, "flush_index_only", False)):
+        if controlled:
+            raise SystemExit(
+                "global analysis-index flush is disabled in controlled evaluation mode"
+            )
+        completed, failed, quarantined = ports.flush_queue(
+            str(args.alert_store_url), not memory_frozen
+        )
+        ports.emit({
+            "ok": failed == 0,
+            "published": completed,
+            "quarantined": quarantined,
+            "remaining_failures": failed,
+        })
+        exit_code = 0 if failed == 0 else 1
+    return BootstrapResult(
+        controlled, runtime_dir, paths, memory_frozen, identity, exit_code
+    )
+
+
+def reconcile_deferred_results(
+    *,
+    controlled: bool,
+    memory_frozen: bool,
+    alert_store_url: str,
+    flush_queue: Callable[[str, bool], tuple[int, int, int]],
+) -> None:
+    """Drain prior durable results before permitting another model call."""
+    failures = 0
+    if not controlled:
+        _, failures, _ = flush_queue(alert_store_url, not memory_frozen)
+    if failures:
+        raise RuntimeError(
+            "a deferred analysis index could not be reconciled; "
+            "refusing to invoke another model until the ordered spool "
+            "can reach alert-store"
+        )
 
 
 @dataclass(frozen=True)

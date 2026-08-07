@@ -10027,68 +10027,38 @@ def main() -> int:
     from onion_sentinel.analysis.query import audit as query_audit_module
 
     args = parse_args()
-    controlled_evaluation, evaluation_runtime_dir = (
-        controlled_evaluation_runtime(args)
-    )
-    if (
-        controlled_evaluation
-        and str(os.environ.get(EVALUATION_FREEZE_MEMORY_ENV) or "").strip()
-        != "1"
-    ):
-        raise SystemExit(
-            "controlled evaluation requires "
-            f"{EVALUATION_FREEZE_MEMORY_ENV}=1"
-        )
-    if evaluation_runtime_dir is not None:
-        args.out_dir = controlled_evaluation_output_dir(
-            args.out_dir,
-            evaluation_runtime_dir,
-        )
-    consume_controlled_evaluation_token(controlled_evaluation)
-    controlled_result_identity = controlled_evaluation_result_identity(
-        controlled_evaluation,
-        reanalysis_attempt_id=args.reanalysis_attempt_id,
-    )
-    if evaluation_runtime_dir is not None:
-        # Harness events are evaluation evidence, never production memory.
-        args.investigation_harness_db = (
-            evaluation_runtime_dir / "investigation-harness.sqlite3"
-        )
-    runtime_paths = pipeline_module.RuntimePaths.resolve(
-        evaluation_runtime_dir,
-        pipeline_module.RuntimePathDefaults(
-            log_dir=DEFAULT_LLM_LOG_DIR,
-            index_queue_dir=DEFAULT_ANALYSIS_INDEX_QUEUE_DIR,
-            index_quarantine_dir=DEFAULT_ANALYSIS_INDEX_QUARANTINE_DIR,
-            memory_receipt_dir=DEFAULT_MEMORY_WRITEBACK_RECEIPT_DIR,
-            memory_pending_dir=DEFAULT_MEMORY_WRITEBACK_PENDING_DIR,
-            memory_committed_dir=DEFAULT_MEMORY_WRITEBACK_COMMITTED_DIR,
+    bootstrap = startup_module.bootstrap(
+        args, environment=os.environ,
+        policy=startup_module.BootstrapPolicy(
+            freeze_memory_env=EVALUATION_FREEZE_MEMORY_ENV,
+            path_defaults=pipeline_module.RuntimePathDefaults(
+                log_dir=DEFAULT_LLM_LOG_DIR,
+                index_queue_dir=DEFAULT_ANALYSIS_INDEX_QUEUE_DIR,
+                index_quarantine_dir=DEFAULT_ANALYSIS_INDEX_QUARANTINE_DIR,
+                memory_receipt_dir=DEFAULT_MEMORY_WRITEBACK_RECEIPT_DIR,
+                memory_pending_dir=DEFAULT_MEMORY_WRITEBACK_PENDING_DIR,
+                memory_committed_dir=DEFAULT_MEMORY_WRITEBACK_COMMITTED_DIR,
+            ),
+        ),
+        ports=startup_module.BootstrapPorts(
+            controlled_runtime=controlled_evaluation_runtime,
+            controlled_output_dir=controlled_evaluation_output_dir,
+            consume_token=consume_controlled_evaluation_token,
+            result_identity=lambda controlled, attempt: controlled_evaluation_result_identity(
+                controlled, reanalysis_attempt_id=attempt),
+            boolean_setting=boolean_setting,
+            flush_queue=lambda url, enabled: flush_analysis_index_queue(
+                url, memory_writeback_enabled=enabled),
+            emit=lambda payload: print(json.dumps(payload)),
         ),
     )
-    # Evaluation isolation must be known before any crash-recovery journal is
-    # replayed. Publishing a completed analysis remains safe while frozen, but
-    # its committed memory task must stay durable and untouched until a normal
-    # non-evaluation worker resumes it.
-    evaluation_memory_frozen = boolean_setting(
-        os.environ.get(EVALUATION_FREEZE_MEMORY_ENV)
-    )
-    if args.flush_index_only:
-        if controlled_evaluation:
-            raise SystemExit(
-                "global analysis-index flush is disabled in controlled "
-                "evaluation mode"
-            )
-        completed, failed, quarantined = flush_analysis_index_queue(
-            args.alert_store_url,
-            memory_writeback_enabled=not evaluation_memory_frozen,
-        )
-        print(json.dumps({
-            "ok": failed == 0,
-            "published": completed,
-            "quarantined": quarantined,
-            "remaining_failures": failed,
-        }))
-        return 0 if failed == 0 else 1
+    if bootstrap.exit_code is not None:
+        return bootstrap.exit_code
+    controlled_evaluation = bootstrap.controlled
+    evaluation_runtime_dir = bootstrap.runtime_dir
+    runtime_paths = bootstrap.runtime_paths
+    evaluation_memory_frozen = bootstrap.memory_frozen
+    controlled_result_identity = bootstrap.controlled_identity
     prompt_path: Path | None = args.prompt_package
     prompt_package: dict[str, Any] = {}
     settings: dict[str, Any] = {}
@@ -10118,21 +10088,13 @@ def main() -> int:
     harness_runtime: OnionSentinelHarnessRun | None = None
 
     try:
-        # Retry compact analysis-index submissions before spending resources on
-        # another inference. A failed local API call never requires rerunning
-        # the LLM because the completed result remains in this durable spool.
-        pending_index_failures = 0
-        if not controlled_evaluation:
-            _, pending_index_failures, _ = flush_analysis_index_queue(
-                args.alert_store_url,
-                memory_writeback_enabled=not evaluation_memory_frozen,
-            )
-        if pending_index_failures:
-            raise RuntimeError(
-                "a deferred analysis index could not be reconciled; "
-                "refusing to invoke another model until the ordered spool "
-                "can reach alert-store"
-            )
+        startup_module.reconcile_deferred_results(
+            controlled=controlled_evaluation,
+            memory_frozen=evaluation_memory_frozen,
+            alert_store_url=args.alert_store_url,
+            flush_queue=lambda url, enabled: flush_analysis_index_queue(
+                url, memory_writeback_enabled=enabled),
+        )
         attested = startup_module.load_and_attest(
             pipeline_context, args,
             policy=startup_module.PromptAttestationPolicy(
