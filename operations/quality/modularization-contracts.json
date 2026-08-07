@@ -224,6 +224,15 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_soc_ai_artifact_context.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_ai_artifact_context.py",
+      "required_symbols": [
+        "AiArtifactContextDependencies",
+        "compose_page_ai_artifact_context"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_catalog_routes.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py",

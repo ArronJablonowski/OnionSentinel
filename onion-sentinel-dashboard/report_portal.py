@@ -136,6 +136,10 @@ from portal_soc_pcap_artifacts import (
 )
 from portal_soc_pcap_renderer import render_pcap_summary
 from portal_soc_enrichment_status import compose_enrichment_status
+from portal_soc_ai_artifact_context import (
+    AiArtifactContextDependencies,
+    compose_page_ai_artifact_context,
+)
 from portal_incident_actions import (
     IncidentStatusPayloadError,
     normalize_incident_status_payload,
@@ -7576,64 +7580,35 @@ def soc_alert_ai_artifact_index() -> dict[str, object]:
     return SOC_ALERT_ARTIFACT_CACHE.get_or_compute("ai-artifact-index", cache_path, build_index)
 
 
+def _soc_ai_group_members(group_keys: list[str]) -> list[tuple[str, str]]:
+    if not group_keys:
+        return []
+    placeholders = ",".join("?" for _ in group_keys)
+    try:
+        with soc_alert_db_connect() as conn:
+            rows = conn.execute(
+                f"SELECT {soc_alert_group_key_sql()} AS group_key, alert_id FROM alerts "
+                f"WHERE {soc_alert_group_key_sql()} IN ({placeholders})",
+                group_keys,
+            ).fetchall()
+    except Exception:
+        return []
+    return [
+        (str(row["group_key"] or "").strip(), str(row["alert_id"] or "").strip())
+        for row in rows
+        if row["group_key"] and row["alert_id"]
+    ]
+
+
 def soc_alert_page_ai_artifact_context(rows: list[sqlite3.Row | dict]) -> dict[str, object]:
-    """Return page-scoped AI artifact state without per-row filesystem scans."""
-    artifact_index = soc_alert_ai_artifact_index()
-    analysis_mtime_by_alert = artifact_index["analysis_mtime_by_alert"]
-    detection_outcome_by_alert = artifact_index["detection_outcome_by_alert"]
-    analysis_group_ids: set[str] = set()
-    detection_outcome_by_group_id: dict[str, str] = {}
-    outcome_mtime_by_group_id: dict[str, float] = {}
-    group_keys: list[str] = []
-
-    def consider_outcome(group_id: str, alert_id: str) -> None:
-        outcome = str(detection_outcome_by_alert.get(alert_id) or "").strip()
-        mtime = float(analysis_mtime_by_alert.get(alert_id, 0.0) or 0.0)
-        if outcome and mtime >= outcome_mtime_by_group_id.get(group_id, 0.0):
-            detection_outcome_by_group_id[group_id] = outcome
-            outcome_mtime_by_group_id[group_id] = mtime
-
-    for row in rows:
-        if isinstance(row, dict):
-            group_key = str(row.get("group_key") or "").strip()
-            alert_id = str(row.get("alert_id") or row.get("representative_alert_id") or "").strip()
-        else:
-            group_key = str(row["group_key"] or "").strip() if "group_key" in row.keys() else ""
-            alert_id = str(row["alert_id"] or row["representative_alert_id"] or "").strip() if "alert_id" in row.keys() else ""
-        if group_key:
-            group_keys.append(group_key)
-            group_id = soc_alert_group_id(group_key)
-            if alert_id in analysis_mtime_by_alert:
-                analysis_group_ids.add(group_id)
-            consider_outcome(group_id, alert_id)
-    group_keys = sorted(set(group_keys))
-    if group_keys and analysis_mtime_by_alert:
-        placeholders = ",".join("?" for _ in group_keys)
-        try:
-            with soc_alert_db_connect() as conn:
-                found = conn.execute(
-                    f"""
-                    SELECT {soc_alert_group_key_sql()} AS group_key, alert_id
-                    FROM alerts
-                    WHERE {soc_alert_group_key_sql()} IN ({placeholders})
-                    """,
-                    group_keys,
-                ).fetchall()
-            for item in found:
-                if str(item["alert_id"] or "").strip() in analysis_mtime_by_alert:
-                    group_key = str(item["group_key"] or "").strip()
-                    if group_key:
-                        group_id = soc_alert_group_id(group_key)
-                        alert_id = str(item["alert_id"] or "").strip()
-                        analysis_group_ids.add(group_id)
-                        consider_outcome(group_id, alert_id)
-        except Exception:
-            pass
-    return {
-        **artifact_index,
-        "analysis_group_ids": analysis_group_ids,
-        "detection_outcome_by_group_id": detection_outcome_by_group_id,
-    }
+    """Return page-scoped AI artifact state through the modular correlator."""
+    dependencies = AiArtifactContextDependencies(
+        dashboard_group_id=soc_alert_group_id,
+        group_members=_soc_ai_group_members,
+    )
+    return compose_page_ai_artifact_context(
+        rows, soc_alert_ai_artifact_index(), dependencies,
+    )
 
 
 def soc_alert_group_has_analysis_artifact(row: sqlite3.Row) -> bool:

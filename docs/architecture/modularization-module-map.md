@@ -424,6 +424,13 @@ sources, pending documented indicators, then no evidence; malformed envelopes
 degrade to an explicit empty state. The module accepts stored JSON or mappings
 and performs no database, filesystem, process, or network access.
 
+`portal_soc_ai_artifact_context.py` owns page-scoped correlation of durable SOC
+AI artifacts to dashboard groups and selects the newest detection outcome across
+each representative alert and its grouped members. `report_portal.py` retains
+artifact-index caching and injects one bounded member lookup plus dashboard
+identity policy; the correlator performs no database, filesystem, process, or
+network access and degrades malformed artifact metadata to explicit empty state.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and
