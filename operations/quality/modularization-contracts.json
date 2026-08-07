@@ -81,8 +81,10 @@
         "compose_incident_row",
         "empty_incident_page",
         "incident_order_sql",
+        "merge_incident_reviewer",
         "optional_case_selects",
         "parse_incident_list_request",
+        "present_incident_review",
         "select_incident_analysis"
       ]
     },
@@ -92,8 +94,19 @@
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_incident_repository.py",
       "required_symbols": [
         "IncidentListRecords",
+        "IncidentReviewRecords",
         "incident_schema_ready",
-        "load_incident_list_records"
+        "load_incident_list_records",
+        "load_incident_review_records"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_incident_review_model.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_incident_review_model.py",
+      "required_symbols": [
+        "IncidentEvidencePresentation",
+        "compose_incident_review_state"
       ]
     },
     {

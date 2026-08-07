@@ -130,6 +130,15 @@ class PortalIncidentRepositoryTests(unittest.TestCase):
             records.adjudications[("case-open", "analysis-1")]["adjudication_id"],
             "new",
         )
+        review_records = repository.load_incident_review_records(
+            self.conn,
+            {"case_id": "case-open", "dashboard_group_id": "dashboard-1"},
+            {"analysis_id": "analysis-1"},
+        )
+        self.assertEqual(review_records.evidence_updated_at, "2")
+        self.assertEqual(review_records.reviewer["status"], "completed")
+        self.assertEqual(review_records.reviewer["reviewer_error"], "")
+        self.assertEqual(review_records.adjudication["adjudication_id"], "new")
 
     def test_legacy_case_schema_returns_null_optional_columns(self) -> None:
         self.conn.executescript("""
@@ -157,6 +166,14 @@ class PortalIncidentRepositoryTests(unittest.TestCase):
         self.assertEqual(records.analyses, {})
         self.assertEqual(records.second_opinions, {})
         self.assertEqual(records.adjudications, {})
+        review_records = repository.load_incident_review_records(
+            self.conn,
+            {"case_id": "legacy", "dashboard_group_id": "missing"},
+            {},
+        )
+        self.assertEqual(review_records.evidence_updated_at, "")
+        self.assertEqual(review_records.reviewer, {})
+        self.assertIsNone(review_records.adjudication)
 
 
 if __name__ == "__main__":

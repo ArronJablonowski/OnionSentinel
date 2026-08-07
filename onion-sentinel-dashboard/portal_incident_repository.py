@@ -25,6 +25,13 @@ class IncidentListRecords:
     adjudications: dict[tuple[str, str], dict]
 
 
+@dataclass(frozen=True)
+class IncidentReviewRecords:
+    evidence_updated_at: str
+    reviewer: dict
+    adjudication: dict | None
+
+
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     try:
         row = conn.execute(
@@ -246,4 +253,63 @@ def load_incident_list_records(
         run_columns=run_columns,
         second_opinions=_second_opinions(conn, analysis_ids),
         adjudications=_adjudications(conn, analysis_ids),
+    )
+
+
+def _review_evidence_updated_at(
+    conn: sqlite3.Connection,
+    dashboard_group_id: str,
+) -> str:
+    if not dashboard_group_id or not _table_exists(conn, "alert_group_summary"):
+        return ""
+    try:
+        row = conn.execute(
+            "SELECT last_seen FROM alert_group_summary WHERE group_id = ?",
+            (dashboard_group_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return ""
+    return str(row["last_seen"] or "") if row else ""
+
+
+def _reviewer_for_analysis(
+    conn: sqlite3.Connection,
+    analysis_id: str,
+) -> dict:
+    if not analysis_id:
+        return {}
+    try:
+        return _second_opinions(conn, [analysis_id]).get(analysis_id, {})
+    except sqlite3.Error:
+        return {}
+
+
+def _adjudication_for_case(
+    conn: sqlite3.Connection,
+    case_id: str,
+    analysis_id: str,
+) -> dict | None:
+    if not case_id or not analysis_id:
+        return None
+    try:
+        return _adjudications(conn, [analysis_id]).get((case_id, analysis_id))
+    except sqlite3.Error:
+        return None
+
+
+def load_incident_review_records(
+    conn: sqlite3.Connection,
+    case: dict,
+    analysis: dict,
+) -> IncidentReviewRecords:
+    """Load resilient detail-review records without applying review policy."""
+    analysis_id = str(analysis.get("analysis_id") or "")
+    return IncidentReviewRecords(
+        evidence_updated_at=_review_evidence_updated_at(
+            conn, str(case.get("dashboard_group_id") or "")
+        ),
+        reviewer=_reviewer_for_analysis(conn, analysis_id),
+        adjudication=_adjudication_for_case(
+            conn, str(case.get("case_id") or ""), analysis_id
+        ),
     )

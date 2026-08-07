@@ -266,7 +266,7 @@ def _analysis_presentation(
     return IncidentAnalysisPresentation(response, gap_count, coverage, freshness)
 
 
-def _merge_reviewer(
+def merge_incident_reviewer(
     response: dict,
     analysis: dict,
     reviewer: dict | None,
@@ -284,7 +284,7 @@ def _merge_reviewer(
     return reviewer_state
 
 
-def _base_review_presentation(
+def present_incident_review(
     analysis: dict,
     reviewer: dict,
     adjudication: dict | None,
@@ -375,8 +375,8 @@ def _review_presentation(
 ) -> IncidentReviewPresentation:
     if fallback:
         return _fallback_review_presentation(fallback)
-    merged = _merge_reviewer(response, analysis, reviewer, callbacks)
-    return _base_review_presentation(
+    merged = merge_incident_reviewer(response, analysis, reviewer, callbacks)
+    return present_incident_review(
         analysis, merged, adjudication, callbacks
     )
 

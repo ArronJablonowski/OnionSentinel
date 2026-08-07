@@ -8,6 +8,7 @@ DASHBOARD = ROOT / "onion-sentinel-dashboard"
 sys.path.insert(0, str(DASHBOARD))
 
 import portal_incident_read_model as model  # noqa: E402
+import portal_incident_review_model as review_model  # noqa: E402
 
 
 class PortalIncidentReadModelTests(unittest.TestCase):
@@ -267,6 +268,80 @@ class PortalIncidentReadModelTests(unittest.TestCase):
         self.assertEqual(row["destination_asset"]["ip"], "10.0.0.4")
         self.assertEqual(row["freshness_status"], "not_analyzed")
         self.assertFalse(row["analysis_available"])
+
+    def test_detail_review_composes_coverage_dispute_and_adjudication(self) -> None:
+        response = {
+            "incident_response_report": {
+                "evidence_used": ["Zeek connection", "Suricata alert"],
+                "evidence_gaps": ["Endpoint telemetry"],
+            },
+            "_incident_query_audit": {"partial": True},
+            "event_status": "observed",
+            "detection_validity": "matched_intent",
+            "activity_disposition": "suspicious",
+            "handling": "investigate",
+            "duplicate_of": None,
+        }
+        reviewer = {
+            "status": "complete",
+            "primary_outcome": "suspicious",
+            "primary_confidence": "medium",
+            "reviewer_outcome": "benign",
+            "reviewer_confidence": "high",
+            "agreement": "disagree",
+            "material_disagreement": "yes",
+            "disputed_fields_json": '["outcome", "confidence"]',
+        }
+        adjudication = {"outcome_override": "malicious", "confidence": "high"}
+        state = review_model.compose_incident_review_state(
+            {
+                "resolution_reason": "Contained",
+                "resolved_at": "30",
+                "resolved_by": "analyst",
+            },
+            {
+                "analysis_id": "analysis-detail",
+                "generated_at": "10",
+                "confidence": "medium",
+                "evidence_hash": "hash-detail",
+                "detection_outcome": "suspicious",
+            },
+            response,
+            "20",
+            reviewer,
+            adjudication,
+            {"default_marker": "preserved"},
+            self.callbacks(),
+        )
+        self.assertEqual(state["default_marker"], "preserved")
+        self.assertEqual(state["freshness_status"], "stale")
+        self.assertEqual(state["coverage_status"], "gaps")
+        self.assertEqual(state["evidence_used_count"], 2)
+        self.assertEqual(state["evidence_gap_count"], 1)
+        self.assertEqual(state["effective_outcome"], "malicious")
+        self.assertEqual(state["effective_confidence"], "high")
+        self.assertEqual(state["final_review_status"], "adjudicated")
+        self.assertEqual(state["disputed_fields"], ["outcome", "confidence"])
+        self.assertEqual(state["case_resolution_reason"], "Contained")
+        self.assertEqual(state["case_resolved_by"], "analyst")
+
+    def test_detail_review_uses_embedded_reviewer_when_record_is_missing(self) -> None:
+        callbacks = self.callbacks()
+        state = review_model.compose_incident_review_state(
+            {},
+            {"analysis_id": "analysis-embedded", "generated_at": "10"},
+            {"_incident_query_audit": {"complete": True}},
+            "",
+            None,
+            None,
+            {},
+            callbacks,
+        )
+        self.assertEqual(state["coverage_status"], "complete")
+        self.assertEqual(state["freshness_status"], "current")
+        self.assertEqual(state["reviewer_status"], "embedded")
+        self.assertEqual(state["reviewer_error"], "embedded error")
+        self.assertEqual(state["disputed_fields"], [])
 
 
 if __name__ == "__main__":

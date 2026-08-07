@@ -55,9 +55,11 @@ from portal_incident_read_model import (
     parse_incident_list_request,
     select_incident_analysis,
 )
+from portal_incident_review_model import compose_incident_review_state
 from portal_incident_repository import (
     incident_schema_ready,
     load_incident_list_records,
+    load_incident_review_records,
 )
 from portal_json_body import parse_json_body
 from portal_request_routes import (
@@ -11430,159 +11432,17 @@ def soc_incident_review_state(
     response: dict[str, object],
 ) -> dict[str, object]:
     """Derive durable current-review state for one Incident Response detail."""
-    review = _soc_review_defaults()
-    dashboard_group_id = str(case.get("dashboard_group_id") or "")
-    analysis_id = str(analysis.get("analysis_id") or "")
-    report = response.get("incident_response_report")
-    report = report if isinstance(report, dict) else {}
-    analysis_generated = str(analysis.get("generated_at") or "")
-    evidence_updated = ""
-    if dashboard_group_id and sqlite_table_exists(conn, "alert_group_summary"):
-        try:
-            row = conn.execute(
-                "SELECT last_seen FROM alert_group_summary WHERE group_id = ?",
-                (dashboard_group_id,),
-            ).fetchone()
-            evidence_updated = str(row["last_seen"] or "") if row else ""
-        except sqlite3.Error:
-            evidence_updated = ""
-    query_audit = response.get("_incident_query_audit")
-    query_audit = query_audit if isinstance(query_audit, dict) else {}
-    gap_count = _soc_review_list_count(report.get("evidence_gaps"))
-    used_count = _soc_review_list_count(report.get("evidence_used"))
-    coverage = (
-        "gaps"
-        if gap_count or query_audit.get("partial")
-        else "complete"
-        if used_count or query_audit.get("complete")
-        else "unknown"
+    records = load_incident_review_records(conn, case, analysis)
+    return compose_incident_review_state(
+        case,
+        analysis,
+        response,
+        records.evidence_updated_at,
+        records.reviewer,
+        records.adjudication,
+        _soc_review_defaults(),
+        INCIDENT_ROW_CALLBACKS,
     )
-    freshness = (
-        "stale"
-        if analysis_generated
-        and _soc_review_epoch(evidence_updated) > _soc_review_epoch(analysis_generated)
-        else "current"
-        if analysis_generated
-        else "not_analyzed"
-    )
-
-    reviewer: dict[str, object] = {}
-    if analysis_id and sqlite_table_exists(conn, "ai_second_opinion_runs"):
-        reviewer_error_select = _soc_reviewer_error_select(conn)
-        try:
-            row = conn.execute(
-                f"""
-                SELECT status, primary_outcome, primary_confidence,
-                       reviewer_outcome, reviewer_confidence, agreement,
-                       material_disagreement, disputed_fields_json,
-                       {reviewer_error_select}, generated_at
-                FROM ai_second_opinion_runs
-                WHERE analysis_id = ?
-                """,
-                (analysis_id,),
-            ).fetchone()
-            reviewer = dict(row) if row else {}
-        except sqlite3.Error:
-            reviewer = {}
-    embedded_reviewer = _soc_embedded_reviewer(response, analysis)
-    if not reviewer:
-        reviewer = embedded_reviewer
-    else:
-        if not reviewer.get("reviewer_error"):
-            reviewer["reviewer_error"] = (
-                embedded_reviewer.get("reviewer_error") or ""
-            )
-        reviewer["automation_authorization"] = (
-            embedded_reviewer.get("automation_authorization") or {}
-        )
-    material = str(reviewer.get("material_disagreement") or "").strip().lower() in {
-        "1", "true", "yes",
-    }
-    try:
-        disputed_fields = json.loads(str(reviewer.get("disputed_fields_json") or "[]"))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        disputed_fields = []
-    if not isinstance(disputed_fields, list):
-        disputed_fields = []
-    adjudication: dict[str, object] | None = None
-    if analysis_id and sqlite_table_exists(conn, "analyst_adjudications"):
-        try:
-            row = conn.execute(
-                """
-                SELECT adjudication_id, dashboard_group_id, case_id, analysis_id,
-                       outcome_override, confidence, rationale, evidence_gap,
-                       next_action, reviewer, event_status, detection_validity,
-                       activity_disposition, handling, duplicate_of,
-                       case_resolution_reason, created_at
-                FROM analyst_adjudications
-                WHERE analysis_id = ? AND case_id = ?
-                ORDER BY created_at DESC, rowid DESC LIMIT 1
-                """,
-                (analysis_id, str(case.get("case_id") or "")),
-            ).fetchone()
-            adjudication = dict(row) if row else None
-        except sqlite3.Error:
-            adjudication = None
-    final_status = _soc_review_final_status(reviewer, material, adjudication)
-    primary_outcome = str(
-        reviewer.get("primary_outcome") or analysis.get("detection_outcome") or ""
-    )
-    primary_confidence = str(
-        reviewer.get("primary_confidence") or analysis.get("confidence") or ""
-    )
-    effective_outcome = str(
-        adjudication.get("outcome_override")
-        if adjudication
-        else primary_outcome
-    )
-    effective_confidence = str(
-        adjudication.get("confidence")
-        if adjudication
-        else primary_confidence
-    )
-    review.update({
-        "analysis_id": analysis_id,
-        "analysis_generated_at": analysis_generated,
-        "analysis_confidence": str(analysis.get("confidence") or ""),
-        "analysis_evidence_hash": str(analysis.get("evidence_hash") or ""),
-        "primary_outcome": primary_outcome,
-        "primary_confidence": primary_confidence,
-        "primary_event_status": str(response.get("event_status") or ""),
-        "primary_detection_validity": str(
-            response.get("detection_validity") or ""
-        ),
-        "primary_activity_disposition": str(
-            response.get("activity_disposition") or ""
-        ),
-        "primary_handling": str(response.get("handling") or ""),
-        "primary_duplicate_of": response.get("duplicate_of"),
-        "effective_outcome": effective_outcome,
-        "effective_outcome_label": soc_alert_detection_outcome_label(
-            effective_outcome
-        ),
-        "effective_confidence": effective_confidence,
-        "freshness_status": freshness,
-        "evidence_updated_at": evidence_updated,
-        "coverage_status": coverage,
-        "evidence_used_count": used_count,
-        "evidence_gap_count": gap_count,
-        "reviewer_status": str(reviewer.get("status") or "not_requested"),
-        "reviewer_error": str(reviewer.get("reviewer_error") or "")[:1000],
-        "reviewer_outcome": str(reviewer.get("reviewer_outcome") or ""),
-        "reviewer_confidence": str(reviewer.get("reviewer_confidence") or ""),
-        "reviewer_agreement": str(reviewer.get("agreement") or ""),
-        "automation_authorization": (
-            _soc_reviewer_automation_authorization(reviewer)
-        ),
-        "material_disagreement": material,
-        "disputed_fields": disputed_fields[:20],
-        "final_review_status": final_status,
-        "adjudication": adjudication,
-        "case_resolution_reason": str(case.get("resolution_reason") or ""),
-        "case_resolved_at": str(case.get("resolved_at") or ""),
-        "case_resolved_by": str(case.get("resolved_by") or ""),
-    })
-    return review
 
 
 def _incident_html_text(value: object, fallback: str = "n/a") -> str:

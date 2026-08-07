@@ -315,16 +315,25 @@ filesystem resolution and traversal enforcement remain in `PortalHandler`.
 for durable Incident Response lists: allowlisted filters and sort fields,
 bounded page sizes, parameterized status predicates, schema-aware sort SQL,
 pagination, optional legacy columns, the empty-schema response, case-bound
-analysis selection, and deterministic evidence, reviewer, adjudication,
-freshness, and asset row composition. The portal retains read-only SQLite and
-inventory-file access for legacy fallback queries; loaded records are passed
-into the pure composer through an explicit callback boundary.
+analysis selection, shared reviewer/adjudication normalization, and
+deterministic evidence, freshness, asset row composition. The portal retains
+read-only SQLite and inventory-file access for legacy analysis fallback
+queries; loaded records are passed into pure composers through an explicit
+callback boundary.
 
 `portal_incident_repository.py` owns the primary Incident Response list's
 read-only SQLite batches: case counts and pages, summary-versus-legacy row
 selection, analysis and reviewer lookup, newest adjudication selection, and
-optional-column compatibility. It returns a typed record bundle and has no
-HTTP, filesystem, asset-resolution, or presentation responsibility.
+optional-column compatibility. It also loads resilient evidence-freshness,
+reviewer, and case-bound adjudication records for incident detail views. It
+returns typed record bundles and has no HTTP, filesystem, asset-resolution, or
+presentation responsibility.
+
+`portal_incident_review_model.py` owns pure Incident Response detail-review
+presentation: evidence coverage and freshness, primary-versus-effective
+outcomes, reviewer disagreement, bounded disputed fields, adjudication, and
+case-resolution metadata. It reuses the shared reviewer policy but has no
+persistence, HTTP, filesystem, or asset-resolution access.
 
 | Domain | Current responsibility examples | Target modules |
 | --- | --- | --- |
