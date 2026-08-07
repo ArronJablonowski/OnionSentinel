@@ -73,6 +73,17 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_time_format.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_time_format.py",
+      "required_symbols": [
+        "format_project_timestamp",
+        "normalize_iso_display_text",
+        "parse_iso_datetime",
+        "parse_iso_timestamp"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_shell_components.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_shell_components.py",

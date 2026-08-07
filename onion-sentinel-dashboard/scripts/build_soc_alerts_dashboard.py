@@ -55,6 +55,12 @@ from dashboard_executive_metrics import (  # noqa: E402
     load_hourly_alert_intake,
 )
 from atomic_io import atomic_write_json, atomic_write_text  # noqa: E402
+from dashboard_time_format import (  # noqa: E402
+    format_project_timestamp,
+    normalize_iso_display_text,
+    parse_iso_datetime,
+    parse_iso_timestamp,
+)
 from dashboard_pcap_components import build_pcap_analysis_index, render_pcap_evidence_markdown  # noqa: E402
 from dashboard_pcap_request_index import (  # noqa: E402
     build_pcap_request_index,
@@ -318,10 +324,6 @@ def load_analyst_group_statuses() -> dict[str, dict[str, object]]:
         conn.close()
 AI_ELIGIBLE_FILTER_STATUSES = {'accepted', 'escalated', 'unknown', 'suppressed'}
 TEST_ALERT_PREFIXES = ('phase', 'config-', 'internal-test-', 'sqlite-', 'policy-', 'codex-')
-ISO_DATE_TIME_SEPARATOR_RE = re.compile(r'(\d{4}-\d{2}-\d{2})(?:T|\s+)(?=\d{2}:\d{2}:\d{2})')
-ISO_TIMESTAMP_RE = re.compile(
-    r'\b\d{4}-\d{2}-\d{2}(?:T|\s+)\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b'
-)
 DEFAULT_SOC_ANALYST_PROMPT = """You are a careful SOC analyst. Use only the supplied evidence.
 
 Your job is to analyze Security Onion alerts for an analyst working a home/lab SOC environment. Be precise, skeptical, and operationally useful.
@@ -405,15 +407,6 @@ Rules:
 - Do not invent packet contents, identities, process activity, attribution, or business context.
 - Never request another opinion.
 - Emit memory candidates only for reusable, evidence-backed lessons that are safe to retain."""
-
-
-def normalize_iso_display_text(value: object) -> str:
-    """Display timestamps as local ISO 8601 with two spaces instead of `T`."""
-    def replace_timestamp(match: re.Match[str]) -> str:
-        parsed = parse_iso_datetime(match.group(0))
-        return format_project_timestamp(parsed) if parsed else ISO_DATE_TIME_SEPARATOR_RE.sub(r'\1  ', match.group(0))
-
-    return ISO_TIMESTAMP_RE.sub(replace_timestamp, str(value))
 
 
 def load_soc_analyst_prompt() -> str:
@@ -1776,35 +1769,6 @@ def extract_rule_identity(text: str, title: str) -> tuple[str, str]:
     rule_id = clean_endpoint_part(rule_id_match.group(1) if rule_id_match else '')
     rule_name = clean_endpoint_part(rule_name_match.group(1) if rule_name_match else title)
     return rule_id, rule_name
-
-
-def parse_iso_timestamp(value: str | None) -> float | None:
-    parsed = parse_iso_datetime(value)
-    return parsed.timestamp() if parsed else None
-
-
-def parse_iso_datetime(value: str | None) -> dt.datetime | None:
-    if not value:
-        return None
-    cleaned = value.strip().strip('"\'')
-    if not cleaned:
-        return None
-    try:
-        parseable = ISO_DATE_TIME_SEPARATOR_RE.sub(r'\1T', cleaned).replace('Z', '+00:00')
-        parsed = dt.datetime.fromisoformat(parseable)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.timezone.utc)
-    return parsed
-
-
-def format_project_timestamp(value: dt.datetime) -> str:
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=dt.timezone.utc)
-    local_value = value.astimezone()
-    timespec = 'milliseconds' if local_value.microsecond else 'seconds'
-    return local_value.isoformat(timespec=timespec).replace('T', '  ')
 
 
 def extract_alert_timestamp(text: str, fallback_ts: float) -> float:

@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (4,970
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (4,934
 lines).
 
 | Boundary | Responsibilities |
@@ -323,6 +323,11 @@ lines).
 | `pages.settings`, `pages.assets`, `pages.software` | administrative/inventory composition |
 | `pages.ac_hunter`, `pages.cti`, `pages.siem`, `pages.threat_hunter`, `pages.logs` | specialist page composition |
 | `dashboard.builder` | validated inputs, page registry, deterministic publication plan |
+
+`dashboard_time_format.py` owns dependency-free ISO timestamp parsing, Unix
+timestamp conversion, local display formatting, and embedded timestamp
+normalization. Dashboard components can now share one explicit time policy
+without importing the monolithic builder.
 
 Page builders receive view models. They do not read SQLite, PostgreSQL,
 configuration, log files, or subprocess state. Existing public page filenames,

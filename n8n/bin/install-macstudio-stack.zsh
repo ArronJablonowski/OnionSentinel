@@ -621,6 +621,7 @@ fi
 # may contain an external link to this service and nothing more.
 mkdir -p "$DASHBOARD_RUNTIME_DIR/scripts" "$DASHBOARD_RUNTIME_DIR/assets"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py" "$DASHBOARD_RUNTIME_DIR/scripts/build_soc_alerts_dashboard.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_time_format.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_time_format.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_executive_metrics.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_executive_metrics.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_metric_components.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_metric_components.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_pcap_components.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_pcap_components.py"
