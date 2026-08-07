@@ -4,11 +4,17 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_BUILDER = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "build_soc_alerts_dashboard.py"
+SHELL_PAGE = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_shell_page.py"
+
+
+def dashboard_contract_source() -> str:
+    shell = SHELL_PAGE.read_text(encoding="utf-8")
+    return DASHBOARD_BUILDER.read_text(encoding="utf-8") + shell.replace("{", "{{").replace("}", "}}")
 
 
 class DashboardMobileNavigationTest(unittest.TestCase):
     def test_mobile_navigation_is_top_collapsed_drawer(self):
-        source = DASHBOARD_BUILDER.read_text()
+        source = dashboard_contract_source()
 
         self.assertIn("@media(max-width:1180px)", source)
         self.assertIn(".sidebar{{position:fixed;left:0;right:0;top:0;bottom:auto", source)
@@ -20,7 +26,7 @@ class DashboardMobileNavigationTest(unittest.TestCase):
         self.assertNotIn(".content{{padding:14px 10px 92px}}", source)
 
     def test_open_mobile_navigation_owns_vertical_scrolling(self):
-        source = DASHBOARD_BUILDER.read_text()
+        source = dashboard_contract_source()
 
         self.assertIn(
             ".app-shell.mobile-nav-open .sidebar{{height:100vh;height:100dvh;"
@@ -42,14 +48,14 @@ class DashboardMobileNavigationTest(unittest.TestCase):
         )
 
     def test_mobile_expansion_survives_api_refresh_without_persisting(self):
-        source = DASHBOARD_BUILDER.read_text()
+        source = dashboard_contract_source()
 
         self.assertIn("expandedMobileId=document.querySelector('.mobile-alert-card.mobile-expanded')", source)
         self.assertIn("restoreExpandedApiMobileCard(expandedMobileId)", source)
         self.assertNotIn("localStorage.setItem('expandedMobile", source)
 
     def test_pinned_alert_row_is_desktop_only(self):
-        source = DASHBOARD_BUILDER.read_text()
+        source = dashboard_contract_source()
 
         self.assertIn(
             "@media(max-width:1180px),(max-height:599px)"
@@ -59,7 +65,7 @@ class DashboardMobileNavigationTest(unittest.TestCase):
         )
 
     def test_phone_landscape_uses_mobile_alert_cards(self):
-        source = DASHBOARD_BUILDER.read_text()
+        source = dashboard_contract_source()
 
         self.assertIn("@media(max-width:960px) and (max-height:560px)", source)
         self.assertIn(
@@ -69,7 +75,7 @@ class DashboardMobileNavigationTest(unittest.TestCase):
         )
 
     def test_phone_landscape_compacts_controls_and_metrics(self):
-        source = DASHBOARD_BUILDER.read_text()
+        source = dashboard_contract_source()
 
         self.assertIn(
             "@media(max-width:960px) and (max-height:560px)"
@@ -91,7 +97,7 @@ class DashboardMobileNavigationTest(unittest.TestCase):
         )
 
     def test_mobile_alert_controls_meet_touch_target_minimum(self):
-        source = DASHBOARD_BUILDER.read_text()
+        source = dashboard_contract_source()
 
         self.assertIn(
             ".mobile-controls-toggle,.alerts-refresh"

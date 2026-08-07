@@ -83,6 +83,15 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_shell_page.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_shell_page.py",
+      "required_symbols": [
+        "DashboardShellViewModel",
+        "render_dashboard_shell"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_logs_page.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_logs_page.py",

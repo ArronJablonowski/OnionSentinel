@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (5,805
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (5,464
 lines).
 
 | Boundary | Responsibilities |
@@ -336,6 +336,13 @@ severity-class sanitization, and placeholder-page rendering. The legacy
 builder imports and re-exports those names while it remains the composition
 root. The production installer copies the component beside the builder before
 dashboard generation, and the modularization contract verifies both files.
+
+`dashboard_shell_page.py` owns the immutable document shell, global SOC Alerts
+styles, suppression and triage dialogs, live alert-table client, and shared
+detail/timeline hydration clients. `build_html` retains runtime aggregation and
+passes eight explicit, already-escaped or trusted component fragments through
+`DashboardShellViewModel`; sentinel replacement avoids interpreting CSS and
+JavaScript braces as a general-purpose format language.
 
 The first page-specific checkpoint is
 `onion-sentinel-dashboard/scripts/dashboard_logs_page.py`. It owns the Logs

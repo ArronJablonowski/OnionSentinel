@@ -10,11 +10,17 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BUILDER_PATH = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "build_soc_alerts_dashboard.py"
+SHELL_PATH = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_shell_page.py"
 SCRIPT_DIR = REPO_ROOT / "onion-sentinel-dashboard" / "scripts"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import dashboard_metric_components
+
+
+def dashboard_contract_source() -> str:
+    shell = SHELL_PATH.read_text(encoding="utf-8")
+    return BUILDER_PATH.read_text(encoding="utf-8") + shell.replace("{", "{{").replace("}", "}}")
 
 
 def load_builder():
@@ -85,7 +91,7 @@ class DashboardMetricComponentTest(unittest.TestCase):
         self.assertIn("Last Alert:</b> 2026-07-06&nbsp;&nbsp;13:00:00-06:00 &lt;latest&gt;", html)
 
     def test_active_alert_metrics_use_all_matching_active_groups(self) -> None:
-        source = BUILDER_PATH.read_text()
+        source = dashboard_contract_source()
 
         self.assertIn(
             "apiActiveTotal=Number(data.active_total??data.status_counts?.open",
@@ -99,7 +105,7 @@ class DashboardMetricComponentTest(unittest.TestCase):
         self.assertNotIn("setActiveAlertCount(apiTotalMatching)", source)
 
     def test_alert_table_exposes_group_evidence_columns(self) -> None:
-        source = BUILDER_PATH.read_text()
+        source = dashboard_contract_source()
 
         for contract_token in (
             "Detection Outcome",

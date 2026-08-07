@@ -10,6 +10,13 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = REPO_ROOT / "onion-sentinel-dashboard" / "scripts"
 MODULE_PATH = SCRIPT_DIR / "build_soc_alerts_dashboard.py"
+SHELL_MODULE_PATH = SCRIPT_DIR / "dashboard_shell_page.py"
+
+
+def dashboard_contract_source() -> str:
+    """Return builder source plus the shell in its former f-string brace form."""
+    shell = SHELL_MODULE_PATH.read_text(encoding="utf-8")
+    return MODULE_PATH.read_text(encoding="utf-8") + shell.replace("{", "{{").replace("}", "}}")
 
 
 def load_builder():
@@ -121,7 +128,7 @@ class DashboardDetailOrderTests(unittest.TestCase):
     def test_derived_artifact_directories_are_not_primary_alert_reports(self) -> None:
         self.assertIn("pcap-analysis", self.builder.DERIVED_REPORT_DIRECTORIES)
         self.assertIn("ai-analysis", self.builder.DERIVED_REPORT_DIRECTORIES)
-        source = MODULE_PATH.read_text()
+        source = dashboard_contract_source()
         self.assertIn("relative_parts[0].lower() in DERIVED_REPORT_DIRECTORIES", source)
 
     def test_primary_alert_report_wins_over_newer_derived_artifacts(self) -> None:
@@ -157,7 +164,7 @@ class DashboardDetailOrderTests(unittest.TestCase):
         )
 
     def test_pinned_row_uses_visible_header_bottom_or_viewport_top(self) -> None:
-        source = MODULE_PATH.read_text()
+        source = dashboard_contract_source()
         self.assertIn("rect&&rect.bottom>0&&rect.top<=1", source)
         self.assertIn("Math.ceil(rect.bottom)", source)
 
@@ -202,7 +209,7 @@ class DashboardDetailOrderTests(unittest.TestCase):
         self.assertNotIn("<details open", html)
 
     def test_detail_accordions_use_compact_consistent_spacing(self) -> None:
-        source = MODULE_PATH.read_text()
+        source = dashboard_contract_source()
 
         self.assertIn(".detail-collapsible-section{{display:block;margin:6px 0}}", source)
         self.assertIn(".detail-collapsible-section>summary{{display:flex", source)
@@ -222,7 +229,7 @@ class DashboardDetailOrderTests(unittest.TestCase):
         self.assertIn('<col class="enrichment-col-tags">', html)
         self.assertIn('<col class="enrichment-col-cached">', html)
 
-        source = MODULE_PATH.read_text()
+        source = dashboard_contract_source()
         self.assertIn(".enrichment-col-tags{{width:360px}}", source)
         self.assertIn(":is(.detail-template,.mobile-pill-details) .markdown-body .public-enrichment-records-table", source)
         self.assertIn("min-width:1154px!important", source)
@@ -288,7 +295,7 @@ class DashboardDetailOrderTests(unittest.TestCase):
         self.assertIn("overflow-x:hidden", stabilizer)
         self.assertIn("scrollRestoration", stabilizer)
 
-        source = MODULE_PATH.read_text()
+        source = dashboard_contract_source()
         self.assertIn('aria-expanded="false"', source)
         self.assertIn("setAttribute('aria-expanded','true')", source)
         self.assertIn("setAttribute('aria-expanded','false')", source)
@@ -388,7 +395,7 @@ class DashboardDetailOrderTests(unittest.TestCase):
         self.assertIn(self.builder.DETAIL_REPORT_LAYOUT_VERSION, error)
 
     def test_dashboard_runtime_surfaces_layout_contract_errors(self) -> None:
-        source = MODULE_PATH.read_text(encoding="utf-8")
+        source = dashboard_contract_source()
 
         self.assertIn("showDetailLayoutContractError", source)
         self.assertIn("MutationObserver", source)
@@ -396,7 +403,7 @@ class DashboardDetailOrderTests(unittest.TestCase):
         self.assertIn("Legacy or malformed data could not be mapped cleanly", source)
 
     def test_pinned_alert_row_uses_measured_columns_and_synced_horizontal_scroll(self) -> None:
-        source = MODULE_PATH.read_text(encoding="utf-8")
+        source = dashboard_contract_source()
 
         self.assertIn("PINNED_ALERT_ROW_SCROLL_SYNC", source)
         self.assertIn("visibleSourceCells", source)
@@ -406,7 +413,7 @@ class DashboardDetailOrderTests(unittest.TestCase):
         self.assertIn(".pinned-alert-cell.action-cell .ack-button", source)
 
     def test_alert_title_column_expands_and_clamps_to_two_lines(self) -> None:
-        source = MODULE_PATH.read_text(encoding="utf-8")
+        source = dashboard_contract_source()
 
         self.assertIn("--soc-alert-title-column-width:420px", source)
         self.assertIn(".alert-table td.alert-cell", source)
@@ -418,7 +425,7 @@ class DashboardDetailOrderTests(unittest.TestCase):
         self.assertIn("ALERT_COLUMN_SINGLE_WRAP_CONTRACT + '</body>'", source)
 
     def test_dashboard_uses_tightly_framed_favicon(self) -> None:
-        source = MODULE_PATH.read_text(encoding="utf-8")
+        source = dashboard_contract_source()
         favicon = MODULE_PATH.parent.parent / "assets" / "onion-sentinel-favicon.png"
 
         self.assertIn('rel="icon" type="image/png" sizes="64x64"', source)
