@@ -179,6 +179,10 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
   complete result-bound columnar fallback now live in
   `analysis.query.prompt_provenance`; partial, extra, duplicate, or malformed
   collector batches fail closed.
+- Recursive cumulative row projection, query-error sanitization, and
+  digest-bound trusted audit compaction now live in
+  `analysis.query.prompt_compaction`; executable query renderings remain only
+  in durable audit, outside size-constrained follow-up prompts.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports

@@ -16,7 +16,6 @@ import fcntl
 import hashlib
 import importlib.util
 import json
-import math
 import os
 import re
 import shlex
@@ -1796,6 +1795,19 @@ def _query_prompt_errors():
     _provider_routing()
     from onion_sentinel.analysis.query import prompt_errors
     return prompt_errors
+
+
+def _query_prompt_compaction():
+    _provider_routing()
+    from onion_sentinel.analysis.query import prompt_compaction
+    return prompt_compaction
+
+
+def _query_prompt_compaction_dependencies():
+    return _query_prompt_compaction().Dependencies(
+        error_category=investigation_query_prompt_error_category,
+        error_digest=investigation_query_prompt_error_digest,
+    )
 
 
 def _query_prompt_facts():
@@ -5812,58 +5824,15 @@ def _prompt_project_investigation_rows(
     value: Any,
     state: dict[str, int | bool],
 ) -> Any:
-    """Copy broker evidence while enforcing one cumulative row budget."""
-    if isinstance(value, dict):
-        output: dict[str, Any] = {}
-        has_query_error = bool(
-            "error" in value
-            and (
-                "query_id" in value
-                or (
-                    "status" in value
-                    and ("backend" in value or "read_only" in value)
-                )
-            )
-        )
-        for raw_key, child in value.items():
-            key = str(raw_key)
-            if has_query_error and key.lower() in {
-                "error",
-                "error_digest",
-                "error_sha256",
-            }:
-                continue
-            if key.lower() in {"hits", "rows", "records"} and isinstance(child, list):
-                remaining = max(
-                    0,
-                    MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS
-                    - int(state["rows"]),
-                )
-                selected = child[:remaining]
-                state["rows"] = int(state["rows"]) + len(selected)
-                output[key] = [
-                    _prompt_project_investigation_rows(item, state)
-                    for item in selected
-                ]
-                if len(selected) < len(child):
-                    output[f"{key}_prompt_truncated"] = True
-                    state["truncated"] = True
-                continue
-            output[key] = _prompt_project_investigation_rows(child, state)
-        if has_query_error:
-            output["error"] = investigation_query_prompt_error_category(
-                value.get("error")
-            )
-            output["error_sha256"] = investigation_query_prompt_error_digest(
-                value.get("error")
-            )
-        return output
-    if isinstance(value, list):
-        return [
-            _prompt_project_investigation_rows(item, state)
-            for item in value
-        ]
-    return value
+    module = _query_prompt_compaction()
+    return module.project_rows(
+        value,
+        state,
+        policy=module.Policy(
+            maximum_rows=MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS
+        ),
+        dependencies=_query_prompt_compaction_dependencies(),
+    )
 
 
 def _investigation_prompt_json_bytes(value: Any) -> bytes:
@@ -5873,91 +5842,9 @@ def _investigation_prompt_json_bytes(value: Any) -> bytes:
 def _compact_prompt_trusted_query_audit(
     value: Any,
 ) -> dict[str, Any]:
-    """Project one query audit while retaining result-bound provenance.
-
-    Broker query audits can legitimately contain several renderings of the same
-    read-only query (Query DSL, KQL, and OQL) plus verbose authorization
-    metadata. The durable round keeps that full audit. When the cumulative
-    model prompt is tight, retain the fields needed to identify and cite the
-    execution and bind the omitted representation with a canonical digest.
-    """
-    encoded = _investigation_prompt_json_bytes(value)
-    summary: dict[str, Any] = {
-        "prompt_projection": "compacted_due_to_cumulative_byte_budget",
-        "audit_bytes": len(encoded),
-        "audit_sha256": hashlib.sha256(encoded).hexdigest(),
-    }
-    if not isinstance(value, dict):
-        summary["audit_type"] = type(value).__name__
-        return summary
-
-    text_limits = {
-        "query_id": 128,
-        "dialect": 40,
-        "backend": 40,
-        "pack": 100,
-        "purpose": 500,
-        "aggregation": 40,
-        "execution_backend": 100,
-        "query_endpoint": 256,
-        "endpoint": 256,
-        "query_digest": 128,
-        "result_digest": 128,
-        "execution_digest": 128,
-        "request_digest": 128,
-        "item_digest": 128,
-        "kql_digest": 128,
-        "oql_digest": 128,
-        "target_alias": 160,
-        "operation": 80,
-        "indicator": 253,
-        "status": 40,
-        "error": 500,
-        "evidence_ref": 512,
-    }
-    for key, limit in text_limits.items():
-        if key in value:
-            if key == "error":
-                summary[key] = investigation_query_prompt_error_category(
-                    value.get(key)
-                )
-                summary["error_sha256"] = (
-                    investigation_query_prompt_error_digest(value.get(key))
-                )
-            else:
-                summary[key] = _query_text(value.get(key), limit)
-
-    for key in (
-        "semantic_valid",
-        "total_hits",
-        "returned_hits",
-        "total_rows",
-        "returned_rows",
-        "candidate_records_scanned",
-        "unique_records_matched",
-        "records_returned",
-        "truncated",
-        "result_truncated",
-        "index_scan_truncated",
-        "duration_ms",
-        "timed_out",
-        "took_ms",
-    ):
-        item = value.get(key)
-        if isinstance(item, (bool, int, float)) and not (
-            isinstance(item, float)
-            and (math.isnan(item) or math.isinf(item))
-        ):
-            summary[key] = item
-
-    window = value.get("window")
-    if isinstance(window, dict):
-        summary["window"] = {
-            key: _query_text(window.get(key), 100)
-            for key in ("start", "end")
-            if window.get(key) not in (None, "")
-        }
-    return summary
+    return _query_prompt_compaction().compact_audit(
+        value, dependencies=_query_prompt_compaction_dependencies()
+    )
 
 
 def _bounded_investigation_prompt_fact(
