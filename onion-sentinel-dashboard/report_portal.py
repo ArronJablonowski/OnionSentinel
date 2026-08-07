@@ -47,6 +47,13 @@ from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
 from portal_catalog_routes import classify_catalog_route
+from portal_incident_read_model import (
+    IncidentQueryError,
+    empty_incident_page,
+    incident_order_sql,
+    optional_case_selects,
+    parse_incident_list_request,
+)
 from portal_json_body import parse_json_body
 from portal_request_routes import (
     classify_get_route,
@@ -11333,50 +11340,19 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
     loads the existing group-detail endpoint only after an analyst expands a
     row, keeping routine polling inexpensive even with a large case history.
     """
-    page = soc_alert_page((query.get("page") or ["1"])[0])
-    per_page = soc_alert_limit((query.get("per_page") or ["25"])[0], 25)
-    status_filter = str((query.get("status") or ["all"])[0] or "all").strip().lower()
-    if status_filter not in {"all", "open", "in_progress", "resolved"}:
-        return soc_alert_api_error("Invalid incident status filter")
-    sort_key = str(
-        (query.get("sort") or ["priority"])[0] or "priority"
-    ).strip().lower()
-    sort_direction = str(
-        (query.get("direction") or ["desc"])[0] or "desc"
-    ).strip().lower()
-    allowed_sort_keys = {
-        "status",
-        "severity",
-        "escalated",
-        "alert",
-        "source",
-        "destination",
-        "destination_port",
-        "count",
-        "agent",
-        "updated",
-        "priority",
-    }
-    if sort_key not in allowed_sort_keys:
-        return soc_alert_api_error("Invalid incident sort field")
-    if sort_direction not in {"asc", "desc"}:
-        return soc_alert_api_error("Invalid incident sort direction")
+    try:
+        request = parse_incident_list_request(
+            query,
+            max_per_page=SOC_ALERT_API_MAX_LIMIT,
+        )
+    except IncidentQueryError as exc:
+        return soc_alert_api_error(str(exc))
     try:
         with soc_alert_db_connect() as conn:
             if not sqlite_table_exists(conn, "incident_response_cases"):
-                return 200, {
-                    "ok": True,
-                    "incidents": [],
-                    "page": 1,
-                    "per_page": per_page,
-                    "total": 0,
-                    "pages": 1,
-                    "status_counts": {},
-                    "agent_status_counts": {},
-                    "schema_ready": False,
-                }
-            where_sql = "" if status_filter == "all" else "WHERE c.status = ?"
-            arguments: list[object] = [] if status_filter == "all" else [status_filter]
+                return 200, empty_incident_page(request)
+            where_sql = request.where_sql
+            arguments = request.where_arguments
             total = int(conn.execute(
                 f"SELECT COUNT(*) FROM incident_response_cases c {where_sql}",
                 arguments,
@@ -11393,63 +11369,15 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                     "SELECT agent_status, COUNT(*) FROM incident_response_cases GROUP BY agent_status"
                 ).fetchall()
             }
-            pages = max(1, (total + per_page - 1) // per_page)
-            page = min(page, pages)
-            offset = (page - 1) * per_page
+            page, pages, offset = request.pagination(total)
             summary_ready = sqlite_table_exists(conn, "alert_group_summary")
-            direction_sql = "ASC" if sort_direction == "asc" else "DESC"
-            common_sort_sql = {
-                "status": "c.status",
-                "escalated": "c.escalated_at",
-                "agent": "c.agent_status",
-                "updated": "c.updated_at",
-            }
-            summary_sort_sql = {
-                **common_sort_sql,
-                "severity": "COALESCE(g.severity, a.severity, 0)",
-                "alert": "COALESCE(g.rule_name, a.rule_name, '') COLLATE NOCASE",
-                "source": "COALESCE(g.source_ip, a.source_ip, '') COLLATE NOCASE",
-                "destination": (
-                    "COALESCE(g.destination_ip, a.destination_ip, '') "
-                    "COLLATE NOCASE"
-                ),
-                "destination_port": (
-                    "COALESCE(g.destination_port, a.destination_port, -1)"
-                ),
-                "count": "COALESCE(g.total_seen_count, a.seen_count, 0)",
-            }
-            # Older databases without the summary table still support sorting
-            # durable case fields. Other requested keys fall back to updated.
-            sort_expression = (
-                summary_sort_sql.get(sort_key, "c.updated_at")
-                if summary_ready
-                else common_sort_sql.get(sort_key, "c.updated_at")
-            )
-            order_sql = (
-                "CASE c.status WHEN 'open' THEN 0 "
-                "WHEN 'in_progress' THEN 1 ELSE 2 END, "
-                "CASE c.agent_status WHEN 'analyzing' THEN 0 "
-                "WHEN 'queued' THEN 1 WHEN 'failed' THEN 2 ELSE 3 END, "
-                "c.updated_at DESC, c.case_id DESC"
-                if sort_key == "priority"
-                else (
-                    f"{sort_expression} {direction_sql}, "
-                    f"c.updated_at DESC, c.case_id DESC"
-                )
-            )
+            order_sql = incident_order_sql(request, summary_ready)
             case_columns = sqlite_table_columns(conn, "incident_response_cases")
-            resolution_reason_sql = (
-                "c.resolution_reason" if "resolution_reason" in case_columns
-                else "NULL AS resolution_reason"
-            )
-            resolved_at_sql = (
-                "c.resolved_at" if "resolved_at" in case_columns
-                else "NULL AS resolved_at"
-            )
-            resolved_by_sql = (
-                "c.resolved_by" if "resolved_by" in case_columns
-                else "NULL AS resolved_by"
-            )
+            (
+                resolution_reason_sql,
+                resolved_at_sql,
+                resolved_by_sql,
+            ) = optional_case_selects(case_columns)
             if summary_ready:
                 rows = conn.execute(
                     f"""
@@ -11477,7 +11405,7 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                     ORDER BY {order_sql}
                     LIMIT ? OFFSET ?
                     """,
-                    [*arguments, per_page, offset],
+                    [*arguments, request.per_page, offset],
                 ).fetchall()
             else:
                 rows = conn.execute(
@@ -11493,7 +11421,7 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                     ORDER BY {order_sql}
                     LIMIT ? OFFSET ?
                     """,
-                    [*arguments, per_page, offset],
+                    [*arguments, request.per_page, offset],
                 ).fetchall()
 
             analyses: dict[str, dict[str, object]] = {}
@@ -11789,14 +11717,14 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
         "ok": True,
         "incidents": incidents,
         "page": page,
-        "per_page": per_page,
+        "per_page": request.per_page,
         "total": total,
         "pages": pages,
         "status_counts": status_counts,
         "agent_status_counts": agent_status_counts,
         "schema_ready": True,
-        "sort": sort_key,
-        "direction": sort_direction,
+        "sort": request.sort,
+        "direction": request.direction,
         "asset_inventory_status": (
             "invalid"
             if incident_inventory_error
