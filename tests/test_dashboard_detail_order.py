@@ -11,6 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = REPO_ROOT / "onion-sentinel-dashboard" / "scripts"
 MODULE_PATH = SCRIPT_DIR / "build_soc_alerts_dashboard.py"
 SHELL_MODULE_PATH = SCRIPT_DIR / "dashboard_shell_page.py"
+REPORT_REPOSITORY_PATH = SCRIPT_DIR / "dashboard_report_repository.py"
 
 
 def dashboard_contract_source() -> str:
@@ -128,8 +129,8 @@ class DashboardDetailOrderTests(unittest.TestCase):
     def test_derived_artifact_directories_are_not_primary_alert_reports(self) -> None:
         self.assertIn("pcap-analysis", self.builder.DERIVED_REPORT_DIRECTORIES)
         self.assertIn("ai-analysis", self.builder.DERIVED_REPORT_DIRECTORIES)
-        source = dashboard_contract_source()
-        self.assertIn("relative_parts[0].lower() in DERIVED_REPORT_DIRECTORIES", source)
+        source = REPORT_REPOSITORY_PATH.read_text(encoding="utf-8")
+        self.assertIn("relative.parts[0].lower() in config.derived_directories", source)
 
     def test_primary_alert_report_wins_over_newer_derived_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

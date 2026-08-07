@@ -144,6 +144,17 @@ from dashboard_alert_report_factory import (  # noqa: E402
     endpoint_label,
     summarize_markdown,
 )
+from dashboard_report_repository import (  # noqa: E402
+    ReportRepositoryConfig,
+    clean_title_from_markdown,
+    detect_criticality,
+    extract_alert_timestamp,
+    extract_markdown_alert_id,
+    extract_network_endpoints,
+    extract_rule_identity,
+    index_markdown_reports,
+    load_markdown_fallback_reports,
+)
 from dashboard_alert_ai_workflow import (  # noqa: E402
     AI_ELIGIBLE_FILTER_STATUSES,
     SOC_ANALYSIS_SEVERITY_LABELS,
@@ -861,98 +872,12 @@ def telegram_sent_counts() -> dict[str, int]:
     return counts
 
 
-def clean_title_from_markdown(text: str, path: Path) -> str:
-    # Used only for legacy Markdown fallback and attached report titles.
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith('#'):
-            title = stripped.lstrip('#').strip()
-            if title:
-                return title[:180]
-    return path.stem.replace('_', ' ').replace('-', ' ').strip().title() or path.name
-
-
-def detect_criticality(text: str, title: str, path: Path) -> tuple[str, int]:
-    """Extract alert criticality from title/content/path with a stable severity order."""
-    candidates = [title, path.name]
-    candidates.extend(text.splitlines()[:40])
-    joined = '\n'.join(candidates)
-    patterns = [
-        r'\[\s*(critical|high|medium|low|informational|info)\s*\]',
-        r'\btriage\s+level\s*[:=]\s*["\']?(critical|high|medium|low|informational|info)\b',
-        r'\bseverity\s*[:=]\s*["\']?(critical|high|medium|low|informational|info)\b',
-        r'\bpriority\s*[:=]\s*["\']?(critical|high|medium|low|informational|info)\b',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, joined, flags=re.IGNORECASE)
-        if match:
-            key = match.group(1).lower()
-            return CRITICALITY_LABELS[key], CRITICALITY_ORDER[key]
-    return 'Informational', CRITICALITY_ORDER['informational']
 
 
 def criticality_class(label: str) -> str:
     return re.sub(r'[^a-z0-9]+', '-', label.lower()).strip('-') or 'informational'
 
 
-def extract_network_endpoints(text: str) -> tuple[str, str, str, str]:
-    """Extract source/destination IP and port from common Security Onion markdown report shapes."""
-    traffic = re.search(
-        r'\bTraffic:\*?\*?\s*([0-9a-fA-F:.]+):(\d+)\s*(?:->|→|-)\s*([0-9a-fA-F:.]+):(\d+)',
-        text,
-        flags=re.IGNORECASE,
-    )
-    if traffic:
-        return traffic.group(1), traffic.group(2), traffic.group(3), traffic.group(4)
-
-    source_obj = re.search(r'"source"\s*:\s*\{(?P<body>.*?)\n\s*\}', text, flags=re.IGNORECASE | re.DOTALL)
-    dest_obj = re.search(r'"destination"\s*:\s*\{(?P<body>.*?)\n\s*\}', text, flags=re.IGNORECASE | re.DOTALL)
-
-    def field(obj: re.Match[str] | None, name: str) -> str | None:
-        if not obj:
-            return None
-        body = obj.group('body')
-        m = re.search(rf'"{name}"\s*:\s*(?:"([^"]+)"|(\d+))', body, flags=re.IGNORECASE)
-        return (m.group(1) or m.group(2)) if m else None
-
-    src_ip_match = re.search(r'^source_ip:\s*["\']?([^"\'\n]+)', text, flags=re.IGNORECASE | re.MULTILINE)
-    src_port_match = re.search(r'^source_port:\s*["\']?(\d+)', text, flags=re.IGNORECASE | re.MULTILINE)
-    dst_ip_match = re.search(r'^(?:destination|dest)_ip:\s*["\']?([^"\'\n]+)', text, flags=re.IGNORECASE | re.MULTILINE)
-    dst_port_match = re.search(r'^(?:destination|dest)_port:\s*["\']?(\d+)', text, flags=re.IGNORECASE | re.MULTILINE)
-
-    src_ip = field(source_obj, 'ip') or (src_ip_match.group(1) if src_ip_match else None)
-    src_port = field(source_obj, 'port') or (src_port_match.group(1) if src_port_match else None)
-    dst_ip = field(dest_obj, 'ip') or (dst_ip_match.group(1) if dst_ip_match else None)
-    dst_port = field(dest_obj, 'port') or (dst_port_match.group(1) if dst_port_match else None)
-    return clean_endpoint_part(src_ip), clean_endpoint_part(src_port), clean_endpoint_part(dst_ip), clean_endpoint_part(dst_port)
-
-
-
-def extract_rule_identity(text: str, title: str) -> tuple[str, str]:
-    """Extract a stable rule identity from Security Onion report markdown/raw JSON."""
-    rule_id_match = re.search(r'"rule_id"\s*:\s*"?([^",\n]+)"?', text, flags=re.IGNORECASE)
-    rule_name_match = re.search(r'"rule_name"\s*:\s*"([^"]+)"', text, flags=re.IGNORECASE)
-    if not rule_name_match:
-        rule_name_match = re.search(r'\|\s*Rule name\s*\|\s*([^|]+?)\s*\|', text, flags=re.IGNORECASE)
-    rule_id = clean_endpoint_part(rule_id_match.group(1) if rule_id_match else '')
-    rule_name = clean_endpoint_part(rule_name_match.group(1) if rule_name_match else title)
-    return rule_id, rule_name
-
-
-def extract_alert_timestamp(text: str, fallback_ts: float) -> float:
-    """Use event time when available; fall back to file mtime."""
-    patterns = [
-        r'"timestamp"\s*:\s*"([^"]+)"',
-        r'\|\s*Timestamp\s*\|\s*([^|]+?)\s*\|',
-        r'^generated_at:\s*([^\n]+)',
-        r'^-\s*\*\*Generated:\*\*\s*([^\n]+)',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE | re.MULTILINE)
-        ts = parse_iso_timestamp(match.group(1)) if match else None
-        if ts is not None:
-            return ts
-    return fallback_ts
 
 
 def compact_text(text: str, max_len: int = 150) -> str:
@@ -966,55 +891,17 @@ def compact_text(text: str, max_len: int = 150) -> str:
 
 
 
-def extract_markdown_alert_id(text: str) -> str | None:
-    # Return the alert_id embedded in an n8n-generated Markdown report. This is
-    # how SQLite rows are paired with their human/LLM report files.
-    patterns = [
-        r'^alert_id:\s*["\']?(.+?)["\']?\s*$',
-        r'^-\s*\*\*Alert ID:\*\*\s*(.+?)\s*$',
-        r'"alert_id"\s*:\s*"([^"]+)"',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE | re.MULTILINE)
-        if not match:
-            continue
-        value = match.group(1).strip().strip('"\'')
-        if value:
-            return value
-    return None
+def _report_repository_config() -> ReportRepositoryConfig:
+    return ReportRepositoryConfig(
+        sources=tuple(MARKDOWN_SOURCES),
+        supported_suffixes=frozenset(SUPPORTED_SUFFIXES),
+        derived_directories=frozenset(DERIVED_REPORT_DIRECTORIES),
+    )
 
 
 def load_markdown_reports_by_alert_id() -> dict[str, tuple[Path, str, os.stat_result]]:
-    # Index only primary alert reports. Derived AI/PCAP artifacts often repeat
-    # the same alert_id and are newer than the source report; allowing them into
-    # this index makes the newest artifact silently replace the standardized
-    # Detailed Alert Report.
-    SOURCE_DIR.mkdir(parents=True, exist_ok=True)
-    by_alert_id: dict[str, tuple[Path, str, os.stat_result]] = {}
-    visited_sources: set[Path] = set()
-    for source_dir in MARKDOWN_SOURCES:
-        source_dir.mkdir(parents=True, exist_ok=True)
-        resolved_source = source_dir.resolve()
-        if resolved_source in visited_sources:
-            continue
-        visited_sources.add(resolved_source)
-        for path in sorted(source_dir.rglob('*'), key=lambda p: str(p).lower()):
-            if not path.is_file() or path.suffix.lower() not in SUPPORTED_SUFFIXES or path.name.startswith('.'):
-                continue
-            try:
-                relative_parts = path.resolve().relative_to(resolved_source).parts
-            except (OSError, ValueError):
-                continue
-            if relative_parts and relative_parts[0].lower() in DERIVED_REPORT_DIRECTORIES:
-                continue
-            try:
-                text = path.read_text(encoding='utf-8')
-            except UnicodeDecodeError:
-                text = path.read_text(encoding='utf-8', errors='replace')
-            alert_id = extract_markdown_alert_id(text)
-            if alert_id:
-                by_alert_id[alert_id] = (path, text, path.stat())
-    return by_alert_id
+    """Index primary Markdown reports through the read-only repository."""
+    return index_markdown_reports(_report_repository_config())
 
 
 def load_ai_analysis_by_alert_id() -> dict[str, dict]:
@@ -1349,66 +1236,6 @@ def pcap_analysis_for_row(row: sqlite3.Row | dict, index: dict[str, object] | No
     )
 
 
-def sqlite_report_markdown(
-    row: sqlite3.Row | dict,
-    raw: dict,
-    ai_analysis: dict | None,
-    pcap_status: tuple[str, str, str] | None = None,
-    pcap_analysis: dict | None = None,
-) -> str:
-    # Render a DB-only alert detail for suppressed/dropped/duplicate rows.
-    alert_json = json.dumps(raw or {'alert_json': row['alert_json']}, indent=2, sort_keys=True)
-    status = row['filter_status'] or 'stored'
-    public_enrichment = public_enrichment_markdown(raw, row_value(row, 'enrichment_json'))
-    pcap_details = render_pcap_evidence_markdown(
-        pcap_status or ('none', 'None', 'No parsed PCAP analysis is available'),
-        pcap_analysis,
-        normalize_iso_display_text((pcap_analysis or {}).get('generated_at') or ''),
-    )
-    ai_details = ai_analysis_report_markdown(ai_analysis)
-    raw_logs = raw_logs_markdown(raw, alert_json, ai_analysis)
-    lines = [
-        '---',
-        'type: soc-alert-db-record',
-        f'alert_id: {json.dumps(row["alert_id"])}',
-        f'triage_level: {json.dumps((row["triage_level"] or row["severity_label"] or "informational").lower())}',
-        f'status: {json.dumps(status)}',
-        f'source_ip: {json.dumps(row["source_ip"] or "")}',
-        f'destination_ip: {json.dumps(row["destination_ip"] or "")}',
-        'tags:',
-        '  - security-onion',
-        '  - soc-alert',
-        '  - sqlite-generated',
-        '---',
-        '',
-        f'# [{severity_label_from_row(row).upper()}] {row["rule_name"] or "Security Onion Alert"}',
-        '',
-        '- **Dashboard source:** SQLite alert-store',
-        f'- **Alert ID:** {row["alert_id"]}',
-        f'- **Workflow status:** {status}',
-        f'- **Filter reason:** {row["filter_reason"] or "n/a"}',
-        f'- **Suppression key:** {row["suppression_key"] or "n/a"}',
-        f'- **Route:** {row["routing"] or "n/a"}',
-        f'- **Score:** {row["triage_score"] if row["triage_score"] is not None else "n/a"}',
-        f'- **Traffic:** {row["source_ip"] or "n/a"} -> {row["destination_ip"] or "n/a"}',
-        '',
-        public_enrichment,
-        '',
-        pcap_details,
-        '',
-        ai_details,
-        '',
-        alert_summary_markdown(row),
-        '',
-        '## Analyst Notes',
-        '',
-        '- [ ] Review whether this DB-only record needs a Markdown investigation note.',
-        '- [ ] If this is recurring benign noise, tune `scoring_rules.json` rather than hiding evidence.',
-        '',
-        raw_logs,
-        '',
-    ]
-    return '\n'.join(lines)
 
 
 def report_from_sqlite_row(
@@ -1437,76 +1264,8 @@ def report_from_sqlite_row(
 
 
 def load_markdown_only_reports() -> list[AlertReport]:
-    # Backward-compatible fallback for disaster recovery if the SQLite DB has
-    # not been restored yet but Markdown reports are present.
-    reports: list[AlertReport] = []
-    for source_dir in MARKDOWN_SOURCES:
-        for path in sorted(source_dir.rglob('*'), key=lambda p: str(p).lower()):
-            if not path.is_file() or path.suffix.lower() not in SUPPORTED_SUFFIXES or path.name.startswith('.'):
-                continue
-            try:
-                text = path.read_text(encoding='utf-8')
-            except UnicodeDecodeError:
-                text = path.read_text(encoding='utf-8', errors='replace')
-            stat = path.stat()
-            digest = hashlib.sha1(str(path).encode('utf-8')).hexdigest()[:12]
-            try:
-                rel_source = str(path.relative_to(source_dir))
-            except ValueError:
-                rel_source = path.name
-            title = clean_title_from_markdown(text, path)
-            criticality, criticality_rank = detect_criticality(text, title, path)
-            source_ip, source_port, destination_ip, destination_port = extract_network_endpoints(text)
-            source_endpoint = endpoint_label(source_ip, source_port)
-            destination_endpoint = endpoint_label(destination_ip, destination_port)
-            rule_id, rule_name = extract_rule_identity(text, title)
-            alert_ts = extract_alert_timestamp(text, stat.st_mtime)
-            reports.append(AlertReport(
-                title=title,
-                source=path,
-                rel_source=rel_source,
-                mtime=stat.st_mtime,
-                size=stat.st_size,
-                digest=digest,
-                rendered_html=markdown_to_html(text),
-                summary=summarize_markdown(text),
-                criticality=criticality,
-                criticality_rank=criticality_rank,
-                alert_source='markdown',
-                filter_status='markdown',
-                source_ip=source_ip,
-                source_port=source_port,
-                destination_ip=destination_ip,
-                destination_port=destination_port,
-                source_endpoint=source_endpoint,
-                destination_endpoint=destination_endpoint,
-                rule_id=rule_id,
-                rule_name=rule_name,
-                raw_alert_count=1,
-                total_seen_count=1,
-                repeat_count=1,
-                first_seen='n/a',
-                last_seen='n/a',
-                alert_group_key=rule_name,
-                alert_ts=alert_ts,
-                ai_status_key='not-queued',
-                ai_status_label='Not queued',
-                ai_status_detail='SQLite alert-store is unavailable; AI status cannot be resolved',
-                enrichment_status_key='none',
-                enrichment_status_label='None',
-                enrichment_status_detail='SQLite alert-store is unavailable; enrichment status cannot be resolved',
-                enrichment_record_count=0,
-                enrichment_skip_count=0,
-                enrichment_error_count=0,
-                pcap_status_key='none',
-                pcap_status_label='None',
-                pcap_status_detail='SQLite alert-store is unavailable; PCAP analysis status cannot be resolved',
-                tuning_recommendation='none',
-                tuning_reason='',
-                recommended_tuning_actions=[],
-                ai_analysis={},
-            ))
-    return sorted(reports, key=lambda r: (r.criticality_rank, r.mtime, r.title.lower()), reverse=True)
+    """Build disaster-recovery reports through the read-only repository."""
+    return load_markdown_fallback_reports(_report_repository_config())
 
 
 def load_reports() -> list[AlertReport]:

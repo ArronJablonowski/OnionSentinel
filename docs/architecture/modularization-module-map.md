@@ -480,6 +480,14 @@ stateful AI/PCAP status and DOM-validation services, preventing a circular
 dependency on the dashboard builder while those workflow services are split
 into their own modules.
 
+`dashboard_report_repository.py` is the read-only Markdown discovery and
+disaster-recovery boundary. It deduplicates configured source roots, rejects
+hidden, unsupported, derived, and path-escaping artifacts, preserves explicit
+later-source precedence for alert IDs, parses legacy identity/network/severity
+fields, and constructs deterministic fallback `AlertReport` models when SQLite
+is unavailable. The unused legacy SQLite-to-Markdown composer was removed
+instead of being preserved as dead modular code.
+
 `dashboard_alert_ai_workflow.py` owns grouped candidate selection, test/filter
 exclusions, severity-floor eligibility, analysis artifact precedence, and the
 running/queued/analyzed/skipped status contract. The report factory consumes

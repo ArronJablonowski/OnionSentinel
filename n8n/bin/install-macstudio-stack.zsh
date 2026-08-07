@@ -644,6 +644,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_alert_detail_composer.p
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_alert_repository.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_repository.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_alert_report_model.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_report_model.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_alert_report_factory.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_report_factory.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_report_repository.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_report_repository.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_alert_ai_workflow.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_ai_workflow.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_alert_pcap_workflow.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_pcap_workflow.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_model_routing.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_model_routing.py"

@@ -274,6 +274,17 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_report_repository.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_report_repository.py",
+      "required_symbols": [
+        "ReportRepositoryConfig",
+        "extract_markdown_alert_id",
+        "index_markdown_reports",
+        "load_markdown_fallback_reports"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_alert_ai_workflow.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_ai_workflow.py",
