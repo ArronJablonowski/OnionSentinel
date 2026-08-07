@@ -10335,15 +10335,15 @@ def main() -> int:
             policy=pipeline_module.AnalysisReviewPolicy(
                 saved_response=bool(args.response_json),
                 controlled_reviewer_required=bool(
-                    controlled_result_identity is not None and
-                    controlled_result_identity.get("reviewer_required") is True
+                    controlled_result_identity is not None
+                    and controlled_result_identity.get("reviewer_required") is True
                 ),
                 freeze_enabled=evaluation_memory_frozen,
             ),
             ports=pipeline_module.AnalysisReviewPorts(
-                load_saved_response=lambda: sanitize_saved_response_input(load_json(
-                    args.response_json, args.max_response_bytes
-                )),
+                load_saved_response=lambda: sanitize_saved_response_input(
+                    load_json(args.response_json, args.max_response_bytes)
+                ),
                 run_primary_analysis=lambda: analyze_with_config(
                     prompt_package,
                     args,
@@ -10400,21 +10400,14 @@ def main() -> int:
                         ),
                     )
                 ),
-                apply_saved_review_gate=lambda candidate: apply_saved_response_review_gate(
-                    prompt_package, candidate
-                ),
-                notify_saved_post_processing=lambda: notify_analysis_phase(
-                    update_current_phase, "post_processing"
-                ),
+                apply_saved_review_gate=lambda candidate: apply_saved_response_review_gate(prompt_package, candidate),
+                notify_saved_post_processing=lambda: notify_analysis_phase(update_current_phase, "post_processing"),
                 controlled_reviewer_gate=lambda candidate, trigger, frozen: (
                     precommit_controlled_evaluation_reviewer_gate(
-                        prompt_package, candidate, settings, agent_role,
-                        trigger_reason=trigger, freeze_enabled=frozen,
-                    )
-                ),
+                        prompt_package, candidate, settings, agent_role, trigger_reason=trigger,
+                        freeze_enabled=frozen)),
                 require_result_routes=lambda candidate: require_controlled_evaluation_result_routes(
-                    controlled_result_identity, candidate
-                ),
+                    controlled_result_identity, candidate),
                 observe_reviewer=lambda candidate: observe_harness(
                     lambda: harness_runtime.record_response(
                         candidate,
@@ -10618,6 +10611,7 @@ def main() -> int:
             if harness_runtime is not None
             else None
         )
+        pipeline_context.advance(pipeline_module.Stage.DETERMINISTIC_GUARDS, "final guards applied")
         submitted_response_sha256 = canonical_payload_digest(response)
         staged_memory_task = stage_memory_writeback_task(
             analysis_id=run_id,
@@ -10634,6 +10628,7 @@ def main() -> int:
             reviewer_reason=reviewer_memory_reason,
             pending_dir=runtime_paths.memory_pending_dir,
         )
+        pipeline_context.advance(pipeline_module.Stage.VALIDATE, "commit inputs validated")
         try:
             json_path, md_path, generated_at = write_outputs(
                 prompt_path,
@@ -10739,6 +10734,8 @@ def main() -> int:
         # finalization problem must be visible, but must not turn that durable
         # success into a failed model job that gets retried.
         status = "success"
+        pipeline_context.artifacts = (json_path, md_path)
+        pipeline_context.advance(pipeline_module.Stage.COMMIT, "analysis index committed")
         memory_receipt: dict[str, Any] = {}
         memory_receipt_path: Path | None = None
         try:
@@ -10872,7 +10869,7 @@ def main() -> int:
                     f"committed analysis: {type(harness_exc).__name__}: "
                     f"{harness_exc}"
                 )
-
+        pipeline_context.advance(pipeline_module.Stage.POST_COMMIT, "post-commit work finalized")
         try:
             print(md_path)
             print(json_path)
@@ -10883,12 +10880,15 @@ def main() -> int:
                 "committed analysis output could not be printed: "
                 f"{type(output_exc).__name__}"
             )
+        pipeline_context.advance(pipeline_module.Stage.COMPLETE, "analysis pipeline completed")
         return 0
     except SystemExit as exc:
         error = str(exc) if str(exc) else f"SystemExit({exc.code})"
+        pipeline_context.fail_if_active(error)
         raise
     except Exception as exc:
         error = str(exc)
+        pipeline_context.fail_if_active(error)
         raise
     finally:
         try:

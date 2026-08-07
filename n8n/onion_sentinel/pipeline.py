@@ -170,6 +170,11 @@ class RuntimeContext:
         self.transitions.append(transition)
         return transition
 
+    def fail_if_active(self, reason: str) -> Transition | None:
+        if self.stage in {Stage.COMPLETE, Stage.FAILED}:
+            return None
+        return self.fail(reason)
+
     def audit(self) -> tuple[Mapping[str, Any], ...]:
         return tuple(
             {

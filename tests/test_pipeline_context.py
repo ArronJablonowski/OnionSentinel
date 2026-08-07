@@ -63,6 +63,13 @@ class PipelineContextTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "terminal pipeline state"):
             context.advance(Stage.LOAD, "retry")
 
+    def test_fail_if_active_is_idempotent_for_cleanup(self) -> None:
+        context = RuntimeContext("run-3b", arguments=None)
+        self.assertIsNotNone(context.fail_if_active("provider failed"))
+        self.assertIsNone(context.fail_if_active("cleanup saw failure"))
+        self.assertEqual(context.stage, Stage.FAILED)
+        self.assertEqual(len(context.transitions), 1)
+
     def test_audit_contains_only_bounded_transition_metadata(self) -> None:
         context = RuntimeContext("run-4", arguments=None)
         context.advance(Stage.LOAD, "loaded prompt contract")
