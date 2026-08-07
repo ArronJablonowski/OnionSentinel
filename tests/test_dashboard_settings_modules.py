@@ -94,6 +94,35 @@ class DashboardSettingsModuleTests(unittest.TestCase):
         self.assertIn('<div id="model-control"></div>', rendered)
         self.assertIn('<div id="prompt-control"></div>', rendered)
 
+    def test_soc_agent_renderer_owns_policy_markup_and_escapes_data(self) -> None:
+        view = self.agent_card.SocAgentSettingsCardViewModel(
+            prompt_path="~/prompt<&>.md",
+            reviewer_prompt_path="~/review.md",
+            memory_path="~/memory.md",
+            shared_memory_path="~/shared.md",
+            model_label="primary<&>",
+            reviewer_model_label="reviewer",
+            adjudicator_model_label="adjudicator",
+            analysis_threshold_label="Medium",
+            pcap_threshold_label="High",
+            incident_threshold_label="Critical",
+            analysis_disabled=False,
+            incident_disabled=True,
+            analysis_threshold_options_html='<option selected>Medium</option>',
+            pcap_threshold_options_html='<option selected>High</option>',
+            incident_threshold_options_html='<option selected>Disabled</option>',
+            model_control_html='<div id="soc-model-control"></div>',
+            prompt_control_html='<div id="soc-prompt-control"></div>',
+        )
+        rendered = self.agent_card.render_soc_agent_settings_card(view)
+        self.assertIn("primary&lt;&amp;&gt;", rendered)
+        self.assertIn("~/prompt&lt;&amp;&gt;.md", rendered)
+        self.assertIn('data-soc-policy-label="analysis">Medium and higher', rendered)
+        self.assertIn('data-soc-policy-label="incident">Disabled', rendered)
+        self.assertIn('id="pcap-capture-loss-threshold-percent"', rendered)
+        self.assertIn('<div id="soc-model-control"></div>', rendered)
+        self.assertIn('<div id="soc-prompt-control"></div>', rendered)
+
     def test_settings_modules_stay_within_the_maintenance_target(self) -> None:
         for name in MODULE_NAMES:
             with self.subTest(name=name):

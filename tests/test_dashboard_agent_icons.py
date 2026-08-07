@@ -6,12 +6,16 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_ROOT = REPO_ROOT / "onion-sentinel-dashboard"
 DASHBOARD_BUILDER = DASHBOARD_ROOT / "scripts" / "build_soc_alerts_dashboard.py"
+SETTINGS_AGENT_CARD = DASHBOARD_ROOT / "scripts" / "dashboard_settings_agent_card.py"
 ASSET_ROOT = DASHBOARD_ROOT / "assets"
 
 
 class DashboardAgentIconTest(unittest.TestCase):
     def test_agent_icons_are_consistent_transparent_png_assets(self) -> None:
-        source = DASHBOARD_BUILDER.read_text(encoding="utf-8")
+        source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (DASHBOARD_BUILDER, SETTINGS_AGENT_CARD)
+        )
         icon_names = (
             "settings-soc-analyst-prompt.png",
             "settings-incident-responder-prompt.png",

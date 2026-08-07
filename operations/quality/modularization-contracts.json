@@ -128,7 +128,10 @@
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_agent_card.py",
       "required_symbols": [
         "AgentSettingsCardViewModel",
-        "render_agent_settings_card"
+        "SocAgentSettingsCardViewModel",
+        "render_agent_settings_card",
+        "render_soc_automation_policy",
+        "render_soc_agent_settings_card"
       ]
     },
     {

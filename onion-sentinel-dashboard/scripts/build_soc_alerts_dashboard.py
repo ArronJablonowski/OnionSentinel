@@ -77,7 +77,9 @@ from dashboard_settings_assets import (  # noqa: E402
 )
 from dashboard_settings_agent_card import (  # noqa: E402
     AgentSettingsCardViewModel,
+    SocAgentSettingsCardViewModel,
     render_agent_settings_card,
+    render_soc_agent_settings_card,
 )
 from dashboard_software_inventory_page import software_inventory_page_section  # noqa: E402
 from dashboard_shell_components import (  # noqa: E402
@@ -7070,12 +7072,11 @@ def flow_page_section(reports: list[AlertReport]) -> str:
 
 def settings_page_section() -> str:
     prompt = html.escape(load_soc_analyst_prompt())
-    prompt_path = html.escape(display_path(SOC_ANALYST_PROMPT_FILE))
+    prompt_path = display_path(SOC_ANALYST_PROMPT_FILE)
     analyst_second_opinion_prompt = html.escape(load_second_opinion_prompt(SOC_ANALYST_SECOND_OPINION_PROMPT_FILE))
-    analyst_second_opinion_prompt_path = html.escape(display_path(SOC_ANALYST_SECOND_OPINION_PROMPT_FILE))
-    analyst_memory_path = html.escape(display_path(SOC_ANALYST_MEMORY_FILE))
+    analyst_second_opinion_prompt_path = display_path(SOC_ANALYST_SECOND_OPINION_PROMPT_FILE)
+    analyst_memory_path = display_path(SOC_ANALYST_MEMORY_FILE)
     shared_memory_display_path = display_path(SHARED_AGENT_MEMORY_FILE)
-    shared_memory_path = html.escape(shared_memory_display_path)
     engineer_prompt = html.escape(load_siem_engineer_prompt())
     engineer_prompt_path = display_path(SIEM_ENGINEER_PROMPT_FILE)
     engineer_second_opinion_prompt = html.escape(load_second_opinion_prompt(SIEM_ENGINEER_SECOND_OPINION_PROMPT_FILE))
@@ -7256,6 +7257,25 @@ def settings_page_section() -> str:
                 prompt_control_html=agent_prompt_controls['threat-hunter'],
             ),
         ),
+    ))
+    soc_agent_card = render_soc_agent_settings_card(SocAgentSettingsCardViewModel(
+        prompt_path=prompt_path,
+        reviewer_prompt_path=analyst_second_opinion_prompt_path,
+        memory_path=analyst_memory_path,
+        shared_memory_path=shared_memory_display_path,
+        model_label=agent_model_labels['soc-analyst'],
+        reviewer_model_label=agent_second_opinion_model_labels['soc-analyst'],
+        adjudicator_model_label=agent_adjudicator_model_labels['soc-analyst'],
+        analysis_threshold_label=analysis_threshold_label,
+        pcap_threshold_label=pcap_threshold_label,
+        incident_threshold_label=incident_threshold_label,
+        analysis_disabled=analysis_min_severity == 'disabled',
+        incident_disabled=incident_min_severity == 'disabled',
+        analysis_threshold_options_html=analysis_threshold_options,
+        pcap_threshold_options_html=pcap_threshold_options,
+        incident_threshold_options_html=incident_threshold_options,
+        model_control_html=agent_model_controls['soc-analyst'],
+        prompt_control_html=agent_prompt_controls['soc-analyst'],
     ))
     ai_path = html.escape(display_path(SOC_AI_SETTINGS_FILE))
     installed_models = list_ollama_models()
@@ -7460,72 +7480,7 @@ def settings_page_section() -> str:
           <span class="settings-kicker">Agent prompts</span>
           <h2 id="cyber-security-agents-title">Cyber Security Agents</h2>
         </div>
-      <details class="settings-panel settings-details" aria-labelledby="soc-analyst-prompt-title">
-        <summary>
-          <span class="settings-summary-main">
-            <span class="settings-summary-icon" aria-hidden="true"><img src="assets/settings-soc-analyst-prompt.png" alt=""></span>
-            <span class="settings-summary-copy">
-              <span class="settings-kicker">SOC analyst prompt</span>
-              <strong id="soc-analyst-prompt-title">SOC Analyst System Prompt</strong>
-              <span class="settings-trigger-line">Trigger: new eligible alert; scheduled AI worker drains highest severity newest first.</span>
-              <span class="settings-model-line"><b>Model</b><span data-agent-model="soc-analyst">{html.escape(agent_model_labels['soc-analyst'])}</span></span>
-              <span class="settings-model-line settings-second-opinion-line"><b>Second opinion</b><span data-agent-second-opinion-model="soc-analyst">{html.escape(agent_second_opinion_model_labels['soc-analyst'])}</span></span>
-              <span class="settings-model-line settings-adjudicator-line"><b>Adjudicator</b><span data-agent-adjudicator-model="soc-analyst">{html.escape(agent_adjudicator_model_labels['soc-analyst'])}</span></span>
-              <span class="settings-model-line"><b>Analysis</b><span data-soc-policy-label="analysis">{analysis_threshold_label if analysis_min_severity != 'disabled' else 'Disabled'}{'' if analysis_min_severity == 'disabled' else ' and higher'}</span></span>
-              <span class="settings-model-line"><b>PCAP</b><span data-soc-policy-label="pcap">{pcap_threshold_label} and higher</span></span>
-              <span class="settings-model-line"><b>Incident</b><span data-soc-policy-label="incident">{incident_threshold_label if incident_min_severity != 'disabled' else 'Disabled'}</span></span>
-            </span>
-          </span>
-          <span class="settings-path-stack" aria-label="SOC Analyst files">
-            <button class="settings-path-row settings-file-link settings-prompt-link" type="button" data-prompt-target="soc-analyst-prompt" aria-label="Open SOC Analyst system prompt"><b>Prompt</b><code>{prompt_path}</code></button>
-            <button class="settings-path-row settings-file-link settings-prompt-link" type="button" data-prompt-target="soc-analyst-second-opinion-prompt" aria-label="Open SOC Analyst second-opinion prompt"><b>Review</b><code>{analyst_second_opinion_prompt_path}</code></button>
-            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="soc-analyst" aria-label="View SOC Analyst memory file"><b>Memory</b><code>{analyst_memory_path}</code></button>
-            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="shared" aria-label="View shared agent memory file"><b>Shared</b><code>{shared_memory_path}</code></button>
-          </span>
-        </summary>
-        <div class="settings-panel-top">
-          <div>
-            <p>This prompt is sent as the system message when the assigned model analyzes Security Onion alerts.</p>
-          </div>
-        </div>
-        {agent_model_controls['soc-analyst']}
-        <section class="settings-agent-policy-control" aria-labelledby="soc-analyst-automation-title">
-          <div class="settings-agent-policy-copy">
-            <span class="settings-kicker">Automation thresholds</span>
-            <h3 id="soc-analyst-automation-title">Evidence and escalation</h3>
-            <p>The selected severity and every higher severity use the same automatic action.</p>
-          </div>
-          <div class="settings-grid">
-            <label class="settings-field">Lowest severity for automatic AI analysis
-              <select id="soc-analyst-analysis-min-severity">
-                {analysis_threshold_options}
-              </select>
-            </label>
-            <label class="settings-field">Lowest severity for automatic PCAP analysis
-              <select id="soc-analyst-pcap-min-severity">
-                {pcap_threshold_options}
-              </select>
-            </label>
-            <label class="settings-field">Lowest severity for automatic incident response
-              <select id="soc-analyst-incident-min-severity">
-                {incident_threshold_options}
-              </select>
-            </label>
-            <label class="settings-field">PCAP capture-loss safety threshold
-              <span class="settings-number-with-unit">
-                <input id="pcap-capture-loss-threshold-percent" type="number" min="0.1" max="100" step="0.1" inputmode="decimal" value="5.0">
-                <span aria-hidden="true">%</span>
-              </span>
-              <small>Relay PCAP reads pause when current Zeek capture loss exceeds this value.</small>
-            </label>
-          </div>
-          <div class="settings-actions">
-            <button id="save-soc-analyst-policy" class="settings-secondary-button" type="button">Save Automation Thresholds</button>
-            <span id="soc-analyst-policy-status" class="settings-save-status" role="status" aria-live="polite"></span>
-          </div>
-        </section>
-        {agent_prompt_controls['soc-analyst']}
-      </details>
+{soc_agent_card.rstrip()}
 {agent_cards.rstrip()}
       </section>
       <section class="settings-maxmind-section" aria-labelledby="maxmind-geoip-title">
