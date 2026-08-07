@@ -323,6 +323,18 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_software_inventory_service.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_software_inventory_service.py",
+      "required_symbols": [
+        "AssetLabelSnapshot",
+        "append_incomplete_asset_warning",
+        "database_query_parameters",
+        "enrich_database_payload",
+        "load_asset_label_snapshot"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_catalog_routes.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py",

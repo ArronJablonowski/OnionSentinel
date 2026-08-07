@@ -237,6 +237,13 @@ from portal_soc_write_dispatch import (
     dispatch_authorized_soc_write,
 )
 from portal_soc_write_request import prepare_soc_write_request
+from portal_software_inventory_service import (
+    AssetLabelSnapshot,
+    append_incomplete_asset_warning,
+    database_query_parameters,
+    enrich_database_payload,
+    load_asset_label_snapshot,
+)
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -1066,72 +1073,27 @@ def asset_inventory_response(
     return HTTPStatus.OK, payload
 
 
+def software_asset_label_snapshot() -> AssetLabelSnapshot:
+    """Load complete public identities before resolving pseudonymous hosts."""
+    return load_asset_label_snapshot(
+        lambda page_query: asset_inventory_response(query=page_query),
+        page_size=software_inventory.ASSET_LABEL_PAGE_SIZE,
+        maximum_pages=software_inventory.ASSET_LABEL_MAX_PAGES,
+        maximum_records=software_inventory.ASSET_LABEL_MAX_RECORDS)
+
+
 def software_inventory_response(
     *,
     observed_at: dt.datetime | None = None,
     query: dict[str, list[str]] | None = None,
 ) -> tuple[int, dict]:
     """Return only the bounded, collector-produced Software Inventory view."""
-    # Restricted-node responses keep endpoint hostnames pseudonymous. Resolve
-    # those stable references only against one complete, already-public
-    # authoritative Asset Inventory. Supplying that identity view while the
-    # software snapshot is built lets trusted endpoint OS evidence correlate
-    # before filtering and pagination. Ambiguous identifiers remain unlabeled.
-    assets: list[dict] = []
-    asset_inventory_complete = False
-    offset = 0
-    for _page_number in range(software_inventory.ASSET_LABEL_MAX_PAGES):
-        inventory_status, inventory = asset_inventory_response(
-            query={
-                "limit": [str(software_inventory.ASSET_LABEL_PAGE_SIZE)],
-                "offset": [str(offset)],
-                "search": [""],
-                "sort": ["asset_id"],
-                "direction": ["asc"],
-                "state": ["current"],
-            }
-        )
-        if inventory_status != HTTPStatus.OK or not isinstance(inventory, dict):
-            break
-        page_assets = inventory.get("assets")
-        if not isinstance(page_assets, list):
-            break
-        if len(page_assets) > software_inventory.ASSET_LABEL_PAGE_SIZE:
-            break
-        remaining = software_inventory.ASSET_LABEL_MAX_RECORDS - len(assets)
-        if len(page_assets) > remaining:
-            break
-        assets.extend(item for item in page_assets if isinstance(item, dict))
-        page = inventory.get("page")
-        if not isinstance(page, dict) or page.get("has_more") is not True:
-            asset_inventory_complete = True
-            break
-        returned = len(page_assets)
-        if returned <= 0:
-            break
-        next_offset = offset + returned
-        if next_offset <= offset:
-            break
-        offset = next_offset
+    snapshot = software_asset_label_snapshot()
 
     if SOFTWARE_DATABASE_READ_ENABLED:
-        query = query or {}
-        allowed = {
-            "limit": (query.get("limit") or ["100"])[0],
-            "offset": (query.get("offset") or ["0"])[0],
-            "search": (query.get("search") or [""])[0],
-            "tier": (query.get("tier") or ["all"])[0],
-            "confidence": (query.get("confidence") or ["all"])[0],
-            "freshness": (query.get("freshness") or ["all"])[0],
-            "platform": (query.get("platform") or ["all"])[0],
-            "window": (query.get("window") or ["30d"])[0],
-            "sort": (query.get("sort") or ["last_seen"])[0],
-            "direction": (query.get("direction") or ["desc"])[0],
-        }
-        if observed_at is not None:
-            allowed["observed_at"] = software_inventory._utc_iso(
-                observed_at.astimezone(dt.timezone.utc)
-            )
+        allowed = database_query_parameters(
+            query, observed_at, software_inventory._utc_iso,
+        )
         try:
             payload = alert_store_get_json(
                 f"/software-inventory?{urlencode(allowed)}",
@@ -1144,60 +1106,27 @@ def software_inventory_response(
                 filters,
                 error=f"PostgreSQL software inventory unavailable: {exc}",
             )
-        items = payload.get("items")
-        if isinstance(items, list):
-            software_inventory.apply_asset_labels(
-                items,
-                assets,
-                inventory_complete=asset_inventory_complete,
-            )
-            software_inventory.correlate_asset_operating_systems(
-                items,
-                items,
-                assets=assets,
-                observed_at=observed_at or dt.datetime.now(dt.timezone.utc),
-            )
-            coverage = payload.get("coverage")
-            if isinstance(coverage, dict):
-                coverage["labeled_visible_records"] = sum(
-                    bool(item.get("asset_label"))
-                    for item in items
-                    if isinstance(item, dict)
-                )
-                coverage["asset_label_inventory_complete"] = (
-                    asset_inventory_complete
-                )
-                coverage["asset_os_correlated_records"] = sum(
-                    bool(item.get("operating_system_association"))
-                    for item in items
-                    if isinstance(item, dict)
-                )
-        if not asset_inventory_complete:
-            warnings = payload.get("warnings")
-            if isinstance(warnings, list):
-                warnings.append(
-                    "Asset labels are withheld because the complete bounded "
-                    "Asset Inventory could not be read."
-                )
-        return HTTPStatus.OK, payload
+        return HTTPStatus.OK, enrich_database_payload(
+            payload,
+            snapshot,
+            observed_at=observed_at or dt.datetime.now(dt.timezone.utc),
+            apply_asset_labels=software_inventory.apply_asset_labels,
+            correlate_operating_systems=(
+                software_inventory.correlate_asset_operating_systems
+            ),
+        )
 
     status, payload = software_inventory.build_response(
         Path(SOFTWARE_INVENTORY_STATE_FILE),
         query,
         observed_at=observed_at,
         maximum_bytes=SOFTWARE_INVENTORY_MAX_BYTES,
-        assets=assets,
-        asset_inventory_complete=asset_inventory_complete,
+        assets=snapshot.assets,
+        asset_inventory_complete=snapshot.complete,
     )
     if status != HTTPStatus.OK or not isinstance(payload.get("items"), list):
         return status, payload
-    if not asset_inventory_complete:
-        warnings = payload.get("warnings")
-        if isinstance(warnings, list):
-            warnings.append(
-                "Asset labels are withheld because the complete bounded "
-                "Asset Inventory could not be read."
-            )
+    append_incomplete_asset_warning(payload, snapshot.complete)
     return status, payload
 
 
