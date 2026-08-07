@@ -6631,6 +6631,7 @@ def apply_investigation_query_loop(
     from onion_sentinel.analysis.query import (
         engine as engine_module,
         planning_retry as planning_retry_module,
+        round_admission as round_admission_module,
         round_result as round_result_module,
     )
     state_module = _query_state()
@@ -6789,182 +6790,77 @@ def apply_investigation_query_loop(
             else None
         )
         admitted_raw = list(admission.admitted_requests)
-        normalized: list[dict[str, Any]] = []
-        rejected: list[dict[str, Any]] = []
-        round_repair_scopes: dict[str, dict[str, Any]] = {}
-        seen_ids: set[str] = set()
         local_context = prompt_package.get("_local_investigation_query_context")
         trusted_time_envelope = (
             local_context.get("time_envelope")
             if isinstance(local_context, dict)
             else None
         )
-        for position, raw in enumerate(admitted_raw, 1):
-            try:
-                if repair_round:
-                    repaired_query_id = (
-                        _query_text(raw.get("query_id"), 64)
-                        if isinstance(raw, dict)
-                        else ""
-                    )
-                    if repaired_query_id not in pending_repair_scopes:
-                        raise InvestigationQueryError(
-                            "query repair emitted an unrequested query_id"
-                        )
-                request = normalize_investigation_query_request(
-                    raw,
+        def authorize_request(
+            request: dict[str, Any],
+        ) -> round_admission_module.Authorization:
+            tool_decision = observe_harness(
+                lambda: harness_runtime.authorize_tool(
                     round_number=harness_round_number,
-                    position=position,
-                    time_envelope=trusted_time_envelope,
-                    authorization_context=local_context,
-                )
-                if repair_round:
-                    validate_investigation_query_repair_scope(
-                        request,
-                        pending_repair_scopes[request["query_id"]],
-                    )
-                if request["query_id"] in seen_ids:
-                    if repair_round:
-                        raise InvestigationQueryError(
-                            "query repair repeated a rejected query_id"
+                    query_id=request["query_id"],
+                    backend=request["backend"],
+                    approved=(
+                        request["backend"] == "osquery"
+                        and live_osquery_harness_operator_approved(
+                            live_osquery_config,
+                            request["parameters"].get("target_alias"),
                         )
-                    request["query_id"] = (
-                        f"round-{harness_round_number}-query-{position}"
-                    )
-                seen_ids.add(request["query_id"])
-                if not investigation_backend_available(
-                    prompt_package,
-                    request["backend"],
-                    live_osquery_config=live_osquery_config,
-                ):
-                    rejected.append(
-                        {
-                            "query_id": request["query_id"],
-                            "backend": request["backend"],
-                            "status": "rejected",
-                            "read_only": True,
-                            "error": (
-                                f"{request['backend']} investigation backend is disabled, "
-                                "unadvertised, or lacks trusted local evidence"
-                            ),
-                        }
-                    )
-                    continue
-                semantic_digest = investigation_request_semantic_digest(request)
-                if (
-                    semantic_digest in seen_semantic_requests
-                    and not repair_round
-                ):
-                    engine_state = engine_module.ignore(engine_state, 1)
-                    rejected.append(
-                        {
-                            "query_id": request["query_id"],
-                            "backend": request["backend"],
-                            "status": "rejected",
-                            "read_only": True,
-                            "request_semantic_digest": semantic_digest,
-                            "error": "equivalent investigation query was already executed in an earlier round",
-                        }
-                    )
-                    continue
-                tool_decision = observe_harness(
-                    lambda: harness_runtime.authorize_tool(
-                        round_number=harness_round_number,
-                        query_id=request["query_id"],
-                        backend=request["backend"],
-                        approved=(
-                            request["backend"] == "osquery"
-                            and live_osquery_harness_operator_approved(
-                                live_osquery_config,
-                                request["parameters"].get("target_alias"),
-                            )
-                        ),
-                    )
+                    ),
+                ) if harness_runtime is not None else None
+            )
+            return round_admission_module.resolve_authorization(
+                runtime_present=harness_runtime is not None,
+                approval_gated=query_backend_is_approval_gated(
+                    request["backend"]
+                ),
+                policy_mode=(
+                    harness_runtime.policy.mode
                     if harness_runtime is not None
-                    else None
-                )
-                missing_required_decision = bool(
-                    harness_runtime is not None
-                    and tool_decision is None
-                    and query_backend_is_approval_gated(
-                        request["backend"]
-                    )
-                )
-                if (
-                    harness_runtime is not None
-                    and (
-                        missing_required_decision
-                        or (
-                            tool_decision is not None
-                            and not policy_decision_is_effective(
-                                harness_runtime.policy.mode,
-                                tool_decision,
-                            )
-                        )
-                    )
-                ):
-                    denied_capability = (
-                        tool_decision.capability
-                        if tool_decision is not None
-                        else query_backend_capability(
-                            request["backend"]
-                        )
-                    )
-                    denied_reason = (
-                        tool_decision.reason
-                        if tool_decision is not None
-                        else "approval authorization was unavailable"
-                    )
-                    rejected.append(
-                        {
-                            "query_id": request["query_id"],
-                            "backend": request["backend"],
-                            "status": "rejected",
-                            "read_only": True,
-                            "error": (
-                                "Onion Sentinel harness denied capability "
-                                f"{denied_capability}: {denied_reason}"
-                            ),
-                        }
-                    )
-                    continue
-                seen_semantic_requests.add(semantic_digest)
-                normalized.append(request)
-            except InvestigationQueryError as exc:
-                rejected_query_id = (
-                    _query_text(raw.get("query_id"), 64)
-                    if isinstance(raw, dict)
-                    else ""
-                )
-                if not INVESTIGATION_QUERY_ID_RE.fullmatch(rejected_query_id):
-                    rejected_query_id = (
-                        f"round-{harness_round_number}-query-{position}"
-                    )
-                rejected.append(
-                    {
-                        "query_id": rejected_query_id,
-                        "backend": "contract",
-                        "status": "rejected",
-                        "read_only": True,
-                        "error": str(exc)[:1000],
-                    }
-                )
-                if not repair_round:
-                    repair_scope = investigation_query_repair_scope(
-                        raw,
-                        round_number=harness_round_number,
-                        position=position,
-                        time_envelope=trusted_time_envelope,
-                        authorization_context=local_context,
-                    )
-                    if repair_scope is not None:
-                        round_repair_scopes[
-                            repair_scope["query_id"]
-                        ] = {
-                            "scope": repair_scope,
-                            "reason": str(exc)[:1000],
-                            "trigger": "contract_rejection",
-                        }
+                    else "off"
+                ),
+                decision=tool_decision,
+                decision_effective=policy_decision_is_effective,
+                fallback_capability=query_backend_capability(request["backend"]),
+            )
+
+        round_admission = round_admission_module.run(
+            admitted_raw,
+            state=engine_state,
+            round_number=harness_round_number,
+            repair_round=repair_round,
+            pending_repair_scopes=pending_repair_scopes,
+            seen_semantic_digests=seen_semantic_requests,
+            time_envelope=trusted_time_envelope,
+            authorization_context=local_context,
+            dependencies=round_admission_module.Dependencies(
+                normalize=normalize_investigation_query_request,
+                validate_repair=validate_investigation_query_repair_scope,
+                backend_available=lambda backend: investigation_backend_available(
+                    prompt_package,
+                    backend,
+                    live_osquery_config=live_osquery_config,
+                ),
+                semantic_digest=investigation_request_semantic_digest,
+                ignore_semantic_repeat=lambda state: engine_module.ignore(state, 1),
+                authorize=authorize_request,
+                repair_scope=investigation_query_repair_scope,
+                query_text=_query_text,
+                valid_query_id=lambda value: bool(
+                    INVESTIGATION_QUERY_ID_RE.fullmatch(value)
+                ),
+            ),
+            error_type=InvestigationQueryError,
+        )
+        engine_state = round_admission.state
+        normalized = list(round_admission.normalized)
+        rejected = list(round_admission.rejected)
+        round_repair_scopes = dict(round_admission.repair_scopes)
+        seen_semantic_requests = set(round_admission.seen_semantic_digests)
         def execute_admitted_requests(
             admitted_requests: list[dict[str, Any]],
         ) -> Any:

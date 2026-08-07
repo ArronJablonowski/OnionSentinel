@@ -48,6 +48,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.query.repair",
     "onion_sentinel.analysis.query.repair_catalog",
     "onion_sentinel.analysis.query.request",
+    "onion_sentinel.analysis.query.round_admission",
     "onion_sentinel.analysis.query.round_result",
     "onion_sentinel.analysis.query.security_onion",
     "onion_sentinel.analysis.query.state",
