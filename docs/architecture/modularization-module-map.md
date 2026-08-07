@@ -503,6 +503,18 @@ retains PostgreSQL transport, collector snapshot path/size policy, current-time
 selection, and the existing validated evidence functions from
 `software_inventory`.
 
+`portal_asset_inventory_service.py` owns time-aware authoritative record
+projection, public-field filtering, allowlisted PostgreSQL query parameters,
+display-only overlay application, and local disaster-recovery response
+composition. `portal_asset_dhcp_overlay.py` separately owns passive DHCP
+observation parsing, lease-aware freshness, exact-IP MAC evidence annotation,
+stable-identity matching, and conflict-safe provisional asset policy. Passive
+DHCP evidence remains distinct from authoritative identifiers: an unambiguous
+hostname or MAC may update the displayed current address, while IP-only or
+conflicting claims remain review-only. `report_portal.py` retains bounded
+file/database loading, runtime clocks, timestamp compatibility, and the public
+facade functions used by existing integrations.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and

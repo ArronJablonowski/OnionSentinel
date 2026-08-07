@@ -244,6 +244,20 @@ from portal_software_inventory_service import (
     enrich_database_payload,
     load_asset_label_snapshot,
 )
+from portal_asset_inventory_service import (
+    apply_asset_overlays,
+    asset_public_record,
+    asset_record_state,
+    compose_local_response as compose_local_asset_inventory_response,
+    current_asset_projection,
+    database_query_parameters as asset_database_query_parameters,
+    database_unavailable_payload as asset_database_unavailable_payload,
+)
+from portal_asset_dhcp_overlay import (
+    annotate_exact_ip_dhcp_macs,
+    dhcp_asset_inventory_overlay,
+    mac_address_scope,
+)
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -608,46 +622,11 @@ def _asset_record_state(
     asset: dict,
     observed_at: dt.datetime,
 ) -> str:
-    try:
-        valid_from = parse_iso_timestamp(asset.get("valid_from"))
-        valid_until = (
-            parse_iso_timestamp(asset.get("valid_until"))
-            if asset.get("valid_until")
-            else None
-        )
-    except (TypeError, ValueError):
-        return "invalid"
-    if valid_from.tzinfo is None:
-        return "invalid"
-    if observed_at < valid_from:
-        return "scheduled"
-    if valid_until is not None and observed_at >= valid_until:
-        return "expired"
-    return "current"
+    return asset_record_state(asset, observed_at, parse_iso_timestamp)
 
 
 def _asset_public_record(asset: dict, state: str) -> dict:
-    """Expose operational identity fields while withholding owner/behavior notes."""
-    identifiers = (
-        asset.get("identifiers")
-        if isinstance(asset.get("identifiers"), dict)
-        else {}
-    )
-    return {
-        "asset_id": str(asset.get("asset_id") or ""),
-        "state": state,
-        "ip_addresses": list(identifiers.get("ip") or []),
-        "hostnames": list(identifiers.get("hostname") or []),
-        "mac_addresses": list(identifiers.get("mac") or []),
-        "role": str(asset.get("role") or ""),
-        "platform": str(asset.get("platform") or ""),
-        "criticality": str(asset.get("criticality") or "unknown"),
-        "confidence": str(asset.get("confidence") or "unknown"),
-        "valid_from": str(asset.get("valid_from") or ""),
-        "valid_until": str(asset.get("valid_until") or ""),
-        "source_type": str(asset.get("source_type") or ""),
-        "source_ref": str(asset.get("source_ref") or ""),
-    }
+    return asset_public_record(asset, state)
 
 
 def load_dhcp_asset_discovery_state_data() -> tuple[dict, str]:
@@ -712,272 +691,27 @@ def load_dhcp_asset_discovery_state_data() -> tuple[dict, str]:
 
 
 def _mac_address_scope(value: object) -> str:
-    """Classify a normalized MAC without claiming a vendor identity."""
-    text = str(value or "").strip().lower()
-    if not re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", text):
-        return "unknown"
-    first_octet = int(text[:2], 16)
-    if first_octet & 1:
-        return "multicast"
-    if first_octet & 2:
-        return "locally_administered"
-    return "globally_administered"
+    return mac_address_scope(value)
 
 
 def _annotate_exact_ip_dhcp_macs(
     records: list[dict],
     observed_at: dt.datetime,
 ) -> dict:
-    """Attach display-only DHCP MAC evidence to exact-IP asset matches.
-
-    These fields deliberately remain separate from ``mac_addresses``. The
-    latter is authoritative inventory, while the former is passive evidence
-    that still requires operator review.
-    """
     state, state_error = load_dhcp_asset_discovery_state_data()
-    collection = (
-        state.get("collection")
-        if isinstance(state.get("collection"), dict)
-        else {}
+    return annotate_exact_ip_dhcp_macs(
+        records, observed_at, state, state_error, parse_iso_timestamp,
     )
-    status = {
-        "status": str(collection.get("status") or "unknown")[:32],
-        "updated_at": str(state.get("updated_at") or "")[:64],
-        "error": str(
-            state_error or collection.get("last_error") or ""
-        )[:300],
-    }
-    if state_error:
-        return status
-
-    by_ip: dict[str, list[dict]] = {}
-    for raw in state.get("observations", []):
-        if not isinstance(raw, dict):
-            continue
-        mac = str(raw.get("mac_address") or "").strip().lower()
-        scope = _mac_address_scope(mac)
-        if scope in {"unknown", "multicast"}:
-            continue
-        try:
-            address = str(
-                ipaddress.ip_address(str(raw.get("current_ip") or "").strip())
-            )
-            last_seen = parse_iso_timestamp(raw.get("last_seen"))
-            if last_seen.tzinfo is None:
-                raise ValueError("last_seen lacks offset")
-            last_seen = last_seen.astimezone(dt.timezone.utc)
-        except (TypeError, ValueError):
-            continue
-        lease_expires = None
-        if raw.get("lease_expires_at"):
-            try:
-                lease_expires = parse_iso_timestamp(
-                    raw["lease_expires_at"]
-                ).astimezone(dt.timezone.utc)
-            except (TypeError, ValueError):
-                lease_expires = None
-        stale = (
-            last_seen < observed_at - dt.timedelta(hours=24)
-            and (lease_expires is None or lease_expires < observed_at)
-        )
-        by_ip.setdefault(address, []).append(
-            {
-                "mac": mac,
-                "scope": scope,
-                "last_seen": str(raw.get("last_seen") or "")[:64],
-                "last_seen_value": last_seen,
-                "stale": stale,
-            }
-        )
-
-    for record in records:
-        if not isinstance(record, dict):
-            continue
-        candidates: list[dict] = []
-        for raw_address in record.get("ip_addresses") or []:
-            try:
-                address = str(ipaddress.ip_address(str(raw_address).strip()))
-            except ValueError:
-                continue
-            candidates.extend(by_ip.get(address, []))
-        if not candidates:
-            continue
-
-        fresh = [item for item in candidates if not item["stale"]]
-        selected = fresh or candidates
-        by_mac: dict[str, dict] = {}
-        for item in sorted(
-            selected,
-            key=lambda entry: entry["last_seen_value"],
-            reverse=True,
-        ):
-            by_mac.setdefault(str(item["mac"]), item)
-        if len(by_mac) != 1:
-            record["observed_mac_ambiguous"] = True
-            record["observed_mac_source"] = "zeek-dhcp-exact-ip"
-            continue
-
-        evidence = next(iter(by_mac.values()))
-        record["observed_mac_addresses"] = [str(evidence["mac"])]
-        record["observed_mac_source"] = "zeek-dhcp-exact-ip"
-        record["observed_mac_scope"] = str(evidence["scope"])
-        record["observed_mac_last_seen"] = str(evidence["last_seen"])
-        record["observed_mac_stale"] = bool(evidence["stale"])
-    return status
 
 
 def _dhcp_asset_inventory_overlay(
     inventory: dict,
     observed_at: dt.datetime,
 ) -> tuple[dict[str, dict], list[dict], dict]:
-    """Build a display-only DHCP overlay without changing authoritative facts."""
     state, state_error = load_dhcp_asset_discovery_state_data()
-    collection = (
-        state.get("collection")
-        if isinstance(state.get("collection"), dict)
-        else {}
+    return dhcp_asset_inventory_overlay(
+        inventory, observed_at, state, state_error, parse_iso_timestamp,
     )
-    status = {
-        "status": str(collection.get("status") or "unknown")[:32],
-        "updated_at": str(state.get("updated_at") or "")[:64],
-        "error": str(
-            state_error or collection.get("last_error") or ""
-        )[:300],
-    }
-    if state_error:
-        return {}, [], status
-
-    current_assets: dict[str, dict] = {}
-    indexes: dict[str, dict[str, set[str]]] = {
-        "ip": {},
-        "hostname": {},
-        "mac": {},
-    }
-    for raw in inventory.get("assets", []):
-        if (
-            not isinstance(raw, dict)
-            or _asset_record_state(raw, observed_at) != "current"
-        ):
-            continue
-        asset_id = str(raw.get("asset_id") or "")
-        if not asset_id:
-            continue
-        public = _asset_public_record(raw, "current")
-        current_assets[asset_id] = public
-        identifiers = (
-            raw.get("identifiers")
-            if isinstance(raw.get("identifiers"), dict)
-            else {}
-        )
-        for kind in indexes:
-            for raw_value in identifiers.get(kind) or []:
-                value = str(raw_value or "").strip().rstrip(".").lower()
-                if value:
-                    indexes[kind].setdefault(value, set()).add(asset_id)
-
-    overlays: dict[str, dict] = {}
-    discovered: dict[str, dict] = {}
-    raw_observations = (
-        state.get("observations")
-        if isinstance(state.get("observations"), list)
-        else []
-    )
-    for raw in sorted(
-        (item for item in raw_observations if isinstance(item, dict)),
-        key=lambda item: (
-            str(item.get("last_seen") or ""),
-            str(item.get("discovery_id") or ""),
-        ),
-    ):
-        try:
-            current_ip = str(
-                ipaddress.ip_address(str(raw.get("current_ip") or "").strip())
-            )
-            last_seen = parse_iso_timestamp(raw.get("last_seen"))
-            if last_seen.tzinfo is None:
-                raise ValueError("last_seen lacks offset")
-            last_seen = last_seen.astimezone(dt.timezone.utc)
-        except (TypeError, ValueError):
-            continue
-        lease_expires = None
-        if raw.get("lease_expires_at"):
-            try:
-                lease_expires = parse_iso_timestamp(
-                    raw["lease_expires_at"]
-                ).astimezone(dt.timezone.utc)
-            except (TypeError, ValueError):
-                lease_expires = None
-        stale = (
-            last_seen < observed_at - dt.timedelta(hours=24)
-            and (lease_expires is None or lease_expires < observed_at)
-        )
-        if stale:
-            continue
-
-        hostname = (
-            str(raw.get("hostname") or "").strip().rstrip(".").lower()
-        )
-        mac = str(raw.get("mac_address") or "").strip().lower()
-        stable_matches: set[str] = set()
-        if hostname:
-            stable_matches.update(indexes["hostname"].get(hostname, set()))
-        if mac:
-            stable_matches.update(indexes["mac"].get(mac, set()))
-        ip_matches = indexes["ip"].get(current_ip, set())
-
-        if (
-            len(stable_matches) == 1
-            and not (ip_matches - stable_matches)
-        ):
-            asset_id = next(iter(stable_matches))
-            authoritative = current_assets[asset_id]
-            overlays[asset_id] = {
-                "configured_ip_addresses": list(
-                    authoritative.get("ip_addresses") or []
-                ),
-                "ip_addresses": [current_ip],
-                "current_ip_source": "zeek-dhcp",
-                "dhcp_last_seen": str(raw.get("last_seen") or "")[:64],
-                "dhcp_lease_expires_at": str(
-                    raw.get("lease_expires_at") or ""
-                )[:64],
-            }
-            continue
-
-        if stable_matches or ip_matches:
-            # Conflicting or IP-only claims remain in the review table and
-            # cannot change the primary inventory presentation.
-            continue
-
-        discovery_id = str(raw.get("discovery_id") or "")[:64]
-        if not discovery_id:
-            continue
-        asset_id = f"dhcp-{discovery_id}"
-        discovered[asset_id] = {
-            "asset_id": asset_id,
-            "state": "observed",
-            "ip_addresses": [current_ip],
-            "configured_ip_addresses": [],
-            "hostnames": [hostname] if hostname else [],
-            "mac_addresses": [mac] if mac else [],
-            "mac_address_scope": _mac_address_scope(mac),
-            "role": "DHCP-discovered LAN client",
-            "platform": "",
-            "criticality": "unknown",
-            "confidence": "low",
-            "valid_from": str(raw.get("first_seen") or "")[:64],
-            "valid_until": str(raw.get("lease_expires_at") or "")[:64],
-            "source_type": "zeek-dhcp-observation",
-            "source_ref": (
-                "Passive DHCP evidence; operator verification required"
-            ),
-            "current_ip_source": "zeek-dhcp",
-            "dhcp_last_seen": str(raw.get("last_seen") or "")[:64],
-            "dhcp_lease_expires_at": str(
-                raw.get("lease_expires_at") or ""
-            )[:64],
-        }
-    return overlays, list(discovered.values()), status
 
 
 def asset_inventory_response(
@@ -987,29 +721,14 @@ def asset_inventory_response(
 ) -> tuple[int, dict]:
     """Return current authoritative asset-to-address assignments."""
     if ASSET_DATABASE_READ_ENABLED and observed_at is None:
-        query = query or {}
-        allowed = {
-            "limit": (query.get("limit") or ["100"])[0],
-            "offset": (query.get("offset") or ["0"])[0],
-            "search": (query.get("search") or [""])[0],
-            "sort": (query.get("sort") or ["asset_id"])[0],
-            "direction": (query.get("direction") or ["asc"])[0],
-            "state": (query.get("state") or ["current"])[0],
-        }
-        encoded = urlencode(allowed)
+        encoded = urlencode(asset_database_query_parameters(query))
         try:
             payload = alert_store_get_json(
                 f"/assets/inventory?{encoded}",
                 timeout=5.0,
             )
         except RuntimeError as exc:
-            return HTTPStatus.SERVICE_UNAVAILABLE, {
-                "ok": False,
-                "inventory_status": "unavailable",
-                "storage_backend": "postgresql",
-                "error": f"Asset inventory unavailable: {exc}",
-                "assets": [],
-            }
+            return HTTPStatus.SERVICE_UNAVAILABLE, asset_database_unavailable_payload(exc)
         now = dt.datetime.now(dt.timezone.utc)
         records = payload.get("assets")
         discovery_status = (
@@ -1026,51 +745,24 @@ def asset_inventory_response(
         now = now.astimezone()
     now = now.astimezone(dt.timezone.utc)
     inventory, error = load_asset_inventory_data()
-    records = []
-    state_counts = {"current": 0, "scheduled": 0, "expired": 0, "invalid": 0}
-    for raw in inventory.get("assets", []):
-        if not isinstance(raw, dict):
-            continue
-        state = _asset_record_state(raw, now)
-        state_counts[state] = state_counts.get(state, 0) + 1
-        if state == "current":
-            records.append(_asset_public_record(raw, state))
+    records, state_counts = current_asset_projection(
+        inventory, now, parse_iso_timestamp,
+    )
     overlays, discovered, discovery_status = _dhcp_asset_inventory_overlay(
         inventory,
         now,
     )
-    for record in records:
-        overlay = overlays.get(str(record.get("asset_id") or ""))
-        if overlay:
-            record.update(overlay)
-    records.extend(discovered)
-    state_counts["observed"] = len(discovered)
-    records.sort(
-        key=lambda item: (
-            str(item.get("asset_id") or "").lower(),
-            str(item.get("valid_from") or ""),
-        )
+    records = apply_asset_overlays(records, overlays, discovered)
+    return compose_local_asset_inventory_response(
+        inventory=inventory,
+        error=error,
+        observed_at=now,
+        records=records,
+        state_counts=state_counts,
+        discovered=discovered,
+        discovery_status=discovery_status,
+        format_timestamp=format_iso_timestamp,
     )
-    status = str(inventory.get("inventory_status") or "loaded")
-    payload = {
-        "ok": not error,
-        "inventory_status": status,
-        "dhcp_discovery": discovery_status,
-        "generated_at": str(inventory.get("generated_at") or ""),
-        "observed_at": format_iso_timestamp(now, utc_z=True),
-        "records_total": sum(state_counts.values()),
-        "authoritative_asset_count": len(records) - len(discovered),
-        "discovered_asset_count": len(discovered),
-        "current_asset_count": len(records),
-        "current_ip_count": sum(len(item["ip_addresses"]) for item in records),
-        "current_hostname_count": sum(len(item["hostnames"]) for item in records),
-        "state_counts": state_counts,
-        "assets": records,
-    }
-    if error:
-        payload["error"] = f"Asset inventory unavailable: {error}"
-        return HTTPStatus.SERVICE_UNAVAILABLE, payload
-    return HTTPStatus.OK, payload
 
 
 def software_asset_label_snapshot() -> AssetLabelSnapshot:

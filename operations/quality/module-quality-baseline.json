@@ -49,7 +49,7 @@
       "max_lines": 979
     },
     "onion-sentinel-dashboard/report_portal.py": {
-      "max_lines": 9606
+      "max_lines": 9298
     },
     "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py": {
       "max_lines": 2670
@@ -714,15 +714,8 @@
       "max_complexity": 58,
       "max_lines": 209
     },
-    "onion-sentinel-dashboard/report_portal.py::_annotate_exact_ip_dhcp_macs": {
-      "max_complexity": 30
-    },
     "onion-sentinel-dashboard/report_portal.py::_brew_entry_versions": {
       "max_complexity": 21
-    },
-    "onion-sentinel-dashboard/report_portal.py::_dhcp_asset_inventory_overlay": {
-      "max_complexity": 51,
-      "max_lines": 152
     },
     "onion-sentinel-dashboard/report_portal.py::_hermes_auth_readiness_error": {
       "max_complexity": 30
@@ -745,9 +738,6 @@
     },
     "onion-sentinel-dashboard/report_portal.py::admin_action_version_info": {
       "max_complexity": 36
-    },
-    "onion-sentinel-dashboard/report_portal.py::asset_inventory_response": {
-      "max_complexity": 27
     },
     "onion-sentinel-dashboard/report_portal.py::asset_store_write_token": {
       "max_complexity": 20
@@ -1098,5 +1088,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "08742446081abd7b0943a562ea988000cb676fef"
+  "source_release": "e69d1a10d9f2f699f6257befbe6a26b11915b69d"
 }
