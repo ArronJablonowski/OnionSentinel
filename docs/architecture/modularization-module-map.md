@@ -381,6 +381,10 @@ Logical-query outcome accounting and deterministic evidence-gap publication
 live under `onion_sentinel.analysis.query.outcomes`. Grouped broker envelopes,
 nested partial results, zero-success runs, repaired attempts, unreported calls,
 and narrowed time windows retain distinct audit semantics.
+Multi-round entry, one-shot repair scheduling, and post-synthesis exhaustion
+decisions live under `onion_sentinel.analysis.query.stopping` and are surfaced
+through the query state boundary. They consume only bounded state and cannot
+execute a model, authorize a backend, mutate evidence, or widen repair scope.
 The legacy runner functions remain compatibility delegates and inject runtime
 policy explicitly, preserving existing test seams while keeping review-package
 mutation and reviewer-output admission out of the composition root.

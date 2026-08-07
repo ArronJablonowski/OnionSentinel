@@ -588,7 +588,7 @@
       "max_lines": 396
     },
     "n8n/bin/run-local-ai-analysis.py::apply_investigation_query_loop": {
-      "max_complexity": 125,
+      "max_complexity": 120,
       "max_lines": 951
     },
     "n8n/bin/run-local-ai-analysis.py::apply_model_roster": {
@@ -1311,5 +1311,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "44438ddc28774ee6c1ab61ee90d548854e22e731"
+  "source_release": "44880f3fac219f21a8f2db09bbc1dddcb365c9e9"
 }

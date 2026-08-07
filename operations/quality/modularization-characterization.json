@@ -23,13 +23,20 @@
     },
     "query_engine": {
       "positive": [
-        "tests/test_provider_neutral_investigation_loop.py::ProviderNeutralInvestigationLoopTests::test_loop_reuses_exact_route_and_enforces_round_budget"
+        "tests/test_provider_neutral_investigation_loop.py::ProviderNeutralInvestigationLoopTests::test_loop_reuses_exact_route_and_enforces_round_budget",
+        "tests/test_query_pipeline_acceptance.py::QueryPipelineAcceptanceTests::test_success_fixture_is_complete_bound_and_gap_free",
+        "tests/test_query_pipeline_acceptance.py::QueryPipelineAcceptanceTests::test_repair_fixture_preserves_failure_and_resolves_terminal_state"
       ],
       "negative": [
-        "tests/test_provider_neutral_investigation_loop.py::ProviderNeutralInvestigationLoopTests::test_enforce_tool_denial_prevents_query_execution"
+        "tests/test_provider_neutral_investigation_loop.py::ProviderNeutralInvestigationLoopTests::test_enforce_tool_denial_prevents_query_execution",
+        "tests/test_query_pipeline_acceptance.py::QueryPipelineAcceptanceTests::test_budget_fixture_caps_admission_and_stops_after_exhaustion",
+        "tests/test_query_pipeline_acceptance.py::QueryPipelineAcceptanceTests::test_backend_unavailable_fixture_is_rejected_and_first_class_gap"
       ],
       "failure": [
-        "tests/test_provider_neutral_investigation_loop.py::ProviderNeutralInvestigationLoopTests::test_unavailable_security_onion_broker_becomes_evidence_gap"
+        "tests/test_provider_neutral_investigation_loop.py::ProviderNeutralInvestigationLoopTests::test_unavailable_security_onion_broker_becomes_evidence_gap",
+        "tests/test_query_pipeline_acceptance.py::QueryPipelineAcceptanceTests::test_empty_fixture_stops_without_inventing_failure_or_gap",
+        "tests/test_query_pipeline_acceptance.py::QueryPipelineAcceptanceTests::test_malformed_fixture_fails_closed_as_unresolved_error",
+        "tests/test_query_pipeline_acceptance.py::QueryPipelineAcceptanceTests::test_stopping_fixture_prioritizes_round_exhaustion_deterministically"
       ]
     },
     "review_pipeline": {

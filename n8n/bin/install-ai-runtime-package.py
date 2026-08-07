@@ -48,6 +48,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.query.request",
     "onion_sentinel.analysis.query.security_onion",
     "onion_sentinel.analysis.query.state",
+    "onion_sentinel.analysis.query.stopping",
     "onion_sentinel.analysis.query.window",
     "onion_sentinel.analysis.query.execution.enrichment",
     "onion_sentinel.analysis.query.execution.derived",

@@ -6826,7 +6826,7 @@ def apply_investigation_query_loop(
         repair_round = bool(pending_repair_scopes)
         if repair_round:
             query_planning_repair_produced_requests = bool(raw_requests)
-        if not raw_requests:
+        if _query_state().round_entry(raw_requests).stop:
             break
         observe_harness(
             lambda: harness_runtime.phase(
@@ -7164,11 +7164,18 @@ def apply_investigation_query_loop(
         )
         remaining_rounds = remaining.rounds
         remaining_queries = remaining.queries
-        repair_scheduled = False
-        if round_repair_scopes and not query_planning_repair_attempted:
-            bounded_candidate_items = list(
-                round_repair_scopes.values()
-            )[:MAX_INVESTIGATION_QUERIES_PER_ROUND]
+        repair_decision = _query_state().schedule_repair(
+            list(round_repair_scopes.values()),
+            already_attempted=query_planning_repair_attempted,
+            remaining_rounds=remaining_rounds,
+            remaining_queries=remaining_queries,
+            maximum_queries_per_round=(
+                MAX_INVESTIGATION_QUERIES_PER_ROUND
+            ),
+        )
+        repair_scheduled = repair_decision.scheduled
+        candidate_items = list(repair_decision.candidates)
+        if repair_decision.considered:
             query_planning_repair_candidates = [
                 {
                     "query_id": item["scope"]["query_id"],
@@ -7198,14 +7205,10 @@ def apply_investigation_query_loop(
                         item["reason"]
                     ),
                 }
-                for item in bounded_candidate_items
+                for item in repair_decision.considered
             ]
-            candidate_items = bounded_candidate_items[
-                :max(0, remaining_queries)
-            ]
-            if candidate_items and remaining_rounds > 0:
+            if repair_scheduled:
                 query_planning_repair_attempted = True
-                repair_scheduled = True
                 pending_repair_scopes = {
                     item["scope"]["query_id"]: item["scope"]
                     for item in candidate_items
@@ -7236,14 +7239,9 @@ def apply_investigation_query_loop(
                         for item in candidate_items
                     ],
                 }
-            elif remaining_rounds <= 0:
+            else:
                 query_planning_repair_not_attempted_reason = (
-                    "no query round remained within the configured call "
-                    "budget"
-                )
-            elif remaining_queries <= 0:
-                query_planning_repair_not_attempted_reason = (
-                    "no query request budget remained"
+                    repair_decision.not_attempted_reason
                 )
         if repair_scheduled:
             # The scope is already normalized, bounded, and derived only from
@@ -7396,7 +7394,9 @@ def apply_investigation_query_loop(
             if harness_runtime is not None
             else None
         )
-        if remaining_rounds <= 0 or remaining_queries <= 0:
+        stop = _query_state().after_follow_up(
+            remaining_rounds, remaining_queries)
+        if stop.stop:
             terminal_count = len(
                 pop_investigation_query_requests(response)
             )
