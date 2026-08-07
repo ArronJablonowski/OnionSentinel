@@ -14,6 +14,11 @@ from dashboard_alert_detail_markdown import markdown_to_html
 from dashboard_alert_detail_sections import severity_label_from_row
 from dashboard_alert_detail_values import nested_value
 from dashboard_alert_ai_workflow import ai_analysis_for_row, ai_workflow_status_for_row
+from dashboard_alert_pcap_workflow import (
+    PcapWorkflowConfig,
+    pcap_analysis_for_row,
+    pcap_status_for_row,
+)
 from dashboard_alert_report_model import AlertReport, CRITICALITY_ORDER
 from dashboard_alert_repository import alert_group_key, raw_alert_object, row_item, safe_int
 from dashboard_pcap_components import render_pcap_evidence_markdown
@@ -30,14 +35,13 @@ class AlertReportFactoryConfig:
 
     database_path: Path
     markdown_sources: tuple[Path, ...]
+    pcap_analysis_directory: Path
 
 
 @dataclass(frozen=True)
 class AlertReportFactoryServices:
     """Stateful status services kept outside the pure report transformation."""
 
-    pcap_status_for_row: Callable[[object, dict[str, object] | None], StatusTuple]
-    pcap_analysis_for_row: Callable[[object, dict[str, object] | None], dict | None]
     finalize_detail_report_html: Callable[[str, str, tuple[str, ...]], str]
 
 
@@ -146,6 +150,7 @@ def workflow_evidence(
     running_ai_alert_ids: set[str],
     pcap_index: dict[str, object] | None,
     ai_analysis_min_severity: str,
+    config: AlertReportFactoryConfig,
     services: AlertReportFactoryServices,
 ) -> ReportWorkflowEvidence:
     """Resolve all stateful workflow evidence through injected services."""
@@ -157,8 +162,9 @@ def workflow_evidence(
         running_ai_alert_ids, ai_analysis_min_severity,
     )
     enrichment_status = public_enrichment_status(row_item(row, "enrichment_json"))
-    pcap_status = services.pcap_status_for_row(row, pcap_index)
-    pcap_analysis = services.pcap_analysis_for_row(row, pcap_index)
+    pcap_config = PcapWorkflowConfig(config.database_path, config.pcap_analysis_directory)
+    pcap_status = pcap_status_for_row(row, pcap_config, pcap_index)
+    pcap_analysis = pcap_analysis_for_row(row, pcap_config, pcap_index)
     generated_at = (pcap_analysis or {}).get("generated_at") or ""
     pcap_details = render_pcap_evidence_markdown(
         pcap_status, pcap_analysis, normalize_iso_display_text(generated_at),
@@ -244,7 +250,7 @@ def build_alert_report(
     alert_id = str(first_value(row_item(row, "alert_id")))
     workflow = workflow_evidence(
         row, ai_analysis_by_alert_id, ai_prompts_by_alert_id, running_ai_alert_ids,
-        pcap_index, ai_analysis_min_severity, services,
+        pcap_index, ai_analysis_min_severity, config, services,
     )
     source, rel_source, source_text, size = source_attachment(
         row, markdown_by_alert_id.get(alert_id), config,

@@ -60,11 +60,7 @@ from dashboard_time_format import (  # noqa: E402
     parse_iso_datetime,
     parse_iso_timestamp,
 )
-from dashboard_pcap_components import build_pcap_analysis_index, render_pcap_evidence_markdown  # noqa: E402
-from dashboard_pcap_request_index import (  # noqa: E402
-    load_pcap_request_index,
-    request_for_alert,
-)
+from dashboard_pcap_components import render_pcap_evidence_markdown  # noqa: E402
 from dashboard_timeline_components import alert_seen_timeline_html  # noqa: E402
 from dashboard_system_health_components import (  # noqa: E402
     inject_system_health_assets,
@@ -160,6 +156,13 @@ from dashboard_alert_ai_workflow import (  # noqa: E402
     is_test_alert_id,
     row_is_ai_backlog_eligible,
     severity_meets_analysis_threshold,
+)
+from dashboard_alert_pcap_workflow import (  # noqa: E402
+    PcapWorkflowConfig,
+    pcap_analysis_for_row as resolve_pcap_analysis_for_row,
+    pcap_analysis_index as resolve_pcap_analysis_index,
+    pcap_request_status_for_row as resolve_pcap_request_status_for_row,
+    pcap_status_for_row as resolve_pcap_status_for_row,
 )
 from dashboard_flow_page import (  # noqa: E402
     FLOW_PAGE_CSS,
@@ -2101,65 +2104,31 @@ def directory_size_bytes(path: Path) -> int:
 
 def pcap_analysis_index() -> dict[str, object]:
     """Index parsed PCAP evidence once per dashboard build for fast row lookups."""
-    return build_pcap_analysis_index(PCAP_ANALYSIS_DIR)
+    return resolve_pcap_analysis_index(PcapWorkflowConfig(DB_PATH, PCAP_ANALYSIS_DIR))
 
 
 def pcap_request_status_for_row(
     row: sqlite3.Row | dict,
     index: dict[str, object] | None = None,
 ) -> dict:
-    """Resolve broker state from a build-wide request index.
-
-    A direct call still works for tests and recovery utilities, but normal
-    dashboard generation passes the index loaded alongside the alert query so
-    the number of SQLite opens remains constant as alert volume grows.
-    """
-    group_id = hashlib.sha1((row['alert_group_key'] or alert_group_key(row)).encode('utf-8')).hexdigest()[:12]
-    alert_id = str(row['alert_id'] or '').strip()
-    request_index = index or load_pcap_request_index(DB_PATH)
-    return request_for_alert(request_index, group_id=group_id, alert_id=alert_id)
+    """Resolve broker state through the configured PCAP workflow boundary."""
+    return resolve_pcap_request_status_for_row(
+        row, PcapWorkflowConfig(DB_PATH, PCAP_ANALYSIS_DIR), index,
+    )
 
 
 def pcap_status_for_row(row: sqlite3.Row | dict, index: dict[str, object] | None = None) -> tuple[str, str, str]:
     """Return a compact PCAP analysis status for the alert table."""
-    pcap_index = index or pcap_analysis_index()
-    group_id = hashlib.sha1((row['alert_group_key'] or alert_group_key(row)).encode('utf-8')).hexdigest()[:12]
-    alert_id = str(row['alert_id'] or '').strip()
-    if group_id in pcap_index.get('group_ids', set()) or alert_id in pcap_index.get('alert_ids', set()):
-        return ('analyzed', 'Analyzed', 'Parsed Zeek/TShark PCAP analysis is available for this detection group')
-    request_record = pcap_request_status_for_row(row, pcap_index)
-    request_status = str(request_record.get('status') or '').strip().lower()
-    if request_status in {'pending', 'claimed', 'fulfilled'}:
-        label = 'Queued' if request_status in {'pending', 'claimed'} else 'Parsing'
-        return ('queued', label, f'PCAP request is {request_status}; parsed analysis is not available yet')
-    if request_status == 'failed':
-        error = str(request_record.get('error') or '').strip()
-        if 'no matching packets' in error.lower():
-            if not request_record.get('used_capture_file'):
-                return ('error', 'Retry', 'Older PCAP request did not include the Security Onion capture file hint; retry the request before treating this as no packets')
-            return ('no-packets', 'No Packets', 'Security Onion found no matching packets for the requested flow/window')
-        return ('error', 'Failed', error[:180] if error else 'PCAP request failed before parsed analysis was produced')
-    return ('none', 'None', 'No parsed PCAP analysis is available for this detection group')
+    return resolve_pcap_status_for_row(
+        row, PcapWorkflowConfig(DB_PATH, PCAP_ANALYSIS_DIR), index,
+    )
 
 
 def pcap_analysis_for_row(row: sqlite3.Row | dict, index: dict[str, object] | None = None) -> dict | None:
     """Return the newest parsed PCAP evidence artifact for this grouped alert."""
-    pcap_index = index or pcap_analysis_index()
-    group_id = hashlib.sha1((row['alert_group_key'] or alert_group_key(row)).encode('utf-8')).hexdigest()[:12]
-    alert_id = str(row['alert_id'] or '').strip()
-    for bucket, key in (
-        ('records_by_group_id', group_id),
-        ('records_by_alert_id', alert_id),
-    ):
-        records = pcap_index.get(bucket) if isinstance(pcap_index.get(bucket), dict) else {}
-        record = records.get(key)
-        if isinstance(record, dict):
-            return record
-    request_record = pcap_request_status_for_row(row, pcap_index)
-    request_id = str(request_record.get('request_id') or '').strip()
-    records = pcap_index.get('records_by_request_id') if isinstance(pcap_index.get('records_by_request_id'), dict) else {}
-    record = records.get(request_id)
-    return record if isinstance(record, dict) else None
+    return resolve_pcap_analysis_for_row(
+        row, PcapWorkflowConfig(DB_PATH, PCAP_ANALYSIS_DIR), index,
+    )
 
 
 def sqlite_report_markdown(
@@ -2234,8 +2203,6 @@ def report_from_sqlite_row(
     ai_analysis_min_severity: str = 'informational',
 ) -> AlertReport:
     services = AlertReportFactoryServices(
-        pcap_status_for_row=pcap_status_for_row,
-        pcap_analysis_for_row=pcap_analysis_for_row,
         finalize_detail_report_html=finalize_detail_report_html,
     )
     return build_alert_report(
@@ -2246,7 +2213,7 @@ def report_from_sqlite_row(
         running_ai_alert_ids,
         pcap_index,  # type: ignore[arg-type]
         ai_analysis_min_severity,
-        AlertReportFactoryConfig(DB_PATH, MARKDOWN_SOURCES),
+        AlertReportFactoryConfig(DB_PATH, MARKDOWN_SOURCES, PCAP_ANALYSIS_DIR),
         services,
     )
 

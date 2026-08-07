@@ -286,6 +286,19 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_alert_pcap_workflow.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_pcap_workflow.py",
+      "required_symbols": [
+        "PcapWorkflowConfig",
+        "grouped_alert_id",
+        "pcap_analysis_for_row",
+        "pcap_analysis_index",
+        "pcap_request_status_for_row",
+        "pcap_status_for_row"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_flow_page.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_flow_page.py",

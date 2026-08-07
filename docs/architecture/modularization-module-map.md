@@ -486,6 +486,12 @@ running/queued/analyzed/skipped status contract. The report factory consumes
 this policy directly, while the builder re-exports its public functions and
 labels for compatibility with settings rendering and existing callers.
 
+`dashboard_alert_pcap_workflow.py` owns the join between parsed PCAP artifacts,
+broker request state, and grouped alert identity. It resolves analyzed,
+queued/parsing, retry, no-packets, failed, and absent states and selects parsed
+records by group, alert, then request ID. Runtime paths enter through
+`PcapWorkflowConfig`; builder wrappers preserve the prior public call shape.
+
 `dashboard_flow_page.py` owns the pure data-flow renderer, enrichment-service
 tiles, responsive pipeline styles, and privacy-toggle client. The builder
 assembles `FlowPageViewModel` from live alert/report/model/notification metrics

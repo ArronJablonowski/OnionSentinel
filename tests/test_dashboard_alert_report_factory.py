@@ -65,8 +65,6 @@ class DashboardAlertReportFactoryTests(unittest.TestCase):
 
     def services(self):
         return self.factory.AlertReportFactoryServices(
-            pcap_status_for_row=lambda *_args: ("none", "None", "No parsed PCAP"),
-            pcap_analysis_for_row=lambda *_args: None,
             finalize_detail_report_html=lambda rendered, timeline, issues: (
                 f'<article data-issues="{len(issues)}">{timeline}{rendered}</article>'
             ),
@@ -74,7 +72,7 @@ class DashboardAlertReportFactoryTests(unittest.TestCase):
 
     def test_factory_builds_complete_model_from_normalized_row(self) -> None:
         row = report_row()
-        config = self.factory.AlertReportFactoryConfig(Path("alerts.sqlite3"), ())
+        config = self.factory.AlertReportFactoryConfig(Path("alerts.sqlite3"), (), Path("pcap"))
         analyses = {
             "alert-1": {
                 "response": {
@@ -88,7 +86,7 @@ class DashboardAlertReportFactoryTests(unittest.TestCase):
         }
 
         report = self.factory.build_alert_report(
-            row, {}, analyses, {}, set(), {}, "medium", config, self.services(),
+            row, {}, analyses, {}, set(), {"empty": True}, "medium", config, self.services(),
         )
 
         self.assertEqual(report.title, "[MEDIUM] Example Rule")
@@ -107,10 +105,10 @@ class DashboardAlertReportFactoryTests(unittest.TestCase):
             source_root = Path(directory)
             source = source_root / "nested" / "alert.md"
             attachment = (source, "## Analyst Notes\n\nAttached evidence.", types.SimpleNamespace(st_size=321))
-            config = self.factory.AlertReportFactoryConfig(Path("alerts.sqlite3"), (source_root,))
+            config = self.factory.AlertReportFactoryConfig(Path("alerts.sqlite3"), (source_root,), Path("pcap"))
 
             report = self.factory.build_alert_report(
-                report_row(), {"alert-1": attachment}, {}, {}, set(), {},
+                report_row(), {"alert-1": attachment}, {}, {}, set(), {"empty": True},
                 "medium", config, self.services(),
             )
 
@@ -122,10 +120,10 @@ class DashboardAlertReportFactoryTests(unittest.TestCase):
     def test_missing_rule_name_retains_the_legacy_report_identity(self) -> None:
         row = report_row()
         row["rule_name"] = ""
-        config = self.factory.AlertReportFactoryConfig(Path("alerts.sqlite3"), ())
+        config = self.factory.AlertReportFactoryConfig(Path("alerts.sqlite3"), (), Path("pcap"))
 
         report = self.factory.build_alert_report(
-            row, {}, {}, {}, set(), {}, "medium", config, self.services(),
+            row, {}, {}, {}, set(), {"empty": True}, "medium", config, self.services(),
         )
 
         self.assertEqual(report.title, "[MEDIUM] Security Onion Alert")
