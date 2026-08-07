@@ -390,6 +390,14 @@ through explicit callback ports. `report_portal.py` retains the public function
 signature and binds existing status policies; the presenter performs no
 database, filesystem, process, or network access.
 
+`portal_soc_ai_status.py` owns SOC AI-status precedence and reconciliation. It
+gives pending reanalysis prompts and actual analysis artifacts priority over
+retained UI state, preserves historical analyses below a newly raised severity
+threshold, requeues stale eligible states, and emits explicit test, filter, and
+threshold skip reasons. `report_portal.py` retains filesystem/database-backed
+artifact discovery and static report loading as injected ports; the policy
+module performs no direct I/O.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and

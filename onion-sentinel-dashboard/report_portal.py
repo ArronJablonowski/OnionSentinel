@@ -118,6 +118,11 @@ from portal_soc_alert_presenter import (
     SocAlertPresentationDependencies,
     compose_soc_alert_row,
 )
+from portal_soc_ai_status import (
+    SocAiStatusPolicy,
+    compose_soc_ai_status,
+    severity_meets_threshold as _modular_severity_meets_threshold,
+)
 from portal_incident_actions import (
     IncidentStatusPayloadError,
     normalize_incident_status_payload,
@@ -7919,21 +7924,8 @@ def soc_alert_severity_meets_analysis_threshold(
     severity: object,
     threshold: object,
 ) -> bool:
-    normalized_severity = str(severity or "informational").strip().lower()
-    normalized_threshold = str(threshold or "informational").strip().lower()
-    if normalized_severity == "info":
-        normalized_severity = "informational"
-    if normalized_threshold == "info":
-        normalized_threshold = "informational"
-    if normalized_threshold == "disabled":
-        return False
-    if normalized_threshold not in SOC_ANALYSIS_SEVERITY_ORDER:
-        normalized_threshold = "informational"
-    if normalized_severity not in SOC_ANALYSIS_SEVERITY_ORDER:
-        return False
-    return (
-        SOC_ANALYSIS_SEVERITY_ORDER.index(normalized_severity)
-        >= SOC_ANALYSIS_SEVERITY_ORDER.index(normalized_threshold)
+    return _modular_severity_meets_threshold(
+        severity, threshold, tuple(SOC_ANALYSIS_SEVERITY_ORDER),
     )
 
 
@@ -7944,105 +7936,18 @@ def soc_alert_group_ai_status(
     ai_artifacts: dict[str, object] | None = None,
     analysis_min_severity: str = "informational",
 ) -> dict:
-    alert_id = str(row["alert_id"] or "") if "alert_id" in row.keys() else ""
-    prompt_mtime_by_alert = ai_artifacts.get("prompt_mtime_by_alert", {}) if isinstance(ai_artifacts, dict) else {}
-    analysis_mtime_by_alert = ai_artifacts.get("analysis_mtime_by_alert", {}) if isinstance(ai_artifacts, dict) else {}
-    analysis_group_ids = ai_artifacts.get("analysis_group_ids", set()) if isinstance(ai_artifacts, dict) else set()
-    prompt_mtime = float(prompt_mtime_by_alert.get(alert_id, 0.0)) if isinstance(prompt_mtime_by_alert, dict) else 0.0
-    analysis_mtime = float(analysis_mtime_by_alert.get(alert_id, 0.0)) if isinstance(analysis_mtime_by_alert, dict) else 0.0
-    if alert_id and not ai_artifacts:
-        prompt_mtime = soc_alert_latest_prompt_mtime(alert_id)
-        analysis_mtime = soc_alert_latest_analysis_mtime(alert_id)
-    if alert_id and prompt_mtime > analysis_mtime:
-        return {
-            "ai_status_key": "queued",
-            "ai_status_label": "Queued",
-            "ai_status_detail": "Manual SOC Analyst reanalysis prompt package is waiting for the local AI worker",
-        }
-
-    reports = ai_reports if isinstance(ai_reports, dict) else soc_alert_static_ai_reports()
-    status = reports.get(group_id)
-    has_artifact = (
-        group_id in analysis_group_ids
-        if ai_artifacts
-        else soc_alert_group_has_analysis_artifact(row)
+    policy = SocAiStatusPolicy(
+        severity_order=tuple(SOC_ANALYSIS_SEVERITY_ORDER),
+        eligible_filter_statuses=frozenset(SOC_ALERT_AI_ELIGIBLE_FILTER_STATUSES),
+        test_prefixes=SOC_ALERT_TEST_PREFIXES,
+        latest_prompt_mtime=soc_alert_latest_prompt_mtime,
+        latest_analysis_mtime=soc_alert_latest_analysis_mtime,
+        static_reports=soc_alert_static_ai_reports,
+        group_has_artifact=soc_alert_group_has_analysis_artifact,
     )
-    triage_level = (
-        row["triage_level"]
-        if "triage_level" in row.keys()
-        else "informational"
+    return compose_soc_ai_status(
+        row, group_id, ai_reports, ai_artifacts, analysis_min_severity, policy,
     )
-    normalized_triage_level = str(triage_level or "").strip().lower()
-    if normalized_triage_level == "info":
-        normalized_triage_level = "informational"
-    if (
-        not has_artifact
-        and normalized_triage_level not in SOC_ANALYSIS_SEVERITY_ORDER
-    ):
-        return {
-            "ai_status_key": "not-queued",
-            "ai_status_label": "Skipped",
-            "ai_status_detail": (
-                f"Unrecognized severity {normalized_triage_level or 'blank'} "
-                "is not eligible for automatic AI analysis"
-            ),
-        }
-    if (
-        not has_artifact
-        and not soc_alert_severity_meets_analysis_threshold(
-            triage_level,
-            analysis_min_severity,
-        )
-    ):
-        threshold_label = str(analysis_min_severity or "informational").strip().title()
-        return {
-            "ai_status_key": "not-queued",
-            "ai_status_label": "Skipped",
-            "ai_status_detail": (
-                f"Below configured {threshold_label} automatic AI-analysis minimum"
-            ),
-        }
-    if isinstance(status, dict):
-        key = str(status.get("ai_status_key") or "queued")
-        filter_status = str(row["filter_status"] or "accepted").strip().lower() if "filter_status" in row.keys() else "accepted"
-        if key in {"analyzed", "analyzing"} and not has_artifact:
-            return {
-                "ai_status_key": "queued",
-                "ai_status_label": "Queued",
-                "ai_status_detail": "The previous AI status was stale; no AI analysis artifact exists for this group",
-            }
-        if key in {"not-queued", "skipped"} and filter_status in SOC_ALERT_AI_ELIGIBLE_FILTER_STATUSES and not has_artifact:
-            return {
-                "ai_status_key": "queued",
-                "ai_status_label": "Queued",
-                "ai_status_detail": "No AI analysis artifact exists for this eligible group; queued for the scheduled local AI analysis worker",
-            }
-        return {
-            "ai_status_key": key,
-            "ai_status_label": str(status.get("ai_status_label") or "Queued"),
-            "ai_status_detail": str(status.get("ai_status_detail") or ""),
-        }
-
-    if alert_id and alert_id.startswith(SOC_ALERT_TEST_PREFIXES):
-        return {
-            "ai_status_key": "not-queued",
-            "ai_status_label": "Skipped",
-            "ai_status_detail": "Test/validation alert is intentionally excluded from automatic local AI analysis",
-        }
-
-    filter_status = str(row["filter_status"] or "accepted").strip().lower() if "filter_status" in row.keys() else "accepted"
-    if filter_status not in SOC_ALERT_AI_ELIGIBLE_FILTER_STATUSES:
-        return {
-            "ai_status_key": "not-queued",
-            "ai_status_label": "Skipped",
-            "ai_status_detail": f"Filter status {filter_status or 'blank'} is not eligible for automatic local AI analysis",
-        }
-
-    return {
-        "ai_status_key": "queued",
-        "ai_status_label": "Queued",
-        "ai_status_detail": "Queued for the scheduled local AI analysis worker",
-    }
 
 
 SOC_ALERT_DETECTION_OUTCOME_LABELS = {

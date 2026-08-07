@@ -177,6 +177,16 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_soc_ai_status.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_ai_status.py",
+      "required_symbols": [
+        "SocAiStatusPolicy",
+        "compose_soc_ai_status",
+        "severity_meets_threshold"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_catalog_routes.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py",
