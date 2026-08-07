@@ -410,6 +410,11 @@ Bounded observable promotion lives under
 `onion_sentinel.analysis.query.observables`. Only successful or partial rows
 from the trusted Security Onion and PCAP/Zeek broker classes reach the injected
 validator; existing and new values remain stable, deduplicated, and capped.
+Deterministic repair-stage artifacts live under
+`onion_sentinel.analysis.query.repair_stage`. The authoritative engine decision
+is converted into bounded audit metadata, exact pending scopes, a secret-safe
+single-attempt prompt artifact, and exact reconstructed requests without a
+model call or any opportunity to widen query authority.
 The legacy runner functions remain compatibility delegates and inject runtime
 policy explicitly, preserving existing test seams while keeping review-package
 mutation and reviewer-output admission out of the composition root.

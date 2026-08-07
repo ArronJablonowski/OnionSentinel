@@ -6632,6 +6632,7 @@ def apply_investigation_query_loop(
         engine as engine_module,
         observables as observables_module,
         planning_retry as planning_retry_module,
+        repair_stage as repair_stage_module,
         round_admission as round_admission_module,
         round_result as round_result_module,
     )
@@ -6976,88 +6977,37 @@ def apply_investigation_query_loop(
         )
         engine_state = repair_transition.state
         repair_decision = repair_transition.repair
-        repair_scheduled = repair_decision.scheduled
-        candidate_items = list(repair_decision.candidates)
-        if repair_decision.considered:
-            query_planning_repair_candidates = [
-                {
-                    "query_id": item["scope"]["query_id"],
-                    "backend": item["scope"]["backend"],
-                    "pack": item["scope"]["pack"],
-                    "trigger": item["trigger"],
-                    "scope_digest": (
-                        investigation_query_canonical_digest(
-                            item["scope"]
-                        )
-                    ),
-                    "original_event_tuple_fields": sorted(
-                        (
-                            item["scope"].get("event_tuple")
-                            if isinstance(
-                                item["scope"].get("event_tuple"),
-                                dict,
-                            )
-                            else {}
-                        )
-                    ),
-                    "observable_scope_source": item["scope"].get(
-                        "observable_scope_source",
-                        "original_valid_scope",
-                    ),
-                    "error_digest": canonical_payload_digest(
-                        item["reason"]
-                    ),
-                }
-                for item in repair_decision.considered
-            ]
-            if repair_scheduled:
-                pending_repair_scopes = {
-                    item["scope"]["query_id"]: item["scope"]
-                    for item in candidate_items
-                }
-                prompt_package["investigation_query_planning_repair"] = {
-                    "attempt": 1,
-                    "maximum_attempts": 1,
-                    "remaining_query_rounds": 1,
-                    "remaining_queries": min(
-                        len(candidate_items),
-                        remaining_queries,
-                    ),
-                    "instruction": (
-                        "Repair only the listed rejected query IDs. Preserve "
-                        "each backend, purpose, pack, aggregation, and exact "
-                        "observable set; the repaired time window must be equal "
-                        "or narrower, size must not increase, and any valid "
-                        "event_tuple must be preserved exactly. "
-                        "Do not emit any unrelated query. This is the only "
-                        "planning repair attempt."
-                    ),
-                    "rejected_queries": [
-                        investigation_query_repair_prompt_entry(
-                            item["scope"],
-                            reason=item["reason"],
-                            trigger=item["trigger"],
-                        )
-                        for item in candidate_items
-                    ],
-                }
-            else:
-                query_planning_repair_not_attempted_reason = (
-                    repair_decision.not_attempted_reason
-                )
+        repair_stage = repair_stage_module.build(
+            repair_decision,
+            remaining_queries=remaining_queries,
+            dependencies=repair_stage_module.Dependencies(
+                canonical_digest=investigation_query_canonical_digest,
+                error_digest=canonical_payload_digest,
+                prompt_entry=investigation_query_repair_prompt_entry,
+                request_from_scope=investigation_query_request_from_repair_scope,
+            ),
+        )
+        repair_scheduled = repair_stage.scheduled
+        if repair_stage.audit_candidates:
+            query_planning_repair_candidates = list(
+                repair_stage.audit_candidates
+            )
+        if repair_stage.not_attempted_reason:
+            query_planning_repair_not_attempted_reason = (
+                repair_stage.not_attempted_reason
+            )
         if repair_scheduled:
             # The scope is already normalized, bounded, and derived only from
             # collector-owned authorization context. Execute that exact scope
             # in the one allowed repair round instead of asking a model to
             # restate it. This removes a non-deterministic failure mode without
             # granting any new query authority.
+            pending_repair_scopes = dict(repair_stage.pending_scopes)
+            prompt_package["investigation_query_planning_repair"] = (
+                repair_stage.prompt
+            )
             response = {
-                "investigation_query_requests": [
-                    investigation_query_request_from_repair_scope(
-                        item["scope"]
-                    )
-                    for item in candidate_items
-                ],
+                "investigation_query_requests": list(repair_stage.requests),
             }
             prompt_package.pop(
                 "investigation_query_planning_repair",
