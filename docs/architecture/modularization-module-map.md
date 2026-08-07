@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (6,166
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (6,109
 lines).
 
 | Boundary | Responsibilities |
@@ -428,6 +428,10 @@ pagination, and per-agent totals. `dashboard_reports_page.py` owns immutable
 current-run, activity-row, and page view models plus the pure initial renderer.
 The builder retains bounded JSONL/current-state reads and converts persisted
 execution provenance into those presentation models.
+
+`dashboard_executive_home_assets.py` owns Executive Home responsive styles and
+the viewer-local hour-label client. The builder re-exports those assets while
+the chart/KPI view-model boundary is extracted separately.
 
 ## Alert Store
 
