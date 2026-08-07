@@ -1746,6 +1746,28 @@ def _evidence_traversal_dependencies():
     )
 
 
+def _evidence_contract():
+    _provider_routing()
+    from onion_sentinel.analysis.evidence import contract
+    return contract
+
+
+def _evidence_contract_dependencies():
+    module = _evidence_contract()
+    return module.Dependencies(
+        registry_factory=_evidence_registry_instance,
+        traverse=lambda value, path, sink: _evidence_traversal().visit(
+            value, path, sink, _evidence_traversal_policy(),
+            _evidence_traversal_dependencies(),
+        ),
+        process_columnar=lambda value, sink: _evidence_columnar().process(
+            value, sink, _evidence_columnar_policy(),
+            _evidence_columnar_dependencies(),
+        ),
+        has_structured_authorization=_has_structured_authorization_evidence,
+    )
+
+
 def _conclusion_authorization_evidence():
     _provider_routing()
     from onion_sentinel.analysis.conclusions import authorization_evidence
@@ -3935,104 +3957,17 @@ def result_bound_query_reference(
 
 
 def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any]:
-    """Build a bounded allowlist of model-citeable, collector-owned references.
-
-    The list intentionally contains identifiers and query provenance, not event
-    bodies. Query results with zero returned rows remain citeable as negative or
-    collection evidence but are marked non-corroborating so they cannot inflate
-    confidence in a positive conclusion.
-    """
-    reference_registry = _evidence_registry_instance()
-    add = reference_registry.add
-
-    # Add only section-level references whose mere presence is itself a
-    # collector-owned fact. Evidence containers whose usefulness depends on
-    # query status or returned rows are represented by the exact references
-    # discovered below; a generic container name must not let an empty/failed
-    # query inflate confidence.
-    section_references = {
-        "alert": True,
-        "grouped_alert_context": True,
-        # A nonempty enrichment/analyst container may contain only failures,
-        # stale notes, or collection metadata. Exact successful child evidence
-        # remains citeable below, but container presence is not corroboration.
-        "public_enrichment": False,
-        "detection_validation": True,
-        "asset_context": False,
-        "analyst_state": False,
-    }
-    for section, corroborating in section_references.items():
-        if prompt_package.get(section) not in (None, {}, []):
-            add(
-                section,
-                source=section,
-                source_class=section,
-                corroborating=corroborating,
-            )
-
-    alert = prompt_package.get("alert")
-    if isinstance(alert, dict) and alert.get("alert_id"):
-        add(
-            f"alert:{alert.get('alert_id')}",
-            source="alert",
-            source_class="alert",
-        )
-
-    # Authorization is decision evidence only when the complete canonical
-    # envelope covers the selected event. Export its immutable digest-bound
-    # entry refs rather than the generic container name so a model cannot cite
-    # campaign membership, prose, or a malformed authorization as proof.
-    if _has_structured_authorization_evidence(prompt_package):
-        authorization = prompt_package.get("authorization_evidence")
-        assert isinstance(authorization, dict)
-        for entry in authorization["entries"]:
-            add(
-                entry["evidence_ref"],
-                source="authorization_evidence.entries",
-                source_class="authorization_evidence",
-                status="operator_authorized",
-            )
-
-    def visit(value: Any, path: tuple[str, ...] = ()) -> None:
-        _evidence_traversal().visit(
-            value, path, reference_registry, _evidence_traversal_policy(),
-            _evidence_traversal_dependencies(),
-        )
-
-    def visit_columnar_investigation_results(value: Any) -> bool:
-        return _evidence_columnar().process(
-            value, reference_registry, _evidence_columnar_policy(),
-            _evidence_columnar_dependencies(),
-        )
-
-    iterative_results = prompt_package.get("investigation_query_results")
-    columnar_claimed = visit_columnar_investigation_results(
-        iterative_results
+    return _evidence_contract().build(
+        prompt_package, _evidence_contract_dependencies()
     )
-    for section in (
-        "grouped_alert_context",
-        "public_enrichment",
-        "pcap_evidence",
-        "detection_validation",
-        "asset_context",
-        "incident_response_evidence",
-        "live_osquery_evidence",
-    ):
-        visit(prompt_package.get(section), (section,))
-    if not columnar_claimed:
-        visit(
-            iterative_results,
-            ("investigation_query_results",),
-        )
-    return reference_registry.contract()
 
 
-def attach_evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any]:
-    """Attach or refresh the bounded evidence-reference allowlist in place."""
-    prompt_package["evidence_reference_contract"] = evidence_reference_contract(
-        prompt_package
+def attach_evidence_reference_contract(
+    prompt_package: dict[str, Any],
+) -> dict[str, Any]:
+    return _evidence_contract().attach(
+        prompt_package, _evidence_contract_dependencies()
     )
-    return prompt_package
 
 
 def validate_evidence_references(
