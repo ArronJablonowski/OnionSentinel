@@ -19,6 +19,12 @@ BUILDER = (
     / "scripts"
     / "build_soc_alerts_dashboard.py"
 )
+ASSET_PAGE = (
+    ROOT
+    / "onion-sentinel-dashboard"
+    / "scripts"
+    / "dashboard_asset_inventory_page.py"
+)
 
 
 class PostgresAssetInventoryTests(unittest.TestCase):
@@ -281,13 +287,13 @@ class PostgresAssetInventoryTests(unittest.TestCase):
 
     def test_dashboard_uses_server_side_paging(self) -> None:
         portal = PORTAL.read_text(encoding="utf-8")
-        builder = BUILDER.read_text(encoding="utf-8")
+        asset_page = ASSET_PAGE.read_text(encoding="utf-8")
         self.assertIn('"/assets/inventory?', portal)
         self.assertIn("ASSET_DATABASE_READ_ENABLED", portal)
-        self.assertIn("asset-page-previous", builder)
-        self.assertIn("asset-page-next", builder)
-        self.assertIn("limit:pageSize.value", builder)
-        self.assertIn("offset:String(pageOffset)", builder)
+        self.assertIn("asset-page-previous", asset_page)
+        self.assertIn("asset-page-next", asset_page)
+        self.assertIn("limit:pageSize.value", asset_page)
+        self.assertIn("offset:String(pageOffset)", asset_page)
 
     def test_node_record_validation_rejects_bad_identity(self) -> None:
         script = f"""

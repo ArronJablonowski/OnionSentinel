@@ -14,13 +14,10 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PORTAL_PATH = ROOT / "onion-sentinel-dashboard" / "report_portal.py"
-BUILDER_PATH = (
-    ROOT
-    / "onion-sentinel-dashboard"
-    / "scripts"
-    / "build_soc_alerts_dashboard.py"
-)
+DASHBOARD_DIR = ROOT / "onion-sentinel-dashboard"
+PORTAL_PATH = DASHBOARD_DIR / "report_portal.py"
+BUILDER_PATH = DASHBOARD_DIR / "scripts" / "build_soc_alerts_dashboard.py"
+ASSET_PAGE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_asset_inventory_page.py"
 INSTALLER_PATH = ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
 
 
@@ -380,6 +377,20 @@ class AssetInventoryPageTests(unittest.TestCase):
             "investigations",
             [],
         )
+
+        builder_source = BUILDER_PATH.read_text(encoding="utf-8")
+        asset_page_source = ASSET_PAGE_PATH.read_text(encoding="utf-8")
+        installer_source = INSTALLER_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            "from dashboard_asset_inventory_page import asset_inventory_page_section",
+            builder_source,
+        )
+        self.assertIn("def asset_inventory_page_section()", asset_page_source)
+        copy_command = (
+            'cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_asset_inventory_page.py" '
+            '"$DASHBOARD_RUNTIME_DIR/scripts/dashboard_asset_inventory_page.py"'
+        )
+        self.assertEqual(installer_source.count(copy_command), 1)
 
         self.assertIn('<h1 id="page-title">Asset Inventory</h1>', page)
         self.assertIn('id="asset-inventory-view"', page)

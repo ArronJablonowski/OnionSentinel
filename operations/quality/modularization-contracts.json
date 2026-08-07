@@ -97,6 +97,14 @@
       "required_symbols": [
         "software_inventory_page_section"
       ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_asset_inventory_page.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_asset_inventory_page.py",
+      "required_symbols": [
+        "asset_inventory_page_section"
+      ]
     }
   ],
   "python_package_trees": [
