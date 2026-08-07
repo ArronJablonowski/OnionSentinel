@@ -172,6 +172,9 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
 - Fixed model-visible query error categories and bounded raw-error digest
   binding now live in `analysis.query.prompt_errors`; broker, validator, and
   attacker-controlled raw error text remains outside follow-up prompts.
+- Canonical prompt serialization, complete bounded facts, exact count
+  admission, most-specific provenance counts, query semantics, and result
+  summaries now live in `analysis.query.prompt_facts`.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports

@@ -1798,6 +1798,18 @@ def _query_prompt_errors():
     return prompt_errors
 
 
+def _query_prompt_facts():
+    _provider_routing()
+    from onion_sentinel.analysis.query import prompt_facts
+    return prompt_facts
+
+
+def _query_prompt_facts_policy():
+    return _query_prompt_facts().Policy(
+        maximum_result_count=MAX_INVESTIGATION_RESULT_COUNT,
+    )
+
+
 def _query_repair_dependencies():
     module = _query_repair()
     return module.Dependencies(
@@ -5830,13 +5842,7 @@ def _prompt_project_investigation_rows(
 
 
 def _investigation_prompt_json_bytes(value: Any) -> bytes:
-    """Return the canonical bytes used for prompt admission and omission hashes."""
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    ).encode("utf-8")
+    return _query_prompt_facts().canonical_bytes(value)
 
 
 def _compact_prompt_trusted_query_audit(
@@ -5934,26 +5940,14 @@ def _bounded_investigation_prompt_fact(
     *,
     maximum_bytes: int = 256,
 ) -> str:
-    """Return one complete bounded fact; never truncate into new semantics."""
-    if value in (None, "", {}, []):
-        return ""
-    if isinstance(value, str):
-        text = value.strip()
-        encoded = text.encode("utf-8")
-    else:
-        encoded = _investigation_prompt_json_bytes(value)
-        text = encoded.decode("utf-8")
-    return text if len(encoded) <= maximum_bytes else ""
+    return _query_prompt_facts().bounded(
+        value, maximum_bytes=maximum_bytes
+    )
 
 
 def _canonical_investigation_count(value: Any) -> int | None:
-    """Return an exact non-negative integer count without coercion."""
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return (
-        value
-        if 0 <= value <= MAX_INVESTIGATION_RESULT_COUNT
-        else None
+    return _query_prompt_facts().canonical_count(
+        value, policy=_query_prompt_facts_policy()
     )
 
 
@@ -5961,96 +5955,15 @@ def _investigation_provenance_count(
     containers: tuple[dict[str, Any], ...],
     keys: tuple[str, ...],
 ) -> int | None:
-    for key in keys:
-        for container in containers:
-            if key not in container:
-                continue
-            # The most specific collector child wins even when it reports an
-            # invalid count. Falling back to an outer positive aggregate could
-            # otherwise turn a malformed child result into corroboration.
-            return _canonical_investigation_count(container.get(key))
-    return None
+    return _query_prompt_facts().provenance_count(
+        containers, keys, policy=_query_prompt_facts_policy()
+    )
 
 
 def _investigation_query_semantics(
     containers: tuple[dict[str, Any], ...],
 ) -> str:
-    """Build a bounded human-readable description of what the query tested."""
-    def first_text(key: str, limit: int) -> str:
-        for container in containers:
-            text = _query_text(container.get(key), limit)
-            if text:
-                return text
-        return ""
-
-    def first_bounded_value(
-        key: str,
-        maximum_bytes: int,
-    ) -> tuple[bool, Any]:
-        for container in containers:
-            value = container.get(key)
-            if value in (None, "", {}, []):
-                continue
-            if isinstance(value, str):
-                value = value.strip()
-                encoded = value.encode("utf-8")
-            else:
-                encoded = _investigation_prompt_json_bytes(value)
-            if len(encoded) <= maximum_bytes:
-                return True, value
-            return True, None
-        return False, None
-
-    summary: dict[str, Any] = {}
-    backend = first_text("dialect", 40) or first_text("backend", 40)
-    if backend:
-        summary["backend"] = backend
-    for key, limit in (
-        ("pack", 100),
-        ("aggregation", 40),
-        ("operation", 80),
-        ("target_alias", 160),
-        ("indicator", 253),
-    ):
-        text = first_text(key, limit)
-        if text:
-            summary[key] = text
-
-    for key, maximum_bytes in (
-        ("semantics", 256),
-        ("purpose", 180),
-        ("observables", 256),
-        ("window", 192),
-        ("match_semantics", 192),
-        ("query", 256),
-        ("filters", 192),
-    ):
-        present, fact = first_bounded_value(key, maximum_bytes)
-        if present and fact is None:
-            return ""
-        if present:
-            summary[key] = fact
-
-    # Transport metadata and broad scope alone do not describe what was tested.
-    # Require a concrete intent or target predicate; a pack, aggregation,
-    # operation label, or time window cannot independently support a finding.
-    if not any(
-        key in summary
-        for key in (
-            "purpose",
-            "observables",
-            "match_semantics",
-            "semantics",
-            "query",
-            "filters",
-            "indicator",
-        )
-    ):
-        return ""
-    return _bounded_investigation_prompt_fact(
-        summary,
-        maximum_bytes=1024,
-    )
+    return _query_prompt_facts().query_semantics(containers)
 
 
 def _investigation_result_summary(
@@ -6059,46 +5972,12 @@ def _investigation_result_summary(
     status: str,
     returned: int | None,
 ) -> str:
-    """Retain bounded collector facts needed to interpret one result digest."""
-    for container in containers:
-        summary = _bounded_investigation_prompt_fact(
-            container.get("evidence_summary"),
-        )
-        if summary:
-            return summary
-    facts: dict[str, Any] = {"status": status}
-    if returned is not None:
-        facts["returned"] = returned
-    total = _investigation_provenance_count(
+    return _query_prompt_facts().result_summary(
         containers,
-        ("total_hits", "total_rows"),
+        status=status,
+        returned=returned,
+        policy=_query_prompt_facts_policy(),
     )
-    if total is not None:
-        facts["total"] = total
-    for key in (
-        "semantic_valid",
-        "truncated",
-        "result_truncated",
-        "index_scan_truncated",
-        "timed_out",
-    ):
-        for container in containers:
-            value = container.get(key)
-            if isinstance(value, bool):
-                facts[key] = value
-                break
-    for container in containers:
-        error = _bounded_investigation_prompt_fact(
-            container.get("error"),
-            maximum_bytes=120,
-        )
-        if error:
-            facts["error"] = error
-            break
-    # A status label by itself is not a finding or result fact.
-    if len(facts) == 1:
-        return ""
-    return _bounded_investigation_prompt_fact(facts)
 
 
 def _investigation_prompt_provenance_rows(

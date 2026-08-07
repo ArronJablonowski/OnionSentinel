@@ -36,6 +36,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.query.event_tuple",
     "onion_sentinel.analysis.query.primitives",
     "onion_sentinel.analysis.query.prompt_errors",
+    "onion_sentinel.analysis.query.prompt_facts",
     "onion_sentinel.analysis.query.repair",
     "onion_sentinel.analysis.query.repair_catalog",
     "onion_sentinel.analysis.query.request",
