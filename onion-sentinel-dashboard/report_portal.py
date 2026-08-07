@@ -114,6 +114,10 @@ from portal_soc_incident_metadata import (
     apply_soc_incident_metadata,
     incident_defaults as _soc_incident_defaults,
 )
+from portal_soc_alert_presenter import (
+    SocAlertPresentationDependencies,
+    compose_soc_alert_row,
+)
 from portal_incident_actions import (
     IncidentStatusPayloadError,
     normalize_incident_status_payload,
@@ -8171,65 +8175,18 @@ def soc_alert_group_row_to_api(
     evidence_metadata: dict[str, dict[str, object]] | None = None,
     analysis_min_severity: str = "informational",
 ) -> dict:
-    group_key = row["group_key"]
-    group_id = soc_alert_group_id(group_key)
-    local_status = statuses.get(group_id, {}) if isinstance(statuses, dict) else {}
-    enrichment_json = row.get("enrichment_json") if isinstance(row, dict) else (row["enrichment_json"] if "enrichment_json" in row.keys() else "")
-    repeat_count = max(
-        int(row["raw_alert_count"] or 0),
-        int(row["total_seen_count"] or 0),
-        int(row["seen_count"] or 0),
+    dependencies = SocAlertPresentationDependencies(
+        dashboard_group_id=soc_alert_group_id,
+        ai_status=soc_alert_group_ai_status,
+        enrichment_status=soc_alert_public_enrichment_status,
+        pcap_status=soc_alert_pcap_status,
+        incident_defaults=_soc_incident_defaults,
+        review_defaults=_soc_review_defaults,
     )
-    data = {
-        "group_id": group_id,
-        "group_key": group_key,
-        "representative_alert_id": row["alert_id"],
-        "first_seen": row["group_first_seen"] or row["first_seen"],
-        "last_seen": row["group_last_seen"] or row["last_seen"],
-        "raw_alert_count": int(row["raw_alert_count"] or 0),
-        "seen_count": repeat_count,
-        "timestamp": row["timestamp"],
-        "rule_name": row["rule_name"],
-        "event_dataset": row["event_dataset"],
-        "severity": row["severity"],
-        "severity_label": row["severity_label"],
-        "triage_score": row["triage_score"],
-        "triage_level": row["triage_level"],
-        "routing": row["routing"],
-        "traffic_direction": row["traffic_direction"],
-        "source_ip": row["source_ip"],
-        "source_port": row["source_port"],
-        "destination_ip": row["destination_ip"],
-        "destination_port": row["destination_port"],
-        "payload_size_bytes": int(row["payload_size_bytes"] or 0) if "payload_size_bytes" in row.keys() else 0,
-        "transport_protocol": row["transport_protocol"],
-        "filter_status": row["filter_status"] or "accepted",
-        "filter_reason": row["filter_reason"],
-        "suppression_key": row["suppression_key"],
-        "analyst_status": local_status.get("status", "open") if isinstance(local_status, dict) else "open",
-        "analyst_status_reason": local_status.get("reason", "") if isinstance(local_status, dict) else "",
-        "analyst_status_updated_at": local_status.get("updated_at") if isinstance(local_status, dict) else None,
-        "analyst_status_updated_by": local_status.get("updated_by", "") if isinstance(local_status, dict) else "",
-    }
-    data.update(
-        soc_alert_group_ai_status(
-            row,
-            group_id,
-            ai_reports,
-            ai_artifacts,
-            analysis_min_severity,
-        )
+    return compose_soc_alert_row(
+        row, statuses, ai_reports, pcap_analysis, pcap_requests, ai_artifacts,
+        evidence_metadata, analysis_min_severity, dependencies,
     )
-    data.update(soc_alert_public_enrichment_status(enrichment_json))
-    data.update(soc_alert_pcap_status(group_id, row["alert_id"], pcap_analysis or {}, pcap_requests or {}))
-    data.update((evidence_metadata or {}).get(group_id, {
-        "pcap_size_bytes": 0,
-        "detection_outcome": "",
-        "detection_outcome_label": "n/a",
-        **_soc_incident_defaults(),
-        **_soc_review_defaults(),
-    }))
-    return data
 
 
 def soc_alert_group_representative_alert_id(group_id: str) -> str:

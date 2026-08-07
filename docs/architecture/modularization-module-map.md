@@ -383,6 +383,13 @@ retains its compatibility signature (including the historical unused rows
 argument) and injects table-discovery policy without opening additional
 connections or introducing per-row queries.
 
+`portal_soc_alert_presenter.py` owns the pure public API projection for one SOC
+summary row. It normalizes occurrence counts, optional payload/enrichment
+fields, analyst status, and precomputed AI, PCAP, review, and incident metadata
+through explicit callback ports. `report_portal.py` retains the public function
+signature and binds existing status policies; the presenter performs no
+database, filesystem, process, or network access.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and

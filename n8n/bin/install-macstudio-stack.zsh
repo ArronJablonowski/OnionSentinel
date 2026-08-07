@@ -689,6 +689,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/portal_dhcp_discovery.py" "$DASHBOARD_RUN
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_review_metadata.py" "$DASHBOARD_RUNTIME_DIR/portal_soc_review_metadata.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_evidence_metadata.py" "$DASHBOARD_RUNTIME_DIR/portal_soc_evidence_metadata.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_incident_metadata.py" "$DASHBOARD_RUNTIME_DIR/portal_soc_incident_metadata.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_soc_alert_presenter.py" "$DASHBOARD_RUNTIME_DIR/portal_soc_alert_presenter.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_ai_model_policy.py" "$DASHBOARD_RUNTIME_DIR/portal_ai_model_policy.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_ai_settings_normalizer.py" "$DASHBOARD_RUNTIME_DIR/portal_ai_settings_normalizer.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_catalog_routes.py" "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py"
