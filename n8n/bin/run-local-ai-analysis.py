@@ -1780,6 +1780,12 @@ def _query_request():
     return request
 
 
+def _query_state():
+    _provider_routing()
+    from onion_sentinel.analysis.query import state
+    return state
+
+
 def _query_request_policy():
     module = _query_request()
     return module.Policy(
@@ -8117,9 +8123,18 @@ def apply_investigation_query_loop(
     )
     response = primary_response
     rounds: list[dict[str, Any]] = []
-    total_requests = 0
-    ignored_requests = 0
-    terminal_ignored_requests = 0
+    state_module = _query_state()
+    state_policy = state_module.Policy(
+        maximum_rounds=MAX_INVESTIGATION_QUERY_ROUNDS,
+        maximum_queries=MAX_INVESTIGATION_QUERIES_TOTAL,
+        maximum_queries_per_round=MAX_INVESTIGATION_QUERIES_PER_ROUND,
+    )
+    limits = state_module.resolve(
+        state_policy,
+        rounds_override=max_rounds_override,
+        queries_override=max_queries_total_override,
+    )
+    budget = state_module.Budget(limits)
     seen_semantic_requests: set[str] = set()
     evaluation_query_guarantee = bool(
         harness_runtime is not None
@@ -8135,21 +8150,6 @@ def apply_investigation_query_loop(
     query_planning_repair_not_attempted_reason = ""
     pending_repair_scopes: dict[str, dict[str, Any]] = {}
     primary_followup_call_number = 0
-    effective_max_rounds = min(
-        MAX_INVESTIGATION_QUERY_ROUNDS,
-        max(1, int(max_rounds_override or MAX_INVESTIGATION_QUERY_ROUNDS)),
-    )
-    effective_max_queries = min(
-        MAX_INVESTIGATION_QUERIES_TOTAL,
-        max(
-            1,
-            int(
-                max_queries_total_override
-                or MAX_INVESTIGATION_QUERIES_TOTAL
-            ),
-        ),
-    )
-
     def observe_harness(call: Callable[[], Any]) -> Any:
         if harness_runtime is None:
             return None
@@ -8180,17 +8180,14 @@ def apply_investigation_query_loop(
         # Consume one of the ordinary model-call slots for planning while
         # retaining room for both bounded reviewer attempts under the
         # checked-in six-call harness budget.
-        effective_max_rounds = max(1, MAX_INVESTIGATION_QUERY_ROUNDS - 1)
-        effective_max_queries = min(
-            MAX_INVESTIGATION_QUERIES_TOTAL,
-            effective_max_rounds * MAX_INVESTIGATION_QUERIES_PER_ROUND,
-        )
+        limits = limits.evaluation_retry(state_policy)
+        budget = state_module.Budget(limits)
         prompt_package["investigation_query_planning_retry"] = {
             "evaluation_only": True,
             "attempt": 1,
             "maximum_attempts": 1,
-            "remaining_query_rounds": effective_max_rounds,
-            "remaining_queries": effective_max_queries,
+            "remaining_query_rounds": limits.rounds,
+            "remaining_queries": limits.queries,
             "maximum_queries_this_round": MAX_INVESTIGATION_QUERIES_PER_ROUND,
             "instruction": (
                 "The initial primary response did not request a dynamic investigation pivot. "
@@ -8315,7 +8312,7 @@ def apply_investigation_query_loop(
                 "evaluation query-planning retry produced no investigation_query_requests"
             )
 
-    for round_number in range(1, effective_max_rounds + 1):
+    for round_number in range(1, limits.rounds + 1):
         harness_round_number = query_round_offset + round_number
         raw_requests = (
             initial_requests
@@ -8336,11 +8333,7 @@ def apply_investigation_query_loop(
             if harness_runtime is not None
             else None
         )
-        remaining = effective_max_queries - total_requests
-        allowed_count = min(MAX_INVESTIGATION_QUERIES_PER_ROUND, remaining)
-        admitted_raw = raw_requests[:allowed_count]
-        ignored_requests += max(0, len(raw_requests) - len(admitted_raw))
-        total_requests += len(admitted_raw)
+        admitted_raw = budget.admit(raw_requests)
         normalized: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
         round_repair_scopes: dict[str, dict[str, Any]] = {}
@@ -8407,7 +8400,7 @@ def apply_investigation_query_loop(
                     semantic_digest in seen_semantic_requests
                     and not repair_round
                 ):
-                    ignored_requests += 1
+                    budget.ignore(1)
                     rejected.append(
                         {
                             "query_id": request["query_id"],
@@ -8662,12 +8655,11 @@ def apply_investigation_query_loop(
                     known.add((item["kind"], item["value"]))
             local_context["discovered_observables"] = existing
 
-        remaining_rounds = (
-            0
-            if repair_round
-            else effective_max_rounds - round_number
+        remaining = budget.remaining(
+            round_number, repair_round=repair_round
         )
-        remaining_queries = effective_max_queries - total_requests
+        remaining_rounds = remaining.rounds
+        remaining_queries = remaining.queries
         repair_scheduled = False
         if round_repair_scopes and not query_planning_repair_attempted:
             bounded_candidate_items = list(
@@ -8904,17 +8896,15 @@ def apply_investigation_query_loop(
             terminal_count = len(
                 pop_investigation_query_requests(response)
             )
-            terminal_ignored_requests += terminal_count
-            ignored_requests += terminal_count
+            budget.ignore(terminal_count, terminal=True)
             break
 
     repeated = pop_investigation_query_requests(response)
-    terminal_ignored_requests += len(repeated)
-    ignored_requests += len(repeated)
-    if rounds or ignored_requests:
+    budget.ignore(len(repeated), terminal=True)
+    if rounds or budget.ignored:
         outcomes = investigation_query_outcome_summary(
             rounds,
-            queries_admitted=total_requests,
+            queries_admitted=budget.admitted,
         )
         round_audits = [_investigation_round_audit(item) for item in rounds]
         tool_call_bindings = [
@@ -8924,16 +8914,16 @@ def apply_investigation_query_loop(
         ]
         binding_summary = investigation_query_binding_summary(
             tool_call_bindings,
-            queries_admitted=total_requests,
+            queries_admitted=budget.admitted,
         )
         response["_investigation_query_audit"] = {
             "query_contract": INVESTIGATION_QUERY_CONTRACT,
             "provider_neutral": True,
             "model_route": route,
             "rounds_completed": len(rounds),
-            "queries_admitted": total_requests,
-            "requests_ignored_or_over_budget": ignored_requests,
-            "terminal_requests_ignored": terminal_ignored_requests,
+            "queries_admitted": budget.admitted,
+            "requests_ignored_or_over_budget": budget.ignored,
+            "terminal_requests_ignored": budget.terminal_ignored,
             "planning_retry_attempted": query_planning_retry_attempted,
             "planning_retry_produced_requests": bool(
                 query_planning_retry_attempted and initial_requests
@@ -8999,8 +8989,8 @@ def apply_investigation_query_loop(
                 ),
             },
             "limits": {
-                "max_rounds": effective_max_rounds,
-                "max_queries_total": effective_max_queries,
+                "max_rounds": limits.rounds,
+                "max_queries_total": limits.queries,
                 "max_queries_per_round": MAX_INVESTIGATION_QUERIES_PER_ROUND,
                 "configured_max_rounds": MAX_INVESTIGATION_QUERY_ROUNDS,
                 "configured_max_queries_total": MAX_INVESTIGATION_QUERIES_TOTAL,

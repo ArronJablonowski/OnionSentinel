@@ -2,10 +2,10 @@
 
 from . import (
     derived, endpoint, enrichment, event_tuple, primitives, request,
-    security_onion, window,
+    security_onion, state, window,
 )
 
 __all__ = [
     "derived", "endpoint", "enrichment", "event_tuple", "primitives",
-    "request", "security_onion", "window",
+    "request", "security_onion", "state", "window",
 ]
