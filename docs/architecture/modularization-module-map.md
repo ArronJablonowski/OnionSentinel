@@ -420,6 +420,11 @@ Post-query evidence synthesis lives under
 call identity, injected harness preflight/recording order, route attestation,
 response shape validation, and terminal request accounting while model access
 remains an injected port.
+Durable run finalization lives under
+`onion_sentinel.analysis.query.finalization`. It consumes terminal proposals,
+assembles planning/repair/limit/outcome/binding audit sections, publishes
+evidence gaps, and enforces the controlled-evaluation completeness gate using
+only injected audit and outcome authorities.
 The legacy runner functions remain compatibility delegates and inject runtime
 policy explicitly, preserving existing test seams while keeping review-package
 mutation and reviewer-output admission out of the composition root.

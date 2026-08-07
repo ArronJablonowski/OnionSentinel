@@ -6630,6 +6630,7 @@ def apply_investigation_query_loop(
     _provider_routing()
     from onion_sentinel.analysis.query import (
         engine as engine_module,
+        finalization as finalization_module,
         observables as observables_module,
         planning_retry as planning_retry_module,
         repair_stage as repair_stage_module,
@@ -7119,131 +7120,57 @@ def apply_investigation_query_loop(
         if synthesis.stop:
             break
 
-    repeated = pop_investigation_query_requests(response)
-    engine_state = engine_module.ignore(engine_state, len(repeated), terminal=True)
-    if rounds or engine_state.requests_ignored:
-        outcomes = investigation_query_outcome_summary(
-            rounds,
-            queries_admitted=engine_state.queries_admitted,
-        )
-        round_audits = [_investigation_round_audit(item) for item in rounds]
-        tool_call_bindings = [
-            binding
-            for round_audit in round_audits
-            for binding in round_audit["tool_call_bindings"]
-        ]
-        binding_summary = investigation_query_binding_summary(
-            tool_call_bindings,
-            queries_admitted=engine_state.queries_admitted,
-        )
-        response["_investigation_query_audit"] = {
-            "query_contract": INVESTIGATION_QUERY_CONTRACT,
-            "provider_neutral": True,
-            "model_route": route,
-            "rounds_completed": len(rounds),
-            "queries_admitted": engine_state.queries_admitted,
-            "requests_ignored_or_over_budget": engine_state.requests_ignored,
-            "terminal_requests_ignored": engine_state.terminal_requests_ignored,
-            "planning_retry_attempted": query_planning_retry_attempted,
-            "planning_retry_produced_requests": bool(
+    finalized = finalization_module.finalize(
+        response,
+        rounds,
+        state=engine_state,
+        policy=finalization_module.Policy(
+            query_contract=INVESTIGATION_QUERY_CONTRACT,
+            route=route,
+            evaluation_required=evaluation_query_guarantee,
+            max_queries_per_round=MAX_INVESTIGATION_QUERIES_PER_ROUND,
+            configured_max_rounds=MAX_INVESTIGATION_QUERY_ROUNDS,
+            configured_max_queries=MAX_INVESTIGATION_QUERIES_TOTAL,
+            max_prompt_evidence_bytes=MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES,
+            max_prompt_evidence_rows=MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS,
+        ),
+        planning=finalization_module.Planning(
+            retry_attempted=query_planning_retry_attempted,
+            retry_produced_requests=bool(
                 query_planning_retry_attempted and initial_requests
             ),
-            "query_planning_retry": {
-                "attempted": query_planning_retry_attempted,
-                "attempts": 1 if query_planning_retry_attempted else 0,
-                "maximum_attempts": 1,
-                "evaluation_only": query_planning_retry_attempted,
-            },
-            "deterministic_protocol_plan": {
-                "enabled": bool(deterministic_requests),
-                "requests": len(deterministic_requests),
-                "query_ids": [
-                    item["query_id"]
-                    for item in deterministic_requests
-                ],
-                "plan_digest": (
-                    investigation_query_canonical_digest(
-                        deterministic_requests
-                    )
-                    if deterministic_requests
-                    else ""
-                ),
-                "model_initial_requests": len(model_initial_requests),
-                "read_only_fixed_packs_only": True,
-                "query_text_model_supplied": False,
-            },
-            "planning_repair_attempted": engine_state.repair_attempted,
-            "planning_repair_produced_requests": (
-                query_planning_repair_produced_requests
+            deterministic_requests=tuple(deterministic_requests),
+            model_initial_requests=len(model_initial_requests),
+        ),
+        repair=finalization_module.Repair(
+            produced_requests=query_planning_repair_produced_requests,
+            admitted_requests=query_planning_repair_admitted_requests,
+            rejected_requests=query_planning_repair_rejected_requests,
+            candidates=tuple(query_planning_repair_candidates),
+            not_attempted_reason=query_planning_repair_not_attempted_reason,
+        ),
+        dependencies=finalization_module.Dependencies(
+            pop_requests=pop_investigation_query_requests,
+            ignore_terminal=lambda state, count: engine_module.ignore(
+                state, count, terminal=True
             ),
-            "query_planning_repair": {
-                "attempted": engine_state.repair_attempted,
-                "attempts": 1 if engine_state.repair_attempted else 0,
-                "maximum_attempts": 1,
-                "used_existing_follow_up_call": (
-                    False
-                ),
-                "deterministic_scope_execution": engine_state.repair_attempted,
-                "scope_widening_allowed": False,
-                "candidate_count": len(
-                    query_planning_repair_candidates
-                ),
-                "candidates": query_planning_repair_candidates,
-                "produced_requests": (
-                    query_planning_repair_produced_requests
-                ),
-                "admitted_repair_requests": (
-                    query_planning_repair_admitted_requests
-                ),
-                "rejected_repair_requests": (
-                    query_planning_repair_rejected_requests
-                ),
-                "not_attempted_reason": (
-                    query_planning_repair_not_attempted_reason
-                ),
-            },
-            "limits": {
-                "max_rounds": limits.rounds,
-                "max_queries_total": limits.queries,
-                "max_queries_per_round": MAX_INVESTIGATION_QUERIES_PER_ROUND,
-                "configured_max_rounds": MAX_INVESTIGATION_QUERY_ROUNDS,
-                "configured_max_queries_total": MAX_INVESTIGATION_QUERIES_TOTAL,
-                "max_prompt_evidence_bytes": MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES,
-                "max_prompt_evidence_rows": MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS,
-            },
-            "read_only": binding_summary["read_only"],
-            "all_tool_call_bindings_read_only": binding_summary[
-                "all_tool_call_bindings_read_only"
-            ],
-            "successful_read_only_queries": binding_summary[
-                "successful_read_only_queries"
-            ],
-            "complete": binding_summary["complete"],
-            "evaluation_requirement_satisfied": binding_summary[
-                "evaluation_requirement_satisfied"
-            ],
-            "evaluation_query_guarantee": {
-                "required": evaluation_query_guarantee,
-                **binding_summary,
-            },
-            "outcomes": outcomes,
-            "tool_call_bindings": tool_call_bindings,
-            "rounds": round_audits,
-        }
-        _append_investigation_evidence_gaps(
-            response,
-            outcomes["evidence_gaps"],
+            outcome_summary=investigation_query_outcome_summary,
+            round_audit=_investigation_round_audit,
+            binding_summary=investigation_query_binding_summary,
+            canonical_digest=investigation_query_canonical_digest,
+            append_gaps=_append_investigation_evidence_gaps,
+        ),
+        error_type=InvestigationQueryError,
+    )
+    response = finalized.response
+    engine_state = finalized.state
+    if (
+        finalized.outcomes is not None
+        and isinstance(prompt_package.get("investigation_query_results"), dict)
+    ):
+        prompt_package["investigation_query_results"]["outcomes"] = (
+            finalized.outcomes
         )
-        if isinstance(prompt_package.get("investigation_query_results"), dict):
-            prompt_package["investigation_query_results"]["outcomes"] = outcomes
-        if (
-            evaluation_query_guarantee
-            and not binding_summary["evaluation_requirement_satisfied"]
-        ):
-            raise InvestigationQueryError(
-                "controlled harness evaluation requires at least one successful "
-                "read-only dynamic pivot and an all-read-only bound tool ledger"
-            )
     return response
 
 
