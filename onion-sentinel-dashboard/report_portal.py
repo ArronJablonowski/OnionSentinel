@@ -51,6 +51,10 @@ from portal_request_routes import (
     head_content_type,
     is_head_route,
 )
+from portal_soc_write_dispatch import (
+    SocWriteCallbacks,
+    dispatch_authorized_soc_write,
+)
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -13607,6 +13611,19 @@ def ack_soc_alert_store_id(alert_id: str, payload: dict) -> tuple[int, dict]:
     return int(status), data
 
 
+PORTAL_SOC_WRITE_CALLBACKS = SocWriteCallbacks(
+    alert_ack=ack_soc_alert_store_id,
+    alert_pcap=soc_alert_pcap_request_response,
+    alert_analyze=soc_alert_queue_analysis_response,
+    alert_escalate=soc_alert_escalate_response,
+    alert_adjudicate=soc_alert_adjudication_response,
+    incident_adjudicate=soc_incident_adjudication_response,
+    incident_status=soc_incident_status_response,
+    incident_reanalyze=soc_incident_reanalysis_response,
+    incident_reanalyze_all=soc_incident_bulk_reanalysis_response,
+)
+
+
 class PortalHandler(BaseHTTPRequestHandler):
     server_version = "ArronReportPortal/1.0"
 
@@ -13894,16 +13911,9 @@ class PortalHandler(BaseHTTPRequestHandler):
                     }).encode(),
                     "application/json; charset=utf-8",
                 )
-            if parsed.path == "/api/soc-incidents/reanalyze-all":
-                status, data = soc_incident_bulk_reanalysis_response(payload)
-            else:
-                encoded_id = parsed.path[
-                    len("/api/soc-incidents/"):-len("/reanalyze")
-                ].strip("/")
-                status, data = soc_incident_reanalysis_response(
-                    unquote(encoded_id),
-                    payload,
-                )
+            status, data = dispatch_authorized_soc_write(
+                route, payload, PORTAL_SOC_WRITE_CALLBACKS
+            )
             if status < 400:
                 SOC_ALERT_RESPONSE_CACHE.clear()
             return self._send(
@@ -13935,21 +13945,9 @@ class PortalHandler(BaseHTTPRequestHandler):
                     json.dumps({"ok": False, "error": "Request body must be a JSON object."}).encode(),
                     "application/json; charset=utf-8",
                 )
-            if parsed.path.startswith("/api/soc-alerts/"):
-                encoded_id = parsed.path[
-                    len("/api/soc-alerts/"):-len("/adjudicate")
-                ].strip("/")
-                status, data = soc_alert_adjudication_response(unquote(encoded_id), payload)
-            elif parsed.path.endswith("/adjudicate"):
-                encoded_id = parsed.path[
-                    len("/api/soc-incidents/"):-len("/adjudicate")
-                ].strip("/")
-                status, data = soc_incident_adjudication_response(unquote(encoded_id), payload)
-            else:
-                encoded_id = parsed.path[
-                    len("/api/soc-incidents/"):-len("/status")
-                ].strip("/")
-                status, data = soc_incident_status_response(unquote(encoded_id), payload)
+            status, data = dispatch_authorized_soc_write(
+                route, payload, PORTAL_SOC_WRITE_CALLBACKS
+            )
             if status < 400:
                 SOC_ALERT_RESPONSE_CACHE.clear()
             return self._send(
@@ -13957,43 +13955,14 @@ class PortalHandler(BaseHTTPRequestHandler):
                 json.dumps(data, indent=2).encode(),
                 "application/json; charset=utf-8",
             )
-        if parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/ack"):
+        if route.alert_action:
             try:
                 payload = json.loads(raw or "{}")
             except json.JSONDecodeError:
                 payload = {}
-            encoded_id = parsed.path[len("/api/soc-alerts/"):-len("/ack")].strip("/")
-            status, data = ack_soc_alert_store_id(unquote(encoded_id), payload)
-            if status < 400:
-                SOC_ALERT_RESPONSE_CACHE.clear()
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/pcap"):
-            try:
-                payload = json.loads(raw or "{}")
-            except json.JSONDecodeError:
-                payload = {}
-            encoded_id = parsed.path[len("/api/soc-alerts/"):-len("/pcap")].strip("/")
-            status, data = soc_alert_pcap_request_response(unquote(encoded_id), payload)
-            if status < 400:
-                SOC_ALERT_RESPONSE_CACHE.clear()
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/analyze"):
-            try:
-                payload = json.loads(raw or "{}")
-            except json.JSONDecodeError:
-                payload = {}
-            encoded_id = parsed.path[len("/api/soc-alerts/"):-len("/analyze")].strip("/")
-            status, data = soc_alert_queue_analysis_response(unquote(encoded_id), payload)
-            if status < 400:
-                SOC_ALERT_RESPONSE_CACHE.clear()
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith("/escalate"):
-            try:
-                payload = json.loads(raw or "{}")
-            except json.JSONDecodeError:
-                payload = {}
-            encoded_id = parsed.path[len("/api/soc-alerts/"):-len("/escalate")].strip("/")
-            status, data = soc_alert_escalate_response(unquote(encoded_id), payload)
+            status, data = dispatch_authorized_soc_write(
+                route, payload, PORTAL_SOC_WRITE_CALLBACKS
+            )
             if status < 400:
                 SOC_ALERT_RESPONSE_CACHE.clear()
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")

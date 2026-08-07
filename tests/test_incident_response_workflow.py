@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sqlite3
 import sys
@@ -669,6 +670,56 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         )
         self.assertTrue(alert_review.review_write)
         self.assertTrue(incident_review.review_write)
+
+    def test_portal_alert_action_posts_through_bounded_dispatch(self) -> None:
+        raw = json.dumps({"reason": "manual triage"}).encode()
+        handler = self.portal.PortalHandler.__new__(self.portal.PortalHandler)
+        handler.path = "/api/soc-alerts/group%20one/analyze"
+        handler.headers = {"Content-Length": str(len(raw))}
+        handler.rfile = io.BytesIO(raw)
+        handler._send = mock.Mock(return_value="sent")
+        with (
+            mock.patch.object(
+                self.portal,
+                "dispatch_authorized_soc_write",
+                return_value=(202, {"ok": True}),
+            ) as dispatch_write,
+            mock.patch.object(
+                self.portal.SOC_ALERT_RESPONSE_CACHE,
+                "clear",
+            ) as clear_cache,
+        ):
+            result = handler.do_POST()
+
+        self.assertEqual(result, "sent")
+        route, payload, callbacks = dispatch_write.call_args.args
+        self.assertEqual(route.operation, "soc_alert_analyze")
+        self.assertEqual(route.resource_id, "group one")
+        self.assertEqual(payload, {"reason": "manual triage"})
+        self.assertIs(callbacks, self.portal.PORTAL_SOC_WRITE_CALLBACKS)
+        clear_cache.assert_called_once_with()
+        self.assertEqual(handler._send.call_args.args[0], 202)
+
+    def test_portal_rejects_unauthorized_review_before_dispatch(self) -> None:
+        raw = json.dumps({"status": "closed"}).encode()
+        handler = self.portal.PortalHandler.__new__(self.portal.PortalHandler)
+        handler.path = "/api/soc-incidents/ir-case/status"
+        handler.headers = {"Content-Length": str(len(raw))}
+        handler.rfile = io.BytesIO(raw)
+        handler._send = mock.Mock(return_value="forbidden")
+        handler._soc_review_write_authorized = mock.Mock(return_value=False)
+        with mock.patch.object(
+            self.portal,
+            "dispatch_authorized_soc_write",
+        ) as dispatch_write:
+            result = handler.do_POST()
+
+        self.assertEqual(result, "forbidden")
+        dispatch_write.assert_not_called()
+        self.assertEqual(
+            handler._send.call_args.args[0],
+            self.portal.HTTPStatus.FORBIDDEN,
+        )
 
     def test_incident_list_returns_case_and_only_incident_responder_analysis(self) -> None:
         conn = sqlite3.connect(self.db_path)

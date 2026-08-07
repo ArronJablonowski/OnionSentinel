@@ -37,19 +37,28 @@ class PortalRequestRouteTests(unittest.TestCase):
 
     def test_dynamic_soc_write_routes_preserve_existing_contract(self) -> None:
         paths = (
-            "/api/soc-alerts/group/ack", "/api/soc-alerts/group/pcap",
-            "/api/soc-alerts/group/analyze", "/api/soc-alerts/group/escalate",
-            "/api/soc-alerts/group/adjudicate",
-            "/api/soc-incidents/ir-case/adjudicate",
-            "/api/soc-incidents/ir-case/status",
-            "/api/soc-incidents/ir-case/reanalyze",
-            "/api/soc-incidents/reanalyze-all",
+            ("/api/soc-alerts/group/ack", "soc_alert_ack", "group"),
+            ("/api/soc-alerts/group/pcap", "soc_alert_pcap", "group"),
+            ("/api/soc-alerts/group/analyze", "soc_alert_analyze", "group"),
+            ("/api/soc-alerts/group/escalate", "soc_alert_escalate", "group"),
+            ("/api/soc-alerts/group/adjudicate", "soc_alert_adjudicate", "group"),
+            ("/api/soc-incidents/ir-case/adjudicate", "soc_incident_adjudicate", "ir-case"),
+            ("/api/soc-incidents/ir-case/status", "soc_incident_status", "ir-case"),
+            ("/api/soc-incidents/ir-case/reanalyze", "soc_incident_reanalyze", "ir-case"),
+            ("/api/soc-incidents/reanalyze-all", "soc_incident_reanalyze_all", None),
         )
-        for path in paths:
+        for path, operation, resource_id in paths:
             with self.subTest(path=path):
                 route = self.classify(path)
                 self.assertTrue(route.accepted)
                 self.assertTrue(route.json_request)
+                self.assertEqual(route.operation, operation)
+                self.assertEqual(route.resource_id, resource_id)
+
+    def test_dynamic_resource_ids_are_decoded_once_by_route_policy(self) -> None:
+        route = self.classify("/api/soc-alerts/group%20one%2Fchild/analyze")
+        self.assertEqual(route.operation, "soc_alert_analyze")
+        self.assertEqual(route.resource_id, "group one/child")
 
     def test_route_roles_are_independent_and_cti_limit_is_explicit(self) -> None:
         cti = self.classify(CTI)

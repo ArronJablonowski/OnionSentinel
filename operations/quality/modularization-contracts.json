@@ -73,6 +73,15 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_soc_write_dispatch.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_write_dispatch.py",
+      "required_symbols": [
+        "SocWriteCallbacks",
+        "dispatch_authorized_soc_write"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/build_soc_alerts_dashboard.py",

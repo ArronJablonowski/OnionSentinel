@@ -292,6 +292,12 @@ own headers, authentication, same-origin enforcement, body parsing, service
 calls, and responses; mutable runtime policy is passed into the classifier
 explicitly so tests and deployed prompt routes cannot drift.
 
+`portal_soc_write_dispatch.py` owns the bounded callback selection for SOC
+alert actions, analyst adjudications, incident status changes, and incident
+reanalysis. Route metadata decodes the target identifier once; the handler
+still owns authorization, JSON validation, cache invalidation, and HTTP
+responses, while the dispatcher has no database or process-state access.
+
 | Domain | Current responsibility examples | Target modules |
 | --- | --- | --- |
 | HTTP composition | server, handler, GET/POST dispatch | `portal.entrypoint`, `portal.routes.registry` |

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import AbstractSet
+from urllib.parse import unquote
 
 
 HEAD_EXACT_PATHS = frozenset({
@@ -38,13 +39,27 @@ ASSET_WRITE_PATHS = frozenset({
     '/api/assets/promote-dhcp', '/api/assets/approve-dhcp-ip-change',
     '/api/assets/update', '/api/assets/demote',
 })
-ALERT_ACTION_SUFFIXES = ('/ack', '/pcap', '/analyze', '/escalate')
+SOC_ALERT_PREFIX = '/api/soc-alerts/'
+SOC_INCIDENT_PREFIX = '/api/soc-incidents/'
+SOC_WRITE_OPERATIONS = frozenset({
+    'soc_alert_ack',
+    'soc_alert_pcap',
+    'soc_alert_analyze',
+    'soc_alert_escalate',
+    'soc_alert_adjudicate',
+    'soc_incident_adjudicate',
+    'soc_incident_status',
+    'soc_incident_reanalyze',
+    'soc_incident_reanalyze_all',
+})
 
 
 @dataclass(frozen=True)
 class PostRoute:
     path: str
     accepted: bool
+    operation: str | None
+    resource_id: str | None
     cti_program_write: bool
     asset_write: bool
     incident_reanalysis: bool
@@ -58,8 +73,35 @@ class PostRoute:
         return cti_file_bytes if self.cti_program_write else 50_000
 
 
-def _dynamic_suffix(path: str, prefix: str, suffixes: tuple[str, ...]) -> bool:
-    return path.startswith(prefix) and path.endswith(suffixes)
+def _dynamic_target(
+    path: str,
+    prefix: str,
+    suffix: str,
+) -> str | None:
+    if not path.startswith(prefix) or not path.endswith(suffix):
+        return None
+    encoded_id = path[len(prefix):-len(suffix)].strip('/')
+    return unquote(encoded_id)
+
+
+def _soc_write_target(path: str) -> tuple[str | None, str | None]:
+    if path == '/api/soc-incidents/reanalyze-all':
+        return 'soc_incident_reanalyze_all', None
+    candidates = (
+        (SOC_ALERT_PREFIX, '/ack', 'soc_alert_ack'),
+        (SOC_ALERT_PREFIX, '/pcap', 'soc_alert_pcap'),
+        (SOC_ALERT_PREFIX, '/analyze', 'soc_alert_analyze'),
+        (SOC_ALERT_PREFIX, '/escalate', 'soc_alert_escalate'),
+        (SOC_ALERT_PREFIX, '/adjudicate', 'soc_alert_adjudicate'),
+        (SOC_INCIDENT_PREFIX, '/adjudicate', 'soc_incident_adjudicate'),
+        (SOC_INCIDENT_PREFIX, '/status', 'soc_incident_status'),
+        (SOC_INCIDENT_PREFIX, '/reanalyze', 'soc_incident_reanalyze'),
+    )
+    for prefix, suffix, operation in candidates:
+        resource_id = _dynamic_target(path, prefix, suffix)
+        if resource_id is not None:
+            return operation, resource_id
+    return None, None
 
 
 def classify_post_route(
@@ -69,20 +111,20 @@ def classify_post_route(
     prompt_paths: AbstractSet[str],
 ) -> PostRoute:
     """Classify a POST path without reading headers, bodies, or runtime state."""
+    operation, resource_id = _soc_write_target(path)
     cti_write = path == cti_program_path
     asset_write = path in ASSET_WRITE_PATHS
-    incident_reanalysis = path == '/api/soc-incidents/reanalyze-all' or (
-        path.startswith('/api/soc-incidents/') and path.endswith('/reanalyze')
-    )
-    review_write = (
-        path.startswith('/api/soc-alerts/') and path.endswith('/adjudicate')
-    ) or (
-        path.startswith('/api/soc-incidents/')
-        and path.endswith(('/adjudicate', '/status'))
-    )
-    alert_action = _dynamic_suffix(
-        path, '/api/soc-alerts/', ALERT_ACTION_SUFFIXES
-    )
+    incident_reanalysis = operation in {
+        'soc_incident_reanalyze', 'soc_incident_reanalyze_all',
+    }
+    review_write = operation in {
+        'soc_alert_adjudicate', 'soc_incident_adjudicate',
+        'soc_incident_status',
+    }
+    alert_action = operation in {
+        'soc_alert_ack', 'soc_alert_pcap', 'soc_alert_analyze',
+        'soc_alert_escalate',
+    }
     prompt_write = path in prompt_paths
     resource_write = path in RESOURCE_WRITE_PATHS
     json_request = bool(
@@ -99,6 +141,8 @@ def classify_post_route(
     return PostRoute(
         path=path,
         accepted=accepted,
+        operation=operation,
+        resource_id=resource_id,
         cti_program_write=cti_write,
         asset_write=asset_write,
         incident_reanalysis=incident_reanalysis,
