@@ -1781,6 +1781,27 @@ def _review_validation():
     return validation
 
 
+def _review_supplemental():
+    _provider_routing()
+    from onion_sentinel.analysis.review import supplemental
+    return supplemental
+
+
+def _review_supplemental_dependencies():
+    module = _review_supplemental()
+    return module.Dependencies(
+        pop_query_requests=pop_investigation_query_requests,
+        canonical_digest=canonical_payload_digest,
+        independent_package=independent_reviewer_package,
+        route_is_hosted=model_route_is_hosted,
+        analyze_route=analyze_model_route,
+        validate_reviewer=validate_reviewer_response,
+        validate_response=validate_response,
+        apply_query_loop=apply_investigation_query_loop,
+        max_queries_per_round=MAX_INVESTIGATION_QUERIES_PER_ROUND,
+    )
+
+
 def normalized_model_roster(value: Any) -> list[str]:
     return _provider_routing().normalized_model_roster(value)
 
@@ -10863,27 +10884,7 @@ def validate_reviewer_response(
 def reviewer_supplemental_pivot_reason(
     reviewer_response: dict[str, Any],
 ) -> str:
-    """Return the bounded unresolved discriminator that permits one pivot."""
-    requests = reviewer_response.get("investigation_query_requests")
-    if not isinstance(requests, list) or not requests:
-        return ""
-    evidence_gaps = reviewer_response.get("evidence_gaps")
-    if isinstance(evidence_gaps, list):
-        for gap in evidence_gaps:
-            text = str(gap or "").strip()
-            if text:
-                return text[:500]
-    hypotheses = reviewer_response.get("hypotheses")
-    if isinstance(hypotheses, list):
-        for item in hypotheses:
-            if not isinstance(item, dict):
-                continue
-            discriminator = str(
-                item.get("next_discriminator") or ""
-            ).strip()
-            if discriminator:
-                return discriminator[:500]
-    return ""
+    return _review_supplemental().pivot_reason(reviewer_response)
 
 
 def apply_reviewer_supplemental_pivot(
@@ -10901,138 +10902,15 @@ def apply_reviewer_supplemental_pivot(
     investigation_pivot_dir: Path,
     harness_runtime: OnionSentinelHarnessRun | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Execute at most one reviewer-requested read-only pivot round."""
-    requests = pop_investigation_query_requests(reviewer_response)
-    audit: dict[str, Any] = {
-        "schema": "onion-sentinel-reviewer-supplemental-pivot-v1",
-        "requested": bool(requests),
-        "executed": False,
-        "maximum_rounds": 1,
-        "maximum_queries": MAX_INVESTIGATION_QUERIES_PER_ROUND,
-        "request_count": len(requests),
-        "reason": "",
-    }
-    if not requests:
-        audit["reason"] = "reviewer requested no supplemental pivot"
-        return reviewer_response, audit
-    discriminator = reviewer_supplemental_pivot_reason(
-        {
-            **reviewer_response,
-            "investigation_query_requests": requests,
-        }
-    )
-    if not discriminator:
-        audit["reason"] = (
-            "supplemental requests lacked a material unresolved discriminator"
-        )
-        return reviewer_response, audit
-    if harness_runtime is None:
-        audit["reason"] = "Onion Sentinel harness is not active"
-        return reviewer_response, audit
-    if harness_runtime.remaining_model_calls() < 1:
-        audit["reason"] = "no model-call budget remains for reconciliation"
-        return reviewer_response, audit
-    if harness_runtime.remaining_query_rounds() < 1:
-        audit["reason"] = "no query-round budget remains for reconciliation"
-        return reviewer_response, audit
-    remaining_queries = harness_runtime.remaining_queries()
-    if remaining_queries < 1:
-        audit["reason"] = "no query budget remains for reconciliation"
-        return reviewer_response, audit
-    query_round_offset = harness_runtime.query_rounds_used()
-
-    initial_review_sha256 = canonical_payload_digest(reviewer_response)
-    prompt_package["reviewer_supplemental_context"] = {
-        "schema": "onion-sentinel-reviewer-supplemental-context-v1",
-        "initial_review_sha256": initial_review_sha256,
-        "material_discriminator": discriminator,
-    }
-
-    def build_review_input(
-        package: dict[str, Any],
-        _call_number: int,
-    ) -> dict[str, Any]:
-        return independent_reviewer_package(
-            package,
-            hosted=model_route_is_hosted(route, settings),
-        )
-
-    def execute_review(
-        requested_route: str,
-        review_package: dict[str, Any],
-        model_args: argparse.Namespace,
-        model_settings: dict[str, Any],
-    ) -> dict[str, Any]:
-        candidate = analyze_model_route(
-            requested_route,
-            review_package,
-            model_args,
-            model_settings,
-            system_prompt_file=reviewer_prompt,
-            independent_review=True,
-        )
-        validated = validate_reviewer_response(
-            candidate,
-            review_package,
-        )
-        validated = validate_response(validated, review_package)
-        validated["second_opinion_recommended"] = False
-        validated["hosted_second_opinion_recommended"] = False
-        return validated
-
-    final_response = apply_investigation_query_loop(
-        prompt_package,
-        {"investigation_query_requests": requests},
-        args,
-        settings,
-        agent_role,
-        live_osquery_config=live_osquery_config,
+    return _review_supplemental().execute(
+        prompt_package, reviewer_response, args, settings, agent_role, route,
+        reviewer_prompt, live_osquery_config=live_osquery_config,
         enrichment_config=enrichment_config,
         security_onion_config_path=security_onion_config_path,
         investigation_pivot_dir=investigation_pivot_dir,
         harness_runtime=harness_runtime,
-        model_executor=execute_review,
-        route_override=route,
-        max_rounds_override=1,
-        max_queries_total_override=min(
-            MAX_INVESTIGATION_QUERIES_PER_ROUND,
-            remaining_queries,
-        ),
-        include_deterministic_requests=False,
-        model_input_builder=build_review_input,
-        model_call_id_prefix="independent-review-supplemental",
-        model_call_purpose_prefix=(
-            "independent reviewer supplemental reconciliation round"
-        ),
-        model_call_independent_review=True,
-        query_round_offset=query_round_offset,
+        deps=_review_supplemental_dependencies(),
     )
-    ignored_recursive_requests = pop_investigation_query_requests(
-        final_response
-    )
-    query_audit = final_response.get("_investigation_query_audit")
-    terminal_ignored_requests = (
-        int(query_audit.get("terminal_requests_ignored") or 0)
-        if isinstance(query_audit, dict)
-        else 0
-    )
-    audit.update(
-        {
-            "executed": True,
-            "reason": discriminator,
-            "initial_review_sha256": initial_review_sha256,
-            "final_review_sha256": canonical_payload_digest(
-                final_response
-            ),
-            "query_audit": final_response.get(
-                "_investigation_query_audit"
-            ),
-            "recursive_requests_ignored": len(
-                ignored_recursive_requests
-            ) + terminal_ignored_requests,
-        }
-    )
-    return final_response, audit
 
 
 def second_opinion_trigger(

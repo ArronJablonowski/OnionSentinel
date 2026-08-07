@@ -278,6 +278,10 @@ completeness scoring so each policy can evolve independently.
 Incident evidence completeness evaluates initial Security Onion collection,
 iterative query pivots, and live endpoint OSQuery as separate bounded sources,
 then publishes one deterministic confidence cap and ordered limiter audit.
+Reviewer supplemental reconciliation is isolated under
+`onion_sentinel.analysis.review`; it admits one discriminator-backed round,
+rebuilds the blind package, suppresses recursion, and delegates governed query
+execution through an injected interface owned by the query pipeline.
 The legacy runner functions remain compatibility delegates and inject runtime
 policy explicitly, preserving existing test seams while keeping review-package
 mutation and reviewer-output admission out of the composition root.
