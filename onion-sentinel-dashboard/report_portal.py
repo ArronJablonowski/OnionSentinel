@@ -140,6 +140,7 @@ from portal_soc_ai_artifact_context import (
     AiArtifactContextDependencies,
     compose_page_ai_artifact_context,
 )
+from portal_soc_ai_artifacts import AiArtifactSources, build_ai_artifact_index
 from portal_incident_actions import (
     IncidentStatusPayloadError,
     normalize_incident_status_payload,
@@ -7537,47 +7538,21 @@ def soc_alert_latest_analysis_mtime(alert_id: str) -> float:
 def soc_alert_ai_artifact_index() -> dict[str, object]:
     """Index AI prompt/analysis artifact mtimes once for one API response."""
     cache_path = SOC_ALERT_AI_ANALYSIS_DIR.parent
-    def build_index() -> dict[str, object]:
-        prompt_mtime_by_alert: dict[str, float] = {}
-        analysis_mtime_by_alert: dict[str, float] = {}
-        detection_outcome_by_alert: dict[str, str] = {}
-        prompt_dir_matches_analysis = (
-            SOC_ALERT_AI_PROMPT_DIR.exists()
-            and SOC_ALERT_AI_ANALYSIS_DIR.exists()
-            and SOC_ALERT_AI_PROMPT_DIR.parent == SOC_ALERT_AI_ANALYSIS_DIR.parent
-        )
-        if prompt_dir_matches_analysis:
-            for path in SOC_ALERT_AI_PROMPT_DIR.glob("*-ai-prompt.json"):
-                try:
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                    continue
-                alert = data.get("alert") if isinstance(data.get("alert"), dict) else {}
-                alert_id = str(alert.get("alert_id") or data.get("alert_id") or "").strip()
-                if alert_id:
-                    prompt_mtime_by_alert[alert_id] = max(prompt_mtime_by_alert.get(alert_id, 0.0), path.stat().st_mtime)
-        if SOC_ALERT_AI_ANALYSIS_DIR.exists():
-            for path in SOC_ALERT_AI_ANALYSIS_DIR.glob("*-local-ai-analysis.json"):
-                try:
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                    continue
-                alert_id = str(data.get("alert_id") or "").strip()
-                if alert_id:
-                    artifact_mtime = path.stat().st_mtime
-                    if artifact_mtime >= analysis_mtime_by_alert.get(alert_id, 0.0):
-                        analysis_mtime_by_alert[alert_id] = artifact_mtime
-                        response = data.get("response") if isinstance(data.get("response"), dict) else {}
-                        outcome = str(response.get("detection_outcome") or data.get("detection_outcome") or "").strip()
-                        if outcome:
-                            detection_outcome_by_alert[alert_id] = outcome
-        return {
-            "prompt_mtime_by_alert": prompt_mtime_by_alert,
-            "analysis_mtime_by_alert": analysis_mtime_by_alert,
-            "detection_outcome_by_alert": detection_outcome_by_alert,
-        }
-
-    return SOC_ALERT_ARTIFACT_CACHE.get_or_compute("ai-artifact-index", cache_path, build_index)
+    sources = AiArtifactSources(
+        prompt_paths=lambda: SOC_ALERT_AI_PROMPT_DIR.glob("*-ai-prompt.json"),
+        analysis_paths=lambda: SOC_ALERT_AI_ANALYSIS_DIR.glob("*-local-ai-analysis.json"),
+        read_record=lambda path: json.loads(path.read_text(encoding="utf-8")),
+        modified_time=lambda path: path.stat().st_mtime,
+    )
+    include_prompts = (
+        SOC_ALERT_AI_PROMPT_DIR.exists()
+        and SOC_ALERT_AI_ANALYSIS_DIR.exists()
+        and SOC_ALERT_AI_PROMPT_DIR.parent == SOC_ALERT_AI_ANALYSIS_DIR.parent
+    )
+    return SOC_ALERT_ARTIFACT_CACHE.get_or_compute(
+        "ai-artifact-index", cache_path,
+        lambda: build_ai_artifact_index(sources, include_prompts=include_prompts),
+    )
 
 
 def _soc_ai_group_members(group_keys: list[str]) -> list[tuple[str, str]]:

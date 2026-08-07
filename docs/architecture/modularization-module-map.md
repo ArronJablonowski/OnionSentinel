@@ -431,6 +431,13 @@ artifact-index caching and injects one bounded member lookup plus dashboard
 identity policy; the correlator performs no database, filesystem, process, or
 network access and degrades malformed artifact metadata to explicit empty state.
 
+`portal_soc_ai_artifacts.py` owns compact prompt and analysis artifact indexing.
+It records only newest modification times and detection outcomes, accepts all
+filesystem operations through `AiArtifactSources`, preserves the last known
+outcome when a newer incomplete artifact has none, and isolates malformed or
+missing files. `report_portal.py` retains the shared cache and runtime-directory
+policy, including the legacy same-parent requirement for prompt discovery.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and
