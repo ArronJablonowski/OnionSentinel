@@ -274,6 +274,18 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_alert_ai_workflow.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_ai_workflow.py",
+      "required_symbols": [
+        "ai_analysis_for_row",
+        "ai_workflow_status_for_row",
+        "candidate_alert_ids_for_row",
+        "row_is_ai_backlog_eligible",
+        "severity_meets_analysis_threshold"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_flow_page.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_flow_page.py",

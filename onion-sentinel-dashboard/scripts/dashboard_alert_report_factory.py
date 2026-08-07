@@ -13,6 +13,7 @@ from dashboard_alert_detail_enrichment import public_enrichment_status
 from dashboard_alert_detail_markdown import markdown_to_html
 from dashboard_alert_detail_sections import severity_label_from_row
 from dashboard_alert_detail_values import nested_value
+from dashboard_alert_ai_workflow import ai_analysis_for_row, ai_workflow_status_for_row
 from dashboard_alert_report_model import AlertReport, CRITICALITY_ORDER
 from dashboard_alert_repository import alert_group_key, raw_alert_object, row_item, safe_int
 from dashboard_pcap_components import render_pcap_evidence_markdown
@@ -35,10 +36,6 @@ class AlertReportFactoryConfig:
 class AlertReportFactoryServices:
     """Stateful status services kept outside the pure report transformation."""
 
-    ai_analysis_for_row: Callable[[object, dict[str, dict]], dict | None]
-    ai_workflow_status_for_row: Callable[
-        [object, dict[str, dict], dict[str, dict], set[str], str], StatusTuple
-    ]
     pcap_status_for_row: Callable[[object, dict[str, object] | None], StatusTuple]
     pcap_analysis_for_row: Callable[[object, dict[str, object] | None], dict | None]
     finalize_detail_report_html: Callable[[str, str, tuple[str, ...]], str]
@@ -152,10 +149,10 @@ def workflow_evidence(
     services: AlertReportFactoryServices,
 ) -> ReportWorkflowEvidence:
     """Resolve all stateful workflow evidence through injected services."""
-    analysis = services.ai_analysis_for_row(row, ai_analysis_by_alert_id)
+    analysis = ai_analysis_for_row(row, ai_analysis_by_alert_id)
     response = analysis.get("response") if isinstance(analysis, dict) else None
     ai_response = response if isinstance(response, dict) else {}
-    ai_status = services.ai_workflow_status_for_row(
+    ai_status = ai_workflow_status_for_row(
         row, ai_analysis_by_alert_id, ai_prompts_by_alert_id,
         running_ai_alert_ids, ai_analysis_min_severity,
     )

@@ -149,6 +149,18 @@ from dashboard_alert_report_factory import (  # noqa: E402
     endpoint_label,
     summarize_markdown,
 )
+from dashboard_alert_ai_workflow import (  # noqa: E402
+    AI_ELIGIBLE_FILTER_STATUSES,
+    SOC_ANALYSIS_SEVERITY_LABELS,
+    TEST_ALERT_PREFIXES,
+    ai_analysis_for_row,
+    ai_workflow_status_for_row,
+    analysis_artifact_mtime,
+    candidate_alert_ids_for_row,
+    is_test_alert_id,
+    row_is_ai_backlog_eligible,
+    severity_meets_analysis_threshold,
+)
 from dashboard_flow_page import (  # noqa: E402
     FLOW_PAGE_CSS,
     FLOW_PAGE_JS,
@@ -350,8 +362,6 @@ def load_analyst_group_statuses() -> dict[str, dict[str, object]]:
         return {}
     finally:
         conn.close()
-AI_ELIGIBLE_FILTER_STATUSES = {'accepted', 'escalated', 'unknown', 'suppressed'}
-TEST_ALERT_PREFIXES = ('phase', 'config-', 'internal-test-', 'sqlite-', 'policy-', 'codex-')
 DEFAULT_SOC_ANALYST_PROMPT = """You are a careful SOC analyst. Use only the supplied evidence.
 
 Your job is to analyze Security Onion alerts for an analyst working a home/lab SOC environment. Be precise, skeptical, and operationally useful.
@@ -523,14 +533,6 @@ SOC_ANALYSIS_SEVERITY_THRESHOLDS = (
     'low',
     'informational',
 )
-SOC_ANALYSIS_SEVERITY_LABELS = {
-    'disabled': 'Disabled',
-    'critical': 'Critical',
-    'high': 'High',
-    'medium': 'Medium',
-    'low': 'Low',
-    'informational': 'Informational',
-}
 CODEX_CLI_REASONING_EFFORTS = ('low', 'medium', 'high', 'xhigh')
 HERMES_AGENT_REASONING_EFFORT = 'medium'
 CODEX_CLI_MODEL_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
@@ -2016,123 +2018,6 @@ def insert_timeline_after_alert_identity(rendered_html: str, timeline_html: str)
     return timeline_html + rendered_html
 
 
-def candidate_alert_ids_for_row(row: sqlite3.Row | dict) -> list[str]:
-    candidate_ids = [row['alert_id']]
-    if isinstance(row, dict):
-        candidate_ids.extend(row.get('member_alert_ids') or [])
-    return [str(alert_id) for alert_id in candidate_ids if alert_id]
-
-
-def is_test_alert_id(alert_id: str) -> bool:
-    return alert_id.startswith(TEST_ALERT_PREFIXES)
-
-
-def severity_meets_analysis_threshold(severity: object, threshold: object) -> bool:
-    levels = ('informational', 'low', 'medium', 'high', 'critical')
-    normalized_severity = str(severity or 'informational').strip().lower()
-    normalized_threshold = str(threshold or 'informational').strip().lower()
-    if normalized_severity == 'info':
-        normalized_severity = 'informational'
-    if normalized_threshold == 'info':
-        normalized_threshold = 'informational'
-    if normalized_threshold == 'disabled':
-        return False
-    if normalized_threshold not in levels:
-        normalized_threshold = 'informational'
-    if normalized_severity not in levels:
-        return False
-    return levels.index(normalized_severity) >= levels.index(normalized_threshold)
-
-
-def row_is_ai_backlog_eligible(
-    row: sqlite3.Row | dict,
-    analysis_min_severity: str = 'informational',
-) -> tuple[bool, str]:
-    candidate_ids = candidate_alert_ids_for_row(row)
-    if candidate_ids and all(is_test_alert_id(alert_id) for alert_id in candidate_ids):
-        return False, 'Test/validation alert is intentionally excluded from automatic assigned-model analysis'
-    status = str(row['filter_status'] or 'accepted').strip().lower()
-    if status not in AI_ELIGIBLE_FILTER_STATUSES:
-        return False, f'Filter status {status or "blank"} is not eligible for automatic assigned-model analysis'
-    triage_level = row_value(row, 'triage_level') or row_value(row, 'severity_label') or 'informational'
-    normalized_level = str(triage_level).strip().lower()
-    if normalized_level == 'info':
-        normalized_level = 'informational'
-    if normalized_level not in {'informational', 'low', 'medium', 'high', 'critical'}:
-        return False, f'Unrecognized severity {normalized_level or "blank"} is not eligible for automatic assigned-model analysis'
-    if not severity_meets_analysis_threshold(triage_level, analysis_min_severity):
-        threshold_label = SOC_ANALYSIS_SEVERITY_LABELS.get(
-            str(analysis_min_severity or '').strip().lower(),
-            'Informational',
-        )
-        return (
-            False,
-            f'Below configured {threshold_label} automatic AI-analysis minimum',
-        )
-    return True, 'Queued for the scheduled assigned-model analysis worker'
-
-
-def ai_analysis_for_row(row: sqlite3.Row | dict, ai_analysis_by_alert_id: dict[str, dict]) -> dict | None:
-    candidate_ids = candidate_alert_ids_for_row(row)
-    for alert_id in candidate_ids:
-        analysis = ai_analysis_by_alert_id.get(alert_id)
-        if analysis:
-            return analysis
-    return None
-
-
-def analysis_artifact_mtime(analysis: dict | None) -> float:
-    if not analysis:
-        return 0
-    path = Path(str(analysis.get('_analysis_path') or ''))
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0
-
-
-def ai_workflow_status_for_row(
-    row: sqlite3.Row | dict,
-    ai_analysis_by_alert_id: dict[str, dict],
-    ai_prompts_by_alert_id: dict[str, dict],
-    running_ai_alert_ids: set[str],
-    analysis_min_severity: str = 'informational',
-) -> tuple[str, str, str]:
-    candidate_ids = candidate_alert_ids_for_row(row)
-    for alert_id in candidate_ids:
-        if alert_id in running_ai_alert_ids:
-            prompt = ai_prompts_by_alert_id.get(alert_id, {})
-            return ('analyzing', 'Analyzing', prompt.get('_prompt_filename') or 'Assigned-model runner is active')
-    prompts = [ai_prompts_by_alert_id[alert_id] for alert_id in candidate_ids if alert_id in ai_prompts_by_alert_id]
-    analyses = [ai_analysis_by_alert_id[alert_id] for alert_id in candidate_ids if alert_id in ai_analysis_by_alert_id]
-    newest_prompt = max((float(prompt.get('_prompt_mtime') or 0) for prompt in prompts), default=0)
-    newest_analysis = max((analysis_artifact_mtime(analysis) for analysis in analyses), default=0)
-    if newest_prompt and newest_prompt > newest_analysis:
-        prompt = max(prompts, key=lambda item: float(item.get('_prompt_mtime') or 0))
-        generated_at = prompt.get('generated_at') or 'queued'
-        return ('queued', 'Queued', normalize_iso_display_text(f'{prompt.get("_prompt_filename") or "prompt package"} at {generated_at}'))
-    if analyses:
-        analysis = max(analyses, key=analysis_artifact_mtime)
-        model = ''
-        response = analysis.get('response') if isinstance(analysis.get('response'), dict) else {}
-        if response:
-            model = str(response.get('_analysis_model') or '')
-        generated_at = analysis.get('generated_at') or 'complete'
-        detail = normalize_iso_display_text(f'{model} at {generated_at}'.strip())
-        return ('analyzed', 'Analyzed', detail)
-    if prompts:
-        prompt = max(prompts, key=lambda item: float(item.get('_prompt_mtime') or 0))
-        generated_at = prompt.get('generated_at') or 'queued'
-        return ('queued', 'Queued', normalize_iso_display_text(f'{prompt.get("_prompt_filename") or "prompt package"} at {generated_at}'))
-    eligible, reason = row_is_ai_backlog_eligible(row, analysis_min_severity)
-    if not eligible:
-        return ('not-queued', 'Skipped', reason)
-    # The scheduled AI worker treats every eligible unique grouped alert as
-    # backlog once it appears on the dashboard. A prompt package may not exist
-    # yet because the worker generates prompts just-in-time.
-    return ('queued', 'Queued', reason)
-
-
 def passthrough_markdown_report_text(text: str) -> str:
     # Kept for compatibility with the existing render path. Full-fidelity mode
     # intentionally renders report text without redacting alert fields.
@@ -2349,8 +2234,6 @@ def report_from_sqlite_row(
     ai_analysis_min_severity: str = 'informational',
 ) -> AlertReport:
     services = AlertReportFactoryServices(
-        ai_analysis_for_row=ai_analysis_for_row,
-        ai_workflow_status_for_row=ai_workflow_status_for_row,
         pcap_status_for_row=pcap_status_for_row,
         pcap_analysis_for_row=pcap_analysis_for_row,
         finalize_detail_report_html=finalize_detail_report_html,

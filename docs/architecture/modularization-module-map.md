@@ -480,6 +480,12 @@ stateful AI/PCAP status and DOM-validation services, preventing a circular
 dependency on the dashboard builder while those workflow services are split
 into their own modules.
 
+`dashboard_alert_ai_workflow.py` owns grouped candidate selection, test/filter
+exclusions, severity-floor eligibility, analysis artifact precedence, and the
+running/queued/analyzed/skipped status contract. The report factory consumes
+this policy directly, while the builder re-exports its public functions and
+labels for compatibility with settings rendering and existing callers.
+
 `dashboard_flow_page.py` owns the pure data-flow renderer, enrichment-service
 tiles, responsive pipeline styles, and privacy-toggle client. The builder
 assembles `FlowPageViewModel` from live alert/report/model/notification metrics

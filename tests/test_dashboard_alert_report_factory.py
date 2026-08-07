@@ -65,15 +65,6 @@ class DashboardAlertReportFactoryTests(unittest.TestCase):
 
     def services(self):
         return self.factory.AlertReportFactoryServices(
-            ai_analysis_for_row=lambda _row, _index: {
-                "response": {
-                    "bluf": "Evidence-backed result.",
-                    "tuning_recommendation": "review",
-                    "tuning_reason": "Repeated activity",
-                    "recommended_tuning_actions": [" Validate scope ", ""],
-                }
-            },
-            ai_workflow_status_for_row=lambda *_args: ("analyzed", "Analyzed", "gpt-test"),
             pcap_status_for_row=lambda *_args: ("none", "None", "No parsed PCAP"),
             pcap_analysis_for_row=lambda *_args: None,
             finalize_detail_report_html=lambda rendered, timeline, issues: (
@@ -84,9 +75,20 @@ class DashboardAlertReportFactoryTests(unittest.TestCase):
     def test_factory_builds_complete_model_from_normalized_row(self) -> None:
         row = report_row()
         config = self.factory.AlertReportFactoryConfig(Path("alerts.sqlite3"), ())
+        analyses = {
+            "alert-1": {
+                "response": {
+                    "bluf": "Evidence-backed result.",
+                    "_analysis_model": "gpt-test",
+                    "tuning_recommendation": "review",
+                    "tuning_reason": "Repeated activity",
+                    "recommended_tuning_actions": [" Validate scope ", ""],
+                }
+            }
+        }
 
         report = self.factory.build_alert_report(
-            row, {}, {}, {}, set(), {}, "medium", config, self.services(),
+            row, {}, analyses, {}, set(), {}, "medium", config, self.services(),
         )
 
         self.assertEqual(report.title, "[MEDIUM] Example Rule")
