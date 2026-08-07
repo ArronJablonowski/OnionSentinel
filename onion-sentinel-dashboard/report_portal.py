@@ -105,6 +105,10 @@ from portal_soc_review_metadata import (
     review_defaults as _soc_review_defaults,
     reviewer_automation_authorization as _soc_reviewer_automation_authorization,
 )
+from portal_soc_evidence_metadata import (
+    SocEvidenceDependencies,
+    compose_soc_evidence_metadata,
+)
 from portal_incident_actions import (
     IncidentStatusPayloadError,
     normalize_incident_status_payload,
@@ -8244,160 +8248,20 @@ def soc_alert_group_evidence_metadata(
     ai_artifacts: dict[str, object] | None = None,
     pcap_analysis: dict[str, object] | None = None,
 ) -> dict[str, dict[str, object]]:
-    """Batch group-level PCAP size and latest AI outcome for one API page.
-
-    The dashboard must not issue one SQLite query per row. This helper resolves
-    the current page in two bounded queries and falls back to retained analysis
-    artifacts when a restored database predates the durable metadata tables.
-    """
-    def row_value(row: sqlite3.Row | dict, key: str) -> str:
-        if isinstance(row, dict):
-            return str(row.get(key) or "").strip()
-        return str(row[key] or "").strip() if key in row.keys() else ""
-
-    group_by_key: dict[str, str] = {}
-    group_by_alert: dict[str, str] = {}
-    metadata: dict[str, dict[str, object]] = {}
-    for row in rows:
-        group_key = row_value(row, "group_key")
-        group_id = soc_alert_group_id(group_key) if group_key else row_value(row, "group_id")
-        if not group_id:
-            continue
-        alert_id = row_value(row, "alert_id") or row_value(row, "representative_alert_id")
-        metadata[group_id] = {
-            "pcap_size_bytes": 0,
-            "detection_outcome": "",
-            "detection_outcome_label": "n/a",
-            **_soc_incident_defaults(),
-            **_soc_review_defaults(),
-        }
-        if group_key:
-            group_by_key[group_key] = group_id
-        if alert_id:
-            group_by_alert[alert_id] = group_id
-
-    ai_artifacts = ai_artifacts if isinstance(ai_artifacts, dict) else {}
-    artifact_outcomes = ai_artifacts.get("detection_outcome_by_group_id")
-    if isinstance(artifact_outcomes, dict):
-        for group_id, record in metadata.items():
-            outcome = str(artifact_outcomes.get(group_id) or "").strip()
-            if outcome:
-                record["detection_outcome"] = outcome
-                record["detection_outcome_label"] = soc_alert_detection_outcome_label(outcome)
-
-    pcap_analysis = pcap_analysis if isinstance(pcap_analysis, dict) else {}
-    artifact_sizes_by_group = pcap_analysis.get("size_by_group_id")
-    artifact_sizes_by_alert = pcap_analysis.get("size_by_alert_id")
-    for group_id, record in metadata.items():
-        fallback_size = 0
-        if isinstance(artifact_sizes_by_group, dict):
-            fallback_size = int(artifact_sizes_by_group.get(group_id, 0) or 0)
-        if fallback_size <= 0 and isinstance(artifact_sizes_by_alert, dict):
-            fallback_size = sum(
-                int(artifact_sizes_by_alert.get(alert_id, 0) or 0)
-                for alert_id, alert_group_id in group_by_alert.items()
-                if alert_group_id == group_id
-            )
-        record["pcap_size_bytes"] = max(0, fallback_size)
-
-    if conn is None or not metadata:
-        return metadata
-
-    def where_terms(columns: list[tuple[str, list[str]]]) -> tuple[str, list[str]]:
-        clauses: list[str] = []
-        arguments: list[str] = []
-        for column, values in columns:
-            if not values:
-                continue
-            clauses.append(f"{column} IN ({','.join('?' for _ in values)})")
-            arguments.extend(values)
-        return " OR ".join(clauses), arguments
-
-    group_ids = sorted(metadata)
-    group_keys = sorted(group_by_key)
-    alert_ids = sorted(group_by_alert)
-
-    if sqlite_table_exists(conn, "pcap_requests"):
-        where_sql, arguments = where_terms([
-            ("group_id", group_ids),
-            ("group_key", group_keys),
-            ("alert_id", alert_ids),
-        ])
-        if where_sql:
-            try:
-                pcap_rows = conn.execute(
-                    f"""
-                    SELECT request_id, alert_id, group_id, group_key, artifact_path,
-                           artifact_sha256, artifact_size_bytes
-                    FROM pcap_requests
-                    WHERE ({where_sql}) AND COALESCE(artifact_size_bytes, 0) > 0
-                    """,
-                    arguments,
-                ).fetchall()
-            except sqlite3.Error:
-                pcap_rows = []
-            db_sizes: dict[str, int] = {}
-            seen_artifacts: set[tuple[str, str]] = set()
-            for item in pcap_rows:
-                stored_group_id = str(item["group_id"] or "").strip()
-                stored_group_key = str(item["group_key"] or "").strip()
-                stored_alert_id = str(item["alert_id"] or "").strip()
-                group_id = (
-                    stored_group_id if stored_group_id in metadata else
-                    group_by_key.get(stored_group_key) or group_by_alert.get(stored_alert_id) or ""
-                )
-                if not group_id:
-                    continue
-                identity = (
-                    str(item["artifact_sha256"] or "").strip()
-                    or str(item["artifact_path"] or "").strip()
-                    or str(item["request_id"] or "").strip()
-                )
-                artifact_key = (group_id, identity)
-                if not identity or artifact_key in seen_artifacts:
-                    continue
-                seen_artifacts.add(artifact_key)
-                db_sizes[group_id] = db_sizes.get(group_id, 0) + max(0, int(item["artifact_size_bytes"] or 0))
-            for group_id, size_bytes in db_sizes.items():
-                metadata[group_id]["pcap_size_bytes"] = size_bytes
-
-    if sqlite_table_exists(conn, "ai_analysis_runs"):
-        where_sql, arguments = where_terms([("group_id", group_ids), ("alert_id", alert_ids)])
-        if where_sql:
-            role_filter = ""
-            if "agent_role" in sqlite_table_columns(conn, "ai_analysis_runs"):
-                # The SOC Alerts outcome column represents SOC triage. A later
-                # Incident Responder run must not silently replace that value.
-                role_filter = " AND COALESCE(NULLIF(agent_role, ''), 'soc-analyst') = 'soc-analyst'"
-            try:
-                analysis_rows = conn.execute(
-                    f"""
-                    SELECT group_id, alert_id, detection_outcome, generated_at, created_at
-                    FROM ai_analysis_runs
-                    WHERE ({where_sql}) AND COALESCE(detection_outcome, '') <> ''{role_filter}
-                    ORDER BY COALESCE(NULLIF(generated_at, ''), created_at) DESC, rowid DESC
-                    """,
-                    arguments,
-                ).fetchall()
-            except sqlite3.Error:
-                analysis_rows = []
-            resolved_groups: set[str] = set()
-            for item in analysis_rows:
-                stored_group_id = str(item["group_id"] or "").strip()
-                stored_alert_id = str(item["alert_id"] or "").strip()
-                group_id = stored_group_id if stored_group_id in metadata else group_by_alert.get(stored_alert_id, "")
-                if not group_id or group_id in resolved_groups:
-                    continue
-                outcome = str(item["detection_outcome"] or "").strip()
-                if not outcome:
-                    continue
-                resolved_groups.add(group_id)
-                metadata[group_id]["detection_outcome"] = outcome
-                metadata[group_id]["detection_outcome_label"] = soc_alert_detection_outcome_label(outcome)
-
-    soc_alert_apply_review_metadata(conn, rows, metadata, group_by_alert)
-    soc_alert_apply_incident_metadata(conn, rows, metadata, group_by_alert)
-    return metadata
+    """Compose bounded SOC evidence metadata through the modular read model."""
+    dependencies = SocEvidenceDependencies(
+        table_exists=sqlite_table_exists,
+        table_columns=sqlite_table_columns,
+        dashboard_group_id=soc_alert_group_id,
+        outcome_label=soc_alert_detection_outcome_label,
+        incident_defaults=_soc_incident_defaults,
+        review_defaults=_soc_review_defaults,
+        apply_review=soc_alert_apply_review_metadata,
+        apply_incident=soc_alert_apply_incident_metadata,
+    )
+    return compose_soc_evidence_metadata(
+        conn, rows, ai_artifacts, pcap_analysis, dependencies,
+    )
 
 
 def soc_alert_group_row_to_api(

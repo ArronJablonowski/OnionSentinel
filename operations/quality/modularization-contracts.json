@@ -149,6 +149,15 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_soc_evidence_metadata.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_evidence_metadata.py",
+      "required_symbols": [
+        "SocEvidenceDependencies",
+        "compose_soc_evidence_metadata"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_catalog_routes.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py",

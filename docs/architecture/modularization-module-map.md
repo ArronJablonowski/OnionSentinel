@@ -367,6 +367,14 @@ authorization, and final-review status. `report_portal.py` retains the
 read-only SQLite lifecycle and public compatibility facade while injecting
 schema, identity, outcome-label, and timestamp policies explicitly.
 
+`portal_soc_evidence_metadata.py` owns the page-bounded SOC evidence summary.
+It initializes explicit empty states, projects retained-artifact fallbacks,
+de-duplicates durable PCAP artifacts, selects the latest SOC-only detection
+outcome, and invokes the review and incident metadata ports once per page.
+`report_portal.py` retains the public facade and injects table discovery,
+identity, labeling, defaults, and downstream metadata callbacks; the composer
+does not open databases, scan artifact directories, or perform network access.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and
