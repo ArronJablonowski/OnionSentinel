@@ -91,6 +91,10 @@ from portal_home_dashboard import (
     compose_home_dashboard,
     render_home_dashboard,
 )
+from portal_dhcp_discovery import (
+    DhcpDiscoveryDependencies,
+    compose_dhcp_discovery_response,
+)
 from portal_incident_actions import (
     IncidentStatusPayloadError,
     normalize_incident_status_payload,
@@ -1200,275 +1204,31 @@ def dhcp_asset_discovery_response(
         now = now.astimezone()
     now = now.astimezone(dt.timezone.utc)
     state, state_error = load_dhcp_asset_discovery_state_data()
-    if state_error:
-        return HTTPStatus.SERVICE_UNAVAILABLE, {
-            "ok": False,
-            "error": f"DHCP discovery state unavailable: {state_error}",
-            "collection": {"status": "invalid"},
-            "counts": {
-                "total": 0,
-                "verified_match": 0,
-                "candidate": 0,
-                "conflict": 0,
-                "stale": 0,
-            },
-            "observations": [],
-        }
-
-    inventory, inventory_error = load_asset_inventory_data()
-    records = []
-    counts = {
-        "total": 0,
-        "verified_match": 0,
-        "candidate": 0,
-        "conflict": 0,
-        "stale": 0,
-    }
-    active_assets: dict[str, dict] = {}
-    identity_indexes: dict[str, dict[str, set[str]]] = {
-        "ip": {},
-        "hostname": {},
-        "mac": {},
-    }
-    if not inventory_error:
-        for raw_asset in inventory.get("assets", []):
-            if (
-                not isinstance(raw_asset, dict)
-                or _asset_record_state(raw_asset, now) != "current"
-            ):
-                continue
-            public_asset = _asset_public_record(raw_asset, "current")
-            asset_id = str(public_asset.get("asset_id") or "")
-            if not asset_id:
-                continue
-            active_assets[asset_id] = public_asset
-            identifiers = (
-                raw_asset.get("identifiers")
-                if isinstance(raw_asset.get("identifiers"), dict)
-                else {}
-            )
-            for kind in identity_indexes:
-                for raw_value in identifiers.get(kind) or []:
-                    value = (
-                        str(raw_value or "")
-                        .strip()
-                        .rstrip(".")
-                        .lower()
-                    )
-                    if value:
-                        identity_indexes[kind].setdefault(
-                            value,
-                            set(),
-                        ).add(asset_id)
-
-    def nonnegative_int(value: object, maximum: int = 2**63 - 1) -> int:
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError, OverflowError):
-            return 0
-        return max(0, min(parsed, maximum))
-
-    def text_list(value: object, maximum_items: int, maximum_length: int) -> list[str]:
-        if not isinstance(value, list):
-            return []
-        return [
-            str(item)[:maximum_length]
-            for item in value[:maximum_items]
-            if isinstance(item, (str, int, float))
-        ]
-
-    for raw in state.get("observations", []):
-        if not isinstance(raw, dict):
-            continue
-        try:
-            address = str(ipaddress.ip_address(str(raw.get("current_ip") or "").strip()))
-            last_seen = parse_iso_timestamp(raw.get("last_seen"))
-            if last_seen.tzinfo is None:
-                raise ValueError("last_seen lacks offset")
-            last_seen = last_seen.astimezone(dt.timezone.utc)
-        except (TypeError, ValueError):
-            continue
-        observed_hostname = str(raw.get("hostname") or "").strip().rstrip(".").lower()
-        observed_mac = str(raw.get("mac_address") or "").strip().lower()
-        ip_matches = identity_indexes["ip"].get(address, set())
-        hostname_matches = (
-            identity_indexes["hostname"].get(observed_hostname, set())
-            if observed_hostname
-            else set()
-        )
-        mac_matches = (
-            identity_indexes["mac"].get(observed_mac, set())
-            if observed_mac
-            else set()
-        )
-        stable_matches = hostname_matches | mac_matches
-        all_matches = ip_matches | stable_matches
-        resolution: dict = {
-            "status": "unmapped",
-            "ip": address,
-        }
-        if inventory_error:
-            resolution["status"] = "inventory_unavailable"
-        elif len(all_matches) > 1:
-            resolution = {
-                "status": "ambiguous",
-                "ip": address,
-                "asset_ids": sorted(all_matches),
-            }
-        elif len(all_matches) == 1:
-            asset_id = next(iter(all_matches))
-            asset = active_assets[asset_id]
-            resolution = {
-                "status": (
-                    "resolved"
-                    if asset.get("hostnames")
-                    else "known_without_hostname"
-                ),
-                "ip": address,
-                "asset_id": asset_id,
-                "hostname": (
-                    asset["hostnames"][0]
-                    if asset.get("hostnames")
-                    else ""
-                ),
-                "hostnames": list(asset.get("hostnames") or []),
-                "role": str(asset.get("role") or ""),
-                "platform": str(asset.get("platform") or ""),
-                "criticality": str(
-                    asset.get("criticality") or "unknown"
-                ),
-                "configured_ip_addresses": list(
-                    asset.get("ip_addresses") or []
-                ),
-                "stable_identity_match": asset_id in stable_matches,
-            }
-
-        authoritative_hostnames = [
-            str(value).strip().rstrip(".").lower()
-            for value in resolution.get("hostnames", [])
-            if str(value).strip()
-        ]
-        if resolution.get("status") in {"resolved", "known_without_hostname"}:
-            if (
-                observed_hostname
-                and authoritative_hostnames
-                and observed_hostname not in authoritative_hostnames
-                and not resolution.get("stable_identity_match")
-            ):
-                reconciliation = "conflict"
-                detail = "DHCP hostname differs from the authoritative assignment."
-            elif address not in resolution.get(
-                "configured_ip_addresses",
-                [],
-            ):
-                reconciliation = "verified_match"
-                detail = (
-                    "A stable DHCP hostname or MAC maps this asset to a "
-                    "new current address."
-                )
-            else:
-                reconciliation = "verified_match"
-                detail = "DHCP address agrees with the authoritative inventory."
-        elif resolution.get("status") == "ambiguous":
-            reconciliation = "conflict"
-            detail = "More than one authoritative asset claims this address."
-        else:
-            reconciliation = "candidate"
-            detail = "Review before adding this observation to the authoritative inventory."
-        lease_expires = None
-        if raw.get("lease_expires_at"):
-            try:
-                lease_expires = parse_iso_timestamp(raw["lease_expires_at"]).astimezone(dt.timezone.utc)
-            except (TypeError, ValueError):
-                lease_expires = None
-        stale = last_seen < now - dt.timedelta(hours=24) and (
-            lease_expires is None or lease_expires < now
-        )
-        counts[reconciliation] += 1
-        if stale:
-            counts["stale"] += 1
-        counts["total"] += 1
-        records.append({
-            "discovery_id": str(raw.get("discovery_id") or "")[:64],
-            "reconciliation": reconciliation,
-            "reconciliation_detail": detail,
-            "stale": stale,
-            "current_ip": address,
-            "ip_addresses": text_list(raw.get("ip_addresses"), 32, 64),
-            "mac_address": str(raw.get("mac_address") or "")[:32],
-            "mac_address_scope": _mac_address_scope(raw.get("mac_address")),
-            "hostname": str(raw.get("hostname") or "")[:253],
-            "hostnames": text_list(raw.get("hostnames"), 32, 253),
-            "first_seen": str(raw.get("first_seen") or "")[:64],
-            "last_seen": str(raw.get("last_seen") or "")[:64],
-            "lease_expires_at": str(raw.get("lease_expires_at") or "")[:64],
-            "message_types": text_list(raw.get("message_types"), 16, 80),
-            "sensors": text_list(raw.get("sensors"), 16, 160),
-            "observation_count": nonnegative_int(raw.get("observation_count")),
-            "authoritative_asset": {
-                "asset_id": str(resolution.get("asset_id") or ""),
-                "hostname": str(resolution.get("hostname") or ""),
-                "hostnames": authoritative_hostnames,
-                "role": str(resolution.get("role") or ""),
-                "platform": str(resolution.get("platform") or ""),
-                "criticality": str(resolution.get("criticality") or ""),
-                "configured_ip_addresses": list(
-                    resolution.get("configured_ip_addresses") or []
-                )[:32],
-            } if resolution.get("status") in {"resolved", "known_without_hostname"} else None,
-        })
-    rank = {"conflict": 0, "candidate": 1, "verified_match": 2}
-    records.sort(
-        key=lambda item: (
-            rank.get(str(item["reconciliation"]), 9),
-            bool(item["stale"]),
-            str(item["last_seen"]),
-        )
+    dependencies = DhcpDiscoveryDependencies(
+        asset_record_state=_asset_record_state,
+        asset_public_record=_asset_public_record,
+        parse_timestamp=parse_iso_timestamp,
+        format_timestamp=format_iso_timestamp,
+        mac_address_scope=_mac_address_scope,
     )
-    collection = state.get("collection") or {}
-    public_collection = {
-        "status": str(collection.get("status") or "unknown")[:32],
-        "last_attempt_at": str(collection.get("last_attempt_at") or "")[:64],
-        "last_success_at": str(collection.get("last_success_at") or "")[:64],
-        "last_error": str(collection.get("last_error") or "")[:300],
-        "last_window": collection.get("last_window") if isinstance(collection.get("last_window"), dict) else {},
-        "last_returned": nonnegative_int(collection.get("last_returned"), 1000),
-        "last_hits_total": nonnegative_int(collection.get("last_hits_total")),
-        "last_truncated": bool(collection.get("last_truncated")),
-        "last_query_segments": nonnegative_int(
-            collection.get("last_query_segments"),
-            64,
-        ),
-    }
-    backfill = state.get("backfill") if isinstance(state.get("backfill"), dict) else {}
-    public_backfill = {
-        "status": str(backfill.get("status") or "never_run")[:32],
-        "last_attempt_at": str(backfill.get("last_attempt_at") or "")[:64],
-        "last_success_at": str(backfill.get("last_success_at") or "")[:64],
-        "last_error": str(backfill.get("last_error") or "")[:300],
-        "requested_start": str(backfill.get("requested_start") or "")[:64],
-        "requested_end": str(backfill.get("requested_end") or "")[:64],
-        "covered_through": str(backfill.get("covered_through") or "")[:64],
-        "last_returned": nonnegative_int(backfill.get("last_returned"), 1_000_000),
-        "last_hits_total": nonnegative_int(backfill.get("last_hits_total")),
-        "last_query_segments": nonnegative_int(
-            backfill.get("last_query_segments"),
-            64,
-        ),
-    }
-    return HTTPStatus.OK, {
-        "ok": True,
-        "updated_at": str(state.get("updated_at") or ""),
-        "observed_at": format_iso_timestamp(now, utc_z=True),
-        "authoritative_inventory_status": (
-            "unavailable" if inventory_error else str(inventory.get("inventory_status") or "loaded")
-        ),
-        "collection": public_collection,
-        "backfill": public_backfill,
-        "counts": counts,
-        "observations": records,
-    }
-
+    if state_error:
+        return compose_dhcp_discovery_response(
+            state=state,
+            state_error=state_error,
+            inventory={},
+            inventory_error="",
+            observed_at=now,
+            dependencies=dependencies,
+        )
+    inventory, inventory_error = load_asset_inventory_data()
+    return compose_dhcp_discovery_response(
+        state=state,
+        state_error="",
+        inventory=inventory,
+        inventory_error=inventory_error,
+        observed_at=now,
+        dependencies=dependencies,
+    )
 
 def pcap_transfer_duration_seconds(
     row: sqlite3.Row, *, has_transfer_duration: bool

@@ -685,6 +685,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/portal_admin_dashboard_assets.py" "$DASHB
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_pcap_health.py" "$DASHBOARD_RUNTIME_DIR/portal_pcap_health.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_home_dashboard.py" "$DASHBOARD_RUNTIME_DIR/portal_home_dashboard.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_home_dashboard_assets.py" "$DASHBOARD_RUNTIME_DIR/portal_home_dashboard_assets.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/portal_dhcp_discovery.py" "$DASHBOARD_RUNTIME_DIR/portal_dhcp_discovery.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_ai_model_policy.py" "$DASHBOARD_RUNTIME_DIR/portal_ai_model_policy.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_ai_settings_normalizer.py" "$DASHBOARD_RUNTIME_DIR/portal_ai_settings_normalizer.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/portal_catalog_routes.py" "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py"

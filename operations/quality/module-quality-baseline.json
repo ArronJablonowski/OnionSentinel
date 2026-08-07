@@ -49,7 +49,7 @@
       "max_lines": 979
     },
     "onion-sentinel-dashboard/report_portal.py": {
-      "max_lines": 11560
+      "max_lines": 11320
     },
     "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py": {
       "max_lines": 2670
@@ -761,10 +761,6 @@
     "onion-sentinel-dashboard/report_portal.py::cron_failure_records": {
       "max_complexity": 28
     },
-    "onion-sentinel-dashboard/report_portal.py::dhcp_asset_discovery_response": {
-      "max_complexity": 79,
-      "max_lines": 278
-    },
     "onion-sentinel-dashboard/report_portal.py::find_resource_library_pdf": {
       "max_complexity": 24
     },
@@ -1158,5 +1154,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "48c0841a0108f71f2232c026537d1e6862143147"
+  "source_release": "26ae5ef06be1e577c8b7814f96c61e5f35d4a92f"
 }

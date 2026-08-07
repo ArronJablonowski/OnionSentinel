@@ -350,6 +350,15 @@ legacy `render_home` signature as a thin facade and injects the existing uptime,
 update, backup, disk, timestamp, and report-discovery callbacks; the renderer
 cannot scan reports, read host state, or execute refresh actions server-side.
 
+`portal_dhcp_discovery.py` owns the pure reconciliation of bounded passive DHCP
+observations against current authoritative Asset Inventory identities. It
+normalizes IP, hostname, MAC, time, lease and collection metadata; classifies
+exact, stable-identity, ambiguous, conflicting, candidate and stale evidence;
+bounds every public field; and preserves the distinction between passive
+observations and authoritative facts. `report_portal.py` retains state and
+inventory loading and injects the shared asset-state, public-record, timestamp,
+formatting and MAC-scope policies through a thin response facade.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and

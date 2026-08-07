@@ -129,6 +129,15 @@
       "required_symbols": []
     },
     {
+      "path": "onion-sentinel-dashboard/portal_dhcp_discovery.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_dhcp_discovery.py",
+      "required_symbols": [
+        "DhcpDiscoveryDependencies",
+        "compose_dhcp_discovery_response"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_catalog_routes.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py",
