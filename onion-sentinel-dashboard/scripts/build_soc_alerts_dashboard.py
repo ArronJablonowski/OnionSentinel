@@ -105,6 +105,18 @@ from dashboard_siem_engineering_assets import (  # noqa: E402
     SIEM_ENGINEERING_JS,
     inject_siem_engineering_assets,
 )
+from dashboard_siem_engineering_page import (  # noqa: E402
+    SiemEngineeringPageViewModel,
+    SiemRecommendationViewModel,
+    render_siem_engineering_best_roi,
+    render_siem_engineering_detail_report,
+    render_siem_engineering_detection_row,
+    render_siem_engineering_page,
+    render_siem_engineering_table,
+    render_siem_engineering_tuning_row,
+    siem_engineering_html_list as render_siem_engineering_html_list,
+    siem_engineering_roi_score as render_siem_engineering_roi_score,
+)
 from dashboard_settings_assets import (  # noqa: E402
     SETTINGS_PAGE_CSS,
     SETTINGS_PAGE_JS,
@@ -5901,284 +5913,96 @@ def cyber_threat_intel_page_section(reports: list[AlertReport]) -> str:
 
 
 def siem_engineering_html_list(values: object, empty: str) -> str:
-    """Render model-provided evidence without trusting it as HTML."""
-    if isinstance(values, list):
-        items = values
-    elif values not in (None, ''):
-        items = [values]
-    else:
-        items = []
-    rendered = []
-    for value in items:
-        if isinstance(value, (dict, list)):
-            text = json.dumps(value, sort_keys=True, default=str)
-        else:
-            text = str(value)
-        if text.strip():
-            rendered.append(f'<li>{html.escape(text.strip())}</li>')
-    return f'<ul>{"".join(rendered)}</ul>' if rendered else f'<p>{html.escape(empty)}</p>'
+    return render_siem_engineering_html_list(values, empty)
+
+
+def _siem_recommendation_view(report: AlertReport) -> SiemRecommendationViewModel:
+    analysis = report.ai_analysis if isinstance(report.ai_analysis, dict) else {}
+    response = analysis.get('response') if isinstance(analysis.get('response'), dict) else {}
+    normalize = lambda value: normalize_iso_display_text(value)
+    return SiemRecommendationViewModel(
+        title=report.title, digest=report.digest, rel_source=report.rel_source,
+        summary=normalize(report.summary), ai_summary=normalize(ai_summary_for(report)),
+        criticality=report.criticality, criticality_rank=report.criticality_rank,
+        alert_source=report.alert_source, source_ip=report.source_ip,
+        destination_ip=report.destination_ip, destination_port=report.destination_port,
+        source_endpoint=report.source_endpoint, destination_endpoint=report.destination_endpoint,
+        rule_id=report.rule_id, rule_name=report.rule_name,
+        raw_alert_count=report.raw_alert_count, total_seen_count=report.total_seen_count,
+        repeat_count=report.repeat_count, first_seen=normalize(report.first_seen),
+        last_seen=last_seen_iso_for(report), alert_group_key=report.alert_group_key,
+        alert_ts=report.alert_ts, ai_status_key=report.ai_status_key,
+        ai_status_label=report.ai_status_label, ai_status_detail=normalize(report.ai_status_detail),
+        enrichment_status_label=report.enrichment_status_label,
+        enrichment_status_detail=normalize(report.enrichment_status_detail),
+        enrichment_record_count=report.enrichment_record_count,
+        enrichment_skip_count=report.enrichment_skip_count,
+        enrichment_error_count=report.enrichment_error_count,
+        pcap_status_label=report.pcap_status_label,
+        pcap_status_detail=normalize(report.pcap_status_detail),
+        tuning_recommendation=report.tuning_recommendation,
+        tuning_reason=normalize(report.tuning_reason),
+        recommended_tuning_actions=tuple(normalize(action) for action in report.recommended_tuning_actions),
+        generated_at=normalize(analysis.get('generated_at') or 'n/a'), response=response,
+    )
 
 
 def siem_engineering_detail_report(report: AlertReport, recommendation_kind: str) -> str:
-    """Build one evidence-backed engineering report for either SIEM table."""
-    analysis = report.ai_analysis if isinstance(report.ai_analysis, dict) else {}
-    response = analysis.get('response') if isinstance(analysis.get('response'), dict) else {}
-    route = f'{report.source_endpoint} > {report.destination_endpoint}'
-    observation_count = max(report.repeat_count, report.raw_alert_count, report.total_seen_count, 1)
-    generated_at = normalize_iso_display_text(analysis.get('generated_at') or 'n/a')
-    outcome = str(response.get('detection_outcome') or 'Inconclusive')
-    bluf = str(response.get('bluf') or response.get('summary') or 'No model BLUF is available yet.')
-    current_rule = recommendation_kind == 'current-rule'
-    if current_rule:
-        report_title = 'Current rule tuning analysis'
-        recommendation = report.tuning_recommendation or 'review'
-        why = report.tuning_reason or str(response.get('alert_frequency_assessment') or ai_summary_for(report))
-        actions = report.recommended_tuning_actions or [
-            'Review this detection with the SIEM Engineer model before changing production rule behavior.'
-        ]
-        validation = [
-            'Replay or query representative historical events and confirm the scoped condition matches only the intended traffic.',
-            'Run the change in audit or count-only mode and compare alert volume, severity, and missed true-positive risk.',
-            'Require analyst approval before enabling a suppression, drop, or score change in production.',
-        ]
-        rollback = 'Restore the prior rule or scoring configuration and rerun the same validation window.'
-    else:
-        report_title = 'New detection candidate analysis'
-        recommendation = 'create candidate'
-        why = str(response.get('alert_frequency_assessment') or response.get('summary') or ai_summary_for(report))
-        actions = [
-            f'Create a candidate detection for the repeated {report.rule_name or report.title} behavior.',
-            f'Scope the first test to log source {report.alert_source}, route {route}, and the observed frequency before generalizing it.',
-        ]
-        validation = [
-            'Backtest the candidate against the full first-seen to last-seen window and record expected and unexpected matches.',
-            'Deploy disabled or alert-only first, then compare precision and coverage with the source detection.',
-            'Promote only after an analyst confirms the query does not encode environment-specific noise as malicious behavior.',
-        ]
-        rollback = 'Disable the candidate detection and preserve its test results for later refinement.'
-
-    context_rows = [
-        ('Detection', report.rule_name or report.title),
-        ('Severity', report.criticality),
-        ('Recommendation type', recommendation),
-        ('Log source', report.alert_source),
-        ('Rule ID', report.rule_id or 'n/a'),
-        ('Alert group', report.alert_group_key or 'n/a'),
-        ('Observed route', route),
-        ('First seen', report.first_seen),
-        ('Last seen', last_seen_iso_for(report)),
-        ('Grouped observations', observation_count),
-        ('Raw alert rows', report.raw_alert_count),
-        ('AI workflow', f'{report.ai_status_label}: {report.ai_status_detail}'),
-        ('Public enrichment', f'{report.enrichment_status_label}: {report.enrichment_status_detail}'),
-        ('Enrichment records', report.enrichment_record_count),
-        ('Enrichment skips', report.enrichment_skip_count),
-        ('Enrichment errors', report.enrichment_error_count),
-        ('PCAP evidence', f'{report.pcap_status_label}: {report.pcap_status_detail}'),
-        ('Source artifact', report.rel_source),
-    ]
-    context_html = ''.join(
-        f'<div><dt>{html.escape(str(label))}</dt><dd>{html.escape(str(value or "n/a"))}</dd></div>'
-        for label, value in context_rows
+    return render_siem_engineering_detail_report(
+        _siem_recommendation_view(report), recommendation_kind
     )
-    complete_response = html.escape(json.dumps(response, indent=2, sort_keys=True, default=str))
-    return f'''
-    <section class="siem-analysis-report" aria-label="{html.escape(report_title)}">
-      <header class="siem-analysis-header">
-        <div><span class="settings-kicker">AI engineering report</span><h3>{html.escape(report_title)}</h3></div>
-        <span class="siem-table-pill">{html.escape(recommendation)}</span>
-      </header>
-      <div class="siem-analysis-generated">Generated: {html.escape(generated_at)} · Model status: {html.escape(report.ai_status_label)}</div>
-      <section class="siem-analysis-bluf"><h4>Bottom line</h4><p><b>{html.escape(outcome)}</b> · {html.escape(bluf)}</p></section>
-      <div class="siem-analysis-lead">
-        <section><h4>What should change</h4>{siem_engineering_html_list(actions, 'No safe change has been recommended yet.')}</section>
-        <section><h4>Why</h4><p>{html.escape(why)}</p></section>
-      </div>
-      <section class="siem-analysis-section"><h4>Detection context</h4><dl class="siem-detection-context">{context_html}</dl></section>
-      <section class="siem-analysis-section">
-        <h4>AI detection assessment</h4>
-        <dl class="siem-analysis-findings">
-          <div><dt>Summary</dt><dd>{html.escape(str(response.get('summary') or 'n/a'))}</dd></div>
-          <div><dt>Likely meaning</dt><dd>{html.escape(str(response.get('likely_meaning') or 'n/a'))}</dd></div>
-          <div><dt>Severity reasoning</dt><dd>{html.escape(str(response.get('severity_reasoning') or 'n/a'))}</dd></div>
-          <div><dt>Frequency assessment</dt><dd>{html.escape(str(response.get('alert_frequency_assessment') or 'n/a'))}</dd></div>
-        </dl>
-      </section>
-      <section class="siem-analysis-evidence">
-        <div><h4>Public enrichment findings</h4>{siem_engineering_html_list(response.get('public_enrichment_findings'), 'No public enrichment findings were recorded.')}</div>
-        <div><h4>PCAP findings</h4>{siem_engineering_html_list(response.get('pcap_analysis_findings'), 'No parsed PCAP findings were recorded.')}</div>
-        <div><h4>False-positive considerations</h4>{siem_engineering_html_list(response.get('false_positive_possibilities'), 'No false-positive considerations were recorded.')}</div>
-        <div><h4>Evidence gaps</h4>{siem_engineering_html_list(response.get('evidence_gaps'), 'No additional evidence gaps were recorded.')}</div>
-        <div><h4>Evidence used</h4>{siem_engineering_html_list(response.get('evidence_used'), 'No evidence list was recorded.')}</div>
-        <div><h4>Recommended investigation</h4>{siem_engineering_html_list(response.get('recommended_next_steps'), 'No additional investigation steps were recorded.')}</div>
-      </section>
-      <section class="siem-analysis-section"><h4>Validation and rollback</h4>{siem_engineering_html_list(validation, 'Validate before deployment.')}<p><b>Rollback:</b> {html.escape(rollback)}</p></section>
-      <details class="siem-ai-json"><summary>Complete AI response JSON</summary><pre><code>{complete_response or '{}'}</code></pre></details>
-    </section>'''
+
 
 
 def siem_engineering_tuning_row(report: AlertReport, index: int) -> str:
-    action = report.recommended_tuning_actions[0] if report.recommended_tuning_actions else 'Review this detection after the SIEM Engineer model run completes.'
-    route = f'{report.source_ip} > {report.destination_ip} : {report.destination_port}'
-    detail_id = f'siem-current-detail-{index}-{report.digest}'
-    return f'''
-    <tr class="siem-recommendation-row" tabindex="0" aria-expanded="false" aria-controls="{html.escape(detail_id)}" data-siem-toggle>
-      <td><span class="severity-label severity-text-{html.escape(criticality_class(report.criticality))}">{html.escape(report.criticality)}</span></td>
-      <td><strong><span class="siem-expand-indicator" aria-hidden="true">›</span>{html.escape(report.rule_name or report.title)}</strong><code>{html.escape(route)}</code></td>
-      <td><span class="siem-table-pill">{html.escape(report.tuning_recommendation or 'review')}</span></td>
-      <td class="siem-reason-cell"><p>{html.escape(compact_text(report.tuning_reason or ai_summary_for(report), 135))}</p><em>{html.escape(compact_text(action, 135))}</em></td>
-      <td><b>{report.repeat_count}</b><span>{html.escape(report.ai_status_label)}</span></td>
-    </tr>
-    <tr id="{html.escape(detail_id)}" class="siem-recommendation-detail" hidden>
-      <td colspan="5">{siem_engineering_detail_report(report, 'current-rule')}</td>
-    </tr>'''
+    return render_siem_engineering_tuning_row(_siem_recommendation_view(report), index)
+
 
 
 def siem_engineering_detection_row(report: AlertReport, index: int) -> str:
-    destination = f'{report.destination_ip}:{report.destination_port}'
-    detail_id = f'siem-new-detail-{index}-{report.digest}'
-    return f'''
-    <tr class="siem-recommendation-row" tabindex="0" aria-expanded="false" aria-controls="{html.escape(detail_id)}" data-siem-toggle>
-      <td><span class="severity-label severity-text-{html.escape(criticality_class(report.criticality))}">{html.escape(report.criticality)}</span></td>
-      <td><strong><span class="siem-expand-indicator" aria-hidden="true">›</span>{html.escape(report.rule_name or report.title)}</strong><code>{html.escape(report.alert_source)}</code></td>
-      <td><span class="siem-table-pill">candidate</span></td>
-      <td class="siem-reason-cell"><p>{html.escape(compact_text(ai_summary_for(report), 135))}</p><em>Repeated target: {html.escape(destination)}</em></td>
-      <td><b>{report.repeat_count}</b><span>{html.escape(last_seen_iso_for(report))}</span></td>
-    </tr>
-    <tr id="{html.escape(detail_id)}" class="siem-recommendation-detail" hidden>
-      <td colspan="5">{siem_engineering_detail_report(report, 'new-detection')}</td>
-    </tr>'''
+    return render_siem_engineering_detection_row(_siem_recommendation_view(report), index)
+
 
 
 def siem_engineering_roi_score(report: AlertReport) -> tuple[int, int, int, float]:
-    has_model_tuning = 1 if report.tuning_recommendation and report.tuning_recommendation not in {'none', 'n/a', 'needs_more_data'} else 0
-    repeat_weight = max(report.repeat_count, report.raw_alert_count, report.total_seen_count, 1)
-    return (
-        has_model_tuning,
-        repeat_weight * max(report.criticality_rank, 1),
-        repeat_weight,
-        report.alert_ts,
-    )
+    return render_siem_engineering_roi_score(_siem_recommendation_view(report))
+
 
 
 def siem_engineering_best_roi_section(reports: list[AlertReport]) -> str:
-    candidates = [
-        report for report in reports
-        if report.tuning_recommendation and report.tuning_recommendation not in {'none', 'n/a'}
-    ]
-    if not candidates:
-        candidates = [report for report in reports if report.repeat_count >= 2]
-    if not candidates:
-        return '''
-      <section class="siem-roi-card" aria-label="Best ROI tuning candidate">
-        <div class="siem-roi-head">
-          <span class="settings-kicker">#1 ROI tune</span>
-          <h3>No candidate yet</h3>
-        </div>
-        <table class="siem-roi-table"><tbody><tr><th>Why</th><td>No repeated or model-backed candidate.</td></tr><tr><th>Tune</th><td>Wait for analysis, then tune only scoped rule/source/destination/port evidence.</td></tr><tr><th>Activity</th><td>0 observations</td></tr></tbody></table>
-      </section>'''
+    views = tuple(_siem_recommendation_view(report) for report in reports)
+    return render_siem_engineering_best_roi(views)
 
-    best = max(candidates, key=siem_engineering_roi_score)
-    action = best.recommended_tuning_actions[0] if best.recommended_tuning_actions else (
-        'Run SIEM Engineer review before changing rules; tune only with a scoped condition such as rule name, source, destination, destination port, direction, or time window.'
-    )
-    route = f'{best.source_ip} > {best.destination_ip} : {best.destination_port}'
-    observation_count = max(best.repeat_count, best.raw_alert_count, best.total_seen_count, 1)
-    if best.tuning_recommendation in {'none', 'n/a', 'needs_more_data'}:
-        tuning_type = 'review'
-        why = (
-            f'This is the highest ROI review candidate because it has {observation_count} observations '
-            f'and {best.criticality} severity, but the model has not provided a safe tuning action yet.'
-        )
-    else:
-        tuning_type = best.tuning_recommendation
-        why = best.tuning_reason or (
-            f'This is the highest ROI tuning candidate because it combines {observation_count} observations, '
-            f'{best.criticality} severity, and a model-backed {best.tuning_recommendation} recommendation.'
-        )
-    return f'''
-      <section class="siem-roi-card" aria-label="Best ROI tuning candidate">
-        <div class="siem-roi-head">
-          <div>
-            <span class="settings-kicker">#1 ROI tune</span>
-            <h3>{html.escape(best.rule_name or best.title)}</h3>
-            <code>{html.escape(route)}</code>
-          </div>
-          <div class="siem-roi-rank">
-            <span>#1 ROI</span>
-            <strong class="severity-text-{html.escape(criticality_class(best.criticality))}">{html.escape(best.criticality)}</strong>
-          </div>
-        </div>
-        <table class="siem-roi-table"><tbody>
-          <tr><th>Why</th><td>{html.escape(compact_text(why, 180))}</td></tr>
-          <tr><th>Tune</th><td>{html.escape(compact_text(action, 180))}</td></tr>
-          <tr><th>Activity</th><td>{html.escape(str(observation_count))} observations · {html.escape(tuning_type)} · {html.escape(best.ai_status_label)}</td></tr>
-        </tbody></table>
-      </section>'''
 
 
 def siem_engineering_table(title: str, subtitle: str, rows: str, empty: str) -> str:
-    body = rows or f'<tr class="siem-empty-row"><td colspan="5">{html.escape(empty)}</td></tr>'
-    return f'''
-    <section class="siem-table-section" aria-label="{html.escape(title)}">
-      <div class="siem-table-title"><h3>{html.escape(title)}</h3></div>
-      <div class="siem-table-wrap">
-        <table class="siem-engineering-table">
-          <thead><tr><th>Severity</th><th>Detection</th><th>Type</th><th>Why / tune</th><th>Seen</th></tr></thead>
-          <tbody>{body}</tbody>
-        </table>
-      </div>
-    </section>'''
+    return render_siem_engineering_table(title, rows, empty)
+
 
 
 def siem_engineering_page_section(reports: list[AlertReport]) -> str:
     settings = load_soc_ai_settings()
-    mode = settings.get('mode', 'ollama')
-    local_model = settings.get('ollama_model') or current_local_ai_model()
-    cloud_model = settings.get('cloud_model') or settings.get('cloud_provider') or 'not configured'
-    analyzed = sum(1 for report in reports if report.ai_status_key == 'analyzed')
-    ready = bool(reports) and analyzed == len(reports)
     actionable = [
         report for report in reports
-        if report.tuning_recommendation and report.tuning_recommendation not in {'none', 'n/a', 'needs_more_data'}
+        if report.tuning_recommendation
+        and report.tuning_recommendation not in {'none', 'n/a', 'needs_more_data'}
     ]
     repeated = sorted(
         [report for report in reports if report.repeat_count >= 3 and report not in actionable],
-        key=lambda report: (report.repeat_count, report.criticality_rank),
-        reverse=True,
+        key=lambda report: (report.repeat_count, report.criticality_rank), reverse=True,
     )[:4]
-    current_rule_rows = ''.join(
-        siem_engineering_tuning_row(report, index)
-        for index, report in enumerate(actionable[:10], 1)
+    view = SiemEngineeringPageViewModel(
+        mode=str(settings.get('mode', 'ollama')),
+        local_model=str(settings.get('ollama_model') or current_local_ai_model()),
+        cloud_model=str(settings.get('cloud_model') or settings.get('cloud_provider') or 'not configured'),
+        analyzed=sum(1 for report in reports if report.ai_status_key == 'analyzed'),
+        total=len(reports),
+        all_candidates=tuple(_siem_recommendation_view(report) for report in reports),
+        actionable=tuple(_siem_recommendation_view(report) for report in actionable),
+        repeated=tuple(_siem_recommendation_view(report) for report in repeated),
     )
-    new_rule_rows = ''.join(
-        siem_engineering_detection_row(report, index)
-        for index, report in enumerate(repeated[:10], 1)
-    )
-    return f'''
-    <section class="view-section active siem-engineering-view" aria-label="SIEM Engineering recommendations">
-      <section class="siem-eng-hero">
-        <div>
-          <span class="settings-kicker">SIEM engineering</span>
-          <h2>SIEM Engineer</h2>
-          <p>Prioritized tuning and detection work.</p>
-        </div>
-        <div class="siem-model-card">
-          <span>Model route</span>
-          <strong>{html.escape(mode.title())}</strong>
-          <em>Local: {html.escape(local_model)} · Cloud: {html.escape(cloud_model)}</em>
-        </div>
-      </section>
-      <section class="siem-eng-kpis" aria-label="SIEM engineering readiness">
-        <article><span>Gate</span><strong>{'Ready' if ready else 'Waiting'}</strong><em>{analyzed}/{len(reports)} analyzed</em></article>
-        <article><span>Cadence</span><strong>6h</strong><em>after backlog clears</em></article>
-        <article><span>Tuning</span><strong>{len(actionable)}</strong><em>current-rule ideas</em></article>
-        <article><span>Detections</span><strong>{len(repeated)}</strong><em>new-rule ideas</em></article>
-      </section>
-      {siem_engineering_best_roi_section(reports)}
-      {siem_engineering_table('Current rule tuning', '', current_rule_rows, 'No model-backed tuning recommendations yet.')}
-      {siem_engineering_table('New detections', '', new_rule_rows, 'No repeated detection candidates yet.')}
-    </section>'''
+    return render_siem_engineering_page(view)
+
 
 
 def _threat_hunt_candidate(report: AlertReport) -> ThreatHuntCandidateViewModel:

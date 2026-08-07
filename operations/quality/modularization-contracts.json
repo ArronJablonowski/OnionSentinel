@@ -162,6 +162,16 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_siem_engineering_page.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_siem_engineering_page.py",
+      "required_symbols": [
+        "SiemEngineeringPageViewModel",
+        "SiemRecommendationViewModel",
+        "render_siem_engineering_page"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_settings_assets.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_assets.py",
