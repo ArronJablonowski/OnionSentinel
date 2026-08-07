@@ -5,8 +5,10 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from n8n.onion_sentinel.analysis.persistence.transaction import (
+    MemoryPromotionPorts,
     PublicationPolicy,
     PublicationPorts,
+    promote_memory,
     publish,
 )
 
@@ -136,6 +138,97 @@ class AnalysisPublicationTransactionTests(unittest.TestCase):
                 ports=self.ports(submit_error=OSError("offline")),
             )
         self.assertTrue((self.root / "pending.json").exists())
+
+
+class MemoryPromotionTransactionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.pending = self.root / "pending-index.json"
+        self.pending.write_text("pending", encoding="utf-8")
+        self.events: list[str] = []
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def ports(
+        self,
+        *,
+        promoted: Path | None = None,
+        process_error: Exception | None = None,
+        direct_error: Exception | None = None,
+    ) -> MemoryPromotionPorts:
+        def promote() -> Path | None:
+            self.events.append("promote")
+            return promoted
+
+        def process(path: Path) -> tuple[dict, Path | None]:
+            self.events.append(f"process:{path.name}")
+            if process_error is not None:
+                raise process_error
+            return {"ok": True, "lane": "staged"}, self.root / "receipt.json"
+
+        def direct() -> tuple[dict, Path | None]:
+            self.events.append("direct")
+            if direct_error is not None:
+                raise direct_error
+            return {"ok": True, "lane": "direct"}, None
+
+        return MemoryPromotionPorts(
+            promote_staged=promote,
+            process_staged=process,
+            persist_direct=direct,
+            error_digest=lambda value: f"digest:{value}",
+            warn=lambda value: self.events.append(f"warn:{value}"),
+        )
+
+    def test_staged_task_is_promoted_before_spool_retirement(self) -> None:
+        committed = self.root / "committed.json"
+        result = promote_memory(
+            analysis_id="analysis-1",
+            staged_task=self.root / "staged.json",
+            pending_index_path=self.pending,
+            ports=self.ports(promoted=committed),
+        )
+        self.assertEqual(self.events, ["promote", "process:committed.json"])
+        self.assertFalse(self.pending.exists())
+        self.assertTrue(result.receipt["ok"])
+
+    def test_missing_staged_task_is_nonfatal_and_keeps_replay_spool(self) -> None:
+        result = promote_memory(
+            analysis_id="analysis-2",
+            staged_task=self.root / "staged.json",
+            pending_index_path=self.pending,
+            ports=self.ports(promoted=None),
+        )
+        self.assertFalse(result.receipt["ok"])
+        self.assertEqual(result.receipt["error_type"], "RuntimeError")
+        self.assertTrue(self.pending.exists())
+        self.assertIn("warn:post-commit memory writeback failed", self.events[-1])
+
+    def test_committed_task_failure_does_not_restore_retired_spool(self) -> None:
+        result = promote_memory(
+            analysis_id="analysis-3",
+            staged_task=self.root / "staged.json",
+            pending_index_path=self.pending,
+            ports=self.ports(
+                promoted=self.root / "committed.json",
+                process_error=RuntimeError("receipt unavailable"),
+            ),
+        )
+        self.assertFalse(result.receipt["ok"])
+        self.assertFalse(self.pending.exists())
+
+    def test_direct_path_retires_spool_before_supplemental_write(self) -> None:
+        result = promote_memory(
+            analysis_id="analysis-4",
+            staged_task=None,
+            pending_index_path=self.pending,
+            ports=self.ports(direct_error=OSError("memory offline")),
+        )
+        self.assertFalse(result.receipt["ok"])
+        self.assertFalse(self.pending.exists())
+        self.assertEqual(self.events[0], "direct")
 
 
 if __name__ == "__main__":

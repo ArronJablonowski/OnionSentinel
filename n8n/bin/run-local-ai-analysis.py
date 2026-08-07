@@ -10672,67 +10672,37 @@ def main() -> int:
         status = "success"
         pipeline_context.artifacts = (json_path, md_path)
         pipeline_context.advance(pipeline_module.Stage.COMMIT, "analysis index committed")
-        memory_receipt: dict[str, Any] = {}
-        memory_receipt_path: Path | None = None
-        try:
-            if staged_memory_task is not None:
-                committed_memory_task = mark_memory_writeback_committed(
+        memory_promotion = transaction_module.promote_memory(
+            analysis_id=run_id,
+            staged_task=staged_memory_task,
+            pending_index_path=pending_index_path,
+            ports=transaction_module.MemoryPromotionPorts(
+                promote_staged=lambda: mark_memory_writeback_committed(
                     run_id,
                     expected_response_digest=submitted_response_sha256,
                     pending_dir=runtime_paths.memory_pending_dir,
                     committed_dir=runtime_paths.memory_committed_dir,
-                )
-                if committed_memory_task is None:
-                    raise RuntimeError(
-                        "staged memory task disappeared before commit "
-                        "promotion"
-                    )
-                # Once this rename succeeds the committed task is independently
-                # recoverable, so the analysis spool can be retired before
-                # supplemental memory processing begins.
-                pending_index_path.unlink(missing_ok=True)
-                memory_receipt, memory_receipt_path = (
-                    process_committed_memory_writeback(
-                        committed_memory_task,
-                        receipt_dir=runtime_paths.memory_receipt_dir,
-                    )
-                )
-            else:
-                pending_index_path.unlink(missing_ok=True)
-                memory_receipt, memory_receipt_path = (
-                    persist_postcommit_memory_writeback(
-                        analysis_id=run_id,
-                        agent_role=agent_role,
-                        role_memory_file=role_memory_file,
-                        shared_memory_file=shared_memory_file,
-                        source_artifact=str(prompt_path),
-                        primary_candidates=raw_memory_candidates,
-                        primary_allowed=primary_memory_allowed,
-                        primary_reason=primary_memory_reason,
-                        reviewer_candidates=reviewer_memory_candidates,
-                        reviewer_allowed=reviewer_memory_allowed,
-                        reviewer_reason=reviewer_memory_reason,
-                        receipt_dir=runtime_paths.memory_receipt_dir,
-                    )
-                )
-        except Exception as memory_exc:
-            # This boundary is intentionally non-fatal: the alert store already
-            # owns the result and retrying the model could duplicate conclusions.
-            # If promotion failed, the still-present analysis spool will obtain
-            # another idempotent commit receipt on startup. If a committed task
-            # failed, that task itself remains replayable.
-            memory_receipt = {
-                "schema": "onion-sentinel-memory-writeback-receipt-v1",
-                "analysis_id": run_id,
-                "authoritative_analysis_committed": True,
-                "ok": False,
-                "error_type": type(memory_exc).__name__,
-                "error_digest": canonical_payload_digest(str(memory_exc)),
-            }
-            best_effort_warning(
-                "post-commit memory writeback failed: "
-                f"{type(memory_exc).__name__}"
-            )
+                ),
+                process_staged=lambda task: process_committed_memory_writeback(
+                    task, receipt_dir=runtime_paths.memory_receipt_dir),
+                persist_direct=lambda: persist_postcommit_memory_writeback(
+                    analysis_id=run_id, agent_role=agent_role,
+                    role_memory_file=role_memory_file,
+                    shared_memory_file=shared_memory_file,
+                    source_artifact=str(prompt_path),
+                    primary_candidates=raw_memory_candidates,
+                    primary_allowed=primary_memory_allowed,
+                    primary_reason=primary_memory_reason,
+                    reviewer_candidates=reviewer_memory_candidates,
+                    reviewer_allowed=reviewer_memory_allowed,
+                    reviewer_reason=reviewer_memory_reason,
+                    receipt_dir=runtime_paths.memory_receipt_dir),
+                error_digest=canonical_payload_digest,
+                warn=best_effort_warning,
+            ),
+        )
+        memory_receipt = memory_promotion.receipt
+        memory_receipt_path = memory_promotion.receipt_path
         if harness_runtime is not None:
             postcommit_runtime: dict[str, Any] = {}
             try:

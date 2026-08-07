@@ -574,20 +574,19 @@ class MemoryWritebackJournalTests(unittest.TestCase):
             "staged_memory_task = stage_memory_writeback_task("
         )
         publication = main_source.index("transaction_module.publish(")
-        promote = main_source.index(
-            "committed_memory_task = mark_memory_writeback_committed("
-        )
-        process = main_source.index(
-            "process_committed_memory_writeback("
-        )
+        promotion = main_source.index("transaction_module.promote_memory(")
 
         self.assertLess(stage, publication)
-        self.assertLess(publication, promote)
-        self.assertLess(promote, process)
+        self.assertLess(publication, promotion)
         self.assertLess(
             transaction_source.index("pending_path = ports.queue("),
             transaction_source.index("receipt = ports.submit("),
         )
+        promote = transaction_source.index("committed_task = ports.promote_staged()")
+        retire = transaction_source.index("pending_index_path.unlink", promote)
+        process = transaction_source.index("ports.process_staged(committed_task)")
+        self.assertLess(promote, retire)
+        self.assertLess(retire, process)
 
 
 if __name__ == "__main__":

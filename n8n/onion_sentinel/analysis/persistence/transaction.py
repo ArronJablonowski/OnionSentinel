@@ -35,6 +35,21 @@ class PublicationResult:
     commit_receipt: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class MemoryPromotionPorts:
+    promote_staged: Callable[[], Path | None]
+    process_staged: Callable[[Path], tuple[dict[str, Any], Path | None]]
+    persist_direct: Callable[[], tuple[dict[str, Any], Path | None]]
+    error_digest: Callable[[str], str]
+    warn: Callable[[str], None]
+
+
+@dataclass(frozen=True)
+class MemoryPromotionResult:
+    receipt: dict[str, Any]
+    receipt_path: Path | None
+
+
 def publish(
     *,
     policy: PublicationPolicy,
@@ -90,3 +105,38 @@ def _deferred_message(
     if policy.controlled:
         return f"{policy.indeterminate_message}; exact result retained at {pending_path}"
     return f"analysis index deferred to {pending_path}: {error}"
+
+
+def promote_memory(
+    *,
+    analysis_id: str,
+    staged_task: Path | None,
+    pending_index_path: Path,
+    ports: MemoryPromotionPorts,
+) -> MemoryPromotionResult:
+    """Cross the memory boundary after commit without retrying analysis."""
+    receipt: dict[str, Any]
+    receipt_path: Path | None = None
+    try:
+        if staged_task is not None:
+            committed_task = ports.promote_staged()
+            if committed_task is None:
+                raise RuntimeError(
+                    "staged memory task disappeared before commit promotion"
+                )
+            pending_index_path.unlink(missing_ok=True)
+            receipt, receipt_path = ports.process_staged(committed_task)
+        else:
+            pending_index_path.unlink(missing_ok=True)
+            receipt, receipt_path = ports.persist_direct()
+    except Exception as exc:
+        receipt = {
+            "schema": "onion-sentinel-memory-writeback-receipt-v1",
+            "analysis_id": analysis_id,
+            "authoritative_analysis_committed": True,
+            "ok": False,
+            "error_type": type(exc).__name__,
+            "error_digest": ports.error_digest(str(exc)),
+        }
+        ports.warn(f"post-commit memory writeback failed: {type(exc).__name__}")
+    return MemoryPromotionResult(receipt=receipt, receipt_path=receipt_path)
