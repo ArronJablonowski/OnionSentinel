@@ -6,14 +6,27 @@ legacy wrapper.
 """
 
 from .composition import invoke_legacy_entrypoint
-from .pipeline import RuntimeContext, RuntimePathDefaults, RuntimePaths, Stage
+from .pipeline import (
+    AnalysisReviewPolicy,
+    AnalysisReviewPorts,
+    AnalysisReviewResult,
+    RuntimeContext,
+    RuntimePathDefaults,
+    RuntimePaths,
+    Stage,
+    run_analysis_review,
+)
 from .runtime import RuntimeDependencies
 
 __all__ = [
+    "AnalysisReviewPolicy",
+    "AnalysisReviewPorts",
+    "AnalysisReviewResult",
     "RuntimeContext",
     "RuntimeDependencies",
     "RuntimePathDefaults",
     "RuntimePaths",
     "Stage",
     "invoke_legacy_entrypoint",
+    "run_analysis_review",
 ]

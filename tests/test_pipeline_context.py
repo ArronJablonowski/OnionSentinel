@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 import unittest
 
 from n8n.onion_sentinel.pipeline import (
+    AnalysisReviewPolicy,
+    AnalysisReviewPorts,
     ORDER,
     RuntimeContext,
     RuntimePathDefaults,
     RuntimePaths,
     Stage,
+    run_analysis_review,
 )
 
 
@@ -90,6 +94,103 @@ class PipelineContextTests(unittest.TestCase):
             paths.index_quarantine_dir,
             Path("evaluation/run-1/analysis-index-quarantine"),
         )
+
+
+class AnalysisReviewPipelineTests(unittest.TestCase):
+    def context(self) -> RuntimeContext:
+        context = RuntimeContext("analysis-review", arguments=None)
+        for stage in (Stage.LOAD, Stage.ATTEST, Stage.PREPARE):
+            context.advance(stage, f"entered {stage.value}")
+        return context
+
+    def ports(self, events: list[str]) -> AnalysisReviewPorts:
+        def event(name: str, value: Any) -> Any:
+            events.append(name)
+            return value
+
+        return AnalysisReviewPorts(
+            load_saved_response=lambda: event("load_saved", {"primary": "saved"}),
+            run_primary_analysis=lambda: event("run_primary", {"primary": "live"}),
+            validate_primary=lambda response: event("validate", response),
+            observe_primary=lambda _response: event("observe_primary", None),
+            review_trigger=lambda _response: event("trigger", "model requested review"),
+            run_configured_review=lambda response, reason: event(
+                f"configured_review:{reason}", {**response, "reviewed": True}
+            ),
+            apply_saved_review_gate=lambda response: event(
+                "saved_review", {**response, "reviewed": True}
+            ),
+            notify_saved_post_processing=lambda: event("notify_saved", None),
+            controlled_reviewer_gate=lambda _response, trigger, frozen: event(
+                f"controlled_gate:{trigger}:{frozen}", {"reviewer": "ok"}
+            ),
+            require_result_routes=lambda _response: event("require_routes", None),
+            observe_reviewer=lambda _response: event("observe_reviewer", None),
+        )
+
+    def test_live_analysis_preserves_review_and_attestation_order(self) -> None:
+        events: list[str] = []
+        context = self.context()
+        result = run_analysis_review(
+            context,
+            policy=AnalysisReviewPolicy(False, False, False),
+            ports=self.ports(events),
+        )
+        self.assertEqual(
+            events,
+            [
+                "run_primary", "validate", "observe_primary", "trigger",
+                "configured_review:",
+                "controlled_gate:model requested review:False",
+                "require_routes", "observe_reviewer",
+            ],
+        )
+        self.assertEqual(result.response["primary"], "live")
+        self.assertEqual(result.trigger_reason, "model requested review")
+        self.assertEqual(context.stage, Stage.ADJUDICATION)
+
+    def test_saved_response_uses_gate_without_primary_provider(self) -> None:
+        events: list[str] = []
+        result = run_analysis_review(
+            self.context(),
+            policy=AnalysisReviewPolicy(True, True, True),
+            ports=self.ports(events),
+        )
+        self.assertEqual(events[0], "load_saved")
+        self.assertNotIn("run_primary", events)
+        self.assertIn("saved_review", events)
+        self.assertIn("notify_saved", events)
+        self.assertEqual(result.response["primary"], "saved")
+
+    def test_controlled_trigger_fills_only_an_empty_model_trigger(self) -> None:
+        events: list[str] = []
+        ports = self.ports(events)
+        ports = AnalysisReviewPorts(
+            **{**vars(ports), "review_trigger": lambda _response: ""}
+        )
+        result = run_analysis_review(
+            self.context(),
+            policy=AnalysisReviewPolicy(False, True, True),
+            ports=ports,
+        )
+        self.assertEqual(
+            result.trigger_reason,
+            "controlled evaluation requires an independent reviewer",
+        )
+        self.assertIn(
+            "configured_review:controlled evaluation requires an independent reviewer",
+            events,
+        )
+
+    def test_unprepared_context_fails_before_any_port_call(self) -> None:
+        events: list[str] = []
+        with self.assertRaisesRegex(ValueError, "requires prepared context"):
+            run_analysis_review(
+                RuntimeContext("not-prepared", arguments=None),
+                policy=AnalysisReviewPolicy(False, False, False),
+                ports=self.ports(events),
+            )
+        self.assertEqual(events, [])
 
 
 if __name__ == "__main__":

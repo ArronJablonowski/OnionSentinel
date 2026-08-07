@@ -10330,104 +10330,104 @@ def main() -> int:
             pipeline_module.Stage.PREPARE,
             "runtime contexts, harness, telemetry, and monitor prepared",
         )
-        if args.response_json:
-            response = sanitize_saved_response_input(
-                load_json(args.response_json, args.max_response_bytes)
-            )
-        else:
-            response = analyze_with_config(
-                prompt_package,
-                args,
-                agent_role=agent_role,
-                settings=settings,
-                live_osquery_config=live_osquery_config,
-                enrichment_config=enrichment_config,
-                security_onion_config_path=getattr(
-                    args,
-                    "incident_evidence_config",
-                    DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE,
+        analysis_review = pipeline_module.run_analysis_review(
+            pipeline_context,
+            policy=pipeline_module.AnalysisReviewPolicy(
+                saved_response=bool(args.response_json),
+                controlled_reviewer_required=bool(
+                    controlled_result_identity is not None and
+                    controlled_result_identity.get("reviewer_required") is True
                 ),
-                investigation_pivot_dir=getattr(
+                freeze_enabled=evaluation_memory_frozen,
+            ),
+            ports=pipeline_module.AnalysisReviewPorts(
+                load_saved_response=lambda: sanitize_saved_response_input(load_json(
+                    args.response_json, args.max_response_bytes
+                )),
+                run_primary_analysis=lambda: analyze_with_config(
+                    prompt_package,
                     args,
-                    "investigation_pivot_dir",
-                    DEFAULT_INVESTIGATION_PIVOT_DIR,
+                    agent_role=agent_role,
+                    settings=settings,
+                    live_osquery_config=live_osquery_config,
+                    enrichment_config=enrichment_config,
+                    security_onion_config_path=getattr(
+                        args,
+                        "incident_evidence_config",
+                        DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE,
+                    ),
+                    investigation_pivot_dir=getattr(
+                        args,
+                        "investigation_pivot_dir",
+                        DEFAULT_INVESTIGATION_PIVOT_DIR,
+                    ),
+                    phase_callback=update_current_phase,
+                    harness_runtime=harness_runtime,
                 ),
-                phase_callback=update_current_phase,
-                harness_runtime=harness_runtime,
-            )
-        response = validate_response(response, prompt_package)
-        observe_harness(
-            lambda: harness_runtime.record_response(
-                response,
-                decision_id="primary",
-                decision_type="primary-analysis",
-                hypothesis_revision=50,
-            )
-            if harness_runtime is not None
-            else None
-        )
-        controlled_reviewer_trigger = (
-            "controlled evaluation requires an independent reviewer"
-            if controlled_result_identity is not None
-            and controlled_result_identity.get("reviewer_required") is True
-            else ""
-        )
-        configured_reviewer_trigger = (
-            second_opinion_trigger(response, prompt_package)
-            or controlled_reviewer_trigger
-        )
-        if not args.response_json:
-            response = apply_configured_second_opinion(
-                prompt_package,
-                response,
-                args,
-                settings,
-                agent_role,
-                phase_callback=update_current_phase,
-                harness_runtime=harness_runtime,
-                force_review_reason=controlled_reviewer_trigger,
-                live_osquery_config=live_osquery_config,
-                enrichment_config=enrichment_config,
-                security_onion_config_path=getattr(
-                    args,
-                    "incident_evidence_config",
-                    DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE,
+                validate_primary=lambda candidate: validate_response(candidate, prompt_package),
+                observe_primary=lambda candidate: observe_harness(
+                    lambda: harness_runtime.record_response(
+                        candidate,
+                        decision_id="primary",
+                        decision_type="primary-analysis",
+                        hypothesis_revision=50,
+                    )
+                    if harness_runtime is not None
+                    else None
                 ),
-                investigation_pivot_dir=getattr(
-                    args,
-                    "investigation_pivot_dir",
-                    DEFAULT_INVESTIGATION_PIVOT_DIR,
+                review_trigger=lambda candidate: second_opinion_trigger(candidate, prompt_package),
+                run_configured_review=lambda candidate, force_reason: (
+                    apply_configured_second_opinion(
+                        prompt_package,
+                        candidate,
+                        args,
+                        settings,
+                        agent_role,
+                        phase_callback=update_current_phase,
+                        harness_runtime=harness_runtime,
+                        force_review_reason=force_reason,
+                        live_osquery_config=live_osquery_config,
+                        enrichment_config=enrichment_config,
+                        security_onion_config_path=getattr(
+                            args,
+                            "incident_evidence_config",
+                            DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE,
+                        ),
+                        investigation_pivot_dir=getattr(
+                            args,
+                            "investigation_pivot_dir",
+                            DEFAULT_INVESTIGATION_PIVOT_DIR,
+                        ),
+                    )
                 ),
-            )
-        else:
-            response = apply_saved_response_review_gate(
-                prompt_package,
-                response,
-            )
-            notify_analysis_phase(update_current_phase, "post_processing")
-        reviewer_response = precommit_controlled_evaluation_reviewer_gate(
-            prompt_package,
-            response,
-            settings,
-            agent_role,
-            trigger_reason=configured_reviewer_trigger,
-            freeze_enabled=evaluation_memory_frozen,
+                apply_saved_review_gate=lambda candidate: apply_saved_response_review_gate(
+                    prompt_package, candidate
+                ),
+                notify_saved_post_processing=lambda: notify_analysis_phase(
+                    update_current_phase, "post_processing"
+                ),
+                controlled_reviewer_gate=lambda candidate, trigger, frozen: (
+                    precommit_controlled_evaluation_reviewer_gate(
+                        prompt_package, candidate, settings, agent_role,
+                        trigger_reason=trigger, freeze_enabled=frozen,
+                    )
+                ),
+                require_result_routes=lambda candidate: require_controlled_evaluation_result_routes(
+                    controlled_result_identity, candidate
+                ),
+                observe_reviewer=lambda candidate: observe_harness(
+                    lambda: harness_runtime.record_response(
+                        candidate,
+                        decision_id="independent-review",
+                        decision_type="independent-review",
+                        hypothesis_revision=75,
+                    )
+                    if harness_runtime is not None
+                    else None
+                ),
+            ),
         )
-        require_controlled_evaluation_result_routes(
-            controlled_result_identity,
-            response,
-        )
-        if isinstance(reviewer_response, dict):
-            observe_harness(
-                lambda: harness_runtime.record_response(
-                    reviewer_response,
-                    decision_id="independent-review",
-                    decision_type="independent-review",
-                    hypothesis_revision=75,
-                )
-                if harness_runtime is not None
-                else None
-            )
+        response = analysis_review.response
         if agent_role == "incident-responder":
             # Attach collector-owned provenance after every model call. This is
             # deliberately not accepted from model output: only the restricted

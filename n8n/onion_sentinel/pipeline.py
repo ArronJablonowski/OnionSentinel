@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 
 class Stage(str, Enum):
@@ -180,3 +180,72 @@ class RuntimeContext:
             }
             for item in self.transitions
         )
+
+
+@dataclass(frozen=True)
+class AnalysisReviewPolicy:
+    saved_response: bool
+    controlled_reviewer_required: bool
+    freeze_enabled: bool
+
+
+@dataclass(frozen=True)
+class AnalysisReviewPorts:
+    load_saved_response: Callable[[], dict[str, Any]]
+    run_primary_analysis: Callable[[], dict[str, Any]]
+    validate_primary: Callable[[dict[str, Any]], dict[str, Any]]
+    observe_primary: Callable[[dict[str, Any]], None]
+    review_trigger: Callable[[dict[str, Any]], str]
+    run_configured_review: Callable[[dict[str, Any], str], dict[str, Any]]
+    apply_saved_review_gate: Callable[[dict[str, Any]], dict[str, Any]]
+    notify_saved_post_processing: Callable[[], None]
+    controlled_reviewer_gate: Callable[[dict[str, Any], str, bool], Any]
+    require_result_routes: Callable[[dict[str, Any]], None]
+    observe_reviewer: Callable[[dict[str, Any]], None]
+
+
+@dataclass(frozen=True)
+class AnalysisReviewResult:
+    response: dict[str, Any]
+    reviewer_response: dict[str, Any] | None
+    trigger_reason: str
+
+
+def run_analysis_review(
+    context: RuntimeContext,
+    *,
+    policy: AnalysisReviewPolicy,
+    ports: AnalysisReviewPorts,
+) -> AnalysisReviewResult:
+    if context.stage is not Stage.PREPARE:
+        raise ValueError("analysis/review pipeline requires prepared context")
+    response = (
+        ports.load_saved_response()
+        if policy.saved_response else ports.run_primary_analysis()
+    )
+    response = ports.validate_primary(response)
+    ports.observe_primary(response)
+    context.response = dict(response)
+    context.advance(Stage.PRIMARY_ANALYSIS, "primary response validated and observed")
+    context.advance(Stage.GOVERNED_PIVOTS, "bounded primary pivots completed")
+    controlled_trigger = (
+        "controlled evaluation requires an independent reviewer"
+        if policy.controlled_reviewer_required else ""
+    )
+    trigger_reason = ports.review_trigger(response) or controlled_trigger
+    if policy.saved_response:
+        response = ports.apply_saved_review_gate(response)
+        ports.notify_saved_post_processing()
+    else:
+        response = ports.run_configured_review(response, controlled_trigger)
+    reviewer = ports.controlled_reviewer_gate(
+        response, trigger_reason, policy.freeze_enabled
+    )
+    ports.require_result_routes(response)
+    reviewer_response = reviewer if isinstance(reviewer, dict) else None
+    if reviewer_response is not None:
+        ports.observe_reviewer(reviewer_response)
+    context.response = dict(response)
+    context.advance(Stage.INDEPENDENT_REVIEW, "review policy completed")
+    context.advance(Stage.ADJUDICATION, "review disagreement policy resolved")
+    return AnalysisReviewResult(response, reviewer_response, trigger_reason)
