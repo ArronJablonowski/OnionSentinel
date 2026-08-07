@@ -479,6 +479,14 @@ to the browser. `report_portal.py` retains runtime path policy, database
 connection creation, schema introspection adapters, and composition of the
 cross-page revision envelope.
 
+`portal_soc_read_dispatch.py` owns transport-neutral dispatch for classified
+SOC Analyst and Incident Responder JSON reads. It preserves query aliases,
+encoded grouped-alert responses, settings readiness status, model refresh
+flags, resource identifiers, adjudication limits, and incident-to-group error
+translation through explicit callbacks. `PortalHandler` retains route
+classification, SSE streaming, JSON serialization, security headers, and
+socket writes.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and

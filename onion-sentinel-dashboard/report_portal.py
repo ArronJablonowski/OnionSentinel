@@ -228,6 +228,10 @@ from portal_request_routes import (
     head_content_type,
     is_head_route,
 )
+from portal_soc_read_dispatch import (
+    SocReadCallbacks,
+    dispatch_soc_read,
+)
 from portal_soc_write_dispatch import (
     SocWriteCallbacks,
     dispatch_authorized_soc_write,
@@ -9109,6 +9113,29 @@ PORTAL_SOC_WRITE_CALLBACKS = SocWriteCallbacks(
     incident_reanalyze_all=soc_incident_bulk_reanalysis_response,
 )
 
+def portal_soc_read_callbacks() -> SocReadCallbacks:
+    """Bind portal adapters late so tests and runtime overrides remain visible."""
+    return SocReadCallbacks(
+        llm_current=read_llm_current_analysis,
+        llm_logs=llm_analysis_logs_response,
+        alert_status=soc_alert_status_response,
+        settings_prompt=read_settings_prompt,
+        agent_memory=read_agent_memory,
+        ai_settings=read_soc_ai_settings,
+        ollama_models=ollama_models_response,
+        alerts=cached_soc_alerts_query_response,
+        alert_metrics=soc_alert_metrics_response,
+        alert_suppressions=soc_alert_suppressions_response,
+        incidents=soc_incidents_query_response,
+        reanalysis_runs=soc_incident_reanalysis_runs_response,
+        incident_case_group=_soc_incident_case_group_id,
+        api_error=soc_alert_api_error,
+        adjudication_history=soc_adjudication_history_response,
+        incident_detail=soc_incident_detail_response,
+        alert_detail_fragment=soc_alert_detail_fragment_response,
+        alert_detail=soc_alert_detail_response,
+    )
+
 
 class PortalHandler(BaseHTTPRequestHandler):
     server_version = "ArronReportPortal/1.0"
@@ -9596,82 +9623,24 @@ class PortalHandler(BaseHTTPRequestHandler):
                 json.dumps(data, indent=2).encode(),
                 "application/json; charset=utf-8",
             )
-        if operation == "llm_analysis_current":
-            return self._send(HTTPStatus.OK, json.dumps(read_llm_current_analysis(), indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "llm_analysis_logs":
-            return self._send(HTTPStatus.OK, json.dumps(llm_analysis_logs_response(query), indent=2).encode(), "application/json; charset=utf-8")
         if operation == "soc_alert_events":
             return self._send_soc_alert_events()
-        if operation == "soc_alert_status":
-            return self._send(HTTPStatus.OK, json.dumps(soc_alert_status_response(), indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "soc_settings_prompt":
-            data = read_settings_prompt(path)
-            return self._send(HTTPStatus.OK if data.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "soc_agent_memory":
-            status, data = read_agent_memory((query.get("key") or [""])[0])
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "soc_ai_model":
-            data = read_soc_ai_settings()
-            return self._send(HTTPStatus.OK if data.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "soc_ollama_models":
-            force_refresh = (query.get("refresh") or [""])[0].strip().lower() in {"1", "true", "yes"}
-            return self._send(HTTPStatus.OK, json.dumps(ollama_models_response(force_refresh), indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "soc_alerts":
-            status, payload = cached_soc_alerts_query_response(query)
-            return self._send(status, payload, "application/json; charset=utf-8")
-        if operation == "soc_alert_metrics":
-            status, data = soc_alert_metrics_response(query)
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "soc_alert_suppressions":
-            status, data = soc_alert_suppressions_response(query)
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "soc_incidents":
-            status, data = soc_incidents_query_response(query)
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "soc_reanalysis_runs":
-            status, data = soc_incident_reanalysis_runs_response(query)
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "incident_adjudications":
-            case_id = route.resource_id or ""
-            case_status, group_id = _soc_incident_case_group_id(case_id)
-            if case_status != HTTPStatus.OK:
-                status, data = soc_alert_api_error(
-                    "Incident case not found"
-                    if case_status == HTTPStatus.NOT_FOUND
-                    else "Invalid incident case id",
-                    case_status,
-                )
-            else:
-                try:
-                    limit = int((query.get("limit") or ["25"])[0])
-                except (TypeError, ValueError):
-                    limit = 25
-                status, data = soc_adjudication_history_response(
-                    group_id,
-                    case_id=case_id,
-                    limit=limit,
-                )
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "incident_detail":
-            case_id = route.resource_id or ""
-            status, data = soc_incident_detail_response(case_id)
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "alert_adjudications":
-            group_id = route.resource_id or ""
-            try:
-                limit = int((query.get("limit") or ["25"])[0])
-            except (TypeError, ValueError):
-                limit = 25
-            status, data = soc_adjudication_history_response(group_id, limit=limit)
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "alert_detail_fragment":
-            group_id = route.resource_id or ""
-            status, data = soc_alert_detail_fragment_response(group_id)
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if operation == "alert_detail":
-            alert_id = route.resource_id or ""
-            status, data = soc_alert_detail_response(alert_id)
-            return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
+        soc_read = dispatch_soc_read(
+            operation,
+            path=path,
+            resource_id=route.resource_id,
+            query=query,
+            callbacks=portal_soc_read_callbacks(),
+        )
+        if soc_read is not None:
+            body = soc_read.payload if soc_read.encoded else json.dumps(
+                soc_read.payload, indent=2,
+            ).encode()
+            return self._send(
+                soc_read.status,
+                body,
+                "application/json; charset=utf-8",
+            )
         if operation == "resource_action_status":
             action_id = (query.get("id") or [""])[0]
             if not re.fullmatch(r"[a-f0-9-]{32,36}", action_id):
