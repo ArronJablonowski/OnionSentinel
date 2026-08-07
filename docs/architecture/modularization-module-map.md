@@ -342,6 +342,14 @@ and supplies its existing database, timestamp, JSON, filesystem, and transfer-
 duration callbacks, preserving API compatibility while isolating health policy
 from HTTP routing.
 
+`portal_home_dashboard.py` owns the Mac Studio LAN Portal home-page view model,
+explicit report-card discovery, metric severity presentation, escaping, and
+HTML rendering. `portal_home_dashboard_assets.py` owns its stable CSS and
+automatic/manual metric-refresh JavaScript. `report_portal.py` retains the
+legacy `render_home` signature as a thin facade and injects the existing uptime,
+update, backup, disk, timestamp, and report-discovery callbacks; the renderer
+cannot scan reports, read host state, or execute refresh actions server-side.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and
