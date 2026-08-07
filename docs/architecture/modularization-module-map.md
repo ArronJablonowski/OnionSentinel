@@ -357,6 +357,14 @@ case-resolution metadata. It also owns safe persisted-response decoding and the
 stable detail API payload shape. It reuses the shared reviewer policy but has
 no persistence, HTTP, filesystem, or asset-resolution access.
 
+`portal_incident_report_renderer.py` owns escaped Incident Response report
+composition: report sections, factual timelines, bounded Security Onion and
+OSquery audit presentation, immutable executed-query details, and the aggregate
+query count exposed to the client. `report_portal.py` retains the compatibility
+entry point and injects its shared text, list, linked-finding, analyst-review,
+and investigation-audit callbacks. The renderer has no persistence, HTTP,
+filesystem, process, or network access.
+
 | Domain | Current responsibility examples | Target modules |
 | --- | --- | --- |
 | HTTP composition | server, handler, GET/POST dispatch | `portal.entrypoint`, `portal.routes.registry` |

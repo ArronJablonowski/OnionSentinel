@@ -64,6 +64,10 @@ from portal_incident_reanalysis import (
     load_reanalysis_progress,
     parse_reanalysis_run_id,
 )
+from portal_incident_report_renderer import (
+    IncidentReportRenderCallbacks,
+    render_incident_response_report,
+)
 from portal_incident_review_model import (
     compose_incident_detail_payload,
     compose_incident_review_state,
@@ -11742,285 +11746,22 @@ def render_incident_response_report_html(
     analysis: dict[str, object],
     review: dict[str, object] | None = None,
 ) -> tuple[str, int]:
-    """Render a fact-grounded responder report and immutable query audit.
-
-    All model and collector values are escaped here. Query DSL is formatted as
-    text, never interpreted as markup, and comes from the runner's trusted
-    post-inference audit rather than model prose.
-    """
-    report = response.get("incident_response_report")
-    report = report if isinstance(report, dict) else {}
-    metadata = (
-        '<div class="ir-analysis-meta">'
-        f'<span><b>Case:</b> {_incident_html_text(case.get("case_id"))}</span>'
-        f'<span><b>Generated:</b> {_incident_html_text(analysis.get("generated_at"))}</span>'
-        f'<span><b>Model:</b> {_incident_html_text(analysis.get("model"))}</span>'
-        f'<span><b>Confidence:</b> {_incident_html_text(report.get("confidence") or analysis.get("confidence"))}</span>'
-        + (
-            f'<span><b>Resolution:</b> {_incident_html_text(case.get("resolution_reason"))}</span>'
-            f'<span><b>Resolved by:</b> {_incident_html_text(case.get("resolved_by"))}</span>'
-            f'<span><b>Resolved at:</b> {_incident_html_text(case.get("resolved_at"))}</span>'
-            if case.get("resolution_reason")
-            else ""
-        )
-        + "</div>"
+    """Render a fact-grounded responder report and immutable query audit."""
+    callbacks = IncidentReportRenderCallbacks(
+        html_text=_incident_html_text,
+        nonnegative_int=_incident_nonnegative_int,
+        linked_finding=_incident_query_linked_finding,
+        html_list=_incident_html_list,
+        report_section=_incident_report_section,
+        investigation_audit=render_investigation_query_audit_html,
+        review_panel=render_analyst_review_panel,
     )
-    if not report:
-        state = str(case.get("agent_status") or "queued").replace("_", " ")
-        error = str(case.get("latest_error") or "").strip()
-        message = error if error else f"Incident Responder analysis is {state}."
-        return (
-            '<section class="ir-investigation-report">'
-            "<h3>Incident Response Investigation</h3>"
-            f"{metadata}<p class=\"ir-analysis-empty\">{html.escape(message)}</p>"
-            "</section>",
-            0,
-        )
-
-    timeline_rows = []
-    timeline = report.get("factual_timeline") if isinstance(report.get("factual_timeline"), list) else []
-    for event in timeline[:200]:
-        if not isinstance(event, dict):
-            continue
-        timeline_rows.append(
-            "<tr>"
-            f"<td>{_incident_html_text(event.get('timestamp'))}</td>"
-            f"<td>{_incident_html_text(event.get('event'))}</td>"
-            f"<td>{_incident_html_text(event.get('source_pack') or 'supplied evidence')}</td>"
-            f"<td><code>{_incident_html_text(event.get('query_digest'))}</code></td>"
-            f"<td>{_incident_html_text(event.get('confidence') or 'low')}</td>"
-            "</tr>"
-        )
-    timeline_html = (
-        '<div class="ir-timeline-wrap"><table class="ir-timeline-table"><thead><tr>'
-        "<th>Time</th><th>Observed event</th><th>Evidence source</th><th>Query digest</th><th>Confidence</th>"
-        f"</tr></thead><tbody>{''.join(timeline_rows)}</tbody></table></div>"
-        if timeline_rows
-        else "<p>No fact-grounded timeline entries were returned.</p>"
-    )
-
-    sections = [
-        _incident_report_section("Executive BLUF", f"<p>{_incident_html_text(report.get('executive_bluf'))}</p>"),
-        _incident_report_section(
-            "Detection Outcome Reasoning",
-            f"<p>{_incident_html_text(report.get('detection_outcome_reasoning'))}</p>",
-        ),
-        _incident_report_section("Scope", f"<p>{_incident_html_text(report.get('scope'))}</p>"),
-        _incident_report_section("Constraints", _incident_html_list(report.get("constraints"), "No explicit constraints were recorded.")),
-        _incident_report_section("Affected Systems", _incident_html_list(report.get("affected_systems"))),
-        _incident_report_section("Methodology", _incident_html_list(report.get("methodology"))),
-        _incident_report_section("Factual Timeline", timeline_html),
-    ]
-    for title, key in (
-        ("Security Onion Findings", "security_onion_findings"),
-        ("OSquery Findings", "osquery_findings"),
-        ("PCAP Findings", "pcap_findings"),
-        ("Host Findings", "host_findings"),
-        ("Correlation Findings", "correlation_findings"),
-        ("Containment Recommendations", "containment_recommendations"),
-        ("Eradication Recommendations", "eradication_recommendations"),
-        ("Recovery Recommendations", "recovery_recommendations"),
-        ("Follow-up Queries", "follow_up_queries"),
-        ("Evidence Gaps", "evidence_gaps"),
-    ):
-        sections.append(_incident_report_section(title, _incident_html_list(report.get(key))))
-    sections.append(
-        _incident_report_section(
-            "Conclusion",
-            f"<p>{_incident_html_text(report.get('conclusion'))}</p>"
-            f'<p><b>Confidence:</b> {_incident_html_text(report.get("confidence") or "low")}</p>',
-        )
-    )
-
-    audit = response.get("_incident_query_audit")
-    audit = audit if isinstance(audit, dict) else {}
-    query_blocks = []
-    queries = audit.get("queries") if isinstance(audit.get("queries"), list) else []
-    for position, query in enumerate(queries[:100], 1):
-        if not isinstance(query, dict):
-            continue
-        window = query.get("window") if isinstance(query.get("window"), dict) else {}
-        dsl = query.get("query_dsl") if isinstance(query.get("query_dsl"), dict) else {}
-        dsl_text = html.escape(json.dumps(dsl, indent=2, sort_keys=True, default=str))
-        linked_finding = _incident_query_linked_finding(report, query.get("query_digest"))
-        query_blocks.append(
-            f'<article class="ir-query-record" data-query-finding="{html.escape(linked_finding, quote=True)}">'
-            f'<h4>Query {position}: {_incident_html_text(query.get("pack") or "evidence pack")}</h4>'
-            '<div class="ir-query-meta">'
-            f'<span><b>Status:</b> {_incident_html_text(query.get("status") or "unknown")}</span>'
-            f'<span><b>Digest:</b> <code>{_incident_html_text(query.get("query_digest"))}</code></span>'
-            f'<span><b>Window:</b> {_incident_html_text(window.get("start"))} to {_incident_html_text(window.get("end"))}</span>'
-            f'<span><b>Hits:</b> {_incident_nonnegative_int(query.get("total_hits"))} total / '
-            f'{_incident_nonnegative_int(query.get("returned_hits"))} returned</span>'
-            "</div>"
-            "<h5>KQL (analyst-readable equivalent)</h5>"
-            f'<pre class="ir-query-code"><code>{_incident_html_text(query.get("kql_equivalent"))}</code></pre>'
-            "<h5>Elasticsearch Query DSL (exact executed request)</h5>"
-            f'<pre class="ir-query-code"><code>{dsl_text}</code></pre>'
-            "</article>"
-        )
-    audit_html = (
-        '<section class="ir-query-audit">'
-        "<h3>Security Onion Query Audit</h3>"
-        '<div class="ir-analysis-meta">'
-        f'<span><b>Source:</b> {_incident_html_text(audit.get("trusted_source"))}</span>'
-        f'<span><b>Read only:</b> {_incident_html_text(audit.get("read_only", True))}</span>'
-        f'<span><b>Complete:</b> {_incident_html_text(audit.get("complete", False))}</span>'
-        f'<span><b>Partial:</b> {_incident_html_text(audit.get("partial", True))}</span>'
-        "</div>"
-        + ("".join(query_blocks) if query_blocks else "<p>No restricted Security Onion queries were recorded.</p>")
-        + "</section>"
-    )
-
-    osquery_audit = response.get("_incident_osquery_audit")
-    osquery_audit = osquery_audit if isinstance(osquery_audit, dict) else {}
-    osquery_blocks = []
-    osquery_queries = (
-        osquery_audit.get("queries")
-        if isinstance(osquery_audit.get("queries"), list)
-        else []
-    )
-    for position, query in enumerate(osquery_queries[:32], 1):
-        if not isinstance(query, dict):
-            continue
-        rows = query.get("rows_preview") if isinstance(query.get("rows_preview"), list) else []
-        rows_text = html.escape(json.dumps(rows[:25], indent=2, sort_keys=True, default=str))
-        linked_finding = _incident_query_linked_finding(report, query.get("query_digest"))
-        error = str(query.get("error") or "").strip()
-        error_html = (
-            f'<p class="ir-query-error"><b>Error:</b> {html.escape(error)}</p>'
-            if error
-            else ""
-        )
-        preview_html = (
-            "<h5>Bounded Result Preview</h5>"
-            f'<pre class="ir-query-code"><code>{rows_text}</code></pre>'
-            if rows
-            else "<p>No rows were returned by this reviewed pack.</p>"
-        )
-        osquery_blocks.append(
-            f'<article class="ir-query-record" data-query-finding="{html.escape(linked_finding, quote=True)}">'
-            f'<h4>OSquery {position}: {_incident_html_text(query.get("pack") or "reviewed pack")}</h4>'
-            '<div class="ir-query-meta">'
-            f'<span><b>Target:</b> {_incident_html_text(query.get("target"))}</span>'
-            f'<span><b>Status:</b> {_incident_html_text(query.get("status") or "unknown")}</span>'
-            f'<span><b>Digest:</b> <code>{_incident_html_text(query.get("query_digest"))}</code></span>'
-            f'<span><b>Rows:</b> {_incident_nonnegative_int(query.get("total_rows"))} total / '
-            f'{_incident_nonnegative_int(query.get("returned_rows"))} returned</span>'
-            f'<span><b>Duration:</b> {_incident_nonnegative_int(query.get("duration_ms"))} ms</span>'
-            f'<span><b>Truncated:</b> {_incident_html_text(query.get("truncated", False))}</span>'
-            "</div>"
-            "<h5>OSquery SQL (exact executed command)</h5>"
-            f'<pre class="ir-query-code"><code>{_incident_html_text(query.get("query"))}</code></pre>'
-            f"{preview_html}{error_html}"
-            "</article>"
-        )
-    osquery_audit_html = (
-        '<section class="ir-query-audit">'
-        "<h3>Security Onion Appliance OSQuery Snapshot Audit</h3>"
-        '<div class="ir-analysis-meta">'
-        f'<span><b>Source:</b> {_incident_html_text(osquery_audit.get("trusted_source"))}</span>'
-        f'<span><b>Read only:</b> {_incident_html_text(osquery_audit.get("read_only", True))}</span>'
-        f'<span><b>Contract:</b> {_incident_html_text(osquery_audit.get("query_contract"))}</span>'
-        "</div>"
-        + (
-            "".join(osquery_blocks)
-            if osquery_blocks
-            else "<p>No validated Security Onion appliance OSquery snapshots were recorded.</p>"
-        )
-        + "</section>"
-    )
-
-    live_osquery_audit = response.get("_incident_live_osquery_audit")
-    live_osquery_audit = live_osquery_audit if isinstance(live_osquery_audit, dict) else {}
-    live_osquery_blocks = []
-    live_osquery_queries = (
-        live_osquery_audit.get("queries")
-        if isinstance(live_osquery_audit.get("queries"), list)
-        else []
-    )
-    for position, query in enumerate(live_osquery_queries[:32], 1):
-        if not isinstance(query, dict):
-            continue
-        rows = query.get("rows_preview") if isinstance(query.get("rows_preview"), list) else []
-        rows_text = html.escape(json.dumps(rows[:25], indent=2, sort_keys=True, default=str))
-        linked_finding = _incident_query_linked_finding(report, query.get("query_digest"))
-        error = str(query.get("error") or "").strip()
-        error_html = (
-            f'<p class="ir-query-error"><b>Error:</b> {html.escape(error)}</p>'
-            if error
-            else ""
-        )
-        preview_html = (
-            "<h5>Bounded Result Preview</h5>"
-            f'<pre class="ir-query-code"><code>{rows_text}</code></pre>'
-            if rows
-            else "<p>No rows were returned by this endpoint query.</p>"
-        )
-        purpose = str(query.get("purpose") or "").strip()
-        live_osquery_blocks.append(
-            f'<article class="ir-query-record" '
-            f'data-query-purpose="{html.escape(purpose, quote=True)}" '
-            f'data-query-finding="{html.escape(linked_finding, quote=True)}">'
-            f'<h4>Endpoint Query {position}: {_incident_html_text(query.get("target_alias") or "configured endpoint")}</h4>'
-            '<div class="ir-query-meta">'
-            f'<span><b>Target:</b> {_incident_html_text(query.get("target_alias"))}</span>'
-            f'<span><b>Status:</b> {_incident_html_text(query.get("status") or "unknown")}</span>'
-            f'<span><b>Digest:</b> <code>{_incident_html_text(query.get("query_digest"))}</code></span>'
-            f'<span><b>Rows:</b> {_incident_nonnegative_int(query.get("total_rows"))} total / '
-            f'{_incident_nonnegative_int(query.get("returned_rows"))} returned</span>'
-            f'<span><b>Duration:</b> {_incident_nonnegative_int(query.get("duration_ms"))} ms</span>'
-            f'<span><b>Truncated:</b> {_incident_html_text(query.get("truncated", False))}</span>'
-            "</div>"
-            "<h5>OSquery SQL (exact executed live query)</h5>"
-            f'<pre class="ir-query-code"><code>{_incident_html_text(query.get("query"))}</code></pre>'
-            f"{preview_html}{error_html}"
-            "</article>"
-        )
-    live_osquery_error = str(live_osquery_audit.get("error") or "").strip()
-    live_osquery_error_html = (
-        f'<p class="ir-query-error"><b>Collection note:</b> {html.escape(live_osquery_error)}</p>'
-        if live_osquery_error
-        else ""
-    )
-    live_osquery_audit_html = (
-        '<section class="ir-query-audit">'
-        "<h3>Endpoint Live OSQuery Audit</h3>"
-        '<div class="ir-analysis-meta">'
-        f'<span><b>Source:</b> {_incident_html_text(live_osquery_audit.get("trusted_source"))}</span>'
-        f'<span><b>Read only:</b> {_incident_html_text(live_osquery_audit.get("read_only", True))}</span>'
-        f'<span><b>Complete:</b> {_incident_html_text(live_osquery_audit.get("complete", False))}</span>'
-        f'<span><b>Contract:</b> {_incident_html_text(live_osquery_audit.get("query_contract"))}</span>'
-        "</div>"
-        + live_osquery_error_html
-        + (
-            "".join(live_osquery_blocks)
-            if live_osquery_blocks
-            else "<p>No endpoint live OSquery batch was executed for this investigation.</p>"
-        )
-        + "</section>"
-    )
-    investigation_audit_html, investigation_query_count = (
-        render_investigation_query_audit_html(response, report)
-    )
-    return (
-        render_analyst_review_panel(
-            review,
-            group_id=str(case.get("dashboard_group_id") or ""),
-            case_id=str(case.get("case_id") or ""),
-        )
-        +
-        '<section class="ir-investigation-report">'
-        "<h3>Incident Response Investigation</h3>"
-        f"{metadata}{''.join(sections)}"
-        "</section>"
-        f"{audit_html}{osquery_audit_html}{live_osquery_audit_html}{investigation_audit_html}",
-        (
-            len(query_blocks)
-            + len(osquery_blocks)
-            + len(live_osquery_blocks)
-            + investigation_query_count
-        ),
+    return render_incident_response_report(
+        case,
+        response,
+        analysis,
+        review,
+        callbacks,
     )
 
 

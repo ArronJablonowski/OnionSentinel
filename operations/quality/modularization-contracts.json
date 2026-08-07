@@ -146,6 +146,15 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_incident_report_renderer.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_incident_report_renderer.py",
+      "required_symbols": [
+        "IncidentReportRenderCallbacks",
+        "render_incident_response_report"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_json_body.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_json_body.py",
