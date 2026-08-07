@@ -148,6 +148,11 @@ from portal_soc_ai_artifacts import (
     latest_analysis_mtime as _modular_latest_analysis_mtime,
     latest_prompt_mtime as _modular_latest_prompt_mtime,
 )
+from portal_soc_group_query import (
+    SocAlertQuerySnapshot,
+    SocGroupQueryDependencies,
+    compose_group_query_payload,
+)
 from portal_incident_actions import (
     IncidentStatusPayloadError,
     normalize_incident_status_payload,
@@ -437,25 +442,6 @@ class CronJobSummary:
     state: str
     last_status: str
     sort_key: str
-
-
-@dataclass(frozen=True)
-class SocAlertQuerySnapshot:
-    statuses: dict
-    status_counts: dict[str, int]
-    active_total: int
-    active_severity_counts: dict[str, int]
-    active_highest_severity: str
-    severity_counts: dict[str, int]
-    highest_severity: str
-    top_endpoints: dict[str, str]
-    filtered_rows: list[sqlite3.Row]
-    page_rows: list[sqlite3.Row | dict]
-    total_matching: int
-    total_pages: int
-    current_page: int
-    offset: int
-    next_cursor: str | None
 
 
 def format_iso_timestamp(value: dt.datetime, *, timespec: str = "seconds", utc_z: bool = False) -> str:
@@ -8850,25 +8836,49 @@ def soc_alert_group_query_payload(
     sort_key: str,
     sort_direction: str,
 ) -> dict:
-    ai_reports = soc_alert_static_ai_reports()
-    ai_artifacts = soc_alert_page_ai_artifact_context(snapshot.page_rows)
+    dependencies = SocGroupQueryDependencies(
+        db_path=str(SOC_ALERT_STORE_DB),
+        load_ai_reports=soc_alert_static_ai_reports,
+        load_ai_artifacts=soc_alert_page_ai_artifact_context,
+        load_analysis_min_severity=_soc_analysis_min_severity,
+        load_pcap_analysis=soc_alert_pcap_analysis_index,
+        load_page_evidence=_soc_group_page_evidence,
+        present_alert=soc_alert_group_row_to_api,
+    )
+    return compose_group_query_payload(
+        source=source,
+        snapshot=snapshot,
+        limit=limit,
+        sort_key=sort_key,
+        sort_direction=sort_direction,
+        dependencies=dependencies,
+    )
+
+
+def _soc_analysis_min_severity() -> str:
     ai_settings_response = read_soc_ai_settings()
     ai_settings = (
         ai_settings_response.get("settings", {})
         if isinstance(ai_settings_response, dict)
         else {}
     )
-    analysis_min_severity = str(
+    return str(
         ai_settings.get("soc_analyst_analysis_min_severity")
         or "informational"
     )
-    pcap_analysis = soc_alert_pcap_analysis_index()
+
+
+def _soc_group_page_evidence(
+    page_rows: list[sqlite3.Row | dict],
+    ai_artifacts: dict,
+    pcap_analysis: dict,
+) -> tuple[dict, dict]:
     try:
         with soc_alert_db_connect() as conn:
-            pcap_requests = soc_alert_pcap_request_statuses(conn, snapshot.page_rows)
+            pcap_requests = soc_alert_pcap_request_statuses(conn, page_rows)
             evidence_metadata = soc_alert_group_evidence_metadata(
                 conn,
-                snapshot.page_rows,
+                page_rows,
                 ai_artifacts,
                 pcap_analysis,
             )
@@ -8876,45 +8886,11 @@ def soc_alert_group_query_payload(
         pcap_requests = {}
         evidence_metadata = soc_alert_group_evidence_metadata(
             None,
-            snapshot.page_rows,
+            page_rows,
             ai_artifacts,
             pcap_analysis,
         )
-    return {
-        "ok": True,
-        "source": source,
-        "mode": "grouped",
-        "db_path": str(SOC_ALERT_STORE_DB),
-        "count": len(snapshot.page_rows),
-        "total_matching": snapshot.total_matching,
-        "status_counts": snapshot.status_counts,
-        "active_total": snapshot.active_total,
-        "active_severity_counts": snapshot.active_severity_counts,
-        "active_highest_severity": snapshot.active_highest_severity,
-        "severity_counts": snapshot.severity_counts,
-        "highest_severity": snapshot.highest_severity,
-        "top_endpoints": snapshot.top_endpoints,
-        "limit": limit,
-        "page": snapshot.current_page,
-        "page_size": limit,
-        "total_pages": snapshot.total_pages,
-        "sort": sort_key,
-        "direction": sort_direction,
-        "next_cursor": snapshot.next_cursor,
-        "alerts": [
-            soc_alert_group_row_to_api(
-                row,
-                snapshot.statuses,
-                ai_reports,
-                pcap_analysis,
-                pcap_requests,
-                ai_artifacts,
-                evidence_metadata,
-                analysis_min_severity,
-            )
-            for row in snapshot.page_rows
-        ],
-    }
+    return pcap_requests, evidence_metadata
 
 
 def soc_alerts_summary_query_response(query: dict[str, list[str]]) -> tuple[int, dict] | None:
