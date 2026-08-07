@@ -1789,6 +1789,38 @@ def _query_event_tuple_dependencies():
     )
 
 
+def _query_security_onion():
+    _provider_routing()
+    from onion_sentinel.analysis.query import security_onion
+    return security_onion
+
+
+def _query_security_onion_policy():
+    module = _query_security_onion()
+    return module.Policy(
+        purposes=frozenset(INVESTIGATION_SECURITY_ONION_PURPOSES),
+        packs=frozenset(INVESTIGATION_QUERY_PACKS),
+        aggregations=frozenset(INVESTIGATION_QUERY_AGGREGATIONS),
+    )
+
+
+def _query_security_onion_dependencies():
+    module = _query_security_onion()
+    return module.Dependencies(
+        normalize_window=lambda value, envelope: (
+            normalize_investigation_query_window(
+                value, time_envelope=envelope
+            )
+        ),
+        project_event_tuple=lambda value, pack, context: (
+            project_investigation_event_tuple(
+                value, pack=pack, authorization_context=context
+            )
+        ),
+        positive_integer=_positive_query_int,
+    )
+
+
 def _query_window():
     _provider_routing()
     from onion_sentinel.analysis.query import window
@@ -4438,66 +4470,18 @@ def normalize_investigation_query_request(
     )
 
     normalized_parameters: dict[str, Any]
-    event_tuple_projection_audit: dict[str, Any] | None = None
+    normalization: dict[str, Any] = {}
     if backend in {"elastic", "oql"}:
-        if purpose not in INVESTIGATION_SECURITY_ONION_PURPOSES:
-            raise InvestigationQueryError(
-                "elastic/oql purpose must be one of: "
-                + ", ".join(sorted(INVESTIGATION_SECURITY_ONION_PURPOSES))
-            )
-        pack = _query_text(parameters.get("pack"), 64).lower()
-        if pack not in INVESTIGATION_QUERY_PACKS:
-            raise InvestigationQueryError(f"unsupported investigation pack: {pack or 'missing'}")
-        aggregation = _query_text(parameters.get("aggregation") or "events", 32).lower()
-        if aggregation not in INVESTIGATION_QUERY_AGGREGATIONS:
-            raise InvestigationQueryError(
-                f"unsupported investigation aggregation: {aggregation or 'missing'}"
-            )
-        if aggregation == "anchor_nearest" and backend != "elastic":
-            raise InvestigationQueryError(
-                "anchor_nearest is available only through compiled Elastic DSL"
-            )
-        window, window_audit = normalize_investigation_query_window(
-            parameters.get("window"),
+        normalized_parameters, normalization = _query_security_onion().normalize(
+            parameters,
+            purpose=purpose,
+            backend=backend,
             time_envelope=time_envelope,
+            authorization_context=authorization_context,
+            policy=_query_security_onion_policy(),
+            dependencies=_query_security_onion_dependencies(),
+            error_type=InvestigationQueryError,
         )
-        observables = parameters.get("observables")
-        if not isinstance(observables, dict):
-            raise InvestigationQueryError("elastic/oql observables must be an object")
-        if set(observables).difference({"ips", "domains", "hosts", "users"}):
-            raise InvestigationQueryError("elastic/oql observables contain unsupported categories")
-        normalized_observables: dict[str, list[str]] = {}
-        for kind in ("ips", "domains", "hosts", "users"):
-            values = observables.get(kind, [])
-            if not isinstance(values, list) or len(values) > 8:
-                raise InvestigationQueryError(
-                    f"elastic/oql observable {kind} must be an array of at most 8 values"
-                )
-            normalized_observables[kind] = [
-                _query_text(item, 255) for item in values if _query_text(item, 255)
-            ]
-        if not any(normalized_observables.values()):
-            raise InvestigationQueryError("elastic/oql request needs at least one exact observable")
-        if sum(len(values) for values in normalized_observables.values()) > 8:
-            raise InvestigationQueryError(
-                "elastic/oql request may use at most 8 total observables"
-            )
-        normalized_parameters = {
-            "pack": pack,
-            "window": window,
-            "observables": normalized_observables,
-            "size": _positive_query_int(parameters.get("size"), 25, 100, "query size"),
-            "aggregation": aggregation,
-        }
-        if "event_tuple" in parameters:
-            (
-                normalized_parameters["event_tuple"],
-                event_tuple_projection_audit,
-            ) = project_investigation_event_tuple(
-                parameters["event_tuple"],
-                pack=pack,
-                authorization_context=authorization_context,
-            )
     elif backend == "osquery":
         target_alias = _query_text(parameters.get("target_alias"), 64)
         query = _query_text(parameters.get("query"), 4096)
@@ -4590,15 +4574,8 @@ def normalize_investigation_query_request(
                 "derived-evidence query limit",
             ),
         }
-    normalization: dict[str, Any] = {}
     if dropped_parameters:
         normalization["dropped_cross_backend_parameters"] = dropped_parameters
-    if backend in {"elastic", "oql"} and window_audit["adjusted"]:
-        normalization["window_adjustment"] = window_audit
-    if event_tuple_projection_audit is not None:
-        normalization["event_tuple_projection"] = (
-            event_tuple_projection_audit
-        )
     normalized = {
         "query_id": query_id,
         "backend": backend,
