@@ -175,6 +175,59 @@ class PortalIncidentRepositoryTests(unittest.TestCase):
         self.assertEqual(review_records.reviewer, {})
         self.assertIsNone(review_records.adjudication)
 
+    def test_current_analysis_rejects_stale_pointer_and_selects_latest_ir_run(self) -> None:
+        self.conn.executescript("""
+        CREATE TABLE ai_analysis_runs (
+          analysis_id TEXT PRIMARY KEY, group_id TEXT, agent_role TEXT,
+          generated_at TEXT, created_at TEXT, model TEXT,
+          detection_outcome TEXT, bluf TEXT, summary TEXT, confidence TEXT,
+          evidence_hash TEXT, response_json TEXT
+        );
+        INSERT INTO ai_analysis_runs VALUES (
+          'wrong-pointer', 'other-group', 'incident-responder', '99', '99',
+          'wrong', '', '', '', '', '', '{}'
+        );
+        INSERT INTO ai_analysis_runs VALUES (
+          'older-ir', 'case-group', 'incident-responder', '10', '10',
+          'older', '', '', '', '', '', '{}'
+        );
+        INSERT INTO ai_analysis_runs VALUES (
+          'latest-ir', 'case-group', 'incident-responder', '20', '20',
+          'latest', '', '', '', '', '', '{}'
+        );
+        INSERT INTO ai_analysis_runs VALUES (
+          'newer-soc', 'case-group', 'soc-analyst', '30', '30',
+          'soc', '', '', '', '', '', '{}'
+        );
+        """)
+        selected = repository.load_current_incident_analysis(
+            self.conn,
+            {"group_id": "case-group", "latest_analysis_id": "wrong-pointer"},
+        )
+        self.assertEqual(selected["analysis_id"], "latest-ir")
+        self.assertEqual(selected["model"], "latest")
+
+        pointed = repository.load_current_incident_analysis(
+            self.conn,
+            {"group_id": "case-group", "latest_analysis_id": "older-ir"},
+        )
+        self.assertEqual(pointed["analysis_id"], "older-ir")
+
+    def test_legacy_analysis_schema_supports_pointer_only_lookup(self) -> None:
+        self.conn.executescript("""
+        CREATE TABLE ai_analysis_runs (
+          analysis_id TEXT PRIMARY KEY, model TEXT, confidence TEXT
+        );
+        INSERT INTO ai_analysis_runs VALUES ('legacy-analysis', 'legacy-model', 'low');
+        """)
+        selected = repository.load_current_incident_analysis(
+            self.conn, {"latest_analysis_id": "legacy-analysis"}
+        )
+        self.assertEqual(selected["model"], "legacy-model")
+        self.assertEqual(
+            repository.load_current_incident_analysis(self.conn, {}), {}
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

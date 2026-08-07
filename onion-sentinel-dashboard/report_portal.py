@@ -58,6 +58,7 @@ from portal_incident_read_model import (
 from portal_incident_review_model import compose_incident_review_state
 from portal_incident_repository import (
     incident_schema_ready,
+    load_current_incident_analysis,
     load_incident_list_records,
     load_incident_review_records,
 )
@@ -11190,53 +11191,7 @@ def soc_incident_current_analysis(
     case: dict[str, object],
 ) -> dict[str, object]:
     """Resolve a case's current IR run without trusting a stale foreign pointer."""
-    if not sqlite_table_exists(conn, "ai_analysis_runs"):
-        return {}
-    run_columns = sqlite_table_columns(conn, "ai_analysis_runs")
-    select_columns = [
-        column for column in (
-            "analysis_id", "group_id", "agent_role", "generated_at", "created_at",
-            "model", "detection_outcome", "bluf", "summary", "confidence",
-            "evidence_hash", "response_json",
-        ) if column in run_columns
-    ]
-    if not select_columns:
-        return {}
-    select_sql = ", ".join(select_columns)
-    group_id = str(case.get("group_id") or "").strip()
-    latest_id = str(case.get("latest_analysis_id") or "").strip()
-    if latest_id:
-        clauses = ["analysis_id = ?"]
-        arguments: list[object] = [latest_id]
-        if "group_id" in run_columns:
-            clauses.append("group_id = ?")
-            arguments.append(group_id)
-        if "agent_role" in run_columns:
-            clauses.append("agent_role = 'incident-responder'")
-        row = conn.execute(
-            f"SELECT {select_sql} FROM ai_analysis_runs "
-            f"WHERE {' AND '.join(clauses)} LIMIT 1",
-            arguments,
-        ).fetchone()
-        if row:
-            return dict(row)
-    if not group_id or "group_id" not in run_columns:
-        return {}
-    clauses = ["group_id = ?"]
-    arguments = [group_id]
-    if "agent_role" in run_columns:
-        clauses.append("agent_role = 'incident-responder'")
-    order_columns = [
-        column for column in ("generated_at", "created_at") if column in run_columns
-    ]
-    order_sql = ", ".join(f"{column} DESC" for column in order_columns)
-    order_sql = f"{order_sql}, rowid DESC" if order_sql else "rowid DESC"
-    row = conn.execute(
-        f"SELECT {select_sql} FROM ai_analysis_runs "
-        f"WHERE {' AND '.join(clauses)} ORDER BY {order_sql} LIMIT 1",
-        arguments,
-    ).fetchone()
-    return dict(row) if row else {}
+    return load_current_incident_analysis(conn, case)
 
 
 def soc_adjudication_history_response(

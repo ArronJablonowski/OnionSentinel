@@ -96,6 +96,7 @@
         "IncidentListRecords",
         "IncidentReviewRecords",
         "incident_schema_ready",
+        "load_current_incident_analysis",
         "load_incident_list_records",
         "load_incident_review_records"
       ]

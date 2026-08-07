@@ -325,9 +325,10 @@ callback boundary.
 read-only SQLite batches: case counts and pages, summary-versus-legacy row
 selection, analysis and reviewer lookup, newest adjudication selection, and
 optional-column compatibility. It also loads resilient evidence-freshness,
-reviewer, and case-bound adjudication records for incident detail views. It
-returns typed record bundles and has no HTTP, filesystem, asset-resolution, or
-presentation responsibility.
+reviewer, and case-bound adjudication records for incident detail views, and
+resolves the current Incident Responder analysis without trusting a stale or
+cross-role foreign pointer. It returns typed record bundles and has no HTTP,
+filesystem, asset-resolution, or presentation responsibility.
 
 `portal_incident_review_model.py` owns pure Incident Response detail-review
 presentation: evidence coverage and freshness, primary-versus-effective

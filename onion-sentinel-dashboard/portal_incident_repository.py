@@ -11,6 +11,13 @@ from portal_incident_read_model import (
 )
 
 
+ANALYSIS_SELECT_COLUMNS = (
+    "analysis_id", "group_id", "agent_role", "generated_at", "created_at",
+    "model", "detection_outcome", "bluf", "summary", "confidence",
+    "evidence_hash", "response_json",
+)
+
+
 @dataclass(frozen=True)
 class IncidentListRecords:
     total: int
@@ -312,4 +319,87 @@ def load_incident_review_records(
         adjudication=_adjudication_for_case(
             conn, str(case.get("case_id") or ""), analysis_id
         ),
+    )
+
+
+def _analysis_select_columns(run_columns: set[str]) -> list[str]:
+    return [
+        column for column in ANALYSIS_SELECT_COLUMNS if column in run_columns
+    ]
+
+
+def _analysis_by_pointer(
+    conn: sqlite3.Connection,
+    case: dict,
+    run_columns: set[str],
+    select_sql: str,
+) -> dict:
+    latest_id = str(case.get("latest_analysis_id") or "").strip()
+    if not latest_id:
+        return {}
+    clauses = ["analysis_id = ?"]
+    arguments: list[object] = [latest_id]
+    if "group_id" in run_columns:
+        clauses.append("group_id = ?")
+        arguments.append(str(case.get("group_id") or "").strip())
+    if "agent_role" in run_columns:
+        clauses.append("agent_role = 'incident-responder'")
+    row = conn.execute(
+        f"SELECT {select_sql} FROM ai_analysis_runs "
+        f"WHERE {' AND '.join(clauses)} LIMIT 1",
+        arguments,
+    ).fetchone()
+    return dict(row) if row else {}
+
+
+def _analysis_order_sql(run_columns: set[str]) -> str:
+    columns = [
+        column
+        for column in ("generated_at", "created_at")
+        if column in run_columns
+    ]
+    prefix = ", ".join(f"{column} DESC" for column in columns)
+    return f"{prefix}, rowid DESC" if prefix else "rowid DESC"
+
+
+def _analysis_by_group(
+    conn: sqlite3.Connection,
+    group_id: str,
+    run_columns: set[str],
+    select_sql: str,
+) -> dict:
+    if not group_id or "group_id" not in run_columns:
+        return {}
+    clauses = ["group_id = ?"]
+    if "agent_role" in run_columns:
+        clauses.append("agent_role = 'incident-responder'")
+    row = conn.execute(
+        f"SELECT {select_sql} FROM ai_analysis_runs "
+        f"WHERE {' AND '.join(clauses)} "
+        f"ORDER BY {_analysis_order_sql(run_columns)} LIMIT 1",
+        [group_id],
+    ).fetchone()
+    return dict(row) if row else {}
+
+
+def load_current_incident_analysis(
+    conn: sqlite3.Connection,
+    case: dict,
+) -> dict:
+    """Resolve a case-bound IR run without trusting a stale foreign pointer."""
+    if not _table_exists(conn, "ai_analysis_runs"):
+        return {}
+    run_columns = _table_columns(conn, "ai_analysis_runs")
+    selected = _analysis_select_columns(run_columns)
+    if not selected:
+        return {}
+    select_sql = ", ".join(selected)
+    pointed = _analysis_by_pointer(conn, case, run_columns, select_sql)
+    if pointed:
+        return pointed
+    return _analysis_by_group(
+        conn,
+        str(case.get("group_id") or "").strip(),
+        run_columns,
+        select_sql,
     )
