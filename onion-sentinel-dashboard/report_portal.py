@@ -47,14 +47,17 @@ from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
 from portal_catalog_routes import classify_catalog_route
+from portal_incident_actions import (
+    IncidentStatusPayloadError,
+    normalize_incident_status_payload,
+)
 from portal_incident_read_model import (
     IncidentRowCallbacks,
     IncidentQueryError,
-    compose_incident_row,
     empty_incident_page,
     parse_incident_list_request,
-    select_incident_analysis,
 )
+from portal_incident_list_service import compose_incident_list_rows
 from portal_incident_reanalysis import (
     IncidentReanalysisQueryError,
     compose_reanalysis_progress_payload,
@@ -11036,22 +11039,13 @@ def soc_incident_status_response(
             "Incident case not found" if status == HTTPStatus.NOT_FOUND else "Invalid incident case id",
             status,
         )
-    payload = payload if isinstance(payload, dict) else {}
-    case_status = str(payload.get("status") or "").strip().lower()
-    resolution_reason = str(payload.get("resolution_reason") or "").strip()[:2000]
-    reviewer = str(payload.get("updated_by") or payload.get("reviewer") or "dashboard").strip()[:100]
-    if case_status not in {"open", "in_progress", "resolved"}:
-        return soc_alert_api_error("Invalid incident case status")
-    if case_status == "resolved" and not resolution_reason:
-        return soc_alert_api_error("A resolution reason is required.")
+    try:
+        request_payload = normalize_incident_status_payload(case_id, payload)
+    except IncidentStatusPayloadError as exc:
+        return soc_alert_api_error(str(exc))
     return _soc_alert_store_mutation(
         "/incidents/status",
-        {
-            "case_id": case_id,
-            "status": case_status,
-            "resolution_reason": resolution_reason,
-            "updated_by": reviewer,
-        },
+        request_payload,
     )
 
 
@@ -11266,38 +11260,14 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                 return 200, empty_incident_page(request)
             records = load_incident_list_records(conn, request)
             incident_inventory, incident_inventory_error = load_asset_inventory_data()
-            incidents: list[dict[str, object]] = []
-            for row in records.rows:
-                item = dict(row)
-                analysis = select_incident_analysis(
-                    item, records.analyses, records.run_columns
-                )
-                fallback_review: dict[str, object] | None = None
-                if not analysis and records.run_columns:
-                    analysis = soc_incident_current_analysis(conn, item)
-                    if analysis:
-                        fallback_response = _soc_review_json(analysis.get("response_json"))
-                        fallback_review = soc_incident_review_state(
-                            conn,
-                            item,
-                            analysis,
-                            fallback_response,
-                        )
-                analysis_id = str(analysis.get("analysis_id") or "")
-                adjudication = records.adjudications.get((
-                    str(item.get("case_id") or ""),
-                    analysis_id,
-                ))
-                incidents.append(compose_incident_row(
-                    item,
-                    analysis,
-                    records.second_opinions.get(analysis_id),
-                    adjudication,
-                    fallback_review,
-                    incident_inventory,
-                    incident_inventory_error,
-                    INCIDENT_ROW_CALLBACKS,
-                ))
+            incidents = compose_incident_list_rows(
+                conn,
+                records,
+                incident_inventory,
+                incident_inventory_error,
+                _soc_review_defaults(),
+                INCIDENT_ROW_CALLBACKS,
+            )
     except (FileNotFoundError, sqlite3.Error) as exc:
         return soc_alert_api_error(f"Incident Response data unavailable: {exc}", 503)
     return 200, {

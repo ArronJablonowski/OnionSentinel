@@ -71,6 +71,23 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_incident_actions.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_incident_actions.py",
+      "required_symbols": [
+        "IncidentStatusPayloadError",
+        "normalize_incident_status_payload"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/portal_incident_list_service.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_incident_list_service.py",
+      "required_symbols": [
+        "compose_incident_list_rows"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_incident_read_model.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_incident_read_model.py",

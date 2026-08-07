@@ -321,6 +321,17 @@ read-only SQLite and inventory-file access for legacy analysis fallback
 queries; loaded records are passed into pure composers through an explicit
 callback boundary.
 
+`portal_incident_list_service.py` owns application-level list composition. It
+joins the typed repository page to case-bound legacy-analysis recovery,
+review-state composition, adjudication, and asset presentation while keeping
+SQLite query construction, HTTP errors, and inventory-file loading outside the
+service.
+
+`portal_incident_actions.py` owns pure analyst-action validation and bounded
+payload construction. Its first contract covers incident status transitions,
+resolution-reason requirements, reviewer aliases, and field-length limits;
+case existence and the append-only alert-store mutation remain portal concerns.
+
 `portal_incident_repository.py` owns the primary Incident Response list's
 read-only SQLite batches: case counts and pages, summary-versus-legacy row
 selection, analysis and reviewer lookup, newest adjudication selection, and
