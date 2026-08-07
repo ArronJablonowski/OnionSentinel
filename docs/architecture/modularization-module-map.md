@@ -118,6 +118,10 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
 - Bounded reference admission, canonical returned-count handling,
   corroboration upgrades, evidence digests, and deterministic contract output
   now live in `analysis.evidence.registry`.
+- Exact top-level compact-column provenance validation, decoding, read-only
+  enforcement, and result-bound registration now live in
+  `analysis.evidence.columnar`; malformed claimed envelopes are consumed as
+  inert evidence and never recursively reinterpreted.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports

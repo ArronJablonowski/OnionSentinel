@@ -1696,6 +1696,34 @@ def _evidence_registry_instance():
     )
 
 
+def _evidence_columnar():
+    _provider_routing()
+    from onion_sentinel.analysis.evidence import columnar
+    return columnar
+
+
+def _evidence_columnar_policy():
+    module = _evidence_columnar()
+    return module.Policy(
+        result_schema=INVESTIGATION_QUERY_RESULT_SCHEMA,
+        provenance_schema=INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA,
+        columns=tuple(INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS),
+        empty_ref_instruction=INVESTIGATION_COLUMNAR_EMPTY_REF_INSTRUCTION,
+        success_statuses=frozenset(INVESTIGATION_QUERY_SUCCESS_STATUSES),
+        maximum_queries=MAX_INVESTIGATION_QUERIES_TOTAL,
+        maximum_rounds=MAX_INVESTIGATION_QUERY_ROUNDS,
+    )
+
+
+def _evidence_columnar_dependencies():
+    module = _evidence_columnar()
+    return module.Dependencies(
+        prompt_json_bytes=_investigation_prompt_json_bytes,
+        canonical_count=_canonical_investigation_count,
+        result_bound_reference=result_bound_query_reference,
+    )
+
+
 def _conclusion_authorization_evidence():
     _provider_routing()
     from onion_sentinel.analysis.conclusions import authorization_evidence
@@ -4076,252 +4104,10 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
                 visit(child, path)
 
     def visit_columnar_investigation_results(value: Any) -> bool:
-        """Decode only the exact runtime-produced top-level compact envelope."""
-        if not isinstance(value, dict):
-            return False
-        projection = value.get("prompt_projection")
-        rounds = value.get("rounds")
-        claimed = bool(
-            isinstance(projection, dict)
-            and projection.get("columnar_provenance_fallback") is True
+        return _evidence_columnar().process(
+            value, reference_registry, _evidence_columnar_policy(),
+            _evidence_columnar_dependencies(),
         )
-        if not claimed:
-            return False
-        if (
-            set(value) != {"schema", "rounds", "prompt_projection"}
-            or value.get("schema") != INVESTIGATION_QUERY_RESULT_SCHEMA
-            or not isinstance(rounds, list)
-            or len(rounds) != 1
-            or not isinstance(rounds[0], dict)
-            or set(projection)
-            != {
-                "max_bytes",
-                "truncated",
-                "columnar_provenance_fallback",
-                "encoded_bytes",
-            }
-            or projection.get("truncated") is not True
-        ):
-            return True
-        round_item = rounds[0]
-        if (
-            set(round_item)
-            != {
-                "schema",
-                "prompt_projection",
-                "source_bytes",
-                "source_sha256",
-                "source_provenance_rows",
-                "columns",
-                "backend_values",
-                "status_values",
-                "semantics_values",
-                "result_summary_values",
-                "empty_evidence_ref",
-                "rows",
-                "omitted_rows",
-            }
-            or round_item.get("schema")
-            != INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA
-            or round_item.get("prompt_projection")
-            != "columnar_provenance_due_to_cumulative_byte_budget"
-            or round_item.get("columns")
-            != list(INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS)
-            or round_item.get("empty_evidence_ref")
-            != INVESTIGATION_COLUMNAR_EMPTY_REF_INSTRUCTION
-        ):
-            return True
-
-        def canonical_integer(raw: Any, *, minimum: int = 0) -> int | None:
-            if isinstance(raw, bool) or not isinstance(raw, int):
-                return None
-            return raw if raw >= minimum else None
-
-        maximum_bytes = canonical_integer(
-            projection.get("max_bytes"),
-            minimum=1,
-        )
-        encoded_bytes = canonical_integer(
-            projection.get("encoded_bytes"),
-            minimum=1,
-        )
-        source_bytes = canonical_integer(round_item.get("source_bytes"))
-        source_rows = canonical_integer(
-            round_item.get("source_provenance_rows"),
-            minimum=1,
-        )
-        omitted_rows = canonical_integer(round_item.get("omitted_rows"))
-        try:
-            encoded_value = len(_investigation_prompt_json_bytes(value))
-        except (TypeError, ValueError, OverflowError):
-            return True
-        rows_value = round_item.get("rows")
-        if (
-            maximum_bytes is None
-            or encoded_bytes is None
-            or encoded_bytes != encoded_value
-            or encoded_value > maximum_bytes
-            or source_bytes is None
-            or source_rows is None
-            or omitted_rows != 0
-            or not isinstance(round_item.get("source_sha256"), str)
-            or not re.fullmatch(
-                r"[a-f0-9]{64}",
-                round_item.get("source_sha256") or "",
-            )
-            or not isinstance(rows_value, list)
-            or not rows_value
-            or len(rows_value) != source_rows
-            or len(rows_value) > MAX_INVESTIGATION_QUERIES_TOTAL
-        ):
-            return True
-
-        table_limits = {
-            "backend_values": 40,
-            "status_values": 40,
-            "semantics_values": 1024,
-            "result_summary_values": 256,
-        }
-        tables: dict[str, list[str]] = {}
-        for table_name, item_maximum_bytes in table_limits.items():
-            table = round_item.get(table_name)
-            if (
-                not isinstance(table, list)
-                or not table
-                or len(table) > MAX_INVESTIGATION_QUERIES_TOTAL
-                or any(
-                    not isinstance(item, str)
-                    or not item
-                    or len(item.encode("utf-8"))
-                    > item_maximum_bytes
-                    for item in table
-                )
-            ):
-                return True
-            tables[table_name] = table
-
-        def table_value(name: str, index: Any) -> str | None:
-            if isinstance(index, bool) or not isinstance(index, int):
-                return None
-            table = tables[name]
-            return table[index] if 0 <= index < len(table) else None
-
-        decoded: list[dict[str, Any]] = []
-        for row in rows_value:
-            if (
-                not isinstance(row, list)
-                or len(row) != len(INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS)
-            ):
-                return True
-            item = dict(
-                zip(
-                    INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS,
-                    row,
-                )
-            )
-            round_number = canonical_integer(item.get("round"), minimum=1)
-            query_id = item.get("query_id")
-            backend = table_value(
-                "backend_values",
-                item.get("backend_index"),
-            )
-            status = table_value(
-                "status_values",
-                item.get("status_index"),
-            )
-            semantics = table_value(
-                "semantics_values",
-                item.get("semantics_index"),
-            )
-            result_summary = table_value(
-                "result_summary_values",
-                item.get("result_summary_index"),
-            )
-            query_digest = item.get("query_digest")
-            result_digest = item.get("result_digest")
-            evidence_ref = item.get("evidence_ref_or_empty")
-            returned_raw = item.get("returned")
-            returned = _canonical_investigation_count(returned_raw)
-            count_valid = returned is not None
-            if (
-                round_number is None
-                or round_number > MAX_INVESTIGATION_QUERY_ROUNDS
-                or not isinstance(query_id, str)
-                or not re.fullmatch(r"[A-Za-z0-9_.:@+=-]{1,128}", query_id)
-                or not backend
-                or not status
-                or not semantics
-                or not result_summary
-                or not isinstance(query_digest, str)
-                or not re.fullmatch(r"[a-f0-9]{64}", query_digest)
-                or not isinstance(result_digest, str)
-                or (
-                    result_digest
-                    and not re.fullmatch(r"[a-f0-9]{64}", result_digest)
-                )
-                or not isinstance(evidence_ref, str)
-                or len(evidence_ref.encode("utf-8")) > 512
-                or not isinstance(item.get("read_only"), bool)
-            ):
-                return True
-            canonical_ref, evidence_digest = (
-                result_bound_query_reference(
-                    query_digest,
-                    result_digest,
-                )
-            )
-            if not evidence_ref:
-                evidence_ref = canonical_ref
-            elif evidence_ref.startswith("query:"):
-                evidence_ref = canonical_ref
-            if not evidence_ref:
-                return True
-            safe_status = status
-            if item["read_only"] is not True:
-                safe_status = "read_only_violation"
-            elif not count_valid:
-                safe_status = "invalid_result_count"
-            decoded.append({
-                "query_id": query_id,
-                "status": safe_status,
-                "returned": returned,
-                "query_digest": query_digest,
-                "result_digest": result_digest,
-                "evidence_ref": evidence_ref,
-                "evidence_digest": evidence_digest,
-            })
-
-        for item in decoded:
-            corroborating = (
-                str(item["status"]).lower()
-                in INVESTIGATION_QUERY_SUCCESS_STATUSES
-            )
-            common = {
-                "source": (
-                    "investigation_query_results.rounds."
-                    "columnar_provenance"
-                ),
-                "source_class": "investigation_query_results",
-                "corroborating": corroborating,
-                "status": item["status"],
-                "returned": item["returned"],
-                "evidence_digest": item["evidence_digest"],
-                "require_valid_count": True,
-            }
-            query_ref, _ = result_bound_query_reference(
-                item["query_digest"],
-                item["result_digest"],
-            )
-            add(query_ref, **common)
-            add(item["evidence_ref"], **common)
-            query_id_ref, _ = result_bound_query_reference(
-                item["query_digest"],
-                item["result_digest"],
-                namespace="query-id",
-                label=item["query_id"],
-            )
-            add(query_id_ref, **common)
-        return True
 
     iterative_results = prompt_package.get("investigation_query_results")
     columnar_claimed = visit_columnar_investigation_results(
