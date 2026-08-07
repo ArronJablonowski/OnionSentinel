@@ -1807,6 +1807,12 @@ def _query_execution_enrichment():
     return enrichment
 
 
+def _query_execution_derived():
+    _provider_routing()
+    from onion_sentinel.analysis.query.execution import derived
+    return derived
+
+
 def _query_derived():
     _provider_routing()
     from onion_sentinel.analysis.query import derived
@@ -5782,143 +5788,27 @@ def execute_investigation_query_batch(
     derived_requests = [
         request for request in requests if request["backend"] == "pcap_zeek"
     ]
-    if derived_requests:
-        rejected_derived = derived_requests[4:]
-        derived_requests = derived_requests[:4]
-        for request in rejected_derived:
-            results.append(
-                {
-                    "query_id": request["query_id"],
-                    "backend": request["backend"],
-                    "status": "rejected",
-                    "read_only": True,
-                    "error": "at most four combined PCAP/Zeek derived-evidence queries are allowed per round",
-                }
-            )
-        try:
-            pcap_context = (
-                prompt_package.get("pcap_evidence")
-                if isinstance(prompt_package.get("pcap_evidence"), dict)
-                else {}
-            )
-            submitted_queries = [
-                {
-                    "operation": item["parameters"]["operation"],
-                    "filters": item["parameters"]["filters"],
-                    "indicator": item["parameters"]["indicator"],
-                    "limit": item["parameters"]["limit"],
-                }
-                for item in derived_requests
-            ]
-            evidence = derived_executor(
-                pcap_context,
-                submitted_queries,
-            )
-            evidence = validate_derived_query_evidence(
-                evidence,
-                submitted_queries,
-            )
-            source_digest = _derived_evidence_source_digest(pcap_context)
-            returned = evidence.get("results") if isinstance(evidence, dict) else []
-            for index, request in enumerate(derived_requests):
-                item = returned[index] if isinstance(returned, list) and index < len(returned) else {}
-                query = item.get("query") if isinstance(item, dict) else {}
-                query_audit = item.get("audit") if isinstance(item, dict) else {}
-                canonical_evidence_ref = (
-                    "derived-pcap-zeek:"
-                    f"{source_digest[:16]}:"
-                    f"{str(item.get('query_digest') or '')[:16]}:"
-                    f"{str(item.get('result_digest') or '')[:16]}"
-                    if isinstance(item, dict)
-                    else ""
-                )
-                model_item = dict(item) if isinstance(item, dict) else {}
-                model_item["evidence_ref"] = canonical_evidence_ref
-                trusted_query_audit = _bounded_trusted_query_audit(
-                    [
-                        {
-                            "query_id": request["query_id"],
-                            "backend": request["backend"],
-                            "purpose": request["purpose"],
-                            "operation": query.get("operation") if isinstance(query, dict) else None,
-                            "filters": query.get("filters") if isinstance(query, dict) else None,
-                            "indicator": query.get("indicator") if isinstance(query, dict) else None,
-                            "limit": query.get("limit") if isinstance(query, dict) else None,
-                            "status": "ok",
-                            "candidate_records_scanned": (
-                                query_audit.get("candidate_records_scanned")
-                                if isinstance(query_audit, dict)
-                                else None
-                            ),
-                            "unique_records_matched": (
-                                query_audit.get("unique_records_matched")
-                                if isinstance(query_audit, dict)
-                                else None
-                            ),
-                            "records_returned": (
-                                query_audit.get("records_returned")
-                                if isinstance(query_audit, dict)
-                                else None
-                            ),
-                            "result_truncated": (
-                                query_audit.get("result_truncated")
-                                if isinstance(query_audit, dict)
-                                else None
-                            ),
-                            "index_scan_truncated": (
-                                query_audit.get("index_scan_truncated")
-                                if isinstance(query_audit, dict)
-                                else None
-                            ),
-                            "derived_views_considered": (
-                                query_audit.get("derived_views_considered")
-                                if isinstance(query_audit, dict)
-                                else None
-                            ),
-                            "query_digest": (
-                                item.get("query_digest")
-                                if isinstance(item, dict)
-                                else None
-                            ),
-                            "result_digest": (
-                                item.get("result_digest")
-                                if isinstance(item, dict)
-                                else None
-                            ),
-                            "evidence_ref": (
-                                canonical_evidence_ref
-                            ),
-                        }
-                    ]
-                )
-                results.append(
-                    {
-                        "query_id": request["query_id"],
-                        "backend": request["backend"],
-                        "status": "ok",
-                        "read_only": True,
-                        "evidence": model_item,
-                        "trusted_query_audit": trusted_query_audit,
-                    }
-                )
-            audits.append(
-                {
-                    "backend": "derived-pcap-zeek",
-                    **_safe_audit_summary(evidence.get("executed") if isinstance(evidence, dict) else {}),
-                }
-            )
-        except (InvestigationQueryError, PcapEvidenceQueryError, OSError) as exc:
-            message = f"{type(exc).__name__}: {exc}"[:1000]
-            for request in derived_requests:
-                results.append(
-                    {
-                        "query_id": request["query_id"],
-                        "backend": request["backend"],
-                        "status": "error",
-                        "read_only": True,
-                        "error": message,
-                    }
-                )
+    derived_module = _query_execution_derived()
+    derived_outcome = derived_module.execute(
+        derived_requests,
+        (
+            prompt_package.get("pcap_evidence")
+            if isinstance(prompt_package.get("pcap_evidence"), dict)
+            else {}
+        ),
+        dependencies=derived_module.Dependencies(
+            executor=derived_executor,
+            validate_evidence=validate_derived_query_evidence,
+            source_digest=_derived_evidence_source_digest,
+            bounded_audit=_bounded_trusted_query_audit,
+            safe_audit_summary=_safe_audit_summary,
+            handled_errors=(
+                InvestigationQueryError, PcapEvidenceQueryError, OSError,
+            ),
+        ),
+    )
+    results.extend(derived_outcome.results)
+    audits.extend(derived_outcome.audits)
     enrichment_requests = [
         request for request in requests if request["backend"] == "enrichment"
     ]
