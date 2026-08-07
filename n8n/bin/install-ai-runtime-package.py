@@ -27,6 +27,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.evidence.references",
     "onion_sentinel.analysis.evidence.columnar",
     "onion_sentinel.analysis.evidence.registry",
+    "onion_sentinel.analysis.evidence.traversal",
     "onion_sentinel.analysis.evidence.validation",
     "onion_sentinel.analysis.conclusions.confidence",
     "onion_sentinel.analysis.conclusions.authorization",

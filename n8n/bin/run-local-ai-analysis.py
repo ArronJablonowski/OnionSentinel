@@ -1724,6 +1724,28 @@ def _evidence_columnar_dependencies():
     )
 
 
+def _evidence_traversal():
+    _provider_routing()
+    from onion_sentinel.analysis.evidence import traversal
+    return traversal
+
+
+def _evidence_traversal_policy():
+    module = _evidence_traversal()
+    return module.Policy(
+        success_statuses=frozenset(INVESTIGATION_QUERY_SUCCESS_STATUSES),
+        columnar_schema=INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA,
+    )
+
+
+def _evidence_traversal_dependencies():
+    module = _evidence_traversal()
+    return module.Dependencies(
+        bounded_reference=_bounded_reference,
+        result_bound_reference=result_bound_query_reference,
+    )
+
+
 def _conclusion_authorization_evidence():
     _provider_routing()
     from onion_sentinel.analysis.conclusions import authorization_evidence
@@ -3972,136 +3994,10 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
             )
 
     def visit(value: Any, path: tuple[str, ...] = ()) -> None:
-        if isinstance(value, dict):
-            if (
-                value.get("prompt_projection")
-                == "columnar_provenance_due_to_cumulative_byte_budget"
-                or value.get("schema")
-                == INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA
-            ):
-                # Only the exact top-level investigation_query_results
-                # envelope is decoded below. Nested lookalikes are inert.
-                return
-            status = value.get("status")
-            returned = next(
-                (
-                    value.get(key)
-                    for key in (
-                        "returned_hits",
-                        "returned_rows",
-                        "records_returned",
-                        "total_hits",
-                        "total_rows",
-                    )
-                    if value.get(key) not in (None, "")
-                ),
-                None,
-            )
-            digest = value.get("query_digest")
-            result_digest = value.get("result_digest")
-            if digest:
-                query_ref, query_evidence_digest = (
-                    result_bound_query_reference(
-                        digest,
-                        result_digest,
-                    )
-                )
-                add(
-                    query_ref,
-                    source=".".join(path[-3:]) or "query",
-                    source_class=path[0] if path else "query",
-                    corroborating=(
-                        str(status or "").lower()
-                        in INVESTIGATION_QUERY_SUCCESS_STATUSES
-                    ),
-                    status=status,
-                    returned=returned,
-                    evidence_digest=query_evidence_digest,
-                    require_valid_count=True,
-                )
-                pack = value.get("pack")
-                if pack:
-                    pack_ref, _ = result_bound_query_reference(
-                        digest,
-                        result_digest,
-                        namespace="pack",
-                        label=pack,
-                    )
-                    add(
-                        pack_ref,
-                        source=".".join(path[-3:]) or "query",
-                        source_class=path[0] if path else "query",
-                        corroborating=(
-                            str(status or "").lower()
-                            in INVESTIGATION_QUERY_SUCCESS_STATUSES
-                        ),
-                        status=status,
-                        returned=returned,
-                        evidence_digest=query_evidence_digest,
-                        require_valid_count=True,
-                    )
-            evidence_ref = value.get("evidence_ref")
-            if evidence_ref:
-                normalized_evidence_ref = _bounded_reference(evidence_ref)
-                evidence_ref_digest = result_digest
-                if normalized_evidence_ref.startswith("query:") and digest:
-                    normalized_evidence_ref, evidence_ref_digest = (
-                        result_bound_query_reference(
-                            digest,
-                            result_digest,
-                        )
-                    )
-                add(
-                    normalized_evidence_ref,
-                    source=".".join(path[-3:]) or "evidence",
-                    source_class=path[0] if path else "evidence",
-                    corroborating=(
-                        str(status or "ok").lower()
-                        in INVESTIGATION_QUERY_SUCCESS_STATUSES
-                    ),
-                    status=status,
-                    returned=returned,
-                    evidence_digest=evidence_ref_digest,
-                    require_valid_count=True,
-                )
-            query_id = value.get("query_id")
-            if query_id and digest:
-                query_id_ref, _ = result_bound_query_reference(
-                    digest,
-                    result_digest,
-                    namespace="query-id",
-                    label=query_id,
-                )
-                add(
-                    query_id_ref,
-                    source=".".join(path[-3:]) or "query",
-                    source_class=path[0] if path else "query",
-                    corroborating=(
-                        str(status or "").lower()
-                        in INVESTIGATION_QUERY_SUCCESS_STATUSES
-                    ),
-                    status=status,
-                    returned=returned,
-                    evidence_digest=query_evidence_digest,
-                    require_valid_count=True,
-                )
-            request_id = value.get("request_id")
-            if request_id:
-                add(
-                    f"pcap_evidence:{_bounded_reference(request_id)}",
-                    source="pcap_evidence",
-                    source_class="pcap_evidence",
-                    corroborating=str(status or "").lower()
-                    in {"ok", "success", "completed", "fulfilled"},
-                    status=status,
-                    returned=returned,
-                    require_valid_count=True,
-                )
-            for key, child in value.items():
-                visit(child, (*path, str(key)))
-        elif isinstance(value, list):
-            for child in value[:1000]:
-                visit(child, path)
+        _evidence_traversal().visit(
+            value, path, reference_registry, _evidence_traversal_policy(),
+            _evidence_traversal_dependencies(),
+        )
 
     def visit_columnar_investigation_results(value: Any) -> bool:
         return _evidence_columnar().process(

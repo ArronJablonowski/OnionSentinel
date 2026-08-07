@@ -122,6 +122,9 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
   enforcement, and result-bound registration now live in
   `analysis.evidence.columnar`; malformed claimed envelopes are consumed as
   inert evidence and never recursively reinterpreted.
+- Bounded ordinary evidence-tree traversal and discovery of query, pack,
+  query-id, evidence, and PCAP references now live in
+  `analysis.evidence.traversal`; nested compact-column lookalikes remain inert.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports
