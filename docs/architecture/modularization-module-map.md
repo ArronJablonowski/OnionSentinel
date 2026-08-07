@@ -385,6 +385,11 @@ Multi-round entry, one-shot repair scheduling, and post-synthesis exhaustion
 decisions live under `onion_sentinel.analysis.query.stopping` and are surfaced
 through the query state boundary. They consume only bounded state and cannot
 execute a model, authorize a backend, mutate evidence, or widen repair scope.
+The stable `onion_sentinel.analysis.query.engine` interface owns immutable
+admission, ignored-request, remaining-capacity, and repair-attempt transitions.
+Every transition returns its resulting state plus bounded audit metadata; the
+legacy runner consumes those transitions instead of maintaining a parallel
+mutable budget ledger.
 The legacy runner functions remain compatibility delegates and inject runtime
 policy explicitly, preserving existing test seams while keeping review-package
 mutation and reviewer-output admission out of the composition root.

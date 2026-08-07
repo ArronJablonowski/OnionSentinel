@@ -4,7 +4,7 @@ import hashlib
 import json
 import unittest
 
-from n8n.onion_sentinel.analysis.query import audit, outcomes, state, stopping
+from n8n.onion_sentinel.analysis.query import audit, engine, outcomes, state, stopping
 
 
 SUCCESS = frozenset({"ok", "success", "completed", "complete", "succeeded"})
@@ -101,12 +101,19 @@ class QueryPipelineAcceptanceTests(unittest.TestCase):
         self.assertEqual(result["evidence_gaps"], [])
 
     def test_budget_fixture_caps_admission_and_stops_after_exhaustion(self) -> None:
-        budget = state.Budget(state.Limits(rounds=2, queries=1, queries_per_round=1))
-        admitted = budget.admit([{"query_id": "q-1"}, {"query_id": "q-2"}])
-        remaining = budget.remaining(1)
-        decision = stopping.after_follow_up(remaining.rounds, remaining.queries)
-        self.assertEqual([item["query_id"] for item in admitted], ["q-1"])
-        self.assertEqual(budget.ignored, 1)
+        initial = engine.begin(state.Limits(rounds=2, queries=1, queries_per_round=1))
+        transition = engine.admit_round(
+            initial,
+            [{"query_id": "q-1"}, {"query_id": "q-2"}],
+            round_number=1,
+        )
+        decision = stopping.after_follow_up(
+            transition.remaining.rounds, transition.remaining.queries
+        )
+        self.assertEqual(
+            [item["query_id"] for item in transition.admitted_requests], ["q-1"]
+        )
+        self.assertEqual(transition.state.requests_ignored, 1)
         self.assertTrue(decision.stop)
         self.assertEqual(decision.reason, stopping.NO_QUERY_REASON)
 

@@ -6627,6 +6627,8 @@ def apply_investigation_query_loop(
     )
     response = primary_response
     rounds: list[dict[str, Any]] = []
+    _provider_routing()
+    from onion_sentinel.analysis.query import engine as engine_module
     state_module = _query_state()
     state_policy = state_module.Policy(
         maximum_rounds=MAX_INVESTIGATION_QUERY_ROUNDS,
@@ -6638,7 +6640,7 @@ def apply_investigation_query_loop(
         rounds_override=max_rounds_override,
         queries_override=max_queries_total_override,
     )
-    budget = state_module.Budget(limits)
+    engine_state = engine_module.begin(limits)
     seen_semantic_requests: set[str] = set()
     evaluation_query_guarantee = bool(
         harness_runtime is not None
@@ -6646,7 +6648,6 @@ def apply_investigation_query_loop(
         and not model_call_independent_review
     )
     query_planning_retry_attempted = False
-    query_planning_repair_attempted = False
     query_planning_repair_produced_requests = False
     query_planning_repair_admitted_requests = 0
     query_planning_repair_rejected_requests = 0
@@ -6685,7 +6686,7 @@ def apply_investigation_query_loop(
         # retaining room for both bounded reviewer attempts under the
         # checked-in six-call harness budget.
         limits = limits.evaluation_retry(state_policy)
-        budget = state_module.Budget(limits)
+        engine_state = engine_module.begin(limits)
         prompt_package["investigation_query_planning_retry"] = {
             "evaluation_only": True,
             "attempt": 1,
@@ -6826,8 +6827,11 @@ def apply_investigation_query_loop(
         repair_round = bool(pending_repair_scopes)
         if repair_round:
             query_planning_repair_produced_requests = bool(raw_requests)
-        if _query_state().round_entry(raw_requests).stop:
+        admission = engine_module.admit_round(
+            engine_state, raw_requests, round_number=round_number)
+        if admission.action == "stop_empty":
             break
+        engine_state = admission.state
         observe_harness(
             lambda: harness_runtime.phase(
                 "investigation_query_planning",
@@ -6837,7 +6841,7 @@ def apply_investigation_query_loop(
             if harness_runtime is not None
             else None
         )
-        admitted_raw = budget.admit(raw_requests)
+        admitted_raw = list(admission.admitted_requests)
         normalized: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
         round_repair_scopes: dict[str, dict[str, Any]] = {}
@@ -6904,7 +6908,7 @@ def apply_investigation_query_loop(
                     semantic_digest in seen_semantic_requests
                     and not repair_round
                 ):
-                    budget.ignore(1)
+                    engine_state = engine_module.ignore(engine_state, 1)
                     rejected.append(
                         {
                             "query_id": request["query_id"],
@@ -7159,20 +7163,18 @@ def apply_investigation_query_loop(
                     known.add((item["kind"], item["value"]))
             local_context["discovered_observables"] = existing
 
-        remaining = budget.remaining(
-            round_number, repair_round=repair_round
-        )
+        remaining = engine_module.remaining(
+            engine_state, round_number, repair_round=repair_round)
         remaining_rounds = remaining.rounds
         remaining_queries = remaining.queries
-        repair_decision = _query_state().schedule_repair(
+        repair_transition = engine_module.plan_repair(
+            engine_state,
             list(round_repair_scopes.values()),
-            already_attempted=query_planning_repair_attempted,
-            remaining_rounds=remaining_rounds,
-            remaining_queries=remaining_queries,
-            maximum_queries_per_round=(
-                MAX_INVESTIGATION_QUERIES_PER_ROUND
-            ),
+            round_number=round_number,
+            repair_round=repair_round,
         )
+        engine_state = repair_transition.state
+        repair_decision = repair_transition.repair
         repair_scheduled = repair_decision.scheduled
         candidate_items = list(repair_decision.candidates)
         if repair_decision.considered:
@@ -7208,7 +7210,6 @@ def apply_investigation_query_loop(
                 for item in repair_decision.considered
             ]
             if repair_scheduled:
-                query_planning_repair_attempted = True
                 pending_repair_scopes = {
                     item["scope"]["query_id"]: item["scope"]
                     for item in candidate_items
@@ -7400,15 +7401,16 @@ def apply_investigation_query_loop(
             terminal_count = len(
                 pop_investigation_query_requests(response)
             )
-            budget.ignore(terminal_count, terminal=True)
+            engine_state = engine_module.ignore(
+                engine_state, terminal_count, terminal=True)
             break
 
     repeated = pop_investigation_query_requests(response)
-    budget.ignore(len(repeated), terminal=True)
-    if rounds or budget.ignored:
+    engine_state = engine_module.ignore(engine_state, len(repeated), terminal=True)
+    if rounds or engine_state.requests_ignored:
         outcomes = investigation_query_outcome_summary(
             rounds,
-            queries_admitted=budget.admitted,
+            queries_admitted=engine_state.queries_admitted,
         )
         round_audits = [_investigation_round_audit(item) for item in rounds]
         tool_call_bindings = [
@@ -7418,16 +7420,16 @@ def apply_investigation_query_loop(
         ]
         binding_summary = investigation_query_binding_summary(
             tool_call_bindings,
-            queries_admitted=budget.admitted,
+            queries_admitted=engine_state.queries_admitted,
         )
         response["_investigation_query_audit"] = {
             "query_contract": INVESTIGATION_QUERY_CONTRACT,
             "provider_neutral": True,
             "model_route": route,
             "rounds_completed": len(rounds),
-            "queries_admitted": budget.admitted,
-            "requests_ignored_or_over_budget": budget.ignored,
-            "terminal_requests_ignored": budget.terminal_ignored,
+            "queries_admitted": engine_state.queries_admitted,
+            "requests_ignored_or_over_budget": engine_state.requests_ignored,
+            "terminal_requests_ignored": engine_state.terminal_requests_ignored,
             "planning_retry_attempted": query_planning_retry_attempted,
             "planning_retry_produced_requests": bool(
                 query_planning_retry_attempted and initial_requests
@@ -7456,24 +7458,18 @@ def apply_investigation_query_loop(
                 "read_only_fixed_packs_only": True,
                 "query_text_model_supplied": False,
             },
-            "planning_repair_attempted": (
-                query_planning_repair_attempted
-            ),
+            "planning_repair_attempted": engine_state.repair_attempted,
             "planning_repair_produced_requests": (
                 query_planning_repair_produced_requests
             ),
             "query_planning_repair": {
-                "attempted": query_planning_repair_attempted,
-                "attempts": (
-                    1 if query_planning_repair_attempted else 0
-                ),
+                "attempted": engine_state.repair_attempted,
+                "attempts": 1 if engine_state.repair_attempted else 0,
                 "maximum_attempts": 1,
                 "used_existing_follow_up_call": (
                     False
                 ),
-                "deterministic_scope_execution": (
-                    query_planning_repair_attempted
-                ),
+                "deterministic_scope_execution": engine_state.repair_attempted,
                 "scope_widening_allowed": False,
                 "candidate_count": len(
                     query_planning_repair_candidates
