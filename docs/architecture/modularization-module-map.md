@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (10,265
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (9,684
 lines).
 
 | Boundary | Responsibilities |
@@ -355,6 +355,12 @@ operator-confirmed write dialogs, and reactive refresh client. The builder
 re-exports `asset_inventory_page_section`; authorization, transactional
 revalidation, collection, and persistence remain behind the existing asset
 and DHCP API contracts.
+
+`onion-sentinel-dashboard/scripts/dashboard_ac_hunter_page.py` owns the AC
+Hunter behavioral-triage page markup, analyst guardrails, responsive finding
+tables, normalized-field rendering, and read-only snapshot refresh client. The
+builder re-exports `ac_hunter_page_section`; collection, relay transport,
+normalization, caching, and verdict scoring remain in the AC Hunter backend.
 
 ## Alert Store
 

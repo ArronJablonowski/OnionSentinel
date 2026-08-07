@@ -47,7 +47,7 @@ class AcHunterPostgresCacheTests(unittest.TestCase):
             ROOT / "onion-sentinel-dashboard/ac_hunter_review.py"
         ).read_text()
         page = (
-            ROOT / "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py"
+            ROOT / "onion-sentinel-dashboard/scripts/dashboard_ac_hunter_page.py"
         ).read_text()
         self.assertIn("return database_review_response()", backend)
         self.assertNotIn("fetchJson(REFRESH_ENDPOINT", page)

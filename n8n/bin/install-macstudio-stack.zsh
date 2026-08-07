@@ -629,6 +629,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_system_health_component
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_reactive_tables.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_reactive_tables.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_logs_page.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_logs_page.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_asset_inventory_page.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_asset_inventory_page.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_ac_hunter_page.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_ac_hunter_page.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_software_inventory_page.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_software_inventory_page.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_shell_components.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_shell_components.py"
 cp -R "$REPO_DIR/onion-sentinel-dashboard/assets/." "$DASHBOARD_RUNTIME_DIR/assets/"
