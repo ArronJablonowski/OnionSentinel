@@ -375,6 +375,14 @@ outcome, and invokes the review and incident metadata ports once per page.
 identity, labeling, defaults, and downstream metadata callbacks; the composer
 does not open databases, scan artifact directories, or perform network access.
 
+`portal_soc_incident_metadata.py` owns SOC-to-Incident-Response routing state.
+It resolves legacy and alert-derived stable identities, performs one bounded,
+schema-tolerant case query, selects the newest case per dashboard group, and
+projects explicit linked-case and agent status fields. `report_portal.py`
+retains its compatibility signature (including the historical unused rows
+argument) and injects table-discovery policy without opening additional
+connections or introducing per-row queries.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and

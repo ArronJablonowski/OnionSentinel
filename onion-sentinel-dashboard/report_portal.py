@@ -109,6 +109,11 @@ from portal_soc_evidence_metadata import (
     SocEvidenceDependencies,
     compose_soc_evidence_metadata,
 )
+from portal_soc_incident_metadata import (
+    SocIncidentDependencies,
+    apply_soc_incident_metadata,
+    incident_defaults as _soc_incident_defaults,
+)
 from portal_incident_actions import (
     IncidentStatusPayloadError,
     normalize_incident_status_payload,
@@ -8063,18 +8068,6 @@ def _soc_review_epoch(value: object) -> float:
     return _modular_soc_review_epoch(value, parse_iso_timestamp)
 
 
-def _soc_incident_defaults() -> dict[str, object]:
-    """Return an explicit not-routed state for the SOC Alerts API."""
-    return {
-        "incident_case_id": "",
-        "incident_status": "not_escalated",
-        "incident_agent_status": "not_queued",
-        "incident_escalated_at": "",
-        "incident_escalated_by": "",
-        "incident_reason": "",
-    }
-
-
 def soc_alert_apply_review_metadata(
     conn: sqlite3.Connection,
     rows: list[sqlite3.Row | dict],
@@ -8138,108 +8131,12 @@ def soc_alert_apply_incident_metadata(
     metadata: dict[str, dict[str, object]],
     group_by_alert: dict[str, str],
 ) -> None:
-    """Attach one page-bounded Incident Response routing state to SOC rows.
-
-    Automatic escalations intentionally remain visible in SOC Alerts, unlike
-    manual handoffs. Exposing the linked case and durable agent state prevents
-    that retained row from looking like an automation miss.
-    """
-    if not metadata or not sqlite_table_exists(conn, "incident_response_cases"):
-        return
-
-    group_ids = sorted(metadata)
-    stable_by_dashboard: dict[str, str] = {}
-    if sqlite_table_exists(conn, "alert_group_alias"):
-        alias_columns = sqlite_table_columns(conn, "alert_group_alias")
-        if {"legacy_group_id", "stable_group_id"}.issubset(alias_columns):
-            placeholders = ",".join("?" for _ in group_ids)
-            try:
-                for item in conn.execute(
-                    f"""
-                    SELECT legacy_group_id, stable_group_id
-                    FROM alert_group_alias
-                    WHERE legacy_group_id IN ({placeholders})
-                    """,
-                    group_ids,
-                ):
-                    stable_by_dashboard[str(item["legacy_group_id"])] = str(
-                        item["stable_group_id"] or ""
-                    )
-            except sqlite3.Error:
-                pass
-
-    alert_columns = sqlite_table_columns(conn, "alerts")
-    if "stable_group_id" in alert_columns and group_by_alert:
-        alert_ids = sorted(group_by_alert)
-        placeholders = ",".join("?" for _ in alert_ids)
-        try:
-            for item in conn.execute(
-                f"SELECT alert_id, stable_group_id FROM alerts WHERE alert_id IN ({placeholders})",
-                alert_ids,
-            ):
-                dashboard_id = group_by_alert.get(str(item["alert_id"] or ""))
-                if dashboard_id and item["stable_group_id"]:
-                    stable_by_dashboard[dashboard_id] = str(item["stable_group_id"])
-        except sqlite3.Error:
-            pass
-
-    dashboards_by_stable: dict[str, list[str]] = {}
-    for dashboard_id, stable_id in stable_by_dashboard.items():
-        if stable_id:
-            dashboards_by_stable.setdefault(stable_id, []).append(dashboard_id)
-
-    case_columns = sqlite_table_columns(conn, "incident_response_cases")
-    if not {"case_id", "group_id", "dashboard_group_id"}.issubset(case_columns):
-        return
-    stable_ids = sorted(dashboards_by_stable)
-    clauses = [f"dashboard_group_id IN ({','.join('?' for _ in group_ids)})"]
-    arguments: list[object] = list(group_ids)
-    if stable_ids:
-        clauses.append(f"group_id IN ({','.join('?' for _ in stable_ids)})")
-        arguments.extend(stable_ids)
-
-    def selected(column: str, fallback: str) -> str:
-        return column if column in case_columns else f"{fallback} AS {column}"
-
-    ordering = "updated_at DESC, rowid DESC" if "updated_at" in case_columns else "rowid DESC"
-    try:
-        cases = conn.execute(
-            f"""
-            SELECT case_id, group_id, dashboard_group_id,
-                   {selected('status', "'open'")},
-                   {selected('agent_status', "'queued'")},
-                   {selected('escalated_at', "''")},
-                   {selected('escalated_by', "''")},
-                   {selected('reason', "''")}
-            FROM incident_response_cases
-            WHERE {' OR '.join(clauses)}
-            ORDER BY {ordering}
-            """,
-            arguments,
-        ).fetchall()
-    except sqlite3.Error:
-        return
-
-    resolved: set[str] = set()
-    for case in cases:
-        stable_id = str(case["group_id"] or "")
-        direct_id = str(case["dashboard_group_id"] or "")
-        target_ids = []
-        if direct_id in metadata:
-            target_ids.append(direct_id)
-        target_ids.extend(dashboards_by_stable.get(stable_id, []))
-        for group_id in dict.fromkeys(target_ids):
-            if group_id in resolved:
-                continue
-            resolved.add(group_id)
-            metadata[group_id].update({
-                "incident_case_id": str(case["case_id"] or ""),
-                "incident_status": str(case["status"] or "open"),
-                "incident_agent_status": str(case["agent_status"] or "queued"),
-                "incident_escalated_at": str(case["escalated_at"] or ""),
-                "incident_escalated_by": str(case["escalated_by"] or ""),
-                "incident_reason": str(case["reason"] or ""),
-            })
+    """Attach page-bounded Incident Response routing state through the module."""
+    dependencies = SocIncidentDependencies(
+        table_exists=sqlite_table_exists,
+        table_columns=sqlite_table_columns,
+    )
+    apply_soc_incident_metadata(conn, metadata, group_by_alert, dependencies)
 
 
 def soc_alert_group_evidence_metadata(

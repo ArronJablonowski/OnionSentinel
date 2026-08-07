@@ -158,6 +158,16 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_soc_incident_metadata.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_incident_metadata.py",
+      "required_symbols": [
+        "SocIncidentDependencies",
+        "apply_soc_incident_metadata",
+        "incident_defaults"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_catalog_routes.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py",
