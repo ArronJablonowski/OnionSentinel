@@ -175,6 +175,10 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
 - Canonical prompt serialization, complete bounded facts, exact count
   admission, most-specific provenance counts, query semantics, and result
   summaries now live in `analysis.query.prompt_facts`.
+- Exact scalar/grouped query-ID coverage, per-query status/fact binding, and
+  complete result-bound columnar fallback now live in
+  `analysis.query.prompt_provenance`; partial, extra, duplicate, or malformed
+  collector batches fail closed.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports

@@ -1810,6 +1810,31 @@ def _query_prompt_facts_policy():
     )
 
 
+def _query_prompt_provenance():
+    _provider_routing()
+    from onion_sentinel.analysis.query import prompt_provenance
+    return prompt_provenance
+
+
+def _query_prompt_provenance_policy():
+    module = _query_prompt_provenance()
+    return module.Policy(
+        maximum_queries=MAX_INVESTIGATION_QUERIES_TOTAL,
+        success_statuses=INVESTIGATION_QUERY_SUCCESS_STATUSES,
+        result_schema=INVESTIGATION_QUERY_RESULT_SCHEMA,
+        columnar_schema=INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA,
+        columns=INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS,
+        empty_ref_instruction=INVESTIGATION_COLUMNAR_EMPTY_REF_INSTRUCTION,
+        facts=_query_prompt_facts_policy(),
+    )
+
+
+def _query_prompt_provenance_dependencies():
+    return _query_prompt_provenance().Dependencies(
+        result_bound_reference=result_bound_query_reference,
+    )
+
+
 def _query_repair_dependencies():
     module = _query_repair()
     return module.Dependencies(
@@ -5983,195 +6008,9 @@ def _investigation_result_summary(
 def _investigation_prompt_provenance_rows(
     rounds: list[dict[str, Any]],
 ) -> list[dict[str, Any]] | None:
-    """Extract one compact, ordered provenance record per logical query."""
-    output: list[dict[str, Any]] = []
-    for round_item in rounds:
-        if not isinstance(round_item, dict):
-            return None
-        round_number = round_item.get("round")
-        raw_results = round_item.get("results", [])
-        if not isinstance(raw_results, list):
-            return None
-        results = raw_results
-        for result in results:
-            if not isinstance(result, dict):
-                return None
-            evidence = (
-                result.get("evidence")
-                if isinstance(result.get("evidence"), dict)
-                else {}
-            )
-            raw_nested = evidence.get("results", [])
-            if not isinstance(raw_nested, list) or any(
-                not isinstance(item, dict) for item in raw_nested
-            ):
-                return None
-            nested_sources = list(raw_nested)
-
-            raw_trusted = result.get("trusted_query_audit", [])
-            if not isinstance(raw_trusted, list) or any(
-                not isinstance(item, dict) for item in raw_trusted
-            ):
-                return None
-            trusted_sources = list(raw_trusted)
-
-            def exact_query_id(raw_query_id: Any) -> str:
-                if not isinstance(raw_query_id, str):
-                    return ""
-                query_id = _query_text(raw_query_id, 128)
-                if (
-                    query_id != raw_query_id
-                    or not re.fullmatch(
-                        r"[A-Za-z0-9_.:@+=-]{1,128}",
-                        query_id,
-                    )
-                ):
-                    return ""
-                return query_id
-
-            has_scalar_id = "query_id" in result
-            has_group_ids = "query_ids" in result
-            if has_scalar_id == has_group_ids:
-                return None
-            if has_group_ids:
-                declared_raw = result.get("query_ids")
-                if not isinstance(declared_raw, list):
-                    return None
-                declared_ids = [
-                    exact_query_id(raw_query_id)
-                    for raw_query_id in declared_raw
-                ]
-            else:
-                declared_ids = [
-                    exact_query_id(result.get("query_id"))
-                ]
-            if (
-                not declared_ids
-                or not all(declared_ids)
-                or len(set(declared_ids)) != len(declared_ids)
-            ):
-                return None
-
-            def exact_declared_coverage(
-                candidates: list[dict[str, Any]],
-            ) -> bool:
-                candidate_ids = [
-                    exact_query_id(item.get("query_id"))
-                    for item in candidates
-                ]
-                return (
-                    len(candidate_ids) == len(declared_ids)
-                    and all(candidate_ids)
-                    and len(set(candidate_ids)) == len(candidate_ids)
-                    and set(candidate_ids) == set(declared_ids)
-                )
-
-            # Every collector representation that is present must bind
-            # exactly one provenance row to every declared logical query.
-            # A partial, extra, or duplicate batch must not mint a projection
-            # from whichever child happened to survive.
-            if (
-                trusted_sources
-                and not exact_declared_coverage(trusted_sources)
-            ) or (
-                nested_sources
-                and not exact_declared_coverage(nested_sources)
-            ):
-                return None
-            if (
-                len(declared_ids) > 1
-                and not trusted_sources
-                and not nested_sources
-            ):
-                return None
-
-            sources = trusted_sources
-            if not sources:
-                sources = nested_sources
-            if not sources:
-                sources = [result]
-            nested_by_id = {
-                exact_query_id(item.get("query_id")): item
-                for item in nested_sources
-            }
-            for source in sources:
-                query_id = _query_text(
-                    source.get("query_id") or result.get("query_id"),
-                    128,
-                )
-                nested_result = nested_by_id.get(query_id, {})
-                containers = (
-                    nested_result,
-                    source,
-                    evidence,
-                    result,
-                )
-                # Per-query terminal state is more precise than an aggregate
-                # outer "partial" status for a mixed batch.
-                query_status = _query_text(
-                    nested_result.get("status")
-                    or source.get("status")
-                    or result.get("status"),
-                    40,
-                )
-                if (
-                    evidence.get("controls_valid") is False
-                    or nested_result.get("semantic_valid") is False
-                    or source.get("semantic_valid") is False
-                ) and (
-                    query_status.lower()
-                    in INVESTIGATION_QUERY_SUCCESS_STATUSES
-                ):
-                    query_status = "partial"
-
-                def provenance_value(key: str) -> Any:
-                    for container in containers:
-                        if container.get(key) not in (None, ""):
-                            return container.get(key)
-                    return ""
-
-                returned = _investigation_provenance_count(
-                    containers,
-                    (
-                        "returned_hits",
-                        "returned_rows",
-                        "records_returned",
-                        "total_hits",
-                        "total_rows",
-                    ),
-                )
-                output.append({
-                    "round": round_number,
-                    "query_id": query_id,
-                    "backend": _query_text(
-                        source.get("backend")
-                        or source.get("dialect")
-                        or result.get("backend"),
-                        40,
-                    ),
-                    "status": query_status,
-                    "read_only": result.get("read_only") is True,
-                    "query_digest": _query_text(
-                        provenance_value("query_digest"),
-                        128,
-                    ),
-                    "result_digest": _query_text(
-                        provenance_value("result_digest"),
-                        128,
-                    ),
-                    "evidence_ref": _query_text(
-                        provenance_value("evidence_ref"),
-                        512,
-                    ),
-                    "returned": returned,
-                    "semantics": _investigation_query_semantics(containers),
-                    "result_summary": _investigation_result_summary(
-                        containers,
-                        status=query_status,
-                        returned=returned,
-                    ),
-                })
-    return output
+    return _query_prompt_provenance().rows(
+        rounds, policy=_query_prompt_provenance_policy()
+    )
 
 
 def _columnar_investigation_prompt_payload(
@@ -6179,109 +6018,12 @@ def _columnar_investigation_prompt_payload(
     *,
     maximum_bytes: int,
 ) -> dict[str, Any] | None:
-    """Return the smallest useful provenance-only projection that fits.
-
-    Empty evidence-ref cells represent the exact canonical result-bound query
-    reference derived from the adjacent digests. Non-canonical references stay
-    verbatim. If unusually large identities cannot all fit, the complete
-    source digest and omitted-row count make that loss explicit.
-    """
-    try:
-        source_bytes = _investigation_prompt_json_bytes(rounds)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    provenance = _investigation_prompt_provenance_rows(rounds)
-    if (
-        not provenance
-        or len(provenance) > MAX_INVESTIGATION_QUERIES_TOTAL
-        or any(
-            not item["query_id"]
-            or not item["backend"]
-            or not item["status"]
-            or not re.fullmatch(r"[a-f0-9]{64}", item["query_digest"])
-            or not item["semantics"]
-            or not item["result_summary"]
-            for item in provenance
-        )
-    ):
-        return None
-    backends = list(dict.fromkeys(item["backend"] for item in provenance))
-    statuses = list(dict.fromkeys(item["status"] for item in provenance))
-    semantics = list(
-        dict.fromkeys(item["semantics"] for item in provenance)
+    return _query_prompt_provenance().columnar_payload(
+        rounds,
+        maximum_bytes=maximum_bytes,
+        policy=_query_prompt_provenance_policy(),
+        dependencies=_query_prompt_provenance_dependencies(),
     )
-    result_summaries = list(
-        dict.fromkeys(item["result_summary"] for item in provenance)
-    )
-    rows: list[list[Any]] = []
-    for item in provenance:
-        canonical_ref, _ = result_bound_query_reference(
-            item["query_digest"],
-            item["result_digest"],
-        )
-        evidence_ref = item["evidence_ref"]
-        if canonical_ref and evidence_ref == canonical_ref:
-            evidence_ref = ""
-        rows.append([
-            item["round"],
-            item["query_id"],
-            backends.index(item["backend"]),
-            statuses.index(item["status"]),
-            item["read_only"],
-            item["query_digest"],
-            item["result_digest"],
-            evidence_ref,
-            item["returned"],
-            semantics.index(item["semantics"]),
-            result_summaries.index(item["result_summary"]),
-        ])
-
-    def candidate() -> dict[str, Any]:
-        value = {
-            "schema": INVESTIGATION_QUERY_RESULT_SCHEMA,
-            "rounds": [{
-                "schema": INVESTIGATION_COLUMNAR_PROVENANCE_SCHEMA,
-                "prompt_projection": (
-                    "columnar_provenance_due_to_cumulative_byte_budget"
-                ),
-                "source_bytes": len(source_bytes),
-                "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
-                "source_provenance_rows": len(provenance),
-                "columns": list(
-                    INVESTIGATION_COLUMNAR_PROVENANCE_COLUMNS
-                ),
-                "backend_values": backends,
-                "status_values": statuses,
-                "semantics_values": semantics,
-                "result_summary_values": result_summaries,
-                "empty_evidence_ref": (
-                    INVESTIGATION_COLUMNAR_EMPTY_REF_INSTRUCTION
-                ),
-                "rows": rows,
-                "omitted_rows": 0,
-            }],
-            "prompt_projection": {
-                "max_bytes": maximum_bytes,
-                "truncated": True,
-                "columnar_provenance_fallback": True,
-                "encoded_bytes": 0,
-            },
-        }
-        for _ in range(8):
-            actual_size = len(_investigation_prompt_json_bytes(value))
-            if value["prompt_projection"]["encoded_bytes"] == actual_size:
-                break
-            value["prompt_projection"]["encoded_bytes"] = actual_size
-        return value
-
-    value = candidate()
-    encoded_size = len(_investigation_prompt_json_bytes(value))
-    if (
-        value["prompt_projection"]["encoded_bytes"] == encoded_size
-        and encoded_size <= maximum_bytes
-    ):
-        return value
-    return None
 
 
 def _investigation_prompt_payload(
