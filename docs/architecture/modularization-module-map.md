@@ -317,8 +317,14 @@ bounded page sizes, parameterized status predicates, schema-aware sort SQL,
 pagination, optional legacy columns, the empty-schema response, case-bound
 analysis selection, and deterministic evidence, reviewer, adjudication,
 freshness, and asset row composition. The portal retains read-only SQLite and
-inventory-file access plus legacy fallback queries; those loaded records are
-passed into the pure composer through an explicit callback boundary.
+inventory-file access for legacy fallback queries; loaded records are passed
+into the pure composer through an explicit callback boundary.
+
+`portal_incident_repository.py` owns the primary Incident Response list's
+read-only SQLite batches: case counts and pages, summary-versus-legacy row
+selection, analysis and reviewer lookup, newest adjudication selection, and
+optional-column compatibility. It returns a typed record bundle and has no
+HTTP, filesystem, asset-resolution, or presentation responsibility.
 
 | Domain | Current responsibility examples | Target modules |
 | --- | --- | --- |

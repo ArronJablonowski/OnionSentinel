@@ -52,10 +52,12 @@ from portal_incident_read_model import (
     IncidentQueryError,
     compose_incident_row,
     empty_incident_page,
-    incident_order_sql,
-    optional_case_selects,
     parse_incident_list_request,
     select_incident_analysis,
+)
+from portal_incident_repository import (
+    incident_schema_ready,
+    load_incident_list_records,
 )
 from portal_json_body import parse_json_body
 from portal_request_routes import (
@@ -11363,154 +11365,18 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
         return soc_alert_api_error(str(exc))
     try:
         with soc_alert_db_connect() as conn:
-            if not sqlite_table_exists(conn, "incident_response_cases"):
+            if not incident_schema_ready(conn):
                 return 200, empty_incident_page(request)
-            where_sql = request.where_sql
-            arguments = request.where_arguments
-            total = int(conn.execute(
-                f"SELECT COUNT(*) FROM incident_response_cases c {where_sql}",
-                arguments,
-            ).fetchone()[0])
-            status_counts = {
-                str(row[0] or "unknown"): int(row[1] or 0)
-                for row in conn.execute(
-                    "SELECT status, COUNT(*) FROM incident_response_cases GROUP BY status"
-                ).fetchall()
-            }
-            agent_status_counts = {
-                str(row[0] or "unknown"): int(row[1] or 0)
-                for row in conn.execute(
-                    "SELECT agent_status, COUNT(*) FROM incident_response_cases GROUP BY agent_status"
-                ).fetchall()
-            }
-            page, pages, offset = request.pagination(total)
-            summary_ready = sqlite_table_exists(conn, "alert_group_summary")
-            order_sql = incident_order_sql(request, summary_ready)
-            case_columns = sqlite_table_columns(conn, "incident_response_cases")
-            (
-                resolution_reason_sql,
-                resolved_at_sql,
-                resolved_by_sql,
-            ) = optional_case_selects(case_columns)
-            if summary_ready:
-                rows = conn.execute(
-                    f"""
-                    SELECT c.case_id, c.group_id, c.dashboard_group_id,
-                           c.representative_alert_id, c.status, c.agent_status,
-                           c.escalated_at, c.updated_at, c.escalated_by, c.reason,
-                           c.latest_analysis_id, c.latest_model,
-                           c.latest_generated_at, c.latest_error,
-                           {resolution_reason_sql}, {resolved_at_sql}, {resolved_by_sql},
-                           COALESCE(g.rule_name, a.rule_name) AS rule_name,
-                           COALESCE(g.severity, a.severity) AS severity,
-                           COALESCE(g.severity_label, a.severity_label) AS severity_label,
-                           COALESCE(g.triage_level, a.triage_level) AS triage_level,
-                           COALESCE(g.source_ip, a.source_ip) AS source_ip,
-                           COALESCE(g.destination_ip, a.destination_ip) AS destination_ip,
-                           COALESCE(g.destination_port, a.destination_port) AS destination_port,
-                           COALESCE(g.raw_alert_count, a.seen_count, 0) AS raw_alert_count,
-                           COALESCE(g.total_seen_count, a.seen_count, 0) AS total_seen_count,
-                           COALESCE(g.first_seen, a.first_seen) AS first_seen,
-                           COALESCE(g.last_seen, a.last_seen) AS last_seen
-                    FROM incident_response_cases c
-                    LEFT JOIN alert_group_summary g ON g.group_id = c.dashboard_group_id
-                    LEFT JOIN alerts a ON a.alert_id = c.representative_alert_id
-                    {where_sql}
-                    ORDER BY {order_sql}
-                    LIMIT ? OFFSET ?
-                    """,
-                    [*arguments, request.per_page, offset],
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    f"""
-                    SELECT c.case_id, c.group_id, c.dashboard_group_id,
-                           c.representative_alert_id, c.status, c.agent_status,
-                           c.escalated_at, c.updated_at, c.escalated_by, c.reason,
-                           c.latest_analysis_id, c.latest_model,
-                           c.latest_generated_at, c.latest_error,
-                           {resolution_reason_sql}, {resolved_at_sql}, {resolved_by_sql}
-                    FROM incident_response_cases c
-                    {where_sql}
-                    ORDER BY {order_sql}
-                    LIMIT ? OFFSET ?
-                    """,
-                    [*arguments, request.per_page, offset],
-                ).fetchall()
-
-            analyses: dict[str, dict[str, object]] = {}
-            run_columns: set[str] = set()
-            analysis_ids = sorted({str(row["latest_analysis_id"] or "") for row in rows if row["latest_analysis_id"]})
-            if analysis_ids and sqlite_table_exists(conn, "ai_analysis_runs"):
-                run_columns = sqlite_table_columns(conn, "ai_analysis_runs")
-                analysis_select = [
-                    column for column in (
-                        "analysis_id", "group_id", "agent_role", "generated_at",
-                        "created_at", "model", "detection_outcome", "bluf",
-                        "summary", "confidence", "evidence_hash", "response_json",
-                    ) if column in run_columns
-                ]
-                placeholders = ",".join("?" for _ in analysis_ids)
-                role_filter = ""
-                if "agent_role" in run_columns:
-                    role_filter = " AND agent_role = 'incident-responder'"
-                for analysis in conn.execute(
-                    f"""
-                    SELECT {", ".join(analysis_select)}
-                    FROM ai_analysis_runs
-                    WHERE analysis_id IN ({placeholders}){role_filter}
-                    """,
-                    analysis_ids,
-                ).fetchall():
-                    analyses[str(analysis["analysis_id"])] = dict(analysis)
-
-            second_opinions: dict[str, dict[str, object]] = {}
-            if analysis_ids and sqlite_table_exists(conn, "ai_second_opinion_runs"):
-                placeholders = ",".join("?" for _ in analysis_ids)
-                reviewer_error_select = _soc_reviewer_error_select(conn)
-                for item in conn.execute(
-                    f"""
-                    SELECT analysis_id, status, primary_outcome, primary_confidence,
-                           reviewer_outcome, reviewer_confidence, agreement,
-                           material_disagreement, disputed_fields_json,
-                           {reviewer_error_select}, generated_at
-                    FROM ai_second_opinion_runs
-                    WHERE analysis_id IN ({placeholders})
-                    """,
-                    analysis_ids,
-                ).fetchall():
-                    second_opinions[str(item["analysis_id"])] = dict(item)
-            adjudications: dict[tuple[str, str], dict[str, object]] = {}
-            if analysis_ids and sqlite_table_exists(conn, "analyst_adjudications"):
-                placeholders = ",".join("?" for _ in analysis_ids)
-                for item in conn.execute(
-                    f"""
-                    SELECT adjudication_id, dashboard_group_id, case_id, analysis_id,
-                           outcome_override, confidence, rationale, evidence_gap,
-                           next_action, reviewer, event_status, detection_validity,
-                           activity_disposition, handling, duplicate_of,
-                           case_resolution_reason, created_at
-                    FROM analyst_adjudications
-                    WHERE analysis_id IN ({placeholders})
-                    ORDER BY created_at DESC, rowid DESC
-                    """,
-                    analysis_ids,
-                ).fetchall():
-                    analysis_id = str(item["analysis_id"] or "")
-                    case_id = str(item["case_id"] or "")
-                    key = (case_id, analysis_id)
-                    if case_id and analysis_id and key not in adjudications:
-                        adjudications[key] = dict(item)
-
+            records = load_incident_list_records(conn, request)
             incident_inventory, incident_inventory_error = load_asset_inventory_data()
             incidents: list[dict[str, object]] = []
-            for row in rows:
+            for row in records.rows:
                 item = dict(row)
                 analysis = select_incident_analysis(
-                    item, analyses, run_columns
+                    item, records.analyses, records.run_columns
                 )
                 fallback_review: dict[str, object] | None = None
-                if not analysis and run_columns:
+                if not analysis and records.run_columns:
                     analysis = soc_incident_current_analysis(conn, item)
                     if analysis:
                         fallback_response = _soc_review_json(analysis.get("response_json"))
@@ -11521,14 +11387,14 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                             fallback_response,
                         )
                 analysis_id = str(analysis.get("analysis_id") or "")
-                adjudication = adjudications.get((
+                adjudication = records.adjudications.get((
                     str(item.get("case_id") or ""),
                     analysis_id,
                 ))
                 incidents.append(compose_incident_row(
                     item,
                     analysis,
-                    second_opinions.get(analysis_id),
+                    records.second_opinions.get(analysis_id),
                     adjudication,
                     fallback_review,
                     incident_inventory,
@@ -11540,12 +11406,12 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
     return 200, {
         "ok": True,
         "incidents": incidents,
-        "page": page,
+        "page": records.page,
         "per_page": request.per_page,
-        "total": total,
-        "pages": pages,
-        "status_counts": status_counts,
-        "agent_status_counts": agent_status_counts,
+        "total": records.total,
+        "pages": records.pages,
+        "status_counts": records.status_counts,
+        "agent_status_counts": records.agent_status_counts,
         "schema_ready": True,
         "sort": request.sort,
         "direction": request.direction,
