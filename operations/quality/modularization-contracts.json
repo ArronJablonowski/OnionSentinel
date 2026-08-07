@@ -368,6 +368,31 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_static_composition.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_static_composition.py",
+      "required_symbols": [
+        "StaticPagePlan",
+        "compose_static_page",
+        "remove_between_markers",
+        "replace_main_page_content"
+      ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_publication.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_publication.py",
+      "required_symbols": [
+        "DashboardPublicationPaths",
+        "copy_static_assets",
+        "publish_beacon_history_json",
+        "publish_beacon_json",
+        "publish_detail_fragments",
+        "publish_static_pages",
+        "publish_status_json"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_flow_page.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_flow_page.py",

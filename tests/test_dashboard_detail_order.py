@@ -423,7 +423,10 @@ class DashboardDetailOrderTests(unittest.TestCase):
         self.assertIn("minimumTwoLineWidth", source)
         self.assertIn("Math.max(420, Math.min(960", source)
         self.assertIn("soc:alert-column-width-changed", source)
-        self.assertIn("ALERT_COLUMN_SINGLE_WRAP_CONTRACT + '</body>'", source)
+        self.assertIn(
+            "PINNED_ALERT_ROW_SCROLL_SYNC, ALERT_COLUMN_SINGLE_WRAP_CONTRACT",
+            source,
+        )
 
     def test_dashboard_uses_tightly_framed_favicon(self) -> None:
         source = dashboard_contract_source()
@@ -455,9 +458,8 @@ class DashboardDetailOrderTests(unittest.TestCase):
                     self.assertEqual(destination.read_text(encoding="utf-8"), "old live fragment")
                 return real_replace(source, destination)
 
-            with mock.patch.object(self.builder.shutil, "rmtree", side_effect=AssertionError("live directory cleared")):
-                with mock.patch.object(self.builder.os, "replace", side_effect=observed_replace):
-                    written = self.builder.write_detail_fragments(reports)
+            with mock.patch.object(self.builder.os, "replace", side_effect=observed_replace):
+                written = self.builder.write_detail_fragments(reports)
 
             self.assertEqual({path.name for path in written}, {f"{existing_digest}.html", f"{new_digest}.html"})
             self.assertIn("updated fragment", existing_path.read_text(encoding="utf-8"))

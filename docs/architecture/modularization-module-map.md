@@ -534,6 +534,18 @@ It performs no settings, artifact, or process I/O; the builder reads only the
 newest stamped artifact when no valid assignment exists and passes that record
 into the pure projection policy.
 
+`dashboard_static_composition.py` owns the side-effect-free transformation from
+the shared dashboard shell to each static route. A `StaticPagePlan` supplies
+escaped route metadata, server-rendered navigation and content, while the
+module preserves the SOC Alerts-only contracts and system-health navigation
+without importing repositories, runtime paths, or page-specific services.
+
+`dashboard_publication.py` owns crash-safe publication of status and beacon
+JSON, lazy detail fragments, static assets, canonical page routes, and legacy
+route aliases. `DashboardPublicationPaths` makes every source and destination
+explicit; the builder's compatibility wrappers resolve mutable runtime/test
+globals at call time and retain the existing CLI and output contract.
+
 `dashboard_flow_page.py` owns the pure data-flow renderer, enrichment-service
 tiles, responsive pipeline styles, and privacy-toggle client. The builder
 assembles `FlowPageViewModel` from live alert/report/model/notification metrics

@@ -105,9 +105,9 @@ class CyberThreatIntelPageTests(unittest.TestCase):
 
     def test_render_dispatch_uses_the_cti_specific_page_and_assets(self):
         source = BUILDER_PATH.read_text(encoding="utf-8")
-        self.assertIn("elif page_key == 'cyber_threat_intel':", source)
+        self.assertIn("if page_key == 'cyber_threat_intel':", source)
         self.assertIn("cyber_threat_intel_page_section(reports)", source)
-        self.assertIn("inject_cyber_threat_intel_assets(rendered)", source)
+        self.assertIn("inject_cyber_threat_intel_assets", source)
 
     def test_builder_reexports_bounded_cti_module_assets(self):
         self.assertIs(

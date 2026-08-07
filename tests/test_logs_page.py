@@ -140,9 +140,9 @@ class LogsPageTests(unittest.TestCase):
             self.builder_source,
         )
         self.assertIn("def logs_page_section()", self.logs_page_source)
-        self.assertIn("elif page_key == 'logs':", self.builder_source)
+        self.assertIn("if page_key == 'logs':", self.builder_source)
         self.assertIn(
-            "replace_main_page_content(rendered, logs_page_section())",
+            "return logs_page_section(), None",
             self.builder_source,
         )
         self.assertIn(

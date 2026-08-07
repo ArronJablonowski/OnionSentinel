@@ -25,7 +25,6 @@ import html
 import json
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -52,7 +51,6 @@ from dashboard_executive_metrics import (  # noqa: E402
     load_enrichment_cache_metrics,
     load_hourly_alert_intake,
 )
-from atomic_io import atomic_write_json, atomic_write_text  # noqa: E402
 from dashboard_time_format import (  # noqa: E402
     format_project_timestamp,
     normalize_iso_display_text,
@@ -66,6 +64,21 @@ from dashboard_system_health_components import (  # noqa: E402
     system_health_page_section,
 )
 from dashboard_reactive_tables import inject_reactive_table_assets  # noqa: E402
+from dashboard_static_composition import (  # noqa: E402
+    StaticPagePlan,
+    compose_static_page,
+    remove_between_markers,
+    replace_main_page_content,
+)
+from dashboard_publication import (  # noqa: E402
+    DashboardPublicationPaths,
+    copy_static_assets as publish_static_assets,
+    publish_beacon_history_json,
+    publish_beacon_json,
+    publish_detail_fragments,
+    publish_static_pages,
+    publish_status_json,
+)
 from dashboard_logs_page import logs_page_section  # noqa: E402
 from dashboard_asset_inventory_page import asset_inventory_page_section  # noqa: E402
 from dashboard_ac_hunter_page import ac_hunter_page_section  # noqa: E402
@@ -2064,68 +2077,46 @@ def executive_home_section(
     return render_executive_home(_executive_home_view(reports, hourly, cache))
 
 
+def _publication_paths() -> DashboardPublicationPaths:
+    """Resolve mutable compatibility globals at the publication boundary."""
+    return DashboardPublicationPaths(
+        out_dir=OUT_DIR,
+        detail_dir=DETAIL_DIR,
+        status_json=STATUS_JSON,
+        beacon_json=N8N_BEACON_JSON,
+        beacon_history_json=N8N_BEACON_HISTORY_JSON,
+        source_beacon_json=DB_BEACON_JSON,
+        source_beacon_history_json=DB_BEACON_HISTORY_JSON,
+        asset_source_dirs=tuple(ASSET_SOURCE_DIRS),
+    )
+
+
+def _publication_timestamp() -> str:
+    return format_project_timestamp(
+        dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    )
+
+
 
 def write_status_json(reports: list[AlertReport]) -> Path:
     """Write the fast-changing status payload polled by the static WebUI."""
-    state = ai_activity_state(reports)
-    payload = {
-        'generated_at': format_project_timestamp(dt.datetime.now(dt.timezone.utc).replace(microsecond=0)),
-        'poll_interval_ms': 5000,
-        'ai': state,
-        'reports': {
-            report.digest: {
-                'ai_status_key': report.ai_status_key,
-                'ai_status_label': report.ai_status_label,
-                'ai_status_detail': report.ai_status_detail,
-            }
-            for report in reports
-        },
-    }
-    atomic_write_json(STATUS_JSON, payload)
-    return STATUS_JSON
+    return publish_status_json(
+        reports, _publication_paths(), generated_at=_publication_timestamp(),
+        ai_state=ai_activity_state(reports),
+    )
 
 
 def write_n8n_beacon_json(reports: list[AlertReport]) -> Path:
     """Seed the dynamic n8n webhook beacon file for static dashboard serving."""
-    if DB_BEACON_JSON.exists():
-        try:
-            payload = json.loads(DB_BEACON_JSON.read_text(encoding='utf-8'))
-            atomic_write_json(N8N_BEACON_JSON, payload)
-            return N8N_BEACON_JSON
-        except Exception:
-            pass
-    latest_report = max(reports, key=lambda report: report.alert_ts) if reports else None
-    payload = {
-        'generated_at': iso_local_time(latest_report.alert_ts) if latest_report else format_project_timestamp(dt.datetime.now(dt.timezone.utc).replace(microsecond=0)),
-        'stage': 'seeded',
-        'ok': True,
-        'status': 'seeded_from_dashboard',
-        'alert_id': latest_report.rule_id if latest_report else None,
-        'rule_name': latest_report.rule_name if latest_report else None,
-        'source_ip': latest_report.source_ip if latest_report else None,
-        'destination_ip': latest_report.destination_ip if latest_report else None,
-        'destination_port': latest_report.destination_port if latest_report else None,
-        'triage_level': latest_report.criticality.lower() if latest_report else None,
-        'filter_status': None,
-        'notification_status': None,
-        'error': None,
-    }
-    atomic_write_json(N8N_BEACON_JSON, payload)
-    return N8N_BEACON_JSON
+    return publish_beacon_json(
+        reports, _publication_paths(), generated_at=_publication_timestamp(),
+        report_time=iso_local_time,
+    )
 
 
 def write_n8n_beacon_history_json() -> Path:
     """Mirror the rolling n8n beacon history into the generated dashboard output."""
-    if DB_BEACON_HISTORY_JSON.exists():
-        try:
-            payload = json.loads(DB_BEACON_HISTORY_JSON.read_text(encoding='utf-8'))
-            if isinstance(payload, list):
-                atomic_write_json(N8N_BEACON_HISTORY_JSON, payload)
-                return N8N_BEACON_HISTORY_JSON
-        except Exception:
-            pass
-    atomic_write_json(N8N_BEACON_HISTORY_JSON, [])
-    return N8N_BEACON_HISTORY_JSON
+    return publish_beacon_history_json(_publication_paths())
 
 
 
@@ -2138,21 +2129,7 @@ def write_detail_fragments(reports: list[AlertReport]) -> list[Path]:
     atomically renamed into place. Stale fragments are removed only after all
     current fragments are available.
     """
-    DETAIL_DIR.mkdir(parents=True, exist_ok=True)
-    written: list[Path] = []
-    current_names: set[str] = set()
-    for report in reports:
-        if not re.fullmatch(r'[a-f0-9]{12}', report.digest):
-            continue
-        path = DETAIL_DIR / f'{report.digest}.html'
-        body = f'<div class="markdown-body">{report.rendered_html}</div>\n'
-        atomic_write_text(path, body)
-        written.append(path)
-        current_names.add(path.name)
-    for stale_path in DETAIL_DIR.glob('*.html'):
-        if stale_path.name not in current_names:
-            stale_path.unlink(missing_ok=True)
-    return written
+    return publish_detail_fragments(reports, _publication_paths())
 
 
 def build_html(reports: list[AlertReport]) -> str:
@@ -2691,132 +2668,67 @@ def inject_threat_hunter_assets(text: str) -> str:
 
 def copy_static_assets() -> None:
     """Copy dashboard image/logo assets beside the generated static pages."""
-    destination = OUT_DIR / 'assets'
-    destination.mkdir(parents=True, exist_ok=True)
-    for source_root in ASSET_SOURCE_DIRS:
-        if not source_root.exists():
-            continue
-        try:
-            if source_root.resolve() == destination.resolve():
-                continue
-        except FileNotFoundError:
-            pass
-        for source in source_root.rglob('*'):
-            if not source.is_file():
-                continue
-            relative = source.relative_to(source_root)
-            target = destination / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+    publish_static_assets(_publication_paths())
 
 
-def remove_between_markers(text: str, start_marker: str, end_marker: str) -> str:
-    start = text.find(start_marker)
-    end = text.find(end_marker, start)
-    if start == -1 or end == -1:
-        return text
-    return text[:start] + text[end:]
-
-
-def replace_main_page_content(text: str, replacement: str) -> str:
-    content_start = text.find('<section id="overview-view"')
-    if content_start == -1:
-        content_start = text.find('<section id="alerts-view"')
-    footer_start = text.find('<div class="footer">', content_start)
-    if footer_start == -1:
-        footer_start = text.find('<div class="footer"', content_start)
-    if content_start == -1 or footer_start == -1:
-        return text
-    return text[:content_start] + replacement + text[footer_start:]
+def _static_page_content(page_key: str, reports: list[AlertReport]) -> tuple[str, object | None]:
+    if page_key == 'home':
+        return executive_home_section(reports), inject_executive_home_assets
+    if page_key == 'flow':
+        return flow_page_section(reports), inject_flow_assets
+    if page_key == 'system_health':
+        return system_health_page_section(), inject_system_health_assets
+    if page_key == 'investigations':
+        return incident_response_page_section(), None
+    if page_key == 'asset_inventory':
+        return asset_inventory_page_section(), None
+    if page_key == 'software_inventory':
+        return software_inventory_page_section(), None
+    if page_key == 'ac_hunter':
+        return ac_hunter_page_section(), None
+    if page_key == 'settings':
+        return settings_page_section(), inject_settings_assets
+    if page_key == 'siem_engineering':
+        return siem_engineering_page_section(reports), inject_siem_engineering_assets
+    if page_key == 'cyber_threat_intel':
+        return cyber_threat_intel_page_section(reports), inject_cyber_threat_intel_assets
+    if page_key == 'threat_hunter':
+        return threat_hunter_page_section(reports), inject_threat_hunter_assets
+    if page_key == 'reports':
+        return reports_page_section(reports), inject_reports_assets
+    if page_key == 'logs':
+        return logs_page_section(), None
+    return placeholder_page_section(page_key), None
 
 
 def render_static_page(shell_html: str, page_key: str, reports: list[AlertReport]) -> str:
     page = PAGE_BY_KEY[page_key]
-    active_count = active_alert_count(reports)
-    active_severity = active_alert_highest_severity_class(reports)
-    data_view = 'alerts' if page_key == 'alerts' else 'overview'
-    rendered = inject_reactive_table_assets(shell_html)
-    rendered = rendered.replace(
-        "dashboard-metrics.css?v=20260712-responsive-qa",
-        "dashboard-metrics.css?v=20260717-pre-soak-qa",
+    content_html, asset_injector = (None, None) if page_key == 'alerts' else _static_page_content(page_key, reports)
+    rendered = compose_static_page(
+        inject_reactive_table_assets(shell_html),
+        StaticPagePlan(
+            page_key=page_key, title=page['title'], subtitle=page['subtitle'],
+            navigation_html=build_nav_html(
+                page_key, active_alert_count(reports), active_alert_highest_severity_class(reports)
+            ),
+            content_html=content_html,
+            alert_contracts=(ALERTS_REACTIVE_FALLBACK, ALERTS_PAGE_SCROLL_STABILIZER,
+                             PINNED_ALERT_ROW_SCROLL_SYNC, ALERT_COLUMN_SINGLE_WRAP_CONTRACT),
+        ),
     )
-    rendered = re.sub(r'<title>.*?</title>', f'<title>{html.escape(page["title"])} - Onion Sentinel</title>', rendered, count=1)
-    rendered = rendered.replace('<div class="app-shell" data-view="overview">', f'<div class="app-shell" data-view="{data_view}">', 1)
-    rendered = re.sub(r'<nav class="nav">.*?</nav>', build_nav_html(page_key, active_count, active_severity), rendered, count=1, flags=re.S)
-    rendered = rendered.replace('<div class="health" id="system-health-tile" data-health-state="unknown">', '<a class="health system-health-link" id="system-health-tile" data-health-state="unknown" href="system-health.html" style="display:block;text-decoration:none">', 1)
-    rendered = rendered.replace('</span></div><div class="analyst byline">', '</span></a><div class="analyst byline">', 1)
-    rendered = rendered.replace('<h1 id="page-title">SOC Overview</h1>', f'<h1 id="page-title">{html.escape(page["title"])}</h1>', 1)
-    rendered = rendered.replace('<div id="page-subtitle" class="subtitle">Resilient alert intake, evidence enrichment, and AI triage</div>', f'<div id="page-subtitle" class="subtitle">{html.escape(page["subtitle"])}</div>', 1)
-    rendered = rendered.replace("setView(appShell?.dataset.view||'overview');", '/* static page navigation is rendered server-side */')
-
-    overview_marker = '<section id="overview-view" class="view-section overview-view" aria-label="SOC Alerts overview">'
-    alerts_marker = '<section id="alerts-view" class="view-section alerts-view" aria-label="SOC alert table">'
-    if page_key == 'home':
-        rendered = replace_main_page_content(rendered, executive_home_section(reports))
-        rendered = inject_executive_home_assets(rendered)
-    elif page_key == 'flow':
-        rendered = replace_main_page_content(rendered, flow_page_section(reports))
-        rendered = inject_flow_assets(rendered)
-    elif page_key == 'alerts':
-        rendered = remove_between_markers(rendered, overview_marker, alerts_marker)
-        rendered = rendered.replace(alerts_marker, '<section id="alerts-view" class="view-section alerts-view active" aria-label="SOC alert table">', 1)
-        if ALERTS_REACTIVE_FALLBACK not in rendered:
-            rendered = rendered.replace('</body>', ALERTS_REACTIVE_FALLBACK + '</body>', 1)
-        if ALERTS_PAGE_SCROLL_STABILIZER not in rendered:
-            rendered = rendered.replace('</body>', ALERTS_PAGE_SCROLL_STABILIZER + '</body>', 1)
-        if PINNED_ALERT_ROW_SCROLL_SYNC not in rendered:
-            rendered = rendered.replace('</body>', PINNED_ALERT_ROW_SCROLL_SYNC + '</body>', 1)
-        if ALERT_COLUMN_SINGLE_WRAP_CONTRACT not in rendered:
-            rendered = rendered.replace('</body>', ALERT_COLUMN_SINGLE_WRAP_CONTRACT + '</body>', 1)
-    elif page_key == 'system_health':
-        rendered = replace_main_page_content(rendered, system_health_page_section())
-        rendered = inject_system_health_assets(rendered)
-    elif page_key == 'investigations':
-        rendered = replace_main_page_content(rendered, incident_response_page_section())
-    elif page_key == 'asset_inventory':
-        rendered = replace_main_page_content(rendered, asset_inventory_page_section())
-    elif page_key == 'software_inventory':
-        rendered = replace_main_page_content(rendered, software_inventory_page_section())
-    elif page_key == 'ac_hunter':
-        rendered = replace_main_page_content(rendered, ac_hunter_page_section())
-    elif page_key == 'settings':
-        rendered = replace_main_page_content(rendered, settings_page_section())
-        rendered = inject_settings_assets(rendered)
-    elif page_key == 'siem_engineering':
-        rendered = replace_main_page_content(rendered, siem_engineering_page_section(reports))
-        rendered = inject_siem_engineering_assets(rendered)
-    elif page_key == 'cyber_threat_intel':
-        rendered = replace_main_page_content(rendered, cyber_threat_intel_page_section(reports))
-        rendered = inject_cyber_threat_intel_assets(rendered)
-    elif page_key == 'threat_hunter':
-        rendered = replace_main_page_content(rendered, threat_hunter_page_section(reports))
-        rendered = inject_threat_hunter_assets(rendered)
-    elif page_key == 'reports':
-        rendered = replace_main_page_content(rendered, reports_page_section(reports))
-        rendered = inject_reports_assets(rendered)
-    elif page_key == 'logs':
-        rendered = replace_main_page_content(rendered, logs_page_section())
-    else:
-        rendered = replace_main_page_content(rendered, placeholder_page_section(page_key))
-    return rendered
+    return asset_injector(rendered) if asset_injector else rendered
 
 
 def write_site_pages(reports: list[AlertReport]) -> list[Path]:
     shell_html = build_html(reports)
     copy_static_assets()
     written: list[Path] = [write_status_json(reports), write_n8n_beacon_json(reports), write_n8n_beacon_history_json(), *write_detail_fragments(reports)]
-    for key, filename, _title, _subtitle in PAGE_DEFS:
-        path = OUT_DIR / filename
-        atomic_write_text(path, render_static_page(shell_html, key, reports))
-        written.append(path)
-    # Keep a direct SOC Alerts route for bookmarks while making index.html the
-    # default SOC Alerts page.
-    soc_alerts_path = OUT_DIR / 'soc-alerts.html'
-    atomic_write_text(soc_alerts_path, render_static_page(shell_html, 'alerts', reports))
-    written.append(soc_alerts_path)
-    siem_tuning_alias = OUT_DIR / 'siem-tuning.html'
-    atomic_write_text(siem_tuning_alias, render_static_page(shell_html, 'siem_engineering', reports))
-    written.append(siem_tuning_alias)
+    written.extend(
+        publish_static_pages(
+            _publication_paths(), PAGE_DEFS, shell_html=shell_html,
+            reports=reports, render_page=render_static_page,
+        )
+    )
     return written
 
 

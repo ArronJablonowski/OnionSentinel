@@ -484,8 +484,8 @@ class ApplicationLogPageContractTests(unittest.TestCase):
             "PageDefinition('logs', 'logs.html', 'Onion Sentinel Logs'",
             self.shell,
         )
-        self.assertIn("elif page_key == 'logs':", self.builder)
-        self.assertIn("replace_main_page_content(rendered, logs_page_section())", self.builder)
+        self.assertIn("if page_key == 'logs':", self.builder)
+        self.assertIn("return logs_page_section(), None", self.builder)
         self.assertIn("const CATALOG_ENDPOINT='/api/application-logs'", self.section)
         self.assertIn(
             "`${CATALOG_ENDPOINT}/${encodeURIComponent(String(view.item.id??''))}",
