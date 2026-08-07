@@ -1678,6 +1678,24 @@ def _evidence_validation():
     return validation
 
 
+def _evidence_registry():
+    _provider_routing()
+    from onion_sentinel.analysis.evidence import registry
+    return registry
+
+
+def _evidence_registry_instance():
+    module = _evidence_registry()
+    return module.Registry(
+        maximum_references=EVIDENCE_REFERENCE_MAX,
+        deps=module.Dependencies(
+            bounded_reference=_bounded_reference,
+            source_class=evidence_source_class,
+            canonical_count=_canonical_investigation_count,
+        ),
+    )
+
+
 def _conclusion_authorization_evidence():
     _provider_routing()
     from onion_sentinel.analysis.conclusions import authorization_evidence
@@ -3874,47 +3892,8 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
     collection evidence but are marked non-corroborating so they cannot inflate
     confidence in a positive conclusion.
     """
-    entries: dict[str, dict[str, Any]] = {}
-
-    def add(
-        reference: Any,
-        *,
-        source: str,
-        corroborating: bool = True,
-        status: Any = "",
-        returned: Any = None,
-        source_class: Any = "",
-        evidence_digest: Any = "",
-        require_valid_count: bool = False,
-    ) -> None:
-        ref = _bounded_reference(reference)
-        if not ref or len(entries) >= EVIDENCE_REFERENCE_MAX:
-            return
-        returned_count = _canonical_investigation_count(returned)
-        count_invalid = returned_count is None and (
-            require_valid_count or returned not in (None, "")
-        )
-        if count_invalid:
-            corroborating = False
-            status = "invalid_result_count"
-        if returned_count == 0:
-            corroborating = False
-        current = entries.get(ref)
-        candidate = {
-            "ref": ref,
-            "source": _bounded_reference(source)[:80],
-            "source_class": evidence_source_class(source_class or source)[:80],
-            "corroborating": bool(corroborating),
-            "status": _bounded_reference(status)[:40],
-            "returned": returned_count,
-            "evidence_digest": (
-                _bounded_reference(evidence_digest)[:64]
-                if re.fullmatch(r"[a-fA-F0-9]{64}", str(evidence_digest or ""))
-                else ""
-            ),
-        }
-        if current is None or (candidate["corroborating"] and not current["corroborating"]):
-            entries[ref] = candidate
+    reference_registry = _evidence_registry_instance()
+    add = reference_registry.add
 
     # Add only section-level references whose mere presence is itself a
     # collector-owned fact. Evidence containers whose usefulness depends on
@@ -4363,15 +4342,7 @@ def evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any
             iterative_results,
             ("investigation_query_results",),
         )
-    return {
-        "schema": "onion-sentinel-evidence-reference-contract-v1",
-        "instruction": (
-            "Every evidence_used item must exactly equal one listed ref. "
-            "Zero-row or non-ok query references may document absence or collection limits "
-            "but are not positive corroboration."
-        ),
-        "references": sorted(entries.values(), key=lambda item: item["ref"]),
-    }
+    return reference_registry.contract()
 
 
 def attach_evidence_reference_contract(prompt_package: dict[str, Any]) -> dict[str, Any]:
