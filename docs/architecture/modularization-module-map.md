@@ -467,6 +467,11 @@ detections with stable keys, timelines, repeat counts, time bounds, and
 enrichment carry-forward. The dashboard builder now consumes this repository
 result instead of owning SQL and grouping policy.
 
+`dashboard_alert_report_model.py` owns the shared `AlertReport` view contract
+and canonical severity ordering used across dashboard pages. The builder
+re-exports both during migration, giving the report factory and page renderers
+a stable dependency without importing the monolithic builder.
+
 `dashboard_flow_page.py` owns the pure data-flow renderer, enrichment-service
 tiles, responsive pipeline styles, and privacy-toggle client. The builder
 assembles `FlowPageViewModel` from live alert/report/model/notification metrics

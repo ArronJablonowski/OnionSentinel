@@ -31,7 +31,6 @@ import sqlite3
 import subprocess
 import sys
 from contextlib import closing
-from dataclasses import dataclass
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -141,6 +140,7 @@ from dashboard_alert_repository import (  # noqa: E402
     load_alert_repository,
     raw_alert_object,
 )
+from dashboard_alert_report_model import AlertReport, CRITICALITY_ORDER  # noqa: E402
 from dashboard_flow_page import (  # noqa: E402
     FLOW_PAGE_CSS,
     FLOW_PAGE_JS,
@@ -1630,56 +1630,6 @@ def telegram_sent_counts() -> dict[str, int]:
     return counts
 
 
-@dataclass
-class AlertReport:
-    # This view model feeds the existing static UI. It can represent either a
-    # DB row with generated detail text or a DB row with a matching Markdown
-    # report attached.
-    title: str
-    source: Path
-    rel_source: str
-    mtime: float
-    size: int
-    digest: str
-    rendered_html: str
-    summary: str
-    criticality: str
-    criticality_rank: int
-    alert_source: str
-    filter_status: str
-    source_ip: str
-    source_port: str
-    destination_ip: str
-    destination_port: str
-    source_endpoint: str
-    destination_endpoint: str
-    rule_id: str
-    rule_name: str
-    raw_alert_count: int
-    total_seen_count: int
-    repeat_count: int
-    first_seen: str
-    last_seen: str
-    alert_group_key: str
-    alert_ts: float
-    ai_status_key: str
-    ai_status_label: str
-    ai_status_detail: str
-    enrichment_status_key: str
-    enrichment_status_label: str
-    enrichment_status_detail: str
-    enrichment_record_count: int
-    enrichment_skip_count: int
-    enrichment_error_count: int
-    pcap_status_key: str
-    pcap_status_label: str
-    pcap_status_detail: str
-    tuning_recommendation: str
-    tuning_reason: str
-    recommended_tuning_actions: list[str]
-    ai_analysis: dict[str, object]
-
-
 def clean_title_from_markdown(text: str, path: Path) -> str:
     # Used only for legacy Markdown fallback and attached report titles.
     for line in text.splitlines():
@@ -1691,14 +1641,6 @@ def clean_title_from_markdown(text: str, path: Path) -> str:
     return path.stem.replace('_', ' ').replace('-', ' ').strip().title() or path.name
 
 
-CRITICALITY_ORDER = {
-    'critical': 5,
-    'high': 4,
-    'medium': 3,
-    'low': 2,
-    'informational': 1,
-    'info': 1,
-}
 def detect_criticality(text: str, title: str, path: Path) -> tuple[str, int]:
     """Extract alert criticality from title/content/path with a stable severity order."""
     candidates = [title, path.name]

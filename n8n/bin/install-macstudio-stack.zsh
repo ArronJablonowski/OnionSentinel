@@ -642,6 +642,7 @@ cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_alert_detail_enrichment
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_alert_detail_sections.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_detail_sections.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_alert_detail_composer.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_detail_composer.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_alert_repository.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_repository.py"
+cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_alert_report_model.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_report_model.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_flow_page.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_flow_page.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_cyber_threat_intel_page.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_cyber_threat_intel_page.py"
 cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_threat_hunter_page.py" "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_threat_hunter_page.py"
