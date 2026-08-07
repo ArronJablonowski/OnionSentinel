@@ -89,6 +89,14 @@
       "required_symbols": [
         "logs_page_section"
       ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_software_inventory_page.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_software_inventory_page.py",
+      "required_symbols": [
+        "software_inventory_page_section"
+      ]
     }
   ],
   "python_package_trees": [

@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (11,020
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (10,657
 lines).
 
 | Boundary | Responsibilities |
@@ -342,6 +342,12 @@ The first page-specific checkpoint is
 page markup, responsive styles, and bounded lazy-viewer client behavior. The
 builder re-exports `logs_page_section` for compatibility; server-side log
 catalog and redaction policy remain in `application_logs.py`.
+
+`onion-sentinel-dashboard/scripts/dashboard_software_inventory_page.py` owns
+the Software Inventory page markup, evidence-language guardrails, responsive
+table/card styles, filters, pagination, and reactive refresh client. The
+builder re-exports `software_inventory_page_section`; inventory collection and
+normalization remain behind the existing `/api/software-inventory` contract.
 
 ## Alert Store
 

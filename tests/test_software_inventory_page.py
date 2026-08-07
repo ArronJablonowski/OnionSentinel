@@ -9,12 +9,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BUILDER_PATH = (
-    ROOT
-    / "onion-sentinel-dashboard"
-    / "scripts"
-    / "build_soc_alerts_dashboard.py"
-)
+DASHBOARD_DIR = ROOT / "onion-sentinel-dashboard"
+BUILDER_PATH = DASHBOARD_DIR / "scripts" / "build_soc_alerts_dashboard.py"
+SOFTWARE_PAGE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_software_inventory_page.py"
+INSTALLER_PATH = ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
 
 
 def load_builder():
@@ -38,6 +36,24 @@ class SoftwareInventoryPageTests(unittest.TestCase):
             "software_inventory",
             [],
         )
+        cls.builder_source = BUILDER_PATH.read_text(encoding="utf-8")
+        cls.software_page_source = SOFTWARE_PAGE_PATH.read_text(encoding="utf-8")
+        cls.installer_source = INSTALLER_PATH.read_text(encoding="utf-8")
+
+    def test_renderer_is_owned_by_a_deployed_page_module(self) -> None:
+        self.assertIn(
+            "from dashboard_software_inventory_page import software_inventory_page_section",
+            self.builder_source,
+        )
+        self.assertIn(
+            "def software_inventory_page_section()",
+            self.software_page_source,
+        )
+        copy_command = (
+            'cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_software_inventory_page.py" '
+            '"$DASHBOARD_RUNTIME_DIR/scripts/dashboard_software_inventory_page.py"'
+        )
+        self.assertEqual(self.installer_source.count(copy_command), 1)
 
     def test_navigation_and_page_identity_are_generated(self) -> None:
         keys = [definition[0] for definition in self.builder.PAGE_DEFS]
