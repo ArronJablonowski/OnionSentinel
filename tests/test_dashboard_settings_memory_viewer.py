@@ -14,7 +14,7 @@ SETTINGS_MODULES = (
     REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_settings_client_model.py",
     REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_settings_client_actions.py",
 )
-PORTAL = REPO_ROOT / "onion-sentinel-dashboard" / "report_portal.py"
+PORTAL_ROUTES = REPO_ROOT / "onion-sentinel-dashboard" / "portal_request_routes.py"
 
 
 def settings_source() -> str:
@@ -35,10 +35,22 @@ def load_dashboard_builder():
     return module
 
 
+def load_portal_routes():
+    spec = importlib.util.spec_from_file_location(
+        "settings_memory_portal_routes", PORTAL_ROUTES
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class DashboardSettingsMemoryViewerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.builder = load_dashboard_builder()
+        cls.routes = load_portal_routes()
 
     def test_each_primary_and_reviewer_prompt_path_opens_its_collapsed_editor(self) -> None:
         source = settings_source()
@@ -94,14 +106,24 @@ class DashboardSettingsMemoryViewerTest(unittest.TestCase):
 
     def test_viewer_uses_text_content_and_has_no_memory_write_route(self) -> None:
         dashboard_source = settings_source()
-        portal_source = PORTAL.read_text(encoding="utf-8")
 
         self.assertIn("memoryContent.textContent = data.content || '';", dashboard_source)
         self.assertIn("/api/soc-settings/agent-memory?key=", dashboard_source)
         self.assertIn("'shared': 'Shared Agent Memory'", dashboard_source)
         self.assertIn("memoryLabels[memoryKey] || 'Agent Memory'", dashboard_source)
-        self.assertIn('if path == "/api/soc-settings/agent-memory":', portal_source)
-        self.assertNotIn('if parsed.path == "/api/soc-settings/agent-memory":', portal_source)
+        path = "/api/soc-settings/agent-memory"
+        get_route = self.routes.classify_get_route(
+            path,
+            cti_program_path="/api/cyber-threat-intel/program",
+            prompt_paths=frozenset(),
+        )
+        post_route = self.routes.classify_post_route(
+            path,
+            cti_program_path="/api/cyber-threat-intel/program",
+            prompt_paths=frozenset(),
+        )
+        self.assertEqual(get_route.operation, "soc_agent_memory")
+        self.assertFalse(post_route.accepted)
 
     def test_maxmind_databases_are_a_standalone_three_database_section(self) -> None:
         source = settings_source()

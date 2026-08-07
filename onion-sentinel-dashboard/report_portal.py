@@ -48,6 +48,7 @@ from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
 from portal_json_body import parse_json_body
 from portal_request_routes import (
+    classify_get_route,
     classify_post_route,
     head_content_type,
     is_head_route,
@@ -14038,21 +14039,23 @@ class PortalHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query, keep_blank_values=True)
-        if path == "/" or path == "/index.html":
+        route = classify_get_route(path, cti_program_path=CTI_PROGRAM_API_PATH, prompt_paths=SOC_SETTINGS_PROMPT_API_PATHS)
+        operation = route.operation
+        if operation == "home":
             reports = scan_reports()
             body = render_home(reports, self.server.server_address[0], self.server.server_address[1])
             return self._send(HTTPStatus.OK, body)
-        if path == "/admin/login":
+        if operation == "admin_login":
             if self._admin_authenticated():
                 return self._redirect("/admin")
             return self._send(HTTPStatus.OK, render_admin_login())
-        if path == "/admin":
+        if operation == "admin":
             if not self._require_admin_auth():
                 return None
             admin_message = (query.get("admin_msg") or [""])[0]
             admin_error = (query.get("admin_error") or [""])[0]
             return self._send(HTTPStatus.OK, render_admin_dashboard(admin_message or admin_error, bool(admin_error)))
-        if path == "/healthz":
+        if operation == "health":
             reports = scan_reports()
             roots = []
             for root in SCAN_ROOTS:
@@ -14064,7 +14067,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 roots.append(info)
             data = {"ok": True, "reports": len(reports), "ip": local_ip(), "time": now_iso_local(), "roots": roots}
             return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/admin/session-status":
+        if operation == "admin_session_status":
             data = {
                 "ok": True,
                 "authenticated": self._admin_authenticated(),
@@ -14075,26 +14078,26 @@ class PortalHandler(BaseHTTPRequestHandler):
                 json.dumps(data, indent=2).encode(),
                 "application/json; charset=utf-8",
             )
-        if path == "/api/admin/service-status":
+        if operation == "admin_service_status":
             if not self._admin_authenticated():
                 return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in before reading Administration service status."}).encode(), "application/json; charset=utf-8")
             return self._send(HTTPStatus.OK, json.dumps(defang_admin_service_json(admin_service_statuses()), indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/resource-library/favorites":
+        if operation == "resource_favorites":
             data = {"ok": True, "favorites": resource_favorites()}
             return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/system-health/beacons":
+        if operation == "system_health_beacons":
             data = n8n_beacon_history_response(query)
             return self._send(HTTPStatus.OK, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/asset-inventory":
+        if operation == "asset_inventory":
             status, data = asset_inventory_response(query=query)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/dhcp-asset-discovery":
+        if operation == "dhcp_asset_discovery":
             status, data = dhcp_asset_discovery_response()
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/software-inventory":
+        if operation == "software_inventory":
             status, data = software_inventory_response(query=query)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path == CTI_PROGRAM_API_PATH:
+        if operation == "cti_program":
             try:
                 data = cti_program.public_response(cti_program.load_program())
                 status = HTTPStatus.OK
@@ -14109,45 +14112,43 @@ class PortalHandler(BaseHTTPRequestHandler):
                 json.dumps(data, indent=2).encode(),
                 "application/json; charset=utf-8",
             )
-        if path == "/api/llm-analysis/current":
+        if operation == "llm_analysis_current":
             return self._send(HTTPStatus.OK, json.dumps(read_llm_current_analysis(), indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/llm-analysis/logs":
+        if operation == "llm_analysis_logs":
             return self._send(HTTPStatus.OK, json.dumps(llm_analysis_logs_response(query), indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/soc-alerts/events":
+        if operation == "soc_alert_events":
             return self._send_soc_alert_events()
-        if path == "/api/soc-alerts/status":
+        if operation == "soc_alert_status":
             return self._send(HTTPStatus.OK, json.dumps(soc_alert_status_response(), indent=2).encode(), "application/json; charset=utf-8")
-        if path in SOC_SETTINGS_PROMPT_API_PATHS:
+        if operation == "soc_settings_prompt":
             data = read_settings_prompt(path)
             return self._send(HTTPStatus.OK if data.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/soc-settings/agent-memory":
+        if operation == "soc_agent_memory":
             status, data = read_agent_memory((query.get("key") or [""])[0])
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/soc-settings/ai-model":
+        if operation == "soc_ai_model":
             data = read_soc_ai_settings()
             return self._send(HTTPStatus.OK if data.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/soc-settings/ollama-models":
+        if operation == "soc_ollama_models":
             force_refresh = (query.get("refresh") or [""])[0].strip().lower() in {"1", "true", "yes"}
             return self._send(HTTPStatus.OK, json.dumps(ollama_models_response(force_refresh), indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/soc-alerts":
+        if operation == "soc_alerts":
             status, payload = cached_soc_alerts_query_response(query)
             return self._send(status, payload, "application/json; charset=utf-8")
-        if path == "/api/soc-alerts/metrics":
+        if operation == "soc_alert_metrics":
             status, data = soc_alert_metrics_response(query)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/soc-alerts/suppressions":
+        if operation == "soc_alert_suppressions":
             status, data = soc_alert_suppressions_response(query)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/soc-incidents":
+        if operation == "soc_incidents":
             status, data = soc_incidents_query_response(query)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/soc-incidents/reanalysis-runs":
+        if operation == "soc_reanalysis_runs":
             status, data = soc_incident_reanalysis_runs_response(query)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path.startswith("/api/soc-incidents/") and path.endswith("/adjudications"):
-            case_id = unquote(
-                path[len("/api/soc-incidents/"):-len("/adjudications")].strip("/")
-            )
+        if operation == "incident_adjudications":
+            case_id = route.resource_id or ""
             case_status, group_id = _soc_incident_case_group_id(case_id)
             if case_status != HTTPStatus.OK:
                 status, data = soc_alert_api_error(
@@ -14167,29 +14168,27 @@ class PortalHandler(BaseHTTPRequestHandler):
                     limit=limit,
                 )
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path.startswith("/api/soc-incidents/") and path.endswith("/detail"):
-            case_id = unquote(path[len("/api/soc-incidents/"):-len("/detail")].strip("/"))
+        if operation == "incident_detail":
+            case_id = route.resource_id or ""
             status, data = soc_incident_detail_response(case_id)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path.startswith("/api/soc-alerts/") and path.endswith("/adjudications"):
-            group_id = unquote(
-                path[len("/api/soc-alerts/"):-len("/adjudications")].strip("/")
-            )
+        if operation == "alert_adjudications":
+            group_id = route.resource_id or ""
             try:
                 limit = int((query.get("limit") or ["25"])[0])
             except (TypeError, ValueError):
                 limit = 25
             status, data = soc_adjudication_history_response(group_id, limit=limit)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path.startswith("/api/soc-alerts/") and path.endswith("/detail"):
-            group_id = unquote(path[len("/api/soc-alerts/"):-len("/detail")].strip("/"))
+        if operation == "alert_detail_fragment":
+            group_id = route.resource_id or ""
             status, data = soc_alert_detail_fragment_response(group_id)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path.startswith("/api/soc-alerts/"):
-            alert_id = unquote(path[len("/api/soc-alerts/"):].strip("/"))
+        if operation == "alert_detail":
+            alert_id = route.resource_id or ""
             status, data = soc_alert_detail_response(alert_id)
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
-        if path == "/api/resource-library/action-status":
+        if operation == "resource_action_status":
             action_id = (query.get("id") or [""])[0]
             if not re.fullmatch(r"[a-f0-9-]{32,36}", action_id):
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid action id"}).encode(), "application/json; charset=utf-8")

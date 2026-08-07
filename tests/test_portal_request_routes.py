@@ -20,6 +20,44 @@ class PortalRequestRouteTests(unittest.TestCase):
             path, cti_program_path=CTI, prompt_paths=PROMPTS
         )
 
+    def classify_get(self, path: str) -> routes.GetRoute:
+        return routes.classify_get_route(
+            path, cti_program_path=CTI, prompt_paths=PROMPTS
+        )
+
+    def test_exact_get_routes_have_stable_operations(self) -> None:
+        for path, operation in routes.GET_EXACT_OPERATIONS.items():
+            with self.subTest(path=path):
+                route = self.classify_get(path)
+                self.assertEqual(route.operation, operation)
+                self.assertIsNone(route.resource_id)
+
+    def test_runtime_get_routes_are_explicit(self) -> None:
+        self.assertEqual(self.classify_get(CTI).operation, "cti_program")
+        self.assertEqual(
+            self.classify_get(next(iter(PROMPTS))).operation,
+            "soc_settings_prompt",
+        )
+
+    def test_dynamic_get_routes_decode_their_resource_once(self) -> None:
+        cases = (
+            ("/api/soc-incidents/ir%20one/adjudications", "incident_adjudications", "ir one"),
+            ("/api/soc-incidents/ir%20one/detail", "incident_detail", "ir one"),
+            ("/api/soc-alerts/group%20one/adjudications", "alert_adjudications", "group one"),
+            ("/api/soc-alerts/group%20one/detail", "alert_detail_fragment", "group one"),
+            ("/api/soc-alerts/alert%20one", "alert_detail", "alert one"),
+        )
+        for path, operation, resource_id in cases:
+            with self.subTest(path=path):
+                route = self.classify_get(path)
+                self.assertEqual(route.operation, operation)
+                self.assertEqual(route.resource_id, resource_id)
+
+    def test_unknown_get_route_is_left_for_catalog_routing(self) -> None:
+        route = self.classify_get("/view/report-id/asset.png")
+        self.assertIsNone(route.operation)
+        self.assertIsNone(route.resource_id)
+
     def test_exact_form_and_json_routes_are_acceptlisted(self) -> None:
         paths = (
             "/admin/login", "/admin/logout", "/admin/action",

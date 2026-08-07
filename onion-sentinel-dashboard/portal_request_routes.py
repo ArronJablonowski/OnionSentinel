@@ -24,6 +24,33 @@ HEAD_EXACT_PATHS = frozenset({
     '/api/soc-settings/ollama-models', '/api/resource-library/favorites',
     '/admin', '/admin/login',
 })
+GET_EXACT_OPERATIONS = {
+    '/': 'home',
+    '/index.html': 'home',
+    '/admin/login': 'admin_login',
+    '/admin': 'admin',
+    '/healthz': 'health',
+    '/api/admin/session-status': 'admin_session_status',
+    '/api/admin/service-status': 'admin_service_status',
+    '/api/resource-library/favorites': 'resource_favorites',
+    '/api/system-health/beacons': 'system_health_beacons',
+    '/api/asset-inventory': 'asset_inventory',
+    '/api/dhcp-asset-discovery': 'dhcp_asset_discovery',
+    '/api/software-inventory': 'software_inventory',
+    '/api/llm-analysis/current': 'llm_analysis_current',
+    '/api/llm-analysis/logs': 'llm_analysis_logs',
+    '/api/soc-alerts/events': 'soc_alert_events',
+    '/api/soc-alerts/status': 'soc_alert_status',
+    '/api/soc-settings/agent-memory': 'soc_agent_memory',
+    '/api/soc-settings/ai-model': 'soc_ai_model',
+    '/api/soc-settings/ollama-models': 'soc_ollama_models',
+    '/api/soc-alerts': 'soc_alerts',
+    '/api/soc-alerts/metrics': 'soc_alert_metrics',
+    '/api/soc-alerts/suppressions': 'soc_alert_suppressions',
+    '/api/soc-incidents': 'soc_incidents',
+    '/api/soc-incidents/reanalysis-runs': 'soc_reanalysis_runs',
+    '/api/resource-library/action-status': 'resource_action_status',
+}
 POST_FORM_PATHS = frozenset({
     '/admin/login', '/admin/logout', '/admin/action',
 })
@@ -71,6 +98,13 @@ class PostRoute:
 
     def request_limit(self, cti_file_bytes: int) -> int:
         return cti_file_bytes if self.cti_program_write else 50_000
+
+
+@dataclass(frozen=True)
+class GetRoute:
+    path: str
+    operation: str | None
+    resource_id: str | None = None
 
 
 def _dynamic_target(
@@ -152,6 +186,45 @@ def classify_post_route(
         resource_write=resource_write,
         json_request=json_request,
     )
+
+
+def classify_get_route(
+    path: str,
+    *,
+    cti_program_path: str,
+    prompt_paths: AbstractSet[str],
+) -> GetRoute:
+    """Classify portal pages and API reads before report-catalog routing."""
+    operation = GET_EXACT_OPERATIONS.get(path)
+    if operation is not None:
+        return GetRoute(path=path, operation=operation)
+    if path == cti_program_path:
+        return GetRoute(path=path, operation='cti_program')
+    if path in prompt_paths:
+        return GetRoute(path=path, operation='soc_settings_prompt')
+
+    candidates = (
+        (SOC_INCIDENT_PREFIX, '/adjudications', 'incident_adjudications'),
+        (SOC_INCIDENT_PREFIX, '/detail', 'incident_detail'),
+        (SOC_ALERT_PREFIX, '/adjudications', 'alert_adjudications'),
+        (SOC_ALERT_PREFIX, '/detail', 'alert_detail_fragment'),
+    )
+    for prefix, suffix, dynamic_operation in candidates:
+        resource_id = _dynamic_target(path, prefix, suffix)
+        if resource_id is not None:
+            return GetRoute(
+                path=path,
+                operation=dynamic_operation,
+                resource_id=resource_id,
+            )
+    if path.startswith(SOC_ALERT_PREFIX):
+        resource_id = unquote(path[len(SOC_ALERT_PREFIX):].strip('/'))
+        return GetRoute(
+            path=path,
+            operation='alert_detail',
+            resource_id=resource_id,
+        )
+    return GetRoute(path=path, operation=None)
 
 
 def is_head_route(

@@ -774,6 +774,21 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertEqual(result, "sent")
         self.assertEqual(dispatch_write.call_args.args[1], {})
 
+    def test_portal_get_uses_classified_incident_target(self) -> None:
+        handler = self.portal.PortalHandler.__new__(self.portal.PortalHandler)
+        handler.path = "/api/soc-incidents/ir%20case/detail"
+        handler._send = mock.Mock(return_value="sent")
+        with mock.patch.object(
+            self.portal,
+            "soc_incident_detail_response",
+            return_value=(200, {"ok": True}),
+        ) as detail_response:
+            result = handler.do_GET()
+
+        self.assertEqual(result, "sent")
+        detail_response.assert_called_once_with("ir case")
+        self.assertEqual(handler._send.call_args.args[0], 200)
+
     def test_incident_list_returns_case_and_only_incident_responder_analysis(self) -> None:
         conn = sqlite3.connect(self.db_path)
         conn.executescript(
