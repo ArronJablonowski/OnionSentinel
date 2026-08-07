@@ -186,6 +186,9 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
 - Exact cumulative byte-budget orchestration, ordered audit/evidence/metadata
   omission, self-size convergence, and fail-closed columnar fallback now live
   in `analysis.query.prompt_budget`.
+- Structural projection-state enumeration, exact whole-package measurement,
+  refreshed citation-contract binding, hosted projection synchronization, and
+  mutation-after-stable-admission now live in `analysis.query.prompt_admission`.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports

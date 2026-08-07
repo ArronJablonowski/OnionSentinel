@@ -1830,6 +1830,25 @@ def _query_prompt_budget_dependencies():
     )
 
 
+def _query_prompt_admission():
+    _provider_routing()
+    from onion_sentinel.analysis.query import prompt_admission
+    return prompt_admission
+
+
+def _query_prompt_admission_dependencies():
+    return _query_prompt_admission().Dependencies(
+        projection=lambda rounds, maximum_bytes: _investigation_prompt_payload(
+            rounds, maximum_bytes=maximum_bytes
+        ),
+        attach_contract=attach_evidence_reference_contract,
+        synchronize_hosted=synchronize_hosted_investigation_contract,
+        model_safe_copy=lambda value, hosted: model_safe_copy(
+            value, hosted=hosted
+        ),
+    )
+
+
 def _query_prompt_facts():
     _provider_routing()
     from onion_sentinel.analysis.query import prompt_facts
@@ -5957,205 +5976,18 @@ def _admit_investigation_query_prompt(
     maximum_prompt_bytes: int,
     hosted: bool,
 ) -> int:
-    """Install the richest complete query projection that exactly fits.
-
-    Admission measures the complete model-safe package after refreshing the
-    citation contract. No fixed headroom estimate is used: every candidate is
-    serialized exactly, and only the final admitted candidate mutates the
-    caller's package.
-    """
-    if (
-        isinstance(maximum_prompt_bytes, bool)
-        or not isinstance(maximum_prompt_bytes, int)
-        or maximum_prompt_bytes <= 0
-    ):
-        raise InvestigationQueryError(
-            "investigation follow-up prompt byte budget is invalid"
-        )
-    base = dict(prompt_package)
-    base.pop("investigation_query_results", None)
-    base.pop("evidence_reference_contract", None)
-
-    projection_cache: dict[int, dict[str, Any] | None] = {}
-
-    def projection_at(evidence_bytes: int) -> dict[str, Any] | None:
-        if evidence_bytes not in projection_cache:
-            try:
-                projection_cache[evidence_bytes] = (
-                    _investigation_prompt_payload(
-                        rounds,
-                        maximum_bytes=evidence_bytes,
-                    )
-                )
-            except InvestigationQueryError:
-                projection_cache[evidence_bytes] = None
-        return projection_cache[evidence_bytes]
-
-    def projection_signature(projection: dict[str, Any]) -> str:
-        """Identify one structural projection state independent of its budget."""
-        signature_value = dict(projection)
-        metadata = (
-            dict(projection.get("prompt_projection"))
-            if isinstance(projection.get("prompt_projection"), dict)
-            else {}
-        )
-        metadata.pop("max_bytes", None)
-        metadata.pop("encoded_bytes", None)
-        signature_value["prompt_projection"] = metadata
-        return hashlib.sha256(
-            _investigation_prompt_json_bytes(signature_value)
-        ).hexdigest()
-
-    def complete_candidate(
-        evidence_bytes: int,
-    ) -> tuple[dict[str, Any], int] | None:
-        projection = projection_at(evidence_bytes)
-        if projection is None:
-            return None
-        candidate = dict(base)
-        candidate["investigation_query_results"] = projection
-        attach_evidence_reference_contract(candidate)
-        if hosted:
-            synchronize_hosted_investigation_contract(candidate)
-        encoded_size = len(
-            _investigation_prompt_json_bytes(
-                model_safe_copy(candidate, hosted=hosted)
-            )
-        )
-        return candidate, encoded_size
-
-    low = 1
-    high = min(
-        MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES,
-        maximum_prompt_bytes,
+    module = _query_prompt_admission()
+    return module.admit(
+        prompt_package,
+        rounds,
+        maximum_prompt_bytes=maximum_prompt_bytes,
+        hosted=hosted,
+        policy=module.Policy(
+            maximum_evidence_bytes=MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES
+        ),
+        dependencies=_query_prompt_admission_dependencies(),
+        error_type=InvestigationQueryError,
     )
-
-    # Projection existence has a lower floor: below the smallest complete
-    # columnar representation there is no safe payload, while every larger
-    # budget admits at least that representation. Find that floor separately
-    # from full-package feasibility. Treating "no projection yet" as an
-    # over-budget package is what caused the former one-pass binary search to
-    # skip narrow feasible intervals at the floor.
-    first_projection_budget: int | None = None
-    search_low = low
-    search_high = high
-    while search_low <= search_high:
-        midpoint = search_low + ((search_high - search_low) // 2)
-        if projection_at(midpoint) is None:
-            search_low = midpoint + 1
-        else:
-            first_projection_budget = midpoint
-            search_high = midpoint - 1
-    if first_projection_budget is None:
-        raise InvestigationQueryError(
-            "no safe prompt budget remains for complete investigation "
-            "query evidence and its refreshed citation contract"
-        )
-
-    # As the evidence budget increases, the deterministic projector advances
-    # through a finite sequence of richer structural states: columnar,
-    # progressively less compact audits/evidence, then the full projection.
-    # Enumerate the exact start of every state and measure the complete package
-    # there. Full-package feasibility is deliberately *not* assumed monotonic:
-    # a richer state may cross the ceiling even though the preceding state's
-    # first admissible byte budget fits exactly.
-    admitted: tuple[dict[str, Any], int] | None = None
-    seen_signatures: set[str] = set()
-    state_start = first_projection_budget
-    while state_start <= high:
-        projection = projection_at(state_start)
-        if projection is None:
-            raise InvestigationQueryError(
-                "investigation prompt projection admission did not converge"
-            )
-        signature = projection_signature(projection)
-        if signature in seen_signatures:
-            raise InvestigationQueryError(
-                "investigation prompt projection states are not monotonic"
-            )
-        seen_signatures.add(signature)
-
-        candidate = complete_candidate(state_start)
-        if candidate is not None and candidate[1] <= maximum_prompt_bytes:
-            admitted = candidate
-        if state_start == high:
-            break
-
-        high_projection = projection_at(high)
-        if high_projection is None:
-            raise InvestigationQueryError(
-                "investigation prompt projection admission did not converge"
-            )
-        if projection_signature(high_projection) == signature:
-            break
-
-        # Within one structural state only the accounting integers vary.
-        # Locate the first byte budget whose structural signature differs.
-        transition_low = state_start + 1
-        transition_high = high
-        while transition_low < transition_high:
-            midpoint = transition_low + (
-                (transition_high - transition_low) // 2
-            )
-            midpoint_projection = projection_at(midpoint)
-            if midpoint_projection is None:
-                transition_low = midpoint + 1
-            elif projection_signature(midpoint_projection) == signature:
-                transition_low = midpoint + 1
-            else:
-                transition_high = midpoint
-        next_projection = projection_at(transition_low)
-        if (
-            next_projection is None
-            or projection_signature(next_projection) == signature
-        ):
-            raise InvestigationQueryError(
-                "investigation prompt projection transition did not converge"
-            )
-        state_start = transition_low
-
-    if admitted is None:
-        raise InvestigationQueryError(
-            "no safe prompt budget remains for complete investigation "
-            "query evidence and its refreshed citation contract"
-        )
-
-    candidate, encoded_size = admitted
-    prepared = copy.deepcopy(prompt_package)
-    prepared.pop("investigation_query_results", None)
-    prepared.pop("evidence_reference_contract", None)
-    prepared["investigation_query_results"] = candidate[
-        "investigation_query_results"
-    ]
-    prepared["evidence_reference_contract"] = candidate[
-        "evidence_reference_contract"
-    ]
-    if hosted:
-        synchronize_hosted_investigation_contract(prepared)
-    final_size = len(
-        _investigation_prompt_json_bytes(
-            model_safe_copy(prepared, hosted=hosted)
-        )
-    )
-    if final_size > maximum_prompt_bytes:
-        raise InvestigationQueryError(
-            "investigation follow-up prompt exceeds max_prompt_bytes"
-        )
-    if final_size != encoded_size:
-        raise InvestigationQueryError(
-            "investigation follow-up prompt changed after admission "
-            f"(measured={encoded_size}, finalized={final_size})"
-        )
-    prompt_package.pop("investigation_query_results", None)
-    prompt_package.pop("evidence_reference_contract", None)
-    prompt_package["investigation_query_results"] = prepared[
-        "investigation_query_results"
-    ]
-    prompt_package["evidence_reference_contract"] = prepared[
-        "evidence_reference_contract"
-    ]
-    return final_size
-
 
 def _investigation_round_audit(round_result: dict[str, Any]) -> dict[str, Any]:
     summaries = []
