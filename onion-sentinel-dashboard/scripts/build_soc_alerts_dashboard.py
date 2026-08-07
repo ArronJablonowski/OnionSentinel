@@ -135,6 +135,18 @@ from dashboard_executive_home_assets import (  # noqa: E402
     EXECUTIVE_HOME_JS,
     inject_executive_home_assets,
 )
+from dashboard_executive_home_page import (  # noqa: E402
+    ExecutiveCacheViewModel,
+    ExecutiveDonutRowViewModel,
+    ExecutiveHomePageViewModel,
+    ExecutiveHourlyBucketViewModel,
+    ExecutiveHourlyIntakeViewModel,
+    render_executive_bar_card,
+    render_executive_cache,
+    render_executive_donut,
+    render_executive_home,
+    render_executive_hourly_intake,
+)
 from dashboard_settings_assets import (  # noqa: E402
     SETTINGS_PAGE_CSS,
     SETTINGS_PAGE_JS,
@@ -4572,119 +4584,103 @@ def counter_top(items: list[tuple[str, int]], limit: int = 6) -> list[tuple[str,
     return sorted(totals.items(), key=lambda item: (item[1], item[0].lower()), reverse=True)[:limit]
 
 
+def _executive_donut_rows(rows: list[tuple[str, int, str]]) -> tuple[ExecutiveDonutRowViewModel, ...]:
+    return tuple(ExecutiveDonutRowViewModel(label, value, class_name) for label, value, class_name in rows)
+
+
+def _executive_hourly_view(metrics: HourlyIntakeMetrics) -> ExecutiveHourlyIntakeViewModel:
+    buckets = tuple(ExecutiveHourlyBucketViewModel(
+        start_utc_iso=bucket.start_utc.isoformat().replace('+00:00', 'Z'),
+        fallback_label=bucket.start_utc.strftime('%H:00 UTC'),
+        count=bucket.count, current=bucket.current,
+    ) for bucket in metrics.buckets)
+    return ExecutiveHourlyIntakeViewModel(buckets=buckets, exact=metrics.exact)
+
+
+def _executive_cache_view(metrics: EnrichmentCacheMetrics) -> ExecutiveCacheViewModel:
+    hit_rate = f'{metrics.hit_rate:g}%' if metrics.hit_rate is not None else 'n/a'
+    return ExecutiveCacheViewModel(
+        available=metrics.available, runtime_available=metrics.runtime_available,
+        fresh_entries=metrics.fresh_entries, stale_entries=metrics.stale_entries,
+        api_calls_avoided=metrics.api_calls_avoided, hit_rate=hit_rate,
+        provider_loads=metrics.provider_loads, stale_fallbacks=metrics.stale_fallbacks,
+        payload_size=human_size(metrics.payload_bytes),
+    )
+
+
+def _executive_cache_kpi(metrics: EnrichmentCacheMetrics) -> tuple[str, str, str]:
+    if metrics.runtime_available and metrics.hit_rate is not None:
+        return 'Cache hit rate', f'{metrics.hit_rate:g}%', f'{metrics.api_calls_avoided} API calls avoided since restart'
+    value = str(metrics.fresh_entries) if metrics.available else 'n/a'
+    return 'Reusable enrichments', value, 'Fresh durable cache results'
+
+
+def _executive_severity_rows(reports: list[AlertReport]) -> tuple[ExecutiveDonutRowViewModel, ...]:
+    order = (('Critical', 'critical'), ('High', 'high'), ('Medium', 'medium'), ('Low', 'low'), ('Info', 'informational'))
+    counts = {level: sum(1 for report in reports if criticality_class(report.criticality) == level) for _label, level in order}
+    return tuple(ExecutiveDonutRowViewModel(label, counts[level], level) for label, level in order)
+
+
+def _executive_status_rows(reports: list[AlertReport]) -> tuple[ExecutiveDonutRowViewModel, ...]:
+    order = (('Accepted', 'accepted'), ('Suppressed', 'suppressed'), ('Escalated', 'escalated'), ('Stored', 'stored'), ('Other', 'other'))
+    counts = {key: 0 for _label, key in order}
+    for report in reports:
+        key = report.filter_status if report.filter_status in counts else 'other'
+        counts[key] += 1
+    return tuple(ExecutiveDonutRowViewModel(label, counts[key], key) for label, key in order)
+
+
+def _executive_ai_rows(reports: list[AlertReport]) -> tuple[ExecutiveDonutRowViewModel, ...]:
+    states = (('Analyzed', 'analyzed', 'cyan'), ('Queued', 'queued', 'amber'), ('Analyzing', 'analyzing', 'green'))
+    rows = [ExecutiveDonutRowViewModel(label, sum(1 for report in reports if report.ai_status_key == key), css) for label, key, css in states]
+    other = sum(1 for report in reports if report.ai_status_key not in {'analyzed', 'queued', 'analyzing'})
+    return tuple(rows + [ExecutiveDonutRowViewModel('Other', other, 'info')])
+
+
+def _executive_home_view(
+    reports: list[AlertReport], hourly: HourlyIntakeMetrics, cache: EnrichmentCacheMetrics,
+) -> ExecutiveHomePageViewModel:
+    total = len(reports)
+    urgent = sum(1 for report in reports if criticality_class(report.criticality) in {'critical', 'high'})
+    suppressed = sum(1 for report in reports if report.filter_status == 'suppressed')
+    analyzed = sum(1 for report in reports if report.ai_status_key == 'analyzed')
+    latest = max((report.alert_ts for report in reports), default=0)
+    cache_label, cache_value, cache_note = _executive_cache_kpi(cache)
+    return ExecutiveHomePageViewModel(
+        latest_seen=human_time(latest) if latest else 'n/a', total_groups=total,
+        total_observations=sum(max(1, int(report.repeat_count or 1)) for report in reports),
+        urgent_groups=urgent, suppressed_groups=suppressed, analyzed_groups=analyzed,
+        urgent_percent=pct(urgent, total), ai_percent=pct(analyzed, total),
+        suppression_percent=pct(suppressed, total), cache_kpi_label=cache_label,
+        cache_kpi_value=cache_value, cache_kpi_note=cache_note,
+        severity_rows=_executive_severity_rows(reports), status_rows=_executive_status_rows(reports),
+        ai_rows=_executive_ai_rows(reports),
+        top_rule_rows=tuple(counter_top([(r.rule_name, r.repeat_count) for r in reports], 7)),
+        destination_rows=tuple(counter_top([(r.destination_ip, r.repeat_count) for r in reports], 7)),
+        source_ip_rows=tuple(counter_top([(r.source_ip, r.repeat_count) for r in reports], 7)),
+        source_rows=tuple(counter_top([(r.alert_source, 1) for r in reports], 5)),
+        hourly=_executive_hourly_view(hourly), cache=_executive_cache_view(cache),
+    )
+
+
 def executive_donut(title: str, center: str, subtitle: str, rows: list[tuple[str, int, str]]) -> str:
-    total = sum(value for _label, value, _class_name in rows)
-    if total <= 0:
-        rows = [('No data', 1, 'info')]
-        total = 1
-    offset = 25
-    segments = []
-    legend = []
-    circumference = 100
-    for label, value, class_name in rows:
-        if value <= 0:
-            continue
-        dash = max(0.5, (value / total) * circumference)
-        segments.append(
-            f'<circle class="donut-segment donut-{html.escape(class_name)}" cx="18" cy="18" r="15.915" '
-            f'stroke-dasharray="{dash:.3f} {circumference - dash:.3f}" stroke-dashoffset="{offset:.3f}"></circle>'
-        )
-        offset -= dash
-        legend.append(
-            f'<span><i class="legend-dot donut-bg-{html.escape(class_name)}"></i>'
-            f'<b>{html.escape(str(value))}</b> {html.escape(label)}</span>'
-        )
-    return f'''
-    <article class="exec-card chart-card">
-      <div class="exec-card-title"><span>{html.escape(title)}</span><b>{html.escape(subtitle)}</b></div>
-      <div class="donut-layout">
-        <div class="donut-wrap">
-          <svg class="donut-chart" viewBox="0 0 36 36" role="img" aria-label="{html.escape(title)}">
-            <circle class="donut-track" cx="18" cy="18" r="15.915"></circle>
-            {''.join(segments)}
-          </svg>
-          <div class="donut-center">{html.escape(center)}</div>
-        </div>
-        <div class="donut-legend">{''.join(legend)}</div>
-      </div>
-    </article>'''
+    return render_executive_donut(title, center, subtitle, _executive_donut_rows(rows))
+
 
 
 def executive_bar_card(title: str, subtitle: str, rows: list[tuple[str, int]], suffix: str = '') -> str:
-    max_value = max((value for _label, value in rows), default=0)
-    if not rows:
-        rows = [('No data', 0)]
-    bars = []
-    for label, value in rows:
-        width = pct(value, max_value) if max_value else 0
-        bars.append(
-            f'<div class="exec-bar-row"><div class="exec-bar-label" title="{html.escape(label, quote=True)}">{html.escape(label)}</div>'
-            f'<div class="exec-bar-track"><span style="width:{width}%"></span></div>'
-            f'<div class="exec-bar-value">{html.escape(str(value))}{html.escape(suffix)}</div></div>'
-        )
-    return f'''
-    <article class="exec-card bar-card">
-      <div class="exec-card-title"><span>{html.escape(title)}</span><b>{html.escape(subtitle)}</b></div>
-      <div class="exec-bars">{''.join(bars)}</div>
-    </article>'''
+    return render_executive_bar_card(title, subtitle, tuple(rows), suffix)
+
 
 
 def executive_hourly_intake_card(metrics: HourlyIntakeMetrics) -> str:
-    """Render exact committed alert observations using viewer-local hour labels."""
-    max_value = max((bucket.count for bucket in metrics.buckets), default=0)
-    total = sum(bucket.count for bucket in metrics.buckets)
-    rows = []
-    for bucket in metrics.buckets:
-        width = pct(bucket.count, max_value) if max_value else 0
-        iso_start = bucket.start_utc.isoformat().replace('+00:00', 'Z')
-        fallback_label = bucket.start_utc.strftime('%H:00 UTC')
-        current = 'true' if bucket.current else 'false'
-        rows.append(
-            f'<div class="exec-bar-row">'
-            f'<div class="exec-bar-label exec-hour-label" data-hour-start="{html.escape(iso_start, quote=True)}" '
-            f'data-current-hour="{current}" title="{html.escape(fallback_label, quote=True)}">'
-            f'{html.escape(fallback_label)}</div>'
-            f'<div class="exec-bar-track"><span style="width:{width}%"></span></div>'
-            f'<div class="exec-bar-value"><b>{bucket.count}</b><span> alerts</span></div>'
-            f'</div>'
-        )
-    source_label = 'Exact committed intake' if metrics.exact else 'Telemetry unavailable'
-    return f'''
-    <article class="exec-card bar-card exec-hourly-card">
-      <div class="exec-card-title"><span>Alert intake</span><b>Completed ingests by local hour</b></div>
-      <div class="exec-bars">{''.join(rows)}</div>
-      <div class="exec-card-note"><b>{total} alerts</b> ingested in this 12-hour window. {html.escape(source_label)}. The current hour is partial; bars scale to the busiest hour.</div>
-    </article>'''
+    return render_executive_hourly_intake(_executive_hourly_view(metrics))
+
 
 
 def executive_cache_card(metrics: EnrichmentCacheMetrics) -> str:
-    """Render cache inventory and process counters with explicit lifetimes."""
-    runtime_value = lambda value: str(value) if metrics.runtime_available else 'n/a'
-    hit_rate = f'{metrics.hit_rate:g}%' if metrics.hit_rate is not None else 'n/a'
-    durable_note = (
-        f'{human_size(metrics.payload_bytes)} normalized cache payload'
-        if metrics.available
-        else 'Durable cache inventory unavailable'
-    )
-    rows = [
-        ('Reusable now', str(metrics.fresh_entries) if metrics.available else 'n/a', 'Fresh durable results'),
-        ('Expired entries', str(metrics.stale_entries) if metrics.available else 'n/a', 'Outage fallback only'),
-        ('API calls avoided', runtime_value(metrics.api_calls_avoided), 'Since alert-store restart'),
-        ('Cache hit rate', hit_rate, 'Since alert-store restart'),
-        ('Provider lookups', runtime_value(metrics.provider_loads), 'Since alert-store restart'),
-        ('Stale fallbacks', runtime_value(metrics.stale_fallbacks), 'Used during provider errors'),
-    ]
-    rendered_rows = ''.join(
-        f'<div class="exec-cache-row"><div><span>{html.escape(label)}</span><small>{html.escape(note)}</small></div>'
-        f'<strong>{html.escape(value)}</strong></div>'
-        for label, value, note in rows
-    )
-    return f'''
-    <article class="exec-card exec-cache-card">
-      <div class="exec-card-title"><span>Threat-intel cache</span><b>Quota protection</b></div>
-      <div class="exec-cache-rows">{rendered_rows}</div>
-      <div class="exec-card-note">{html.escape(durable_note)}. Process counters reset when alert-store restarts.</div>
-    </article>'''
+    return render_executive_cache(_executive_cache_view(metrics))
+
 
 
 def executive_home_section(
@@ -4692,95 +4688,10 @@ def executive_home_section(
     hourly_metrics: HourlyIntakeMetrics | None = None,
     cache_metrics: EnrichmentCacheMetrics | None = None,
 ) -> str:
-    """Render executive-level summary metrics for the Home page."""
-    total_groups = len(reports)
-    total_observations = sum(max(1, int(report.repeat_count or 1)) for report in reports)
-    urgent_groups = sum(1 for report in reports if criticality_class(report.criticality) in {'critical', 'high'})
-    suppressed_groups = sum(1 for report in reports if report.filter_status == 'suppressed')
-    analyzed_groups = sum(1 for report in reports if report.ai_status_key == 'analyzed')
-    latest_seen = max((report.alert_ts for report in reports), default=0)
-    latest_seen_text = human_time(latest_seen) if latest_seen else 'n/a'
+    hourly = hourly_metrics or load_hourly_alert_intake(DB_PATH)
+    cache = cache_metrics or load_enrichment_cache_metrics(DB_PATH)
+    return render_executive_home(_executive_home_view(reports, hourly, cache))
 
-    severity_order = [
-        ('Critical', 'critical'),
-        ('High', 'high'),
-        ('Medium', 'medium'),
-        ('Low', 'low'),
-        ('Info', 'informational'),
-    ]
-    severity_counts = {
-        level: sum(1 for report in reports if criticality_class(report.criticality) == level)
-        for _label, level in severity_order
-    }
-    severity_rows = [(label, severity_counts[level], level) for label, level in severity_order]
-
-    status_order = [('Accepted', 'accepted'), ('Suppressed', 'suppressed'), ('Escalated', 'escalated'), ('Stored', 'stored'), ('Other', 'other')]
-    status_counts = {key: 0 for _label, key in status_order}
-    for report in reports:
-        key = report.filter_status if report.filter_status in status_counts else 'other'
-        status_counts[key] += 1
-    status_rows = [(label, status_counts[key], key) for label, key in status_order]
-
-    ai_rows = [
-        ('Analyzed', sum(1 for report in reports if report.ai_status_key == 'analyzed'), 'cyan'),
-        ('Queued', sum(1 for report in reports if report.ai_status_key == 'queued'), 'amber'),
-        ('Analyzing', sum(1 for report in reports if report.ai_status_key == 'analyzing'), 'green'),
-        ('Other', sum(1 for report in reports if report.ai_status_key not in {'analyzed', 'queued', 'analyzing'}), 'info'),
-    ]
-
-    source_rows = [(label, count) for label, count in counter_top([(report.alert_source, 1) for report in reports], 5)]
-    top_rule_rows = counter_top([(report.rule_name, report.repeat_count) for report in reports], 7)
-    destination_rows = counter_top([(report.destination_ip, report.repeat_count) for report in reports], 7)
-    source_ip_rows = counter_top([(report.source_ip, report.repeat_count) for report in reports], 7)
-
-    hourly_metrics = hourly_metrics or load_hourly_alert_intake(DB_PATH)
-    cache_metrics = cache_metrics or load_enrichment_cache_metrics(DB_PATH)
-
-    urgent_pct = pct(urgent_groups, total_groups)
-    ai_pct = pct(analyzed_groups, total_groups)
-    suppression_pct = pct(suppressed_groups, total_groups)
-    if cache_metrics.runtime_available and cache_metrics.hit_rate is not None:
-        cache_kpi_value = f'{cache_metrics.hit_rate:g}%'
-        cache_kpi_label = 'Cache hit rate'
-        cache_kpi_note = f'{cache_metrics.api_calls_avoided} API calls avoided since restart'
-    else:
-        cache_kpi_value = str(cache_metrics.fresh_entries) if cache_metrics.available else 'n/a'
-        cache_kpi_label = 'Reusable enrichments'
-        cache_kpi_note = 'Fresh durable cache results'
-
-    return f'''
-    <section class="view-section active executive-home-view" aria-label="Executive SOC overview">
-      <section class="exec-hero" aria-label="Executive SOC summary">
-        <div>
-          <span class="exec-kicker">Executive overview</span>
-          <h2>Security posture at a glance</h2>
-          <p>Grouped detections, alert volume, AI analysis coverage, and noisy-repeat pressure from the Security Onion alert pipeline.</p>
-        </div>
-        <div class="exec-hero-stamp">
-          <span>Latest alert</span>
-          <strong>{html.escape(latest_seen_text)}</strong>
-        </div>
-      </section>
-      <section class="exec-kpi-grid" aria-label="Executive SOC key metrics">
-        <article class="exec-kpi"><span>Grouped detections</span><strong>{total_groups}</strong><em>Unique analyst-facing rows</em></article>
-        <article class="exec-kpi"><span>Total observations</span><strong>{total_observations}</strong><em>Includes repeated detections</em></article>
-        <article class="exec-kpi"><span>Urgent exposure</span><strong>{urgent_pct}%</strong><em>{urgent_groups} critical/high groups</em></article>
-        <article class="exec-kpi"><span>AI coverage</span><strong>{ai_pct}%</strong><em>{analyzed_groups} analyzed groups</em></article>
-        <article class="exec-kpi"><span>Suppression pressure</span><strong>{suppression_pct}%</strong><em>{suppressed_groups} noisy groups</em></article>
-        <article class="exec-kpi"><span>{html.escape(cache_kpi_label)}</span><strong>{html.escape(cache_kpi_value)}</strong><em>{html.escape(cache_kpi_note)}</em></article>
-      </section>
-      <section class="exec-chart-grid" aria-label="Executive SOC charts">
-        {executive_donut('Severity mix', f'{urgent_pct}%', 'Critical/high share', severity_rows)}
-        {executive_donut('Workflow status', f'{suppression_pct}%', 'Suppressed share', status_rows)}
-        {executive_donut('AI analysis coverage', f'{ai_pct}%', 'Analyzed share', ai_rows)}
-        {executive_bar_card('Top detection families', 'By total observations', top_rule_rows)}
-        {executive_bar_card('Top destination assets', 'By total observations', destination_rows)}
-        {executive_bar_card('Top source assets', 'By total observations', source_ip_rows)}
-        {executive_hourly_intake_card(hourly_metrics)}
-        {executive_bar_card('Log source mix', 'Grouped detections', source_rows)}
-        {executive_cache_card(cache_metrics)}
-      </section>
-    </section>'''
 
 
 def write_status_json(reports: list[AlertReport]) -> Path:

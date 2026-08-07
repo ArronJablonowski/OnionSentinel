@@ -199,6 +199,17 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_executive_home_page.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_executive_home_page.py",
+      "required_symbols": [
+        "ExecutiveHomePageViewModel",
+        "ExecutiveHourlyIntakeViewModel",
+        "ExecutiveCacheViewModel",
+        "render_executive_home"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_settings_assets.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_assets.py",

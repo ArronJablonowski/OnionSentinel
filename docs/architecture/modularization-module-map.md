@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (6,109
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (6,020
 lines).
 
 | Boundary | Responsibilities |
@@ -430,8 +430,10 @@ The builder retains bounded JSONL/current-state reads and converts persisted
 execution provenance into those presentation models.
 
 `dashboard_executive_home_assets.py` owns Executive Home responsive styles and
-the viewer-local hour-label client. The builder re-exports those assets while
-the chart/KPI view-model boundary is extracted separately.
+the viewer-local hour-label client. `dashboard_executive_home_page.py` owns
+immutable donut, hourly-intake, cache, and page view models plus pure KPI/chart
+renderers. The builder retains alert aggregation and bounded metric loading,
+then normalizes those results at the composition boundary.
 
 ## Alert Store
 
