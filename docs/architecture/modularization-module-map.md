@@ -499,6 +499,13 @@ normalization while owning only UI-specific primary, reviewer, and adjudicator
 assignment policy. This removes duplicated route parsing and identity policy
 from the dashboard builder without forking the inference runtime contract.
 
+`dashboard_ai_settings.py` owns dashboard defaults and the read-only migration
+of persisted AI-provider settings. It normalizes legacy mode/roster fields,
+provider executable and model allowlists, severity aliases, GeoIP path aliases,
+and independent primary/reviewer/adjudicator assignments. The builder retains
+only a path-aware compatibility wrapper, so runtime and test path overrides do
+not leak filesystem state into the settings policy.
+
 `dashboard_flow_page.py` owns the pure data-flow renderer, enrichment-service
 tiles, responsive pipeline styles, and privacy-toggle client. The builder
 assembles `FlowPageViewModel` from live alert/report/model/notification metrics

@@ -311,6 +311,15 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_ai_settings.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_ai_settings.py",
+      "required_symbols": [
+        "default_soc_ai_settings",
+        "load_ai_settings"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_flow_page.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_flow_page.py",
