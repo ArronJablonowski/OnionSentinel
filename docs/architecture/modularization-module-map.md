@@ -106,6 +106,9 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
   `analysis.review.disagreement`; validated shadow adjudication projection
   lives in `analysis.review.projection`; and required/completed review
   fail-closed automation controls live in `analysis.review.gates`.
+- Canonical, digest-bound operator authorization validation now lives in
+  `analysis.conclusions.authorization_evidence`; the runner retains private
+  compatibility delegates used by characterization tests.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports

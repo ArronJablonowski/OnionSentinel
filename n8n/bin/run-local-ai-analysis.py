@@ -1660,6 +1660,12 @@ def _conclusion_authorization():
     return authorization
 
 
+def _conclusion_authorization_evidence():
+    _provider_routing()
+    from onion_sentinel.analysis.conclusions import authorization_evidence
+    return authorization_evidence
+
+
 def _conclusion_evidence_guard():
     _provider_routing()
     from onion_sentinel.analysis.conclusions import evidence_guard
@@ -12607,349 +12613,31 @@ def _is_incident_responder_package(prompt_package: dict[str, Any] | None) -> boo
     return role == "incident-responder"
 
 
-AUTHORIZATION_COVERAGE_KEYS = frozenset(
-    {
-        "source_ips",
-        "destination_ips",
-        "rule_ids",
-        "source_ports",
-        "destination_ports",
-        "destination_port_ranges",
-        "transport_protocols",
-        "authorization_start",
-        "authorization_end",
-    }
-)
-AUTHORIZATION_ENTRY_KEYS = frozenset(
-    {"authorized", "source", "evidence_ref", "coverage"}
-)
-AUTHORIZATION_EVIDENCE_REF_RE = re.compile(
-    r"authorized-activity:sha256:([0-9a-f]{64})"
-)
-AUTHORIZATION_CANONICAL_UTC_RE = re.compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"
-)
-
-
 def _canonical_authorization_timestamp(value: Any) -> dt.datetime | None:
-    text = str(value or "")
-    if not AUTHORIZATION_CANONICAL_UTC_RE.fullmatch(text):
-        return None
-    try:
-        parsed = dt.datetime.fromisoformat(text[:-1] + "+00:00")
-    except ValueError:
-        return None
-    if (
-        parsed.astimezone(dt.timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z")
-        != text
-    ):
-        return None
-    return parsed
+    return _conclusion_authorization_evidence().canonical_timestamp(value)
 
 
 def _prompt_authorization_event_tuple(
     prompt_package: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Normalize the exact alert tuple used by the prompt builder."""
-    import ipaddress
-
-    alert = prompt_package.get("alert")
-    if not isinstance(alert, dict):
-        return None
-    timestamp: dt.datetime | None = None
-    for key in ("timestamp", "last_seen", "first_seen"):
-        raw = str(alert.get(key) or "").strip().replace("  ", "T", 1)
-        if not raw:
-            continue
-        if raw.endswith("Z"):
-            raw = raw[:-1] + "+00:00"
-        try:
-            candidate = dt.datetime.fromisoformat(raw)
-        except ValueError:
-            continue
-        if candidate.tzinfo is not None:
-            timestamp = candidate.astimezone(dt.timezone.utc)
-            break
-    if timestamp is None:
-        return None
-
-    def address(key: str) -> str | None:
-        text = str(alert.get(key) or "").strip().lower()
-        if not text:
-            return ""
-        try:
-            ipaddress.ip_address(text)
-        except ValueError:
-            return None
-        return text
-
-    def port(key: str) -> int | None:
-        value = alert.get(key)
-        if value in (None, "") or isinstance(value, bool):
-            return None
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            return None
-        if str(value).strip() != str(parsed) or not 1 <= parsed <= 65535:
-            return None
-        return parsed
-
-    source_ip = address("source_ip")
-    destination_ip = address("destination_ip")
-    source_port = port("source_port")
-    destination_port = port("destination_port")
-    rule_id = str(alert.get("rule_id") or "").strip().lower()
-    transport = str(
-        alert.get("transport_protocol")
-        or alert.get("network_protocol")
-        or ""
-    ).strip().lower()
-    if (
-        source_ip is None
-        or destination_ip is None
-        or not (source_ip or destination_ip)
-        or destination_port is None
-        or not re.fullmatch(r"[a-z0-9_.:-]{1,128}", rule_id)
-        or not re.fullmatch(r"[a-z0-9_.-]{1,32}", transport)
-    ):
-        return None
-    return {
-        "timestamp": timestamp,
-        "source_ip": source_ip,
-        "destination_ip": destination_ip,
-        "source_port": source_port,
-        "destination_port": destination_port,
-        "rule_id": rule_id,
-        "transport": transport,
-    }
+    return _conclusion_authorization_evidence().prompt_event(prompt_package)
 
 
-def _canonical_authorization_coverage(
-    value: Any,
-) -> dict[str, Any] | None:
-    """Validate the prompt builder's exact, digest-bound coverage shape."""
-    import ipaddress
-
-    if not isinstance(value, dict) or set(value) != AUTHORIZATION_COVERAGE_KEYS:
-        return None
-
-    def strings(
-        key: str,
-        *,
-        maximum: int,
-        required: bool,
-        validator: Callable[[str], bool],
-    ) -> list[str] | None:
-        raw = value.get(key)
-        if not isinstance(raw, list) or len(raw) > maximum:
-            return None
-        if required and not raw:
-            return None
-        normalized: list[str] = []
-        for item in raw:
-            text = str(item or "").strip().lower()
-            if (
-                not text
-                or text != item
-                or not validator(text)
-                or text in normalized
-            ):
-                return None
-            normalized.append(text)
-        return normalized
-
-    def ports(key: str, *, maximum: int) -> list[int] | None:
-        raw = value.get(key)
-        if not isinstance(raw, list) or len(raw) > maximum:
-            return None
-        normalized: list[int] = []
-        for item in raw:
-            if (
-                isinstance(item, bool)
-                or not isinstance(item, int)
-                or not 1 <= item <= 65535
-                or item in normalized
-            ):
-                return None
-            normalized.append(item)
-        return normalized
-
-    def valid_ip(text: str) -> bool:
-        try:
-            ipaddress.ip_address(text)
-        except ValueError:
-            return False
-        return True
-
-    source_ips = strings(
-        "source_ips",
-        maximum=100,
-        required=False,
-        validator=valid_ip,
-    )
-    destination_ips = strings(
-        "destination_ips",
-        maximum=100,
-        required=False,
-        validator=valid_ip,
-    )
-    rule_ids = strings(
-        "rule_ids",
-        maximum=100,
-        required=True,
-        validator=lambda item: bool(
-            re.fullmatch(r"[a-z0-9_.:-]{1,128}", item)
-        ),
-    )
-    transport_protocols = strings(
-        "transport_protocols",
-        maximum=100,
-        required=True,
-        validator=lambda item: bool(
-            re.fullmatch(r"[a-z0-9_.-]{1,32}", item)
-        ),
-    )
-    source_ports = ports("source_ports", maximum=100)
-    destination_ports = ports("destination_ports", maximum=100)
-    raw_ranges = value.get("destination_port_ranges")
-    if not isinstance(raw_ranges, list) or len(raw_ranges) > 20:
-        return None
-    destination_port_ranges: list[list[int]] = []
-    for item in raw_ranges:
-        if (
-            not isinstance(item, list)
-            or len(item) != 2
-            or any(
-                isinstance(part, bool) or not isinstance(part, int)
-                for part in item
-            )
-            or not 1 <= item[0] <= item[1] <= 65535
-            or item in destination_port_ranges
-        ):
-            return None
-        destination_port_ranges.append(list(item))
-    authorization_start = _canonical_authorization_timestamp(
-        value.get("authorization_start")
-    )
-    authorization_end = _canonical_authorization_timestamp(
-        value.get("authorization_end")
-    )
-    if (
-        source_ips is None
-        or destination_ips is None
-        or not (source_ips or destination_ips)
-        or rule_ids is None
-        or source_ports is None
-        or destination_ports is None
-        or not (destination_ports or destination_port_ranges)
-        or transport_protocols is None
-        or authorization_start is None
-        or authorization_end is None
-        or authorization_end <= authorization_start
-    ):
-        return None
-    return {
-        "source_ips": source_ips,
-        "destination_ips": destination_ips,
-        "rule_ids": rule_ids,
-        "source_ports": source_ports,
-        "destination_ports": destination_ports,
-        "destination_port_ranges": destination_port_ranges,
-        "transport_protocols": transport_protocols,
-        "authorization_start": str(value["authorization_start"]),
-        "authorization_end": str(value["authorization_end"]),
-    }
+def _canonical_authorization_coverage(value: Any) -> dict[str, Any] | None:
+    return _conclusion_authorization_evidence().canonical_coverage(value)
 
 
 def _canonical_authorization_entry_covers_event(
-    entry: Any,
-    event: dict[str, Any],
+    entry: Any, event: dict[str, Any],
 ) -> bool:
-    if not isinstance(entry, dict) or set(entry) != AUTHORIZATION_ENTRY_KEYS:
-        return False
-    if (
-        entry.get("authorized") is not True
-        or entry.get("source") != "operator_assertion"
-    ):
-        return False
-    evidence_ref = str(entry.get("evidence_ref") or "")
-    match = AUTHORIZATION_EVIDENCE_REF_RE.fullmatch(evidence_ref)
-    coverage = _canonical_authorization_coverage(entry.get("coverage"))
-    if match is None or coverage is None:
-        return False
-    expected_digest = hashlib.sha256(
-        json.dumps(
-            {"coverage": coverage},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    if match.group(1) != expected_digest:
-        return False
-    start = _canonical_authorization_timestamp(
-        coverage["authorization_start"]
-    )
-    end = _canonical_authorization_timestamp(
-        coverage["authorization_end"]
-    )
-    assert start is not None and end is not None
-    destination_port = event["destination_port"]
-    return bool(
-        start <= event["timestamp"] <= end
-        and (
-            not coverage["source_ips"]
-            or event["source_ip"] in coverage["source_ips"]
-        )
-        and (
-            not coverage["destination_ips"]
-            or event["destination_ip"] in coverage["destination_ips"]
-        )
-        and event["rule_id"] in coverage["rule_ids"]
-        and (
-            not coverage["source_ports"]
-            or event["source_port"] in coverage["source_ports"]
-        )
-        and (
-            destination_port in coverage["destination_ports"]
-            or any(
-                lower <= destination_port <= upper
-                for lower, upper in coverage["destination_port_ranges"]
-            )
-        )
-        and event["transport"] in coverage["transport_protocols"]
-    )
+    return _conclusion_authorization_evidence().entry_covers_event(entry, event)
 
 
 def _has_structured_authorization_evidence(
     prompt_package: dict[str, Any] | None,
 ) -> bool:
-    """Accept only canonical builder entries covering this exact alert.
-
-    Asset expectations, vendor ownership, recurrence, model prose, and the
-    former top-level ``authorized/source/evidence_ref`` shortcut are not
-    authorization. Every accepted entry is shape-checked, digest-bound, and
-    re-evaluated against the prompt alert's endpoint/rule/port/transport/time
-    tuple. Missing or tampered fields fail closed.
-    """
-    if not isinstance(prompt_package, dict):
-        return False
-    raw = prompt_package.get("authorization_evidence")
-    if (
-        not isinstance(raw, dict)
-        or raw.get("status") != "operator_authorized"
-        or not isinstance(raw.get("entries"), list)
-        or not 1 <= len(raw["entries"]) <= 8
-    ):
-        return False
-    event = _prompt_authorization_event_tuple(prompt_package)
-    if event is None:
-        return False
-    return all(
-        _canonical_authorization_entry_covers_event(entry, event)
-        for entry in raw["entries"]
+    return _conclusion_authorization_evidence().has_structured_evidence(
+        prompt_package
     )
 
 
