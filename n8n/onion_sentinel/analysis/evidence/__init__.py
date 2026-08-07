@@ -1,5 +1,5 @@
 """Evidence-reference contracts and governed investigation state."""
 
-from . import references
+from . import references, validation
 
-__all__ = ["references"]
+__all__ = ["references", "validation"]

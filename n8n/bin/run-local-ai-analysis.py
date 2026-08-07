@@ -1672,6 +1672,12 @@ def _evidence_reference_policy():
     )
 
 
+def _evidence_validation():
+    _provider_routing()
+    from onion_sentinel.analysis.evidence import validation
+    return validation
+
+
 def _conclusion_authorization_evidence():
     _provider_routing()
     from onion_sentinel.analysis.conclusions import authorization_evidence
@@ -4380,69 +4386,12 @@ def validate_evidence_references(
     response: dict[str, Any],
     prompt_package: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Remove unverified citations from confidence inputs while retaining audit."""
-    if not isinstance(prompt_package, dict):
-        return response
-    contract = prompt_package.get("evidence_reference_contract")
-    if not isinstance(contract, dict):
-        return response
-    references = contract.get("references")
-    if not isinstance(references, list):
-        return response
-    catalog = {
-        str(item.get("ref")): item
-        for item in references
-        if isinstance(item, dict) and str(item.get("ref") or "")
-    }
-    cited = (
-        response.get("evidence_used")
-        if isinstance(response.get("evidence_used"), list)
-        else []
+    return _evidence_validation().apply(
+        response, prompt_package,
+        _evidence_validation().Dependencies(
+            bounded_reference=_bounded_reference,
+        ),
     )
-    valid: list[str] = []
-    invalid: list[str] = []
-    corroborating: list[str] = []
-    corroborating_source_classes: list[str] = []
-    non_corroborating: list[str] = []
-    for raw in cited[:100]:
-        reference = _bounded_reference(raw)
-        item = catalog.get(reference)
-        if item is None:
-            invalid.append(reference)
-            continue
-        if reference not in valid:
-            valid.append(reference)
-        if item.get("corroborating") is True:
-            if reference not in corroborating:
-                corroborating.append(reference)
-            source_class = _bounded_reference(item.get("source_class"))
-            if source_class and source_class not in corroborating_source_classes:
-                corroborating_source_classes.append(source_class)
-        else:
-            if reference not in non_corroborating:
-                non_corroborating.append(reference)
-    response["evidence_used"] = valid
-    response["_evidence_reference_validation"] = {
-        "schema": "onion-sentinel-evidence-reference-validation-v1",
-        "valid_refs": valid,
-        "invalid_refs": invalid,
-        "corroborating_refs": corroborating,
-        "corroborating_source_classes": corroborating_source_classes,
-        "non_corroborating_refs": non_corroborating,
-        "catalog_size": len(catalog),
-    }
-    if invalid:
-        gaps = response.get("evidence_gaps")
-        if not isinstance(gaps, list):
-            gaps = []
-        gap = (
-            f"{len(invalid)} model-supplied evidence reference(s) did not resolve "
-            "to the collector-owned evidence catalog."
-        )
-        if gap not in gaps:
-            gaps.append(gap)
-        response["evidence_gaps"] = gaps
-    return response
 
 
 def reviewer_observable_catalog(prompt_package: dict[str, Any]) -> list[dict[str, str]]:
