@@ -233,6 +233,16 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_alert_detail_composer.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_detail_composer.py",
+      "required_symbols": [
+        "analysis_sections",
+        "canonical_detail_report_markdown",
+        "generated_section_order"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_flow_page.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_flow_page.py",

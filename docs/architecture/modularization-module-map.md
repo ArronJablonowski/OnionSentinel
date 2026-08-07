@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (4,498
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (4,440
 lines).
 
 | Boundary | Responsibilities |
@@ -454,6 +454,11 @@ dashboard timestamp and table-cell policies directly.
 identity and summary sections, triage and analyst-note fallbacks, and complete
 raw/legacy/AI JSON evidence. These core sections now accept mapping-like view
 data and do not import SQLite or filesystem state.
+
+`dashboard_alert_detail_composer.py` is the pure orchestration boundary for
+the versioned Detailed Alert Report. It selects current-versus-legacy AI
+evidence, composes every required section exactly once, validates generated H2
+order, and returns immutable layout issues without reading runtime state.
 
 `dashboard_flow_page.py` owns the pure data-flow renderer, enrichment-service
 tiles, responsive pipeline styles, and privacy-toggle client. The builder

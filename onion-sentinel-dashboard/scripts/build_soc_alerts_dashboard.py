@@ -135,6 +135,7 @@ from dashboard_alert_detail_sections import (  # noqa: E402
     severity_label_from_row,
     triage_reasons_markdown,
 )
+from dashboard_alert_detail_composer import canonical_detail_report_markdown  # noqa: E402
 from dashboard_flow_page import (  # noqa: E402
     FLOW_PAGE_CSS,
     FLOW_PAGE_JS,
@@ -2249,65 +2250,6 @@ def passthrough_markdown_report_text(text: str) -> str:
     # Kept for compatibility with the existing render path. Full-fidelity mode
     # intentionally renders report text without redacting alert fields.
     return text
-
-
-def canonical_detail_report_markdown(
-    source_text: str,
-    row: sqlite3.Row | dict,
-    raw: dict,
-    ai_analysis: dict | None,
-    pcap_details: str,
-) -> DetailLayoutResult:
-    """Compose every report from the versioned layout contract in one pass."""
-    source_sections, legacy_sections, issues = split_detail_source_sections(source_text)
-    structured = standard_alert_detail_sections(raw)
-    enrichment = public_enrichment_markdown(raw, row_value(row, 'enrichment_json')) or '\n'.join([
-        '## Enriched Alert Details',
-        '',
-        'No public enrichment records were stored for this alert group.',
-    ])
-    ai_output = ai_analysis_output_markdown(ai_analysis)
-    ai_model = ai_model_used_markdown(ai_analysis)
-    if not ai_analysis and source_sections.get('ai analysis output'):
-        ai_output = source_sections['ai analysis output']
-    if not ai_analysis and source_sections.get('ai model used'):
-        ai_model = source_sections['ai model used']
-    sections = {
-        'triage reasons': triage_reasons_markdown(raw, source_sections),
-        'ai analysis output': ai_output,
-        'ai model used': ai_model,
-        'enriched alert details': enrichment,
-        'alert summary': alert_summary_markdown(row),
-        'analyst notes': analyst_notes_markdown(source_sections),
-        'parsed pcap evidence': pcap_details or '\n'.join([
-            '## Parsed PCAP Evidence',
-            '',
-            'No parsed Zeek/TShark PCAP summary is available for this alert group yet.',
-        ]),
-        **structured,
-        'raw logs': raw_logs_markdown(
-            raw,
-            row_value(row, 'alert_json'),
-            ai_analysis,
-            legacy_sections=legacy_sections,
-        ),
-    }
-    markdown = '\n\n'.join([
-        alert_identity_markdown(row, source_text),
-        *(sections[title] for title in DETAIL_REPORT_SECTION_ORDER),
-    ]).strip()
-    actual_order = [
-        title
-        for line in markdown.splitlines()
-        if (heading := normalized_heading_text(line)) and heading[0] == 2
-        for title in [DETAIL_REPORT_SOURCE_ALIASES.get(heading[1], heading[1])]
-    ]
-    if tuple(actual_order) != DETAIL_REPORT_SECTION_ORDER:
-        issues.append(
-            'The generated section sequence did not match the canonical contract: '
-            + ', '.join(actual_order or ['no H2 sections found'])
-        )
-    return DetailLayoutResult(markdown=markdown, issues=tuple(dict.fromkeys(issues)))
 
 
 def validate_rendered_detail_layout(rendered_html: str) -> list[str]:
