@@ -1810,6 +1810,26 @@ def _query_prompt_compaction_dependencies():
     )
 
 
+def _query_prompt_budget():
+    _provider_routing()
+    from onion_sentinel.analysis.query import prompt_budget
+    return prompt_budget
+
+
+def _query_prompt_budget_dependencies():
+    return _query_prompt_budget().Dependencies(
+        project_rows=lambda value, state: _prompt_project_investigation_rows(
+            value, state
+        ),
+        compact_audit=_compact_prompt_trusted_query_audit,
+        columnar_payload=lambda rounds, maximum_bytes: (
+            _columnar_investigation_prompt_payload(
+                rounds, maximum_bytes=maximum_bytes
+            )
+        ),
+    )
+
+
 def _query_prompt_facts():
     _provider_routing()
     from onion_sentinel.analysis.query import prompt_facts
@@ -5918,197 +5938,17 @@ def _investigation_prompt_payload(
     *,
     maximum_bytes: int = MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES,
 ) -> dict[str, Any]:
-    """Project all query rounds below cumulative row and serialized-byte caps."""
-    if (
-        isinstance(maximum_bytes, bool)
-        or not isinstance(maximum_bytes, int)
-        or maximum_bytes <= 0
-    ):
-        raise InvestigationQueryError(
-            "investigation query prompt byte budget must be a positive integer"
-        )
-    state: dict[str, int | bool] = {
-        "rows": 0,
-        "truncated": False,
-        "trusted_query_audits_compacted": 0,
-        "evidence_bodies_omitted": 0,
-        "round_metadata_omitted": 0,
-    }
-    projected = [
-        _prompt_project_investigation_rows(item, state)
-        for item in rounds
-    ]
-
-    def encoded_size(value: Any) -> int:
-        return len(_investigation_prompt_json_bytes(value))
-
-    def envelope(encoded_bytes: int | None = None) -> dict[str, Any]:
-        projection = {
-            "max_bytes": maximum_bytes,
-            "max_rows": MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS,
-            "rows_included": int(state["rows"]),
-            "truncated": bool(state["truncated"]),
-            "trusted_query_audits_compacted": int(
-                state["trusted_query_audits_compacted"]
-            ),
-            "evidence_bodies_omitted": int(
-                state["evidence_bodies_omitted"]
-            ),
-            "round_metadata_omitted": int(
-                state["round_metadata_omitted"]
-            ),
-        }
-        if encoded_bytes is not None:
-            projection["encoded_bytes"] = encoded_bytes
-        return {
-            "schema": INVESTIGATION_QUERY_RESULT_SCHEMA,
-            "rounds": projected,
-            "prompt_projection": projection,
-        }
-
-    # Reserve the maximum possible digit width for encoded_bytes during every
-    # admission decision. Otherwise adding that final accounting field can
-    # itself push an exactly-full payload over the hard limit.
-    encoded_size_reservation = (10 ** len(str(maximum_bytes))) - 1
-
-    def within_budget() -> bool:
-        return (
-            encoded_size(envelope(encoded_size_reservation))
-            <= maximum_bytes
-        )
-
-    # The executed query is durably retained outside this model-only
-    # projection. Compact its redundant rendered forms before discarding
-    # evidence. Core status, result-bound digests, evidence_ref, and a hash of
-    # the exact omitted audit remain available to the model.
-    while not within_budget():
-        audit_candidates: list[
-            tuple[int, dict[str, Any], int, dict[str, Any]]
-        ] = []
-        for round_item in projected:
-            if not isinstance(round_item, dict):
-                continue
-            for result in round_item.get("results") or []:
-                if not isinstance(result, dict):
-                    continue
-                trusted = result.get("trusted_query_audit")
-                if not isinstance(trusted, list):
-                    continue
-                for index, audit in enumerate(trusted):
-                    if (
-                        isinstance(audit, dict)
-                        and audit.get("prompt_projection")
-                        == "compacted_due_to_cumulative_byte_budget"
-                    ):
-                        continue
-                    compact = _compact_prompt_trusted_query_audit(audit)
-                    savings = encoded_size(audit) - encoded_size(compact)
-                    if savings > 0:
-                        audit_candidates.append(
-                            (savings, result, index, compact)
-                        )
-        if not audit_candidates:
-            break
-        _, result, index, compact = max(
-            audit_candidates,
-            key=lambda item: item[0],
-        )
-        result["trusted_query_audit"][index] = compact
-        state["trusted_query_audits_compacted"] = (
-            int(state["trusted_query_audits_compacted"]) + 1
-        )
-        state["truncated"] = True
-
-    # If compact provenance is not sufficient, replace the largest evidence
-    # bodies. All hashes bind the exact pre-byte-projection body.
-    while not within_budget():
-        candidates: list[tuple[int, dict[str, Any]]] = []
-        for round_item in projected:
-            if not isinstance(round_item, dict):
-                continue
-            for result in round_item.get("results") or []:
-                if (
-                    isinstance(result, dict)
-                    and "evidence" in result
-                    and not (
-                        isinstance(result["evidence"], dict)
-                        and result["evidence"].get("prompt_projection")
-                        == "omitted_due_to_cumulative_byte_budget"
-                    )
-                ):
-                    candidates.append((encoded_size(result["evidence"]), result))
-        if not candidates:
-            break
-        _, result = max(candidates, key=lambda item: item[0])
-        evidence = result.pop("evidence")
-        evidence_bytes = _investigation_prompt_json_bytes(evidence)
-        summary = {
-            "prompt_projection": "omitted_due_to_cumulative_byte_budget",
-            "evidence_bytes": len(evidence_bytes),
-            "evidence_sha256": hashlib.sha256(evidence_bytes).hexdigest(),
-        }
-        if isinstance(evidence, dict):
-            for key in ("query_digest", "result_digest", "evidence_ref"):
-                if key in evidence:
-                    summary[key] = evidence[key]
-        result["evidence"] = summary
-        state["truncated"] = True
-        state["evidence_bodies_omitted"] = (
-            int(state["evidence_bodies_omitted"]) + 1
-        )
-
-    # A pathological broker response can still bloat request/audit metadata.
-    # Replace those sections by hashes rather than exceeding the model prompt.
-    if not within_budget():
-        for round_item in projected:
-            if not isinstance(round_item, dict):
-                continue
-            for key in ("requests", "audit"):
-                original = round_item.get(key)
-                if original:
-                    original_bytes = _investigation_prompt_json_bytes(original)
-                    round_item[key] = {
-                        "prompt_projection": "omitted_due_to_cumulative_byte_budget",
-                        "bytes": len(original_bytes),
-                        "sha256": hashlib.sha256(original_bytes).hexdigest(),
-                    }
-                    state["truncated"] = True
-                    state["round_metadata_omitted"] = (
-                        int(state["round_metadata_omitted"]) + 1
-                    )
-                    if within_budget():
-                        break
-            if within_budget():
-                break
-
-    payload = envelope(0)
-    # Updating encoded_bytes can change its own digit width. Converge to the
-    # exact serialized size; the reservation above guarantees this cannot turn
-    # an admitted payload into an over-budget one.
-    for _ in range(8):
-        actual_size = encoded_size(payload)
-        if payload["prompt_projection"]["encoded_bytes"] == actual_size:
-            break
-        payload["prompt_projection"]["encoded_bytes"] = actual_size
-    if not (
-        payload["prompt_projection"]["encoded_bytes"] == encoded_size(payload)
-        and encoded_size(payload) <= maximum_bytes
-    ):
-        provenance_fallback = _columnar_investigation_prompt_payload(
-            rounds,
-            maximum_bytes=maximum_bytes,
-        )
-        if provenance_fallback is not None:
-            return provenance_fallback
-    if (
-        payload["prompt_projection"]["encoded_bytes"] != encoded_size(payload)
-        or encoded_size(payload) > maximum_bytes
-    ):
-        raise InvestigationQueryError(
-            "investigation query prompt projection exceeds its cumulative byte budget"
-        )
-    return payload
-
+    module = _query_prompt_budget()
+    return module.payload(
+        rounds,
+        maximum_bytes=maximum_bytes,
+        policy=module.Policy(
+            maximum_rows=MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS,
+            result_schema=INVESTIGATION_QUERY_RESULT_SCHEMA,
+        ),
+        dependencies=_query_prompt_budget_dependencies(),
+        error_type=InvestigationQueryError,
+    )
 
 def _admit_investigation_query_prompt(
     prompt_package: dict[str, Any],
