@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (7,407
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (6,922
 lines).
 
 | Boundary | Responsibilities |
@@ -401,6 +401,12 @@ behind the existing `/api/soc-incidents` contracts.
 tiles, responsive pipeline styles, and privacy-toggle client. The builder
 assembles `FlowPageViewModel` from live alert/report/model/notification metrics
 and re-exports the page assets during the compatibility migration.
+
+`dashboard_cyber_threat_intel_page.py` owns the pure CTI lifecycle workspace,
+responsive styles, and revision-aware CRUD client. The builder assembles a
+`CyberThreatIntelPageViewModel` from actionable local-signal counts and the
+assigned CTI model; CTI persistence and authorization remain behind the
+existing program API.
 
 ## Alert Store
 

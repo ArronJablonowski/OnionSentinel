@@ -10,7 +10,9 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_DIR = REPO_ROOT / "onion-sentinel-dashboard"
 BUILDER_PATH = DASHBOARD_DIR / "scripts" / "build_soc_alerts_dashboard.py"
+MODULE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_cyber_threat_intel_page.py"
 PORTAL_PATH = DASHBOARD_DIR / "report_portal.py"
+INSTALLER_PATH = REPO_ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
 
 
 def load_module(name: str, path: Path):
@@ -25,6 +27,7 @@ def load_module(name: str, path: Path):
 class CyberThreatIntelPageTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        cls.page = load_module("dashboard_cyber_threat_intel_page", MODULE_PATH)
         cls.builder = load_module("cti_page_test_builder", BUILDER_PATH)
         cls.portal = load_module("cti_page_test_portal", PORTAL_PATH)
 
@@ -105,6 +108,39 @@ class CyberThreatIntelPageTests(unittest.TestCase):
         self.assertIn("elif page_key == 'cyber_threat_intel':", source)
         self.assertIn("cyber_threat_intel_page_section(reports)", source)
         self.assertIn("inject_cyber_threat_intel_assets(rendered)", source)
+
+    def test_builder_reexports_bounded_cti_module_assets(self):
+        self.assertIs(
+            self.builder.render_cyber_threat_intel_page,
+            self.page.render_cyber_threat_intel_page,
+        )
+        self.assertIs(
+            self.builder.inject_cyber_threat_intel_assets,
+            self.page.inject_cyber_threat_intel_assets,
+        )
+        self.assertIs(self.builder.CYBER_THREAT_INTEL_CSS, self.page.CYBER_THREAT_INTEL_CSS)
+        self.assertIs(self.builder.CYBER_THREAT_INTEL_JS, self.page.CYBER_THREAT_INTEL_JS)
+        self.assertLessEqual(len(MODULE_PATH.read_text(encoding="utf-8").splitlines()), 600)
+
+    def test_cti_view_model_escapes_assigned_model(self):
+        rendered = self.page.render_cyber_threat_intel_page(
+            self.page.CyberThreatIntelPageViewModel(
+                urgent_local_signals=2,
+                repeated_local_signals=3,
+                model_label='<script>alert("unsafe")</script>',
+            )
+        )
+        self.assertIn('<strong>2</strong><em>Open critical/high alert groups</em>', rendered)
+        self.assertIn('<strong>3</strong><em>Open groups repeated 5+ times</em>', rendered)
+        self.assertIn('&lt;script&gt;alert(&quot;unsafe&quot;)&lt;/script&gt;', rendered)
+
+    def test_installer_copies_cti_module_once(self):
+        installer = INSTALLER_PATH.read_text(encoding="utf-8")
+        command = (
+            'cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_cyber_threat_intel_page.py" '
+            '"$DASHBOARD_RUNTIME_DIR/scripts/dashboard_cyber_threat_intel_page.py"'
+        )
+        self.assertEqual(installer.count(command), 1)
 
 
 if __name__ == "__main__":

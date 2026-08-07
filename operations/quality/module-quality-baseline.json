@@ -52,7 +52,7 @@
       "max_lines": 14366
     },
     "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py": {
-      "max_lines": 7407
+      "max_lines": 6922
     },
     "onion-sentinel-dashboard/software_inventory.py": {
       "max_lines": 1181
@@ -955,9 +955,6 @@
     "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py::current_soc_analysis_model": {
       "max_complexity": 20
     },
-    "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py::cyber_threat_intel_page_section": {
-      "max_lines": 192
-    },
     "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py::executive_home_section": {
       "max_complexity": 37
     },
@@ -1284,5 +1281,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "604bd542462bcfeeedc047fdcb3e9c306993f3e5"
+  "source_release": "990a8503d850a11dfd92129ca2004f3be6d5230a"
 }
