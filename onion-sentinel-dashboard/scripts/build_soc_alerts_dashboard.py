@@ -79,6 +79,10 @@ from dashboard_publication import (  # noqa: E402
     publish_static_pages,
     publish_status_json,
 )
+from dashboard_soc_shell_content import (  # noqa: E402
+    render_alert_table_shell,
+    render_soc_overview,
+)
 from dashboard_logs_page import logs_page_section  # noqa: E402
 from dashboard_asset_inventory_page import asset_inventory_page_section  # noqa: E402
 from dashboard_ac_hunter_page import ac_hunter_page_section  # noqa: E402
@@ -2133,22 +2137,19 @@ def write_detail_fragments(reports: list[AlertReport]) -> list[Path]:
 
 
 def build_html(reports: list[AlertReport]) -> str:
-    # Preserve the existing Onion Sentinel UI while swapping the data source behind
-    # it. The next scale step is to replace this full-page render with paginated
-    # API calls.
+    """Compose the generated shell from live report metrics and pure fragments."""
     now = dt.datetime.now().astimezone().replace(microsecond=0).isoformat().replace('T', '  ')
     latest = reports[0] if reports else None
     active_count = active_alert_count(reports)
-    total_bytes = sum(r.size for r in reports)
-    pcap_ingest_bytes = directory_size_bytes(PCAP_ARTIFACT_DIR)
     active_reports = active_alert_reports(reports)
-    severity_levels = ['critical', 'high', 'medium', 'low', 'informational']
+    severity_levels = ('critical', 'high', 'medium', 'low', 'informational')
     severity_labels = {'critical': 'Crit', 'high': 'High', 'medium': 'Med', 'low': 'Low', 'informational': 'Info'}
-    total_severity_counts = {level: 0 for level in severity_levels}
+    severity_counts = {level: 0 for level in severity_levels}
     for report in active_reports:
-        total_severity_counts[criticality_class(report.criticality)] = total_severity_counts.get(criticality_class(report.criticality), 0) + 1
-    total_severity_html = ''.join(
-        f'<span class="sev-chip sev-{level}{" sev-zero" if total_severity_counts[level] == 0 else ""}"><b>{total_severity_counts[level]}</b> {severity_labels[level]}</span>'
+        level = criticality_class(report.criticality)
+        severity_counts[level] = severity_counts.get(level, 0) + 1
+    severity_html = ''.join(
+        f'<span class="sev-chip sev-{level}{" sev-zero" if severity_counts[level] == 0 else ""}"><b>{severity_counts[level]}</b> {severity_labels[level]}</span>'
         for level in severity_levels
     )
     latest_extra_html = (
@@ -2157,101 +2158,25 @@ def build_html(reports: list[AlertReport]) -> str:
     ) if latest else '<span class="metric-detail-row"><b>Source</b><span>—</span></span>'
     latest_alert = max(reports, key=last_seen_ts_for) if reports else None
     latest_alert_text = compact_minute_timestamp(last_seen_iso_for(latest_alert)) if latest_alert else 'No alerts yet'
-    ai_state = ai_activity_state(reports)
-    soc_metrics_html = ''.join(
-        [
-            render_active_alerts_metric(total_severity_html),
-            render_latest_network_metric(latest_extra_html),
-            render_ai_activity_metric(ai_state),
-            render_alert_status_metric(),
-            render_size_metric_card(human_size(total_bytes), latest_alert_text, human_size(pcap_ingest_bytes)),
-        ]
-    )
-    mobile_triage_controls = '''<div class="mobile-triage-bar" aria-label="Mobile alert triage controls"><div class="severity-chip-row"><button class="severity-chip active" type="button" data-severity-filter="all">All</button><button class="severity-chip sev-critical" type="button" data-severity-filter="critical">Critical</button><button class="severity-chip sev-high" type="button" data-severity-filter="high">High</button><button class="severity-chip sev-medium" type="button" data-severity-filter="medium">Medium</button><button class="severity-chip sev-low" type="button" data-severity-filter="low">Low</button><button class="severity-chip sev-informational" type="button" data-severity-filter="informational">Info</button></div><label class="mobile-sort-label">Sort <select id="mobile-sort"><option value="priority">Priority</option><option value="newest">Newest</option><option value="risk">Risk score</option></select></label></div>'''
-    table_html = f'''{mobile_triage_controls}<div class="mobile-alert-list" aria-label="Mobile SOC alert cards"></div><div class="table-card"><table class="alert-table"><thead><tr><th></th><th><button class="sort-header" type="button" data-sort-key="count">Count<span class="sort-indicator"></span></button></th><th class="severity-header"><button class="sort-header" type="button" data-sort-key="severity">Severity<span class="sort-indicator"></span></button></th><th><button class="sort-header" type="button" data-sort-key="last_seen">Last Seen<span class="sort-indicator"></span></button></th><th><button class="sort-header" type="button" data-sort-key="alert">Alert<span class="sort-indicator"></span></button></th><th class="ip-header"><button class="sort-header" type="button" data-sort-key="source_ip">Source IP<span class="sort-indicator"></span></button></th><th class="ip-header"><button class="sort-header" type="button" data-sort-key="destination_ip">Destination IP<span class="sort-indicator"></span></button></th><th class="port-header"><button class="sort-header" type="button" data-sort-key="destination_port">Destination Port<span class="sort-indicator"></span></button></th><th class="ai-header"><button class="sort-header" type="button" data-sort-key="ai">AI<span class="sort-indicator"></span></button></th><th class="enrichment-header"><button class="sort-header" type="button" data-sort-key="enrichment">Enrichment<span class="sort-indicator"></span></button></th><th class="pcap-header"><button class="sort-header" type="button" data-sort-key="pcap">PCAP<span class="sort-indicator"></span></button></th><th><button class="sort-header" type="button" data-sort-key="log_source">Log Source<span class="sort-indicator"></span></button></th><th><button class="sort-header" type="button" data-sort-key="size">Size<span class="sort-indicator"></span></button></th><th class="wide-only"><button class="sort-header" type="button" data-sort-key="risk">Risk<span class="sort-indicator"></span></button></th><th>Action</th><th></th></tr></thead></table><div class="api-pagination"><div class="api-page-size"><span>Rows</span><select id="api-page-size" aria-label="Rows per page"><option value="25" selected>25</option><option value="50">50</option><option value="75">75</option><option value="100">100</option><option value="250">250</option></select></div><div class="api-page-controls" aria-label="Alert table pagination"><button id="api-prev-page" class="ack-button api-page-button" type="button">Previous</button><select id="api-page-select" aria-label="Alert table page"><option value="1">Page 1</option></select><button id="api-next-page" class="ack-button api-page-button" type="button">Next</button></div><span id="api-alert-page-status" class="api-page-status">Loading alerts from SQLite API...</span><div class="api-table-metrics" aria-label="Alert table totals"><span class="api-table-metric"><b id="api-visible-total">0</b> Active</span><span class="api-table-metric suppressed"><b id="api-suppressed-total">0</b> Suppressed</span><span class="api-table-metric acknowledged"><b id="api-acknowledged-total">0</b> Acknowledged</span></div></div></div>'''
-    table_html = table_html.replace(
-        '<th class="enrichment-header">',
-        '<th class="outcome-header">Detection Outcome</th><th class="enrichment-header">',
-    )
-    pcap_header = '<th class="pcap-header"><button class="sort-header" type="button" data-sort-key="pcap">PCAP<span class="sort-indicator"></span></button></th>'
-    table_html = table_html.replace(
-        pcap_header,
-        pcap_header + '<th class="pcap-size-header">PCAP Size</th>',
-    )
-    table_html += '''
-    <style id="soc-alert-evidence-column-styles">
-      .alert-table{min-width:1740px}
-      .outcome-header,.outcome-cell{min-width:142px;text-align:center;white-space:nowrap}
-      .pcap-size-header,.pcap-size-cell{min-width:96px;text-align:center;white-space:nowrap;font-variant-numeric:tabular-nums}
-      .outcome-pill{display:inline-block;font-size:11px;font-weight:900;line-height:1.15;text-transform:uppercase;white-space:nowrap}
-      .outcome-malicious{color:var(--red)}
-      .outcome-suspicious{color:var(--orange)}
-      .outcome-benign{color:var(--green)}
-      .outcome-false-positive{color:var(--cyan)}
-      .outcome-informational{color:#93c5fd}
-      .outcome-inconclusive,.outcome-none{color:#94a3b8}
-      .pinned-alert-row{grid-template-columns:42px 62px 74px 166px minmax(300px,1.25fr) minmax(126px,.68fr) minmax(126px,.68fr) 82px 112px 150px 112px 112px 96px 142px 62px 118px 38px}
-      @media(max-width:1180px), (max-height:600px){.alert-table{min-width:0}}
-    </style>
-    '''
-    overview_html = f'''
-    <section id="overview-view" class="view-section overview-view" aria-label="SOC Alerts overview">
-      <div class="overview-grid">
-        <section class="flow-hero" aria-label="Resilient SOC alert and evidence data flow">
-          <div class="flow-copy">
-            <span class="flow-kicker">Network flow</span>
-            <h2>Resilient SOC Alert Intake & AI Triage</h2>
-            <p>Alerts use a durable relay and SQLite-backed intake path. PCAP travels separately as read-only evidence, then enrichment, parsed packet findings, correlation context, and agent memory converge at the assigned analysis model.</p>
-          </div>
-          <div class="network-diagram" role="img" aria-label="Security Onion alert data flow diagram">
-            <div class="flow-node node-so">
-              <span class="node-icon">SO</span>
-              <strong>Security Onion</strong>
-              <span class="flow-ip-address" data-ip="192.168.1.7">xxx.xxx.xxx.xxx</span>
-              <em>Alert source</em>
-            </div>
-            <div class="flow-link link-one"><span>restricted SSH poll</span></div>
-            <div class="flow-node node-pi">
-              <span class="node-icon">Pi</span>
-              <strong>Relay VLAN 888</strong>
-              <span class="flow-ip-address" data-ip="10.88.8.8">xxx.xxx.xxx.xxx</span>
-              <em>Transport only</em>
-            </div>
-            <div class="flow-link link-two"><span>webhook POST</span></div>
-            <div class="flow-node node-mac">
-              <span class="node-icon">AI</span>
-              <strong>Mac Studio AI Lab</strong>
-              <span class="flow-ip-address" data-ip="10.77.7.225">xxx.xxx.xxx.xxx</span>
-              <em>n8n + SQLite</em>
-            </div>
-            <div class="flow-fanout" aria-hidden="true"></div>
-            <div class="flow-output output-dashboard"><b>Dashboard</b><span>Grouped Count rows</span></div>
-            <div class="flow-output output-markdown"><b>Markdown</b><span>Reports + rollups</span></div>
-            <div class="flow-output output-ai"><b>Assigned AI</b><span>Prompt packages</span></div>
-            <div class="flow-output output-phone"><b>Telegram</b><span>High/critical only</span></div>
-          </div>
-        </section>
-        <section class="overview-status" aria-label="Pipeline status">
-          <div class="status-tile"><span>Source</span><strong>Security Onion</strong><em>Restricted export wrapper</em></div>
-          <div class="status-tile"><span>Relay</span><strong>Raspberry Pi</strong><em>5 minute timer</em></div>
-          <div class="status-tile"><span>Store</span><strong>SQLite</strong><em>{len(reports)} grouped detections</em></div>
-          <div class="status-tile"><span>Analyst</span><strong>Assigned AI</strong><em>Daily rollups ready</em></div>
-        </section>
-      </div>
-    </section>'''
-    return render_dashboard_shell(
-        DashboardShellViewModel(
-            navigation_html=build_nav_html('home', active_count),
-            overview_html=overview_html,
-            metrics_html=soc_metrics_html,
-            alert_table_html=table_html,
-            generated_at=html.escape(now),
-            database_path=html.escape(str(DB_PATH).replace(str(HOME), '~')),
-            source_directory=html.escape(str(SOURCE_DIR).replace(str(HOME), '~')),
-            adjudication_modal_html=analyst_adjudication_modal_html(),
-        )
-    )
-
+    total_bytes = sum(report.size for report in reports)
+    pcap_ingest_bytes = directory_size_bytes(PCAP_ARTIFACT_DIR)
+    metrics_html = ''.join((
+        render_active_alerts_metric(severity_html),
+        render_latest_network_metric(latest_extra_html),
+        render_ai_activity_metric(ai_activity_state(reports)),
+        render_alert_status_metric(),
+        render_size_metric_card(human_size(total_bytes), latest_alert_text, human_size(pcap_ingest_bytes)),
+    ))
+    return render_dashboard_shell(DashboardShellViewModel(
+        navigation_html=build_nav_html('home', active_count),
+        overview_html=render_soc_overview(len(reports)),
+        metrics_html=metrics_html,
+        alert_table_html=render_alert_table_shell(),
+        generated_at=html.escape(now),
+        database_path=html.escape(str(DB_PATH).replace(str(HOME), '~')),
+        source_directory=html.escape(str(SOURCE_DIR).replace(str(HOME), '~')),
+        adjudication_modal_html=analyst_adjudication_modal_html(),
+    ))
 
 def _cyber_threat_intel_page_view(reports: list[AlertReport]) -> CyberThreatIntelPageViewModel:
     actionable = [

@@ -546,6 +546,12 @@ route aliases. `DashboardPublicationPaths` makes every source and destination
 explicit; the builder's compatibility wrappers resolve mutable runtime/test
 globals at call time and retain the existing CLI and output contract.
 
+`dashboard_soc_shell_content.py` owns the immutable API-backed alert-table
+scaffold, responsive evidence-column contract, mobile triage controls, and
+resilient intake overview. The builder supplies only live severity, AI, size,
+path, and report-count values before composing these pure fragments into the
+shared shell.
+
 `dashboard_flow_page.py` owns the pure data-flow renderer, enrichment-service
 tiles, responsive pipeline styles, and privacy-toggle client. The builder
 assembles `FlowPageViewModel` from live alert/report/model/notification metrics

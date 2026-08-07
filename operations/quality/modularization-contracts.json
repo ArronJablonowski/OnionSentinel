@@ -393,6 +393,15 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_soc_shell_content.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_soc_shell_content.py",
+      "required_symbols": [
+        "render_alert_table_shell",
+        "render_soc_overview"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_flow_page.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_flow_page.py",
