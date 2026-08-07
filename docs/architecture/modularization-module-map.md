@@ -137,6 +137,8 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
 - Elastic/OQL purpose, pack, aggregation, bounded-observable, size, window,
   and event-tuple request normalization now live in
   `analysis.query.security_onion` behind explicit policy and dependency ports.
+- Exact public-enrichment indicators and their trusted original/discovered
+  evidence authorization now live in `analysis.query.enrichment`.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports

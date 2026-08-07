@@ -1780,6 +1780,12 @@ def _query_event_tuple():
     return event_tuple
 
 
+def _query_enrichment():
+    _provider_routing()
+    from onion_sentinel.analysis.query import enrichment
+    return enrichment
+
+
 def _query_event_tuple_dependencies():
     module = _query_event_tuple()
     return module.Dependencies(
@@ -4495,44 +4501,11 @@ def normalize_investigation_query_request(
             raise InvestigationQueryError(str(exc)) from exc
         normalized_parameters = {"target_alias": target_alias, "query": query}
     elif backend == "enrichment":
-        indicator_type = _query_text(parameters.get("indicator_type"), 16).lower()
-        indicator = _query_text(parameters.get("indicator"), 2048).strip()
-        if indicator_type not in {"ip", "domain", "url", "hash", "cve"}:
-            raise InvestigationQueryError("unsupported enrichment indicator type")
-        if not indicator:
-            raise InvestigationQueryError("enrichment request requires one exact indicator")
-        permitted: set[tuple[str, str]] = set()
-        if isinstance(authorization_context, dict):
-            network_observables = authorization_context.get("permitted_observables")
-            if isinstance(network_observables, dict):
-                for value in network_observables.get("ips", []):
-                    permitted.add(("ip", str(value).strip().lower()))
-                for value in network_observables.get("domains", []):
-                    permitted.add(("domain", str(value).strip().rstrip(".").lower()))
-            initial = authorization_context.get("permitted_enrichment_indicators")
-            if isinstance(initial, dict):
-                for kind, values in initial.items():
-                    if isinstance(values, list):
-                        permitted.update(
-                            (str(kind).lower(), str(value).strip().rstrip(".").lower())
-                            for value in values
-                            if str(value).strip()
-                        )
-            for item in authorization_context.get("discovered_observables", []):
-                if not isinstance(item, dict):
-                    continue
-                kind = {"ips": "ip", "domains": "domain"}.get(str(item.get("kind") or ""))
-                if kind:
-                    permitted.add((kind, str(item.get("value") or "").strip().rstrip(".").lower()))
-        normalized_indicator = indicator.rstrip(".") if indicator_type == "domain" else indicator
-        if (indicator_type, normalized_indicator.lower()) not in permitted:
-            raise InvestigationQueryError(
-                "enrichment indicator is not bound to original or provenance-validated evidence"
-            )
-        normalized_parameters = {
-            "indicator_type": indicator_type,
-            "indicator": normalized_indicator,
-        }
+        normalized_parameters = _query_enrichment().normalize(
+            parameters,
+            authorization_context=authorization_context,
+            error_type=InvestigationQueryError,
+        )
     else:
         operation = _query_text(parameters.get("operation"), 64).lower()
         if operation not in INVESTIGATION_DERIVED_OPERATIONS:

@@ -1,5 +1,7 @@
 """Provider-neutral governed investigation query contracts."""
 
-from . import event_tuple, primitives, security_onion, window
+from . import enrichment, event_tuple, primitives, security_onion, window
 
-__all__ = ["event_tuple", "primitives", "security_onion", "window"]
+__all__ = [
+    "enrichment", "event_tuple", "primitives", "security_onion", "window",
+]
