@@ -10020,6 +10020,7 @@ def write_outputs(
 
 def main() -> int:
     from onion_sentinel import pipeline as pipeline_module
+    from onion_sentinel import startup as startup_module
     from onion_sentinel.analysis.persistence import memory_policy as memory_policy_module
     from onion_sentinel.analysis.persistence import postcommit as postcommit_module
     from onion_sentinel.analysis.persistence import transaction as transaction_module
@@ -10132,71 +10133,35 @@ def main() -> int:
                 "refusing to invoke another model until the ordered spool "
                 "can reach alert-store"
             )
-        if args.generate_prompt:
-            prompt_path = generate_prompt(args)
-        if prompt_path is None:
-            prompt_path = latest_prompt(args.prompt_dir)
-
-        prompt_package = load_json(prompt_path, args.max_prompt_bytes)
-        pipeline_context.prompt_path = prompt_path
-        pipeline_context.prompt_package = dict(prompt_package)
-        pipeline_context.advance(pipeline_module.Stage.LOAD, "prompt package loaded")
-        if prompt_package.get("package_type") != "soc-ai-investigation-prompt":
-            raise SystemExit(f"unexpected prompt package type in {prompt_path}")
-        agent_role = str(prompt_package.get("agent_role") or "soc-analyst").strip().lower()
-        if agent_role not in CYBER_SECURITY_AGENT_ROLES:
-            raise SystemExit(f"unexpected cyber-security agent role in {prompt_path}: {agent_role}")
-        config_dir = Path(
-            getattr(args, "ai_settings_file", DEFAULT_AI_SETTINGS_FILE)
-            or DEFAULT_AI_SETTINGS_FILE
-        ).parent
-        canonical_prompt_paths = {
-            "system_prompt_file": role_prompt_file(config_dir, agent_role),
-            "second_opinion_system_prompt_file": role_second_opinion_prompt_file(
-                config_dir,
-                agent_role,
+        attested = startup_module.load_and_attest(
+            pipeline_context, args,
+            policy=startup_module.PromptAttestationPolicy(
+                package_type="soc-ai-investigation-prompt",
+                allowed_roles=frozenset(CYBER_SECURITY_AGENT_ROLES),
+                default_settings_file=DEFAULT_AI_SETTINGS_FILE,
+                default_live_osquery_file=DEFAULT_LIVE_OSQUERY_CONFIG_FILE,
+                controlled_identity=controlled_result_identity,
             ),
-        }
-        for field, expected_path in canonical_prompt_paths.items():
-            declared_path = str(prompt_package.get(field) or "").strip()
-            if (
-                declared_path
-                and Path(declared_path).expanduser() != expected_path.expanduser()
-            ):
-                raise SystemExit(
-                    f"prompt package {field} does not match the canonical "
-                    f"{agent_role} runtime path"
-                )
-        if agent_role == "incident-responder":
-            validate_incident_evidence_artifact(prompt_package.get("incident_response_evidence"))
-
-        settings = effective_ai_settings(args)
-        require_controlled_evaluation_routes(
-            controlled_result_identity,
-            args,
-            settings,
-            agent_role,
-        )
-        pipeline_context.settings = dict(settings)
-        pipeline_context.advance(
-            pipeline_module.Stage.ATTEST,
-            "prompt role, evidence, and model routes attested",
-        )
-        live_osquery_config = prepare_live_osquery_context(
-            prompt_package,
-            agent_role,
-            getattr(
-                args,
-                "live_osquery_config",
-                DEFAULT_LIVE_OSQUERY_CONFIG_FILE,
+            ports=startup_module.PromptAttestationPorts(
+                generate_prompt=generate_prompt,
+                latest_prompt=latest_prompt,
+                load_json=load_json,
+                role_prompt_file=role_prompt_file,
+                role_review_file=role_second_opinion_prompt_file,
+                validate_incident_evidence=validate_incident_evidence_artifact,
+                effective_settings=effective_ai_settings,
+                require_controlled_routes=require_controlled_evaluation_routes,
+                prepare_live_osquery=prepare_live_osquery_context,
+                prepare_enrichment=prepare_investigation_enrichment_context,
+                attach_evidence_contract=attach_evidence_reference_contract,
             ),
         )
-        enrichment_config = prepare_investigation_enrichment_context(
-            prompt_package,
-            agent_role,
-            args.alert_store_url,
-        )
-        attach_evidence_reference_contract(prompt_package)
+        prompt_path = attested.prompt_path
+        prompt_package = attested.prompt_package
+        agent_role = attested.agent_role
+        settings = attested.settings
+        live_osquery_config = attested.live_osquery_config
+        enrichment_config = attested.enrichment_config
         enabled_routes = enabled_agent_model_routes(settings)
         assigned_route = canonical_model_route(
             (settings.get("agent_models") or {}).get(agent_role),
