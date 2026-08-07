@@ -332,6 +332,13 @@ analysis, latest prior SOC analysis, and review records while explicit lookup
 errors preserve schema-unavailable versus case-not-found behavior. The module
 has no HTTP, filesystem, asset-resolution, or presentation responsibility.
 
+`portal_incident_reanalysis.py` owns bounded reanalysis-progress request policy
+and read-side aggregation: normalized allowlisted run IDs, newest-run
+selection, per-status case counts, requested-run case pages, missing-schema
+state, and the stable progress payload. It ignores unknown durable case states
+instead of allowing them to corrupt the five recognized progress buckets and
+has no HTTP or mutation responsibility.
+
 `portal_incident_review_model.py` owns pure Incident Response detail-review
 presentation: evidence coverage and freshness, primary-versus-effective
 outcomes, reviewer disagreement, bounded disputed fields, adjudication, and

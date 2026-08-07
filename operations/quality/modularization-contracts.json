@@ -89,6 +89,18 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_incident_reanalysis.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_incident_reanalysis.py",
+      "required_symbols": [
+        "IncidentReanalysisProgress",
+        "IncidentReanalysisQueryError",
+        "compose_reanalysis_progress_payload",
+        "load_reanalysis_progress",
+        "parse_reanalysis_run_id"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_incident_repository.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_incident_repository.py",

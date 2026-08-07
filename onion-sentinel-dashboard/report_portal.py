@@ -55,6 +55,12 @@ from portal_incident_read_model import (
     parse_incident_list_request,
     select_incident_analysis,
 )
+from portal_incident_reanalysis import (
+    IncidentReanalysisQueryError,
+    compose_reanalysis_progress_payload,
+    load_reanalysis_progress,
+    parse_reanalysis_run_id,
+)
 from portal_incident_review_model import (
     compose_incident_detail_payload,
     compose_incident_review_state,
@@ -11105,92 +11111,19 @@ def soc_incident_bulk_reanalysis_response(
 def soc_incident_reanalysis_runs_response(
     query: dict[str, list[str]],
 ) -> tuple[int, dict]:
-    run_id = str((query.get("run_id") or [""])[0] or "").strip().lower()
-    if run_id and not re.fullmatch(r"irr-[a-z0-9-]{1,64}", run_id):
-        return soc_alert_api_error("Invalid incident reanalysis run id")
+    try:
+        run_id = parse_reanalysis_run_id(query)
+    except IncidentReanalysisQueryError as exc:
+        return soc_alert_api_error(str(exc))
     try:
         with soc_alert_db_connect() as conn:
-            if not sqlite_table_exists(conn, "incident_reanalysis_runs"):
-                return 200, {
-                    "ok": True,
-                    "latest_run": None,
-                    "runs": [],
-                    "cases": [],
-                    "schema_ready": False,
-                }
-            where_sql = "WHERE run_id = ?" if run_id else ""
-            arguments: list[object] = [run_id] if run_id else []
-            runs = [
-                dict(row)
-                for row in conn.execute(
-                    f"""
-                    SELECT run_id, release_id, scope, status, requested_by, reason,
-                           total_count, created_at, updated_at, completed_at
-                    FROM incident_reanalysis_runs
-                    {where_sql}
-                    ORDER BY created_at DESC, run_id DESC LIMIT 20
-                    """,
-                    arguments,
-                ).fetchall()
-            ]
-            run_ids = [str(item.get("run_id") or "") for item in runs]
-            counts_by_run: dict[str, dict[str, int]] = {
-                item: {
-                    "queued": 0,
-                    "running": 0,
-                    "completed": 0,
-                    "failed": 0,
-                    "skipped": 0,
-                }
-                for item in run_ids
-            }
-            if run_ids and sqlite_table_exists(conn, "incident_reanalysis_run_cases"):
-                placeholders = ",".join("?" for _ in run_ids)
-                for row in conn.execute(
-                    f"""
-                    SELECT run_id, status, COUNT(*) AS count
-                    FROM incident_reanalysis_run_cases
-                    WHERE run_id IN ({placeholders})
-                    GROUP BY run_id, status
-                    """,
-                    run_ids,
-                ).fetchall():
-                    run_counts = counts_by_run.get(str(row["run_id"] or ""))
-                    if run_counts is not None and str(row["status"] or "") in run_counts:
-                        run_counts[str(row["status"])] = int(row["count"] or 0)
-            for item in runs:
-                item["total_count"] = int(item.get("total_count") or 0)
-                item["counts"] = counts_by_run.get(str(item.get("run_id") or ""), {})
-            selected_run_id = run_id or (run_ids[0] if run_ids else "")
-            cases = []
-            if selected_run_id and sqlite_table_exists(conn, "incident_reanalysis_run_cases"):
-                cases = [
-                    dict(row)
-                    for row in conn.execute(
-                        """
-                        SELECT run_id, case_id, group_id, dashboard_group_id,
-                               representative_alert_id, status, skip_reason,
-                               latest_error, queued_at, started_at, completed_at,
-                               updated_at
-                        FROM incident_reanalysis_run_cases
-                        WHERE run_id = ?
-                        ORDER BY case_id ASC LIMIT 2000
-                        """,
-                        (selected_run_id,),
-                    ).fetchall()
-                ]
+            progress = load_reanalysis_progress(conn, run_id)
     except (FileNotFoundError, sqlite3.Error) as exc:
         return soc_alert_api_error(
             f"Incident reanalysis progress unavailable: {exc}",
             HTTPStatus.SERVICE_UNAVAILABLE,
         )
-    return 200, {
-        "ok": True,
-        "latest_run": runs[0] if runs else None,
-        "runs": runs,
-        "cases": cases,
-        "schema_ready": True,
-    }
+    return 200, compose_reanalysis_progress_payload(progress)
 
 
 def soc_incident_current_analysis(
