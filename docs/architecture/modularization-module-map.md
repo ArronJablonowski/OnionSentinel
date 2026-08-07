@@ -324,6 +324,15 @@ settings lock and public normalization facade. This policy module reads only
 the two documented default environment variables and performs no persistence,
 HTTP, filesystem reads or writes, process execution, or network access.
 
+`portal_admin_dashboard.py` owns the Administration dashboard view model and
+escaped rendering. Its explicit source boundary collects service health,
+running/latest actions, update and reboot state, version/availability details,
+bounded state-file metadata, log tails, and trusted cron fragments before pure
+rendering. `portal_admin_dashboard_assets.py` owns the stable page CSS and
+browser-side service-start/reboot-confirmation behavior. `report_portal.py`
+retains a small facade that supplies existing host, process, filesystem, and
+shell callbacks; the renderer itself cannot invoke an undeclared system action.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and
