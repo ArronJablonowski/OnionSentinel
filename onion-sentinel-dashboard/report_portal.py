@@ -134,6 +134,7 @@ from portal_soc_pcap_artifacts import (
     has_parsed_pcap as _modular_has_parsed_pcap,
     newest_pcap_analysis_record,
 )
+from portal_soc_pcap_renderer import render_pcap_summary
 from portal_incident_actions import (
     IncidentStatusPayloadError,
     normalize_incident_status_payload,
@@ -4935,77 +4936,8 @@ def soc_alert_pcap_analysis_record(group_id: str) -> dict | None:
 
 
 def soc_alert_pcap_summary_html(record: dict) -> str:
-    """Render bounded, escaped parsed packet evidence for lazy detail loading."""
-    def esc(value: object) -> str:
-        return html.escape("n/a" if value is None else str(value))
-
-    def compact_json(value: object, limit: int = 2400) -> str:
-        text = json.dumps(value, indent=2, sort_keys=True) if not isinstance(value, str) else value
-        text = text.strip() or "n/a"
-        if len(text) > limit:
-            text = text[:limit].rstrip() + "\n... truncated ..."
-        return html.escape(text)
-
-    request = record.get("request") if isinstance(record.get("request"), dict) else {}
-    zeek = record.get("zeek") if isinstance(record.get("zeek"), dict) else {}
-    tshark = record.get("tshark") if isinstance(record.get("tshark"), dict) else {}
-    pcap_files = record.get("pcap_files") if isinstance(record.get("pcap_files"), list) else []
-    analysis_name = Path(str(record.get("_analysis_path") or "")).name or "n/a"
-    rows = [
-        ("Status", "Parsed"),
-        ("Request ID", request.get("request_id")),
-        ("Generated", record.get("generated_at")),
-        ("PCAP files parsed", len(pcap_files)),
-        ("Analysis artifact", analysis_name),
-    ]
-    summary_rows = "\n".join(
-        f"<tr><th>{esc(label)}</th><td>{esc(value)}</td></tr>"
-        for label, value in rows
-    )
-    parts = [
-        '<section class="detail-section parsed-pcap-evidence">',
-        "<h3>Parsed PCAP Evidence</h3>",
-        "<p>Current Zeek/TShark packet evidence for this grouped detection. "
-        "This section is generated from parsed summaries; raw packet payloads are not displayed.</p>",
-        f'<table class="detail-kv-table"><tbody>{summary_rows}</tbody></table>',
-        "<h4>Zeek Summary</h4>",
-    ]
-    if zeek.get("available"):
-        record_counts = zeek.get("record_counts") if isinstance(zeek.get("record_counts"), dict) else {}
-        parts.append(f"<p><strong>Record counts:</strong> <code>{esc(json.dumps(record_counts, sort_keys=True))}</code></p>")
-        for title, key in (
-            ("Top Connections", "top_connections"),
-            ("DNS Queries", "dns_queries"),
-            ("TLS SNI", "tls_sni"),
-            ("HTTP Hosts", "http_hosts"),
-            ("Notices", "notices"),
-            ("Weird Activity", "weird"),
-        ):
-            values = zeek.get(key) if isinstance(zeek.get(key), list) else []
-            if values:
-                parts.extend([f"<h5>{esc(title)}</h5>", f"<pre><code>{compact_json(values[:10])}</code></pre>"])
-    else:
-        parts.append(f"<p>Zeek unavailable: {esc(zeek.get('reason'))}</p>")
-    parts.append("<h4>TShark Corroboration</h4>")
-    if tshark.get("available"):
-        samples = tshark.get("samples") if isinstance(tshark.get("samples"), list) else []
-        if not samples:
-            parts.append("<p>No bounded TShark samples were produced.</p>")
-        for sample in samples[:2]:
-            if not isinstance(sample, dict):
-                continue
-            parts.extend(
-                [
-                    "<h5>Protocol hierarchy</h5>",
-                    f"<pre><code>{compact_json(sample.get('protocol_hierarchy'), 1800)}</code></pre>",
-                    "<h5>Conversations</h5>",
-                    f"<pre><code>{compact_json(sample.get('conversations'), 1800)}</code></pre>",
-                ]
-            )
-    else:
-        parts.append(f"<p>TShark unavailable: {esc(tshark.get('reason'))}</p>")
-    parts.append("</section>")
-    return "\n".join(parts)
+    """Render bounded parsed packet evidence through the modular renderer."""
+    return render_pcap_summary(record)
 
 
 SOC_ALERT_DETAIL_LAYOUT_VERSION = "2026-07-15.1"

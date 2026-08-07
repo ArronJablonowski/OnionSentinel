@@ -208,6 +208,14 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_soc_pcap_renderer.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_pcap_renderer.py",
+      "required_symbols": [
+        "render_pcap_summary"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_catalog_routes.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py",

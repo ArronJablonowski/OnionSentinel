@@ -412,6 +412,12 @@ unparsed historical artifacts remain isolated, and the shared admission rule
 requires capture files plus Zeek or TShark output. `report_portal.py` retains
 the cache boundary and concrete runtime-directory adapters.
 
+`portal_soc_pcap_renderer.py` owns bounded, escaped HTML presentation of parsed
+PCAP evidence. It renders summary identity, record counts, at most ten values
+per Zeek category, at most two TShark samples, and size-bounded JSON while
+explicitly excluding raw packet payloads. Runtime paths are reduced to a
+basename and all evidence-controlled text is escaped before rendering.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and
