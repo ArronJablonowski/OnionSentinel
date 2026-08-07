@@ -6584,6 +6584,283 @@ def deterministic_incident_pivot_requests(
     return output
 
 
+class _QueryCoordinatorRuntime:
+    def __init__(
+        self,
+        *,
+        coordinator: Any,
+        prompt_package: dict[str, Any],
+        args: argparse.Namespace,
+        settings: dict[str, Any],
+        route: str,
+        harness_runtime: OnionSentinelHarnessRun | None,
+        model_executor: Callable[..., Any],
+        query_executor: Callable[..., Any],
+        configured_query_executor: bool,
+        live_osquery_config: dict[str, Any] | None,
+        enrichment_config: dict[str, Any] | None,
+        security_onion_config_path: Path,
+        investigation_pivot_dir: Path,
+        model_input_builder: Callable[[dict[str, Any], int], Any] | None,
+        model_call_independent_review: bool,
+        evaluation_required: bool,
+        maximum_prompt_bytes: int,
+        hosted_route: bool,
+    ) -> None:
+        self.coordinator = coordinator
+        self.prompt_package = prompt_package
+        self.args = args
+        self.settings = settings
+        self.route = route
+        self.harness_runtime = harness_runtime
+        self.model_executor = model_executor
+        self.query_executor = query_executor
+        self.configured_query_executor = configured_query_executor
+        self.live_osquery_config = live_osquery_config
+        self.enrichment_config = enrichment_config
+        self.security_onion_config_path = security_onion_config_path
+        self.investigation_pivot_dir = investigation_pivot_dir
+        self.model_input_builder = model_input_builder
+        self.model_call_independent_review = model_call_independent_review
+        self.evaluation_required = evaluation_required
+        self.maximum_prompt_bytes = maximum_prompt_bytes
+        self.hosted_route = hosted_route
+
+    def observe(self, call: Callable[[], Any]) -> Any:
+        if self.harness_runtime is None:
+            return None
+        try:
+            return call()
+        except Exception as exc:
+            if (
+                self.harness_runtime.policy.mode == "enforce"
+                or self.evaluation_required
+            ):
+                raise
+            print(
+                "warning: Onion Sentinel harness shadow query observation "
+                f"failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return None
+
+    def planning_phase(self, note: str) -> None:
+        self.observe(
+            lambda: self.harness_runtime.phase(
+                "investigation_query_planning", self.route, note
+            ) if self.harness_runtime is not None else None
+        )
+
+    def planning_preflight(self, package: dict[str, Any]) -> None:
+        self.observe(
+            lambda: self.harness_runtime.preflight_model_call(
+                call_id="primary-query-planning-retry-1",
+                input_value=package,
+                requested_route=self.route,
+                purpose="evaluation query-planning retry 1 of 1",
+            ) if self.harness_runtime is not None else None
+        )
+
+    def planning_record(
+        self, response: dict[str, Any], duration: float, status: str,
+    ) -> None:
+        kwargs = {"status": status} if status else {}
+        self.observe(
+            lambda: self.harness_runtime.model_call(
+                call_id="primary-query-planning-retry-1",
+                purpose="evaluation query-planning retry 1 of 1",
+                requested_route=self.route,
+                response=response,
+                input_value=self.prompt_package,
+                duration_seconds=duration,
+                **kwargs,
+            ) if self.harness_runtime is not None else None
+        )
+
+    def authorize(
+        self, round_number: int, request: dict[str, Any],
+    ) -> Any:
+        decision = self.observe(
+            lambda: self.harness_runtime.authorize_tool(
+                round_number=round_number,
+                query_id=request["query_id"],
+                backend=request["backend"],
+                approved=(
+                    request["backend"] == "osquery"
+                    and live_osquery_harness_operator_approved(
+                        self.live_osquery_config,
+                        request["parameters"].get("target_alias"),
+                    )
+                ),
+            ) if self.harness_runtime is not None else None
+        )
+        return self.coordinator.round_admission.resolve_authorization(
+            runtime_present=self.harness_runtime is not None,
+            approval_gated=query_backend_is_approval_gated(request["backend"]),
+            policy_mode=(
+                self.harness_runtime.policy.mode
+                if self.harness_runtime is not None else "off"
+            ),
+            decision=decision,
+            decision_effective=policy_decision_is_effective,
+            fallback_capability=query_backend_capability(request["backend"]),
+        )
+
+    def backend_available(self, backend: str) -> bool:
+        return investigation_backend_available(
+            self.prompt_package,
+            backend,
+            live_osquery_config=self.live_osquery_config,
+        )
+
+    def query_execute(
+        self, round_number: int, requests: list[dict[str, Any]],
+    ) -> Any:
+        self.observe(
+            lambda: self.harness_runtime.preflight_query_batch(
+                round_number=round_number, request_count=len(requests)
+            ) if self.harness_runtime is not None else None
+        )
+        self.observe(
+            lambda: self.harness_runtime.phase(
+                "investigation_query_execution", self.route,
+                f"round {round_number}; {len(requests)} admitted request(s)",
+            ) if self.harness_runtime is not None else None
+        )
+        kwargs = {
+            "round_number": round_number,
+            "live_osquery_config": self.live_osquery_config,
+        }
+        if self.configured_query_executor:
+            kwargs.update({
+                "security_onion_config_path": self.security_onion_config_path,
+                "investigation_pivot_dir": self.investigation_pivot_dir,
+            })
+        if self.enrichment_config is not None:
+            kwargs["enrichment_config"] = self.enrichment_config
+        return self.query_executor(self.prompt_package, requests, **kwargs)
+
+    def observe_round(self, result: dict[str, Any]) -> None:
+        self.observe(
+            lambda: self.harness_runtime.query_round(result)
+            if self.harness_runtime is not None else None
+        )
+
+    def admit_prompt(
+        self, package: dict[str, Any], rounds: list[dict[str, Any]],
+    ) -> None:
+        _admit_investigation_query_prompt(
+            package,
+            rounds,
+            maximum_prompt_bytes=self.maximum_prompt_bytes,
+            hosted=self.hosted_route,
+        )
+
+    def build_model_input(self, package: dict[str, Any], number: int) -> Any:
+        return (
+            self.model_input_builder(package, number)
+            if self.model_input_builder is not None else package
+        )
+
+    def synthesis_preflight(
+        self, call_id: str, model_input: Any, purpose: str,
+    ) -> None:
+        self.observe(
+            lambda: self.harness_runtime.preflight_model_call(
+                call_id=call_id,
+                input_value=model_input,
+                requested_route=self.route,
+                purpose=purpose,
+                independent_review=self.model_call_independent_review,
+            ) if self.harness_runtime is not None else None
+        )
+
+    def synthesis_record(
+        self, call_id: str, purpose: str, response: Any, model_input: Any,
+        duration: float, status: str,
+    ) -> None:
+        kwargs = {"status": status} if status else {}
+        self.observe(
+            lambda: self.harness_runtime.model_call(
+                call_id=call_id,
+                purpose=purpose,
+                requested_route=self.route,
+                response=response,
+                input_value=model_input,
+                duration_seconds=duration,
+                independent_review=self.model_call_independent_review,
+                **kwargs,
+            ) if self.harness_runtime is not None else None
+        )
+
+    def model_safe_copy(self, value: Any, hosted: bool) -> Any:
+        return model_safe_copy(value, hosted=hosted)
+
+    def planning_execute(self, package: dict[str, Any]) -> Any:
+        return self.model_executor(self.route, package, self.args, self.settings)
+
+    def valid_query_id(self, value: str) -> bool:
+        return bool(INVESTIGATION_QUERY_ID_RE.fullmatch(value))
+
+    def synthesis_catalogue(self, value: Any) -> None:
+        self.observe(
+            lambda: self.harness_runtime.catalogue_prompt_evidence(value)
+            if self.harness_runtime is not None else None
+        )
+
+    def synthesis_execute(self, model_input: Any) -> Any:
+        return self.model_executor(
+            self.route, model_input, self.args, self.settings
+        )
+
+    def synthesis_phase(self, note: str) -> None:
+        self.observe(
+            lambda: self.harness_runtime.phase(
+                "evidence_synthesis", self.route, note
+            ) if self.harness_runtime is not None else None
+        )
+
+    def ports(self) -> Any:
+        return self.coordinator.Ports(
+            pop_requests=pop_investigation_query_requests,
+            deterministic_requests=deterministic_incident_pivot_requests,
+            model_safe_copy=self.model_safe_copy,
+            planning_execute=self.planning_execute,
+            planning_phase=self.planning_phase,
+            planning_preflight=self.planning_preflight,
+            planning_record=self.planning_record,
+            normalize_request=normalize_investigation_query_request,
+            validate_repair=validate_investigation_query_repair_scope,
+            backend_available=self.backend_available,
+            semantic_digest=investigation_request_semantic_digest,
+            authorize=self.authorize,
+            repair_scope=investigation_query_repair_scope,
+            query_text=_query_text,
+            valid_query_id=self.valid_query_id,
+            query_execute=self.query_execute,
+            repair_failures=investigation_query_repair_failures,
+            now=project_now,
+            observe_round=self.observe_round,
+            validate_observables=_validated_discovered_observables,
+            canonical_digest=investigation_query_canonical_digest,
+            error_digest=canonical_payload_digest,
+            repair_prompt_entry=investigation_query_repair_prompt_entry,
+            request_from_scope=investigation_query_request_from_repair_scope,
+            admit_prompt=self.admit_prompt,
+            build_model_input=self.build_model_input,
+            synthesis_catalogue=self.synthesis_catalogue,
+            synthesis_preflight=self.synthesis_preflight,
+            synthesis_execute=self.synthesis_execute,
+            synthesis_record=self.synthesis_record,
+            synthesis_phase=self.synthesis_phase,
+            outcome_summary=investigation_query_outcome_summary,
+            round_audit=_investigation_round_audit,
+            binding_summary=investigation_query_binding_summary,
+            append_gaps=_append_investigation_evidence_gaps,
+            monotonic=time.monotonic,
+        )
+
+
 def apply_investigation_query_loop(
     prompt_package: dict[str, Any],
     primary_response: dict[str, Any],
@@ -6596,582 +6873,92 @@ def apply_investigation_query_loop(
     security_onion_config_path: Path = DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE,
     investigation_pivot_dir: Path = DEFAULT_INVESTIGATION_PIVOT_DIR,
     harness_runtime: OnionSentinelHarnessRun | None = None,
-    model_executor: Callable[[str, dict[str, Any], argparse.Namespace, dict[str, Any]], dict[str, Any]]
-    | None = None,
+    model_executor: Callable[..., dict[str, Any]] | None = None,
     query_executor: Callable[..., dict[str, Any]] | None = None,
     route_override: str = "",
     max_rounds_override: int | None = None,
     max_queries_total_override: int | None = None,
     include_deterministic_requests: bool = True,
-    model_input_builder: Callable[[dict[str, Any], int], dict[str, Any]]
-    | None = None,
+    model_input_builder: Callable[[dict[str, Any], int], dict[str, Any]] | None = None,
     model_call_id_prefix: str = "primary-followup",
     model_call_purpose_prefix: str = "primary investigation follow-up round",
     model_call_independent_review: bool = False,
     query_round_offset: int = 0,
 ) -> dict[str, Any]:
-    """Run a strictly bounded inspect/query/pivot loop for any model provider."""
-    model_executor = model_executor or (
-        lambda route, package, model_args, model_settings: analyze_model_route(
-            route,
-            package,
-            model_args,
-            model_settings,
-        )
-    )
+    """Compose runtime ports for the package-owned query coordinator."""
+    from onion_sentinel.analysis.query import coordinator
+
+    model_executor = model_executor or analyze_model_route
     configured_query_executor = query_executor is None
     query_executor = query_executor or execute_investigation_query_batch
     route = canonical_model_route(
-        route_override
-        or (settings.get("agent_models") or {}).get(agent_role)
+        route_override or (settings.get("agent_models") or {}).get(agent_role)
     )
-    response = primary_response
-    rounds: list[dict[str, Any]] = []
-    _provider_routing()
-    from onion_sentinel.analysis.query import (
-        engine as engine_module,
-        finalization as finalization_module,
-        observables as observables_module,
-        planning_retry as planning_retry_module,
-        repair_stage as repair_stage_module,
-        round_admission as round_admission_module,
-        round_result as round_result_module,
-        synthesis as synthesis_module,
-    )
-    state_module = _query_state()
-    state_policy = state_module.Policy(
-        maximum_rounds=MAX_INVESTIGATION_QUERY_ROUNDS,
-        maximum_queries=MAX_INVESTIGATION_QUERIES_TOTAL,
-        maximum_queries_per_round=MAX_INVESTIGATION_QUERIES_PER_ROUND,
-    )
-    limits = state_module.resolve(
-        state_policy,
-        rounds_override=max_rounds_override,
-        queries_override=max_queries_total_override,
-    )
-    engine_state = engine_module.begin(limits)
-    seen_semantic_requests: set[str] = set()
-    evaluation_query_guarantee = bool(
+    evaluation_required = bool(
         harness_runtime is not None
         and boolean_setting(os.environ.get(EVALUATION_FREEZE_MEMORY_ENV))
         and not model_call_independent_review
     )
-    query_planning_retry_attempted = False
-    query_planning_repair_produced_requests = False
-    query_planning_repair_admitted_requests = 0
-    query_planning_repair_rejected_requests = 0
-    query_planning_repair_candidates: list[dict[str, Any]] = []
-    query_planning_repair_not_attempted_reason = ""
-    pending_repair_scopes: dict[str, dict[str, Any]] = {}
-    primary_followup_call_number = 0
-    def observe_harness(call: Callable[[], Any]) -> Any:
-        if harness_runtime is None:
-            return None
-        try:
-            return call()
-        except Exception as exc:
-            if (
-                harness_runtime.policy.mode == "enforce"
-                or evaluation_query_guarantee
-            ):
-                raise
-            print(
-                "warning: Onion Sentinel harness shadow query observation "
-                f"failed: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-            return None
-
-    model_initial_requests = pop_investigation_query_requests(response)
-    deterministic_requests = (
-        deterministic_incident_pivot_requests(prompt_package)
-        if include_deterministic_requests
-        else []
+    maximum_prompt_bytes = int(
+        getattr(args, "max_prompt_bytes", DEFAULT_MAX_PROMPT_BYTES)
+        or DEFAULT_MAX_PROMPT_BYTES
     )
-    initial_requests = deterministic_requests + model_initial_requests
-    if evaluation_query_guarantee and not initial_requests:
-        query_planning_retry_attempted = True
-        limits = limits.evaluation_retry(state_policy)
-        engine_state = engine_module.begin(limits)
-        maximum_prompt_bytes = int(
-            getattr(args, "max_prompt_bytes", DEFAULT_MAX_PROMPT_BYTES)
-            or DEFAULT_MAX_PROMPT_BYTES
+    hosted_route = model_route_is_hosted(route, settings)
+    if canonical_model_route(
+        route, enabled_agent_model_routes(settings)
+    ).startswith("codex-cli:"):
+        maximum_prompt_bytes = min(
+            maximum_prompt_bytes, CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES
         )
-        hosted_route = model_route_is_hosted(route, settings)
-        if canonical_model_route(
-            route,
-            enabled_agent_model_routes(settings),
-        ).startswith("codex-cli:"):
-            maximum_prompt_bytes = min(
-                maximum_prompt_bytes,
-                CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES,
-            )
-        def record_planning_retry(
-            result: dict[str, Any], duration: float, status: str
-        ) -> None:
-            kwargs = {"status": status} if status else {}
-            observe_harness(
-                lambda: harness_runtime.model_call(
-                    call_id=planning_retry_module.CALL_ID,
-                    purpose=planning_retry_module.PURPOSE,
-                    requested_route=route,
-                    response=result,
-                    input_value=prompt_package,
-                    duration_seconds=duration,
-                    **kwargs,
-                ) if harness_runtime is not None else None
-            )
-
-        retry_result = planning_retry_module.run(
-            prompt_package,
+    runtime = _QueryCoordinatorRuntime(
+        coordinator=coordinator,
+        prompt_package=prompt_package,
+        args=args,
+        settings=settings,
+        route=route,
+        harness_runtime=harness_runtime,
+        model_executor=model_executor,
+        query_executor=query_executor,
+        configured_query_executor=configured_query_executor,
+        live_osquery_config=live_osquery_config,
+        enrichment_config=enrichment_config,
+        security_onion_config_path=security_onion_config_path,
+        investigation_pivot_dir=investigation_pivot_dir,
+        model_input_builder=model_input_builder,
+        model_call_independent_review=model_call_independent_review,
+        evaluation_required=evaluation_required,
+        maximum_prompt_bytes=maximum_prompt_bytes,
+        hosted_route=hosted_route,
+    )
+    return coordinator.run(
+        prompt_package,
+        primary_response,
+        policy=coordinator.Policy(
             route=route,
-            limits=limits,
-            maximum_prompt_bytes=maximum_prompt_bytes,
-            hosted=hosted_route,
-            policy=planning_retry_module.Policy(
+            state_policy=_query_state().Policy(
+                maximum_rounds=MAX_INVESTIGATION_QUERY_ROUNDS,
+                maximum_queries=MAX_INVESTIGATION_QUERIES_TOTAL,
                 maximum_queries_per_round=MAX_INVESTIGATION_QUERIES_PER_ROUND,
-                instruction=(
-                    "The initial primary response did not request a dynamic "
-                    "investigation pivot. Return at least one narrow, material, "
-                    "read-only investigation_query_requests entry using only the "
-                    "advertised schema, backends, observables, time envelope, and "
-                    "budgets. Do not invent direct tool access or widen authorization."
-                ),
             ),
-            dependencies=planning_retry_module.Dependencies(
-                model_safe_copy=lambda value, hosted: model_safe_copy(
-                    value, hosted=hosted
-                ),
-                execute_model=lambda package: model_executor(
-                    route, package, args, settings
-                ),
-                pop_requests=pop_investigation_query_requests,
-                phase=lambda: observe_harness(
-                    lambda: harness_runtime.phase(
-                        "investigation_query_planning",
-                        route,
-                        "evaluation retry 1 of 1 after initial response omitted pivots",
-                    ) if harness_runtime is not None else None
-                ),
-                preflight=lambda package: observe_harness(
-                    lambda: harness_runtime.preflight_model_call(
-                        call_id=planning_retry_module.CALL_ID,
-                        input_value=package,
-                        requested_route=route,
-                        purpose=planning_retry_module.PURPOSE,
-                    ) if harness_runtime is not None else None
-                ),
-                record=record_planning_retry,
-                monotonic=time.monotonic,
-            ),
-            error_type=InvestigationQueryError,
-        )
-        response = retry_result.response
-        initial_requests = list(retry_result.requests)
-
-    for round_number in range(1, limits.rounds + 1):
-        harness_round_number = query_round_offset + round_number
-        raw_requests = (
-            initial_requests
-            if round_number == 1
-            else pop_investigation_query_requests(response)
-        )
-        repair_round = bool(pending_repair_scopes)
-        if repair_round:
-            query_planning_repair_produced_requests = bool(raw_requests)
-        admission = engine_module.admit_round(
-            engine_state, raw_requests, round_number=round_number)
-        if admission.action == "stop_empty":
-            break
-        engine_state = admission.state
-        observe_harness(
-            lambda: harness_runtime.phase(
-                "investigation_query_planning",
-                route,
-                f"round {harness_round_number}",
-            )
-            if harness_runtime is not None
-            else None
-        )
-        admitted_raw = list(admission.admitted_requests)
-        local_context = prompt_package.get("_local_investigation_query_context")
-        trusted_time_envelope = (
-            local_context.get("time_envelope")
-            if isinstance(local_context, dict)
-            else None
-        )
-        def authorize_request(
-            request: dict[str, Any],
-        ) -> round_admission_module.Authorization:
-            tool_decision = observe_harness(
-                lambda: harness_runtime.authorize_tool(
-                    round_number=harness_round_number,
-                    query_id=request["query_id"],
-                    backend=request["backend"],
-                    approved=(
-                        request["backend"] == "osquery"
-                        and live_osquery_harness_operator_approved(
-                            live_osquery_config,
-                            request["parameters"].get("target_alias"),
-                        )
-                    ),
-                ) if harness_runtime is not None else None
-            )
-            return round_admission_module.resolve_authorization(
-                runtime_present=harness_runtime is not None,
-                approval_gated=query_backend_is_approval_gated(
-                    request["backend"]
-                ),
-                policy_mode=(
-                    harness_runtime.policy.mode
-                    if harness_runtime is not None
-                    else "off"
-                ),
-                decision=tool_decision,
-                decision_effective=policy_decision_is_effective,
-                fallback_capability=query_backend_capability(request["backend"]),
-            )
-
-        round_admission = round_admission_module.run(
-            admitted_raw,
-            state=engine_state,
-            round_number=harness_round_number,
-            repair_round=repair_round,
-            pending_repair_scopes=pending_repair_scopes,
-            seen_semantic_digests=seen_semantic_requests,
-            time_envelope=trusted_time_envelope,
-            authorization_context=local_context,
-            dependencies=round_admission_module.Dependencies(
-                normalize=normalize_investigation_query_request,
-                validate_repair=validate_investigation_query_repair_scope,
-                backend_available=lambda backend: investigation_backend_available(
-                    prompt_package,
-                    backend,
-                    live_osquery_config=live_osquery_config,
-                ),
-                semantic_digest=investigation_request_semantic_digest,
-                ignore_semantic_repeat=lambda state: engine_module.ignore(state, 1),
-                authorize=authorize_request,
-                repair_scope=investigation_query_repair_scope,
-                query_text=_query_text,
-                valid_query_id=lambda value: bool(
-                    INVESTIGATION_QUERY_ID_RE.fullmatch(value)
-                ),
-            ),
-            error_type=InvestigationQueryError,
-        )
-        engine_state = round_admission.state
-        normalized = list(round_admission.normalized)
-        rejected = list(round_admission.rejected)
-        round_repair_scopes = dict(round_admission.repair_scopes)
-        seen_semantic_requests = set(round_admission.seen_semantic_digests)
-        def execute_admitted_requests(
-            admitted_requests: list[dict[str, Any]],
-        ) -> Any:
-            observe_harness(
-                lambda: harness_runtime.preflight_query_batch(
-                    round_number=harness_round_number,
-                    request_count=len(admitted_requests),
-                )
-                if harness_runtime is not None
-                else None
-            )
-            observe_harness(
-                lambda: harness_runtime.phase(
-                    "investigation_query_execution",
-                    route,
-                    f"round {harness_round_number}; {len(admitted_requests)} admitted request(s)",
-                )
-                if harness_runtime is not None
-                else None
-            )
-            query_kwargs = {
-                "round_number": harness_round_number,
-                "live_osquery_config": live_osquery_config,
-            }
-            if configured_query_executor:
-                query_kwargs.update(
-                    {
-                        "security_onion_config_path": security_onion_config_path,
-                        "investigation_pivot_dir": investigation_pivot_dir,
-                    }
-                )
-            if enrichment_config is not None:
-                query_kwargs["enrichment_config"] = enrichment_config
-            return query_executor(
-                prompt_package,
-                admitted_requests,
-                **query_kwargs,
-            )
-
-        round_execution = round_result_module.run(
-            normalized,
-            rejected,
-            round_number=harness_round_number,
-            policy=round_result_module.Policy(
-                schema=INVESTIGATION_QUERY_RESULT_SCHEMA,
-            ),
-            dependencies=round_result_module.Dependencies(
-                execute=execute_admitted_requests,
-                repair_failures=investigation_query_repair_failures,
-                now=project_now,
-            ),
-        )
-        round_result = round_execution.envelope
-        broker_repair_failures = round_execution.repair_failures
-        if not repair_round:
-            normalized_by_id = {
-                request["query_id"]: request
-                for request in normalized
-            }
-            for query_id, reason in broker_repair_failures.items():
-                request = normalized_by_id.get(query_id)
-                if request is None:
-                    continue
-                repair_scope = investigation_query_repair_scope(
-                    request,
-                    round_number=harness_round_number,
-                    position=1,
-                    time_envelope=trusted_time_envelope,
-                    authorization_context=local_context,
-                )
-                if repair_scope is not None:
-                    round_repair_scopes[query_id] = {
-                        "scope": repair_scope,
-                        "reason": reason,
-                        "trigger": "broker_rejection_or_invalid_response",
-                    }
-        rounds.append(round_result)
-        observe_harness(
-            lambda: harness_runtime.query_round(round_result)
-            if harness_runtime is not None
-            else None
-        )
-        if repair_round:
-            query_planning_repair_admitted_requests += len(normalized)
-            query_planning_repair_rejected_requests += len(rejected)
-            query_planning_repair_rejected_requests += len(
-                broker_repair_failures
-            )
-            pending_repair_scopes = {}
-
-        local_context = prompt_package.get("_local_investigation_query_context")
-        if isinstance(local_context, dict):
-            promotion = observables_module.promote(
-                local_context.get("discovered_observables"),
-                round_result.get("results"),
-                limit=MAX_DISCOVERED_OBSERVABLES,
-                validate=_validated_discovered_observables,
-            )
-            local_context["discovered_observables"] = list(
-                promotion.observables
-            )
-
-        remaining = engine_module.remaining(
-            engine_state, round_number, repair_round=repair_round)
-        remaining_rounds = remaining.rounds
-        remaining_queries = remaining.queries
-        repair_transition = engine_module.plan_repair(
-            engine_state,
-            list(round_repair_scopes.values()),
-            round_number=round_number,
-            repair_round=repair_round,
-        )
-        engine_state = repair_transition.state
-        repair_decision = repair_transition.repair
-        repair_stage = repair_stage_module.build(
-            repair_decision,
-            remaining_queries=remaining_queries,
-            dependencies=repair_stage_module.Dependencies(
-                canonical_digest=investigation_query_canonical_digest,
-                error_digest=canonical_payload_digest,
-                prompt_entry=investigation_query_repair_prompt_entry,
-                request_from_scope=investigation_query_request_from_repair_scope,
-            ),
-        )
-        repair_scheduled = repair_stage.scheduled
-        if repair_stage.audit_candidates:
-            query_planning_repair_candidates = list(
-                repair_stage.audit_candidates
-            )
-        if repair_stage.not_attempted_reason:
-            query_planning_repair_not_attempted_reason = (
-                repair_stage.not_attempted_reason
-            )
-        if repair_scheduled:
-            # The scope is already normalized, bounded, and derived only from
-            # collector-owned authorization context. Execute that exact scope
-            # in the one allowed repair round instead of asking a model to
-            # restate it. This removes a non-deterministic failure mode without
-            # granting any new query authority.
-            pending_repair_scopes = dict(repair_stage.pending_scopes)
-            prompt_package["investigation_query_planning_repair"] = (
-                repair_stage.prompt
-            )
-            response = {
-                "investigation_query_requests": list(repair_stage.requests),
-            }
-            prompt_package.pop(
-                "investigation_query_planning_repair",
-                None,
-            )
-            continue
-        prompt_package["investigation_follow_up"] = synthesis_module.follow_up(
-            round_number=round_number,
-            remaining_rounds=remaining_rounds,
-            remaining_queries=remaining_queries,
-        )
-        maximum_prompt_bytes = int(
-            getattr(args, "max_prompt_bytes", DEFAULT_MAX_PROMPT_BYTES)
-            or DEFAULT_MAX_PROMPT_BYTES
-        )
-        hosted_route = model_route_is_hosted(route, settings)
-        if canonical_model_route(
-            route,
-            enabled_agent_model_routes(settings),
-        ).startswith("codex-cli:"):
-            maximum_prompt_bytes = min(
-                maximum_prompt_bytes,
-                CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES,
-            )
-        _admit_investigation_query_prompt(
-            prompt_package,
-            rounds,
+            rounds_override=max_rounds_override,
+            queries_override=max_queries_total_override,
+            evaluation_required=evaluation_required,
+            include_deterministic_requests=include_deterministic_requests,
             maximum_prompt_bytes=maximum_prompt_bytes,
-            hosted=hosted_route,
-        )
-        def record_synthesis_call(
-            call_id: str,
-            purpose: str,
-            observed_response: Any,
-            model_input: Any,
-            duration: float,
-            status: str,
-        ) -> None:
-            observe_harness(
-                lambda: harness_runtime.model_call(
-                    call_id=call_id,
-                    purpose=purpose,
-                    requested_route=route,
-                    response=observed_response,
-                    input_value=model_input,
-                    duration_seconds=duration,
-                    independent_review=model_call_independent_review,
-                    status=status,
-                )
-                if harness_runtime is not None
-                else None
-            )
-
-        synthesis = synthesis_module.run(
-            prompt_package,
-            state=engine_state,
-            prior_call_number=primary_followup_call_number,
-            remaining_rounds=remaining_rounds,
-            remaining_queries=remaining_queries,
-            harness_round_number=harness_round_number,
-            policy=synthesis_module.Policy(
-                route=route,
-                call_id_prefix=model_call_id_prefix,
-                call_purpose_prefix=model_call_purpose_prefix,
-                independent_review=model_call_independent_review,
-                attest_route=evaluation_query_guarantee,
-            ),
-            dependencies=synthesis_module.Dependencies(
-                build_input=lambda package, number: (
-                    model_input_builder(package, number)
-                    if model_input_builder is not None
-                    else package
-                ),
-                catalogue=lambda model_input: observe_harness(
-                    lambda: harness_runtime.catalogue_prompt_evidence(model_input)
-                    if harness_runtime is not None else None
-                ),
-                preflight=lambda call_id, model_input, purpose: observe_harness(
-                    lambda: harness_runtime.preflight_model_call(
-                        call_id=call_id,
-                        input_value=model_input,
-                        requested_route=route,
-                        purpose=purpose,
-                        independent_review=model_call_independent_review,
-                    ) if harness_runtime is not None else None
-                ),
-                execute=lambda model_input: model_executor(
-                    route, model_input, args, settings
-                ),
-                record=record_synthesis_call,
-                phase=lambda note: observe_harness(
-                    lambda: harness_runtime.phase(
-                        "evidence_synthesis", route, note
-                    ) if harness_runtime is not None else None
-                ),
-                after_follow_up=_query_state().after_follow_up,
-                pop_requests=pop_investigation_query_requests,
-                ignore_terminal=lambda state, count: engine_module.ignore(
-                    state, count, terminal=True
-                ),
-                monotonic=time.monotonic,
-            ),
-            error_type=InvestigationQueryError,
-        )
-        response = synthesis.response
-        engine_state = synthesis.state
-        primary_followup_call_number = synthesis.call_number
-        if synthesis.stop:
-            break
-
-    finalized = finalization_module.finalize(
-        response,
-        rounds,
-        state=engine_state,
-        policy=finalization_module.Policy(
+            hosted_route=hosted_route,
+            query_round_offset=query_round_offset,
+            model_call_id_prefix=model_call_id_prefix,
+            model_call_purpose_prefix=model_call_purpose_prefix,
+            model_call_independent_review=model_call_independent_review,
+            query_result_schema=INVESTIGATION_QUERY_RESULT_SCHEMA,
             query_contract=INVESTIGATION_QUERY_CONTRACT,
-            route=route,
-            evaluation_required=evaluation_query_guarantee,
-            max_queries_per_round=MAX_INVESTIGATION_QUERIES_PER_ROUND,
-            configured_max_rounds=MAX_INVESTIGATION_QUERY_ROUNDS,
-            configured_max_queries=MAX_INVESTIGATION_QUERIES_TOTAL,
+            max_discovered_observables=MAX_DISCOVERED_OBSERVABLES,
             max_prompt_evidence_bytes=MAX_INVESTIGATION_PROMPT_EVIDENCE_BYTES,
             max_prompt_evidence_rows=MAX_INVESTIGATION_PROMPT_EVIDENCE_ROWS,
         ),
-        planning=finalization_module.Planning(
-            retry_attempted=query_planning_retry_attempted,
-            retry_produced_requests=bool(
-                query_planning_retry_attempted and initial_requests
-            ),
-            deterministic_requests=tuple(deterministic_requests),
-            model_initial_requests=len(model_initial_requests),
-        ),
-        repair=finalization_module.Repair(
-            produced_requests=query_planning_repair_produced_requests,
-            admitted_requests=query_planning_repair_admitted_requests,
-            rejected_requests=query_planning_repair_rejected_requests,
-            candidates=tuple(query_planning_repair_candidates),
-            not_attempted_reason=query_planning_repair_not_attempted_reason,
-        ),
-        dependencies=finalization_module.Dependencies(
-            pop_requests=pop_investigation_query_requests,
-            ignore_terminal=lambda state, count: engine_module.ignore(
-                state, count, terminal=True
-            ),
-            outcome_summary=investigation_query_outcome_summary,
-            round_audit=_investigation_round_audit,
-            binding_summary=investigation_query_binding_summary,
-            canonical_digest=investigation_query_canonical_digest,
-            append_gaps=_append_investigation_evidence_gaps,
-        ),
+        ports=runtime.ports(),
         error_type=InvestigationQueryError,
     )
-    response = finalized.response
-    engine_state = finalized.state
-    if (
-        finalized.outcomes is not None
-        and isinstance(prompt_package.get("investigation_query_results"), dict)
-    ):
-        prompt_package["investigation_query_results"]["outcomes"] = (
-            finalized.outcomes
-        )
-    return response
 
 
 def _ollama_request(

@@ -27,6 +27,14 @@ def top_level_symbols(path: Path) -> set[str]:
     }
 
 
+def top_level_function(path: Path, name: str) -> ast.FunctionDef:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"missing top-level function: {name}")
+
+
 class ModularizationCompatibilityContractTests(unittest.TestCase):
     def test_contract_is_versioned_and_bound_to_a_full_release(self) -> None:
         contract = load_contract()
@@ -103,6 +111,25 @@ class ModularizationCompatibilityContractTests(unittest.TestCase):
             for path in (ROOT / "n8n/onion_sentinel").rglob("*.py")
         )
         self.assertNotIn("run-local-ai-analysis", package_sources)
+
+    def test_ai_runner_query_entry_point_is_a_bounded_coordinator_delegate(self) -> None:
+        runner_path = ROOT / "n8n/bin/run-local-ai-analysis.py"
+        function = top_level_function(
+            runner_path,
+            "apply_investigation_query_loop",
+        )
+        self.assertLessEqual(function.end_lineno - function.lineno + 1, 100)
+        self.assertFalse(
+            any(isinstance(node, (ast.For, ast.While)) for node in ast.walk(function))
+        )
+        calls = {
+            f"{node.func.value.id}.{node.func.attr}"
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+        }
+        self.assertIn("coordinator.run", calls)
 
     def test_node_entry_point_matches_package_and_production_installer(self) -> None:
         installer = INSTALLER_PATH.read_text(encoding="utf-8")
