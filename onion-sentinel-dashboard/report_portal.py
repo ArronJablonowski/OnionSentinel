@@ -160,6 +160,12 @@ from portal_soc_group_query import (
     parse_group_query_request,
     summary_query_plan,
 )
+from portal_soc_group_enrichment import (
+    group_enrichment_query_plan,
+    merge_page_enrichment,
+    page_group_keys,
+    project_group_enrichment_rows,
+)
 from portal_incident_actions import (
     IncidentStatusPayloadError,
     normalize_incident_status_payload,
@@ -4744,33 +4750,8 @@ def soc_alert_public_enrichment_status(enrichment_json: object) -> dict:
 
 
 def soc_alert_group_enrichment_json(conn: sqlite3.Connection, group_key: object) -> str:
-    if not group_key:
-        return ""
-    group_expr = soc_alert_group_key_sql()
-    try:
-        row = conn.execute(
-            f"""
-            SELECT enrichment_json
-            FROM alerts
-            WHERE {group_expr} = ?
-              AND enrichment_json IS NOT NULL
-              AND TRIM(enrichment_json) != ''
-            ORDER BY
-              CASE
-                WHEN COALESCE(json_array_length(json_extract(enrichment_json, '$.external_intel.records')), 0) > 0 THEN 0
-                WHEN COALESCE(json_array_length(json_extract(enrichment_json, '$.external_intel.errors')), 0) > 0 THEN 1
-                WHEN COALESCE(json_array_length(json_extract(enrichment_json, '$.external_intel.skipped')), 0) > 0 THEN 2
-                ELSE 3
-              END,
-              replace(replace(COALESCE(last_seen, timestamp, first_seen), 'T', ' '), 'Z', '') DESC,
-              alert_id DESC
-            LIMIT 1
-            """,
-            (group_key,),
-        ).fetchone()
-    except sqlite3.Error:
-        return ""
-    return str(row["enrichment_json"] or "") if row else ""
+    key = str(group_key or "").strip()
+    return soc_alert_group_enrichment_json_map(conn, [key]).get(key, "") if key else ""
 
 
 def soc_alert_group_enrichment_json_map(
@@ -4785,49 +4766,14 @@ def soc_alert_group_enrichment_json_map(
     the bounded page and preserves the same quality/newness ordering used by
     ``soc_alert_group_enrichment_json``.
     """
-    keys = list(dict.fromkeys(str(value or "").strip() for value in group_keys if str(value or "").strip()))
-    if not keys:
+    plan = group_enrichment_query_plan(group_keys, soc_alert_group_key_sql())
+    if not plan.args:
         return {}
-
-    group_expr = soc_alert_group_key_sql()
-    placeholders = ",".join("?" for _ in keys)
     try:
-        rows = conn.execute(
-            f"""
-            WITH ranked_enrichment AS (
-              SELECT
-                {group_expr} AS resolved_group_key,
-                enrichment_json,
-                ROW_NUMBER() OVER (
-                  PARTITION BY {group_expr}
-                  ORDER BY
-                    CASE
-                      WHEN COALESCE(json_array_length(json_extract(enrichment_json, '$.external_intel.records')), 0) > 0 THEN 0
-                      WHEN COALESCE(json_array_length(json_extract(enrichment_json, '$.external_intel.errors')), 0) > 0 THEN 1
-                      WHEN COALESCE(json_array_length(json_extract(enrichment_json, '$.external_intel.skipped')), 0) > 0 THEN 2
-                      ELSE 3
-                    END,
-                    replace(replace(COALESCE(last_seen, timestamp, first_seen), 'T', ' '), 'Z', '') DESC,
-                    alert_id DESC
-                ) AS enrichment_rank
-              FROM alerts
-              WHERE {group_expr} IN ({placeholders})
-                AND enrichment_json IS NOT NULL
-                AND TRIM(enrichment_json) != ''
-            )
-            SELECT resolved_group_key, enrichment_json
-            FROM ranked_enrichment
-            WHERE enrichment_rank = 1
-            """,
-            keys,
-        ).fetchall()
+        rows = conn.execute(plan.sql, plan.args).fetchall()
     except sqlite3.Error:
         return {}
-    return {
-        str(row["resolved_group_key"]): str(row["enrichment_json"] or "")
-        for row in rows
-        if row["resolved_group_key"]
-    }
+    return project_group_enrichment_rows(rows)
 
 
 def directory_size_bytes(path: Path) -> int:
@@ -8702,11 +8648,9 @@ def soc_incident_detail_response(case_id: str) -> tuple[int, dict]:
 
 
 def soc_alert_status_bucket_counts(rows: list[sqlite3.Row], statuses: dict) -> dict[str, int]:
-    def group_id_for_row(row: sqlite3.Row) -> str:
-        group_key = row["group_key"] if "group_key" in row.keys() else ""
-        return row["group_id"] if "group_id" in row.keys() and row["group_id"] else soc_alert_group_id(group_key)
-
-    return soc_alert_api.status_bucket_counts(rows, statuses, group_id_for_row)
+    return soc_alert_api.status_bucket_counts(
+        rows, statuses, soc_alert_group_id_for_query_row,
+    )
 
 
 def soc_alert_top_endpoint_metrics(rows: list[sqlite3.Row]) -> dict[str, str]:
@@ -8726,21 +8670,11 @@ def soc_alert_enriched_page_rows(page_rows: list[sqlite3.Row]) -> list[sqlite3.R
     try:
         with soc_alert_db_connect() as conn:
             enrichment_by_group = soc_alert_group_enrichment_json_map(
-                conn,
-                [row["group_key"] for row in page_rows if "group_key" in row.keys()],
+                conn, page_group_keys(page_rows),
             )
-            return [
-                {
-                    **dict(row),
-                    "enrichment_json": (
-                        dict(row).get("enrichment_json")
-                        or enrichment_by_group.get(str(row["group_key"] or ""), "")
-                    ),
-                }
-                for row in page_rows
-            ]
     except Exception:
         return [dict(row) for row in page_rows]
+    return merge_page_enrichment(page_rows, enrichment_by_group)
 
 
 def soc_alert_group_query_snapshot(

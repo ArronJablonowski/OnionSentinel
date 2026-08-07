@@ -455,6 +455,14 @@ settings, status/enrichment readers, metric adapters, read-only SQLite execution
 and the compatibility facade; the service performs no direct database,
 filesystem, process, or network access.
 
+`portal_soc_group_enrichment.py` owns normalized bounded group-key selection,
+the parameterized best-enrichment window query, repository-row projection, and
+page merge policy. Quality precedence remains completed records, errors,
+skipped sources, then other data before newest-event and alert identity ties;
+embedded representative enrichment is never overwritten. `report_portal.py`
+retains read-only SQLite execution and returns unchanged rows if the enrichment
+repository is unavailable.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and
