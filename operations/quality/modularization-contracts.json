@@ -198,6 +198,18 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_alert_detail_ai.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_detail_ai.py",
+      "required_symbols": [
+        "ai_analysis_output_markdown",
+        "ai_analysis_report_markdown",
+        "ai_model_used_markdown",
+        "complete_ai_response_json_markdown",
+        "markdown_bullets"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_flow_page.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_flow_page.py",

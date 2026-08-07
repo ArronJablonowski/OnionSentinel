@@ -112,6 +112,13 @@ from dashboard_alert_detail_evidence import (  # noqa: E402
     detail_section_markdown,
     standard_alert_detail_sections,
 )
+from dashboard_alert_detail_ai import (  # noqa: E402
+    ai_analysis_output_markdown,
+    ai_analysis_report_markdown,
+    ai_model_used_markdown,
+    complete_ai_response_json_markdown,
+    markdown_bullets,
+)
 from dashboard_flow_page import (  # noqa: E402
     FLOW_PAGE_CSS,
     FLOW_PAGE_JS,
@@ -2206,15 +2213,6 @@ def alert_summary_markdown(row: sqlite3.Row | dict) -> str:
     ])
 
 
-def markdown_bullets(value: object) -> str:
-    if isinstance(value, list):
-        items = [str(item).strip() for item in value if str(item).strip()]
-        return '\n'.join(f'- {item}' for item in items) if items else '- n/a'
-    if value in (None, '', [], {}):
-        return '- n/a'
-    return f'- {value}'
-
-
 def candidate_alert_ids_for_row(row: sqlite3.Row | dict) -> list[str]:
     candidate_ids = [row['alert_id']]
     if isinstance(row, dict):
@@ -2330,187 +2328,6 @@ def ai_workflow_status_for_row(
     # backlog once it appears on the dashboard. A prompt package may not exist
     # yet because the worker generates prompts just-in-time.
     return ('queued', 'Queued', reason)
-
-
-def ai_model_used_markdown(analysis: dict | None) -> str:
-    if not analysis:
-        return '\n'.join([
-            '## AI Model Used',
-            '',
-            '| Field | Value |',
-            '| --- | --- |',
-            '| Analysis status | Not analyzed yet |',
-            '| Model path | n/a |',
-            '| Model | n/a |',
-        ])
-
-    response = analysis.get('response') if isinstance(analysis.get('response'), dict) else {}
-    model = response.get('_analysis_model') or analysis.get('analysis_model') or 'unknown'
-    analysis_type = str(analysis.get('analysis_type') or '').strip().lower()
-    model_path_labels = {
-        'local-ai': 'Ollama local',
-        'ollama': 'Ollama local',
-        'frontier-cloud': 'Frontier cloud CLI',
-        'hybrid': 'Hybrid local + cloud',
-        'hybrid-local-only': 'Hybrid local-only',
-    }
-    model_path = model_path_labels.get(analysis_type, analysis.get('analysis_type') or 'unknown')
-    generated_at = normalize_iso_display_text(analysis.get('generated_at') or 'unknown')
-    prompt_package = analysis.get('prompt_package') or 'n/a'
-    source_file = analysis.get('_analysis_filename') or 'n/a'
-    source_path = analysis.get('_analysis_path') or 'n/a'
-    return '\n'.join([
-        '## AI Model Used',
-        '',
-        '| Field | Value |',
-        '| --- | --- |',
-        '| Analysis status | Complete |',
-        f'| Model path | {markdown_cell(model_path)} |',
-        f'| Model | {markdown_cell(model)} |',
-        f'| Generated at | {markdown_cell(generated_at)} |',
-        f'| Analysis artifact | {markdown_cell(source_file)} |',
-        f'| Prompt package | {markdown_cell(prompt_package)} |',
-        f'| Artifact path | {markdown_cell(source_path, 700)} |',
-    ])
-
-
-def ai_analysis_output_markdown(analysis: dict | None) -> str:
-    if not analysis:
-        return '\n'.join([
-            '## AI Analysis Output',
-            '',
-            '**Generated:** n/a',
-            '',
-            'No AI analysis artifact was found for this alert yet.',
-        ])
-
-    response = analysis.get('response') if isinstance(analysis.get('response'), dict) else {}
-    generated_at = normalize_iso_display_text(analysis.get('generated_at') or 'unknown')
-    outcome = str(response.get('detection_outcome') or 'Inconclusive')
-    bluf = str(response.get('bluf') or 'Inconclusive - Needs More Data: No BLUF classification was found in this analysis artifact.')
-    correlation = response.get('correlation_assessment') if isinstance(response.get('correlation_assessment'), dict) else {}
-    related_groups = []
-    for item in correlation.get('related_groups', []) if isinstance(correlation.get('related_groups'), list) else []:
-        if isinstance(item, dict):
-            group_id = str(item.get('group_id') or '').strip()
-            reason = str(item.get('reason') or '').strip()
-        else:
-            group_id = str(item or '').strip()
-            reason = ''
-        if group_id:
-            related_groups.append(f"{group_id}: {reason or 'relationship requires analyst validation'}")
-    lines = [
-        '## AI Analysis Output',
-        '',
-        f'**Generated:** {generated_at}',
-        '',
-        '### BLUF',
-        '',
-        f'**Detection outcome:** {outcome}',
-        '',
-        bluf,
-        '',
-        '### Assessment',
-        '',
-        str(response.get('summary') or 'n/a'),
-        '',
-        '### Likely Meaning',
-        '',
-        str(response.get('likely_meaning') or 'n/a'),
-        '',
-        '### Severity',
-        '',
-        str(response.get('severity_reasoning') or 'n/a'),
-        '',
-        '### Frequency',
-        '',
-        str(response.get('alert_frequency_assessment') or 'n/a'),
-        '',
-        '### Correlation Assessment',
-        '',
-        f"- **Correlation found:** {correlation.get('correlation_found') if 'correlation_found' in correlation else 'n/a'}",
-        f"- **Confidence:** {correlation.get('confidence') or 'n/a'}",
-        f"- **Attack-chain hypothesis:** {correlation.get('attack_chain_hypothesis') or 'n/a'}",
-        '',
-        '#### Related Alert Groups',
-        '',
-        markdown_bullets(related_groups),
-        '',
-        '#### Shared Evidence',
-        '',
-        markdown_bullets(correlation.get('shared_evidence')),
-        '',
-        '#### Contradicting Evidence',
-        '',
-        markdown_bullets(correlation.get('contradicting_evidence')),
-        '',
-        '#### Recommended Correlation Pivots',
-        '',
-        markdown_bullets(correlation.get('recommended_pivots')),
-        '',
-        '### Public Enrichment Findings',
-        '',
-        markdown_bullets(response.get('public_enrichment_findings')),
-        '',
-        '### PCAP Findings',
-        '',
-        markdown_bullets(response.get('pcap_analysis_findings')),
-        '',
-        '### False Positive Checks',
-        '',
-        markdown_bullets(response.get('false_positive_possibilities')),
-        '',
-        '### Next Steps',
-        '',
-        markdown_bullets(response.get('recommended_next_steps')),
-        '',
-        '### Evidence Used',
-        '',
-        markdown_bullets(response.get('evidence_used')),
-        '',
-        '### Evidence Gaps',
-        '',
-        markdown_bullets(response.get('evidence_gaps')),
-        '',
-        '### SIEM Tuning',
-        '',
-        f"- **Recommendation:** {response.get('tuning_recommendation') or 'n/a'}",
-        f"- **Reason:** {response.get('tuning_reason') or 'n/a'}",
-        '',
-        '#### Recommended Tuning Actions',
-        '',
-        markdown_bullets(response.get('recommended_tuning_actions')),
-        '',
-        '### Escalation',
-        '',
-        f"- **Confidence:** {response.get('confidence') or 'n/a'}",
-        f"- **Escalation needed:** {response.get('escalation_needed') if 'escalation_needed' in response else 'n/a'}",
-        f"- **Hosted second opinion recommended:** {response.get('hosted_second_opinion_recommended') if 'hosted_second_opinion_recommended' in response else 'n/a'}",
-    ]
-    return '\n'.join(lines)
-
-
-def ai_analysis_report_markdown(analysis: dict | None) -> str:
-    return '\n\n'.join([
-        ai_analysis_output_markdown(analysis),
-        ai_model_used_markdown(analysis),
-    ])
-
-
-def complete_ai_response_json_markdown(analysis: dict | None) -> str:
-    if not analysis:
-        return ''
-    response = analysis.get('response') if isinstance(analysis.get('response'), dict) else {}
-    if not response:
-        return ''
-    output_json = json.dumps(response, indent=2, sort_keys=True)
-    return '\n'.join([
-        '### Complete AI Response JSON',
-        '',
-        '```json',
-        output_json,
-        '```',
-    ])
 
 
 def passthrough_markdown_report_text(text: str) -> str:
