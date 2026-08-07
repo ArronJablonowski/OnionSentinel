@@ -135,6 +135,7 @@ from portal_soc_pcap_artifacts import (
     newest_pcap_analysis_record,
 )
 from portal_soc_pcap_renderer import render_pcap_summary
+from portal_soc_enrichment_status import compose_enrichment_status
 from portal_incident_actions import (
     IncidentStatusPayloadError,
     normalize_incident_status_payload,
@@ -4734,54 +4735,7 @@ def soc_alert_group_key_sql() -> str:
 
 
 def soc_alert_public_enrichment_status(enrichment_json: object) -> dict:
-    try:
-        record = json.loads(enrichment_json or "{}") if isinstance(enrichment_json, str) else (enrichment_json or {})
-    except Exception:
-        record = {}
-    external_intel = record.get("external_intel") if isinstance(record, dict) else {}
-    if not isinstance(external_intel, dict):
-        return {
-            "enrichment_status_key": "none",
-            "enrichment_status_label": "None",
-            "enrichment_status_detail": "No public enrichment data recorded for this alert group",
-            "enrichment_record_count": 0,
-            "enrichment_skip_count": 0,
-            "enrichment_error_count": 0,
-        }
-
-    records = external_intel.get("records") if isinstance(external_intel.get("records"), list) else []
-    skipped = external_intel.get("skipped") if isinstance(external_intel.get("skipped"), list) else []
-    errors = external_intel.get("errors") if isinstance(external_intel.get("errors"), list) else []
-    indicators = external_intel.get("indicators") if isinstance(external_intel.get("indicators"), dict) else {}
-    indicator_count = sum(
-        len(indicators.get(key) or [])
-        for key in ("public_ips", "domains", "urls", "hashes", "cves")
-        if isinstance(indicators.get(key), list)
-    )
-
-    if records:
-        detail = f"{len(records)} enrichment record(s), {len(skipped)} skipped source(s), {len(errors)} error(s)"
-        key, label = "enriched", "Enriched"
-    elif errors:
-        detail = f"{len(errors)} enrichment error(s), {len(skipped)} skipped source(s)"
-        key, label = "error", "Error"
-    elif skipped:
-        detail = f"Indicators found, but {len(skipped)} source(s) skipped or unavailable"
-        key, label = "checked", "Checked"
-    elif indicator_count:
-        detail = f"{indicator_count} public indicator(s) found with no completed enrichment records yet"
-        key, label = "pending", "Pending"
-    else:
-        detail = "No public indicators were recorded for enrichment"
-        key, label = "none", "None"
-    return {
-        "enrichment_status_key": key,
-        "enrichment_status_label": label,
-        "enrichment_status_detail": detail,
-        "enrichment_record_count": len(records),
-        "enrichment_skip_count": len(skipped),
-        "enrichment_error_count": len(errors),
-    }
+    return compose_enrichment_status(enrichment_json)
 
 
 def soc_alert_group_enrichment_json(conn: sqlite3.Connection, group_key: object) -> str:

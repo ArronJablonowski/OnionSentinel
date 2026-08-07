@@ -216,6 +216,14 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_soc_enrichment_status.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_enrichment_status.py",
+      "required_symbols": [
+        "compose_enrichment_status"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_catalog_routes.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py",

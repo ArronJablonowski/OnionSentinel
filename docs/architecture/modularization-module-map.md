@@ -418,6 +418,12 @@ per Zeek category, at most two TShark samples, and size-bounded JSON while
 explicitly excluding raw packet payloads. Runtime paths are reduced to a
 basename and all evidence-controlled text is escaped before rendering.
 
+`portal_soc_enrichment_status.py` owns pure public-enrichment status and count
+projection. Its explicit precedence is completed records, errors, skipped
+sources, pending documented indicators, then no evidence; malformed envelopes
+degrade to an explicit empty state. The module accepts stored JSON or mappings
+and performs no database, filesystem, process, or network access.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and
