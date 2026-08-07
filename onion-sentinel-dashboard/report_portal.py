@@ -166,6 +166,12 @@ from portal_soc_group_enrichment import (
     page_group_keys,
     project_group_enrichment_rows,
 )
+from portal_soc_metrics import (
+    compose_metrics_payload,
+    compose_status_payload,
+    exclude_group_rows,
+    metrics_query_plan,
+)
 from portal_incident_actions import (
     IncidentStatusPayloadError,
     normalize_incident_status_payload,
@@ -6106,39 +6112,19 @@ def write_soc_alert_status(alert_id: str, meta: dict) -> None:
 
 def soc_alert_status_response() -> dict:
     statuses = load_soc_alert_statuses()
-    acknowledged_all = {
-        alert_id for alert_id, meta in statuses.items()
-        if isinstance(meta, dict) and meta.get("status") == "acknowledged"
-    }
-    suppressed_all = {
-        alert_id for alert_id, meta in statuses.items()
-        if isinstance(meta, dict) and meta.get("status") == "suppressed"
-    }
-    acknowledged = sorted(acknowledged_all)
-    suppressed = sorted(suppressed_all)
-    counts = {"open": 0, "acknowledged": len(acknowledged), "suppressed": len(suppressed)}
     try:
         with soc_alert_db_connect() as conn:
             group_counts = soc_alert_group_counts(conn)
             escalated_group_ids = soc_alert_manually_escalated_group_ids(conn)
             active_group_ids = soc_alert_active_group_ids(conn, statuses, escalated_group_ids)
-        acknowledged = sorted(acknowledged_all.difference(escalated_group_ids))
-        suppressed = sorted(suppressed_all.difference(escalated_group_ids))
-        counts["open"] = len(active_group_ids)
-        counts["acknowledged"] = len(acknowledged)
-        counts["suppressed"] = len(suppressed)
-        counts["escalated"] = len(set(group_counts).intersection(escalated_group_ids))
-        counts["total"] = len(set(group_counts).difference(escalated_group_ids))
     except Exception:
-        counts["total"] = len(statuses)
-    return {
-        "ok": True,
-        "mode": "grouped",
-        "statuses": statuses,
-        "acknowledged": acknowledged,
-        "suppressed": suppressed,
-        "counts": counts,
-    }
+        return compose_status_payload(statuses)
+    return compose_status_payload(
+        statuses,
+        group_counts=group_counts,
+        escalated_group_ids=escalated_group_ids,
+        active_group_ids=active_group_ids,
+    )
 
 
 def llm_analysis_log_limit(raw: object) -> int:
@@ -8926,76 +8912,40 @@ def soc_alert_detail_response(alert_id: str) -> tuple[int, dict]:
 
 def soc_alert_metrics_response(query: dict[str, list[str]]) -> tuple[int, dict]:
     since = parse_soc_alert_since((query.get("since") or ["24h"])[0])
-    where = " where last_seen >= ?" if since else ""
-    args = [since] if since else []
-    group_expr = soc_alert_group_key_sql()
-    metrics_source = "sqlite"
     try:
         with soc_alert_db_connect() as conn:
-            total = conn.execute(f"select count(*) from alerts{where}", args).fetchone()[0]
-            latest = conn.execute(f"select max(last_seen) from alerts{where}", args).fetchone()[0]
-            if soc_alert_group_summary_available(conn):
-                metrics_source = "sqlite-summary"
-                summary_where = " where last_seen >= ?" if since else ""
-                grouped_rows = conn.execute(
-                    f"""
-                    SELECT group_id, group_key, raw_alert_count, total_seen_count,
-                           last_seen, filter_status
-                    FROM alert_group_summary
-                    {summary_where}
-                    """,
-                    args,
-                ).fetchall()
-            else:
-                grouped_rows = conn.execute(
-                    f"""
-                    SELECT {group_expr} AS group_key,
-                           COUNT(*) AS raw_alert_count,
-                           COALESCE(SUM(MAX(1, COALESCE(seen_count, 1))), 0) AS total_seen_count,
-                           MAX(last_seen) AS last_seen,
-                           COALESCE(NULLIF(filter_status, ''), 'accepted') AS filter_status
-                    FROM alerts
-                    {where}
-                    GROUP BY group_key, filter_status
-                    """,
-                    args,
-                ).fetchall()
-            manually_escalated_group_ids = soc_alert_manually_escalated_group_ids(conn)
-            grouped_rows = [
-                row for row in grouped_rows
-                if soc_alert_group_id_for_query_row(row) not in manually_escalated_group_ids
-            ]
-            by_filter = {r[0] or "accepted": r[1] for r in conn.execute(f"select coalesce(filter_status, 'accepted'), count(*) from alerts{where} group by coalesce(filter_status, 'accepted')", args)}
-            by_level = {r[0] or "unknown": r[1] for r in conn.execute(f"select coalesce(triage_level, severity_label, 'unknown'), count(*) from alerts{where} group by coalesce(triage_level, severity_label, 'unknown')", args)}
-            top_rules = [dict(rule_name=r[0] or "unknown", count=r[1]) for r in conn.execute(f"select coalesce(rule_name, 'unknown'), count(*) from alerts{where} group by coalesce(rule_name, 'unknown') order by count(*) desc limit 10", args)]
-            suppression_windows = conn.execute("select count(*), coalesce(sum(suppressed_count), 0), coalesce(sum(escalated_count), 0) from suppression_log").fetchone()
+            plan = metrics_query_plan(
+                since, soc_alert_group_key_sql(), soc_alert_group_summary_available(conn),
+            )
+            total = conn.execute(plan.total_sql, plan.args).fetchone()[0]
+            latest = conn.execute(plan.latest_sql, plan.args).fetchone()[0]
+            grouped_rows = conn.execute(plan.grouped_sql, plan.args).fetchall()
+            grouped_rows = exclude_group_rows(
+                grouped_rows,
+                soc_alert_manually_escalated_group_ids(conn),
+                soc_alert_group_id_for_query_row,
+            )
+            by_filter = {r[0] or "accepted": r[1] for r in conn.execute(plan.filter_status_sql, plan.args)}
+            by_level = {r[0] or "unknown": r[1] for r in conn.execute(plan.level_sql, plan.args)}
+            top_rules = [dict(rule_name=r[0] or "unknown", count=r[1]) for r in conn.execute(plan.top_rules_sql, plan.args)]
+            suppression_windows = conn.execute(plan.suppression_sql).fetchone()
     except Exception as e:
         return soc_alert_api_error(str(e), 503)
     statuses = load_soc_alert_statuses()
     by_analyst_status = soc_alert_status_bucket_counts(grouped_rows, statuses)
-    grouped_observations = 0
-    for row in grouped_rows:
-        grouped_observations += max(int(row["raw_alert_count"] or 0), int(row["total_seen_count"] or 0))
-    return 200, {
-        "ok": True,
-        "source": metrics_source,
-        "mode": "grouped",
-        "since": since or None,
-        "total": total,
-        "grouped_total": len(grouped_rows),
-        "grouped_observations": grouped_observations,
-        "pcap_ingest_size_bytes": directory_size_bytes(SOC_ALERT_PCAP_ARTIFACT_DIR),
-        "latest_seen": latest,
-        "by_filter_status": by_filter,
-        "by_analyst_status": by_analyst_status,
-        "by_level": by_level,
-        "top_rules": top_rules,
-        "suppression_log": {
-            "windows": suppression_windows[0],
-            "suppressed_count": suppression_windows[1],
-            "escalated_count": suppression_windows[2],
-        },
-    }
+    return 200, compose_metrics_payload(
+        source=plan.source,
+        since=since,
+        total=total,
+        latest_seen=latest,
+        grouped_rows=grouped_rows,
+        pcap_ingest_size_bytes=directory_size_bytes(SOC_ALERT_PCAP_ARTIFACT_DIR),
+        by_filter_status=by_filter,
+        by_analyst_status=by_analyst_status,
+        by_level=by_level,
+        top_rules=top_rules,
+        suppression_totals=suppression_windows,
+    )
 
 
 def soc_alert_suppressions_response(query: dict[str, list[str]]) -> tuple[int, dict]:

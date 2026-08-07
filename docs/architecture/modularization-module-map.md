@@ -463,6 +463,14 @@ embedded representative enrichment is never overwritten. `report_portal.py`
 retains read-only SQLite execution and returns unchanged rows if the enrichment
 repository is unavailable.
 
+`portal_soc_metrics.py` owns the grouped SOC metrics query plan, manual-
+escalation exclusion, observation-volume projection, public metrics envelope,
+and analyst-status count envelope. The query plan keeps both the summary-table
+hot path and raw-alert fallback parameterized and explicit, while status
+composition preserves the database-unavailable JSON fallback. `report_portal.py`
+retains timestamp parsing, read-only SQLite execution, PCAP directory sizing,
+status loading, and group-identity adapters.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and

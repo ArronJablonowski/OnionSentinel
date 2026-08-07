@@ -278,6 +278,19 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_soc_metrics.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_metrics.py",
+      "required_symbols": [
+        "SocMetricsQueryPlan",
+        "compose_metrics_payload",
+        "compose_status_payload",
+        "exclude_group_rows",
+        "grouped_observation_count",
+        "metrics_query_plan"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_catalog_routes.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py",
