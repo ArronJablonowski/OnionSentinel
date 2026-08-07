@@ -151,7 +151,12 @@ from portal_soc_ai_artifacts import (
 from portal_soc_group_query import (
     SocAlertQuerySnapshot,
     SocGroupQueryDependencies,
+    SocGroupQueryRequest,
+    SocGroupQueryRequestPolicy,
     compose_group_query_payload,
+    fallback_query_plan,
+    parse_group_query_request,
+    summary_query_plan,
 )
 from portal_incident_actions import (
     IncidentStatusPayloadError,
@@ -8893,172 +8898,80 @@ def _soc_group_page_evidence(
     return pcap_requests, evidence_metadata
 
 
-def soc_alerts_summary_query_response(query: dict[str, list[str]]) -> tuple[int, dict] | None:
-    """Serve grouped alert rows from alert_group_summary when available.
+def soc_alert_group_query_request(
+    query: dict[str, list[str]],
+) -> SocGroupQueryRequest:
+    policy = SocGroupQueryRequestPolicy(
+        parse_since=parse_soc_alert_since,
+        parse_levels=soc_alert_level_names,
+        parse_cursor=soc_alert_cursor_parts,
+        parse_limit=soc_alert_limit,
+        parse_page=soc_alert_page,
+        parse_sort=lambda values, fallback: soc_alert_sort_clause(
+            values, fallback=fallback,
+        ),
+    )
+    return parse_group_query_request(query, policy)
 
-    The fallback grouped query below remains useful for old/restored databases,
-    but this summary path keeps the hot dashboard API off full-table window
-    functions during normal operation.
-    """
-    since = parse_soc_alert_since((query.get("since") or [""])[0])
-    levels = soc_alert_level_names((query.get("level") or query.get("levels") or [""])[0])
-    filter_status = str((query.get("filter_status") or query.get("status") or [""])[0]).strip().lower()
-    analyst_status = str((query.get("analyst_status") or [""])[0]).strip().lower()
-    q = str((query.get("q") or query.get("search") or [""])[0]).strip()
-    cursor_seen, cursor_id = soc_alert_cursor_parts((query.get("cursor") or [""])[0])
-    limit = soc_alert_limit((query.get("limit") or [""])[0])
-    requested_page = soc_alert_page((query.get("page") or ["1"])[0])
-    sort_key, sort_direction, order_sql = soc_alert_sort_clause(query)
 
-    where = []
-    args: list[object] = []
-    if since:
-        where.append("last_seen >= ?")
-        args.append(since)
-    if levels:
-        placeholders = ",".join("?" for _ in levels)
-        where.append(f"lower(coalesce(triage_level, severity_label, 'unknown')) in ({placeholders})")
-        args.extend(levels)
-    if filter_status in {"accepted", "suppressed", "dropped", "duplicate"}:
-        where.append("lower(coalesce(filter_status, 'accepted')) = ?")
-        args.append(filter_status)
-    if q:
-        where.append(
-            "("
-            "rule_name like ? or source_ip like ? or destination_ip like ? or "
-            "event_dataset like ? or representative_alert_id like ? or group_key like ?"
-            ")"
-        )
-        like = f"%{q}%"
-        args.extend([like, like, like, like, like, like])
-    where_sql = " WHERE " + " AND ".join(where) if where else ""
-    sql = f"""
-        SELECT group_id, group_key, representative_alert_id AS alert_id,
-               first_seen AS group_first_seen, first_seen,
-               last_seen AS group_last_seen, last_seen,
-               raw_alert_count, total_seen_count, total_seen_count AS seen_count,
-               timestamp, rule_name, event_dataset, severity, severity_label,
-               source_ip, source_port, destination_ip, destination_port,
-               transport_protocol, traffic_direction, triage_score, triage_level,
-               routing, filter_status, filter_reason, suppression_key,
-               (
-                 SELECT LENGTH(COALESCE(alert_json, ''))
-                 FROM alerts
-                 WHERE alert_id = alert_group_summary.representative_alert_id
-                 LIMIT 1
-               ) AS payload_size_bytes
-        FROM alert_group_summary
-        {where_sql}
-        ORDER BY {order_sql}
-    """
+def soc_alerts_summary_query_response(
+    request: SocGroupQueryRequest,
+) -> tuple[int, dict] | None:
+    """Serve the grouped summary-table plan when its durable table is available."""
+    plan = summary_query_plan(request)
     try:
         with soc_alert_db_connect() as conn:
             if not soc_alert_group_summary_available(conn):
                 return None
-            rows = conn.execute(sql, args).fetchall()
+            rows = conn.execute(plan.sql, plan.args).fetchall()
             manually_escalated_group_ids = soc_alert_manually_escalated_group_ids(conn)
-    except Exception as e:
-        return soc_alert_api_error(str(e), 503)
-
+    except Exception as exc:
+        return soc_alert_api_error(str(exc), 503)
     snapshot = soc_alert_group_query_snapshot(
         rows,
-        analyst_status=analyst_status,
-        cursor_seen=cursor_seen,
-        cursor_id=cursor_id,
-        limit=limit,
-        requested_page=requested_page,
+        analyst_status=request.analyst_status,
+        cursor_seen=request.cursor_seen,
+        cursor_id=request.cursor_id,
+        limit=request.limit,
+        requested_page=request.requested_page,
         excluded_group_ids=manually_escalated_group_ids,
     )
     return 200, soc_alert_group_query_payload(
         source="sqlite-summary",
         snapshot=snapshot,
-        limit=limit,
-        sort_key=sort_key,
-        sort_direction=sort_direction,
+        limit=request.limit,
+        sort_key=request.sort_key,
+        sort_direction=request.sort_direction,
     )
 
 
 def soc_alerts_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
-    summary_response = soc_alerts_summary_query_response(query)
+    request = soc_alert_group_query_request(query)
+    summary_response = soc_alerts_summary_query_response(request)
     if summary_response is not None:
         return summary_response
-
-    since = parse_soc_alert_since((query.get("since") or [""])[0])
-    levels = soc_alert_level_names((query.get("level") or query.get("levels") or [""])[0])
-    filter_status = str((query.get("filter_status") or query.get("status") or [""])[0]).strip().lower()
-    analyst_status = str((query.get("analyst_status") or [""])[0]).strip().lower()
-    q = str((query.get("q") or query.get("search") or [""])[0]).strip()
-    cursor_seen, cursor_id = soc_alert_cursor_parts((query.get("cursor") or [""])[0])
-    limit = soc_alert_limit((query.get("limit") or [""])[0])
-    requested_page = soc_alert_page((query.get("page") or ["1"])[0])
-    sort_key, sort_direction, order_sql = soc_alert_sort_clause(query, fallback=True)
-
-    where = []
-    args: list[object] = []
-    if since:
-        where.append("last_seen >= ?")
-        args.append(since)
-    if levels:
-        placeholders = ",".join("?" for _ in levels)
-        where.append(f"lower(coalesce(triage_level, severity_label, 'unknown')) in ({placeholders})")
-        args.extend(levels)
-    if filter_status in {"accepted", "suppressed", "dropped"}:
-        where.append("lower(coalesce(filter_status, 'accepted')) = ?")
-        args.append(filter_status)
-    if q:
-        where.append("(rule_name like ? or source_ip like ? or destination_ip like ? or alert_json like ?)")
-        like = f"%{q}%"
-        args.extend([like, like, like, like])
-    where_sql = " where " + " and ".join(where) if where else ""
-    group_expr = soc_alert_group_key_sql()
-    sql = f"""
-        WITH ranked AS (
-          SELECT alert_id, first_seen, last_seen, seen_count, timestamp, rule_name,
-                 event_dataset, severity, severity_label, source_ip, source_port,
-                 destination_ip, destination_port, transport_protocol,
-                 traffic_direction, triage_score, triage_level, routing, filter_status,
-                 filter_reason, suppression_key, alert_json, enrichment_json,
-                 LENGTH(COALESCE(alert_json, '')) AS payload_size_bytes,
-                 {group_expr} AS group_key,
-                 COUNT(*) OVER (PARTITION BY {group_expr}) AS raw_alert_count,
-                 SUM(MAX(1, COALESCE(seen_count, 1))) OVER (PARTITION BY {group_expr}) AS total_seen_count,
-                 MIN(first_seen) OVER (PARTITION BY {group_expr}) AS group_first_seen,
-                 MAX(last_seen) OVER (PARTITION BY {group_expr}) AS group_last_seen,
-                 ROW_NUMBER() OVER (
-                   PARTITION BY {group_expr}
-                   ORDER BY replace(replace(COALESCE(last_seen, timestamp, first_seen), 'T', ' '), 'Z', '') DESC,
-                            alert_id DESC
-                 ) AS rn
-          FROM alerts
-          {where_sql}
-        )
-        SELECT *
-        FROM ranked
-        WHERE rn = 1
-        ORDER BY {order_sql}
-    """
+    plan = fallback_query_plan(request, soc_alert_group_key_sql())
     try:
         with soc_alert_db_connect() as conn:
-            rows = conn.execute(sql, args).fetchall()
+            rows = conn.execute(plan.sql, plan.args).fetchall()
             manually_escalated_group_ids = soc_alert_manually_escalated_group_ids(conn)
-    except Exception as e:
-        return soc_alert_api_error(str(e), 503)
-
+    except Exception as exc:
+        return soc_alert_api_error(str(exc), 503)
     snapshot = soc_alert_group_query_snapshot(
         rows,
-        analyst_status=analyst_status,
-        cursor_seen=cursor_seen,
-        cursor_id=cursor_id,
-        limit=limit,
-        requested_page=requested_page,
+        analyst_status=request.analyst_status,
+        cursor_seen=request.cursor_seen,
+        cursor_id=request.cursor_id,
+        limit=request.limit,
+        requested_page=request.requested_page,
         excluded_group_ids=manually_escalated_group_ids,
     )
     return 200, soc_alert_group_query_payload(
         source="sqlite",
         snapshot=snapshot,
-        limit=limit,
-        sort_key=sort_key,
-        sort_direction=sort_direction,
+        limit=request.limit,
+        sort_key=request.sort_key,
+        sort_direction=request.sort_direction,
     )
 
 

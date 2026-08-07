@@ -12,7 +12,12 @@ sys.path.insert(0, str(ROOT / "onion-sentinel-dashboard"))
 from portal_soc_group_query import (  # noqa: E402
     SocAlertQuerySnapshot,
     SocGroupQueryDependencies,
+    SocGroupQueryRequest,
+    SocGroupQueryRequestPolicy,
     compose_group_query_payload,
+    fallback_query_plan,
+    parse_group_query_request,
+    summary_query_plan,
 )
 
 
@@ -35,6 +40,97 @@ class SocGroupQueryTests(unittest.TestCase):
             offset=2,
             next_cursor="2026-08-07|group-b",
         )
+
+    def request(self, **overrides: object) -> SocGroupQueryRequest:
+        values = {
+            "since": "2026-08-01  00:00:00Z",
+            "levels": ["critical", "high"],
+            "filter_status": "accepted",
+            "analyst_status": "open",
+            "search": "needle",
+            "cursor_seen": "2026-08-07",
+            "cursor_id": "group-a",
+            "limit": 25,
+            "requested_page": 2,
+            "sort_key": "last_seen",
+            "sort_direction": "desc",
+            "summary_order_sql": "last_seen DESC, group_id DESC",
+            "fallback_order_sql": "last_seen DESC, group_key DESC",
+        }
+        values.update(overrides)
+        return SocGroupQueryRequest(**values)
+
+    def test_request_aliases_are_normalized_once_for_both_query_paths(self) -> None:
+        sort_calls: list[bool] = []
+
+        def parse_sort(_query: dict[str, list[str]], fallback: bool) -> tuple[str, str, str]:
+            sort_calls.append(fallback)
+            suffix = "group_key" if fallback else "group_id"
+            return "severity", "asc", f"severity ASC, {suffix} ASC"
+
+        policy = SocGroupQueryRequestPolicy(
+            parse_since=lambda value: f"since:{value}",
+            parse_levels=lambda value: value.lower().split(","),
+            parse_cursor=lambda value: tuple(value.split("|", 1)),
+            parse_limit=lambda value: int(value),
+            parse_page=lambda value: int(value),
+            parse_sort=parse_sort,
+        )
+        request = parse_group_query_request(
+            {
+                "levels": ["Critical,High"],
+                "status": [" SUPPRESSED "],
+                "search": ["  suspicious host  "],
+                "analyst_status": [" OPEN "],
+                "cursor": ["seen|group-a"],
+                "limit": ["50"],
+                "page": ["3"],
+                "since": ["24h"],
+            },
+            policy,
+        )
+
+        self.assertEqual(sort_calls, [False, True])
+        self.assertEqual(request.since, "since:24h")
+        self.assertEqual(request.levels, ["critical", "high"])
+        self.assertEqual(request.filter_status, "suppressed")
+        self.assertEqual(request.analyst_status, "open")
+        self.assertEqual(request.search, "suspicious host")
+        self.assertEqual((request.cursor_seen, request.cursor_id), ("seen", "group-a"))
+        self.assertEqual((request.limit, request.requested_page), (50, 3))
+        self.assertEqual(request.summary_order_sql, "severity ASC, group_id ASC")
+        self.assertEqual(request.fallback_order_sql, "severity ASC, group_key ASC")
+
+    def test_summary_plan_parameterizes_filters_and_search(self) -> None:
+        search = "x%' OR 1=1 --"
+        plan = summary_query_plan(self.request(search=search, filter_status="duplicate"))
+
+        self.assertNotIn(search, plan.sql)
+        self.assertIn("FROM alert_group_summary", plan.sql)
+        self.assertIn("representative_alert_id like ?", plan.sql)
+        self.assertIn("group_key like ?", plan.sql)
+        self.assertIn("filter_status, 'accepted')) = ?", plan.sql)
+        self.assertEqual(plan.args[:4], [
+            "2026-08-01  00:00:00Z", "critical", "high", "duplicate",
+        ])
+        self.assertEqual(plan.args[4:], [f"%{search}%"] * 6)
+
+    def test_fallback_plan_uses_injected_group_expression_and_legacy_filters(self) -> None:
+        search = "fallback needle"
+        plan = fallback_query_plan(
+            self.request(search=search, filter_status="duplicate"),
+            "coalesce(stable_group_key, alert_id)",
+        )
+
+        self.assertIn("coalesce(stable_group_key, alert_id) AS group_key", plan.sql)
+        self.assertIn("alert_json like ?", plan.sql)
+        self.assertNotIn("representative_alert_id like ?", plan.sql)
+        self.assertNotIn("filter_status, 'accepted')) = ?", plan.sql)
+        self.assertNotIn(search, plan.sql)
+        self.assertEqual(plan.args[:3], [
+            "2026-08-01  00:00:00Z", "critical", "high",
+        ])
+        self.assertEqual(plan.args[3:], [f"%{search}%"] * 4)
 
     def test_loads_page_metadata_once_and_shares_it_across_rows(self) -> None:
         rows = [{"alert_id": "alert-a"}, {"alert_id": "alert-b"}]

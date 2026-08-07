@@ -443,11 +443,13 @@ legacy same-parent requirement for prompt discovery.
 
 `portal_soc_group_query.py` owns the grouped SOC page snapshot model, page-level
 AI/PCAP/evidence orchestration, per-row presenter invocation, and stable public
-response envelope. Its explicit dependency ports ensure each metadata source is
-loaded once per page and shared across all rows. `report_portal.py` retains the
-concrete caches, settings reader, bounded SQLite fallback, and compatibility
-facade; the service performs no direct database, filesystem, process, or network
-access.
+response envelope. It also normalizes request aliases once and builds the
+parameterized summary-table and legacy window-function query plans, preserving
+their intentional filter differences. Its explicit dependency ports ensure each
+metadata source is loaded once per page and shared across all rows.
+`report_portal.py` retains allowlisted sort/severity parsing, concrete caches,
+settings, read-only SQLite execution and the compatibility facade; the service
+performs no direct database, filesystem, process, or network access.
 
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
