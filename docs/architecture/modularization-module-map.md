@@ -20,7 +20,10 @@ API identifiers and will change as extractions land.
 
 ## AI Analysis Runner
 
-Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
+Baseline owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines). At the
+ARR-79 composition checkpoint the compatibility file is 10,497 lines and its
+`main()` entry point is the enforced 250-line composition root. The baseline
+line ranges below remain historical navigation aids for the extraction ledger.
 
 | Baseline area | Current lines | Target boundary | Contract to freeze | Side effects |
 | --- | ---: | --- | --- | --- |
@@ -46,6 +49,28 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
 
 ### Extraction ledger
 
+- Controlled-evaluation discovery, exact memory-freeze enforcement, output and
+  harness-database confinement, one-time token consumption, deferred-result
+  reconciliation, prompt loading, role attestation, settings resolution, live
+  OSQuery preparation, enrichment preparation, and evidence-contract binding
+  now live in `onion_sentinel.startup` behind typed policy and port records.
+- Route resolution, harness eligibility/start/bypass behavior, controlled-mode
+  enforcement, shadow-mode failure isolation, running-record publication,
+  phase observation, and resource-monitor startup now live in
+  `onion_sentinel.preparation`.
+- The ordered load, attest, prepare, primary analysis, governed pivots,
+  independent review, adjudication, deterministic guards, validation, commit,
+  post-commit, completion, and failure ledger now lives in
+  `onion_sentinel.pipeline.RuntimeContext`. Analysis/review orchestration uses
+  explicit ports and does not own provider or persistence side effects.
+- Best-effort terminal harness failure, monitor shutdown, final telemetry
+  publication, and stale active-record cleanup now live in
+  `onion_sentinel.telemetry`; telemetry failure cannot change a committed
+  analysis outcome.
+- `n8n/bin/local_ai_pipeline_adapters.py` owns concrete binding of legacy
+  callables to package ports. It contains no investigation or persistence
+  policy. `run-local-ai-analysis.py::main` is limited to stage composition,
+  state handoff, terminal error classification, and the compatibility CLI.
 - Model roster normalization, exact route construction/parsing, assigned/live
   metadata, external-harness route handling, and reviewer model identity now
   live in `onion_sentinel.analysis.providers.routing`. The legacy runner keeps
