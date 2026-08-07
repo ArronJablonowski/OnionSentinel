@@ -72,6 +72,20 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_ai_model_policy.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_ai_model_policy.py",
+      "required_symbols": [
+        "default_soc_ai_settings",
+        "_canonical_agent_route",
+        "_enabled_agent_model_routes",
+        "_model_route_identity",
+        "_normalize_agent_adjudicator_models",
+        "_normalize_agent_models",
+        "_normalize_agent_second_opinion_models"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_catalog_routes.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_catalog_routes.py",

@@ -314,6 +314,16 @@ and injects an immutable policy containing the existing model-roster, route-
 identity, executable, and assignment helpers. The normalizer has no persistence,
 HTTP, filesystem reads or writes, process execution, or network access.
 
+`portal_ai_model_policy.py` owns the model catalog and reusable route policy
+injected into the settings normalizer: safe defaults, bounded Ollama rosters,
+literal boolean parsing, executable and provider-model validation, Codex roster
+completion, enabled-route composition, stale-route migration, effort-independent
+provider/model identity, and primary/reviewer/adjudicator independence. The
+portal re-exports the legacy names for compatibility while holding only the
+settings lock and public normalization facade. This policy module reads only
+the two documented default environment variables and performs no persistence,
+HTTP, filesystem reads or writes, process execution, or network access.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and
