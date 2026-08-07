@@ -1678,6 +1678,23 @@ def _conclusion_incident_report():
     return incident_report
 
 
+def _conclusion_incident_completeness():
+    _provider_routing()
+    from onion_sentinel.analysis.conclusions import incident_completeness
+    return incident_completeness
+
+
+def _incident_completeness_dependencies():
+    module = _conclusion_incident_completeness()
+    return module.Dependencies(
+        is_incident_responder=_is_incident_responder_package,
+        safe_nonnegative_int=safe_nonnegative_int,
+        success_statuses=frozenset(INVESTIGATION_QUERY_SUCCESS_STATUSES),
+        report_text_fields=frozenset(INCIDENT_RESPONSE_REPORT_TEXT_FIELDS),
+        confidence_high_threshold=CONFIDENCE_HIGH_THRESHOLD,
+    )
+
+
 def _incident_report_dependencies():
     module = _conclusion_incident_report()
     return module.Dependencies(
@@ -13541,264 +13558,10 @@ def apply_incident_evidence_completeness_guard(
     response: dict[str, Any],
     prompt_package: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Cap Incident Responder confidence when query coverage is incomplete.
-
-    Query contracts intentionally permit bounded and partial evidence as an
-    explicit gap. This guard prevents a model from recovering ``high``
-    confidence merely by omitting that gap from free-form prose.
-    """
-    if not _is_incident_responder_package(prompt_package):
-        return response
-    assert isinstance(prompt_package, dict)
-    reasons: list[str] = []
-    maximum_score = 1.0
-
-    def cap(value: float, reason: str) -> None:
-        nonlocal maximum_score
-        maximum_score = min(maximum_score, value)
-        if reason not in reasons:
-            reasons.append(reason)
-
-    report_validation = response.get("_incident_response_report_validation")
-    if isinstance(report_validation, dict) and not report_validation.get("valid"):
-        critical_missing = set(report_validation.get("missing_fields") or []).intersection(
-            INCIDENT_RESPONSE_REPORT_TEXT_FIELDS
-        )
-        if (
-            not report_validation.get("model_report_present")
-            or critical_missing
-            or "incident_response_report"
-            in set(report_validation.get("invalid_fields") or [])
-        ):
-            cap(0.39, "required_incident_response_report_incomplete")
-        else:
-            cap(0.69, "incident_response_report_schema_defect")
-
-    evidence = prompt_package.get("incident_response_evidence")
-    if not isinstance(evidence, dict):
-        cap(0.39, "required_incident_evidence_missing")
-    else:
-        coverage_note = str(evidence.get("coverage_note") or "").strip().lower()
-        if any(marker in coverage_note for marker in ("bounded", "gap", "fallback")):
-            cap(0.79, "incident_evidence_temporal_coverage_limited")
-        security_onion = evidence.get("security_onion_response")
-        if not isinstance(security_onion, dict):
-            cap(0.39, "incident_evidence_response_missing")
-        else:
-            if security_onion.get("complete") is not True or security_onion.get("partial") is True:
-                cap(0.69, "incident_evidence_partial")
-            semantic = security_onion.get("semantic_validity")
-            if isinstance(semantic, dict):
-                if semantic.get("controls_valid") is not True:
-                    cap(0.39, "incident_evidence_controls_invalid")
-                elif semantic.get("semantic_valid") is not True:
-                    cap(0.69, "incident_evidence_semantically_incomplete")
-            results = (
-                security_onion.get("results")
-                if isinstance(security_onion.get("results"), list)
-                else []
-            )
-            for result in results:
-                if not isinstance(result, dict):
-                    cap(0.69, "incident_evidence_result_malformed")
-                    continue
-                if (
-                    str(result.get("status") or "").strip().lower() != "ok"
-                    or result.get("semantic_valid") is False
-                    or result.get("timed_out") is True
-                ):
-                    cap(0.69, "incident_evidence_query_failed_or_partial")
-                shards = result.get("shards")
-                if isinstance(shards, dict) and safe_nonnegative_int(shards.get("failed")):
-                    cap(0.69, "incident_evidence_failed_shards")
-                projection = result.get("prompt_projection")
-                if (
-                    result.get("truncated") is True
-                    or isinstance(projection, dict)
-                    and (
-                        projection.get("source_truncated") is True
-                        or safe_nonnegative_int(projection.get("source_returned_hits"))
-                        > safe_nonnegative_int(projection.get("retained_hits"))
-                    )
-                ):
-                    cap(0.79, "incident_evidence_query_truncated")
-
-    iterative = prompt_package.get("investigation_query_results")
-    if isinstance(iterative, dict):
-        outcomes = iterative.get("outcomes")
-        if isinstance(outcomes, dict):
-            unresolved_attempts = (
-                safe_nonnegative_int(
-                    outcomes.get("unresolved_non_success_attempts")
-                )
-                if "unresolved_non_success_attempts" in outcomes
-                else sum(
-                    safe_nonnegative_int(outcomes.get(key))
-                    for key in (
-                        "partial_queries",
-                        "rejected_queries",
-                        "error_queries",
-                        "timeout_queries",
-                    )
-                )
-            )
-            if outcomes.get("zero_success") is True:
-                cap(0.69, "investigation_pivots_zero_success")
-            elif (
-                unresolved_attempts
-                or safe_nonnegative_int(
-                    outcomes.get("unreported_queries")
-                )
-            ):
-                cap(0.79, "investigation_pivots_incomplete")
-        projection = iterative.get("prompt_projection")
-        if isinstance(projection, dict) and projection.get("truncated") is True:
-            cap(0.79, "investigation_pivot_prompt_projection_truncated")
-        rounds = iterative.get("rounds") if isinstance(iterative.get("rounds"), list) else []
-        resolved_retry_query_ids = {
-            str(item).strip()
-            for item in (
-                outcomes.get("resolved_retry_query_ids")
-                if isinstance(outcomes, dict)
-                and isinstance(
-                    outcomes.get("resolved_retry_query_ids"),
-                    list,
-                )
-                else []
-            )
-            if str(item).strip()
-        }
-        unresolved_non_success_attempts = (
-            unresolved_attempts
-            if isinstance(outcomes, dict)
-            else 0
-        )
-        for round_item in rounds:
-            if not isinstance(round_item, dict):
-                continue
-            for result in (
-                round_item.get("results")
-                if isinstance(round_item.get("results"), list)
-                else []
-            ):
-                if not isinstance(result, dict):
-                    continue
-                status = str(result.get("status") or "").strip().lower()
-                result_query_id = str(
-                    result.get("query_id") or ""
-                ).strip()
-                resolved_failure = bool(
-                    result_query_id
-                    and result_query_id in resolved_retry_query_ids
-                    and status
-                    not in INVESTIGATION_QUERY_SUCCESS_STATUSES
-                )
-                if status in {"partial", "error", "timeout", "output_limit"}:
-                    if (
-                        not resolved_failure
-                        and unresolved_non_success_attempts
-                    ):
-                        cap(
-                            0.69,
-                            "investigation_pivot_failed_or_partial",
-                        )
-                elif status in {"rejected", "invalid_response"}:
-                    if (
-                        not resolved_failure
-                        and unresolved_non_success_attempts
-                    ):
-                        cap(0.79, "investigation_pivot_rejected")
-                model_evidence = result.get("evidence")
-                if isinstance(model_evidence, dict):
-                    if model_evidence.get("controls_valid") is False:
-                        cap(0.39, "investigation_pivot_controls_invalid")
-                    if (
-                        model_evidence.get("partial") is True
-                        or model_evidence.get("complete") is False
-                        or bool(model_evidence.get("evidence_gaps"))
-                    ):
-                        cap(0.69, "investigation_pivot_evidence_partial")
-                    if (
-                        model_evidence.get("truncated") is True
-                        or model_evidence.get("model_projection_truncated") is True
-                        or model_evidence.get("prompt_projection")
-                        == "omitted_due_to_cumulative_byte_budget"
-                    ):
-                        cap(0.79, "investigation_pivot_evidence_truncated")
-                    evidence_results = (
-                        model_evidence.get("results")
-                        if isinstance(model_evidence.get("results"), list)
-                        else []
-                    )
-                    for evidence_result in evidence_results:
-                        if not isinstance(evidence_result, dict):
-                            cap(0.69, "investigation_pivot_result_malformed")
-                            continue
-                        if (
-                            str(evidence_result.get("status") or "").strip().lower()
-                            != "ok"
-                            or evidence_result.get("semantic_valid") is False
-                        ):
-                            cap(0.69, "investigation_pivot_failed_or_partial")
-                        if (
-                            evidence_result.get("truncated") is True
-                            or evidence_result.get("model_projection_truncated") is True
-                            or evidence_result.get("hits_prompt_truncated") is True
-                            or evidence_result.get("rows_prompt_truncated") is True
-                            or evidence_result.get("records_prompt_truncated") is True
-                        ):
-                            cap(0.79, "investigation_pivot_evidence_truncated")
-                trusted = (
-                    result.get("trusted_query_audit")
-                    if isinstance(result.get("trusted_query_audit"), list)
-                    else []
-                )
-                if any(
-                    isinstance(item, dict)
-                    and any(
-                        item.get(key) is True
-                        for key in (
-                            "truncated",
-                            "result_truncated",
-                            "index_scan_truncated",
-                            "audit_truncated",
-                        )
-                    )
-                    for item in trusted
-                ):
-                    cap(0.79, "investigation_pivot_result_truncated")
-
-    live_osquery = prompt_package.get("_live_osquery_evidence_accumulator")
-    if not isinstance(live_osquery, dict):
-        live_osquery = prompt_package.get("live_osquery_evidence")
-    if isinstance(live_osquery, dict):
-        if live_osquery.get("complete") is not True:
-            cap(0.69, "live_endpoint_osquery_incomplete")
-        live_results = (
-            live_osquery.get("results")
-            if isinstance(live_osquery.get("results"), list)
-            else []
-        )
-        for result in live_results:
-            if not isinstance(result, dict):
-                continue
-            if str(result.get("status") or "").strip().lower() != "ok":
-                cap(0.69, "live_endpoint_osquery_query_failed")
-            if result.get("truncated") is True:
-                cap(0.79, "live_endpoint_osquery_result_truncated")
-
-    response["_incident_evidence_completeness"] = {
-        "version": 1,
-        "complete_for_high_confidence": maximum_score >= CONFIDENCE_HIGH_THRESHOLD,
-        "maximum_confidence_score": round(maximum_score, 3),
-        "confidence_cap": (
-            round(maximum_score, 3)
-            if maximum_score < 1.0
-            else None
-        ),
-        "limiters": reasons,
-    }
-    return response
+    """Cap confidence when required Incident Responder evidence is incomplete."""
+    return _conclusion_incident_completeness().apply(
+        response, prompt_package, _incident_completeness_dependencies(),
+    )
 
 
 def _canonical_incident_disposition_sentence(response: dict[str, Any]) -> str:
