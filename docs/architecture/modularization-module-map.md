@@ -395,6 +395,12 @@ The evaluation-only missing-pivot retry lives under
 instruction lifecycle, prompt-size admission, model-call recording, route
 attestation, and required-request validation while receiving model and harness
 operations only through injected callbacks.
+Canonical per-round result handling lives under
+`onion_sentinel.analysis.query.round_result`. It invokes the already-authorized
+broker only through an injected callback, rejects malformed result envelopes
+as read-only `invalid_response` records, preserves empty rounds, computes repair
+failures before local policy rejections are merged, and cannot select or widen
+query scope.
 The legacy runner functions remain compatibility delegates and inject runtime
 policy explicitly, preserving existing test seams while keeping review-package
 mutation and reviewer-output admission out of the composition root.

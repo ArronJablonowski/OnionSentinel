@@ -6631,6 +6631,7 @@ def apply_investigation_query_loop(
     from onion_sentinel.analysis.query import (
         engine as engine_module,
         planning_retry as planning_retry_module,
+        round_result as round_result_module,
     )
     state_module = _query_state()
     state_policy = state_module.Policy(
@@ -6964,11 +6965,13 @@ def apply_investigation_query_loop(
                             "reason": str(exc)[:1000],
                             "trigger": "contract_rejection",
                         }
-        if normalized:
+        def execute_admitted_requests(
+            admitted_requests: list[dict[str, Any]],
+        ) -> Any:
             observe_harness(
                 lambda: harness_runtime.preflight_query_batch(
                     round_number=harness_round_number,
-                    request_count=len(normalized),
+                    request_count=len(admitted_requests),
                 )
                 if harness_runtime is not None
                 else None
@@ -6977,7 +6980,7 @@ def apply_investigation_query_loop(
                 lambda: harness_runtime.phase(
                     "investigation_query_execution",
                     route,
-                    f"round {harness_round_number}; {len(normalized)} admitted request(s)",
+                    f"round {harness_round_number}; {len(admitted_requests)} admitted request(s)",
                 )
                 if harness_runtime is not None
                 else None
@@ -6995,48 +6998,27 @@ def apply_investigation_query_loop(
                 )
             if enrichment_config is not None:
                 query_kwargs["enrichment_config"] = enrichment_config
-            round_result = query_executor(
+            return query_executor(
                 prompt_package,
-                normalized,
+                admitted_requests,
                 **query_kwargs,
             )
-            if (
-                not isinstance(round_result, dict)
-                or not isinstance(round_result.get("results"), list)
-                or not isinstance(round_result.get("requests"), list)
-            ):
-                round_result = {
-                    "schema": INVESTIGATION_QUERY_RESULT_SCHEMA,
-                    "round": harness_round_number,
-                    "generated_at": project_now(),
-                    "requests": copy.deepcopy(normalized),
-                    "results": [
-                        {
-                            "query_id": request["query_id"],
-                            "backend": request["backend"],
-                            "status": "invalid_response",
-                            "read_only": True,
-                            "error": (
-                                "query broker returned an invalid result "
-                                "envelope"
-                            ),
-                        }
-                        for request in normalized
-                    ],
-                    "audit": [],
-                }
-        else:
-            round_result = {
-                "schema": INVESTIGATION_QUERY_RESULT_SCHEMA,
-                "round": harness_round_number,
-                "generated_at": project_now(),
-                "requests": [],
-                "results": [],
-                "audit": [],
-            }
-        broker_repair_failures = investigation_query_repair_failures(
-            round_result
+
+        round_execution = round_result_module.run(
+            normalized,
+            rejected,
+            round_number=harness_round_number,
+            policy=round_result_module.Policy(
+                schema=INVESTIGATION_QUERY_RESULT_SCHEMA,
+            ),
+            dependencies=round_result_module.Dependencies(
+                execute=execute_admitted_requests,
+                repair_failures=investigation_query_repair_failures,
+                now=project_now,
+            ),
         )
+        round_result = round_execution.envelope
+        broker_repair_failures = round_execution.repair_failures
         if not repair_round:
             normalized_by_id = {
                 request["query_id"]: request
@@ -7059,7 +7041,6 @@ def apply_investigation_query_loop(
                         "reason": reason,
                         "trigger": "broker_rejection_or_invalid_response",
                     }
-        round_result.setdefault("results", []).extend(rejected)
         rounds.append(round_result)
         observe_harness(
             lambda: harness_runtime.query_round(round_result)
