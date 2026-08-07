@@ -123,6 +123,15 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_settings_agent_card.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_agent_card.py",
+      "required_symbols": [
+        "AgentSettingsCardViewModel",
+        "render_agent_settings_card"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_settings_client_shell.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_client_shell.py",

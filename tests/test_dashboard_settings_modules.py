@@ -12,9 +12,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = ROOT / "onion-sentinel-dashboard" / "scripts"
 BUILDER_PATH = SCRIPT_DIR / "build_soc_alerts_dashboard.py"
 ASSETS_PATH = SCRIPT_DIR / "dashboard_settings_assets.py"
+AGENT_CARD_PATH = SCRIPT_DIR / "dashboard_settings_agent_card.py"
 INSTALLER_PATH = ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
 MODULE_NAMES = (
     "dashboard_settings_assets.py",
+    "dashboard_settings_agent_card.py",
     "dashboard_settings_client_shell.py",
     "dashboard_settings_client_model.py",
     "dashboard_settings_client_actions.py",
@@ -36,6 +38,7 @@ class DashboardSettingsModuleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.assets = load(ASSETS_PATH, "dashboard_settings_assets")
+        cls.agent_card = load(AGENT_CARD_PATH, "dashboard_settings_agent_card")
         cls.builder = load(BUILDER_PATH, "dashboard_settings_builder_test")
         cls.installer = INSTALLER_PATH.read_text(encoding="utf-8")
 
@@ -61,6 +64,35 @@ class DashboardSettingsModuleTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first.count(self.assets.SETTINGS_PAGE_CSS), 1)
         self.assertEqual(first.count(self.assets.SETTINGS_PAGE_JS), 1)
+
+    def test_agent_card_renderer_escapes_data_and_preserves_owned_controls(self) -> None:
+        view = self.agent_card.AgentSettingsCardViewModel(
+            role="test-agent",
+            role_label="Test & Agent",
+            kicker="Test <agent>",
+            title="Agent <title>",
+            trigger="Run & inspect",
+            description="Description <unsafe>",
+            icon_path='assets/test".png',
+            prompt_path="~/prompt&a.md",
+            reviewer_prompt_path="~/review.md",
+            memory_path="~/memory.md",
+            shared_memory_path="~/shared.md",
+            model_label="model<&>",
+            reviewer_model_label="reviewer",
+            adjudicator_model_label="adjudicator",
+            model_control_html='<div id="model-control"></div>',
+            prompt_control_html='<div id="prompt-control"></div>',
+            note="Review <carefully>",
+        )
+        rendered = self.agent_card.render_agent_settings_card(view)
+        self.assertIn("Test &amp; Agent files", rendered)
+        self.assertIn("Test &lt;agent&gt;", rendered)
+        self.assertIn("model&lt;&amp;&gt;", rendered)
+        self.assertIn('assets/test&quot;.png', rendered)
+        self.assertIn("Review &lt;carefully&gt;", rendered)
+        self.assertIn('<div id="model-control"></div>', rendered)
+        self.assertIn('<div id="prompt-control"></div>', rendered)
 
     def test_settings_modules_stay_within_the_maintenance_target(self) -> None:
         for name in MODULE_NAMES:

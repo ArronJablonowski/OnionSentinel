@@ -75,6 +75,10 @@ from dashboard_settings_assets import (  # noqa: E402
     SETTINGS_PAGE_JS,
     inject_settings_assets,
 )
+from dashboard_settings_agent_card import (  # noqa: E402
+    AgentSettingsCardViewModel,
+    render_agent_settings_card,
+)
 from dashboard_software_inventory_page import software_inventory_page_section  # noqa: E402
 from dashboard_shell_components import (  # noqa: E402
     PAGE_BY_KEY,
@@ -7070,38 +7074,39 @@ def settings_page_section() -> str:
     analyst_second_opinion_prompt = html.escape(load_second_opinion_prompt(SOC_ANALYST_SECOND_OPINION_PROMPT_FILE))
     analyst_second_opinion_prompt_path = html.escape(display_path(SOC_ANALYST_SECOND_OPINION_PROMPT_FILE))
     analyst_memory_path = html.escape(display_path(SOC_ANALYST_MEMORY_FILE))
-    shared_memory_path = html.escape(display_path(SHARED_AGENT_MEMORY_FILE))
+    shared_memory_display_path = display_path(SHARED_AGENT_MEMORY_FILE)
+    shared_memory_path = html.escape(shared_memory_display_path)
     engineer_prompt = html.escape(load_siem_engineer_prompt())
-    engineer_prompt_path = html.escape(display_path(SIEM_ENGINEER_PROMPT_FILE))
+    engineer_prompt_path = display_path(SIEM_ENGINEER_PROMPT_FILE)
     engineer_second_opinion_prompt = html.escape(load_second_opinion_prompt(SIEM_ENGINEER_SECOND_OPINION_PROMPT_FILE))
-    engineer_second_opinion_prompt_path = html.escape(display_path(SIEM_ENGINEER_SECOND_OPINION_PROMPT_FILE))
-    engineer_memory_path = html.escape(display_path(SIEM_ENGINEER_MEMORY_FILE))
+    engineer_second_opinion_prompt_path = display_path(SIEM_ENGINEER_SECOND_OPINION_PROMPT_FILE)
+    engineer_memory_path = display_path(SIEM_ENGINEER_MEMORY_FILE)
     hunter_prompt = html.escape(load_threat_hunter_prompt())
-    hunter_prompt_path = html.escape(display_path(THREAT_HUNTER_PROMPT_FILE))
+    hunter_prompt_path = display_path(THREAT_HUNTER_PROMPT_FILE)
     hunter_second_opinion_prompt = html.escape(load_second_opinion_prompt(THREAT_HUNTER_SECOND_OPINION_PROMPT_FILE))
-    hunter_second_opinion_prompt_path = html.escape(display_path(THREAT_HUNTER_SECOND_OPINION_PROMPT_FILE))
-    hunter_memory_path = html.escape(display_path(THREAT_HUNTER_MEMORY_FILE))
+    hunter_second_opinion_prompt_path = display_path(THREAT_HUNTER_SECOND_OPINION_PROMPT_FILE)
+    hunter_memory_path = display_path(THREAT_HUNTER_MEMORY_FILE)
     intel_prompt = html.escape(load_cyber_threat_intel_prompt())
-    intel_prompt_path = html.escape(display_path(CYBER_THREAT_INTEL_PROMPT_FILE))
+    intel_prompt_path = display_path(CYBER_THREAT_INTEL_PROMPT_FILE)
     intel_second_opinion_prompt = html.escape(load_second_opinion_prompt(CYBER_THREAT_INTEL_SECOND_OPINION_PROMPT_FILE))
-    intel_second_opinion_prompt_path = html.escape(display_path(CYBER_THREAT_INTEL_SECOND_OPINION_PROMPT_FILE))
-    intel_memory_path = html.escape(display_path(CYBER_THREAT_INTEL_MEMORY_FILE))
+    intel_second_opinion_prompt_path = display_path(CYBER_THREAT_INTEL_SECOND_OPINION_PROMPT_FILE)
+    intel_memory_path = display_path(CYBER_THREAT_INTEL_MEMORY_FILE)
     incident_prompt = html.escape(load_incident_responder_prompt())
-    incident_prompt_path = html.escape(display_path(INCIDENT_RESPONDER_PROMPT_FILE))
+    incident_prompt_path = display_path(INCIDENT_RESPONDER_PROMPT_FILE)
     incident_second_opinion_prompt = html.escape(load_second_opinion_prompt(INCIDENT_RESPONDER_SECOND_OPINION_PROMPT_FILE))
-    incident_second_opinion_prompt_path = html.escape(display_path(INCIDENT_RESPONDER_SECOND_OPINION_PROMPT_FILE))
-    incident_memory_path = html.escape(display_path(INCIDENT_RESPONDER_MEMORY_FILE))
+    incident_second_opinion_prompt_path = display_path(INCIDENT_RESPONDER_SECOND_OPINION_PROMPT_FILE)
+    incident_memory_path = display_path(INCIDENT_RESPONDER_MEMORY_FILE)
     ai_settings = load_soc_ai_settings()
     agent_model_labels = {
-        role: html.escape(agent_model_route_label(ai_settings, role))
+        role: agent_model_route_label(ai_settings, role)
         for role in CYBER_SECURITY_AGENT_ROLES
     }
     agent_second_opinion_model_labels = {
-        role: html.escape(agent_second_opinion_model_route_label(ai_settings, role))
+        role: agent_second_opinion_model_route_label(ai_settings, role)
         for role in CYBER_SECURITY_AGENT_ROLES
     }
     agent_adjudicator_model_labels = {
-        role: html.escape(agent_adjudicator_model_route_label(ai_settings, role))
+        role: agent_adjudicator_model_route_label(ai_settings, role)
         for role in CYBER_SECURITY_AGENT_ROLES
     }
     agent_model_controls = {
@@ -7173,6 +7178,85 @@ def settings_page_section() -> str:
             reviewer_endpoint='/api/soc-settings/threat-hunter-second-opinion-prompt',
         ),
     }
+    agent_cards = ''.join(map(
+        render_agent_settings_card,
+        (
+            AgentSettingsCardViewModel(
+                role='incident-responder',
+                role_label='Incident Responder',
+                kicker='Incident responder prompt',
+                title='Incident Responder',
+                trigger='Trigger: manual incident workflow now; external IR host collection is TODO.',
+                description='This prompt guides senior incident response planning, evidence preservation, containment guidance, and future host artifact collection workflows.',
+                icon_path='assets/settings-incident-responder-prompt.png',
+                prompt_path=incident_prompt_path,
+                reviewer_prompt_path=incident_second_opinion_prompt_path,
+                memory_path=incident_memory_path,
+                shared_memory_path=shared_memory_display_path,
+                model_label=agent_model_labels['incident-responder'],
+                reviewer_model_label=agent_second_opinion_model_labels['incident-responder'],
+                adjudicator_model_label=agent_adjudicator_model_labels['incident-responder'],
+                model_control_html=agent_model_controls['incident-responder'],
+                prompt_control_html=agent_prompt_controls['incident-responder'],
+                note='TODO: connect the dedicated incident response host before allowing this agent to trigger external host artifact collection scripts. Until then, recommendations should mark those actions as pending integration.',
+            ),
+            AgentSettingsCardViewModel(
+                role='siem-engineer',
+                role_label='SIEM Engineer',
+                kicker='SIEM engineer prompt',
+                title='SIEM Engineer System Prompt',
+                trigger='Planned trigger: cron every 6 hours after all eligible alerts are analyzed.',
+                description='This prompt guides the SIEM Engineering review that recommends scoped tuning and new detection work after all eligible alerts have finished AI analysis.',
+                icon_path='assets/settings-siem-engineer-prompt.png',
+                prompt_path=engineer_prompt_path,
+                reviewer_prompt_path=engineer_second_opinion_prompt_path,
+                memory_path=engineer_memory_path,
+                shared_memory_path=shared_memory_display_path,
+                model_label=agent_model_labels['siem-engineer'],
+                reviewer_model_label=agent_second_opinion_model_labels['siem-engineer'],
+                adjudicator_model_label=agent_adjudicator_model_labels['siem-engineer'],
+                model_control_html=agent_model_controls['siem-engineer'],
+                prompt_control_html=agent_prompt_controls['siem-engineer'],
+                note='Designed cadence: every 6 hours, only when the alert analysis backlog is clear. It should review alerts, enrichments, notes, acknowledgments, suppressions, and related detection context before recommending changes.',
+            ),
+            AgentSettingsCardViewModel(
+                role='cyber-threat-intel',
+                role_label='Cyber Threat Intel Analyst',
+                kicker='Cyber threat intel prompt',
+                title='Cyber Threat Intel Analyst',
+                trigger='Trigger: manual intel review from alerts, enrichments, hunts, and engineering context; scheduled briefs are future work.',
+                description='This prompt guides intelligence briefs, indicator review, enrichment pivots, confidence scoring, and cross-agent context for SOC decisions.',
+                icon_path='assets/settings-cyber-threat-intel-prompt.png',
+                prompt_path=intel_prompt_path,
+                reviewer_prompt_path=intel_second_opinion_prompt_path,
+                memory_path=intel_memory_path,
+                shared_memory_path=shared_memory_display_path,
+                model_label=agent_model_labels['cyber-threat-intel'],
+                reviewer_model_label=agent_second_opinion_model_labels['cyber-threat-intel'],
+                adjudicator_model_label=agent_adjudicator_model_labels['cyber-threat-intel'],
+                model_control_html=agent_model_controls['cyber-threat-intel'],
+                prompt_control_html=agent_prompt_controls['cyber-threat-intel'],
+            ),
+            AgentSettingsCardViewModel(
+                role='threat-hunter',
+                role_label='Threat Hunter',
+                kicker='Threat hunter prompt',
+                title='Threat Hunter System Prompt',
+                trigger='Trigger: manual hunt review from alert patterns; automated hunts are future work.',
+                description='This prompt guides senior threat-hunt recommendations, including Security Onion pivots and query-ready KQL, OQL, and OSQuery hunt plans.',
+                icon_path='assets/settings-threat-hunter-prompt.png',
+                prompt_path=hunter_prompt_path,
+                reviewer_prompt_path=hunter_second_opinion_prompt_path,
+                memory_path=hunter_memory_path,
+                shared_memory_path=shared_memory_display_path,
+                model_label=agent_model_labels['threat-hunter'],
+                reviewer_model_label=agent_second_opinion_model_labels['threat-hunter'],
+                adjudicator_model_label=agent_adjudicator_model_labels['threat-hunter'],
+                model_control_html=agent_model_controls['threat-hunter'],
+                prompt_control_html=agent_prompt_controls['threat-hunter'],
+            ),
+        ),
+    ))
     ai_path = html.escape(display_path(SOC_AI_SETTINGS_FILE))
     installed_models = list_ollama_models()
     enabled_models = _normalized_enabled_models(ai_settings.get('enabled_ollama_models'))
@@ -7384,9 +7468,9 @@ def settings_page_section() -> str:
               <span class="settings-kicker">SOC analyst prompt</span>
               <strong id="soc-analyst-prompt-title">SOC Analyst System Prompt</strong>
               <span class="settings-trigger-line">Trigger: new eligible alert; scheduled AI worker drains highest severity newest first.</span>
-              <span class="settings-model-line"><b>Model</b><span data-agent-model="soc-analyst">{agent_model_labels['soc-analyst']}</span></span>
-              <span class="settings-model-line settings-second-opinion-line"><b>Second opinion</b><span data-agent-second-opinion-model="soc-analyst">{agent_second_opinion_model_labels['soc-analyst']}</span></span>
-              <span class="settings-model-line settings-adjudicator-line"><b>Adjudicator</b><span data-agent-adjudicator-model="soc-analyst">{agent_adjudicator_model_labels['soc-analyst']}</span></span>
+              <span class="settings-model-line"><b>Model</b><span data-agent-model="soc-analyst">{html.escape(agent_model_labels['soc-analyst'])}</span></span>
+              <span class="settings-model-line settings-second-opinion-line"><b>Second opinion</b><span data-agent-second-opinion-model="soc-analyst">{html.escape(agent_second_opinion_model_labels['soc-analyst'])}</span></span>
+              <span class="settings-model-line settings-adjudicator-line"><b>Adjudicator</b><span data-agent-adjudicator-model="soc-analyst">{html.escape(agent_adjudicator_model_labels['soc-analyst'])}</span></span>
               <span class="settings-model-line"><b>Analysis</b><span data-soc-policy-label="analysis">{analysis_threshold_label if analysis_min_severity != 'disabled' else 'Disabled'}{'' if analysis_min_severity == 'disabled' else ' and higher'}</span></span>
               <span class="settings-model-line"><b>PCAP</b><span data-soc-policy-label="pcap">{pcap_threshold_label} and higher</span></span>
               <span class="settings-model-line"><b>Incident</b><span data-soc-policy-label="incident">{incident_threshold_label if incident_min_severity != 'disabled' else 'Disabled'}</span></span>
@@ -7442,120 +7526,7 @@ def settings_page_section() -> str:
         </section>
         {agent_prompt_controls['soc-analyst']}
       </details>
-      <details class="settings-panel settings-details" aria-labelledby="incident-responder-prompt-title">
-        <summary>
-          <span class="settings-summary-main">
-            <span class="settings-summary-icon" aria-hidden="true"><img src="assets/settings-incident-responder-prompt.png" alt=""></span>
-            <span class="settings-summary-copy">
-              <span class="settings-kicker">Incident responder prompt</span>
-              <strong id="incident-responder-prompt-title">Incident Responder</strong>
-              <span class="settings-trigger-line">Trigger: manual incident workflow now; external IR host collection is TODO.</span>
-              <span class="settings-model-line"><b>Model</b><span data-agent-model="incident-responder">{agent_model_labels['incident-responder']}</span></span>
-              <span class="settings-model-line settings-second-opinion-line"><b>Second opinion</b><span data-agent-second-opinion-model="incident-responder">{agent_second_opinion_model_labels['incident-responder']}</span></span>
-              <span class="settings-model-line settings-adjudicator-line"><b>Adjudicator</b><span data-agent-adjudicator-model="incident-responder">{agent_adjudicator_model_labels['incident-responder']}</span></span>
-            </span>
-          </span>
-          <span class="settings-path-stack" aria-label="Incident Responder files">
-            <button class="settings-path-row settings-file-link settings-prompt-link" type="button" data-prompt-target="incident-responder-prompt" aria-label="Open Incident Responder system prompt"><b>Prompt</b><code>{incident_prompt_path}</code></button>
-            <button class="settings-path-row settings-file-link settings-prompt-link" type="button" data-prompt-target="incident-responder-second-opinion-prompt" aria-label="Open Incident Responder second-opinion prompt"><b>Review</b><code>{incident_second_opinion_prompt_path}</code></button>
-            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="incident-responder" aria-label="View Incident Responder memory file"><b>Memory</b><code>{incident_memory_path}</code></button>
-            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="shared" aria-label="View shared agent memory file"><b>Shared</b><code>{shared_memory_path}</code></button>
-          </span>
-        </summary>
-        <div class="settings-panel-top">
-          <div>
-            <p>This prompt guides senior incident response planning, evidence preservation, containment guidance, and future host artifact collection workflows.</p>
-          </div>
-        </div>
-        {agent_model_controls['incident-responder']}
-        <div class="settings-note">TODO: connect the dedicated incident response host before allowing this agent to trigger external host artifact collection scripts. Until then, recommendations should mark those actions as pending integration.</div>
-        {agent_prompt_controls['incident-responder']}
-      </details>
-      <details class="settings-panel settings-details" aria-labelledby="siem-engineer-prompt-title">
-        <summary>
-          <span class="settings-summary-main">
-            <span class="settings-summary-icon" aria-hidden="true"><img src="assets/settings-siem-engineer-prompt.png" alt=""></span>
-            <span class="settings-summary-copy">
-              <span class="settings-kicker">SIEM engineer prompt</span>
-              <strong id="siem-engineer-prompt-title">SIEM Engineer System Prompt</strong>
-              <span class="settings-trigger-line">Planned trigger: cron every 6 hours after all eligible alerts are analyzed.</span>
-              <span class="settings-model-line"><b>Model</b><span data-agent-model="siem-engineer">{agent_model_labels['siem-engineer']}</span></span>
-              <span class="settings-model-line settings-second-opinion-line"><b>Second opinion</b><span data-agent-second-opinion-model="siem-engineer">{agent_second_opinion_model_labels['siem-engineer']}</span></span>
-              <span class="settings-model-line settings-adjudicator-line"><b>Adjudicator</b><span data-agent-adjudicator-model="siem-engineer">{agent_adjudicator_model_labels['siem-engineer']}</span></span>
-            </span>
-          </span>
-          <span class="settings-path-stack" aria-label="SIEM Engineer files">
-            <button class="settings-path-row settings-file-link settings-prompt-link" type="button" data-prompt-target="siem-engineer-prompt" aria-label="Open SIEM Engineer system prompt"><b>Prompt</b><code>{engineer_prompt_path}</code></button>
-            <button class="settings-path-row settings-file-link settings-prompt-link" type="button" data-prompt-target="siem-engineer-second-opinion-prompt" aria-label="Open SIEM Engineer second-opinion prompt"><b>Review</b><code>{engineer_second_opinion_prompt_path}</code></button>
-            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="siem-engineer" aria-label="View SIEM Engineer memory file"><b>Memory</b><code>{engineer_memory_path}</code></button>
-            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="shared" aria-label="View shared agent memory file"><b>Shared</b><code>{shared_memory_path}</code></button>
-          </span>
-        </summary>
-        <div class="settings-panel-top">
-          <div>
-            <p>This prompt guides the SIEM Engineering review that recommends scoped tuning and new detection work after all eligible alerts have finished AI analysis.</p>
-          </div>
-        </div>
-        {agent_model_controls['siem-engineer']}
-        <div class="settings-note">Designed cadence: every 6 hours, only when the alert analysis backlog is clear. It should review alerts, enrichments, notes, acknowledgments, suppressions, and related detection context before recommending changes.</div>
-        {agent_prompt_controls['siem-engineer']}
-      </details>
-      <details class="settings-panel settings-details" aria-labelledby="cyber-threat-intel-prompt-title">
-        <summary>
-          <span class="settings-summary-main">
-            <span class="settings-summary-icon" aria-hidden="true"><img src="assets/settings-cyber-threat-intel-prompt.png" alt=""></span>
-            <span class="settings-summary-copy">
-              <span class="settings-kicker">Cyber threat intel prompt</span>
-              <strong id="cyber-threat-intel-prompt-title">Cyber Threat Intel Analyst</strong>
-              <span class="settings-trigger-line">Trigger: manual intel review from alerts, enrichments, hunts, and engineering context; scheduled briefs are future work.</span>
-              <span class="settings-model-line"><b>Model</b><span data-agent-model="cyber-threat-intel">{agent_model_labels['cyber-threat-intel']}</span></span>
-              <span class="settings-model-line settings-second-opinion-line"><b>Second opinion</b><span data-agent-second-opinion-model="cyber-threat-intel">{agent_second_opinion_model_labels['cyber-threat-intel']}</span></span>
-              <span class="settings-model-line settings-adjudicator-line"><b>Adjudicator</b><span data-agent-adjudicator-model="cyber-threat-intel">{agent_adjudicator_model_labels['cyber-threat-intel']}</span></span>
-            </span>
-          </span>
-          <span class="settings-path-stack" aria-label="Cyber Threat Intel Analyst files">
-            <button class="settings-path-row settings-file-link settings-prompt-link" type="button" data-prompt-target="cyber-threat-intel-prompt" aria-label="Open Cyber Threat Intel system prompt"><b>Prompt</b><code>{intel_prompt_path}</code></button>
-            <button class="settings-path-row settings-file-link settings-prompt-link" type="button" data-prompt-target="cyber-threat-intel-second-opinion-prompt" aria-label="Open Cyber Threat Intel second-opinion prompt"><b>Review</b><code>{intel_second_opinion_prompt_path}</code></button>
-            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="cyber-threat-intel" aria-label="View Cyber Threat Intel memory file"><b>Memory</b><code>{intel_memory_path}</code></button>
-            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="shared" aria-label="View shared agent memory file"><b>Shared</b><code>{shared_memory_path}</code></button>
-          </span>
-        </summary>
-        <div class="settings-panel-top">
-          <div>
-            <p>This prompt guides intelligence briefs, indicator review, enrichment pivots, confidence scoring, and cross-agent context for SOC decisions.</p>
-          </div>
-        </div>
-        {agent_model_controls['cyber-threat-intel']}
-        {agent_prompt_controls['cyber-threat-intel']}
-      </details>
-      <details class="settings-panel settings-details" aria-labelledby="threat-hunter-prompt-title">
-        <summary>
-          <span class="settings-summary-main">
-            <span class="settings-summary-icon" aria-hidden="true"><img src="assets/settings-threat-hunter-prompt.png" alt=""></span>
-            <span class="settings-summary-copy">
-              <span class="settings-kicker">Threat hunter prompt</span>
-              <strong id="threat-hunter-prompt-title">Threat Hunter System Prompt</strong>
-              <span class="settings-trigger-line">Trigger: manual hunt review from alert patterns; automated hunts are future work.</span>
-              <span class="settings-model-line"><b>Model</b><span data-agent-model="threat-hunter">{agent_model_labels['threat-hunter']}</span></span>
-              <span class="settings-model-line settings-second-opinion-line"><b>Second opinion</b><span data-agent-second-opinion-model="threat-hunter">{agent_second_opinion_model_labels['threat-hunter']}</span></span>
-              <span class="settings-model-line settings-adjudicator-line"><b>Adjudicator</b><span data-agent-adjudicator-model="threat-hunter">{agent_adjudicator_model_labels['threat-hunter']}</span></span>
-            </span>
-          </span>
-          <span class="settings-path-stack" aria-label="Threat Hunter files">
-            <button class="settings-path-row settings-file-link settings-prompt-link" type="button" data-prompt-target="threat-hunter-prompt" aria-label="Open Threat Hunter system prompt"><b>Prompt</b><code>{hunter_prompt_path}</code></button>
-            <button class="settings-path-row settings-file-link settings-prompt-link" type="button" data-prompt-target="threat-hunter-second-opinion-prompt" aria-label="Open Threat Hunter second-opinion prompt"><b>Review</b><code>{hunter_second_opinion_prompt_path}</code></button>
-            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="threat-hunter" aria-label="View Threat Hunter memory file"><b>Memory</b><code>{hunter_memory_path}</code></button>
-            <button class="settings-path-row settings-memory-link" type="button" data-memory-key="shared" aria-label="View shared agent memory file"><b>Shared</b><code>{shared_memory_path}</code></button>
-          </span>
-        </summary>
-        <div class="settings-panel-top">
-          <div>
-            <p>This prompt guides senior threat-hunt recommendations, including Security Onion pivots and query-ready KQL, OQL, and OSQuery hunt plans.</p>
-          </div>
-        </div>
-        {agent_model_controls['threat-hunter']}
-        {agent_prompt_controls['threat-hunter']}
-      </details>
+{agent_cards.rstrip()}
       </section>
       <section class="settings-maxmind-section" aria-labelledby="maxmind-geoip-title">
         <div class="settings-agent-heading">

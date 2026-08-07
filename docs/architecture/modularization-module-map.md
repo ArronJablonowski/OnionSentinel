@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (8,482
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (8,453
 lines).
 
 | Boundary | Responsibilities |
@@ -371,6 +371,14 @@ plus event wiring while preserving one injected client script. The builder
 continues to re-export `SETTINGS_PAGE_CSS`, `SETTINGS_PAGE_JS`, and
 `inject_settings_assets` until the Settings renderer receives its view-model
 boundary.
+
+`dashboard_settings_agent_card.py` establishes the first Settings renderer
+view-model boundary. The dashboard builder supplies runtime-derived prompt,
+model, memory, and path data through `AgentSettingsCardViewModel`; the pure
+renderer owns escaping and markup for the structurally identical Incident
+Responder, SIEM Engineer, Cyber Threat Intel, and Threat Hunter cards. The SOC
+Analyst card remains in the composition root until its additional automation
+policy controls receive their own bounded view model.
 
 ## Alert Store
 
