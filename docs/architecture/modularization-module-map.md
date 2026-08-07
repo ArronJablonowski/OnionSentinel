@@ -153,6 +153,9 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
 - Capped PCAP/Zeek-derived execution, provider evidence validation,
   source/query/result digest binding, canonical evidence references, and
   terminal batch errors now live in `analysis.query.execution.derived`.
+- Live OSQuery target authorization, dispatch, artifact validation, exact
+  request/result coverage binding, support-evidence accumulation, and failure
+  custody now live in `analysis.query.execution.endpoint`.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports

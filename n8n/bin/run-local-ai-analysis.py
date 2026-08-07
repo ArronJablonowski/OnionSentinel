@@ -1813,6 +1813,12 @@ def _query_execution_derived():
     return derived
 
 
+def _query_execution_endpoint():
+    _provider_routing()
+    from onion_sentinel.analysis.query.execution import endpoint
+    return endpoint
+
+
 def _query_derived():
     _provider_routing()
     from onion_sentinel.analysis.query import derived
@@ -5619,171 +5625,29 @@ def execute_investigation_query_batch(
                 )
 
     osquery_requests = [request for request in requests if request["backend"] == "osquery"]
-    if osquery_requests:
-        collector_requests = [
-            {
-                "target_alias": item["parameters"]["target_alias"],
-                "query": item["parameters"]["query"],
-                "purpose": item["purpose"],
-            }
-            for item in osquery_requests
-        ]
-        collector_case_id = live_osquery_case_id(prompt_package)
-        dispatch_started = False
-        try:
-            if not live_osquery_config or not live_osquery_config.get("enabled"):
-                raise LiveOsqueryClientError(
-                    "live-host OSQuery is not enabled for this deployment"
-                )
-            unbound_aliases = sorted(
-                {
-                    item["target_alias"]
-                    for item in collector_requests
-                    if not _live_osquery_target_bound_to_case(
-                        prompt_package,
-                        item["target_alias"],
-                        live_osquery_config,
-                    )
-                }
-            )
-            if unbound_aliases:
-                raise LiveOsqueryClientError(
-                    "live-host OSQuery target is not bound to a trusted "
-                    "endpoint observable for this alert"
-                )
-            dispatch_started = True
-            evidence = osquery_executor(
-                case_id=collector_case_id,
-                requests=collector_requests,
-                config=live_osquery_config,
-                persist=True,
-            )
-            evidence = validate_live_osquery_result_artifact(
-                evidence,
-                expected_requests=collector_requests,
-            )
-            if evidence.get("case_id") != collector_case_id:
-                raise LiveOsqueryClientError(
-                    "live OSQuery evidence case_id did not match the investigation"
-                )
-            audit_evidence = copy.deepcopy(evidence)
-            for item in audit_evidence.get("results", []):
-                if isinstance(item, dict):
-                    item["support_bindings"] = _live_osquery_support_bindings(
-                        prompt_package,
-                        item,
-                        live_osquery_config,
-                    )
-            accumulate_live_osquery_evidence(prompt_package, audit_evidence)
-            returned = evidence.get("results") if isinstance(evidence, dict) else []
-            if not isinstance(returned, list):
-                raise LiveOsqueryClientError(
-                    "live OSQuery evidence did not contain a result list"
-                )
-            returned_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
-            for item in returned:
-                if not isinstance(item, dict):
-                    raise LiveOsqueryClientError(
-                        "live OSQuery evidence contained a non-object result"
-                    )
-                identity = (
-                    _query_text(item.get("target_alias"), 64).lower(),
-                    _query_text(item.get("query_digest"), 64).lower(),
-                )
-                if not all(identity) or identity in returned_by_identity:
-                    raise LiveOsqueryClientError(
-                        "live OSQuery evidence contained a missing or duplicate result identity"
-                    )
-                returned_by_identity[identity] = item
-            expected_requests_by_identity: dict[
-                tuple[str, str],
-                dict[str, Any],
-            ] = {}
-            for request in osquery_requests:
-                normalized_query = normalize_live_osquery_query(
-                    request["parameters"]["query"]
-                )
-                identity = (
-                    _query_text(
-                        request["parameters"].get("target_alias"),
-                        64,
-                    ).lower(),
-                    hashlib.sha256(
-                        normalized_query.encode("utf-8")
-                    ).hexdigest(),
-                )
-                if identity in expected_requests_by_identity:
-                    raise LiveOsqueryClientError(
-                        "live OSQuery submission contained a duplicate query identity"
-                    )
-                expected_requests_by_identity[identity] = request
-            if set(returned_by_identity) != set(expected_requests_by_identity):
-                raise LiveOsqueryClientError(
-                    "live OSQuery evidence coverage did not match submitted query digests"
-                )
-            for identity, request in expected_requests_by_identity.items():
-                item = returned_by_identity.get(identity)
-                if item is None or str(item.get("purpose") or "") != request["purpose"]:
-                    raise LiveOsqueryClientError(
-                        "live OSQuery evidence did not bind to the submitted query digest"
-                    )
-                trusted_query_audit = _bounded_trusted_query_audit(
-                    [
-                        {
-                            "query_id": request["query_id"],
-                            "backend": "osquery",
-                            "purpose": item.get("purpose"),
-                            "target_alias": item.get("target_alias"),
-                            "query": item.get("query"),
-                            "query_digest": item.get("query_digest"),
-                            "status": item.get("status"),
-                            "total_rows": item.get("total_rows"),
-                            "returned_rows": len(item.get("rows") or []),
-                            "truncated": item.get("truncated"),
-                            "duration_ms": item.get("duration_ms"),
-                            "error": item.get("error"),
-                        }
-                    ]
-                )
-                results.append(
-                    {
-                        "query_id": request["query_id"],
-                        "backend": "osquery",
-                        "status": _query_text(
-                            item.get("status"),
-                            40,
-                        )
-                        or "error",
-                        "read_only": True,
-                        "evidence": item,
-                        "trusted_query_audit": trusted_query_audit,
-                    }
-                )
-            audits.append(
-                {
-                    "backend": "osquery",
-                    **_safe_audit_summary(evidence),
-                }
-                )
-        except (LiveOsqueryClientError, LiveOsqueryContractError, OSError) as exc:
-            message = f"{type(exc).__name__}: {exc}"[:1000]
-            accumulate_live_osquery_failure(
-                prompt_package,
-                case_id=collector_case_id,
-                requests=collector_requests,
-                error=message,
-                dispatch_possible=dispatch_started,
-            )
-            for request in osquery_requests:
-                results.append(
-                    {
-                        "query_id": request["query_id"],
-                        "backend": "osquery",
-                        "status": "error",
-                        "read_only": True,
-                        "error": message,
-                    }
-                )
+    endpoint_module = _query_execution_endpoint()
+    endpoint_outcome = endpoint_module.execute(
+        osquery_requests, prompt_package, live_osquery_config,
+        dependencies=endpoint_module.Dependencies(
+            executor=osquery_executor,
+            validate_artifact=validate_live_osquery_result_artifact,
+            case_id=live_osquery_case_id,
+            target_bound=_live_osquery_target_bound_to_case,
+            support_bindings=_live_osquery_support_bindings,
+            accumulate_evidence=accumulate_live_osquery_evidence,
+            accumulate_failure=accumulate_live_osquery_failure,
+            normalize_query=normalize_live_osquery_query,
+            text=_query_text,
+            bounded_audit=_bounded_trusted_query_audit,
+            safe_audit_summary=_safe_audit_summary,
+            client_error=LiveOsqueryClientError,
+            handled_errors=(
+                LiveOsqueryClientError, LiveOsqueryContractError, OSError,
+            ),
+        ),
+    )
+    results.extend(endpoint_outcome.results)
+    audits.extend(endpoint_outcome.audits)
 
     derived_requests = [
         request for request in requests if request["backend"] == "pcap_zeek"

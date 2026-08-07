@@ -40,6 +40,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.query.window",
     "onion_sentinel.analysis.query.execution.enrichment",
     "onion_sentinel.analysis.query.execution.derived",
+    "onion_sentinel.analysis.query.execution.endpoint",
     "onion_sentinel.analysis.conclusions.confidence",
     "onion_sentinel.analysis.conclusions.authorization",
     "onion_sentinel.analysis.conclusions.authorization_evidence",
