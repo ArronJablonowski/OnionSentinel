@@ -566,15 +566,14 @@ class MemoryWritebackJournalTests(unittest.TestCase):
     ) -> None:
         source = RUNNER_PATH.read_text(encoding="utf-8")
         main_source = source[source.index("def main()"):]
+        transaction_source = (
+            REPO_ROOT
+            / "n8n/onion_sentinel/analysis/persistence/transaction.py"
+        ).read_text(encoding="utf-8")
         stage = main_source.index(
             "staged_memory_task = stage_memory_writeback_task("
         )
-        durable_spool = main_source.index(
-            "pending_index_path = queue_analysis_index(index_payload)"
-        )
-        submit = main_source.index(
-            "commit_receipt = post_analysis_index("
-        )
+        publication = main_source.index("transaction_module.publish(")
         promote = main_source.index(
             "committed_memory_task = mark_memory_writeback_committed("
         )
@@ -582,10 +581,13 @@ class MemoryWritebackJournalTests(unittest.TestCase):
             "process_committed_memory_writeback("
         )
 
-        self.assertLess(stage, durable_spool)
-        self.assertLess(durable_spool, submit)
-        self.assertLess(submit, promote)
+        self.assertLess(stage, publication)
+        self.assertLess(publication, promote)
         self.assertLess(promote, process)
+        self.assertLess(
+            transaction_source.index("pending_path = ports.queue("),
+            transaction_source.index("receipt = ports.submit("),
+        )
 
 
 if __name__ == "__main__":

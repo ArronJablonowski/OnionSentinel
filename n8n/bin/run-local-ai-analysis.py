@@ -10020,6 +10020,7 @@ def write_outputs(
 
 def main() -> int:
     from onion_sentinel import pipeline as pipeline_module
+    from onion_sentinel.analysis.persistence import transaction as transaction_module
 
     args = parse_args()
     controlled_evaluation, evaluation_runtime_dir = (
@@ -10629,107 +10630,42 @@ def main() -> int:
             pending_dir=runtime_paths.memory_pending_dir,
         )
         pipeline_context.advance(pipeline_module.Stage.VALIDATE, "commit inputs validated")
-        try:
-            json_path, md_path, generated_at = write_outputs(
-                prompt_path,
-                prompt_package,
-                response,
-                args,
-                run_id,
-            )
-            index_payload = analysis_index_payload(
-                run_id,
-                prompt_package,
-                response,
-                args.reanalysis_attempt_id,
-                started_at,
-                generated_at,
-                json_path,
-            )
-            if controlled_result_identity is not None:
-                index_payload["controlled_job"] = (
-                    controlled_result_identity
-                )
-            # Re-check the deadline before creating a replayable submission. A
-            # failed enforce-mode deadline must not leave work that a later
-            # startup would publish.
-            observe_harness(
-                lambda: harness_runtime.preflight_completion(
-                    operation_id="pre-index-commit",
-                )
-                if harness_runtime is not None
-                else None
-            )
-            # The exact submission is durably staged before the network call.
-            # If the worker dies after alert-store commits but before local
-            # bookkeeping, startup can replay the immutable analysis_id,
-            # obtain an idempotent receipt, and safely cross the memory commit
-            # boundary.
-            if controlled_evaluation:
-                pending_index_path = queue_analysis_index(
-                    index_payload,
+        publication = transaction_module.publish(
+            policy=transaction_module.PublicationPolicy(
+                controlled=controlled_evaluation,
+                controlled_identity=controlled_result_identity,
+                submission_error=AnalysisIndexSubmissionError,
+                indeterminate_message=CONTROLLED_RESULT_SUBMISSION_INDETERMINATE,
+            ),
+            ports=transaction_module.PublicationPorts(
+                write_outputs=lambda: write_outputs(
+                    prompt_path, prompt_package, response, args, run_id),
+                build_payload=lambda generated, artifact: analysis_index_payload(
+                    run_id, prompt_package, response, args.reanalysis_attempt_id,
+                    started_at, generated, artifact),
+                preflight=lambda: observe_harness(
+                    lambda: harness_runtime.preflight_completion(
+                        operation_id="pre-index-commit")
+                    if harness_runtime is not None else None),
+                queue=lambda payload, controlled: queue_analysis_index(
+                    payload,
                     queue_dir=runtime_paths.index_queue_dir,
-                )
-            else:
-                pending_index_path = queue_analysis_index(index_payload)
-        except Exception:
-            discard_pending_memory_writeback(
-                run_id,
-                pending_dir=runtime_paths.memory_pending_dir,
-            )
-            for unpublished_artifact in (json_path, md_path):
-                if unpublished_artifact is not None:
-                    unpublished_artifact.unlink(missing_ok=True)
-            raise
-        commit_receipt: dict[str, Any] = {}
-        try:
-            if controlled_evaluation:
-                commit_receipt = post_controlled_analysis_index(
-                    index_payload,
-                    args.alert_store_url,
-                )
-            else:
-                commit_receipt = post_analysis_index(
-                    index_payload,
-                    args.alert_store_url,
-                )
-        except AnalysisIndexSubmissionError as exc:
-            if not exc.retryable:
-                rejected_path = quarantine_analysis_index(
-                    pending_index_path,
-                    index_payload,
-                    exc,
-                    quarantine_dir=runtime_paths.index_quarantine_dir,
-                )
-                discard_pending_memory_writeback(
-                    run_id,
-                    pending_dir=runtime_paths.memory_pending_dir,
-                )
-                raise RuntimeError(
-                    "analysis index was deterministically rejected and "
-                    f"quarantined as {rejected_path.name}"
-                ) from exc
-            # The model output is safely retained, but the durable queue must
-            # remain pending until alert-store commits this result. The next
-            # scheduler pass publishes the compact spool before any new model
-            # call, then reconciles the original job without duplicate GPU work.
-            if controlled_evaluation:
-                raise RuntimeError(
-                    f"{CONTROLLED_RESULT_SUBMISSION_INDETERMINATE}; "
-                    f"exact result retained at {pending_index_path}"
-                ) from exc
-            raise RuntimeError(
-                f"analysis index deferred to {pending_index_path}: {exc}"
-            ) from exc
-        except Exception as exc:
-            if controlled_evaluation:
-                raise RuntimeError(
-                    f"{CONTROLLED_RESULT_SUBMISSION_INDETERMINATE}; "
-                    f"exact result retained at {pending_index_path}"
-                ) from exc
-            raise RuntimeError(
-                f"analysis index deferred to {pending_index_path}: {exc}"
-            ) from exc
+                ) if controlled else queue_analysis_index(payload),
+                submit=lambda payload, controlled: post_controlled_analysis_index(
+                    payload, args.alert_store_url,
+                ) if controlled else post_analysis_index(payload, args.alert_store_url),
+                quarantine=lambda path, payload, exc: quarantine_analysis_index(
+                    path, payload, exc,
+                    quarantine_dir=runtime_paths.index_quarantine_dir),
+                discard_memory=lambda: discard_pending_memory_writeback(
+                    run_id, pending_dir=runtime_paths.memory_pending_dir),
+            ),
+        )
+        json_path = publication.json_path
+        md_path = publication.markdown_path
+        index_payload = publication.index_payload
+        pending_index_path = publication.pending_index_path
+        commit_receipt = publication.commit_receipt
         # The alert store now owns the committed success. A subsequent audit
         # finalization problem must be visible, but must not turn that durable
         # success into a failed model job that gets retried.
