@@ -165,6 +165,15 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_review_panel_renderer.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_review_panel_renderer.py",
+      "required_symbols": [
+        "ReviewPanelRenderCallbacks",
+        "render_analyst_review_panel"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_json_body.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_json_body.py",

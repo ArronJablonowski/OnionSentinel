@@ -72,6 +72,10 @@ from portal_investigation_audit_renderer import (
     InvestigationAuditRenderCallbacks,
     render_investigation_query_audit,
 )
+from portal_review_panel_renderer import (
+    ReviewPanelRenderCallbacks,
+    render_analyst_review_panel as render_review_panel,
+)
 from portal_incident_review_model import (
     compose_incident_detail_payload,
     compose_incident_review_state,
@@ -11390,182 +11394,16 @@ def render_analyst_review_panel(
     case_id: str = "",
 ) -> str:
     """Render bounded review state and one explicit human-adjudication entry."""
-    review = review if isinstance(review, dict) else _soc_review_defaults()
-    final_status = str(
-        review.get("final_review_status")
-        or review.get("final_status")
-        or "unreviewed"
+    callbacks = ReviewPanelRenderCallbacks(
+        html_text=_incident_html_text,
+        outcome_label=soc_alert_detection_outcome_label,
+        review_defaults=_soc_review_defaults,
     )
-    status_labels = {
-        "disputed_pending_human": "Disputed — human decision required",
-        "review_required_failed": "Independent review failed — human decision required",
-        "review_completed_not_authorized": (
-            "Review completed — automation not authorized; human decision required"
-        ),
-        "adjudicated": "Adjudicated",
-        "model_consensus": "Primary and reviewer agree",
-        "reviewer_advisory": "Reviewer advisory — no material disagreement",
-        "unreviewed": "Not independently reviewed",
-    }
-    primary_outcome = str(
-        review.get("primary_outcome")
-        or review.get("detection_outcome")
-        or ""
-    )
-    primary_confidence = str(
-        review.get("primary_confidence")
-        or review.get("analysis_confidence")
-        or ""
-    )
-    primary_event_status = str(review.get("primary_event_status") or "")
-    primary_detection_validity = str(
-        review.get("primary_detection_validity") or ""
-    )
-    primary_activity_disposition = str(
-        review.get("primary_activity_disposition") or ""
-    )
-    primary_handling = str(review.get("primary_handling") or "")
-    primary_duplicate_of = str(review.get("primary_duplicate_of") or "")
-    reviewer_outcome = str(review.get("reviewer_outcome") or "")
-    reviewer_confidence = str(review.get("reviewer_confidence") or "")
-    reviewer_error = str(review.get("reviewer_error") or "").strip()[:1000]
-    agreement = str(
-        review.get("reviewer_agreement")
-        or review.get("agreement")
-        or ""
-    )
-    freshness = str(review.get("freshness_status") or "unknown")
-    coverage = str(review.get("coverage_status") or "unknown")
-    analysis_id = str(review.get("analysis_id") or "")
-    adjudication = review.get("adjudication")
-    adjudication = adjudication if isinstance(adjudication, dict) else {}
-    disputed_fields = review.get("disputed_fields")
-    disputed_fields = disputed_fields if isinstance(disputed_fields, list) else []
-    disputed = final_status == "disputed_pending_human"
-    review_failed = final_status == "review_required_failed"
-    review_not_authorized = (
-        final_status == "review_completed_not_authorized"
-    )
-    role_attr = (
-        ' role="alert"'
-        if disputed or review_failed or review_not_authorized
-        else ""
-    )
-    disabled_attr = (
-        ' disabled title="Run an analysis before recording an analyst decision"'
-        if not analysis_id
-        else ""
-    )
-    comparison = (
-        '<div class="analyst-review-comparison">'
-        f'<div><b>Primary</b><span>{_incident_html_text(soc_alert_detection_outcome_label(primary_outcome))}'
-        f' · {_incident_html_text(primary_confidence or "confidence unknown")}</span></div>'
-        f'<div><b>Independent reviewer</b><span>{_incident_html_text(soc_alert_detection_outcome_label(reviewer_outcome))}'
-        f' · {_incident_html_text(reviewer_confidence or "confidence unknown")}</span></div>'
-        "</div>"
-        if reviewer_outcome or agreement
-        else '<p class="analyst-review-empty">No completed independent reviewer result is attached.</p>'
-    )
-    disputed_fields_html = (
-        '<p class="analyst-review-disputed-fields"><b>Disputed fields:</b> '
-        + ", ".join(_incident_html_text(item) for item in disputed_fields[:20])
-        + "</p>"
-        if disputed_fields
-        else ""
-    )
-    reviewer_error_html = (
-        '<p class="analyst-review-failure"><b>Reviewer failure:</b> '
-        + _incident_html_text(reviewer_error)
-        + "</p>"
-        if reviewer_error
-        else ""
-    )
-    adjudication_html = ""
-    if adjudication:
-        evidence_gap = str(adjudication.get("evidence_gap") or "").strip()
-        next_action = str(adjudication.get("next_action") or "").strip()
-        resolution_reason = str(
-            adjudication.get("case_resolution_reason") or ""
-        ).strip()
-        factored_verdict = [
-            (label, str(adjudication.get(key) or "").strip())
-            for key, label in (
-                ("event_status", "Event"),
-                ("detection_validity", "Detection"),
-                ("activity_disposition", "Activity"),
-                ("handling", "Handling"),
-                ("duplicate_of", "Duplicate of"),
-            )
-            if str(adjudication.get(key) or "").strip()
-        ]
-        factored_html = (
-            '<div class="analyst-adjudication-factors"><b>Analyst-confirmed verdict factors:</b><ul>'
-            + "".join(
-                f"<li>{_incident_html_text(label)}: {_incident_html_text(value)}</li>"
-                for label, value in factored_verdict
-            )
-            + "</ul></div>"
-            if factored_verdict
-            else ""
-        )
-        adjudication_html = (
-            '<div class="analyst-adjudication-summary">'
-            f'<b>Final analyst decision:</b> {_incident_html_text(soc_alert_detection_outcome_label(adjudication.get("outcome_override")))}'
-            f' · {_incident_html_text(adjudication.get("confidence") or "confidence unknown")}'
-            f'<p>{_incident_html_text(adjudication.get("rationale"))}</p>'
-            + (
-                f'<p><b>Evidence gap:</b> {_incident_html_text(evidence_gap)}</p>'
-                if evidence_gap else ""
-            )
-            + (
-                f'<p><b>Next action:</b> {_incident_html_text(next_action)}</p>'
-                if next_action else ""
-            )
-            + (
-                f'<p><b>Case resolution:</b> {_incident_html_text(resolution_reason)}</p>'
-                if resolution_reason else ""
-            )
-            + factored_html
-            + f'<small>Reviewed by {_incident_html_text(adjudication.get("reviewer"))} at '
-            f'{_incident_html_text(adjudication.get("created_at"))}</small>'
-            "</div>"
-        )
-    case_resolution_html = ""
-    case_resolution_reason = str(
-        review.get("case_resolution_reason") or ""
-    ).strip()
-    if case_resolution_reason:
-        case_resolution_html = (
-            '<div class="analyst-case-resolution">'
-            f'<b>Resolved:</b> {_incident_html_text(case_resolution_reason)}'
-            f'<small> by {_incident_html_text(review.get("case_resolved_by"))} at '
-            f'{_incident_html_text(review.get("case_resolved_at"))}</small>'
-            "</div>"
-        )
-    return (
-        f'<section class="analyst-review-panel review-status-{html.escape(final_status, quote=True)}" '
-        f'data-review-group="{html.escape(group_id, quote=True)}" '
-        f'data-review-case="{html.escape(case_id, quote=True)}" '
-        f'data-review-analysis="{html.escape(analysis_id, quote=True)}" '
-        f'data-review-primary="{html.escape(primary_outcome, quote=True)}" '
-        f'data-review-event-status="{html.escape(primary_event_status, quote=True)}" '
-        f'data-review-detection-validity="{html.escape(primary_detection_validity, quote=True)}" '
-        f'data-review-activity-disposition="{html.escape(primary_activity_disposition, quote=True)}" '
-        f'data-review-handling="{html.escape(primary_handling, quote=True)}" '
-        f'data-review-duplicate-of="{html.escape(primary_duplicate_of, quote=True)}" '
-        f"{role_attr}>"
-        '<div class="analyst-review-heading">'
-        '<div><span class="analyst-review-eyebrow">Human validation</span>'
-        f'<h3>{html.escape(status_labels.get(final_status, final_status.replace("_", " ").title()))}</h3></div>'
-        '<div class="analyst-review-badges">'
-        f'<span class="review-badge review-freshness-{html.escape(freshness, quote=True)}">Freshness: {html.escape(freshness.replace("_", " "))}</span>'
-        f'<span class="review-badge review-coverage-{html.escape(coverage, quote=True)}">Coverage: {html.escape(coverage.replace("_", " "))}</span>'
-        "</div></div>"
-        f"{comparison}{reviewer_error_html}{disputed_fields_html}{adjudication_html}{case_resolution_html}"
-        f'<button class="analyst-adjudicate-button" type="button" data-open-adjudication{disabled_attr}>'
-        f'{"Resolve required review" if disputed or review_failed or review_not_authorized else "Record analyst decision"}'
-        "</button>"
-        "</section>"
+    return render_review_panel(
+        review,
+        group_id=group_id,
+        case_id=case_id,
+        callbacks=callbacks,
     )
 
 

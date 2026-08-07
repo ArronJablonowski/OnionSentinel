@@ -374,6 +374,14 @@ point and injects shared text, counter, and query-to-finding policies. The
 renderer cannot execute model-authored queries and has no persistence, HTTP,
 filesystem, process, or network access.
 
+`portal_review_panel_renderer.py` owns escaped analyst-review presentation:
+review freshness and coverage, primary-versus-reviewer comparison, bounded
+failure and disputed-field details, factored adjudication, case resolution,
+and the human-decision action state. `report_portal.py` retains the compatibility
+entry point and injects shared text, outcome-label, and empty-review policies.
+The renderer has no persistence, mutation, HTTP, filesystem, process, or
+network access.
+
 | Domain | Current responsibility examples | Target modules |
 | --- | --- | --- |
 | HTTP composition | server, handler, GET/POST dispatch | `portal.entrypoint`, `portal.routes.registry` |
