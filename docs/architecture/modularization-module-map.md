@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (8,117
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (7,733
 lines).
 
 | Boundary | Responsibilities |
@@ -389,6 +389,13 @@ Hermes, OpenClaw, MaxMind databases, agent-section assembly, and memory modal.
 prompts/configuration and discovers models, normalizes those values, produces
 trusted owned control fragments, and passes the resulting view model to the
 page renderer.
+
+`dashboard_incident_response_page.py` owns the API-backed Incident Responder
+case queue, responsive case presentation, reanalysis controls, evidence/query
+detail behavior, copy controls, sorting, pagination, and reactive refresh
+client. The builder re-exports `incident_response_page_section`; incident
+storage, authorization, reanalysis execution, and detail serialization remain
+behind the existing `/api/soc-incidents` contracts.
 
 ## Alert Store
 

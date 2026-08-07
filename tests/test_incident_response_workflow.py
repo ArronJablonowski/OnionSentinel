@@ -15,6 +15,7 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_DIR = REPO_ROOT / "onion-sentinel-dashboard"
 BUILDER_PATH = DASHBOARD_DIR / "scripts" / "build_soc_alerts_dashboard.py"
+INCIDENT_PAGE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_incident_response_page.py"
 PORTAL_PATH = DASHBOARD_DIR / "report_portal.py"
 ALERT_STORE_PATH = REPO_ROOT / "n8n" / "alert_store" / "alert_store.js"
 AI_RUNNER_PATH = REPO_ROOT / "n8n" / "bin" / "run-local-ai-analysis.py"
@@ -240,7 +241,10 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         self.assertLess(page.index("Incident Responder</h1>"), page.index('id="incident-response-view"'))
 
     def test_alert_rows_and_case_page_keep_the_full_escalation_contract(self) -> None:
-        source = BUILDER_PATH.read_text(encoding="utf-8")
+        source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (BUILDER_PATH, INCIDENT_PAGE_PATH)
+        )
 
         self.assertGreaterEqual(source.count('data-escalate="'), 2)
         self.assertIn("requestIncidentEscalationForGroup", source)

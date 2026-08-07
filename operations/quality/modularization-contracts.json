@@ -115,6 +115,14 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_incident_response_page.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_incident_response_page.py",
+      "required_symbols": [
+        "incident_response_page_section"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_settings_assets.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_assets.py",
