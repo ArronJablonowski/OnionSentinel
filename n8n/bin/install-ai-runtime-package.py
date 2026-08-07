@@ -42,6 +42,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.query.execution.derived",
     "onion_sentinel.analysis.query.execution.endpoint",
     "onion_sentinel.analysis.query.execution.security_onion",
+    "onion_sentinel.analysis.query.execution.batch",
     "onion_sentinel.analysis.conclusions.confidence",
     "onion_sentinel.analysis.conclusions.authorization",
     "onion_sentinel.analysis.conclusions.authorization_evidence",

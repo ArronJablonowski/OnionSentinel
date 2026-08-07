@@ -1825,6 +1825,12 @@ def _query_execution_security_onion():
     return security_onion
 
 
+def _query_execution_batch():
+    _provider_routing()
+    from onion_sentinel.analysis.query.execution import batch
+    return batch
+
+
 def _query_derived():
     _provider_routing()
     from onion_sentinel.analysis.query import derived
@@ -5405,6 +5411,81 @@ def security_onion_authorization_context(value: Any) -> dict[str, Any]:
     }
 
 
+def _execute_security_query_backend(
+    requests: list[dict[str, Any]], context: dict[str, Any],
+    round_number: int, executor: Callable[..., dict[str, Any]],
+):
+    module = _query_execution_security_onion()
+    return module.execute(
+        requests, context, round_number=round_number,
+        policy=module.Policy(
+            query_contract=INVESTIGATION_QUERY_CONTRACT,
+            require_anchor_time=INVESTIGATION_QUERY_V2),
+        dependencies=module.Dependencies(
+            project_context=security_onion_authorization_context,
+            authorize=authorize_investigation_query_request,
+            executor=executor,
+            text=_query_text,
+            random_hex=lambda size: os.urandom(size).hex(),
+            bounded_audit=_bounded_trusted_query_audit,
+            safe_audit_summary=_safe_audit_summary,
+            contract_error=InvestigationQueryContractError,
+            query_error=InvestigationQueryError,
+        ),
+    )
+def _execute_endpoint_query_backend(
+    requests: list[dict[str, Any]], prompt_package: dict[str, Any],
+    config: dict[str, Any] | None, executor: Callable[..., dict[str, Any]],
+):
+    module = _query_execution_endpoint()
+    return module.execute(
+        requests, prompt_package, config,
+        dependencies=module.Dependencies(
+            executor=executor,
+            validate_artifact=validate_live_osquery_result_artifact,
+            case_id=live_osquery_case_id,
+            target_bound=_live_osquery_target_bound_to_case,
+            support_bindings=_live_osquery_support_bindings,
+            accumulate_evidence=accumulate_live_osquery_evidence,
+            accumulate_failure=accumulate_live_osquery_failure,
+            normalize_query=normalize_live_osquery_query,
+            text=_query_text,
+            bounded_audit=_bounded_trusted_query_audit,
+            safe_audit_summary=_safe_audit_summary,
+            client_error=LiveOsqueryClientError,
+            handled_errors=(LiveOsqueryClientError, LiveOsqueryContractError, OSError),
+        ),
+    )
+def _execute_derived_query_backend(
+    requests: list[dict[str, Any]], prompt_package: dict[str, Any],
+    executor: Callable[..., dict[str, Any]],
+):
+    module = _query_execution_derived()
+    context = prompt_package.get("pcap_evidence")
+    return module.execute(
+        requests, context if isinstance(context, dict) else {},
+        dependencies=module.Dependencies(
+            executor=executor,
+            validate_evidence=validate_derived_query_evidence,
+            source_digest=_derived_evidence_source_digest,
+            bounded_audit=_bounded_trusted_query_audit,
+            safe_audit_summary=_safe_audit_summary,
+            handled_errors=(InvestigationQueryError, PcapEvidenceQueryError, OSError),
+        ),
+    )
+def _execute_enrichment_query_backend(
+    requests: list[dict[str, Any]], config: dict[str, Any] | None,
+    executor: Callable[..., dict[str, Any]],
+):
+    module = _query_execution_enrichment()
+    return module.execute(
+        requests, config,
+        dependencies=module.Dependencies(
+            executor=executor,
+            error_type=InvestigationQueryError,
+            handled_errors=(InvestigationQueryError, OSError, urllib.error.URLError),
+        ),
+    )
 def execute_investigation_query_batch(
     prompt_package: dict[str, Any],
     requests: list[dict[str, Any]],
@@ -5424,119 +5505,35 @@ def execute_investigation_query_batch(
     if security_onion_executor is None:
         security_onion_executor = lambda proposal, authorization: (
             collect_security_onion_pivots(
-                proposal,
-                authorization,
+                proposal, authorization,
                 config_path=security_onion_config_path,
-                out_dir=investigation_pivot_dir,
-            )
+                out_dir=investigation_pivot_dir)
         )
     osquery_executor = osquery_executor or collect_live_osquery
     derived_executor = derived_executor or query_derived_pcap_evidence
     enrichment_executor = enrichment_executor or collect_investigation_enrichment
-    results: list[dict[str, Any]] = []
-    audits: list[dict[str, Any]] = []
     local_context = prompt_package.get("_local_investigation_query_context")
     authorization_context = local_context if isinstance(local_context, dict) else {}
-
-    security_requests = [
-        request for request in requests if request["backend"] in {"elastic", "oql"}
-    ]
-    security_module = _query_execution_security_onion()
-    security_outcome = security_module.execute(
-        security_requests, authorization_context, round_number=round_number,
-        policy=security_module.Policy(
-            query_contract=INVESTIGATION_QUERY_CONTRACT,
-            require_anchor_time=INVESTIGATION_QUERY_V2,
-        ),
-        dependencies=security_module.Dependencies(
-            project_context=security_onion_authorization_context,
-            authorize=authorize_investigation_query_request,
-            executor=security_onion_executor,
-            text=_query_text,
-            random_hex=lambda size: os.urandom(size).hex(),
-            bounded_audit=_bounded_trusted_query_audit,
-            safe_audit_summary=_safe_audit_summary,
-            contract_error=InvestigationQueryContractError,
-            query_error=InvestigationQueryError,
-        ),
-    )
-    results.extend(security_outcome.results)
-    audits.extend(security_outcome.audits)
-
-    osquery_requests = [request for request in requests if request["backend"] == "osquery"]
-    endpoint_module = _query_execution_endpoint()
-    endpoint_outcome = endpoint_module.execute(
-        osquery_requests, prompt_package, live_osquery_config,
-        dependencies=endpoint_module.Dependencies(
-            executor=osquery_executor,
-            validate_artifact=validate_live_osquery_result_artifact,
-            case_id=live_osquery_case_id,
-            target_bound=_live_osquery_target_bound_to_case,
-            support_bindings=_live_osquery_support_bindings,
-            accumulate_evidence=accumulate_live_osquery_evidence,
-            accumulate_failure=accumulate_live_osquery_failure,
-            normalize_query=normalize_live_osquery_query,
-            text=_query_text,
-            bounded_audit=_bounded_trusted_query_audit,
-            safe_audit_summary=_safe_audit_summary,
-            client_error=LiveOsqueryClientError,
-            handled_errors=(
-                LiveOsqueryClientError, LiveOsqueryContractError, OSError,
+    module = _query_execution_batch()
+    return module.execute(
+        requests, round_number=round_number,
+        policy=module.Policy(result_schema=INVESTIGATION_QUERY_RESULT_SCHEMA),
+        dependencies=module.Dependencies(
+            security_onion=lambda selected: _execute_security_query_backend(
+                selected, authorization_context, round_number, security_onion_executor,
             ),
-        ),
-    )
-    results.extend(endpoint_outcome.results)
-    audits.extend(endpoint_outcome.audits)
-
-    derived_requests = [
-        request for request in requests if request["backend"] == "pcap_zeek"
-    ]
-    derived_module = _query_execution_derived()
-    derived_outcome = derived_module.execute(
-        derived_requests,
-        (
-            prompt_package.get("pcap_evidence")
-            if isinstance(prompt_package.get("pcap_evidence"), dict)
-            else {}
-        ),
-        dependencies=derived_module.Dependencies(
-            executor=derived_executor,
-            validate_evidence=validate_derived_query_evidence,
-            source_digest=_derived_evidence_source_digest,
-            bounded_audit=_bounded_trusted_query_audit,
-            safe_audit_summary=_safe_audit_summary,
-            handled_errors=(
-                InvestigationQueryError, PcapEvidenceQueryError, OSError,
+            endpoint=lambda selected: _execute_endpoint_query_backend(
+                selected, prompt_package, live_osquery_config, osquery_executor,
             ),
-        ),
-    )
-    results.extend(derived_outcome.results)
-    audits.extend(derived_outcome.audits)
-    enrichment_requests = [
-        request for request in requests if request["backend"] == "enrichment"
-    ]
-    enrichment_module = _query_execution_enrichment()
-    enrichment_outcome = enrichment_module.execute(
-        enrichment_requests,
-        enrichment_config,
-        dependencies=enrichment_module.Dependencies(
-            executor=enrichment_executor,
-            error_type=InvestigationQueryError,
-            handled_errors=(
-                InvestigationQueryError, OSError, urllib.error.URLError,
+            derived=lambda selected: _execute_derived_query_backend(
+                selected, prompt_package, derived_executor,
             ),
+            enrichment=lambda selected: _execute_enrichment_query_backend(
+                selected, enrichment_config, enrichment_executor,
+            ),
+            now=project_now,
         ),
     )
-    results.extend(enrichment_outcome.results)
-    audits.extend(enrichment_outcome.audits)
-    return {
-        "schema": INVESTIGATION_QUERY_RESULT_SCHEMA,
-        "round": round_number,
-        "generated_at": project_now(),
-        "requests": requests,
-        "results": results,
-        "audit": audits,
-    }
 
 
 def _evidence_ref_component(value: Any, maximum: int = 40) -> str:
