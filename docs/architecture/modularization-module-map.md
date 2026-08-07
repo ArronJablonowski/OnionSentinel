@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (6,497
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (6,205
 lines).
 
 | Boundary | Responsibilities |
@@ -420,6 +420,12 @@ client. `dashboard_siem_engineering_page.py` owns immutable recommendation and
 page view models plus the pure evidence report, tuning row, detection row, ROI,
 table, and page renderers. The builder retains settings/report selection and
 normalizes runtime `AlertReport` objects at the composition boundary.
+
+`dashboard_reports_assets.py` owns the Reports page responsive activity-log
+styles and reactive current-run/history client. Its live API refresh preserves
+observed model, provider, reasoning effort, agent, job, phase, telemetry,
+pagination, and per-agent totals while the builder continues to compose the
+initial runtime snapshot.
 
 ## Alert Store
 

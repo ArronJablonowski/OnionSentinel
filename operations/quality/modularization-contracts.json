@@ -172,6 +172,14 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_reports_assets.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_reports_assets.py",
+      "required_symbols": [
+        "inject_reports_assets"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_settings_assets.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_assets.py",
