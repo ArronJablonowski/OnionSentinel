@@ -320,6 +320,17 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_investigation_skills.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_investigation_skills.py",
+      "required_symbols": [
+        "InvestigationSkillCatalogConfig",
+        "load_investigation_skill_registry",
+        "render_investigation_skill_catalog",
+        "unavailable_registry"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_flow_page.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_flow_page.py",

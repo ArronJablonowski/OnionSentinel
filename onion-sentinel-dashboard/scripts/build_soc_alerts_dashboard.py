@@ -22,7 +22,6 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import html
-import importlib.util
 import json
 import os
 import re
@@ -193,6 +192,11 @@ from dashboard_ai_settings import (  # noqa: E402
     _normalized_reasoning_effort,
     default_soc_ai_settings,
     load_ai_settings,
+)
+from dashboard_investigation_skills import (  # noqa: E402
+    InvestigationSkillCatalogConfig,
+    load_investigation_skill_registry,
+    render_investigation_skill_catalog,
 )
 from dashboard_flow_page import (  # noqa: E402
     FLOW_PAGE_CSS,
@@ -558,183 +562,26 @@ def load_soc_ai_settings() -> dict:
 
 def load_dashboard_investigation_skills() -> dict:
     """Load the exact normalized skill registry used by the investigation runtime."""
-    module_candidates = (
-        HOME / 'n8n-local' / 'bin' / 'investigation_skills.py',
-        Path(__file__).resolve().parents[2] / 'n8n' / 'bin' / 'investigation_skills.py',
+    return load_investigation_skill_registry(_investigation_skill_catalog_config())
+
+
+def _investigation_skill_catalog_config() -> InvestigationSkillCatalogConfig:
+    return InvestigationSkillCatalogConfig(
+        registry_path=INVESTIGATION_SKILLS_FILE,
+        loader_candidates=(
+            HOME / 'n8n-local' / 'bin' / 'investigation_skills.py',
+            Path(__file__).resolve().parents[2] / 'n8n' / 'bin' / 'investigation_skills.py',
+        ),
+        home=HOME,
     )
-    try:
-        module_path = next(path for path in module_candidates if path.is_file())
-        spec = importlib.util.spec_from_file_location(
-            '_onion_sentinel_investigation_skills_dashboard',
-            module_path,
-        )
-        if spec is None or spec.loader is None:
-            raise RuntimeError('the investigation skill loader could not be initialized')
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        registry = module.load_investigation_skills(INVESTIGATION_SKILLS_FILE)
-        if not isinstance(registry, dict):
-            raise ValueError('the investigation skill registry returned an invalid result')
-        return registry
-    except Exception as exc:
-        return {
-            'schema': 'onion-sentinel-investigation-skills-v1',
-            'version': 0,
-            'mode': 'unavailable',
-            'skills': [],
-            'registry_sha256': '',
-            'error': str(exc),
-        }
-
-
-def _skill_text_items(values: object) -> str:
-    items = values if isinstance(values, list) else []
-    return ''.join(f'<li>{html.escape(str(value))}</li>' for value in items)
-
-
-def _skill_chips(values: object) -> str:
-    items = values if isinstance(values, list) else []
-    return ''.join(
-        f'<span class="settings-skill-chip">{html.escape(str(value).replace("_", " "))}</span>'
-        for value in items
-    )
-
-
-def _skill_title(skill_id: object) -> str:
-    words = str(skill_id or '').replace('-', ' ').replace('_', ' ').split()
-    acronyms = {'dns', 'http', 'ssh', 'tls', 'pcap', 'oql', 'osquery'}
-    return ' '.join(word.upper() if word.lower() in acronyms else word.title() for word in words)
 
 
 def investigation_skill_catalog(registry: object) -> str:
     """Render the registry as a read-only, expandable skill catalog."""
-    data = registry if isinstance(registry, dict) else {}
-    source_path = html.escape(display_path(INVESTIGATION_SKILLS_FILE))
-    source_path_title = html.escape(str(INVESTIGATION_SKILLS_FILE), quote=True)
-    skills = data.get('skills') if isinstance(data.get('skills'), list) else []
-    mode = str(data.get('mode') or 'unavailable')
-    registry_digest = str(data.get('registry_sha256') or '')
-    error = str(data.get('error') or '').strip()
-    rows: list[str] = []
-    for raw_skill in skills:
-        if not isinstance(raw_skill, dict):
-            continue
-        skill_id = str(raw_skill.get('id') or 'unnamed-skill')
-        skill_id_attr = html.escape(skill_id, quote=True)
-        objective = html.escape(str(raw_skill.get('objective') or 'No objective recorded.'))
-        status = html.escape(str(raw_skill.get('status') or mode))
-        version = html.escape(str(raw_skill.get('version') or '—'))
-        digest = html.escape(str(raw_skill.get('skill_sha256') or 'Unavailable'))
-        match = raw_skill.get('match') if isinstance(raw_skill.get('match'), dict) else {}
-        trigger_parts: list[str] = []
-        for field, values in match.items():
-            display_values = values if isinstance(values, list) else [values]
-            trigger_parts.append(
-                '<span class="settings-skill-trigger">'
-                f'<b>{html.escape(str(field).replace("_", " "))}</b> '
-                f'{html.escape(", ".join(str(value) for value in display_values))}'
-                '</span>'
-            )
-        pivots: list[str] = []
-        for index, raw_pivot in enumerate(
-            raw_skill.get('pivot_plan') if isinstance(raw_skill.get('pivot_plan'), list) else [],
-            start=1,
-        ):
-            if not isinstance(raw_pivot, dict):
-                continue
-            required = raw_pivot.get('required') is True
-            pivots.append(
-                '<li class="settings-skill-pivot">'
-                f'<span class="settings-skill-step">{index}</span>'
-                '<span class="settings-skill-pivot-copy">'
-                f'<strong>{html.escape(str(raw_pivot.get("step") or "Unnamed step"))}</strong>'
-                '<span class="settings-skill-pivot-meta">'
-                f'{html.escape(str(raw_pivot.get("backend") or "unknown"))} · '
-                f'{html.escape(str(raw_pivot.get("pack") or "unknown"))} · '
-                f'{html.escape(str(raw_pivot.get("purpose") or "unknown").replace("_", " "))}'
-                '</span>'
-                f'<p>{html.escape(str(raw_pivot.get("discriminator") or "No discriminator recorded."))}</p>'
-                '</span>'
-                f'<span class="settings-skill-requirement {"required" if required else "advisory"}">'
-                f'{"Required" if required else "Advisory"}</span>'
-                '</li>'
-            )
-        rows.append(
-            f'''
-            <details class="settings-skill-details" data-investigation-skill="{skill_id_attr}">
-              <summary>
-                <span class="settings-skill-summary-copy">
-                  <strong>{html.escape(_skill_title(skill_id))}</strong>
-                  <small>{objective}</small>
-                </span>
-                <span class="settings-skill-summary-meta">
-                  <span class="settings-skill-status">{status}</span>
-                  <span>v{version}</span>
-                  <span class="settings-skill-view-label" aria-hidden="true"></span>
-                </span>
-              </summary>
-              <div class="settings-skill-body">
-                <div class="settings-skill-facts">
-                  <section><span class="settings-kicker">Skill ID</span><code>{html.escape(skill_id)}</code></section>
-                  <section><span class="settings-kicker">Skill source file</span><code title="{source_path_title}">{source_path}</code></section>
-                  <section><span class="settings-kicker">Definition SHA-256</span><code title="{digest}">{digest}</code></section>
-                </div>
-                <section class="settings-skill-block settings-skill-objective">
-                  <h4>Objective</h4><p>{objective}</p>
-                </section>
-                <section class="settings-skill-block">
-                  <h4>Deterministic trigger</h4>
-                  <div class="settings-skill-trigger-list">{''.join(trigger_parts) or '<span>None recorded</span>'}</div>
-                </section>
-                <section class="settings-skill-block">
-                  <h4>Applicable agents</h4>
-                  <div class="settings-skill-chip-list">{_skill_chips(raw_skill.get('roles'))}</div>
-                </section>
-                <section class="settings-skill-block">
-                  <h4>Required evidence</h4>
-                  <div class="settings-skill-chip-list">{_skill_chips(raw_skill.get('required_evidence'))}</div>
-                </section>
-                <section class="settings-skill-block settings-skill-pivot-block">
-                  <h4>Repeatable evidence pivots</h4>
-                  <ol class="settings-skill-pivot-list">{''.join(pivots)}</ol>
-                </section>
-                <div class="settings-skill-grid">
-                  <section class="settings-skill-block"><h4>Alternative hypotheses</h4><ul>{_skill_text_items(raw_skill.get('alternative_hypotheses'))}</ul></section>
-                  <section class="settings-skill-block"><h4>Stop conditions</h4><ul>{_skill_text_items(raw_skill.get('stop_conditions'))}</ul></section>
-                  <section class="settings-skill-block"><h4>Confidence limiters</h4><ul>{_skill_text_items(raw_skill.get('confidence_limiters'))}</ul></section>
-                  <section class="settings-skill-block"><h4>Known false-positive patterns</h4><ul>{_skill_text_items(raw_skill.get('known_false_positive_patterns'))}</ul></section>
-                  <section class="settings-skill-block"><h4>Verification rules</h4><ul>{_skill_text_items(raw_skill.get('verification'))}</ul></section>
-                </div>
-              </div>
-            </details>'''
-        )
-    state = f'{len(rows)} {mode}' if rows else 'Unavailable'
-    registry_meta = (
-        f'<code title="{html.escape(registry_digest, quote=True)}">{html.escape(registry_digest)}</code>'
-        if registry_digest else '<span>Digest unavailable</span>'
+    return render_investigation_skill_catalog(
+        registry,
+        _investigation_skill_catalog_config(),
     )
-    error_notice = (
-        '<div class="settings-skill-error" role="status">'
-        f'Skills could not be loaded: {html.escape(error)}</div>'
-        if error else ''
-    )
-    return f'''
-      <section class="settings-harness-skills" aria-labelledby="onion-sentinel-skills-title">
-        <div class="settings-harness-skills-heading">
-          <span class="settings-harness-heading-copy">
-            <span class="settings-kicker">Procedural investigation guidance</span>
-            <strong id="onion-sentinel-skills-title">Harness Skills</strong>
-            <small>Open a skill to inspect its deterministic trigger, evidence contract, repeatable pivots, competing hypotheses, confidence limits, and verification rules.</small>
-          </span>
-          <span class="settings-provider-state" id="onion-sentinel-skills-summary">{html.escape(state)}</span>
-        </div>
-        <div class="settings-skill-list">{''.join(rows)}</div>
-        {error_notice}
-        <div class="settings-skill-registry-meta">
-          <span>Registry</span>{registry_meta}
-        </div>
-        <div class="settings-note">This catalog is read-only. Skills are versioned, digest-bound code assets. Candidate skills cannot activate themselves and still require replay evaluation, independent review, and human approval.</div>
-      </section>'''
 
 
 def severity_threshold_options(selected: str) -> str:

@@ -506,6 +506,12 @@ and independent primary/reviewer/adjudicator assignments. The builder retains
 only a path-aware compatibility wrapper, so runtime and test path overrides do
 not leak filesystem state into the settings policy.
 
+`dashboard_investigation_skills.py` owns discovery of the trusted harness skill
+validator, fail-closed registry loading, and the escaped read-only Settings
+catalog. `InvestigationSkillCatalogConfig` makes registry, validator, and home
+paths explicit; the builder retains path-aware wrappers so deployed and
+repository layouts use the same strict code-owned skill validation contract.
+
 `dashboard_flow_page.py` owns the pure data-flow renderer, enrichment-service
 tiles, responsive pipeline styles, and privacy-toggle client. The builder
 assembles `FlowPageViewModel` from live alert/report/model/notification metrics
