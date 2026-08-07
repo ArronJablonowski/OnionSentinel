@@ -1791,6 +1791,31 @@ def _query_repair():
     return repair
 
 
+def _query_audit():
+    _provider_routing()
+    from onion_sentinel.analysis.query import audit
+    return audit
+
+
+def _query_audit_policy():
+    module = _query_audit()
+    return module.Policy(
+        maximum_queries_per_round=MAX_INVESTIGATION_QUERIES_PER_ROUND,
+        success_statuses=frozenset(INVESTIGATION_QUERY_SUCCESS_STATUSES),
+        nonexecution_statuses=frozenset(
+            INVESTIGATION_QUERY_NONEXECUTION_STATUSES
+        ),
+    )
+
+
+def _query_audit_dependencies():
+    module = _query_audit()
+    return module.Dependencies(
+        digest_json=harness_digest_json,
+        resolve_binding=resolve_query_binding,
+    )
+
+
 def _query_prompt_errors():
     _provider_routing()
     from onion_sentinel.analysis.query import prompt_errors
@@ -5990,49 +6015,11 @@ def _admit_investigation_query_prompt(
     )
 
 def _investigation_round_audit(round_result: dict[str, Any]) -> dict[str, Any]:
-    summaries = []
-    trusted_queries: list[dict[str, Any]] = []
-    for item in round_result.get("results", []):
-        if not isinstance(item, dict):
-            continue
-        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
-        summaries.append(
-            {
-                "query_id": _query_text(item.get("query_id"), 64),
-                "query_ids": item.get("query_ids") if isinstance(item.get("query_ids"), list) else [],
-                "backend": _query_text(item.get("backend"), 40),
-                "status": _query_text(item.get("status"), 40),
-                "query_digest": _query_text(evidence.get("query_digest"), 128),
-                "error": _query_text(item.get("error"), 500),
-            }
-        )
-        trusted = item.get("trusted_query_audit")
-        if isinstance(trusted, list):
-            trusted_queries.extend(
-                entry for entry in trusted if isinstance(entry, dict)
-            )
-    return {
-        "round": round_result.get("round"),
-        "request_count": len(round_result.get("requests") or []),
-        "results": summaries,
-        "trusted_queries": trusted_queries[:MAX_INVESTIGATION_QUERIES_PER_ROUND],
-        "tool_call_bindings": _investigation_tool_call_bindings(round_result),
-        "broker_audit": round_result.get("audit") or [],
-        "request_normalizations": [
-            {
-                "query_id": _query_text(item.get("query_id"), 64),
-                "normalization": item.get("normalization"),
-            }
-            for item in (
-                round_result.get("requests")
-                if isinstance(round_result.get("requests"), list)
-                else []
-            )
-            if isinstance(item, dict)
-            and isinstance(item.get("normalization"), dict)
-            and item.get("normalization")
-        ][:MAX_INVESTIGATION_QUERIES_PER_ROUND],
-    }
+    return _query_audit().round_audit(
+        round_result,
+        policy=_query_audit_policy(),
+        dependencies=_query_audit_dependencies(),
+    )
 
 INVESTIGATION_QUERY_NONEXECUTION_STATUSES = frozenset(
     {"rejected", "denied", "blocked", "unauthorized", "forbidden"}
@@ -6042,76 +6029,11 @@ INVESTIGATION_QUERY_NONEXECUTION_STATUSES = frozenset(
 def _investigation_tool_call_bindings(
     round_result: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Bind the response audit to the exact collector-owned harness tool rows.
-
-    This deliberately mirrors ``HarnessRun.query_round``. It emits only compact
-    identities and digests, never query text or returned evidence.
-    """
-    try:
-        round_number = int(round_result.get("round") or 0)
-    except (TypeError, ValueError, OverflowError):
-        round_number = 0
-    requests = (
-        round_result.get("requests")
-        if isinstance(round_result.get("requests"), list)
-        else []
+    return _query_audit().tool_call_bindings(
+        round_result,
+        policy=_query_audit_policy(),
+        dependencies=_query_audit_dependencies(),
     )
-    results = (
-        round_result.get("results")
-        if isinstance(round_result.get("results"), list)
-        else []
-    )
-    request_by_id = {
-        str(item.get("query_id")): item
-        for item in requests
-        if isinstance(item, dict) and item.get("query_id")
-    }
-    result_by_id: dict[str, dict[str, Any]] = {}
-    for item in results:
-        if not isinstance(item, dict):
-            continue
-        item_ids = (
-            [str(value) for value in item.get("query_ids", [])]
-            if isinstance(item.get("query_ids"), list)
-            else [str(item.get("query_id"))]
-            if item.get("query_id")
-            else []
-        )
-        for item_id in item_ids:
-            result_by_id[item_id] = item
-    # Rejected proposals that never entered the normalized request array still
-    # produce harness tool rows. Reconstruct the same bounded request stub so
-    # the response-side digest intersects the durable ledger exactly.
-    for query_id, result in result_by_id.items():
-        if query_id not in request_by_id:
-            request_by_id[query_id] = {
-                "query_id": query_id,
-                "backend": result.get("backend"),
-                "purpose": result.get("purpose")
-                or "proposal rejected before execution",
-                "rejected_before_execution": True,
-            }
-
-    bindings: list[dict[str, Any]] = []
-    for query_id, request in request_by_id.items():
-        result = result_by_id.get(query_id, {})
-        backend = str(request.get("backend") or result.get("backend") or "")
-        status, _result_observation = resolve_query_binding(result, query_id)
-        bindings.append(
-            {
-                "call_id": f"round-{round_number}-{query_id}"[:128],
-                "round": round_number,
-                "round_number": round_number,
-                "query_id": query_id[:128],
-                "backend": backend[:80],
-                "status": status[:40],
-                "normalized_status": status.strip().lower()[:40],
-                "request_digest": harness_digest_json(request),
-                "result_digest": harness_digest_json(result),
-                "read_only": result.get("read_only") is True,
-            }
-        )
-    return bindings[: MAX_INVESTIGATION_QUERIES_PER_ROUND * 2]
 
 
 def investigation_query_binding_summary(
@@ -6119,58 +6041,11 @@ def investigation_query_binding_summary(
     *,
     queries_admitted: int,
 ) -> dict[str, Any]:
-    """Summarize collector-bound read-only execution without model assertions."""
-    executed = [
-        item
-        for item in bindings
-        if str(item.get("normalized_status") or "")
-        not in INVESTIGATION_QUERY_NONEXECUTION_STATUSES
-    ]
-    successful_read_only = [
-        item
-        for item in bindings
-        if item.get("read_only") is True
-        and str(item.get("normalized_status") or "")
-        in INVESTIGATION_QUERY_SUCCESS_STATUSES
-    ]
-    all_bindings_read_only = bool(bindings) and all(
-        item.get("read_only") is True for item in bindings
+    return _query_audit().binding_summary(
+        bindings,
+        queries_admitted=queries_admitted,
+        policy=_query_audit_policy(),
     )
-    executed_read_only = bool(executed) and all(
-        item.get("read_only") is True for item in executed
-    )
-    status_history: dict[str, list[str]] = {}
-    for item in bindings:
-        query_id = str(item.get("query_id") or "").strip()
-        if not query_id:
-            continue
-        status_history.setdefault(query_id, []).append(
-            str(item.get("normalized_status") or "").strip().lower()
-        )
-    # A rejected/failed proposal remains in the immutable tool ledger, but it
-    # is not an unresolved evidence gap when the broker's one-shot,
-    # non-widening repair for the same query_id subsequently succeeds.  The
-    # repair admission path validates the fixed scope before this summary is
-    # built; this only corrects terminal-outcome accounting.
-    terminal_queries_succeeded = bool(status_history) and all(
-        statuses
-        and statuses[-1] in INVESTIGATION_QUERY_SUCCESS_STATUSES
-        for statuses in status_history.values()
-    )
-    complete = (
-        bool(bindings)
-        and all_bindings_read_only
-        and terminal_queries_succeeded
-        and len(bindings) >= max(1, int(queries_admitted))
-    )
-    return {
-        "read_only": executed_read_only,
-        "all_tool_call_bindings_read_only": all_bindings_read_only,
-        "successful_read_only_queries": len(successful_read_only),
-        "complete": complete,
-        "evaluation_requirement_satisfied": bool(successful_read_only)
-        and all_bindings_read_only,
-    }
 
 
 def investigation_query_outcome_summary(

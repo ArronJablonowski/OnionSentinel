@@ -1,7 +1,7 @@
 """Provider-neutral governed investigation query contracts."""
 
 from . import (
-    derived, endpoint, enrichment, event_tuple, primitives, prompt_admission,
+    audit, derived, endpoint, enrichment, event_tuple, primitives, prompt_admission,
     prompt_budget, prompt_compaction, prompt_errors, prompt_facts, prompt_provenance, repair,
     repair_catalog, request,
     security_onion, state, window,
@@ -9,7 +9,7 @@ from . import (
 
 __all__ = [
     "derived", "endpoint", "enrichment", "event_tuple", "primitives",
-    "prompt_admission", "prompt_budget", "prompt_compaction", "prompt_errors",
+    "audit", "prompt_admission", "prompt_budget", "prompt_compaction", "prompt_errors",
     "prompt_facts", "prompt_provenance", "repair", "repair_catalog", "request",
     "security_onion", "state", "window",
 ]
