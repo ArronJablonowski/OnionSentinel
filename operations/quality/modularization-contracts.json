@@ -62,6 +62,17 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_request_routes.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_request_routes.py",
+      "required_symbols": [
+        "PostRoute",
+        "classify_post_route",
+        "head_content_type",
+        "is_head_route"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/build_soc_alerts_dashboard.py",

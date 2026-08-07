@@ -46,6 +46,11 @@ import cti_program
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
+from portal_request_routes import (
+    classify_post_route,
+    head_content_type,
+    is_head_route,
+)
 from response_cache import ResponseCache
 
 HOME = Path.home()
@@ -13725,7 +13730,11 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html", "/healthz", "/api/reports", "/api/admin/session-status", "/api/asset-inventory", "/api/dhcp-asset-discovery", "/api/software-inventory", CTI_PROGRAM_API_PATH, "/api/llm-analysis/current", "/api/llm-analysis/logs", "/api/system-health/beacons", "/api/soc-alerts", "/api/soc-alerts/events", "/api/soc-alerts/metrics", "/api/soc-alerts/suppressions", "/api/soc-alerts/status", "/api/soc-incidents", "/api/soc-incidents/reanalysis-runs", "/api/soc-settings/agent-memory", "/api/soc-settings/ai-model", "/api/soc-settings/ollama-models", "/api/resource-library/favorites", "/admin", "/admin/login") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-incidents/") and parsed.path.endswith("/detail")) or (parsed.path.startswith("/api/soc-alerts/") and not parsed.path.endswith(("/ack", "/escalate"))):
+        if is_head_route(
+            parsed.path,
+            cti_program_path=CTI_PROGRAM_API_PATH,
+            prompt_paths=SOC_SETTINGS_PROMPT_API_PATHS,
+        ):
             if parsed.path == "/admin" and not self._admin_authenticated():
                 self.send_response(HTTPStatus.FOUND)
                 self.send_header("Location", "/admin/login")
@@ -13733,10 +13742,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             self.send_response(HTTPStatus.OK)
-            content_type = "text/html; charset=utf-8" if parsed.path in ("/", "/index.html", "/admin", "/admin/login") else "application/json; charset=utf-8"
-            if parsed.path == "/api/soc-alerts/events":
-                content_type = "text/event-stream; charset=utf-8"
-            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Type", head_content_type(parsed.path))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
@@ -13746,40 +13752,24 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        is_cti_program_write = parsed.path == CTI_PROGRAM_API_PATH
-        is_asset_write = parsed.path in {
-            "/api/assets/promote-dhcp",
-            "/api/assets/approve-dhcp-ip-change",
-            "/api/assets/update",
-            "/api/assets/demote",
-        }
-        is_incident_reanalysis = (
-            parsed.path == "/api/soc-incidents/reanalyze-all"
-            or (
-                parsed.path.startswith("/api/soc-incidents/")
-                and parsed.path.endswith("/reanalyze")
-            )
+        route = classify_post_route(
+            parsed.path,
+            cti_program_path=CTI_PROGRAM_API_PATH,
+            prompt_paths=SOC_SETTINGS_PROMPT_API_PATHS,
         )
-        is_review_write = (
-            parsed.path.startswith("/api/soc-alerts/")
-            and parsed.path.endswith("/adjudicate")
-        ) or (
-            parsed.path.startswith("/api/soc-incidents/")
-            and parsed.path.endswith(("/adjudicate", "/status"))
-        )
-        if parsed.path not in ("/admin/login", "/admin/logout", "/admin/action", "/api/admin/start-service", "/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model", "/api/resource-library/remove", "/api/resource-library/tags", "/api/resource-library/rename", "/api/resource-library/favorite") and parsed.path not in SOC_SETTINGS_PROMPT_API_PATHS and not (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) and not is_review_write and not is_incident_reanalysis and not is_asset_write and not is_cti_program_write:
+        is_cti_program_write = route.cti_program_write
+        is_asset_write = route.asset_write
+        is_incident_reanalysis = route.incident_reanalysis
+        is_review_write = route.review_write
+        if not route.accepted:
             return self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain; charset=utf-8")
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             length = 0
-        request_limit = cti_program.MAX_FILE_BYTES if is_cti_program_write else 50000
+        request_limit = route.request_limit(cti_program.MAX_FILE_BYTES)
         if length <= 0 or length > request_limit:
-            if parsed.path == "/api/admin/start-service":
-                return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
-            if parsed.path in ("/api/soc-alerts/status", "/api/soc-settings/ai-model", "/api/soc-settings/agent-model") or parsed.path in SOC_SETTINGS_PROMPT_API_PATHS or (parsed.path.startswith("/api/soc-alerts/") and parsed.path.endswith(("/ack", "/pcap", "/analyze", "/escalate"))) or is_review_write or is_incident_reanalysis or is_asset_write or is_cti_program_write:
-                return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
-            if parsed.path.startswith("/api/resource-library/"):
+            if route.json_request:
                 return self._send(HTTPStatus.BAD_REQUEST, json.dumps({"ok": False, "error": "Invalid request size"}).encode(), "application/json; charset=utf-8")
             if parsed.path == "/admin/action" and self._admin_authenticated():
                 return self._send(HTTPStatus.BAD_REQUEST, render_admin_dashboard("Invalid admin action request size.", True))

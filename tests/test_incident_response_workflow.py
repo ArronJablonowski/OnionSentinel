@@ -649,14 +649,26 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
         contradictory_post.assert_not_called()
 
     def test_portal_review_routes_require_same_origin_json_marker(self) -> None:
-        source = PORTAL_PATH.read_text(encoding="utf-8")
+        source = PORTAL_PATH.read_text(encoding="utf-8") + (
+            PORTAL_PATH.parent / "portal_request_routes.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("def _soc_review_write_authorized", source)
         self.assertIn('X-Onion-Sentinel-Request', source)
         self.assertIn('fetch_site != "same-origin"', source)
         self.assertIn('parsed_origin.netloc.lower() != request_host', source)
-        self.assertIn('endswith("/adjudicate")', source)
-        self.assertIn('endswith(("/adjudicate", "/status"))', source)
+        alert_review = self.portal.classify_post_route(
+            "/api/soc-alerts/group/adjudicate",
+            cti_program_path=self.portal.CTI_PROGRAM_API_PATH,
+            prompt_paths=self.portal.SOC_SETTINGS_PROMPT_API_PATHS,
+        )
+        incident_review = self.portal.classify_post_route(
+            "/api/soc-incidents/ir-case/status",
+            cti_program_path=self.portal.CTI_PROGRAM_API_PATH,
+            prompt_paths=self.portal.SOC_SETTINGS_PROMPT_API_PATHS,
+        )
+        self.assertTrue(alert_review.review_write)
+        self.assertTrue(incident_review.review_write)
 
     def test_incident_list_returns_case_and_only_incident_responder_analysis(self) -> None:
         conn = sqlite3.connect(self.db_path)

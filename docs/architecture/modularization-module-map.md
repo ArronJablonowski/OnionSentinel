@@ -285,6 +285,13 @@ copy validation logic.
 
 Current owner: `onion-sentinel-dashboard/report_portal.py` (14,366 lines).
 
+`portal_request_routes.py` is the first extracted HTTP boundary. It owns the
+pure HEAD/POST method-path allowlist, POST responsibility classification,
+request-size class, and advertised content type. `PortalHandler` continues to
+own headers, authentication, same-origin enforcement, body parsing, service
+calls, and responses; mutable runtime policy is passed into the classifier
+explicitly so tests and deployed prompt routes cannot drift.
+
 | Domain | Current responsibility examples | Target modules |
 | --- | --- | --- |
 | HTTP composition | server, handler, GET/POST dispatch | `portal.entrypoint`, `portal.routes.registry` |
