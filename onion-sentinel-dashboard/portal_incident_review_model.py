@@ -27,6 +27,19 @@ def _nonempty_count(value: object) -> int:
     return 1 if str(value or '').strip() else 0
 
 
+def parse_analysis_response(analysis: dict | None) -> dict:
+    """Decode one persisted analysis response without leaking parser errors."""
+    analysis = analysis if isinstance(analysis, dict) else {}
+    value = analysis.get('response_json')
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(str(value or '{}'))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _coverage_status(gap_count: int, used_count: int, audit: dict) -> str:
     if gap_count or audit.get('partial'):
         return 'gaps'
@@ -172,4 +185,26 @@ def compose_incident_review_state(
         **_review_fields(review, merged, callbacks),
         **_evidence_fields(evidence),
         **_case_fields(case),
+    }
+
+
+def compose_incident_detail_payload(
+    case_id: str,
+    case: dict,
+    response: dict,
+    review: dict,
+    incident_html: str,
+    prior_ai_html: str,
+    query_count: int,
+) -> dict:
+    """Assemble the stable Incident Response detail API payload."""
+    return {
+        'ok': True,
+        'case_id': case_id,
+        'agent_status': case.get('agent_status') or 'queued',
+        'analysis_available': bool(response.get('incident_response_report')),
+        'query_count': query_count,
+        'review': review,
+        'incident_html': incident_html,
+        'prior_ai_html': prior_ai_html,
     }

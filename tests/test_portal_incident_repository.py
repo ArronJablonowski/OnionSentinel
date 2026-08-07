@@ -38,6 +38,13 @@ class PortalIncidentRepositoryTests(unittest.TestCase):
 
     def test_missing_incident_schema_is_reported_without_querying(self) -> None:
         self.assertFalse(repository.incident_schema_ready(self.conn))
+        with self.assertRaises(repository.IncidentSchemaUnavailable):
+            repository.load_incident_detail_records(self.conn, "missing")
+
+    def test_missing_incident_case_has_an_explicit_repository_error(self) -> None:
+        self.conn.executescript(CASE_SCHEMA)
+        with self.assertRaises(repository.IncidentCaseNotFound):
+            repository.load_incident_detail_records(self.conn, "missing")
 
     def test_repository_batches_summary_analysis_review_and_adjudication(self) -> None:
         self.conn.executescript(CASE_SCHEMA + """
@@ -176,7 +183,7 @@ class PortalIncidentRepositoryTests(unittest.TestCase):
         self.assertIsNone(review_records.adjudication)
 
     def test_current_analysis_rejects_stale_pointer_and_selects_latest_ir_run(self) -> None:
-        self.conn.executescript("""
+        self.conn.executescript(CASE_SCHEMA + """
         CREATE TABLE ai_analysis_runs (
           analysis_id TEXT PRIMARY KEY, group_id TEXT, agent_role TEXT,
           generated_at TEXT, created_at TEXT, model TEXT,
@@ -199,6 +206,11 @@ class PortalIncidentRepositoryTests(unittest.TestCase):
           'newer-soc', 'case-group', 'soc-analyst', '30', '30',
           'soc', '', '', '', '', '', '{}'
         );
+        INSERT INTO incident_response_cases VALUES (
+          'case-detail', 'case-group', 'dashboard-detail', 'alert-detail',
+          'open', 'analyzed', '1', '2', 'analyst', 'detail',
+          'wrong-pointer', 'wrong', '99', '', NULL, NULL, NULL
+        );
         """)
         selected = repository.load_current_incident_analysis(
             self.conn,
@@ -212,6 +224,12 @@ class PortalIncidentRepositoryTests(unittest.TestCase):
             {"group_id": "case-group", "latest_analysis_id": "older-ir"},
         )
         self.assertEqual(pointed["analysis_id"], "older-ir")
+        detail = repository.load_incident_detail_records(
+            self.conn, "case-detail"
+        )
+        self.assertEqual(detail.analysis["analysis_id"], "latest-ir")
+        self.assertEqual(detail.prior_analysis["analysis_id"], "newer-soc")
+        self.assertEqual(detail.review.reviewer, {})
 
     def test_legacy_analysis_schema_supports_pointer_only_lookup(self) -> None:
         self.conn.executescript("""

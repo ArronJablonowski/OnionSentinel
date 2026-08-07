@@ -93,10 +93,14 @@
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_incident_repository.py",
       "required_symbols": [
+        "IncidentCaseNotFound",
+        "IncidentDetailRecords",
         "IncidentListRecords",
         "IncidentReviewRecords",
+        "IncidentSchemaUnavailable",
         "incident_schema_ready",
         "load_current_incident_analysis",
+        "load_incident_detail_records",
         "load_incident_list_records",
         "load_incident_review_records"
       ]
@@ -107,7 +111,9 @@
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_incident_review_model.py",
       "required_symbols": [
         "IncidentEvidencePresentation",
-        "compose_incident_review_state"
+        "compose_incident_detail_payload",
+        "compose_incident_review_state",
+        "parse_analysis_response"
       ]
     },
     {

@@ -327,14 +327,17 @@ selection, analysis and reviewer lookup, newest adjudication selection, and
 optional-column compatibility. It also loads resilient evidence-freshness,
 reviewer, and case-bound adjudication records for incident detail views, and
 resolves the current Incident Responder analysis without trusting a stale or
-cross-role foreign pointer. It returns typed record bundles and has no HTTP,
-filesystem, asset-resolution, or presentation responsibility.
+cross-role foreign pointer. A typed detail bundle combines the case, current IR
+analysis, latest prior SOC analysis, and review records while explicit lookup
+errors preserve schema-unavailable versus case-not-found behavior. The module
+has no HTTP, filesystem, asset-resolution, or presentation responsibility.
 
 `portal_incident_review_model.py` owns pure Incident Response detail-review
 presentation: evidence coverage and freshness, primary-versus-effective
 outcomes, reviewer disagreement, bounded disputed fields, adjudication, and
-case-resolution metadata. It reuses the shared reviewer policy but has no
-persistence, HTTP, filesystem, or asset-resolution access.
+case-resolution metadata. It also owns safe persisted-response decoding and the
+stable detail API payload shape. It reuses the shared reviewer policy but has
+no persistence, HTTP, filesystem, or asset-resolution access.
 
 | Domain | Current responsibility examples | Target modules |
 | --- | --- | --- |

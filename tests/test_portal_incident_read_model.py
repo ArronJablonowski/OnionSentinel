@@ -343,6 +343,35 @@ class PortalIncidentReadModelTests(unittest.TestCase):
         self.assertEqual(state["reviewer_error"], "embedded error")
         self.assertEqual(state["disputed_fields"], [])
 
+    def test_detail_response_parser_and_payload_are_bounded(self) -> None:
+        self.assertEqual(
+            review_model.parse_analysis_response(
+                {"response_json": '{"incident_response_report":{"ok":true}}'}
+            )["incident_response_report"],
+            {"ok": True},
+        )
+        self.assertEqual(
+            review_model.parse_analysis_response({"response_json": "[1, 2]"}),
+            {},
+        )
+        self.assertEqual(
+            review_model.parse_analysis_response({"response_json": "invalid"}),
+            {},
+        )
+        payload = review_model.compose_incident_detail_payload(
+            "case-1",
+            {},
+            {"incident_response_report": {"summary": "test"}},
+            {"final_review_status": "reviewed"},
+            "<article>incident</article>",
+            "<article>prior</article>",
+            3,
+        )
+        self.assertTrue(payload["analysis_available"])
+        self.assertEqual(payload["agent_status"], "queued")
+        self.assertEqual(payload["query_count"], 3)
+        self.assertEqual(payload["prior_ai_html"], "<article>prior</article>")
+
 
 if __name__ == "__main__":
     unittest.main()

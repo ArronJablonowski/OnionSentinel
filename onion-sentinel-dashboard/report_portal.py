@@ -55,10 +55,17 @@ from portal_incident_read_model import (
     parse_incident_list_request,
     select_incident_analysis,
 )
-from portal_incident_review_model import compose_incident_review_state
+from portal_incident_review_model import (
+    compose_incident_detail_payload,
+    compose_incident_review_state,
+    parse_analysis_response,
+)
 from portal_incident_repository import (
+    IncidentCaseNotFound,
+    IncidentSchemaUnavailable,
     incident_schema_ready,
     load_current_incident_analysis,
+    load_incident_detail_records,
     load_incident_list_records,
     load_incident_review_records,
 )
@@ -12139,71 +12146,44 @@ def soc_incident_detail_response(case_id: str) -> tuple[int, dict]:
         return soc_alert_api_error("Invalid incident case id")
     try:
         with soc_alert_db_connect() as conn:
-            if not sqlite_table_exists(conn, "incident_response_cases"):
-                return soc_alert_api_error("Incident Response schema is unavailable", 503)
-            case_row = conn.execute(
-                "SELECT * FROM incident_response_cases WHERE case_id = ?", (case_id,)
-            ).fetchone()
-            if not case_row:
-                return soc_alert_api_error("Incident case not found", 404)
-            case = dict(case_row)
-            run_columns = sqlite_table_columns(conn, "ai_analysis_runs")
-            analysis: dict[str, object] = {}
-            response: dict[str, object] = {}
-            prior_analysis: dict[str, object] = {}
-            prior_response: dict[str, object] = {}
-            review = _soc_review_defaults()
-            if run_columns:
-                select_columns = [
-                    column for column in (
-                        "analysis_id", "group_id", "agent_role", "generated_at", "model",
-                        "detection_outcome", "bluf", "summary", "confidence",
-                        "evidence_hash", "response_json",
-                    ) if column in run_columns
-                ]
-                select_sql = ", ".join(select_columns)
-                analysis = soc_incident_current_analysis(conn, case)
-                if analysis.get("response_json"):
-                    try:
-                        parsed = json.loads(str(analysis["response_json"]))
-                        response = parsed if isinstance(parsed, dict) else {}
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        response = {}
-                if "group_id" in run_columns and "agent_role" in run_columns:
-                    row = conn.execute(
-                        f"SELECT {select_sql} FROM ai_analysis_runs "
-                        "WHERE group_id = ? AND agent_role = 'soc-analyst' "
-                        "ORDER BY generated_at DESC LIMIT 1",
-                        (case.get("group_id"),),
-                    ).fetchone()
-                    prior_analysis = dict(row) if row else {}
-                    if prior_analysis.get("response_json"):
-                        try:
-                            parsed = json.loads(str(prior_analysis["response_json"]))
-                            prior_response = parsed if isinstance(parsed, dict) else {}
-                        except (TypeError, ValueError, json.JSONDecodeError):
-                            prior_response = {}
-            review = soc_incident_review_state(conn, case, analysis, response)
+            records = load_incident_detail_records(conn, case_id)
+    except IncidentSchemaUnavailable:
+        return soc_alert_api_error("Incident Response schema is unavailable", 503)
+    except IncidentCaseNotFound:
+        return soc_alert_api_error("Incident case not found", 404)
     except (FileNotFoundError, sqlite3.Error) as exc:
         return soc_alert_api_error(f"Incident Response detail unavailable: {exc}", 503)
 
-    incident_html, query_count = render_incident_response_report_html(
-        case,
+    response = parse_analysis_response(records.analysis)
+    prior_response = parse_analysis_response(records.prior_analysis)
+    review = compose_incident_review_state(
+        records.case,
+        records.analysis,
         response,
-        analysis,
+        records.review.evidence_updated_at,
+        records.review.reviewer,
+        records.review.adjudication,
+        _soc_review_defaults(),
+        INCIDENT_ROW_CALLBACKS,
+    )
+    incident_html, query_count = render_incident_response_report_html(
+        records.case,
+        response,
+        records.analysis,
         review,
     )
-    prior_html = render_prior_soc_analysis_html(prior_response, prior_analysis)
-    return 200, {
-        "ok": True,
-        "case_id": case_id,
-        "agent_status": case.get("agent_status") or "queued",
-        "analysis_available": bool(response.get("incident_response_report")),
-        "query_count": query_count,
-        "review": review,
-        "incident_html": incident_html,
-        "prior_ai_html": prior_html,
-    }
+    prior_html = render_prior_soc_analysis_html(
+        prior_response, records.prior_analysis
+    )
+    return 200, compose_incident_detail_payload(
+        case_id,
+        records.case,
+        response,
+        review,
+        incident_html,
+        prior_html,
+        query_count,
+    )
 
 
 def soc_alert_row_filter_status(row: sqlite3.Row) -> str:

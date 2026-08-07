@@ -39,6 +39,22 @@ class IncidentReviewRecords:
     adjudication: dict | None
 
 
+@dataclass(frozen=True)
+class IncidentDetailRecords:
+    case: dict
+    analysis: dict
+    prior_analysis: dict
+    review: IncidentReviewRecords
+
+
+class IncidentSchemaUnavailable(LookupError):
+    """Raised when the durable Incident Response schema is not initialized."""
+
+
+class IncidentCaseNotFound(LookupError):
+    """Raised when a requested durable Incident Response case does not exist."""
+
+
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     try:
         row = conn.execute(
@@ -402,4 +418,55 @@ def load_current_incident_analysis(
         str(case.get("group_id") or "").strip(),
         run_columns,
         select_sql,
+    )
+
+
+def _prior_soc_analysis(
+    conn: sqlite3.Connection,
+    case: dict,
+    run_columns: set[str],
+) -> dict:
+    if not {"group_id", "agent_role"}.issubset(run_columns):
+        return {}
+    selected = _analysis_select_columns(run_columns)
+    if not selected:
+        return {}
+    order_column = (
+        "generated_at"
+        if "generated_at" in run_columns
+        else "created_at"
+        if "created_at" in run_columns
+        else "rowid"
+    )
+    row = conn.execute(
+        f"SELECT {', '.join(selected)} FROM ai_analysis_runs "
+        "WHERE group_id = ? AND agent_role = 'soc-analyst' "
+        f"ORDER BY {order_column} DESC, rowid DESC LIMIT 1",
+        (case.get("group_id"),),
+    ).fetchone()
+    return dict(row) if row else {}
+
+
+def load_incident_detail_records(
+    conn: sqlite3.Connection,
+    case_id: str,
+) -> IncidentDetailRecords:
+    """Load one incident case and its current IR, prior SOC, and review records."""
+    if not incident_schema_ready(conn):
+        raise IncidentSchemaUnavailable(case_id)
+    row = conn.execute(
+        "SELECT * FROM incident_response_cases WHERE case_id = ?",
+        (case_id,),
+    ).fetchone()
+    if not row:
+        raise IncidentCaseNotFound(case_id)
+    case = dict(row)
+    run_columns = _table_columns(conn, "ai_analysis_runs")
+    analysis = load_current_incident_analysis(conn, case) if run_columns else {}
+    prior = _prior_soc_analysis(conn, case, run_columns)
+    return IncidentDetailRecords(
+        case=case,
+        analysis=analysis,
+        prior_analysis=prior,
+        review=load_incident_review_records(conn, case, analysis),
     )
