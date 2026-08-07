@@ -30,6 +30,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.evidence.registry",
     "onion_sentinel.analysis.evidence.traversal",
     "onion_sentinel.analysis.evidence.validation",
+    "onion_sentinel.analysis.query.event_tuple",
     "onion_sentinel.analysis.query.primitives",
     "onion_sentinel.analysis.query.window",
     "onion_sentinel.analysis.conclusions.confidence",

@@ -1774,6 +1774,21 @@ def _query_primitives():
     return primitives
 
 
+def _query_event_tuple():
+    _provider_routing()
+    from onion_sentinel.analysis.query import event_tuple
+    return event_tuple
+
+
+def _query_event_tuple_dependencies():
+    module = _query_event_tuple()
+    return module.Dependencies(
+        canonical_digest=investigation_query_canonical_digest,
+        pack_fields=pack_event_tuple_fields,
+        match_semantics=tuple_match_semantics,
+    )
+
+
 def _query_window():
     _provider_routing()
     from onion_sentinel.analysis.query import window
@@ -4317,75 +4332,9 @@ def _query_utc_text(value: dt.datetime) -> str:
 
 
 def normalize_investigation_event_tuple(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or not value:
-        raise InvestigationQueryError(
-            "elastic/oql event_tuple must be a non-empty object"
-        )
-    allowed = {
-        "source_ip", "destination_ip", "source_port", "destination_port",
-        "transport", "protocol", "community_id", "rule_id",
-    }
-    unknown = set(value) - allowed
-    if unknown:
-        raise InvestigationQueryError(
-            "elastic/oql event_tuple contains unsupported fields: "
-            + ", ".join(sorted(unknown))
-        )
-    clean: dict[str, Any] = {}
-    for field in (
-        "source_ip", "destination_ip", "source_port", "destination_port",
-        "transport", "protocol", "community_id", "rule_id",
-    ):
-        if field not in value:
-            continue
-        raw = value[field]
-        if field in {"source_ip", "destination_ip"}:
-            import ipaddress
-
-            try:
-                clean[field] = str(ipaddress.ip_address(str(raw).strip()))
-            except ValueError as exc:
-                raise InvestigationQueryError(
-                    f"elastic/oql event_tuple {field} is invalid"
-                ) from exc
-        elif field in {"source_port", "destination_port"}:
-            if isinstance(raw, bool):
-                raise InvestigationQueryError(
-                    f"elastic/oql event_tuple {field} is invalid"
-                )
-            try:
-                port = int(raw)
-            except (TypeError, ValueError) as exc:
-                raise InvestigationQueryError(
-                    f"elastic/oql event_tuple {field} is invalid"
-                ) from exc
-            if port < 0 or port > 65535:
-                raise InvestigationQueryError(
-                    f"elastic/oql event_tuple {field} is outside the port range"
-                )
-            clean[field] = port
-        elif field in {"transport", "protocol"}:
-            text = _query_text(raw, 255).lower()
-            if not INVESTIGATION_SAFE_ATOM_RE.fullmatch(text):
-                raise InvestigationQueryError(
-                    f"elastic/oql event_tuple {field} is invalid"
-                )
-            clean[field] = text
-        elif field == "community_id":
-            text = _query_text(raw, 256)
-            if not re.fullmatch(r"[A-Za-z0-9_:+/=-]{1,256}", text):
-                raise InvestigationQueryError(
-                    "elastic/oql event_tuple community_id is invalid"
-                )
-            clean[field] = text
-        else:
-            text = _query_text(raw, 255)
-            if not INVESTIGATION_SAFE_ATOM_RE.fullmatch(text):
-                raise InvestigationQueryError(
-                    "elastic/oql event_tuple rule_id is invalid"
-                )
-            clean[field] = text
-    return clean
+    return _query_event_tuple().normalize(
+        value, error_type=InvestigationQueryError
+    )
 
 
 def project_investigation_event_tuple(
@@ -4408,115 +4357,13 @@ def project_investigation_event_tuple(
     always supplies its trusted local context and therefore always takes the
     provenance-checked path.
     """
-    requested = normalize_investigation_event_tuple(value)
-    if authorization_context is None:
-        return requested, None
-    if not isinstance(authorization_context, dict):
-        raise InvestigationQueryError(
-            "trusted investigation authorization context is invalid"
-        )
-    permitted = authorization_context.get("permitted_event_tuples")
-    if not isinstance(permitted, list) or not permitted:
-        raise InvestigationQueryError(
-            "event_tuple projection requires trusted role-aware tuple provenance"
-        )
-
-    candidates: list[
-        tuple[str, str, dict[str, Any], dict[str, Any]]
-    ] = []
-    for entry in permitted:
-        if not isinstance(entry, dict):
-            continue
-        trusted_value = entry.get("event_tuple")
-        try:
-            trusted_tuple = normalize_investigation_event_tuple(trusted_value)
-        except InvestigationQueryError:
-            continue
-        if not all(
-            trusted_tuple.get(field) == supplied
-            for field, supplied in requested.items()
-        ):
-            continue
-        provenance = {
-            "event_tuple": trusted_tuple,
-            "role_semantics": _query_text(
-                entry.get("role_semantics"),
-                80,
-            ),
-            "source": _query_text(entry.get("source"), 80),
-            "evidence_ref": _query_text(entry.get("evidence_ref"), 255),
-        }
-        candidates.append((
-            # Match the broker's deterministic selection over the complete
-            # trusted entry without exposing that entry in model-facing audit.
-            investigation_query_canonical_digest(entry),
-            investigation_query_canonical_digest({
-                "event_tuple": trusted_tuple,
-                "role_semantics": provenance["role_semantics"],
-            }),
-            trusted_tuple,
-            provenance,
-        ))
-    if not candidates:
-        raise InvestigationQueryError(
-            "event_tuple does not match one trusted role-aware tuple"
-        )
-
-    (
-        trusted_provenance_digest,
-        trusted_tuple_digest,
-        trusted_tuple,
-        provenance,
-    ) = min(
-        candidates,
-        key=lambda item: item[0],
+    return _query_event_tuple().project(
+        value,
+        pack=pack,
+        authorization_context=authorization_context,
+        dependencies=_query_event_tuple_dependencies(),
+        error_type=InvestigationQueryError,
     )
-    allowed_fields = set(pack_event_tuple_fields(pack))
-    projected = {
-        field: supplied
-        for field, supplied in requested.items()
-        if field in allowed_fields
-    }
-    if not projected:
-        raise InvestigationQueryError(
-            f"event_tuple has no fields authenticated by pack {pack}"
-        )
-    if (
-        {"source_ip", "destination_ip"}.intersection(trusted_tuple)
-        and not {"source_ip", "destination_ip"}.intersection(projected)
-    ):
-        raise InvestigationQueryError(
-            f"event_tuple projection for pack {pack} must retain a trusted "
-            "source or destination IP role"
-        )
-
-    requested_fields = sorted(requested)
-    executed_fields = sorted(projected)
-    role_semantics = provenance["role_semantics"]
-    audit: dict[str, Any] = {
-        "schema": "onion-sentinel-event-tuple-projection-v1",
-        "pack": pack,
-        "provenance_verified": True,
-        "projection_applied": requested_fields != executed_fields,
-        "requested_fields": requested_fields,
-        "executed_fields": executed_fields,
-        "dropped_pack_unavailable_fields": sorted(
-            set(requested_fields).difference(executed_fields)
-        ),
-        "trusted_tuple_digest": trusted_tuple_digest,
-        "trusted_provenance_digest": trusted_provenance_digest,
-        "role_semantics": role_semantics,
-        "match_semantics": tuple_match_semantics(
-            pack,
-            projected,
-            role_semantics,
-        ),
-    }
-    if provenance["source"]:
-        audit["trusted_source"] = provenance["source"]
-    if provenance["evidence_ref"]:
-        audit["trusted_evidence_ref"] = provenance["evidence_ref"]
-    return projected, audit
 
 
 def normalize_investigation_query_window(
