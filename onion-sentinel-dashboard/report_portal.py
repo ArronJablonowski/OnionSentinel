@@ -46,6 +46,7 @@ import cti_program
 from artifact_cache import ArtifactCache
 from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
+from portal_json_body import parse_json_body
 from portal_request_routes import (
     classify_post_route,
     head_content_type,
@@ -13812,10 +13813,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                     }).encode(),
                     "application/json; charset=utf-8",
                 )
-            try:
-                payload = json.loads(raw)
-            except json.JSONDecodeError:
-                payload = None
+            payload = parse_json_body(raw).value_or(None)
             try:
                 program = cti_program.save_program(payload)
             except cti_program.CTIProgramConflict as exc:
@@ -13871,10 +13869,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                     }).encode(),
                     "application/json; charset=utf-8",
                 )
-            try:
-                payload = json.loads(raw)
-            except json.JSONDecodeError:
-                payload = None
+            payload = parse_json_body(raw).value_or(None)
             if parsed.path == "/api/assets/promote-dhcp":
                 status, data = asset_dhcp_promotion_response(payload)
             elif parsed.path == "/api/assets/approve-dhcp-ip-change":
@@ -13898,10 +13893,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                     }).encode(),
                     "application/json; charset=utf-8",
                 )
-            try:
-                payload = json.loads(raw)
-            except json.JSONDecodeError:
-                payload = None
+            payload = parse_json_body(raw).value_or(None)
             if not isinstance(payload, dict):
                 return self._send(
                     HTTPStatus.BAD_REQUEST,
@@ -13931,14 +13923,14 @@ class PortalHandler(BaseHTTPRequestHandler):
                     }).encode(),
                     "application/json; charset=utf-8",
                 )
-            try:
-                payload = json.loads(raw)
-            except json.JSONDecodeError:
+            parsed_body = parse_json_body(raw)
+            if not parsed_body.valid:
                 return self._send(
                     HTTPStatus.BAD_REQUEST,
                     json.dumps({"ok": False, "error": "Request body must be valid JSON."}).encode(),
                     "application/json; charset=utf-8",
                 )
+            payload = parsed_body.value
             if not isinstance(payload, dict):
                 return self._send(
                     HTTPStatus.BAD_REQUEST,
@@ -13956,10 +13948,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 "application/json; charset=utf-8",
             )
         if route.alert_action:
-            try:
-                payload = json.loads(raw or "{}")
-            except json.JSONDecodeError:
-                payload = {}
+            payload = parse_json_body(raw, empty_object=True).value_or({})
             status, data = dispatch_authorized_soc_write(
                 route, payload, PORTAL_SOC_WRITE_CALLBACKS
             )
@@ -13967,10 +13956,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 SOC_ALERT_RESPONSE_CACHE.clear()
             return self._send(status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path == "/api/soc-alerts/status":
-            try:
-                payload = json.loads(raw or "{}")
-            except json.JSONDecodeError:
-                payload = {}
+            payload = parse_json_body(raw, empty_object=True).value_or({})
             ok, data = update_soc_alert_status(payload)
             if ok:
                 SOC_ALERT_RESPONSE_CACHE.clear()
@@ -13981,37 +13967,25 @@ class PortalHandler(BaseHTTPRequestHandler):
             )
             return self._send(response_status, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path in SOC_SETTINGS_PROMPT_API_PATHS:
-            try:
-                payload = json.loads(raw or "{}")
-            except json.JSONDecodeError:
-                payload = {}
+            payload = parse_json_body(raw, empty_object=True).value_or({})
             if not self._soc_settings_write_authorized():
                 return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
             ok, data = save_settings_prompt(parsed.path, payload.get("prompt", ""))
             return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path == "/api/soc-settings/ai-model":
-            try:
-                payload = json.loads(raw or "{}")
-            except json.JSONDecodeError:
-                payload = {}
+            payload = parse_json_body(raw, empty_object=True).value_or({})
             if not self._soc_settings_write_authorized():
                 return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
             ok, data = save_soc_ai_settings(payload)
             return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path == "/api/soc-settings/agent-model":
-            try:
-                payload = json.loads(raw or "{}")
-            except json.JSONDecodeError:
-                payload = {}
+            payload = parse_json_body(raw, empty_object=True).value_or({})
             if not self._soc_settings_write_authorized():
                 return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in to Administration before saving SOC settings."}).encode(), "application/json; charset=utf-8")
             ok, data = save_soc_agent_model(payload)
             return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(data, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path == "/api/admin/start-service":
-            try:
-                payload = json.loads(raw or "{}")
-            except json.JSONDecodeError:
-                payload = {}
+            payload = parse_json_body(raw, empty_object=True).value_or({})
             if not self._admin_authenticated():
                 return self._send(HTTPStatus.FORBIDDEN, json.dumps({"ok": False, "error": "Sign in before starting services."}).encode(), "application/json; charset=utf-8")
             if str(payload.get("token", "")) != ensure_admin_token():
@@ -14023,10 +13997,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 body["error"] = message
             return self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, json.dumps(body, indent=2).encode(), "application/json; charset=utf-8")
         if parsed.path.startswith("/api/resource-library/"):
-            try:
-                payload = json.loads(raw or "{}")
-            except json.JSONDecodeError:
-                payload = {}
+            payload = parse_json_body(raw, empty_object=True).value_or({})
             if parsed.path == "/api/resource-library/remove":
                 ok, data = move_resource_to_removal(str(payload.get("id", "")).strip(), str(payload.get("source", "")).strip())
             elif parsed.path == "/api/resource-library/tags":

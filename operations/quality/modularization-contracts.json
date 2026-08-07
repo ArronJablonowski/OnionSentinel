@@ -62,6 +62,15 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_json_body.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_json_body.py",
+      "required_symbols": [
+        "ParsedJsonBody",
+        "parse_json_body"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_request_routes.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_request_routes.py",

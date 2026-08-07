@@ -49,7 +49,7 @@
       "max_lines": 979
     },
     "onion-sentinel-dashboard/report_portal.py": {
-      "max_lines": 14325
+      "max_lines": 14296
     },
     "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py": {
       "max_lines": 2670
@@ -711,8 +711,8 @@
       "max_lines": 247
     },
     "onion-sentinel-dashboard/report_portal.py::PortalHandler.do_POST": {
-      "max_complexity": 82,
-      "max_lines": 295
+      "max_complexity": 65,
+      "max_lines": 265
     },
     "onion-sentinel-dashboard/report_portal.py::_annotate_exact_ip_dhcp_macs": {
       "max_complexity": 30
@@ -1206,5 +1206,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "8d5cb2815767fbee494b60ddbf74bdad5336cdce"
+  "source_release": "f5380c1d9950d9e7c7ead33fe8316c76e6b43ca9"
 }

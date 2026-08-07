@@ -298,6 +298,12 @@ reanalysis. Route metadata decodes the target identifier once; the handler
 still owns authorization, JSON validation, cache invalidation, and HTTP
 responses, while the dispatcher has no database or process-state access.
 
+`portal_json_body.py` owns decoded-body JSON parsing and explicitly preserves
+the portal's strict, nullable, and lenient fallback modes. It distinguishes
+malformed JSON from valid JSON `null` and does not silently coerce valid arrays
+or scalar values, allowing each endpoint to retain its existing validation
+policy while removing repeated decoder exception blocks.
+
 | Domain | Current responsibility examples | Target modules |
 | --- | --- | --- |
 | HTTP composition | server, handler, GET/POST dispatch | `portal.entrypoint`, `portal.routes.registry` |

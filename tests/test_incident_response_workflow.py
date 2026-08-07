@@ -721,6 +721,59 @@ class IncidentResponseWorkflowTests(unittest.TestCase):
             self.portal.HTTPStatus.FORBIDDEN,
         )
 
+    def test_portal_preserves_strict_review_json_errors(self) -> None:
+        cases = (
+            (
+                "/api/soc-alerts/group/adjudicate",
+                "Request body must be valid JSON.",
+            ),
+            (
+                "/api/soc-incidents/ir-case/reanalyze",
+                "Request body must be a JSON object.",
+            ),
+        )
+        for path, expected_error in cases:
+            with self.subTest(path=path):
+                raw = b"{not-json"
+                handler = self.portal.PortalHandler.__new__(
+                    self.portal.PortalHandler
+                )
+                handler.path = path
+                handler.headers = {"Content-Length": str(len(raw))}
+                handler.rfile = io.BytesIO(raw)
+                handler._send = mock.Mock(return_value="bad-request")
+                handler._soc_review_write_authorized = mock.Mock(
+                    return_value=True
+                )
+                with mock.patch.object(
+                    self.portal,
+                    "dispatch_authorized_soc_write",
+                ) as dispatch_write:
+                    result = handler.do_POST()
+
+                self.assertEqual(result, "bad-request")
+                dispatch_write.assert_not_called()
+                status, body = handler._send.call_args.args[:2]
+                self.assertEqual(status, self.portal.HTTPStatus.BAD_REQUEST)
+                self.assertEqual(json.loads(body)["error"], expected_error)
+
+    def test_portal_preserves_lenient_alert_action_json_fallback(self) -> None:
+        raw = b"{not-json"
+        handler = self.portal.PortalHandler.__new__(self.portal.PortalHandler)
+        handler.path = "/api/soc-alerts/group/ack"
+        handler.headers = {"Content-Length": str(len(raw))}
+        handler.rfile = io.BytesIO(raw)
+        handler._send = mock.Mock(return_value="sent")
+        with mock.patch.object(
+            self.portal,
+            "dispatch_authorized_soc_write",
+            return_value=(400, {"ok": False}),
+        ) as dispatch_write:
+            result = handler.do_POST()
+
+        self.assertEqual(result, "sent")
+        self.assertEqual(dispatch_write.call_args.args[1], {})
+
     def test_incident_list_returns_case_and_only_incident_responder_analysis(self) -> None:
         conn = sqlite3.connect(self.db_path)
         conn.executescript(
