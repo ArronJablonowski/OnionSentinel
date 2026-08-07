@@ -311,11 +311,14 @@ catalog-scan requirements explicit, so unrelated metrics, static files, and
 unknown requests cannot trigger an expensive recursive report-tree walk;
 filesystem resolution and traversal enforcement remain in `PortalHandler`.
 
-`portal_incident_read_model.py` owns the pure request policy for durable
-Incident Response lists: allowlisted filters and sort fields, bounded page
-sizes, parameterized status predicates, schema-aware sort SQL, pagination,
-optional legacy columns, and the empty-schema response. The portal retains
-read-only SQLite access and evidence/reviewer/asset enrichment orchestration.
+`portal_incident_read_model.py` owns the pure request and presentation policy
+for durable Incident Response lists: allowlisted filters and sort fields,
+bounded page sizes, parameterized status predicates, schema-aware sort SQL,
+pagination, optional legacy columns, the empty-schema response, case-bound
+analysis selection, and deterministic evidence, reviewer, adjudication,
+freshness, and asset row composition. The portal retains read-only SQLite and
+inventory-file access plus legacy fallback queries; those loaded records are
+passed into the pure composer through an explicit callback boundary.
 
 | Domain | Current responsibility examples | Target modules |
 | --- | --- | --- |

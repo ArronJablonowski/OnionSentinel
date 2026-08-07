@@ -77,10 +77,13 @@
       "required_symbols": [
         "IncidentListRequest",
         "IncidentQueryError",
+        "IncidentRowCallbacks",
+        "compose_incident_row",
         "empty_incident_page",
         "incident_order_sql",
         "optional_case_selects",
-        "parse_incident_list_request"
+        "parse_incident_list_request",
+        "select_incident_analysis"
       ]
     },
     {

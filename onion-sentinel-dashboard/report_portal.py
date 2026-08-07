@@ -48,11 +48,14 @@ from http_runtime import BoundedResponseError, read_bounded_json
 from jsonl_log import JsonlLogIndex
 from portal_catalog_routes import classify_catalog_route
 from portal_incident_read_model import (
+    IncidentRowCallbacks,
     IncidentQueryError,
+    compose_incident_row,
     empty_incident_page,
     incident_order_sql,
     optional_case_selects,
     parse_incident_list_request,
+    select_incident_analysis,
 )
 from portal_json_body import parse_json_body
 from portal_request_routes import (
@@ -11333,6 +11336,17 @@ def soc_incident_agent_display_state(
     return "refresh_failed", "Analysis ready · refresh failed"
 
 
+INCIDENT_ROW_CALLBACKS = IncidentRowCallbacks(
+    epoch=_soc_review_epoch,
+    embedded_reviewer=_soc_embedded_reviewer,
+    final_review_status=_soc_review_final_status,
+    outcome_label=soc_alert_detection_outcome_label,
+    agent_display_state=soc_incident_agent_display_state,
+    reviewer_authorization=_soc_reviewer_automation_authorization,
+    resolve_asset_ip=resolve_asset_ip,
+)
+
+
 def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict]:
     """Return one bounded page of durable Incident Response cases.
 
@@ -11492,20 +11506,9 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
             incidents: list[dict[str, object]] = []
             for row in rows:
                 item = dict(row)
-                analysis_id = str(item.get("latest_analysis_id") or "")
-                analysis = analyses.get(analysis_id, {})
-                if (
-                    analysis
-                    and "group_id" in run_columns
-                    and str(analysis.get("group_id") or "") != str(item.get("group_id") or "")
-                ):
-                    analysis = {}
-                if (
-                    analysis
-                    and "agent_role" in run_columns
-                    and str(analysis.get("agent_role") or "") != "incident-responder"
-                ):
-                    analysis = {}
+                analysis = select_incident_analysis(
+                    item, analyses, run_columns
+                )
                 fallback_review: dict[str, object] | None = None
                 if not analysis and run_columns:
                     analysis = soc_incident_current_analysis(conn, item)
@@ -11518,199 +11521,20 @@ def soc_incidents_query_response(query: dict[str, list[str]]) -> tuple[int, dict
                             fallback_response,
                         )
                 analysis_id = str(analysis.get("analysis_id") or "")
-                response = _soc_review_json(analysis.get("response_json"))
-                report = response.get("incident_response_report")
-                report = report if isinstance(report, dict) else {}
-                evidence_gap_count = _soc_review_list_count(report.get("evidence_gaps"))
-                query_audit = response.get("_incident_query_audit")
-                query_audit = query_audit if isinstance(query_audit, dict) else {}
-                coverage_status = (
-                    "gaps" if evidence_gap_count or query_audit.get("partial")
-                    else ("complete" if query_audit.get("complete") else "unknown")
-                )
-                analysis_generated = str(
-                    analysis.get("generated_at") or ""
-                )
-                freshness_status = (
-                    "stale"
-                    if (
-                        analysis_generated
-                        and _soc_review_epoch(item.get("last_seen"))
-                        > _soc_review_epoch(analysis_generated)
-                    )
-                    else ("current" if analysis_generated else "not_analyzed")
-                )
-                reviewer = second_opinions.get(analysis_id, {})
-                embedded_reviewer = _soc_embedded_reviewer(response, analysis)
-                if not reviewer:
-                    reviewer = embedded_reviewer
-                else:
-                    if not reviewer.get("reviewer_error"):
-                        reviewer["reviewer_error"] = (
-                            embedded_reviewer.get("reviewer_error") or ""
-                        )
-                    reviewer["automation_authorization"] = (
-                        embedded_reviewer.get(
-                            "automation_authorization"
-                        ) or {}
-                    )
-                material_disagreement = str(
-                    reviewer.get("material_disagreement") or ""
-                ).strip().lower() in {"1", "true", "yes"}
                 adjudication = adjudications.get((
                     str(item.get("case_id") or ""),
                     analysis_id,
                 ))
-                final_review_status = _soc_review_final_status(
-                    reviewer,
-                    material_disagreement,
+                incidents.append(compose_incident_row(
+                    item,
+                    analysis,
+                    second_opinions.get(analysis_id),
                     adjudication,
-                )
-                primary_outcome = str(
-                    reviewer.get("primary_outcome")
-                    or analysis.get("detection_outcome")
-                    or ""
-                )
-                primary_confidence = str(
-                    reviewer.get("primary_confidence")
-                    or analysis.get("confidence")
-                    or ""
-                )
-                effective_outcome = str(
-                    adjudication.get("outcome_override")
-                    if adjudication
-                    else primary_outcome
-                )
-                effective_confidence = str(
-                    adjudication.get("confidence")
-                    if adjudication
-                    else primary_confidence
-                )
-                if fallback_review:
-                    adjudication = fallback_review.get("adjudication")
-                    final_review_status = str(
-                        fallback_review.get("final_review_status") or "unreviewed"
-                    )
-                    primary_outcome = str(fallback_review.get("primary_outcome") or "")
-                    primary_confidence = str(
-                        fallback_review.get("primary_confidence") or ""
-                    )
-                    effective_outcome = str(
-                        fallback_review.get("effective_outcome") or primary_outcome
-                    )
-                    effective_confidence = str(
-                        fallback_review.get("effective_confidence")
-                        or primary_confidence
-                    )
-                    material_disagreement = bool(
-                        fallback_review.get("material_disagreement")
-                    )
-                reviewer_status = (
-                    fallback_review.get("reviewer_status")
-                    if fallback_review
-                    else reviewer.get("status")
-                ) or "not_requested"
-                agent_display_status, agent_display_label = (
-                    soc_incident_agent_display_state(
-                        item.get("agent_status"),
-                        analysis_id,
-                        reviewer_status,
-                    )
-                )
-                count = max(int(item.get("raw_alert_count") or 0), int(item.get("total_seen_count") or 0))
-                asset_observed_at = (
-                    item.get("last_seen")
-                    or item.get("escalated_at")
-                    or item.get("updated_at")
-                )
-                if incident_inventory_error:
-                    source_asset = {
-                        "status": "inventory_unavailable",
-                        "ip": str(item.get("source_ip") or ""),
-                    }
-                    destination_asset = {
-                        "status": "inventory_unavailable",
-                        "ip": str(item.get("destination_ip") or ""),
-                    }
-                else:
-                    source_asset = resolve_asset_ip(
-                        item.get("source_ip"),
-                        asset_observed_at,
-                        incident_inventory,
-                    )
-                    destination_asset = resolve_asset_ip(
-                        item.get("destination_ip"),
-                        asset_observed_at,
-                        incident_inventory,
-                    )
-                incidents.append({
-                    **item,
-                    "seen_count": count,
-                    "asset_observed_at": str(asset_observed_at or ""),
-                    "source_asset": source_asset,
-                    "destination_asset": destination_asset,
-                    "analysis_id": analysis_id,
-                    "analysis_generated_at": analysis.get("generated_at") or "",
-                    "analysis_model": analysis.get("model") or "",
-                    "detection_outcome": analysis.get("detection_outcome") or "",
-                    "primary_outcome": primary_outcome,
-                    "primary_confidence": primary_confidence,
-                    "primary_event_status": str(response.get("event_status") or ""),
-                    "primary_detection_validity": str(
-                        response.get("detection_validity") or ""
-                    ),
-                    "primary_activity_disposition": str(
-                        response.get("activity_disposition") or ""
-                    ),
-                    "primary_handling": str(response.get("handling") or ""),
-                    "primary_duplicate_of": response.get("duplicate_of"),
-                    "effective_outcome": effective_outcome,
-                    "effective_outcome_label": soc_alert_detection_outcome_label(
-                        effective_outcome
-                    ),
-                    "effective_confidence": effective_confidence,
-                    "analysis_bluf": analysis.get("bluf") or "",
-                    "analysis_summary": analysis.get("summary") or "",
-                    "analysis_confidence": analysis.get("confidence") or "",
-                    "analysis_evidence_hash": analysis.get("evidence_hash") or "",
-                    "analysis_available": bool(analysis_id),
-                    "agent_display_status": agent_display_status,
-                    "agent_display_label": agent_display_label,
-                    "freshness_status": freshness_status,
-                    "coverage_status": coverage_status,
-                    "evidence_gap_count": evidence_gap_count,
-                    "reviewer_status": reviewer_status,
-                    "reviewer_error": (
-                        fallback_review.get("reviewer_error")
-                        if fallback_review
-                        else reviewer.get("reviewer_error")
-                    ) or "",
-                    "reviewer_outcome": (
-                        fallback_review.get("reviewer_outcome")
-                        if fallback_review
-                        else reviewer.get("reviewer_outcome")
-                    ) or "",
-                    "reviewer_confidence": (
-                        fallback_review.get("reviewer_confidence")
-                        if fallback_review
-                        else reviewer.get("reviewer_confidence")
-                    ) or "",
-                    "reviewer_agreement": (
-                        fallback_review.get("reviewer_agreement")
-                        if fallback_review
-                        else reviewer.get("agreement")
-                    ) or "",
-                    "automation_authorization": (
-                        fallback_review.get("automation_authorization")
-                        if fallback_review
-                        else _soc_reviewer_automation_authorization(
-                            reviewer
-                        )
-                    ) or {},
-                    "material_disagreement": material_disagreement,
-                    "final_review_status": final_review_status,
-                    "adjudication": adjudication,
-                })
+                    fallback_review,
+                    incident_inventory,
+                    incident_inventory_error,
+                    INCIDENT_ROW_CALLBACKS,
+                ))
     except (FileNotFoundError, sqlite3.Error) as exc:
         return soc_alert_api_error(f"Incident Response data unavailable: {exc}", 503)
     return 200, {
