@@ -86,6 +86,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.reporting.markdown",
     "onion_sentinel.analysis.reporting.publication",
     "onion_sentinel.composition",
+    "onion_sentinel.pipeline",
     "onion_sentinel.contracts.errors",
     "onion_sentinel.contracts.models",
     "onion_sentinel.contracts.ports",

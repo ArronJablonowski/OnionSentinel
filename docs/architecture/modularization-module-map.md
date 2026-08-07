@@ -430,6 +430,11 @@ The stable multi-round interface lives under
 transitions and the extracted admission, execution-result, repair, observable,
 synthesis, and finalization stages through explicit runtime ports. The legacy
 runner is a compatibility composition root and does not own the pivot loop.
+The AI lifecycle state machine lives under `onion_sentinel.pipeline`. Its
+single typed runtime context exposes the ordered load, attestation, preparation,
+analysis, governed-pivot, review, adjudication, guard, validation, commit, and
+post-commit transitions as bounded metadata-only audit records. It owns no
+provider, query, filesystem, network, database, or harness side effects.
 The legacy runner functions remain compatibility delegates and inject runtime
 policy explicitly, preserving existing test seams while keeping review-package
 mutation and reviewer-output admission out of the composition root.
