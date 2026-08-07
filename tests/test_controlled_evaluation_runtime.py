@@ -6177,11 +6177,11 @@ class ControlledWorkerIsolationTests(unittest.TestCase):
     ) -> None:
         source = RUNNER_PATH.read_text(encoding="utf-8")
         for wiring in (
-            "queue_dir=evaluation_index_queue_dir",
-            "quarantine_dir=evaluation_index_quarantine_dir",
-            "pending_dir=evaluation_memory_pending_dir",
-            "committed_dir=evaluation_memory_committed_dir",
-            "receipt_dir=evaluation_memory_receipt_dir",
+            "queue_dir=runtime_paths.index_queue_dir",
+            "quarantine_dir=runtime_paths.index_quarantine_dir",
+            "pending_dir=runtime_paths.memory_pending_dir",
+            "committed_dir=runtime_paths.memory_committed_dir",
+            "receipt_dir=runtime_paths.memory_receipt_dir",
         ):
             self.assertIn(wiring, source)
 

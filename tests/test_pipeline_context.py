@@ -3,10 +3,26 @@ from __future__ import annotations
 from pathlib import Path
 import unittest
 
-from n8n.onion_sentinel.pipeline import ORDER, RuntimeContext, Stage
+from n8n.onion_sentinel.pipeline import (
+    ORDER,
+    RuntimeContext,
+    RuntimePathDefaults,
+    RuntimePaths,
+    Stage,
+)
 
 
 class PipelineContextTests(unittest.TestCase):
+    def defaults(self) -> RuntimePathDefaults:
+        return RuntimePathDefaults(
+            log_dir=Path("production/logs"),
+            index_queue_dir=Path("production/index-pending"),
+            index_quarantine_dir=Path("production/index-quarantine"),
+            memory_receipt_dir=Path("production/memory-receipts"),
+            memory_pending_dir=Path("production/memory-pending"),
+            memory_committed_dir=Path("production/memory-committed"),
+        )
+
     def test_full_lifecycle_is_ordered_and_auditable(self) -> None:
         context = RuntimeContext("run-1", arguments={"mode": "test"})
         for stage in ORDER[1:]:
@@ -56,6 +72,24 @@ class PipelineContextTests(unittest.TestCase):
                 Stage.LOAD,
                 "x" * 257,
             )
+
+    def test_production_paths_preserve_operator_owned_defaults(self) -> None:
+        paths = RuntimePaths.resolve(None, self.defaults())
+        self.assertEqual(paths.log_file, Path("production/logs/llm-analysis-log.jsonl"))
+        self.assertEqual(paths.index_queue_dir, Path("production/index-pending"))
+        self.assertEqual(
+            paths.memory_committed_dir,
+            Path("production/memory-committed"),
+        )
+
+    def test_controlled_paths_are_confined_to_evaluation_root(self) -> None:
+        paths = RuntimePaths.resolve(Path("evaluation/run-1"), self.defaults())
+        for value in vars(paths).values():
+            self.assertTrue(Path(value).is_relative_to(Path("evaluation/run-1")))
+        self.assertEqual(
+            paths.index_quarantine_dir,
+            Path("evaluation/run-1/analysis-index-quarantine"),
+        )
 
 
 if __name__ == "__main__":

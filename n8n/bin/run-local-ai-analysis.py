@@ -10019,6 +10019,8 @@ def write_outputs(
 
 
 def main() -> int:
+    from onion_sentinel import pipeline as pipeline_module
+
     args = parse_args()
     controlled_evaluation, evaluation_runtime_dir = (
         controlled_evaluation_runtime(args)
@@ -10047,38 +10049,16 @@ def main() -> int:
         args.investigation_harness_db = (
             evaluation_runtime_dir / "investigation-harness.sqlite3"
         )
-    evaluation_log_dir = (
-        evaluation_runtime_dir / "llm-analysis-logs"
-        if evaluation_runtime_dir is not None
-        else DEFAULT_LLM_LOG_DIR
-    )
-    evaluation_log_file = evaluation_log_dir / "llm-analysis-log.jsonl"
-    evaluation_current_file = evaluation_log_dir / "current-analysis.json"
-    evaluation_active_dir = evaluation_log_dir / "active"
-    evaluation_index_queue_dir = (
-        evaluation_runtime_dir / "analysis-index-pending"
-        if evaluation_runtime_dir is not None
-        else DEFAULT_ANALYSIS_INDEX_QUEUE_DIR
-    )
-    evaluation_index_quarantine_dir = (
-        evaluation_runtime_dir / "analysis-index-quarantine"
-        if evaluation_runtime_dir is not None
-        else DEFAULT_ANALYSIS_INDEX_QUARANTINE_DIR
-    )
-    evaluation_memory_receipt_dir = (
-        evaluation_runtime_dir / "memory-writeback-receipts"
-        if evaluation_runtime_dir is not None
-        else DEFAULT_MEMORY_WRITEBACK_RECEIPT_DIR
-    )
-    evaluation_memory_pending_dir = (
-        evaluation_runtime_dir / "memory-writeback-pending"
-        if evaluation_runtime_dir is not None
-        else DEFAULT_MEMORY_WRITEBACK_PENDING_DIR
-    )
-    evaluation_memory_committed_dir = (
-        evaluation_runtime_dir / "memory-writeback-committed"
-        if evaluation_runtime_dir is not None
-        else DEFAULT_MEMORY_WRITEBACK_COMMITTED_DIR
+    runtime_paths = pipeline_module.RuntimePaths.resolve(
+        evaluation_runtime_dir,
+        pipeline_module.RuntimePathDefaults(
+            log_dir=DEFAULT_LLM_LOG_DIR,
+            index_queue_dir=DEFAULT_ANALYSIS_INDEX_QUEUE_DIR,
+            index_quarantine_dir=DEFAULT_ANALYSIS_INDEX_QUARANTINE_DIR,
+            memory_receipt_dir=DEFAULT_MEMORY_WRITEBACK_RECEIPT_DIR,
+            memory_pending_dir=DEFAULT_MEMORY_WRITEBACK_PENDING_DIR,
+            memory_committed_dir=DEFAULT_MEMORY_WRITEBACK_COMMITTED_DIR,
+        ),
     )
     # Evaluation isolation must be known before any crash-recovery journal is
     # replayed. Publishing a completed analysis remains safe while frozen, but
@@ -10114,9 +10094,17 @@ def main() -> int:
     started_at = project_now()
     started_monotonic = time.monotonic()
     run_id = hashlib.sha1(f"{started_at}:{prompt_path or ''}:{os.getpid()}".encode("utf-8")).hexdigest()[:16]
+    pipeline_context = pipeline_module.RuntimeContext(
+        run_id,
+        arguments=args,
+        controlled_evaluation=controlled_evaluation,
+        runtime_dir=evaluation_runtime_dir,
+        paths=runtime_paths,
+        prompt_path=prompt_path,
+    )
     active_record_path = active_analysis_record_path(
         run_id,
-        active_dir=evaluation_active_dir,
+        active_dir=runtime_paths.active_dir,
     )
     resource_monitor = SystemResourceMonitor()
     status = "failure"
@@ -10146,6 +10134,9 @@ def main() -> int:
             prompt_path = latest_prompt(args.prompt_dir)
 
         prompt_package = load_json(prompt_path, args.max_prompt_bytes)
+        pipeline_context.prompt_path = prompt_path
+        pipeline_context.prompt_package = dict(prompt_package)
+        pipeline_context.advance(pipeline_module.Stage.LOAD, "prompt package loaded")
         if prompt_package.get("package_type") != "soc-ai-investigation-prompt":
             raise SystemExit(f"unexpected prompt package type in {prompt_path}")
         agent_role = str(prompt_package.get("agent_role") or "soc-analyst").strip().lower()
@@ -10181,6 +10172,11 @@ def main() -> int:
             args,
             settings,
             agent_role,
+        )
+        pipeline_context.settings = dict(settings)
+        pipeline_context.advance(
+            pipeline_module.Stage.ATTEST,
+            "prompt role, evidence, and model routes attested",
         )
         live_osquery_config = prepare_live_osquery_context(
             prompt_package,
@@ -10330,6 +10326,10 @@ def main() -> int:
 
         resource_monitor.start()
         monitor_started = True
+        pipeline_context.advance(
+            pipeline_module.Stage.PREPARE,
+            "runtime contexts, harness, telemetry, and monitor prepared",
+        )
         if args.response_json:
             response = sanitize_saved_response_input(
                 load_json(args.response_json, args.max_response_bytes)
@@ -10632,7 +10632,7 @@ def main() -> int:
             reviewer_candidates=reviewer_memory_candidates,
             reviewer_allowed=reviewer_memory_allowed,
             reviewer_reason=reviewer_memory_reason,
-            pending_dir=evaluation_memory_pending_dir,
+            pending_dir=runtime_paths.memory_pending_dir,
         )
         try:
             json_path, md_path, generated_at = write_outputs(
@@ -10673,14 +10673,14 @@ def main() -> int:
             if controlled_evaluation:
                 pending_index_path = queue_analysis_index(
                     index_payload,
-                    queue_dir=evaluation_index_queue_dir,
+                    queue_dir=runtime_paths.index_queue_dir,
                 )
             else:
                 pending_index_path = queue_analysis_index(index_payload)
         except Exception:
             discard_pending_memory_writeback(
                 run_id,
-                pending_dir=evaluation_memory_pending_dir,
+                pending_dir=runtime_paths.memory_pending_dir,
             )
             for unpublished_artifact in (json_path, md_path):
                 if unpublished_artifact is not None:
@@ -10704,11 +10704,11 @@ def main() -> int:
                     pending_index_path,
                     index_payload,
                     exc,
-                    quarantine_dir=evaluation_index_quarantine_dir,
+                    quarantine_dir=runtime_paths.index_quarantine_dir,
                 )
                 discard_pending_memory_writeback(
                     run_id,
-                    pending_dir=evaluation_memory_pending_dir,
+                    pending_dir=runtime_paths.memory_pending_dir,
                 )
                 raise RuntimeError(
                     "analysis index was deterministically rejected and "
@@ -10746,8 +10746,8 @@ def main() -> int:
                 committed_memory_task = mark_memory_writeback_committed(
                     run_id,
                     expected_response_digest=submitted_response_sha256,
-                    pending_dir=evaluation_memory_pending_dir,
-                    committed_dir=evaluation_memory_committed_dir,
+                    pending_dir=runtime_paths.memory_pending_dir,
+                    committed_dir=runtime_paths.memory_committed_dir,
                 )
                 if committed_memory_task is None:
                     raise RuntimeError(
@@ -10761,7 +10761,7 @@ def main() -> int:
                 memory_receipt, memory_receipt_path = (
                     process_committed_memory_writeback(
                         committed_memory_task,
-                        receipt_dir=evaluation_memory_receipt_dir,
+                        receipt_dir=runtime_paths.memory_receipt_dir,
                     )
                 )
             else:
@@ -10779,7 +10779,7 @@ def main() -> int:
                         reviewer_candidates=reviewer_memory_candidates,
                         reviewer_allowed=reviewer_memory_allowed,
                         reviewer_reason=reviewer_memory_reason,
-                        receipt_dir=evaluation_memory_receipt_dir,
+                        receipt_dir=runtime_paths.memory_receipt_dir,
                     )
                 )
         except Exception as memory_exc:
@@ -10919,11 +10919,11 @@ def main() -> int:
                         error=error,
                         runtime_observation=running_record,
                     )
-                    append_jsonl(evaluation_log_file, record)
+                    append_jsonl(runtime_paths.log_file, record)
                     # Retain the legacy single-record artifact for rolling
                     # upgrades and last-completed-run consumers. Live state uses
                     # per-run files.
-                    atomic_write_json(evaluation_current_file, record)
+                    atomic_write_json(runtime_paths.current_file, record)
             except Exception as telemetry_exc:
                 # Telemetry is deliberately outside the job's transaction. It
                 # must neither mask the original failure nor turn a committed

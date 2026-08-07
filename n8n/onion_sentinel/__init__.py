@@ -6,12 +6,14 @@ legacy wrapper.
 """
 
 from .composition import invoke_legacy_entrypoint
-from .pipeline import RuntimeContext, Stage
+from .pipeline import RuntimeContext, RuntimePathDefaults, RuntimePaths, Stage
 from .runtime import RuntimeDependencies
 
 __all__ = [
     "RuntimeContext",
     "RuntimeDependencies",
+    "RuntimePathDefaults",
+    "RuntimePaths",
     "Stage",
     "invoke_legacy_entrypoint",
 ]

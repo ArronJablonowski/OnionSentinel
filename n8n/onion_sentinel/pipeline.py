@@ -56,12 +56,69 @@ class Transition:
     reason: str
 
 
+@dataclass(frozen=True)
+class RuntimePathDefaults:
+    log_dir: Path
+    index_queue_dir: Path
+    index_quarantine_dir: Path
+    memory_receipt_dir: Path
+    memory_pending_dir: Path
+    memory_committed_dir: Path
+
+
+@dataclass(frozen=True)
+class RuntimePaths:
+    log_dir: Path
+    log_file: Path
+    current_file: Path
+    active_dir: Path
+    index_queue_dir: Path
+    index_quarantine_dir: Path
+    memory_receipt_dir: Path
+    memory_pending_dir: Path
+    memory_committed_dir: Path
+
+    @classmethod
+    def resolve(
+        cls,
+        runtime_dir: Path | None,
+        defaults: RuntimePathDefaults,
+    ) -> "RuntimePaths":
+        if runtime_dir is None:
+            log_dir = Path(defaults.log_dir)
+            return cls(
+                log_dir=log_dir,
+                log_file=log_dir / "llm-analysis-log.jsonl",
+                current_file=log_dir / "current-analysis.json",
+                active_dir=log_dir / "active",
+                index_queue_dir=Path(defaults.index_queue_dir),
+                index_quarantine_dir=Path(defaults.index_quarantine_dir),
+                memory_receipt_dir=Path(defaults.memory_receipt_dir),
+                memory_pending_dir=Path(defaults.memory_pending_dir),
+                memory_committed_dir=Path(defaults.memory_committed_dir),
+            )
+        root = Path(runtime_dir)
+        log_dir = root / "llm-analysis-logs"
+        return cls(
+            log_dir=log_dir,
+            log_file=log_dir / "llm-analysis-log.jsonl",
+            current_file=log_dir / "current-analysis.json",
+            active_dir=log_dir / "active",
+            index_queue_dir=root / "analysis-index-pending",
+            index_quarantine_dir=root / "analysis-index-quarantine",
+            memory_receipt_dir=root / "memory-writeback-receipts",
+            memory_pending_dir=root / "memory-writeback-pending",
+            memory_committed_dir=root / "memory-writeback-committed",
+        )
+
+
 @dataclass
 class RuntimeContext:
     run_id: str
     arguments: Any
     controlled_evaluation: bool = False
     runtime_dir: Path | None = None
+    paths: RuntimePaths | None = None
     prompt_path: Path | None = None
     prompt_package: dict[str, Any] = field(default_factory=dict)
     settings: dict[str, Any] = field(default_factory=dict)
