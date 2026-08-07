@@ -121,6 +121,15 @@ from dashboard_reports_assets import (  # noqa: E402
     REPORTS_PAGE_ASSETS,
     inject_reports_assets,
 )
+from dashboard_reports_page import (  # noqa: E402
+    ReportsCurrentRunViewModel,
+    ReportsLogRowViewModel,
+    ReportsPageViewModel,
+    render_reports_current_panel,
+    render_reports_log_row,
+    render_reports_page,
+    render_reports_status_badge,
+)
 from dashboard_settings_assets import (  # noqa: E402
     SETTINGS_PAGE_CSS,
     SETTINGS_PAGE_JS,
@@ -4022,8 +4031,7 @@ def llm_log_size(log: dict[str, object], key: str) -> str:
 def llm_log_status_badge(log: dict[str, object]) -> str:
     status = str(log.get('status') or 'unknown').lower()
     label = {'success': 'Success', 'failure': 'Failed', 'running': 'Running'}.get(status, status.title())
-    css = {'success': 'success', 'failure': 'failed', 'running': 'running'}.get(status, 'unknown')
-    return f'<span class="llm-status-badge {css}">{html.escape(label)}</span>'
+    return render_reports_status_badge(status, label)
 
 
 def llm_agent_label(log: dict[str, object]) -> str:
@@ -4124,138 +4132,91 @@ def llm_executed_model_label(log: dict[str, object], *, live: bool = False) -> s
     return label
 
 
-def llm_log_table_row(log: dict[str, object]) -> str:
-    alert = llm_log_alert(log)
+def _reports_alert_route(alert: dict[str, object], empty: str) -> str:
     src = str(alert.get('source_ip') or '').strip()
     dst = str(alert.get('destination_ip') or '').strip()
     port = str(alert.get('destination_port') or '').strip()
-    route = f'{src} > {dst}' + (f' : {port}' if port else '') if src or dst else 'n/a'
-    count = alert.get('alert_count') or 0
-    model = llm_executed_model_label(log, live=str(log.get('status') or '').lower() == 'running')
-    agent = str(log.get('agent_label') or llm_agent_label(log))
-    job = str(log.get('job_label') or llm_job_label(log))
-    started = normalize_iso_display_text(log.get('started_at') or '')
+    return f'{src} > {dst}' + (f' : {port}' if port else '') if src or dst else empty
+
+
+def _reports_status(log: dict[str, object]) -> tuple[str, str]:
+    status = str(log.get('status') or 'unknown').lower()
+    label = {'success': 'Success', 'failure': 'Failed', 'running': 'Running'}.get(status, status.title())
+    return status, label
+
+
+def _reports_log_detail(log: dict[str, object], alert: dict[str, object]) -> str:
     error = str(log.get('error') or '').strip()
-    detail = compact_text(error, 120) if error else compact_text(str(alert.get('primary_alert_id') or ''), 120)
-    row_class = {
-        'second_opinion': ' class="llm-log-second-opinion"',
-        'disagreement_adjudication': ' class="llm-log-adjudication"',
-    }.get(str(log.get('run_kind') or ''), '')
-    return f'''
-      <tr{row_class}>
-        <td>{html.escape(started)}</td>
-        <td>{html.escape(str(count))}</td>
-        <td><strong title="{html.escape(str(alert.get('rule_name') or 'Security Onion Alert'), quote=True)}">{html.escape(str(alert.get('rule_name') or 'Security Onion Alert'))}</strong><code title="{html.escape(route, quote=True)}">{html.escape(route)}</code></td>
-        <td>{llm_log_status_badge(log)}</td>
-        <td>{html.escape(agent)}</td>
-        <td>{html.escape(job)}</td>
-        <td>{html.escape(llm_log_runtime(log))}</td>
-        <td>{html.escape(llm_log_gpu(log))}</td>
-        <td>{html.escape(llm_log_gpu_utilization(log))}</td>
-        <td>{html.escape(llm_log_cpu_temperature(log))}</td>
-        <td>{html.escape(llm_log_soc_temperature(log))}</td>
-        <td>{html.escape(llm_log_memory(log))}</td>
-        <td>{html.escape(llm_log_power(log))}</td>
-        <td>{html.escape(llm_log_cpu(log))}</td>
-        <td>{html.escape(llm_log_size(log, 'pcap_total_size_bytes'))}</td>
-        <td>{html.escape(llm_log_size(log, 'alert_context_size_bytes'))}</td>
-        <td><code>{html.escape(model)}</code></td>
-        <td>{html.escape(detail)}</td>
-      </tr>'''
+    return compact_text(error or str(alert.get('primary_alert_id') or ''), 120)
+
+
+def _reports_log_row_view(log: dict[str, object]) -> ReportsLogRowViewModel:
+    alert = llm_log_alert(log)
+    status, status_label = _reports_status(log)
+    return ReportsLogRowViewModel(
+        started=normalize_iso_display_text(log.get('started_at') or ''),
+        alert_count=str(alert.get('alert_count') or 0),
+        rule_name=str(alert.get('rule_name') or 'Security Onion Alert'),
+        route=_reports_alert_route(alert, 'n/a'),
+        status_key=status, status_label=status_label,
+        agent=str(log.get('agent_label') or llm_agent_label(log)),
+        job=str(log.get('job_label') or llm_job_label(log)),
+        runtime=llm_log_runtime(log), gpu_temperature=llm_log_gpu(log),
+        gpu_utilization=llm_log_gpu_utilization(log),
+        cpu_temperature=llm_log_cpu_temperature(log), soc_temperature=llm_log_soc_temperature(log),
+        memory=llm_log_memory(log), power=llm_log_power(log), cpu=llm_log_cpu(log),
+        pcap_size=llm_log_size(log, 'pcap_total_size_bytes'),
+        alert_size=llm_log_size(log, 'alert_context_size_bytes'),
+        model=llm_executed_model_label(log, live=status == 'running'),
+        detail=_reports_log_detail(log, alert),
+        run_kind=str(log.get('run_kind') or ''),
+    )
+
+
+def _reports_current_owner(current: dict[str, object], running: bool) -> tuple[str, str]:
+    if not running:
+        return 'No agent running', 'No active job'
+    return llm_agent_label(current), llm_job_label(current)
+
+
+def _reports_current_view(current: dict[str, object]) -> ReportsCurrentRunViewModel:
+    alert = llm_log_alert(current)
+    status = str(current.get('status') or 'idle').lower()
+    running = status == 'running'
+    phase = str(current.get('phase_label') or (llm_phase_label(current) if running else 'Idle'))
+    default_agent, default_job = _reports_current_owner(current, running)
+    return ReportsCurrentRunViewModel(
+        title=str(alert.get('rule_name') or 'No active AI analysis'),
+        route=_reports_alert_route(alert, 'Idle'),
+        started=normalize_iso_display_text(current.get('started_at') or ''), running=running,
+        status_label=phase,
+        agent=str(current.get('agent_label') or default_agent),
+        job=str(current.get('job_label') or default_job),
+        model=str(current.get('runtime_model_label') or llm_executed_model_label(current, live=True)),
+        alert_count=str(alert.get('alert_count') or 0),
+        queue_size=str(current.get('queue_size', current_llm_queue_size())),
+    )
+
+
+def llm_log_table_row(log: dict[str, object]) -> str:
+    return render_reports_log_row(_reports_log_row_view(log))
+
 
 
 def llm_current_panel(current: dict[str, object]) -> str:
-    alert = llm_log_alert(current)
-    status = str(current.get('status') or 'idle').lower()
-    title = str(alert.get('rule_name') or 'No active AI analysis')
-    src = str(alert.get('source_ip') or '').strip()
-    dst = str(alert.get('destination_ip') or '').strip()
-    port = str(alert.get('destination_port') or '').strip()
-    route = f'{src} > {dst}' + (f' : {port}' if port else '') if src or dst else 'Idle'
-    started = normalize_iso_display_text(current.get('started_at') or '')
-    running = status == 'running'
-    model = str(current.get('runtime_model_label') or llm_executed_model_label(current, live=True))
-    agent = str(current.get('agent_label') or (llm_agent_label(current) if running else 'No agent running'))
-    job = str(current.get('job_label') or (llm_job_label(current) if running else 'No active job'))
-    phase = str(current.get('phase_label') or (llm_phase_label(current) if running else 'Idle'))
-    queue_size = current.get('queue_size', current_llm_queue_size())
-    status_label = phase if running else 'Idle'
-    return f'''
-      <section class="llm-current-card" aria-label="Current alert being analyzed">
-        <div>
-          <span class="settings-kicker">Observed AI execution</span>
-          <h2 id="llm-current-title">{html.escape(title)}</h2>
-          <p id="llm-current-route">{html.escape(route)}</p>
-        </div>
-        <div class="llm-current-meta">
-          <span id="llm-current-status" class="llm-status-badge {'running' if status == 'running' else 'unknown'}">{html.escape(status_label)}</span>
-          <span><b>Agent</b><em id="llm-current-agent">{html.escape(agent)}</em></span>
-          <span><b>Job</b><em id="llm-current-job">{html.escape(job)}</em></span>
-          <span><b>Model</b><em id="llm-current-model">{html.escape(model)}</em></span>
-          <span class="llm-current-stack"><b>Started</b><em id="llm-current-started">{html.escape(started or 'n/a')}</em><small><b>Runtime</b><em id="llm-current-runtime">n/a</em></small></span>
-          <span class="llm-current-stack"><b>Alerts</b><em id="llm-current-count">{html.escape(str(alert.get('alert_count') or 0))}</em><small><b>Queue</b><em id="llm-current-queue">{html.escape(str(queue_size))}</em></small></span>
-        </div>
-      </section>'''
+    return render_reports_current_panel(_reports_current_view(current))
+
 
 
 def reports_page_section(_reports: list[AlertReport]) -> str:
     logs = load_llm_analysis_logs()
-    total_runs = count_llm_analysis_logs()
-    rows = ''.join(llm_log_table_row(log) for log in logs[:50])
-    if not rows:
-        rows = '<tr><td colspan="18" class="llm-empty-row">No AI analysis logs found yet.</td></tr>'
-    return f'''
-    <section class="view-section active reports-view" aria-label="AI analysis reports">
-      {llm_current_panel(load_current_llm_analysis())}
-      <section class="llm-log-section" aria-label="Agent analysis activity log">
-        <div class="llm-log-toolbar">
-          <div>
-            <span class="settings-kicker">Reports</span>
-            <h2>Agent Analysis Activity Log</h2>
-            <span class="llm-log-total-runs"><b id="llm-log-total-runs">{total_runs}</b><em>Total runs</em></span>
-            <div id="llm-log-agent-totals" class="llm-log-agent-totals" aria-label="Runs by agent"></div>
-          </div>
-          <label>Rows
-            <select id="llm-log-page-size" aria-label="Rows per log page">
-              <option value="10">10</option>
-              <option value="25" selected>25</option>
-              <option value="50">50</option>
-            </select>
-          </label>
-        </div>
-        <div class="llm-log-table-wrap">
-          <table class="llm-log-table">
-            <colgroup>
-              <col class="llm-log-started">
-              <col class="llm-log-count">
-              <col class="llm-log-alerts">
-              <col class="llm-log-status">
-              <col class="llm-log-agent">
-              <col class="llm-log-job">
-              <col class="llm-log-runtime">
-              <col class="llm-log-gpu">
-              <col class="llm-log-gpu-util">
-              <col class="llm-log-cpu-temp">
-              <col class="llm-log-soc-temp">
-              <col class="llm-log-memory">
-              <col class="llm-log-power">
-              <col class="llm-log-cpu">
-              <col class="llm-log-pcap-size">
-              <col class="llm-log-alert-size">
-              <col class="llm-log-model">
-              <col class="llm-log-detail">
-            </colgroup>
-            <thead><tr><th>Started</th><th>Count</th><th>Alert(s)</th><th>Status</th><th>Agent</th><th>Job</th><th>Runtime</th><th>GPU °C</th><th>GPU %</th><th>CPU °C</th><th>SOC °C</th><th>Max Memory</th><th>Max Power</th><th>Max CPU</th><th>PCAP Size</th><th>Alert Data</th><th>Model</th><th>Detail</th></tr></thead>
-            <tbody id="llm-log-table-body">{rows}</tbody>
-          </table>
-        </div>
-        <div class="llm-log-footer">
-          <button id="llm-log-prev" class="ack-button api-page-button" type="button">Previous</button>
-          <span id="llm-log-page-status">Loading logs...</span>
-          <button id="llm-log-next" class="ack-button api-page-button" type="button">Next</button>
-        </div>
-      </section>
-    </section>'''
+    view = ReportsPageViewModel(
+        current=_reports_current_view(load_current_llm_analysis()),
+        rows=tuple(_reports_log_row_view(log) for log in logs[:50]),
+        total_runs=count_llm_analysis_logs(),
+    )
+    return render_reports_page(view)
+
 
 
 

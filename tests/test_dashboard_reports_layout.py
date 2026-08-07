@@ -5,10 +5,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_BUILDER = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "build_soc_alerts_dashboard.py"
 REPORTS_ASSETS = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_reports_assets.py"
+REPORTS_PAGE = REPO_ROOT / "onion-sentinel-dashboard" / "scripts" / "dashboard_reports_page.py"
 
 
 def reports_source() -> str:
-    return DASHBOARD_BUILDER.read_text() + REPORTS_ASSETS.read_text()
+    return DASHBOARD_BUILDER.read_text() + REPORTS_ASSETS.read_text() + REPORTS_PAGE.read_text()
 
 
 class DashboardReportsLayoutTests(unittest.TestCase):
