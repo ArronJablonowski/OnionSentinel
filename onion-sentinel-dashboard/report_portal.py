@@ -140,7 +140,14 @@ from portal_soc_ai_artifact_context import (
     AiArtifactContextDependencies,
     compose_page_ai_artifact_context,
 )
-from portal_soc_ai_artifacts import AiArtifactSources, build_ai_artifact_index
+from portal_soc_ai_artifacts import (
+    AiArtifactSources,
+    AiGroupArtifactDependencies,
+    build_ai_artifact_index,
+    group_has_analysis_artifact as _modular_group_has_analysis_artifact,
+    latest_analysis_mtime as _modular_latest_analysis_mtime,
+    latest_prompt_mtime as _modular_latest_prompt_mtime,
+)
 from portal_incident_actions import (
     IncidentStatusPayloadError,
     normalize_incident_status_payload,
@@ -7506,44 +7513,31 @@ def soc_alert_static_ai_reports() -> dict:
     return reports if isinstance(reports, dict) else {}
 
 
-def soc_alert_latest_prompt_mtime(alert_id: str) -> float:
-    if not alert_id or not SOC_ALERT_AI_PROMPT_DIR.exists():
-        return 0
-    newest = 0.0
-    for path in SOC_ALERT_AI_PROMPT_DIR.glob("*-ai-prompt.json"):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        alert = data.get("alert") if isinstance(data.get("alert"), dict) else {}
-        if str(alert.get("alert_id") or data.get("alert_id") or "").strip() == alert_id:
-            newest = max(newest, path.stat().st_mtime)
-    return newest
-
-
-def soc_alert_latest_analysis_mtime(alert_id: str) -> float:
-    if not alert_id or not SOC_ALERT_AI_ANALYSIS_DIR.exists():
-        return 0
-    newest = 0.0
-    for path in SOC_ALERT_AI_ANALYSIS_DIR.glob("*-local-ai-analysis.json"):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if str(data.get("alert_id") or "").strip() == alert_id:
-            newest = max(newest, path.stat().st_mtime)
-    return newest
-
-
-def soc_alert_ai_artifact_index() -> dict[str, object]:
-    """Index AI prompt/analysis artifact mtimes once for one API response."""
-    cache_path = SOC_ALERT_AI_ANALYSIS_DIR.parent
-    sources = AiArtifactSources(
+def _soc_ai_artifact_sources() -> AiArtifactSources:
+    return AiArtifactSources(
         prompt_paths=lambda: SOC_ALERT_AI_PROMPT_DIR.glob("*-ai-prompt.json"),
         analysis_paths=lambda: SOC_ALERT_AI_ANALYSIS_DIR.glob("*-local-ai-analysis.json"),
         read_record=lambda path: json.loads(path.read_text(encoding="utf-8")),
         modified_time=lambda path: path.stat().st_mtime,
     )
+
+
+def soc_alert_latest_prompt_mtime(alert_id: str) -> float:
+    if not alert_id or not SOC_ALERT_AI_PROMPT_DIR.exists():
+        return 0
+    return _modular_latest_prompt_mtime(alert_id, _soc_ai_artifact_sources())
+
+
+def soc_alert_latest_analysis_mtime(alert_id: str) -> float:
+    if not alert_id or not SOC_ALERT_AI_ANALYSIS_DIR.exists():
+        return 0
+    return _modular_latest_analysis_mtime(alert_id, _soc_ai_artifact_sources())
+
+
+def soc_alert_ai_artifact_index() -> dict[str, object]:
+    """Index AI prompt/analysis artifact mtimes once for one API response."""
+    cache_path = SOC_ALERT_AI_ANALYSIS_DIR.parent
+    sources = _soc_ai_artifact_sources()
     include_prompts = (
         SOC_ALERT_AI_PROMPT_DIR.exists()
         and SOC_ALERT_AI_ANALYSIS_DIR.exists()
@@ -7590,27 +7584,13 @@ def soc_alert_group_has_analysis_artifact(row: sqlite3.Row) -> bool:
     """Return true when any current member of this dashboard group has AI output."""
     if not SOC_ALERT_AI_ANALYSIS_DIR.exists():
         return False
-    group_key = row["group_key"] if "group_key" in row.keys() else ""
-    representative = str(row["alert_id"] or "") if "alert_id" in row.keys() else ""
-    member_ids: set[str] = {representative} if representative else set()
-    if group_key:
-        try:
-            with soc_alert_db_connect() as conn:
-                member_ids.update(
-                    str(item["alert_id"] or "").strip()
-                    for item in conn.execute(
-                        f"""
-                        SELECT alert_id
-                        FROM alerts
-                        WHERE {soc_alert_group_key_sql()} = ?
-                        """,
-                        [group_key],
-                    )
-                    if str(item["alert_id"] or "").strip()
-                )
-        except Exception:
-            pass
-    return any(soc_alert_latest_analysis_mtime(alert_id) > 0 for alert_id in member_ids)
+    dependencies = AiGroupArtifactDependencies(
+        group_members=lambda group_key: [
+            alert_id for _, alert_id in _soc_ai_group_members([group_key])
+        ],
+        latest_analysis_mtime=soc_alert_latest_analysis_mtime,
+    )
+    return _modular_group_has_analysis_artifact(row, dependencies)
 
 
 def soc_alert_severity_meets_analysis_threshold(

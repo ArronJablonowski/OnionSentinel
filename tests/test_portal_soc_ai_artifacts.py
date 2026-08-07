@@ -11,7 +11,11 @@ sys.path.insert(0, str(ROOT / "onion-sentinel-dashboard"))
 
 from portal_soc_ai_artifacts import (  # noqa: E402
     AiArtifactSources,
+    AiGroupArtifactDependencies,
     build_ai_artifact_index,
+    group_has_analysis_artifact,
+    latest_analysis_mtime,
+    latest_prompt_mtime,
 )
 
 
@@ -108,6 +112,83 @@ class SocAiArtifactTests(unittest.TestCase):
         self.assertEqual(result["prompt_mtime_by_alert"], {})
         self.assertEqual(result["analysis_mtime_by_alert"], {})
         self.assertEqual(result["detection_outcome_by_alert"], {})
+
+    def test_single_alert_lookup_selects_newest_matching_artifact(self) -> None:
+        sources = self.sources(
+            {
+                "old-prompt.json": {"alert": {"alert_id": "alert-a"}},
+                "new-prompt.json": {"alert_id": "alert-a"},
+                "other-prompt.json": {"alert_id": "alert-b"},
+            },
+            {
+                "old-analysis.json": {"alert_id": "alert-a"},
+                "new-analysis.json": {"alert_id": "alert-a"},
+            },
+            {
+                "old-prompt.json": 2,
+                "new-prompt.json": 7,
+                "other-prompt.json": 9,
+                "old-analysis.json": 3,
+                "new-analysis.json": 8,
+            },
+        )
+
+        self.assertEqual(latest_prompt_mtime("alert-a", sources), 7.0)
+        self.assertEqual(latest_analysis_mtime("alert-a", sources), 8.0)
+        self.assertEqual(latest_analysis_mtime("missing", sources), 0.0)
+        self.assertEqual(latest_prompt_mtime("", sources), 0.0)
+
+    def test_single_alert_lookup_ignores_unreadable_and_unstatable_matches(self) -> None:
+        sources = self.sources(
+            {
+                "broken-prompt.json": ValueError("broken"),
+                "missing-stat-prompt.json": {"alert_id": "alert-a"},
+            },
+            {"missing-stat-analysis.json": {"alert_id": "alert-a"}},
+            {
+                "broken-prompt.json": 3,
+                "missing-stat-prompt.json": OSError("missing"),
+                "missing-stat-analysis.json": OSError("missing"),
+            },
+        )
+
+        self.assertEqual(latest_prompt_mtime("alert-a", sources), 0.0)
+        self.assertEqual(latest_analysis_mtime("alert-a", sources), 0.0)
+
+    def test_group_lookup_checks_representative_and_all_members(self) -> None:
+        checked: list[str] = []
+
+        def latest(alert_id: str) -> float:
+            checked.append(alert_id)
+            return 4.0 if alert_id == "member-with-analysis" else 0.0
+
+        dependencies = AiGroupArtifactDependencies(
+            group_members=lambda group_key: (
+                ["member-without-analysis", "member-with-analysis"]
+                if group_key == "group-a" else []
+            ),
+            latest_analysis_mtime=latest,
+        )
+
+        self.assertTrue(group_has_analysis_artifact(
+            {"group_key": "group-a", "alert_id": "representative"},
+            dependencies,
+        ))
+        self.assertEqual(
+            checked,
+            ["representative", "member-without-analysis", "member-with-analysis"],
+        )
+
+    def test_group_lookup_handles_representative_only_and_empty_rows(self) -> None:
+        dependencies = AiGroupArtifactDependencies(
+            group_members=lambda _group_key: [],
+            latest_analysis_mtime=lambda alert_id: 1.0 if alert_id == "representative" else 0.0,
+        )
+
+        self.assertTrue(group_has_analysis_artifact(
+            {"alert_id": "representative"}, dependencies,
+        ))
+        self.assertFalse(group_has_analysis_artifact({}, dependencies))
 
 
 if __name__ == "__main__":

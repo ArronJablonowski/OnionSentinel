@@ -238,7 +238,11 @@
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_soc_ai_artifacts.py",
       "required_symbols": [
         "AiArtifactSources",
-        "build_ai_artifact_index"
+        "AiGroupArtifactDependencies",
+        "build_ai_artifact_index",
+        "group_has_analysis_artifact",
+        "latest_analysis_mtime",
+        "latest_prompt_mtime"
       ]
     },
     {

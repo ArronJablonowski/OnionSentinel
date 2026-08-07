@@ -435,8 +435,11 @@ network access and degrades malformed artifact metadata to explicit empty state.
 It records only newest modification times and detection outcomes, accepts all
 filesystem operations through `AiArtifactSources`, preserves the last known
 outcome when a newer incomplete artifact has none, and isolates malformed or
-missing files. `report_portal.py` retains the shared cache and runtime-directory
-policy, including the legacy same-parent requirement for prompt discovery.
+missing files. The same repository owns single-alert newest-time fallback and
+deterministic representative/member analysis resolution through injected group
+and modification-time ports. `report_portal.py` retains the shared cache,
+bounded SQLite member lookup, and runtime-directory policy, including the
+legacy same-parent requirement for prompt discovery.
 
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
