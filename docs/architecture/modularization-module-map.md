@@ -365,6 +365,15 @@ entry point and injects its shared text, list, linked-finding, analyst-review,
 and investigation-audit callbacks. The renderer has no persistence, HTTP,
 filesystem, process, or network access.
 
+`portal_investigation_audit_renderer.py` owns escaped presentation of the
+broker-authorized interactive pivot trail. It expands stable investigation
+purposes, bounds rounds and trusted queries, renders backend-specific OQL, KQL,
+Elasticsearch DSL, OSquery SQL, and structured PCAP/Zeek requests, and exposes
+only executed audit records. `report_portal.py` retains the compatibility entry
+point and injects shared text, counter, and query-to-finding policies. The
+renderer cannot execute model-authored queries and has no persistence, HTTP,
+filesystem, process, or network access.
+
 | Domain | Current responsibility examples | Target modules |
 | --- | --- | --- |
 | HTTP composition | server, handler, GET/POST dispatch | `portal.entrypoint`, `portal.routes.registry` |

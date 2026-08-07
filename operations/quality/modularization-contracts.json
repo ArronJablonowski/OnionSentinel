@@ -155,6 +155,16 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/portal_investigation_audit_renderer.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_investigation_audit_renderer.py",
+      "required_symbols": [
+        "InvestigationAuditRenderCallbacks",
+        "investigation_purpose_text",
+        "render_investigation_query_audit"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/portal_json_body.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/portal_json_body.py",

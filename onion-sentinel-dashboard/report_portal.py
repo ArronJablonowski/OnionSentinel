@@ -68,6 +68,10 @@ from portal_incident_report_renderer import (
     IncidentReportRenderCallbacks,
     render_incident_response_report,
 )
+from portal_investigation_audit_renderer import (
+    InvestigationAuditRenderCallbacks,
+    render_investigation_query_audit,
+)
 from portal_incident_review_model import (
     compose_incident_detail_payload,
     compose_incident_review_state,
@@ -11565,179 +11569,17 @@ def render_analyst_review_panel(
     )
 
 
-def _investigation_purpose_text(value: object) -> str:
-    purpose = str(value or "").strip()
-    labels = {
-        "validate_detection": "Validate whether the observed event matches the triggering detection.",
-        "establish_timeline": "Establish the order and timing of related activity.",
-        "correlate_observable": "Correlate an exact trusted observable across reviewed telemetry.",
-        "measure_prevalence": "Measure how often the exact activity appears in the authorized window.",
-        "identify_related_activity": "Identify related activity that could expand or narrow incident scope.",
-        "test_benign_hypothesis": "Test a specific benign explanation against the available telemetry.",
-    }
-    return labels.get(purpose, purpose)
-
-
 def render_investigation_query_audit_html(
     response: dict[str, object],
     report: dict[str, object],
 ) -> tuple[str, int]:
     """Render broker-owned iterative pivot records, never model-authored queries."""
-    audit = response.get("_investigation_query_audit")
-    if not isinstance(audit, dict):
-        return "", 0
-    rounds = audit.get("rounds") if isinstance(audit.get("rounds"), list) else []
-    query_blocks: list[str] = []
-    position = 0
-    for round_record in rounds[:12]:
-        if not isinstance(round_record, dict):
-            continue
-        round_number = _incident_nonnegative_int(round_record.get("round"))
-        trusted_queries = (
-            round_record.get("trusted_queries")
-            if isinstance(round_record.get("trusted_queries"), list)
-            else []
-        )
-        for query in trusted_queries[:12]:
-            if not isinstance(query, dict):
-                continue
-            position += 1
-            backend = str(query.get("backend") or query.get("dialect") or "broker").strip().lower()
-            subject = str(
-                query.get("pack")
-                or query.get("operation")
-                or query.get("target_alias")
-                or query.get("query_id")
-                or "reviewed pivot"
-            ).strip()
-            title = f"Pivot {position} (round {round_number or 1}): {backend.upper()} · {subject}"
-            purpose = _investigation_purpose_text(query.get("purpose"))
-            digest = str(
-                query.get("query_digest")
-                or query.get("execution_digest")
-                or query.get("request_digest")
-                or ""
-            ).strip()
-            linked_finding = _incident_query_linked_finding(report, digest)
-            window = query.get("window") if isinstance(query.get("window"), dict) else {}
-            meta: list[str] = [
-                f'<span><b>Status:</b> {_incident_html_text(query.get("status") or "unknown")}</span>',
-                f'<span><b>Digest:</b> <code>{_incident_html_text(digest)}</code></span>',
-            ]
-            if window:
-                meta.append(
-                    f'<span><b>Window:</b> {_incident_html_text(window.get("start"))} '
-                    f'to {_incident_html_text(window.get("end"))}</span>'
-                )
-            if query.get("total_hits") is not None or query.get("returned_hits") is not None:
-                meta.append(
-                    f'<span><b>Hits:</b> {_incident_nonnegative_int(query.get("total_hits"))} total / '
-                    f'{_incident_nonnegative_int(query.get("returned_hits"))} returned</span>'
-                )
-            if query.get("total_rows") is not None or query.get("returned_rows") is not None:
-                meta.append(
-                    f'<span><b>Rows:</b> {_incident_nonnegative_int(query.get("total_rows"))} total / '
-                    f'{_incident_nonnegative_int(query.get("returned_rows"))} returned</span>'
-                )
-            if (
-                query.get("candidate_records_scanned") is not None
-                or query.get("records_returned") is not None
-            ):
-                meta.append(
-                    f'<span><b>Records:</b> {_incident_nonnegative_int(query.get("candidate_records_scanned"))} '
-                    f'scanned / {_incident_nonnegative_int(query.get("records_returned"))} returned</span>'
-                )
-            semantics = query.get("semantics") or query.get("execution_semantics")
-            if semantics:
-                meta.append(
-                    f'<span><b>Semantics:</b> {_incident_html_text(semantics)}</span>'
-                )
-            if query.get("execution_backend"):
-                meta.append(
-                    f'<span><b>Executor:</b> {_incident_html_text(query.get("execution_backend"))}</span>'
-                )
-            if any(
-                bool(query.get(key))
-                for key in ("truncated", "result_truncated", "index_scan_truncated")
-            ):
-                meta.append("<span><b>Truncated:</b> true</span>")
-
-            code_blocks: list[str] = []
-
-            def add_code_block(heading: str, value: object, *, json_value: bool = False) -> None:
-                if value in (None, "", {}, []):
-                    return
-                rendered = (
-                    json.dumps(value, indent=2, sort_keys=True, default=str)
-                    if json_value
-                    else str(value)
-                )
-                code_blocks.extend([
-                    f"<h5>{html.escape(heading)}</h5>",
-                    f'<pre class="ir-query-code"><code>{html.escape(rendered)}</code></pre>',
-                ])
-
-            add_code_block("OQL (analyst-readable equivalent)", query.get("oql_equivalent"))
-            add_code_block("KQL (analyst-readable equivalent)", query.get("kql_equivalent"))
-            add_code_block(
-                "Elasticsearch Query DSL (exact executed request)",
-                query.get("query_dsl"),
-                json_value=True,
-            )
-            if backend == "osquery":
-                add_code_block(
-                    "OSquery SQL (exact executed live query)",
-                    query.get("query"),
-                )
-            if backend in {"pcap", "zeek"}:
-                structured_request = {
-                    key: query.get(key)
-                    for key in ("operation", "filters", "indicator", "limit")
-                    if query.get(key) not in (None, "", {}, [])
-                }
-                add_code_block(
-                    "Structured PCAP/Zeek request (exact broker input)",
-                    structured_request,
-                    json_value=True,
-                )
-            error = str(query.get("error") or "").strip()
-            error_html = (
-                f'<p class="ir-query-error"><b>Error:</b> {html.escape(error)}</p>'
-                if error
-                else ""
-            )
-            query_blocks.append(
-                f'<article class="ir-query-record" '
-                f'data-query-purpose="{html.escape(purpose, quote=True)}" '
-                f'data-query-finding="{html.escape(linked_finding, quote=True)}">'
-                f"<h4>{html.escape(title)}</h4>"
-                f'<div class="ir-query-meta">{"".join(meta)}</div>'
-                f'{"".join(code_blocks)}{error_html}'
-                "</article>"
-            )
-
-    rounds_completed = _incident_nonnegative_int(audit.get("rounds_completed"))
-    admitted = _incident_nonnegative_int(audit.get("queries_admitted"))
-    ignored = _incident_nonnegative_int(audit.get("requests_ignored_or_over_budget"))
-    section = (
-        '<section class="ir-query-audit">'
-        "<h3>Interactive Investigation Pivot Audit</h3>"
-        '<div class="ir-analysis-meta">'
-        f'<span><b>Contract:</b> {_incident_html_text(audit.get("query_contract"))}</span>'
-        f'<span><b>Provider neutral:</b> {_incident_html_text(audit.get("provider_neutral", True))}</span>'
-        f'<span><b>Model route:</b> {_incident_html_text(audit.get("model_route"))}</span>'
-        f"<span><b>Rounds:</b> {rounds_completed}</span>"
-        f"<span><b>Admitted:</b> {admitted}</span>"
-        f"<span><b>Rejected/over budget:</b> {ignored}</span>"
-        "</div>"
-        + (
-            "".join(query_blocks)
-            if query_blocks
-            else "<p>No broker-authorized pivot produced a presentation-ready execution record.</p>"
-        )
-        + "</section>"
+    callbacks = InvestigationAuditRenderCallbacks(
+        html_text=_incident_html_text,
+        nonnegative_int=_incident_nonnegative_int,
+        linked_finding=_incident_query_linked_finding,
     )
-    return section, len(query_blocks)
+    return render_investigation_query_audit(response, report, callbacks)
 
 
 def render_incident_response_report_html(
