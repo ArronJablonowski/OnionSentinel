@@ -1786,6 +1786,29 @@ def _query_enrichment():
     return enrichment
 
 
+def _query_derived():
+    _provider_routing()
+    from onion_sentinel.analysis.query import derived
+    return derived
+
+
+def _query_derived_policy():
+    module = _query_derived()
+    return module.Policy(
+        operations=frozenset(INVESTIGATION_DERIVED_OPERATIONS),
+        filters_by_operation=PCAP_FILTERS_BY_OPERATION,
+    )
+
+
+def _query_derived_dependencies():
+    module = _query_derived()
+    return module.Dependencies(
+        normalize_filters=normalize_pcap_filters,
+        filter_error=PcapEvidenceQueryError,
+        positive_integer=_positive_query_int,
+    )
+
+
 def _query_event_tuple_dependencies():
     module = _query_event_tuple()
     return module.Dependencies(
@@ -4507,46 +4530,12 @@ def normalize_investigation_query_request(
             error_type=InvestigationQueryError,
         )
     else:
-        operation = _query_text(parameters.get("operation"), 64).lower()
-        if operation not in INVESTIGATION_DERIVED_OPERATIONS:
-            raise InvestigationQueryError(
-                f"unsupported derived-evidence operation: {operation or 'missing'}"
-            )
-        filters = parameters.get("filters", {})
-        if not isinstance(filters, dict):
-            raise InvestigationQueryError(
-                "derived-evidence filters must be an object"
-            )
-        unsupported_filters = set(filters).difference(
-            PCAP_FILTERS_BY_OPERATION.get(operation, set())
+        normalized_parameters = _query_derived().normalize(
+            parameters,
+            policy=_query_derived_policy(),
+            dependencies=_query_derived_dependencies(),
+            error_type=InvestigationQueryError,
         )
-        if unsupported_filters:
-            raise InvestigationQueryError(
-                f"unsupported {operation} filters: "
-                + ", ".join(sorted(str(item) for item in unsupported_filters))
-            )
-        if len(filters) > 16 or any(
-            isinstance(value, (dict, list))
-            for value in filters.values()
-        ):
-            raise InvestigationQueryError(
-                "derived-evidence filters must contain at most 16 scalar exact values"
-            )
-        try:
-            normalized_filters = normalize_pcap_filters(operation, filters)
-        except PcapEvidenceQueryError as exc:
-            raise InvestigationQueryError(str(exc)) from exc
-        normalized_parameters = {
-            "operation": operation,
-            "filters": normalized_filters,
-            "indicator": _query_text(parameters.get("indicator"), 253),
-            "limit": _positive_query_int(
-                parameters.get("limit"),
-                10,
-                20,
-                "derived-evidence query limit",
-            ),
-        }
     if dropped_parameters:
         normalization["dropped_cross_backend_parameters"] = dropped_parameters
     normalized = {
