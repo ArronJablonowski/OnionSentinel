@@ -91,6 +91,16 @@ from dashboard_alert_detail_layout import (  # noqa: E402
     normalized_heading_text,
     split_detail_source_sections,
 )
+from dashboard_alert_detail_values import (  # noqa: E402
+    detail_table,
+    json_object,
+    markdown_cell,
+    nested_object,
+    nested_value,
+    present_values,
+    raw_event_for_details,
+    row_value,
+)
 from dashboard_flow_page import (  # noqa: E402
     FLOW_PAGE_CSS,
     FLOW_PAGE_JS,
@@ -1977,27 +1987,6 @@ def raw_alert_object(row: sqlite3.Row) -> dict:
         return {}
 
 
-def json_object(value: object) -> dict:
-    if isinstance(value, dict):
-        return value
-    if not isinstance(value, str) or not value.strip():
-        return {}
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def row_value(row: sqlite3.Row | dict, key: str, default: object = None) -> object:
-    if isinstance(row, dict):
-        return row.get(key, default)
-    try:
-        return row[key]
-    except (IndexError, KeyError):
-        return default
-
-
 def alert_group_key(row: sqlite3.Row) -> str:
     # Keep source port out of grouping because it can rotate per connection.
     if row['suppression_key']:
@@ -2047,64 +2036,6 @@ def active_alert_highest_severity_class(reports: list[AlertReport]) -> str:
     if not active:
         return 'none'
     return criticality_class(max(active, key=lambda report: report.criticality_rank).criticality)
-
-
-def nested_value(obj: dict, *keys: str) -> str | None:
-    current = obj
-    for key in keys:
-        if not isinstance(current, dict) or key not in current:
-            return None
-        current = current[key]
-    if current is None:
-        return None
-    return str(current)
-
-
-def nested_object(obj: dict, *keys: str) -> object | None:
-    current: object = obj
-    for key in keys:
-        if not isinstance(current, dict) or key not in current:
-            return None
-        current = current[key]
-    return current
-
-
-def markdown_cell(value: object, max_len: int = 420) -> str:
-    # Keep generated Markdown tables valid even when alert fields contain pipes,
-    # newlines, lists, or nested objects.
-    if value is None or value == '' or value == [] or value == {}:
-        return ''
-    if isinstance(value, (dict, list)):
-        rendered = json.dumps(value, sort_keys=True)
-    else:
-        rendered = str(value)
-    rendered = re.sub(r'\s+', ' ', rendered).strip()
-    rendered = rendered.replace('|', '\\|')
-    return (rendered[:max_len - 1] + '…') if len(rendered) > max_len else rendered
-
-
-def detail_table(title: str, rows: list[tuple[str, object]], max_len: int = 420) -> list[str]:
-    visible_rows = [(label, markdown_cell(value, max_len)) for label, value in rows]
-    visible_rows = [(label, value) for label, value in visible_rows if value]
-    if not visible_rows:
-        return []
-    lines = [
-        f'## {title}',
-        '',
-        '| Field | Value |',
-        '| --- | --- |',
-    ]
-    lines.extend(f'| {label} | {value} |' for label, value in visible_rows)
-    lines.append('')
-    return lines
-
-
-def raw_event_for_details(raw: dict) -> dict:
-    # New exporter versions preserve selected original Security Onion fields
-    # under security_onion.raw_event. Older rows can still render from the
-    # normalized alert object.
-    raw_event = nested_object(raw, 'security_onion', 'raw_event')
-    return raw_event if isinstance(raw_event, dict) else raw
 
 
 def complete_alert_json_markdown(raw: dict) -> str:
@@ -2630,11 +2561,6 @@ def detail_section_markdown(
     if lines:
         return '\n'.join(lines).strip()
     return f'## {title}\n\n{empty_message}'
-
-
-def present_values(*values: object) -> list[object]:
-    """Keep compound detail cells empty unless at least one value exists."""
-    return [value for value in values if value not in (None, '', [], {})]
 
 
 def standard_alert_detail_sections(raw: dict) -> dict[str, str]:

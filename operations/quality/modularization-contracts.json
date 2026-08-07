@@ -162,6 +162,21 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_alert_detail_values.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_detail_values.py",
+      "required_symbols": [
+        "detail_table",
+        "json_object",
+        "markdown_cell",
+        "nested_object",
+        "nested_value",
+        "present_values",
+        "raw_event_for_details",
+        "row_value"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_flow_page.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_flow_page.py",
