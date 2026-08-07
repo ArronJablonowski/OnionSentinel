@@ -6630,6 +6630,7 @@ def apply_investigation_query_loop(
     _provider_routing()
     from onion_sentinel.analysis.query import (
         engine as engine_module,
+        observables as observables_module,
         planning_retry as planning_retry_module,
         round_admission as round_admission_module,
         round_result as round_result_module,
@@ -6953,38 +6954,15 @@ def apply_investigation_query_loop(
 
         local_context = prompt_package.get("_local_investigation_query_context")
         if isinstance(local_context, dict):
-            existing = local_context.get("discovered_observables")
-            if not isinstance(existing, list):
-                existing = []
-            existing = existing[:MAX_DISCOVERED_OBSERVABLES]
-            discovery_sources = [
-                item
-                for item in (
-                    round_result.get("results")
-                    if isinstance(round_result.get("results"), list)
-                    else []
-                )
-                if isinstance(item, dict)
-                and item.get("backend") in {"security_onion", "pcap_zeek"}
-                and item.get("status") in {"ok", "partial"}
-            ]
-            newly_discovered = _validated_discovered_observables(
-                discovery_sources,
-                limit=max(0, MAX_DISCOVERED_OBSERVABLES - len(existing)),
+            promotion = observables_module.promote(
+                local_context.get("discovered_observables"),
+                round_result.get("results"),
+                limit=MAX_DISCOVERED_OBSERVABLES,
+                validate=_validated_discovered_observables,
             )
-            known = {
-                (str(item.get("kind")), str(item.get("value")))
-                for item in existing
-                if isinstance(item, dict)
-            }
-            for item in newly_discovered:
-                if (
-                    (item["kind"], item["value"]) not in known
-                    and len(existing) < MAX_DISCOVERED_OBSERVABLES
-                ):
-                    existing.append(item)
-                    known.add((item["kind"], item["value"]))
-            local_context["discovered_observables"] = existing
+            local_context["discovered_observables"] = list(
+                promotion.observables
+            )
 
         remaining = engine_module.remaining(
             engine_state, round_number, repair_round=repair_round)

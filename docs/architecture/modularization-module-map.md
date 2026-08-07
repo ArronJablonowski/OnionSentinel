@@ -406,6 +406,10 @@ semantic deduplication, and authorization enforcement live under
 `onion_sentinel.analysis.query.round_admission`. Runtime authority remains in
 injected ports; the package returns an immutable admission result and cannot
 execute a query, call a model, access the Relay, or widen repair scope.
+Bounded observable promotion lives under
+`onion_sentinel.analysis.query.observables`. Only successful or partial rows
+from the trusted Security Onion and PCAP/Zeek broker classes reach the injected
+validator; existing and new values remain stable, deduplicated, and capped.
 The legacy runner functions remain compatibility delegates and inject runtime
 policy explicitly, preserving existing test seams while keeping review-package
 mutation and reviewer-output admission out of the composition root.
