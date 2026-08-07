@@ -32,6 +32,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.conclusions.incident_completeness",
     "onion_sentinel.analysis.review.comparison",
     "onion_sentinel.analysis.review.adjudication",
+    "onion_sentinel.analysis.review.authorization",
     "onion_sentinel.analysis.review.contracts",
     "onion_sentinel.analysis.review.package",
     "onion_sentinel.analysis.review.text",

@@ -1757,6 +1757,21 @@ def _review_adjudication():
     return adjudication
 
 
+def _review_authorization():
+    _provider_routing()
+    from onion_sentinel.analysis.review import authorization
+    return authorization
+
+
+def _review_authorization_dependencies():
+    module = _review_authorization()
+    return module.Dependencies(
+        confidence_high_threshold=CONFIDENCE_HIGH_THRESHOLD,
+        control_tuning_values=frozenset(CONTROL_TUNING_VALUES),
+        consequential_conclusion=_consequential_model_conclusion,
+    )
+
+
 def _review_contracts():
     _provider_routing()
     from onion_sentinel.analysis.review import contracts
@@ -11157,18 +11172,7 @@ def run_bounded_disagreement_adjudication(
 
 
 def second_opinion_memory_eligibility(second_opinion: Any) -> tuple[bool, str]:
-    """Gate reviewer memory so disagreement or uncertainty cannot become durable context."""
-    if not isinstance(second_opinion, dict) or second_opinion.get("status") != "completed":
-        return False, "reviewer did not complete"
-    response = second_opinion.get("response")
-    comparison = second_opinion.get("comparison")
-    if not isinstance(response, dict) or not isinstance(comparison, dict):
-        return False, "reviewer result is incomplete"
-    if str(response.get("confidence") or "").lower() != "high":
-        return False, "reviewer confidence is not high"
-    if comparison.get("agreement") != "agreement" or comparison.get("material_disagreement"):
-        return False, "primary and reviewer did not fully agree"
-    return True, "high-confidence independent agreement"
+    return _review_authorization().memory_eligibility(second_opinion)
 
 
 def reviewer_automation_authorization(
@@ -11176,84 +11180,10 @@ def reviewer_automation_authorization(
     reviewer_response: dict[str, Any],
     comparison: dict[str, Any],
 ) -> dict[str, Any]:
-    """Separate a valid review decision from authorization to automate it."""
-    reviewer_confidence = str(
-        reviewer_response.get("confidence") or ""
-    ).strip().lower()
-    try:
-        reviewer_score = float(
-            reviewer_response.get("confidence_score") or 0.0
-        )
-    except (TypeError, ValueError):
-        reviewer_score = 0.0
-    high_confidence = bool(
-        reviewer_confidence == "high"
-        and reviewer_score >= CONFIDENCE_HIGH_THRESHOLD
+    return _review_authorization().automation_authorization(
+        primary_response, reviewer_response, comparison,
+        _review_authorization_dependencies(),
     )
-    material_disagreement = bool(
-        comparison.get("material_disagreement")
-    )
-    authorized = bool(high_confidence and not material_disagreement)
-    tuning_guard = (
-        primary_response.get("_tuning_coherence_guard")
-        if isinstance(
-            primary_response.get("_tuning_coherence_guard"),
-            dict,
-        )
-        else {}
-    )
-    control_tuning_requested = any(
-        str(value or "").strip().lower() in CONTROL_TUNING_VALUES
-        for value in (
-            primary_response.get("tuning_recommendation"),
-            tuning_guard.get("requested_tuning"),
-        )
-    )
-    full_agreement = comparison.get("agreement") == "agreement"
-    if material_disagreement:
-        reason_code = "material_disagreement"
-        reason = (
-            "Primary and reviewer materially disagree; human adjudication "
-            "is required."
-        )
-    elif not high_confidence:
-        reason_code = "reviewer_confidence_below_automation_threshold"
-        reason = (
-            "The review completed validly but did not reach the grounded "
-            "high-confidence threshold required for automation."
-        )
-    else:
-        reason_code = "high_confidence_nonmaterial_agreement"
-        reason = (
-            "The high-confidence reviewer did not materially disagree with "
-            "the primary disposition."
-        )
-    return {
-        "schema": "onion-sentinel-reviewer-automation-authorization-v1",
-        "authorized": authorized,
-        "reason_code": reason_code,
-        "reason": reason,
-        "reviewer_confidence": reviewer_confidence,
-        "reviewer_confidence_score": round(reviewer_score, 3),
-        "required_confidence": "high",
-        "required_confidence_score": CONFIDENCE_HIGH_THRESHOLD,
-        "agreement": str(comparison.get("agreement") or ""),
-        "material_disagreement": material_disagreement,
-        "consequential_automation_requested": (
-            _consequential_model_conclusion(primary_response)
-        ),
-        "automatic_closure_authorized": authorized,
-        "containment_authorized": authorized,
-        # Suppress/drop is always a human-approved control change even when
-        # the reviewer fully corroborates the analysis.
-        "tuning_authorized": bool(
-            authorized and not control_tuning_requested
-        ),
-        "control_tuning_requested": control_tuning_requested,
-        "memory_writeback_authorized": bool(
-            authorized and full_agreement
-        ),
-    }
 
 
 def apply_material_disagreement_gate(
