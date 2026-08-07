@@ -155,6 +155,13 @@ from dashboard_report_repository import (  # noqa: E402
     index_markdown_reports,
     load_markdown_fallback_reports,
 )
+from dashboard_ai_artifact_repository import (  # noqa: E402
+    AiArtifactRepositoryConfig,
+    index_ai_analysis_by_alert_id,
+    index_ai_prompts_by_alert_id,
+    inspect_running_prompt_alert_ids,
+    load_ai_analysis_records,
+)
 from dashboard_alert_ai_workflow import (  # noqa: E402
     AI_ELIGIBLE_FILTER_STATUSES,
     SOC_ANALYSIS_SEVERITY_LABELS,
@@ -807,20 +814,11 @@ def reasoning_effort_options(selected: str) -> str:
 
 def _latest_observed_model_projection() -> dict[str, str] | None:
     """Read the newest stamped analysis provenance without consulting settings."""
-    try:
-        paths = sorted(
-            AI_ANALYSIS_DIR.glob('*.json'),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
-    except Exception:
-        return None
-    for path in paths:
-        try:
-            data = json.loads(path.read_text(encoding='utf-8'))
-        except Exception:
-            continue
-        if projection := observed_model_projection(data):
+    for record in load_ai_analysis_records(
+        _ai_artifact_repository_config(),
+        newest_first=True,
+    ):
+        if projection := observed_model_projection(record):
             return projection
     return None
 
@@ -904,64 +902,29 @@ def load_markdown_reports_by_alert_id() -> dict[str, tuple[Path, str, os.stat_re
     return index_markdown_reports(_report_repository_config())
 
 
+def _ai_artifact_repository_config() -> AiArtifactRepositoryConfig:
+    return AiArtifactRepositoryConfig(
+        analysis_dir=AI_ANALYSIS_DIR,
+        prompt_dir=AI_PROMPT_DIR,
+    )
+
+
 def load_ai_analysis_by_alert_id() -> dict[str, dict]:
-    # Local AI analysis jobs write one JSON artifact per analyzed alert. Index
-    # the newest artifact for each alert_id so the detail view can show exactly
-    # which model evaluated the alert and what it concluded.
-    by_alert_id: dict[str, dict] = {}
-    if not AI_ANALYSIS_DIR.exists():
-        return by_alert_id
-    for path in sorted(AI_ANALYSIS_DIR.glob('*.json'), key=lambda p: p.stat().st_mtime):
-        try:
-            data = json.loads(path.read_text(encoding='utf-8'))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        alert_id = str(data.get('alert_id') or '').strip()
-        if not alert_id:
-            continue
-        data['_analysis_path'] = str(path)
-        data['_analysis_filename'] = path.name
-        by_alert_id[alert_id] = data
-    return by_alert_id
+    """Index newest AI results through the artifact repository."""
+    return index_ai_analysis_by_alert_id(_ai_artifact_repository_config())
 
 
 def load_ai_prompts_by_alert_id() -> dict[str, dict]:
-    # Prompt packages are the queue input for local AI analysis. If a prompt
-    # exists but no analysis artifact exists yet, the dashboard can show Queued.
-    by_alert_id: dict[str, dict] = {}
-    if not AI_PROMPT_DIR.exists():
-        return by_alert_id
-    for path in sorted(AI_PROMPT_DIR.glob('*.json'), key=lambda p: p.stat().st_mtime):
-        try:
-            data = json.loads(path.read_text(encoding='utf-8'))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        alert = data.get('alert') if isinstance(data.get('alert'), dict) else {}
-        alert_id = str(alert.get('alert_id') or data.get('alert_id') or '').strip()
-        if not alert_id:
-            continue
-        data['_prompt_path'] = str(path)
-        data['_prompt_filename'] = path.name
-        data['_prompt_mtime'] = path.stat().st_mtime
-        by_alert_id[alert_id] = data
-    return by_alert_id
+    """Index newest prompt packages through the artifact repository."""
+    return index_ai_prompts_by_alert_id(_ai_artifact_repository_config())
 
 
 def running_ai_prompt_alert_ids(ai_prompts_by_alert_id: dict[str, dict]) -> set[str]:
-    # The current runner is a short-lived local process. When it is active, its
-    # command line includes the prompt package path, which lets the static page
-    # label that alert as Analyzing during the next dashboard build.
-    try:
-        result = subprocess.run(['ps', 'axo', 'command='], check=False, capture_output=True, text=True, timeout=3)
-    except (OSError, subprocess.SubprocessError):
-        return set()
-    commands = result.stdout.splitlines()
-    running: set[str] = set()
-    for alert_id, prompt in ai_prompts_by_alert_id.items():
-        prompt_path = str(prompt.get('_prompt_path') or '')
-        if prompt_path and any('run-local-ai-analysis.py' in command and prompt_path in command for command in commands):
-            running.add(alert_id)
-    return running
+    """Resolve running prompt packages through the process-inspection boundary."""
+    return inspect_running_prompt_alert_ids(
+        _ai_artifact_repository_config(),
+        ai_prompts_by_alert_id,
+    )
 
 
 def safe_int(value: object) -> int:

@@ -52,7 +52,7 @@
       "max_lines": 14366
     },
     "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py": {
-      "max_lines": 2870
+      "max_lines": 2833
     },
     "onion-sentinel-dashboard/software_inventory.py": {
       "max_lines": 1181
@@ -1212,5 +1212,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "137689b0da4fceb4f992c6b3abe66411967e2081"
+  "source_release": "e0205323b64b25f3081a394f52e5f0e4d31ba43e"
 }

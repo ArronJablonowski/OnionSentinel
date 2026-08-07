@@ -488,6 +488,13 @@ fields, and constructs deterministic fallback `AlertReport` models when SQLite
 is unavailable. The unused legacy SQLite-to-Markdown composer was removed
 instead of being preserved as dead modular code.
 
+`dashboard_ai_artifact_repository.py` is the read-only prompt/result artifact
+and worker-process correlation boundary. It rejects malformed and non-object
+JSON, preserves newest-per-alert precedence, stamps source metadata, separates
+pure prompt/command correlation from bounded `ps` inspection, and exposes an
+explicit configuration used by both report assembly and observed-model
+provenance fallback.
+
 `dashboard_alert_ai_workflow.py` owns grouped candidate selection, test/filter
 exclusions, severity-floor eligibility, analysis artifact precedence, and the
 running/queued/analyzed/skipped status contract. The report factory consumes

@@ -285,6 +285,19 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_ai_artifact_repository.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_ai_artifact_repository.py",
+      "required_symbols": [
+        "AiArtifactRepositoryConfig",
+        "index_ai_analysis_by_alert_id",
+        "index_ai_prompts_by_alert_id",
+        "inspect_running_prompt_alert_ids",
+        "load_ai_analysis_records",
+        "running_prompt_alert_ids"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_alert_ai_workflow.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_ai_workflow.py",
