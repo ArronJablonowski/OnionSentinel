@@ -10020,6 +10020,7 @@ def write_outputs(
 
 def main() -> int:
     from onion_sentinel import pipeline as pipeline_module
+    from onion_sentinel import preparation as preparation_module
     from onion_sentinel import startup as startup_module
     from onion_sentinel.analysis.persistence import memory_policy as memory_policy_module
     from onion_sentinel.analysis.persistence import postcommit as postcommit_module
@@ -10086,6 +10087,7 @@ def main() -> int:
     error = ""
     monitor_started = False
     harness_runtime: OnionSentinelHarnessRun | None = None
+    prepared: preparation_module.PreparedRuntime | None = None
 
     try:
         startup_module.reconcile_deferred_results(
@@ -10124,143 +10126,59 @@ def main() -> int:
         settings = attested.settings
         live_osquery_config = attested.live_osquery_config
         enrichment_config = attested.enrichment_config
-        enabled_routes = enabled_agent_model_routes(settings)
-        assigned_route = canonical_model_route(
-            (settings.get("agent_models") or {}).get(agent_role),
-            enabled_routes,
-        )
-        reviewer_route = canonical_model_route(
-            (settings.get("agent_second_opinion_models") or {}).get(
-                agent_role
+        prepared = preparation_module.prepare(
+            pipeline_context,
+            preparation_module.PreparationInputs(
+                run_id, prompt_package, settings, agent_role,
+                evaluation_memory_frozen, args.reanalysis_attempt_id,
+                args.investigation_harness_policy, args.investigation_harness_db,
+                INVESTIGATION_QUERY_CONTRACT, MAX_INVESTIGATION_QUERY_ROUNDS,
+                MAX_INVESTIGATION_QUERIES_TOTAL,
+                MAX_INVESTIGATION_QUERIES_PER_ROUND,
+                args.max_prompt_bytes, args.max_response_bytes,
             ),
-            enabled_routes,
+            preparation_module.PreparationPorts(
+                enabled_routes=enabled_agent_model_routes,
+                canonical_route=canonical_model_route,
+                load_harness_policy=load_investigation_harness_policy,
+                harness_activation=lambda enabled, assigned, reviewer: (
+                    should_start_onion_sentinel_harness(
+                        policy_enabled=enabled, assigned_route=assigned,
+                        reviewer_route=reviewer)),
+                start_harness=lambda request, policy: start_harness_run(
+                    run_id=request.run_id,
+                    prompt_package=request.prompt_package,
+                    role=request.role,
+                    assigned_route=request.assigned_route,
+                    configuration=request.configuration,
+                    reanalysis_attempt_id=request.reanalysis_attempt_id,
+                    policy_path=request.policy_path,
+                    db_path=request.database_path,
+                    policy=policy,
+                ),
+                build_running_record=lambda: build_llm_log_record(
+                    run_id=run_id, status="running", started_at=started_at,
+                    finished_at=None, runtime_seconds=None,
+                    prompt_path=prompt_path, prompt_package=prompt_package,
+                    settings=settings, response=None, json_path=None,
+                    md_path=None, resource_monitor=resource_monitor),
+                write_running_record=lambda record: atomic_write_json(
+                    active_record_path, record),
+                publish_phase=lambda record, phase, route, reason: (
+                    publish_current_analysis_phase(
+                        record, settings, phase=phase, model_route=route,
+                        trigger_reason=reason,
+                        active_record_path=active_record_path)),
+                start_monitor=resource_monitor.start,
+                process_id=os.getpid,
+                warn=lambda message: print(f"warning: {message}", file=sys.stderr),
+            ),
         )
-        harness_configuration = {
-            "query_contract": INVESTIGATION_QUERY_CONTRACT,
-            "agent_role": agent_role,
-            "assigned_route": assigned_route,
-            "reviewer_route": reviewer_route,
-            "evaluation_memory_frozen": evaluation_memory_frozen,
-            "limits": {
-                "max_query_rounds": MAX_INVESTIGATION_QUERY_ROUNDS,
-                "max_queries_total": MAX_INVESTIGATION_QUERIES_TOTAL,
-                "max_queries_per_round": MAX_INVESTIGATION_QUERIES_PER_ROUND,
-                "max_prompt_bytes": args.max_prompt_bytes,
-                "max_response_bytes": args.max_response_bytes,
-            },
-        }
-        configured_harness_policy = load_investigation_harness_policy(
-            args.investigation_harness_policy
-        )
-        (
-            harness_start_allowed,
-            harness_activation_reason,
-        ) = should_start_onion_sentinel_harness(
-            policy_enabled=configured_harness_policy.enabled,
-            assigned_route=assigned_route,
-            reviewer_route=reviewer_route,
-        )
-        if harness_start_allowed:
-            try:
-                harness_runtime = start_harness_run(
-                    run_id=run_id,
-                    prompt_package=prompt_package,
-                    role=agent_role,
-                    assigned_route=assigned_route,
-                    configuration=harness_configuration,
-                    reanalysis_attempt_id=args.reanalysis_attempt_id,
-                    policy_path=args.investigation_harness_policy,
-                    db_path=args.investigation_harness_db,
-                    policy=configured_harness_policy,
-                )
-            except Exception as exc:
-                if (
-                    configured_harness_policy.mode == "enforce"
-                    or evaluation_memory_frozen
-                ):
-                    raise
-                print(
-                    "warning: Onion Sentinel harness shadow initialization "
-                    f"failed: {type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                )
-        elif evaluation_memory_frozen:
-            raise RuntimeError(
-                "controlled harness evaluation cannot bypass the Onion "
-                f"Sentinel harness: {harness_activation_reason}"
-            )
-        elif configured_harness_policy.enabled:
-            print(
-                "Onion Sentinel investigation harness bypassed: "
-                f"{harness_activation_reason}.",
-                file=sys.stderr,
-            )
-
-        def observe_harness(call: Callable[[], Any]) -> Any:
-            if harness_runtime is None:
-                return None
-            try:
-                return call()
-            except Exception as exc:
-                if (
-                    harness_runtime.policy.mode == "enforce"
-                    or evaluation_memory_frozen
-                ):
-                    raise
-                print(
-                    "warning: Onion Sentinel harness shadow observation "
-                    f"failed: {type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                )
-                return None
-
-        running_record = build_llm_log_record(
-            run_id=run_id,
-            status="running",
-            started_at=started_at,
-            finished_at=None,
-            runtime_seconds=None,
-            prompt_path=prompt_path,
-            prompt_package=prompt_package,
-            settings=settings,
-            response=None,
-            json_path=None,
-            md_path=None,
-            resource_monitor=resource_monitor,
-        )
-        running_record["runner_pid"] = os.getpid()
-        atomic_write_json(active_record_path, running_record)
-
-        def update_current_phase(
-            phase: str,
-            model_route: str = "",
-            trigger_reason: str = "",
-        ) -> None:
-            nonlocal running_record
-            running_record = publish_current_analysis_phase(
-                running_record,
-                settings,
-                phase=phase,
-                model_route=model_route,
-                trigger_reason=trigger_reason,
-                active_record_path=active_record_path,
-            )
-            observe_harness(
-                lambda: harness_runtime.phase(
-                    phase,
-                    model_route,
-                    trigger_reason,
-                )
-                if harness_runtime is not None
-                else None
-            )
-
-        resource_monitor.start()
-        monitor_started = True
-        pipeline_context.advance(
-            pipeline_module.Stage.PREPARE,
-            "runtime contexts, harness, telemetry, and monitor prepared",
-        )
+        harness_runtime = prepared.harness
+        running_record = prepared.running_record
+        monitor_started = prepared.monitor_started
+        observe_harness = prepared.observe
+        update_current_phase = prepared.update_phase
         analysis_review = pipeline_module.run_analysis_review(
             pipeline_context,
             policy=pipeline_module.AnalysisReviewPolicy(
@@ -10578,7 +10496,10 @@ def main() -> int:
                         md_path=md_path,
                         resource_monitor=resource_monitor,
                         error=error,
-                        runtime_observation=running_record,
+                        runtime_observation=(
+                            prepared.running_record
+                            if prepared is not None else running_record
+                        ),
                     )
                     append_jsonl(runtime_paths.log_file, record)
                     # Retain the legacy single-record artifact for rolling
