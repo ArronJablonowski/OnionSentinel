@@ -1672,6 +1672,28 @@ def _conclusion_tuning():
     return tuning
 
 
+def _conclusion_incident_report():
+    _provider_routing()
+    from onion_sentinel.analysis.conclusions import incident_report
+    return incident_report
+
+
+def _incident_report_dependencies():
+    module = _conclusion_incident_report()
+    return module.Dependencies(
+        is_incident_responder=_is_incident_responder_package,
+        bounded_text=bounded_text,
+        bounded_text_list=bounded_text_list,
+        normalized_outcome=normalized_detection_outcome,
+        outcome_labels=dict(DETECTION_OUTCOME_LABELS),
+        confidence_values=frozenset(CONFIDENCE_VALUES),
+        confidence_score_by_label=dict(CONFIDENCE_SCORE_BY_LABEL),
+        required_fields=frozenset(INCIDENT_RESPONSE_REPORT_REQUIRED_FIELDS),
+        text_fields=frozenset(INCIDENT_RESPONSE_REPORT_TEXT_FIELDS),
+        list_fields=frozenset(INCIDENT_RESPONSE_REPORT_LIST_FIELDS),
+    )
+
+
 def _tuning_guard_dependencies():
     module = _conclusion_tuning()
     return module.Dependencies(
@@ -13500,197 +13522,19 @@ def apply_policy_sensitive_activity_guard(
 
 
 def _incident_timeline_timestamp(value: Any) -> dt.datetime | None:
-    """Parse a timeline timestamp for deterministic ordering."""
-    text = str(value or "").strip()
-    if not text:
-        return None
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = dt.datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return None
-    return parsed.astimezone(dt.timezone.utc)
+    return _conclusion_incident_report().timeline_timestamp(value)
 
 
 def validate_incident_response_report_shape(value: Any) -> dict[str, Any]:
-    """Describe missing or malformed responder fields without trusting prose.
-
-    The queue deliberately repairs minor model schema drift, so this validator
-    records deterministic defects instead of throwing away the entire analysis.
-    Confidence and automation guards can then fail closed while the dashboard
-    still receives an inspectable artifact.
-    """
-    report = value if isinstance(value, dict) else {}
-    missing_fields = sorted(INCIDENT_RESPONSE_REPORT_REQUIRED_FIELDS.difference(report))
-    invalid_fields: list[str] = []
-    if not isinstance(value, dict):
-        invalid_fields.append("incident_response_report")
-
-    for key in INCIDENT_RESPONSE_REPORT_TEXT_FIELDS:
-        if key in report and (
-            not isinstance(report.get(key), str)
-            or not str(report.get(key) or "").strip()
-        ):
-            invalid_fields.append(key)
-    for key in INCIDENT_RESPONSE_REPORT_LIST_FIELDS:
-        if key not in report:
-            continue
-        items = report.get(key)
-        if not isinstance(items, list):
-            invalid_fields.append(key)
-        elif key != "factual_timeline" and any(
-            not isinstance(item, str) or not item.strip()
-            for item in items
-        ):
-            invalid_fields.append(f"{key}[]")
-
-    timeline = report.get("factual_timeline")
-    invalid_timeline_entries = 0
-    unparseable_timeline_entries = 0
-    timeline_instants: list[dt.datetime] = []
-    if isinstance(timeline, list):
-        for item in timeline[:200]:
-            if not isinstance(item, dict):
-                invalid_timeline_entries += 1
-                continue
-            if any(
-                not isinstance(item.get(key), str)
-                or not str(item.get(key) or "").strip()
-                for key in ("timestamp", "event", "source_pack")
-            ):
-                invalid_timeline_entries += 1
-                continue
-            item_confidence = str(item.get("confidence") or "").strip().lower()
-            if item_confidence not in CONFIDENCE_VALUES:
-                invalid_timeline_entries += 1
-            instant = _incident_timeline_timestamp(item.get("timestamp"))
-            if instant is None:
-                unparseable_timeline_entries += 1
-            else:
-                timeline_instants.append(instant)
-
-    timeline_out_of_order = any(
-        later < earlier
-        for earlier, later in zip(
-            timeline_instants,
-            timeline_instants[1:],
-        )
+    return _conclusion_incident_report().validate_shape(
+        value, _incident_report_dependencies(),
     )
-
-    report_confidence = str(report.get("confidence") or "").strip().lower()
-    if "confidence" in report and report_confidence not in CONFIDENCE_VALUES:
-        invalid_fields.append("confidence")
-    report_confidence_score = report.get("confidence_score")
-    if "confidence_score" in report and (
-        isinstance(report_confidence_score, bool)
-        or not isinstance(report_confidence_score, (int, float))
-        or not 0.0 <= report_confidence_score <= 1.0
-    ):
-        invalid_fields.append("confidence_score")
-
-    invalid_fields = sorted(set(invalid_fields))
-    return {
-        "required": True,
-        "model_report_present": isinstance(value, dict),
-        "valid": bool(
-            not missing_fields
-            and not invalid_fields
-            and invalid_timeline_entries == 0
-            and unparseable_timeline_entries == 0
-        ),
-        "missing_fields": missing_fields,
-        "invalid_fields": invalid_fields,
-        "timeline_entries_received": len(timeline) if isinstance(timeline, list) else 0,
-        "invalid_timeline_entries": invalid_timeline_entries,
-        "unparseable_timeline_entries": unparseable_timeline_entries,
-        "timeline_out_of_order": timeline_out_of_order,
-        "timeline_reordering_required": timeline_out_of_order,
-    }
 
 
 def normalize_incident_response_report(value: Any) -> dict[str, Any]:
-    """Normalize the responder report while retaining explicit evidence limits.
-
-    Incident reports are longer lived than routine triage output. Bounding every
-    list and string prevents a malformed model response from producing an
-    unrenderable artifact while keeping enough detail for a complete timeline.
-    """
-    report = value if isinstance(value, dict) else {}
-    confidence = bounded_text(report.get("confidence") or "low", 20).lower()
-    if confidence not in CONFIDENCE_VALUES:
-        confidence = "low"
-    try:
-        confidence_score = float(report.get("confidence_score"))
-    except (TypeError, ValueError, OverflowError):
-        confidence_score = CONFIDENCE_SCORE_BY_LABEL[confidence]
-    if not 0.0 <= confidence_score <= 1.0:
-        confidence_score = CONFIDENCE_SCORE_BY_LABEL[confidence]
-
-    timeline: list[dict[str, str]] = []
-    raw_timeline = report.get("factual_timeline")
-    if isinstance(raw_timeline, list):
-        for item in raw_timeline[:200]:
-            if not isinstance(item, dict):
-                continue
-            item_confidence = bounded_text(item.get("confidence") or "low", 20).lower()
-            if item_confidence not in CONFIDENCE_VALUES:
-                item_confidence = "low"
-            timeline.append({
-                "timestamp": bounded_text(item.get("timestamp"), 100),
-                "event": bounded_text(item.get("event"), 4000),
-                "source_pack": bounded_text(item.get("source_pack"), 200),
-                "query_digest": bounded_text(item.get("query_digest"), 128),
-                "confidence": item_confidence,
-            })
-    timeline = [
-        item
-        for _, item in sorted(
-            enumerate(timeline),
-            key=lambda pair: (
-                _incident_timeline_timestamp(pair[1].get("timestamp"))
-                is None,
-                _incident_timeline_timestamp(pair[1].get("timestamp"))
-                or dt.datetime.max.replace(tzinfo=dt.timezone.utc),
-                pair[0],
-            ),
-        )
-    ]
-
-    methodology = report.get("methodology")
-    if not methodology and report.get("confirmed_facts"):
-        methodology = ["Reviewed the supplied alert, enrichment, packet, and Security Onion evidence."]
-
-    return {
-        "executive_bluf": bounded_text(
-            report.get("executive_bluf") or report.get("case_summary"), 8000
-        ),
-        "detection_outcome_reasoning": bounded_text(
-            report.get("detection_outcome_reasoning"), 8000
-        ),
-        "scope": bounded_text(report.get("scope"), 8000),
-        "affected_systems": bounded_text_list(report.get("affected_systems")),
-        "constraints": bounded_text_list(report.get("constraints")),
-        "methodology": bounded_text_list(methodology),
-        "factual_timeline": timeline,
-        "security_onion_findings": bounded_text_list(report.get("security_onion_findings")),
-        "osquery_findings": bounded_text_list(report.get("osquery_findings")),
-        "pcap_findings": bounded_text_list(report.get("pcap_findings")),
-        "host_findings": bounded_text_list(report.get("host_findings")),
-        "correlation_findings": bounded_text_list(report.get("correlation_findings")),
-        "containment_recommendations": bounded_text_list(report.get("containment_recommendations")),
-        "eradication_recommendations": bounded_text_list(report.get("eradication_recommendations")),
-        "recovery_recommendations": bounded_text_list(report.get("recovery_recommendations")),
-        "follow_up_queries": bounded_text_list(report.get("follow_up_queries")),
-        "evidence_gaps": bounded_text_list(
-            report.get("evidence_gaps") or report.get("constraints")
-        ),
-        "conclusion": bounded_text(report.get("conclusion") or report.get("case_summary"), 8000),
-        "confidence": confidence,
-        "confidence_score": round(confidence_score, 3),
-    }
+    return _conclusion_incident_report().normalize(
+        value, _incident_report_dependencies(),
+    )
 
 
 def apply_incident_evidence_completeness_guard(
@@ -13958,197 +13802,28 @@ def apply_incident_evidence_completeness_guard(
 
 
 def _canonical_incident_disposition_sentence(response: dict[str, Any]) -> str:
-    outcome = normalized_detection_outcome(response.get("detection_outcome"))
-    label = DETECTION_OUTCOME_LABELS.get(outcome, "Inconclusive")
-    return (
-        f"{label}: the canonical runtime disposition records "
-        f"event_status={response.get('event_status') or 'unknown'}, "
-        f"detection_validity={response.get('detection_validity') or 'unknown'}, "
-        f"activity_disposition={response.get('activity_disposition') or 'unknown'}, "
-        f"and handling={response.get('handling') or 'investigate'}."
+    return _conclusion_incident_report().canonical_disposition(
+        response, _incident_report_dependencies(),
     )
 
 
 def _human_review_incident_actions(response: dict[str, Any]) -> dict[str, list[str]]:
-    """Replace superseded action prose with canonical, non-automatic guidance."""
-    handling = str(response.get("handling") or "investigate").strip().lower()
-    if handling == "contain":
-        containment = (
-            "Do not execute containment steps from the superseded model report "
-            "automatically. Canonical handling=contain requires a human incident "
-            "responder to validate scope and approve proportionate containment."
-        )
-    elif handling == "escalate":
-        containment = (
-            "Do not initiate containment from the superseded model report "
-            "automatically. Canonical handling=escalate requires prompt human "
-            "review and an explicit containment decision."
-        )
-    else:
-        containment = (
-            "Do not initiate containment from the superseded model report. "
-            f"Canonical handling={handling} does not authorize automatic "
-            "containment; complete human review before changing host or network state."
-        )
-    return {
-        "containment_recommendations": [containment],
-        "eradication_recommendations": [
-            "Do not execute eradication steps from the superseded model report. "
-            "Preserve evidence and require a human responder to confirm compromise, "
-            "scope, and the approved remediation plan first."
-        ],
-        "recovery_recommendations": [
-            "Do not execute recovery steps from the superseded model report. "
-            "A human responder must confirm impact and approve recovery criteria "
-            "after any validated containment or eradication work."
-        ],
-    }
+    return _conclusion_incident_report().human_review_actions(response)
 
 
 def _incident_report_requests_containment(report: dict[str, Any]) -> bool:
-    """Return whether report prose recommends a positive containment action."""
-    for item in bounded_text_list(
-        report.get("containment_recommendations"),
-        limit=20,
-        item_limit=1000,
-    ):
-        text = re.sub(r"\s+", " ", item.strip().lower())
-        if not text:
-            continue
-        if any(
-            marker in text
-            for marker in (
-                "no containment",
-                "do not ",
-                "does not justify",
-                "not justified",
-                "not indicated",
-                "defer containment",
-                "containment is unnecessary",
-            )
-        ):
-            continue
-        if re.search(
-            r"\b(contain|isolate|quarantine|block|disable|revoke|terminate)\b",
-            text,
-        ):
-            return True
-    return False
+    return _conclusion_incident_report().requests_containment(
+        report, _incident_report_dependencies(),
+    )
 
 
 def reconcile_incident_response_report(
     response: dict[str, Any],
     prompt_package: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Align the durable responder narrative with runtime-owned verdict fields."""
-    if not _is_incident_responder_package(prompt_package):
-        return response
-    report = response.get("incident_response_report")
-    if not isinstance(report, dict):
-        report = normalize_incident_response_report({})
-        response["incident_response_report"] = report
-    report["confidence"] = str(response.get("confidence") or "low")
-    report["confidence_score"] = response.get("confidence_score")
-
-    validation = (
-        dict(response.get("_incident_response_report_validation"))
-        if isinstance(response.get("_incident_response_report_validation"), dict)
-        else validate_incident_response_report_shape(report)
+    return _conclusion_incident_report().reconcile(
+        response, prompt_package, _incident_report_dependencies(),
     )
-    verdict_validation = (
-        response.get("_verdict_validation")
-        if isinstance(response.get("_verdict_validation"), dict)
-        else {}
-    )
-    guard = (
-        verdict_validation.get("deterministic_evidence_guard")
-        if isinstance(verdict_validation.get("deterministic_evidence_guard"), dict)
-        else {}
-    )
-    automation_controls = (
-        response.get("_automation_controls")
-        if isinstance(response.get("_automation_controls"), dict)
-        else {}
-    )
-    reconciliation_reason = ""
-    if guard.get("override_applied"):
-        reconciliation_reason = "deterministic evidence guard changed the model verdict"
-    elif verdict_validation.get("material_contradiction"):
-        reconciliation_reason = "runtime factored-verdict validation found a material contradiction"
-    elif not validation.get("valid"):
-        reconciliation_reason = "the model omitted or malformed required responder report fields"
-    elif str(response.get("final_disposition_status") or "").startswith(
-        "review_required_"
-    ):
-        reconciliation_reason = "the required independent review was unavailable or invalid"
-    elif (
-        automation_controls.get("containment_blocked")
-        and _incident_report_requests_containment(report)
-    ):
-        reconciliation_reason = "runtime safety controls blocked model-authored containment"
-
-    if reconciliation_reason:
-        validation["top_level_before_reconciliation"] = {
-            key: bounded_text(response.get(key), 2000)
-            for key in ("bluf", "summary", "likely_meaning")
-        }
-        validation["model_narrative_before_reconciliation"] = {
-            key: bounded_text(report.get(key), 2000)
-            for key in (
-                "executive_bluf",
-                "detection_outcome_reasoning",
-                "conclusion",
-            )
-        }
-        validation["model_actions_before_reconciliation"] = {
-            key: bounded_text_list(report.get(key), limit=20, item_limit=1000)
-            for key in (
-                "containment_recommendations",
-                "eradication_recommendations",
-                "recovery_recommendations",
-            )
-        }
-        canonical = _canonical_incident_disposition_sentence(response)
-        report["executive_bluf"] = canonical
-        if guard.get("rule_intent_match") == "mismatch":
-            report["detection_outcome_reasoning"] = (
-                "Collector-owned detection validation recorded rule_intent_match=mismatch. "
-                "The runtime therefore set detection_validity=logic_error and did not allow "
-                "the detection name alone to support malicious attribution or containment."
-            )
-        else:
-            report["detection_outcome_reasoning"] = (
-                f"{canonical} The displayed disposition was reconciled because "
-                f"{reconciliation_reason}."
-            )
-        report.update(_human_review_incident_actions(response))
-        report["conclusion"] = (
-            f"{canonical} Human review is required before relying on superseded "
-            "model-authored narrative."
-        )
-        constraint = (
-            "The runtime replaced contradictory or incomplete responder narrative "
-            f"because {reconciliation_reason}."
-        )
-        constraints = bounded_text_list(report.get("constraints"))
-        if constraint not in constraints:
-            constraints.append(constraint)
-        report["constraints"] = constraints
-        validation["narrative_reconciled"] = True
-        validation["reconciliation_reason"] = reconciliation_reason
-        # Alert-store and the dashboard index these top-level compatibility
-        # fields. They must never continue advertising a superseded verdict
-        # after the canonical Incident Responder report was reconciled.
-        response["bluf"] = report["executive_bluf"]
-        response["summary"] = report["conclusion"]
-        response["likely_meaning"] = report["detection_outcome_reasoning"]
-    else:
-        validation["narrative_reconciled"] = False
-        validation["reconciliation_reason"] = ""
-    validation["canonical_confidence"] = report["confidence"]
-    validation["canonical_confidence_score"] = report["confidence_score"]
-    response["_incident_response_report_validation"] = validation
-    return response
 
 
 def incident_query_audit(prompt_package: dict[str, Any]) -> dict[str, Any]:

@@ -272,6 +272,9 @@ from their authoritative runtime owners.
 Advisory suppress/drop coherence is a separate conclusion policy module; it
 records deterministic blockers and always preserves explicit human approval
 as the only authority for detection-control changes.
+Durable Incident Responder report schema, timeline ordering, normalization,
+and canonical narrative reconciliation are isolated from query-evidence
+completeness scoring so each policy can evolve independently.
 The legacy runner functions remain compatibility delegates and inject runtime
 policy explicitly, preserving existing test seams while keeping review-package
 mutation and reviewer-output admission out of the composition root.

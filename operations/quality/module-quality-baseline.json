@@ -40,7 +40,7 @@
       "max_lines": 2018
     },
     "n8n/bin/run-local-ai-analysis.py": {
-      "max_lines": 15688
+      "max_lines": 15363
     },
     "onion-sentinel-dashboard/ac_hunter_review.py": {
       "max_lines": 2225
@@ -705,9 +705,6 @@
     "n8n/bin/run-local-ai-analysis.py::normalize_correlation_assessment": {
       "max_complexity": 17
     },
-    "n8n/bin/run-local-ai-analysis.py::normalize_incident_response_report": {
-      "max_complexity": 18
-    },
     "n8n/bin/run-local-ai-analysis.py::normalize_investigation_event_tuple": {
       "max_complexity": 18
     },
@@ -738,10 +735,6 @@
     "n8n/bin/run-local-ai-analysis.py::read_gpu_temperature_celsius": {
       "max_complexity": 17
     },
-    "n8n/bin/run-local-ai-analysis.py::reconcile_incident_response_report": {
-      "max_complexity": 21,
-      "max_lines": 113
-    },
     "n8n/bin/run-local-ai-analysis.py::recover_repair_observables_from_trusted_catalog": {
       "max_complexity": 17
     },
@@ -754,9 +747,6 @@
     },
     "n8n/bin/run-local-ai-analysis.py::validate_evidence_references": {
       "max_complexity": 20
-    },
-    "n8n/bin/run-local-ai-analysis.py::validate_incident_response_report_shape": {
-      "max_complexity": 37
     },
     "n8n/bin/run-local-ai-analysis.py::validate_investigation_query_repair_scope": {
       "max_complexity": 19
@@ -1416,5 +1406,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "2dcafc57ee80ce5509194c5098782ea099056b0c"
+  "source_release": "bd17b8f6549fc2e7161dd61dd6c6a12ebfab2d6d"
 }
