@@ -123,6 +123,14 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_analyst_adjudication_modal.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_analyst_adjudication_modal.py",
+      "required_symbols": [
+        "analyst_adjudication_modal_html"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_flow_page.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_flow_page.py",

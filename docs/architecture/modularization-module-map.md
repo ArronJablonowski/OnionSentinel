@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (6,020
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (5,805
 lines).
 
 | Boundary | Responsibilities |
@@ -396,6 +396,13 @@ detail behavior, copy controls, sorting, pagination, and reactive refresh
 client. The builder re-exports `incident_response_page_section`; incident
 storage, authorization, reanalysis execution, and detail serialization remain
 behind the existing `/api/soc-incidents` contracts.
+
+`dashboard_analyst_adjudication_modal.py` owns the shared SOC/Incident analyst
+decision dialog, review badges, accessible status feedback, and same-origin
+append-only submission client. The builder directly re-exports
+`analyst_adjudication_modal_html`; authentication, current-analysis binding,
+terminal-action guards, case resolution, and adjudication persistence remain
+behind the existing alert-store API contracts.
 
 `dashboard_flow_page.py` owns the pure data-flow renderer, enrichment-service
 tiles, responsive pipeline styles, and privacy-toggle client. The builder
