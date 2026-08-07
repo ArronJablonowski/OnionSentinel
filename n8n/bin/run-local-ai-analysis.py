@@ -1819,6 +1819,12 @@ def _query_execution_endpoint():
     return endpoint
 
 
+def _query_execution_security_onion():
+    _provider_routing()
+    from onion_sentinel.analysis.query.execution import security_onion
+    return security_onion
+
+
 def _query_derived():
     _provider_routing()
     from onion_sentinel.analysis.query import derived
@@ -5435,194 +5441,27 @@ def execute_investigation_query_batch(
     security_requests = [
         request for request in requests if request["backend"] in {"elastic", "oql"}
     ]
-    security_context_error = ""
-    try:
-        security_authorization_context = security_onion_authorization_context(
-            authorization_context
-        )
-    except InvestigationQueryContractError as exc:
-        security_authorization_context = {}
-        security_context_error = (
-            "Security Onion query failed isolated local authorization: "
-            f"{str(exc)[:700]}"
-        )
-    admitted_security: list[dict[str, Any]] = []
-    security_observables: set[tuple[str, str]] = set()
-    can_preflight_security = all(
-        key in security_authorization_context
-        for key in (
-            "context_id",
-            "case_id",
-            "actor_role",
-            "anchor",
-            *(
-                ["anchor_time"]
-                if INVESTIGATION_QUERY_V2
-                else []
-            ),
-            "time_envelope",
-            "permitted_observables",
-        )
+    security_module = _query_execution_security_onion()
+    security_outcome = security_module.execute(
+        security_requests, authorization_context, round_number=round_number,
+        policy=security_module.Policy(
+            query_contract=INVESTIGATION_QUERY_CONTRACT,
+            require_anchor_time=INVESTIGATION_QUERY_V2,
+        ),
+        dependencies=security_module.Dependencies(
+            project_context=security_onion_authorization_context,
+            authorize=authorize_investigation_query_request,
+            executor=security_onion_executor,
+            text=_query_text,
+            random_hex=lambda size: os.urandom(size).hex(),
+            bounded_audit=_bounded_trusted_query_audit,
+            safe_audit_summary=_safe_audit_summary,
+            contract_error=InvestigationQueryContractError,
+            query_error=InvestigationQueryError,
+        ),
     )
-    for request_index, request in enumerate(security_requests, 1):
-        request_observables = {
-            (kind, value)
-            for kind, values in request["parameters"]["observables"].items()
-            for value in values
-        }
-        reason = security_context_error
-        if reason:
-            pass
-        elif len(admitted_security) >= 4:
-            reason = "at most four Security Onion Elastic/OQL queries are allowed per round"
-        elif len(security_observables.union(request_observables)) > 24:
-            reason = "Security Onion query batch exceeds 24 distinct observables"
-        elif can_preflight_security:
-            preflight_proposal = {
-                "query_contract": INVESTIGATION_QUERY_CONTRACT,
-                "batch_id": f"preflight-r{round_number}-q{request_index}",
-                "queries": [
-                    {
-                        "query_id": request["query_id"],
-                        "dialect": request["backend"],
-                        "pack": request["parameters"]["pack"],
-                        "purpose": request["purpose"],
-                        "window": request["parameters"]["window"],
-                        "observables": request["parameters"]["observables"],
-                        **(
-                            {"event_tuple": request["parameters"]["event_tuple"]}
-                            if request["parameters"].get("event_tuple")
-                            else {}
-                        ),
-                        "size": request["parameters"]["size"],
-                        "aggregation": request["parameters"]["aggregation"],
-                    }
-                ],
-            }
-            try:
-                authorize_investigation_query_request(
-                    preflight_proposal,
-                    security_authorization_context,
-                )
-            except InvestigationQueryContractError as exc:
-                reason = (
-                    "Security Onion query failed isolated local authorization: "
-                    f"{str(exc)[:700]}"
-                )
-        if reason:
-            results.append(
-                {
-                    "query_id": request["query_id"],
-                    "backend": request["backend"],
-                    "status": "rejected",
-                    "read_only": True,
-                    "error": reason,
-                    "normalization": request.get("normalization") or {},
-                }
-            )
-            continue
-        admitted_security.append(request)
-        security_observables.update(request_observables)
-    security_requests = admitted_security
-    if security_requests:
-        batch_id = (
-            f"{_query_text(authorization_context.get('case_id'), 80) or 'investigation'}"
-            f"-r{round_number}-{os.urandom(8).hex()}"
-        )
-        proposal = {
-            "query_contract": INVESTIGATION_QUERY_CONTRACT,
-            "batch_id": batch_id,
-            "queries": [
-                {
-                    "query_id": request["query_id"],
-                    "dialect": request["backend"],
-                    "pack": request["parameters"]["pack"],
-                    "purpose": request["purpose"],
-                    "window": request["parameters"]["window"],
-                    "observables": request["parameters"]["observables"],
-                    **(
-                        {"event_tuple": request["parameters"]["event_tuple"]}
-                        if request["parameters"].get("event_tuple")
-                        else {}
-                    ),
-                    "size": request["parameters"]["size"],
-                    "aggregation": request["parameters"]["aggregation"],
-                }
-                for request in security_requests
-            ],
-        }
-        try:
-            artifact = security_onion_executor(
-                proposal,
-                security_authorization_context,
-            )
-            model_evidence = (
-                artifact.get("model_evidence")
-                if isinstance(artifact, dict)
-                else None
-            )
-            if not isinstance(model_evidence, (dict, list)):
-                raise InvestigationQueryError(
-                    "Security Onion pivot broker returned no model evidence"
-                )
-            artifact_audit = (
-                artifact.get("audit")
-                if isinstance(artifact.get("audit"), dict)
-                else {}
-            )
-            security_onion_response_digest = _query_text(
-                artifact_audit.get("security_onion_response_digest"),
-                64,
-            )
-            status = (
-                "ok"
-                if artifact.get("complete") is True
-                and artifact.get("partial") is not True
-                else "partial"
-                if artifact.get("partial") is True
-                else "error"
-            )
-            results.append(
-                {
-                    "backend": "security_onion",
-                    "query_ids": [item["query_id"] for item in security_requests],
-                    "status": status,
-                    "read_only": True,
-                    "evidence": model_evidence,
-                    "security_onion_response_digest": security_onion_response_digest,
-                    "trusted_query_audit": _bounded_trusted_query_audit(
-                        artifact.get("query_audit")
-                        or (
-                            artifact.get("audit", {}).get("query_audit")
-                            if isinstance(artifact.get("audit"), dict)
-                            else []
-                        )
-                    ),
-                }
-            )
-            audits.append(
-                {
-                    "backend": "security_onion",
-                    **_safe_audit_summary(
-                        {
-                            **artifact_audit,
-                            "complete": artifact.get("complete"),
-                        }
-                    ),
-                }
-            )
-        except Exception as exc:
-            message = f"{type(exc).__name__}: {exc}"[:1000]
-            for request in security_requests:
-                results.append(
-                    {
-                        "query_id": request["query_id"],
-                        "backend": request["backend"],
-                        "status": "error",
-                        "read_only": True,
-                        "error": message,
-                    }
-                )
+    results.extend(security_outcome.results)
+    audits.extend(security_outcome.audits)
 
     osquery_requests = [request for request in requests if request["backend"] == "osquery"]
     endpoint_module = _query_execution_endpoint()
