@@ -390,6 +390,11 @@ admission, ignored-request, remaining-capacity, and repair-attempt transitions.
 Every transition returns its resulting state plus bounded audit metadata; the
 legacy runner consumes those transitions instead of maintaining a parallel
 mutable budget ledger.
+The evaluation-only missing-pivot retry lives under
+`onion_sentinel.analysis.query.planning_retry`. It owns the single-attempt
+instruction lifecycle, prompt-size admission, model-call recording, route
+attestation, and required-request validation while receiving model and harness
+operations only through injected callbacks.
 The legacy runner functions remain compatibility delegates and inject runtime
 policy explicitly, preserving existing test seams while keeping review-package
 mutation and reviewer-output admission out of the composition root.

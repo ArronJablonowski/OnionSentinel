@@ -6628,7 +6628,10 @@ def apply_investigation_query_loop(
     response = primary_response
     rounds: list[dict[str, Any]] = []
     _provider_routing()
-    from onion_sentinel.analysis.query import engine as engine_module
+    from onion_sentinel.analysis.query import (
+        engine as engine_module,
+        planning_retry as planning_retry_module,
+    )
     state_module = _query_state()
     state_policy = state_module.Policy(
         maximum_rounds=MAX_INVESTIGATION_QUERY_ROUNDS,
@@ -6682,25 +6685,8 @@ def apply_investigation_query_loop(
     initial_requests = deterministic_requests + model_initial_requests
     if evaluation_query_guarantee and not initial_requests:
         query_planning_retry_attempted = True
-        # Consume one of the ordinary model-call slots for planning while
-        # retaining room for both bounded reviewer attempts under the
-        # checked-in six-call harness budget.
         limits = limits.evaluation_retry(state_policy)
         engine_state = engine_module.begin(limits)
-        prompt_package["investigation_query_planning_retry"] = {
-            "evaluation_only": True,
-            "attempt": 1,
-            "maximum_attempts": 1,
-            "remaining_query_rounds": limits.rounds,
-            "remaining_queries": limits.queries,
-            "maximum_queries_this_round": MAX_INVESTIGATION_QUERIES_PER_ROUND,
-            "instruction": (
-                "The initial primary response did not request a dynamic investigation pivot. "
-                "Return at least one narrow, material, read-only investigation_query_requests "
-                "entry using only the advertised schema, backends, observables, time envelope, "
-                "and budgets. Do not invent direct tool access or widen authorization."
-            ),
-        }
         maximum_prompt_bytes = int(
             getattr(args, "max_prompt_bytes", DEFAULT_MAX_PROMPT_BYTES)
             or DEFAULT_MAX_PROMPT_BYTES
@@ -6714,108 +6700,68 @@ def apply_investigation_query_loop(
                 maximum_prompt_bytes,
                 CODEX_CLI_MAX_PROMPT_PACKAGE_BYTES,
             )
-        serialized_prompt_bytes = len(
-            json.dumps(
-                model_safe_copy(prompt_package, hosted=hosted_route),
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
-            ).encode("utf-8")
-        )
-        if serialized_prompt_bytes > maximum_prompt_bytes:
-            raise InvestigationQueryError(
-                "evaluation query-planning retry prompt exceeds max_prompt_bytes"
-            )
-        observe_harness(
-            lambda: harness_runtime.phase(
-                "investigation_query_planning",
-                route,
-                "evaluation retry 1 of 1 after initial response omitted pivots",
-            )
-            if harness_runtime is not None
-            else None
-        )
-        planning_call_id = "primary-query-planning-retry-1"
-        planning_purpose = "evaluation query-planning retry 1 of 1"
-        observe_harness(
-            lambda: harness_runtime.preflight_model_call(
-                call_id=planning_call_id,
-                input_value=prompt_package,
-                requested_route=route,
-                purpose=planning_purpose,
-            )
-            if harness_runtime is not None
-            else None
-        )
-        model_started = time.monotonic()
-        try:
-            planned_response = model_executor(
-                route,
-                prompt_package,
-                args,
-                settings,
-            )
-        except (Exception, SystemExit) as exc:
+        def record_planning_retry(
+            result: dict[str, Any], duration: float, status: str
+        ) -> None:
+            kwargs = {"status": status} if status else {}
             observe_harness(
                 lambda: harness_runtime.model_call(
-                    call_id=planning_call_id,
-                    purpose=planning_purpose,
+                    call_id=planning_retry_module.CALL_ID,
+                    purpose=planning_retry_module.PURPOSE,
                     requested_route=route,
-                    response={},
+                    response=result,
                     input_value=prompt_package,
-                    duration_seconds=time.monotonic() - model_started,
-                    status=f"failed:{type(exc).__name__}",
-                )
-                if harness_runtime is not None
-                else None
+                    duration_seconds=duration,
+                    **kwargs,
+                ) if harness_runtime is not None else None
             )
-            raise
-        if not isinstance(planned_response, dict):
-            observe_harness(
-                lambda: harness_runtime.model_call(
-                    call_id=planning_call_id,
-                    purpose=planning_purpose,
-                    requested_route=route,
-                    response={},
-                    input_value=prompt_package,
-                    duration_seconds=time.monotonic() - model_started,
-                    status="failed:InvalidResponse",
-                )
-                if harness_runtime is not None
-                else None
-            )
-            raise InvestigationQueryError(
-                "evaluation query-planning retry returned a non-object response"
-            )
-        observe_harness(
-            lambda: harness_runtime.model_call(
-                call_id=planning_call_id,
-                purpose=planning_purpose,
-                requested_route=route,
-                response=planned_response,
-                input_value=prompt_package,
-                duration_seconds=time.monotonic() - model_started,
-            )
-            if harness_runtime is not None
-            else None
+
+        retry_result = planning_retry_module.run(
+            prompt_package,
+            route=route,
+            limits=limits,
+            maximum_prompt_bytes=maximum_prompt_bytes,
+            hosted=hosted_route,
+            policy=planning_retry_module.Policy(
+                maximum_queries_per_round=MAX_INVESTIGATION_QUERIES_PER_ROUND,
+                instruction=(
+                    "The initial primary response did not request a dynamic "
+                    "investigation pivot. Return at least one narrow, material, "
+                    "read-only investigation_query_requests entry using only the "
+                    "advertised schema, backends, observables, time envelope, and "
+                    "budgets. Do not invent direct tool access or widen authorization."
+                ),
+            ),
+            dependencies=planning_retry_module.Dependencies(
+                model_safe_copy=lambda value, hosted: model_safe_copy(
+                    value, hosted=hosted
+                ),
+                execute_model=lambda package: model_executor(
+                    route, package, args, settings
+                ),
+                pop_requests=pop_investigation_query_requests,
+                phase=lambda: observe_harness(
+                    lambda: harness_runtime.phase(
+                        "investigation_query_planning",
+                        route,
+                        "evaluation retry 1 of 1 after initial response omitted pivots",
+                    ) if harness_runtime is not None else None
+                ),
+                preflight=lambda package: observe_harness(
+                    lambda: harness_runtime.preflight_model_call(
+                        call_id=planning_retry_module.CALL_ID,
+                        input_value=package,
+                        requested_route=route,
+                        purpose=planning_retry_module.PURPOSE,
+                    ) if harness_runtime is not None else None
+                ),
+                record=record_planning_retry,
+                monotonic=time.monotonic,
+            ),
+            error_type=InvestigationQueryError,
         )
-        # This instruction is scoped to the single planning retry. Keeping it
-        # in later evidence-synthesis prompts could incorrectly steer a final
-        # response back into query-only mode.
-        prompt_package.pop("investigation_query_planning_retry", None)
-        observed_route = str(
-            planned_response.get("_analysis_model_route") or ""
-        ).strip()
-        if observed_route != route:
-            raise InvestigationQueryError(
-                "evaluation query-planning retry did not preserve the assigned model route"
-            )
-        response = planned_response
-        initial_requests = pop_investigation_query_requests(response)
-        if not initial_requests:
-            raise InvestigationQueryError(
-                "evaluation query-planning retry produced no investigation_query_requests"
-            )
+        response = retry_result.response
+        initial_requests = list(retry_result.requests)
 
     for round_number in range(1, limits.rounds + 1):
         harness_round_number = query_round_offset + round_number

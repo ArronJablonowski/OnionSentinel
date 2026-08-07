@@ -37,6 +37,7 @@ REQUIRED_MODULES = (
     "onion_sentinel.analysis.query.enrichment",
     "onion_sentinel.analysis.query.event_tuple",
     "onion_sentinel.analysis.query.outcomes",
+    "onion_sentinel.analysis.query.planning_retry",
     "onion_sentinel.analysis.query.primitives",
     "onion_sentinel.analysis.query.prompt_admission",
     "onion_sentinel.analysis.query.prompt_budget",
