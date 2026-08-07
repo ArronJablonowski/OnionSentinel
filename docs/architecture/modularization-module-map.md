@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (6,774
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (6,673
 lines).
 
 | Boundary | Responsibilities |
@@ -413,6 +413,11 @@ generation, candidate rendering, responsive styles, expansion state, copy
 controls, and reactive refresh. The builder ranks reports and converts the top
 candidates into `ThreatHuntCandidateViewModel` instances while compatibility
 wrappers preserve the existing report-oriented helper signatures.
+
+`dashboard_siem_engineering_assets.py` owns the SIEM Engineering base and
+expanded-report styles plus the accessible, reactive recommendation-expansion
+client. The builder re-exports these assets while recommendation view models
+and the pure page renderer are moved across the next controlled boundary.
 
 ## Alert Store
 
