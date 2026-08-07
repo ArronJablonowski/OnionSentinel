@@ -475,9 +475,9 @@ class ApplicationLogPageContractTests(unittest.TestCase):
         cls.shell = (
             DASHBOARD_DIR / "scripts" / "dashboard_shell_components.py"
         ).read_text(encoding="utf-8")
-        start = cls.builder.index("def logs_page_section()")
-        end = cls.builder.index("\n\nALERTS_REACTIVE_FALLBACK", start)
-        cls.section = cls.builder[start:end]
+        cls.section = (
+            DASHBOARD_DIR / "scripts" / "dashboard_logs_page.py"
+        ).read_text(encoding="utf-8")
 
     def test_logs_page_is_in_navigation_and_uses_fixed_api(self) -> None:
         self.assertIn(

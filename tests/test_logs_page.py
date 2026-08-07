@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_DIR = ROOT / "onion-sentinel-dashboard"
 BUILDER_PATH = DASHBOARD_DIR / "scripts" / "build_soc_alerts_dashboard.py"
 SHELL_COMPONENT_PATH = DASHBOARD_DIR / "scripts" / "dashboard_shell_components.py"
+LOGS_PAGE_PATH = DASHBOARD_DIR / "scripts" / "dashboard_logs_page.py"
 SERVER_PATH = DASHBOARD_DIR / "onion_sentinel_server.py"
 INSTALLER_PATH = ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
 
@@ -40,6 +41,7 @@ class LogsPageTests(unittest.TestCase):
         )
         cls.builder_source = BUILDER_PATH.read_text(encoding="utf-8")
         cls.shell_source = SHELL_COMPONENT_PATH.read_text(encoding="utf-8")
+        cls.logs_page_source = LOGS_PAGE_PATH.read_text(encoding="utf-8")
         cls.server_source = SERVER_PATH.read_text(encoding="utf-8")
         cls.installer_source = INSTALLER_PATH.read_text(encoding="utf-8")
 
@@ -133,6 +135,11 @@ class LogsPageTests(unittest.TestCase):
         self.assertIn("min(application_logs.MAX_TAIL_LINES, lines)", self.server_source)
 
     def test_render_dispatch_builds_the_logs_specific_page(self) -> None:
+        self.assertIn(
+            "from dashboard_logs_page import logs_page_section",
+            self.builder_source,
+        )
+        self.assertIn("def logs_page_section()", self.logs_page_source)
         self.assertIn("elif page_key == 'logs':", self.builder_source)
         self.assertIn(
             "replace_main_page_content(rendered, logs_page_section())",
@@ -146,6 +153,11 @@ class LogsPageTests(unittest.TestCase):
         self.assertNotIn('id="alerts-view"', self.page)
 
     def test_mac_studio_installer_packages_the_log_api_module(self) -> None:
+        page_copy_command = (
+            'cp "$REPO_DIR/onion-sentinel-dashboard/scripts/dashboard_logs_page.py" '
+            '"$DASHBOARD_RUNTIME_DIR/scripts/dashboard_logs_page.py"'
+        )
+        self.assertEqual(self.installer_source.count(page_copy_command), 1)
         copy_command = (
             'cp "$REPO_DIR/onion-sentinel-dashboard/application_logs.py" '
             '"$DASHBOARD_RUNTIME_DIR/application_logs.py"'

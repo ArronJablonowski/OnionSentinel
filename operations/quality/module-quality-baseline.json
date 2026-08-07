@@ -52,7 +52,7 @@
       "max_lines": 14366
     },
     "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py": {
-      "max_lines": 11357
+      "max_lines": 11020
     },
     "onion-sentinel-dashboard/software_inventory.py": {
       "max_lines": 1181
@@ -994,9 +994,6 @@
       "max_complexity": 46,
       "max_lines": 149
     },
-    "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py::logs_page_section": {
-      "max_lines": 336
-    },
     "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py::markdown_to_html": {
       "max_complexity": 20,
       "max_lines": 153
@@ -1306,5 +1303,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "a3044e137849232ec4bc82f48fbe1609514e3800"
+  "source_release": "9b341d183a56abd15361b82e14b4c20ec8d25e5a"
 }
