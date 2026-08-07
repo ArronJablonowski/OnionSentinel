@@ -471,6 +471,14 @@ composition preserves the database-unavailable JSON fallback. `report_portal.py`
 retains timestamp parsing, read-only SQLite execution, PCAP directory sizing,
 status loading, and group-identity adapters.
 
+`portal_live_revisions.py` owns opaque deterministic revision hashing, bounded
+file identity signals, schema-tolerant revision-row reads, and the Incident
+Responder live-state repository across cases, groups, alerts, analyses,
+reviews, adjudications, and the newest reanalysis run. It returns only a digest
+to the browser. `report_portal.py` retains runtime path policy, database
+connection creation, schema introspection adapters, and composition of the
+cross-page revision envelope.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and

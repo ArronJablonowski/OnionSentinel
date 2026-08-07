@@ -172,6 +172,12 @@ from portal_soc_metrics import (
     exclude_group_rows,
     metrics_query_plan,
 )
+from portal_live_revisions import (
+    RevisionSchemaDependencies,
+    bounded_file_revision as _bounded_file_revision,
+    incident_response_revision,
+    revision_digest as _revision_digest,
+)
 from portal_incident_actions import (
     IncidentStatusPayloadError,
     normalize_incident_status_payload,
@@ -9001,25 +9007,6 @@ def soc_alert_events_snapshot() -> dict:
     }
 
 
-def _revision_digest(value: object) -> str:
-    """Return an opaque, deterministic live-update token."""
-    raw = json.dumps(value, separators=(",", ":"), sort_keys=True, default=str)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def _bounded_file_revision(path: Path, maximum_bytes: int) -> str:
-    """Fingerprint file identity without exposing its path or contents."""
-    try:
-        metadata = path.stat()
-        if not path.is_file() or metadata.st_size > maximum_bytes:
-            return _revision_digest(("invalid",))
-        return _revision_digest((metadata.st_mtime_ns, metadata.st_size))
-    except FileNotFoundError:
-        return _revision_digest(("missing",))
-    except OSError:
-        return _revision_digest(("unavailable",))
-
-
 def asset_inventory_live_revision() -> str:
     """Track the public inventory view, including time-scoped assignments."""
     _status, payload = asset_inventory_response()
@@ -9045,163 +9032,17 @@ def software_inventory_live_revision() -> str:
     )
 
 
-def _revision_rows(
-    conn: sqlite3.Connection,
-    table: str,
-    columns: tuple[str, ...],
-    *,
-    where_sql: str = "",
-    arguments: tuple[object, ...] = (),
-    order_sql: str = "",
-    limit: int | None = None,
-) -> list[dict[str, object]]:
-    """Read a schema-tolerant, bounded table slice for revision hashing."""
-    if not sqlite_table_exists(conn, table):
-        return []
-    available = sqlite_table_columns(conn, table)
-    selected = [column for column in columns if column in available]
-    if not selected:
-        return []
-    query = f"SELECT {', '.join(selected)} FROM {table}"
-    if where_sql:
-        query += f" WHERE {where_sql}"
-    if order_sql:
-        query += f" ORDER BY {order_sql}"
-    query_arguments = list(arguments)
-    if limit is not None:
-        query += " LIMIT ?"
-        query_arguments.append(limit)
-    return [dict(row) for row in conn.execute(query, query_arguments).fetchall()]
-
-
 def incident_response_live_revision() -> str:
     """Fingerprint only records capable of changing the Incident Responder UI."""
     try:
         with soc_alert_db_connect() as conn:
-            cases = _revision_rows(
+            return incident_response_revision(
                 conn,
-                "incident_response_cases",
-                (
-                    "case_id", "group_id", "dashboard_group_id",
-                    "representative_alert_id", "status", "agent_status",
-                    "escalated_at", "updated_at", "latest_analysis_id",
-                    "latest_model", "latest_generated_at", "latest_error",
-                    "resolution_reason", "resolved_at", "resolved_by",
+                RevisionSchemaDependencies(
+                    table_exists=sqlite_table_exists,
+                    table_columns=sqlite_table_columns,
                 ),
-                order_sql="case_id",
             )
-            dashboard_group_ids = tuple(
-                str(row["dashboard_group_id"])
-                for row in cases
-                if row.get("dashboard_group_id")
-            )
-            representative_alert_ids = tuple(
-                str(row["representative_alert_id"])
-                for row in cases
-                if row.get("representative_alert_id")
-            )
-            analysis_ids = tuple(
-                str(row["latest_analysis_id"])
-                for row in cases
-                if row.get("latest_analysis_id")
-            )
-            case_ids = tuple(
-                str(row["case_id"]) for row in cases if row.get("case_id")
-            )
-
-            def related_rows(
-                table: str,
-                columns: tuple[str, ...],
-                key: str,
-                values: tuple[str, ...],
-            ) -> list[dict[str, object]]:
-                if not values:
-                    return []
-                placeholders = ",".join("?" for _ in values)
-                return _revision_rows(
-                    conn,
-                    table,
-                    columns,
-                    where_sql=f"{key} IN ({placeholders})",
-                    arguments=values,
-                    order_sql=key,
-                )
-
-            state: dict[str, object] = {"cases": cases}
-            state["groups"] = related_rows(
-                "alert_group_summary",
-                (
-                    "group_id", "rule_name", "severity", "severity_label",
-                    "triage_level", "source_ip", "destination_ip",
-                    "destination_port", "raw_alert_count", "total_seen_count",
-                    "first_seen", "last_seen",
-                ),
-                "group_id",
-                dashboard_group_ids,
-            )
-            state["alerts"] = related_rows(
-                "alerts",
-                (
-                    "alert_id", "rule_name", "severity", "severity_label",
-                    "triage_level", "source_ip", "destination_ip",
-                    "destination_port", "seen_count", "first_seen", "last_seen",
-                ),
-                "alert_id",
-                representative_alert_ids,
-            )
-            state["analyses"] = related_rows(
-                "ai_analysis_runs",
-                (
-                    "analysis_id", "generated_at", "model", "detection_outcome",
-                    "confidence", "evidence_hash", "response_json",
-                ),
-                "analysis_id",
-                analysis_ids,
-            )
-            state["reviews"] = related_rows(
-                "ai_second_opinion_runs",
-                (
-                    "analysis_id", "status", "reviewer_outcome",
-                    "reviewer_confidence", "agreement", "material_disagreement",
-                    "disputed_fields_json", "generated_at",
-                ),
-                "analysis_id",
-                analysis_ids,
-            )
-            state["adjudications"] = related_rows(
-                "analyst_adjudications",
-                (
-                    "case_id", "analysis_id", "outcome_override", "confidence",
-                    "event_status", "detection_validity", "activity_disposition",
-                    "handling", "case_resolution_reason", "created_at",
-                ),
-                "case_id",
-                case_ids,
-            )
-            latest_runs = _revision_rows(
-                conn,
-                "incident_reanalysis_runs",
-                (
-                    "run_id", "release_id", "scope", "status", "total_count",
-                    "created_at", "updated_at", "completed_at",
-                ),
-                order_sql="created_at DESC",
-                limit=1,
-            )
-            state["reanalysis_runs"] = latest_runs
-            if latest_runs:
-                run_id = str(latest_runs[0].get("run_id") or "")
-                state["reanalysis_cases"] = related_rows(
-                    "incident_reanalysis_run_cases",
-                    (
-                        "run_id", "case_id", "status", "skip_reason",
-                        "latest_error", "analysis_id", "result_generated_at",
-                        "updated_at",
-                    ),
-                    "run_id",
-                    (run_id,),
-                )
-            return _revision_digest(state)
     except (FileNotFoundError, sqlite3.Error):
         return _revision_digest(("unavailable",))
 
