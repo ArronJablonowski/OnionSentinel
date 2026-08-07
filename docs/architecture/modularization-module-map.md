@@ -128,6 +128,9 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
 - Top-level section admission, canonical authorization references, compact vs
   ordinary routing, and contract attachment now live in
   `analysis.evidence.contract` behind injected evidence ports.
+- Canonical query scalar/timestamp parsing and trusted-envelope 24-hour
+  clamping now live in `analysis.query.primitives` and
+  `analysis.query.window`, preserving explicit adjustment audit metadata.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports

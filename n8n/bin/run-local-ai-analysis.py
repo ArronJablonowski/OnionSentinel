@@ -1768,6 +1768,18 @@ def _evidence_contract_dependencies():
     )
 
 
+def _query_primitives():
+    _provider_routing()
+    from onion_sentinel.analysis.query import primitives
+    return primitives
+
+
+def _query_window():
+    _provider_routing()
+    from onion_sentinel.analysis.query import window
+    return window
+
+
 def _conclusion_authorization_evidence():
     _provider_routing()
     from onion_sentinel.analysis.conclusions import authorization_evidence
@@ -4268,21 +4280,14 @@ class InvestigationQueryError(ValueError):
 
 
 def _query_text(value: Any, limit: int) -> str:
-    return str(value or "").strip()[:limit]
+    return _query_primitives().text(value, limit)
 
 
 def _positive_query_int(value: Any, default: int, maximum: int, label: str) -> int:
-    if value in (None, ""):
-        return default
-    if isinstance(value, bool):
-        raise InvestigationQueryError(f"{label} must be an integer")
-    try:
-        number = int(value)
-    except (TypeError, ValueError) as exc:
-        raise InvestigationQueryError(f"{label} must be an integer") from exc
-    if number < 1 or number > maximum:
-        raise InvestigationQueryError(f"{label} must be between 1 and {maximum}")
-    return number
+    return _query_primitives().positive_integer(
+        value, default, maximum, label,
+        error_type=InvestigationQueryError,
+    )
 
 
 INVESTIGATION_PARAMETER_KEYS = {
@@ -4302,22 +4307,13 @@ INVESTIGATION_PARAMETER_UNION = frozenset().union(
 
 
 def _query_utc(value: Any, label: str) -> dt.datetime:
-    text = _query_text(value, 64)
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = dt.datetime.fromisoformat(text)
-    except ValueError as exc:
-        raise InvestigationQueryError(f"{label} must be an ISO-8601 timestamp") from exc
-    if parsed.tzinfo is None:
-        raise InvestigationQueryError(f"{label} must include a UTC offset")
-    return parsed.astimezone(dt.timezone.utc)
+    return _query_primitives().utc(
+        value, label, error_type=InvestigationQueryError
+    )
 
 
 def _query_utc_text(value: dt.datetime) -> str:
-    return value.astimezone(dt.timezone.utc).isoformat(
-        timespec="milliseconds"
-    ).replace("+00:00", "Z")
+    return _query_primitives().utc_text(value)
 
 
 def normalize_investigation_event_tuple(value: Any) -> dict[str, Any]:
@@ -4524,90 +4520,12 @@ def project_investigation_event_tuple(
 
 
 def normalize_investigation_query_window(
-    value: Any,
-    *,
-    time_envelope: Any = None,
+    value: Any, *, time_envelope: Any = None,
 ) -> tuple[dict[str, str], dict[str, Any]]:
-    """Narrow a model window to the broker's 24-hour read-only boundary.
-
-    The authorization context is trusted and centered on the selected alert.
-    When a model asks for the full 48-hour visible envelope, retain the 24 hours
-    nearest that center instead of rejecting the entire mixed batch. Any
-    narrowing is explicit audit metadata and therefore an evidence limitation,
-    never silent full-window coverage.
-    """
-    if not isinstance(value, dict) or set(value) != {"start", "end"}:
-        raise InvestigationQueryError(
-            "elastic/oql window must contain exact start and end timestamps"
-        )
-    requested_start = _query_utc(value.get("start"), "elastic/oql window start")
-    requested_end = _query_utc(value.get("end"), "elastic/oql window end")
-    if requested_end <= requested_start:
-        raise InvestigationQueryError("elastic/oql window must be positive")
-
-    envelope_start = requested_start
-    envelope_end = requested_end
-    if time_envelope is not None:
-        if (
-            not isinstance(time_envelope, dict)
-            or set(time_envelope) != {"start", "end"}
-        ):
-            raise InvestigationQueryError(
-                "trusted investigation time envelope is invalid"
-            )
-        envelope_start = _query_utc(
-            time_envelope.get("start"),
-            "trusted investigation time envelope start",
-        )
-        envelope_end = _query_utc(
-            time_envelope.get("end"),
-            "trusted investigation time envelope end",
-        )
-        if envelope_end <= envelope_start:
-            raise InvestigationQueryError(
-                "trusted investigation time envelope must be positive"
-            )
-
-    start = max(requested_start, envelope_start)
-    end = min(requested_end, envelope_end)
-    if end <= start:
-        raise InvestigationQueryError(
-            "elastic/oql window does not overlap its trusted time envelope"
-        )
-
-    maximum = dt.timedelta(hours=24)
-    reasons: list[str] = []
-    if start != requested_start or end != requested_end:
-        reasons.append("clipped_to_trusted_time_envelope")
-    if end - start > maximum:
-        center = envelope_start + (envelope_end - envelope_start) / 2
-        if center <= start:
-            end = start + maximum
-        elif center >= end:
-            start = end - maximum
-        else:
-            start = max(start, center - maximum / 2)
-            end = start + maximum
-            if end > min(requested_end, envelope_end):
-                end = min(requested_end, envelope_end)
-                start = end - maximum
-        reasons.append("clamped_to_24_hours_nearest_alert")
-
-    normalized = {
-        "start": _query_utc_text(start),
-        "end": _query_utc_text(end),
-    }
-    audit: dict[str, Any] = {
-        "adjusted": bool(reasons),
-        "reasons": reasons,
-    }
-    if reasons:
-        audit["requested_window"] = {
-            "start": _query_utc_text(requested_start),
-            "end": _query_utc_text(requested_end),
-        }
-        audit["executed_window"] = dict(normalized)
-    return normalized, audit
+    return _query_window().normalize(
+        value, time_envelope=time_envelope,
+        error_type=InvestigationQueryError,
+    )
 
 
 def project_investigation_parameters(
