@@ -1772,6 +1772,24 @@ def _review_authorization_dependencies():
     )
 
 
+def _review_disagreement():
+    _provider_routing()
+    from onion_sentinel.analysis.review import disagreement
+    return disagreement
+
+
+def _review_projection():
+    _provider_routing()
+    from onion_sentinel.analysis.review import projection
+    return projection
+
+
+def _review_gates():
+    _provider_routing()
+    from onion_sentinel.analysis.review import gates
+    return gates
+
+
 def _review_contracts():
     _provider_routing()
     from onion_sentinel.analysis.review import contracts
@@ -11191,214 +11209,9 @@ def apply_material_disagreement_gate(
     reviewer_response: dict[str, Any],
     comparison: dict[str, Any],
 ) -> dict[str, Any]:
-    """Publish a conservative disputed state instead of a contested verdict.
-
-    The primary and reviewer artifacts remain immutable inside the second-
-    opinion ledger. The top-level projection is what the dashboard and
-    downstream automation consume, so it must not continue to say no_action,
-    authorized_benign, or suppress while the independent reviewer materially
-    disputes those claims.
-    """
-    disputed_fields = (
-        comparison.get("disputed_fields")
-        if isinstance(comparison.get("disputed_fields"), list)
-        else []
+    return _review_disagreement().apply(
+        primary_response, reviewer_response, comparison
     )
-    material_fields = {
-        str(item.get("field") or "")
-        for item in disputed_fields
-        if isinstance(item, dict) and item.get("material") is True
-    }
-    verdict_material_fields = {
-        "detection_outcome",
-        "event_status",
-        "detection_validity",
-        "activity_disposition",
-        "handling",
-        "duplicate_of",
-        "escalation_needed",
-    }
-    verdict_disputed = bool(
-        material_fields.intersection(verdict_material_fields)
-    )
-    if not verdict_disputed:
-        notice = (
-            "DISPUTED TUNING — the primary and independent reviewer agree "
-            "on the case disposition but materially disagree on a detection "
-            "control; human adjudication is required before tuning."
-        )
-        bluf = str(primary_response.get("bluf") or "").strip()
-        summary = str(primary_response.get("summary") or "").strip()
-        if not bluf.startswith("DISPUTED TUNING"):
-            primary_response["bluf"] = f"{notice} {bluf}".strip()
-        if not summary.startswith("DISPUTED TUNING"):
-            primary_response["summary"] = f"{notice} {summary}".strip()
-        evidence_gaps = (
-            list(primary_response.get("evidence_gaps"))
-            if isinstance(primary_response.get("evidence_gaps"), list)
-            else []
-        )
-        if notice not in evidence_gaps:
-            evidence_gaps.append(notice)
-        primary_response["evidence_gaps"] = evidence_gaps
-
-        report = primary_response.get("incident_response_report")
-        if isinstance(report, dict):
-            constraints = (
-                list(report.get("constraints"))
-                if isinstance(report.get("constraints"), list)
-                else []
-            )
-            if notice not in constraints:
-                constraints.append(notice)
-            report["constraints"] = constraints
-
-        calibration = (
-            dict(primary_response.get("_confidence_calibration"))
-            if isinstance(
-                primary_response.get("_confidence_calibration"),
-                dict,
-            )
-            else {}
-        )
-        limiters = (
-            list(calibration.get("limiters"))
-            if isinstance(calibration.get("limiters"), list)
-            else []
-        )
-        if "material_second_opinion_tuning_disagreement" not in limiters:
-            limiters.append(
-                "material_second_opinion_tuning_disagreement"
-            )
-        calibration["limiters"] = limiters
-        primary_response["_confidence_calibration"] = calibration
-        primary_response["_material_disagreement_gate"] = {
-            "version": 2,
-            "applied": True,
-            "scope": "control_only",
-            "agreement": comparison.get("agreement"),
-            "disputed_fields": disputed_fields,
-            "guarded_handling": primary_response.get("handling"),
-            "verdict_preserved": True,
-        }
-        return primary_response
-
-    primary_handling = str(
-        primary_response.get("handling") or ""
-    ).strip().lower()
-    reviewer_handling = str(
-        reviewer_response.get("handling") or ""
-    ).strip().lower()
-    if {primary_handling, reviewer_handling}.intersection(
-        {"contain", "escalate", "investigate"}
-    ):
-        guarded_handling = "investigate"
-    else:
-        guarded_handling = "monitor"
-
-    primary_response["detection_outcome"] = "inconclusive"
-    primary_response["activity_disposition"] = "unknown"
-    primary_response["handling"] = guarded_handling
-    primary_response["duplicate_of"] = None
-    primary_response["escalation_needed"] = True
-    primary_response["confidence"] = "low"
-    try:
-        score = float(primary_response.get("confidence_score") or 0.39)
-    except (TypeError, ValueError, OverflowError):
-        score = 0.39
-    primary_response["confidence_score"] = round(
-        min(max(score, 0.0), 0.39),
-        3,
-    )
-
-    notice = (
-        "DISPUTED — the primary and independent reviewer materially disagree; "
-        "human adjudication is required before closure, containment, or tuning."
-    )
-    bluf = str(primary_response.get("bluf") or "").strip()
-    summary = str(primary_response.get("summary") or "").strip()
-    if not bluf.startswith("DISPUTED"):
-        primary_response["bluf"] = f"{notice} {bluf}".strip()
-    if not summary.startswith("DISPUTED"):
-        primary_response["summary"] = f"{notice} {summary}".strip()
-    evidence_gaps = (
-        list(primary_response.get("evidence_gaps"))
-        if isinstance(primary_response.get("evidence_gaps"), list)
-        else []
-    )
-    if notice not in evidence_gaps:
-        evidence_gaps.append(notice)
-    primary_response["evidence_gaps"] = evidence_gaps
-    if guarded_handling == "investigate":
-        guarded_next_steps = [
-            "Preserve the current evidence and continue a bounded human investigation.",
-            "Resolve the material primary/reviewer disagreements with the specific additional evidence listed in the adjudication record.",
-            "Do not close, contain, tune, or write durable memory until a human reviewer records the adjudicated disposition.",
-        ]
-    else:
-        guarded_next_steps = [
-            "Continue monitoring while a human reviewer resolves the material primary/reviewer disagreements.",
-            "Collect only the bounded additional evidence listed in the adjudication record if the activity recurs.",
-            "Do not close, contain, tune, or write durable memory until a human reviewer records the adjudicated disposition.",
-        ]
-    primary_response["recommended_next_steps"] = guarded_next_steps
-
-    report = primary_response.get("incident_response_report")
-    if isinstance(report, dict):
-        executive = str(report.get("executive_bluf") or "").strip()
-        conclusion = str(report.get("conclusion") or "").strip()
-        if not executive.startswith("DISPUTED"):
-            report["executive_bluf"] = f"{notice} {executive}".strip()
-        if not conclusion.startswith("DISPUTED"):
-            report["conclusion"] = f"{notice} {conclusion}".strip()
-        constraints = (
-            list(report.get("constraints"))
-            if isinstance(report.get("constraints"), list)
-            else []
-        )
-        if notice not in constraints:
-            constraints.append(notice)
-        report["constraints"] = constraints
-
-    calibration = (
-        dict(primary_response.get("_confidence_calibration"))
-        if isinstance(primary_response.get("_confidence_calibration"), dict)
-        else {}
-    )
-    limiters = (
-        list(calibration.get("limiters"))
-        if isinstance(calibration.get("limiters"), list)
-        else []
-    )
-    if "material_second_opinion_disagreement" not in limiters:
-        limiters.append("material_second_opinion_disagreement")
-    calibration.update(
-        {
-            "calibrated_confidence": "low",
-            "calibrated_confidence_score": primary_response[
-                "confidence_score"
-            ],
-            "maximum_confidence_score": min(
-                float(
-                    calibration.get("maximum_confidence_score", 1.0)
-                    or 1.0
-                ),
-                0.39,
-            ),
-            "limiters": limiters,
-        }
-    )
-    primary_response["_confidence_calibration"] = calibration
-    primary_response["_material_disagreement_gate"] = {
-        "version": 2,
-        "applied": True,
-        "scope": "case_disposition",
-        "agreement": comparison.get("agreement"),
-        "disputed_fields": disputed_fields,
-        "guarded_handling": guarded_handling,
-        "verdict_preserved": False,
-    }
-    return primary_response
 
 
 def apply_analytical_adjudication_projection(
@@ -11406,81 +11219,9 @@ def apply_analytical_adjudication_projection(
     reviewer_response: dict[str, Any],
     adjudication: Any,
 ) -> bool:
-    """Project a validated shadow decision without authorizing automation.
-
-    The adjudicator is allowed to choose one immutable analytical position; it
-    is never allowed to synthesize a third verdict or authorize an operational
-    action. Returning ``True`` means the analyst-facing factored conclusion can
-    show the supported position while the caller retains the independent human
-    and automation gates.
-    """
-    if not isinstance(adjudication, dict):
-        return False
-    result = adjudication.get("response")
-    if (
-        adjudication.get("status") != "completed"
-        or adjudication.get("mode") != "shadow"
-        or adjudication.get("automation_authorized") is not False
-        or not isinstance(result, dict)
-    ):
-        return False
-    validation = result.get("_adjudication_contract_validation")
-    decision = str(result.get("decision") or "").strip().lower()
-    remaining = {
-        str(item or "").strip()
-        for item in (
-            result.get("remaining_disagreements")
-            if isinstance(result.get("remaining_disagreements"), list)
-            else []
-        )
-        if str(item or "").strip()
-    }
-    if (
-        not isinstance(validation, dict)
-        or validation.get("valid") is not True
-        or validation.get("automation_authorized") is not False
-        or decision not in {"primary_supported", "reviewer_supported"}
-        or remaining
-    ):
-        return False
-
-    chosen = (
-        primary_response
-        if decision == "primary_supported"
-        else reviewer_response
+    return _review_projection().apply(
+        primary_response, reviewer_response, adjudication
     )
-    analytical_fields = (
-        "event_status",
-        "detection_validity",
-        "activity_disposition",
-        "handling",
-        "duplicate_of",
-        "detection_outcome",
-        "escalation_needed",
-    )
-    before = {
-        key: primary_response.get(key) for key in analytical_fields
-    }
-    for key in analytical_fields:
-        primary_response[key] = chosen.get(key)
-    if isinstance(chosen.get("scope_dispositions"), dict):
-        primary_response["scope_dispositions"] = dict(
-            chosen["scope_dispositions"]
-        )
-    primary_response["_analytical_adjudication_projection"] = {
-        "schema": "onion-sentinel-analytical-adjudication-projection-v1",
-        "applied": True,
-        "selected_position": decision,
-        "resolved_fields": list(result.get("resolved_fields") or [])[:16],
-        "remaining_disagreements": [],
-        "before": before,
-        "after": {
-            key: primary_response.get(key) for key in analytical_fields
-        },
-        "automation_authorized": False,
-        "human_adjudication_required": True,
-    }
-    return True
 
 
 def memory_writeback_plan(
@@ -11533,107 +11274,17 @@ def persist_postcommit_memory_writeback(
 
 
 def apply_review_required_gate(
-    response: dict[str, Any],
-    *,
-    status: str,
-    reason: str,
+    response: dict[str, Any], *, status: str, reason: str,
 ) -> dict[str, Any]:
-    """Block consequential automation when a required review is unavailable."""
-    response["final_disposition_status"] = status
-    try:
-        score = float(response.get("confidence_score"))
-    except (TypeError, ValueError):
-        score = 0.3
-    response["confidence_score"] = round(min(max(score, 0.0), 0.39), 3)
-    response["confidence"] = "low"
-    if str(response.get("handling") or "").strip().lower() == "contain":
-        response["handling"] = "investigate"
-    response["tuning_recommendation"] = "needs_more_data"
-    response["tuning_reason"] = (
-        "Automatic tuning is blocked because the required independent review "
-        f"did not validate: {reason[:500]}"
+    return _review_gates().required(
+        response, status=status, reason=reason
     )
-    response["recommended_tuning_actions"] = []
-    response["memory_candidates"] = []
-    controls = (
-        dict(response.get("_automation_controls"))
-        if isinstance(response.get("_automation_controls"), dict)
-        else {}
-    )
-    controls.update(
-        {
-            "automatic_closure_blocked": True,
-            "containment_blocked": True,
-            "tuning_blocked": True,
-            "memory_writeback_blocked": True,
-            "requires_human_review": True,
-            "reason": reason[:500],
-        }
-    )
-    response["_automation_controls"] = controls
-    calibration = (
-        dict(response.get("_confidence_calibration"))
-        if isinstance(response.get("_confidence_calibration"), dict)
-        else {}
-    )
-    limiters = (
-        list(calibration.get("limiters"))
-        if isinstance(calibration.get("limiters"), list)
-        else []
-    )
-    limiter = f"required_reviewer_unavailable:{status}"
-    if limiter not in limiters:
-        limiters.append(limiter)
-    calibration.update(
-        {
-            "calibrated_confidence": "low",
-            "calibrated_confidence_score": response["confidence_score"],
-            "maximum_confidence_score": min(
-                float(calibration.get("maximum_confidence_score", 1.0) or 1.0),
-                0.39,
-            ),
-            "limiters": limiters,
-        }
-    )
-    response["_confidence_calibration"] = calibration
-    return response
 
 
 def apply_review_completed_automation_gate(
-    response: dict[str, Any],
-    *,
-    reason: str,
+    response: dict[str, Any], *, reason: str,
 ) -> dict[str, Any]:
-    """Block controls without mislabeling a valid uncertain review as failed."""
-    response["final_disposition_status"] = (
-        "review_completed_not_authorized"
-    )
-    if str(response.get("handling") or "").strip().lower() == "contain":
-        response["handling"] = "investigate"
-    response["tuning_recommendation"] = "needs_more_data"
-    response["tuning_reason"] = (
-        "Automatic tuning is blocked because the completed independent "
-        f"review did not authorize automation: {reason[:500]}"
-    )
-    response["recommended_tuning_actions"] = []
-    response["memory_candidates"] = []
-    controls = (
-        dict(response.get("_automation_controls"))
-        if isinstance(response.get("_automation_controls"), dict)
-        else {}
-    )
-    controls.update(
-        {
-            "automatic_closure_blocked": True,
-            "containment_blocked": True,
-            "tuning_blocked": True,
-            "memory_writeback_blocked": True,
-            "requires_human_review": True,
-            "reason": reason[:500],
-        }
-    )
-    response["_automation_controls"] = controls
-    return response
+    return _review_gates().completed(response, reason=reason)
 
 
 def apply_saved_response_review_gate(
