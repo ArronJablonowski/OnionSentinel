@@ -119,6 +119,11 @@ from dashboard_alert_detail_ai import (  # noqa: E402
     complete_ai_response_json_markdown,
     markdown_bullets,
 )
+from dashboard_alert_detail_enrichment import (  # noqa: E402
+    public_enrichment_has_content,
+    public_enrichment_markdown,
+    public_enrichment_status,
+)
 from dashboard_flow_page import (  # noqa: E402
     FLOW_PAGE_CSS,
     FLOW_PAGE_JS,
@@ -2336,74 +2341,6 @@ def passthrough_markdown_report_text(text: str) -> str:
     return text
 
 
-def public_enrichment_markdown(raw: dict, enrichment_json: object = None) -> str:
-    external_intel = nested_object(raw, 'enrichment', 'external_intel')
-    if not isinstance(external_intel, dict) or (
-        not external_intel.get('records')
-        and not external_intel.get('skipped')
-        and not external_intel.get('errors')
-    ):
-        enrichment_record = json_object(enrichment_json)
-        stored_external_intel = enrichment_record.get('external_intel')
-        if isinstance(stored_external_intel, dict):
-            external_intel = stored_external_intel
-    if not isinstance(external_intel, dict):
-        return ''
-    records = external_intel.get('records') if isinstance(external_intel.get('records'), list) else []
-    skipped = external_intel.get('skipped') if isinstance(external_intel.get('skipped'), list) else []
-    errors = external_intel.get('errors') if isinstance(external_intel.get('errors'), list) else []
-    if not records and not skipped and not errors:
-        return '\n'.join([
-            '## Enriched Alert Details',
-            '',
-            'No public enrichment lookups were applicable for this alert.',
-        ])
-    lines = ['## Enriched Alert Details', '']
-    if records:
-        lines.extend([
-            '| Source | Indicator | Type | Verdict | Confidence | Tags | Cached |',
-            '| --- | --- | --- | --- | --- | --- | --- |',
-        ])
-        for record in records[:24]:
-            if not isinstance(record, dict):
-                continue
-            tags = record.get('tags') if isinstance(record.get('tags'), list) else []
-            lines.append(
-                f'| {markdown_cell(record.get("source"))} | '
-                f'{markdown_cell(record.get("indicator"), 120)} | '
-                f'{markdown_cell(record.get("indicator_type"))} | '
-                f'{markdown_cell(record.get("verdict"))} | '
-                f'{markdown_cell(record.get("confidence"))} | '
-                f'{markdown_cell(", ".join(str(tag) for tag in tags if str(tag).strip()), 180)} | '
-                f'{markdown_cell(normalize_iso_display_text(record.get("cached_at") or ""))} |'
-            )
-        lines.append('')
-    skipped_rows = []
-    for item in [*skipped, *errors]:
-        if isinstance(item, dict):
-            skipped_rows.append(item)
-    if skipped_rows:
-        lines.extend([
-            '### Skipped / Limits',
-            '',
-            '| Source | Indicator | Reason | Limit note |',
-            '| --- | --- | --- | --- |',
-        ])
-        for item in skipped_rows[:32]:
-            lines.append(
-                f'| {markdown_cell(item.get("source"))} | '
-                f'{markdown_cell(item.get("indicator"), 120)} | '
-                f'{markdown_cell(item.get("reason"), 220)} | '
-                f'{markdown_cell(item.get("limit_note"), 260)} |'
-            )
-        lines.append('')
-    return '\n'.join(lines).strip()
-
-
-
-
-
-
 def alert_identity_markdown(row: sqlite3.Row | dict, source_text: str = '') -> str:
     """Generate the fixed identity card from authoritative SQLite state."""
     generated_match = re.search(
@@ -2581,47 +2518,6 @@ def finalize_detail_report_html(
         f'<div class="detail-layout-contract" data-layout-version="{DETAIL_REPORT_LAYOUT_VERSION}" '
         f'data-layout-valid="{valid}">{detail_layout_error_html(issues)}{rendered}</div>'
     )
-
-
-def public_enrichment_has_content(enrichment_json: object) -> bool:
-    enrichment_record = json_object(enrichment_json)
-    external_intel = enrichment_record.get('external_intel')
-    if not isinstance(external_intel, dict):
-        return False
-    return any(
-        isinstance(external_intel.get(key), list) and len(external_intel.get(key)) > 0
-        for key in ('records', 'skipped', 'errors')
-    )
-
-
-def public_enrichment_status(enrichment_json: object) -> tuple[str, str, str, int, int, int]:
-    enrichment_record = json_object(enrichment_json)
-    external_intel = enrichment_record.get('external_intel')
-    if not isinstance(external_intel, dict):
-        return ('none', 'None', 'No public enrichment data recorded for this alert group', 0, 0, 0)
-
-    records = external_intel.get('records') if isinstance(external_intel.get('records'), list) else []
-    skipped = external_intel.get('skipped') if isinstance(external_intel.get('skipped'), list) else []
-    errors = external_intel.get('errors') if isinstance(external_intel.get('errors'), list) else []
-    indicators = external_intel.get('indicators') if isinstance(external_intel.get('indicators'), dict) else {}
-    indicator_count = sum(
-        len(indicators.get(key) or [])
-        for key in ('public_ips', 'domains', 'urls', 'hashes', 'cves')
-        if isinstance(indicators.get(key), list)
-    )
-
-    if records:
-        detail = f'{len(records)} enrichment record(s), {len(skipped)} skipped source(s), {len(errors)} error(s)'
-        return ('enriched', 'Enriched', detail, len(records), len(skipped), len(errors))
-    if errors:
-        detail = f'{len(errors)} enrichment error(s), {len(skipped)} skipped source(s)'
-        return ('error', 'Error', detail, 0, len(skipped), len(errors))
-    if skipped:
-        detail = f'Indicators found, but {len(skipped)} source(s) skipped or unavailable'
-        return ('checked', 'Checked', detail, 0, len(skipped), 0)
-    if indicator_count:
-        return ('pending', 'Pending', f'{indicator_count} public indicator(s) found with no completed enrichment records yet', 0, 0, 0)
-    return ('none', 'None', 'No public indicators were recorded for enrichment', 0, 0, 0)
 
 
 def directory_size_bytes(path: Path) -> int:
