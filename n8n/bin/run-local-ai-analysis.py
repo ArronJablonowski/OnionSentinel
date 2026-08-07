@@ -1786,6 +1786,24 @@ def _query_state():
     return state
 
 
+def _query_repair():
+    _provider_routing()
+    from onion_sentinel.analysis.query import repair
+    return repair
+
+
+def _query_repair_dependencies():
+    module = _query_repair()
+    return module.Dependencies(
+        normalize_request=normalize_investigation_query_request,
+        normalize_event_tuple=normalize_investigation_event_tuple,
+        pack_event_tuple_fields=pack_event_tuple_fields,
+        prompt_error_category=investigation_query_prompt_error_category,
+        prompt_error_digest=investigation_query_prompt_error_digest,
+        canonical_digest=investigation_query_canonical_digest,
+    )
+
+
 def _query_request_policy():
     module = _query_request()
     return module.Policy(
@@ -7348,81 +7366,9 @@ def recover_repair_observables_from_trusted_catalog(
     value: Any,
     authorization_context: Any,
 ) -> dict[str, list[str]] | None:
-    """Recover only model values already present in the trusted catalog.
-
-    A malformed observables container has no executable meaning, so it cannot
-    be normalized directly.  It may still contain exact scalar values that the
-    collector independently authorized.  Recovering the intersection lets the
-    single bounded planning-repair round correct the container shape without
-    granting the model a new value or observable category.  Ambiguous catalog
-    values fail closed.
-    """
-    if not isinstance(authorization_context, dict):
-        return None
-    permitted = authorization_context.get("permitted_observables")
-    if not isinstance(permitted, dict):
-        return None
-
-    raw_values: set[str] = set()
-
-    def visit(item: Any, depth: int = 0) -> None:
-        if depth > 4 or len(raw_values) > 32:
-            return
-        if isinstance(item, str):
-            text = _query_text(item, 255)
-            if text:
-                raw_values.add(text)
-        elif isinstance(item, list):
-            for child in item[:32]:
-                visit(child, depth + 1)
-        elif isinstance(item, dict):
-            for child in list(item.values())[:32]:
-                visit(child, depth + 1)
-
-    visit(value)
-    if not raw_values or len(raw_values) > 32:
-        return None
-
-    catalog: dict[str, list[tuple[str, str]]] = {}
-    for kind in ("ips", "domains", "hosts", "users"):
-        values = permitted.get(kind)
-        if not isinstance(values, list):
-            continue
-        for raw_permitted in values[:100]:
-            permitted_text = _query_text(raw_permitted, 255)
-            if not permitted_text:
-                continue
-            comparison = (
-                permitted_text.lower().rstrip(".")
-                if kind == "domains"
-                else permitted_text
-            )
-            catalog.setdefault(comparison, []).append(
-                (kind, permitted_text)
-            )
-
-    recovered = {
-        "ips": [],
-        "domains": [],
-        "hosts": [],
-        "users": [],
-    }
-    for raw_value in sorted(raw_values):
-        candidates = catalog.get(raw_value, [])
-        if not candidates:
-            candidates = catalog.get(raw_value.lower().rstrip("."), [])
-        unique_candidates = sorted(set(candidates))
-        if len(unique_candidates) != 1:
-            continue
-        kind, trusted_value = unique_candidates[0]
-        recovered[kind].append(trusted_value)
-
-    for kind in recovered:
-        recovered[kind] = sorted(set(recovered[kind]))
-    total = sum(len(values) for values in recovered.values())
-    if total < 1 or total > 8:
-        return None
-    return recovered
+    return _query_repair().recover_observables(
+        value, authorization_context
+    )
 
 
 def investigation_query_repair_scope(
@@ -7433,283 +7379,36 @@ def investigation_query_repair_scope(
     time_envelope: Any = None,
     authorization_context: Any = None,
 ) -> dict[str, Any] | None:
-    """Recover a non-widenable Security Onion scope from an invalid request.
-
-    Only the declarative scope fields are considered. Unknown syntax and the
-    event tuple remain rejected; this helper merely determines whether one
-    later model response can safely correct the rejected shape without gaining
-    a new backend, pack, purpose, time range, observable, aggregation, or row
-    budget.
-    """
-    if not isinstance(raw, dict):
-        return None
-    backend = _query_text(raw.get("backend"), 32).lower()
-    parameters = raw.get("parameters")
-    if backend not in {"elastic", "oql"} or not isinstance(parameters, dict):
-        return None
-    raw_observables = parameters.get("observables")
-    recovered_observables = None
-    observable_scope_source = "original_valid_scope"
-    observable_categories = {"ips", "domains", "hosts", "users"}
-    observables_shape_valid = bool(
-        isinstance(raw_observables, dict)
-        and not set(raw_observables).difference(observable_categories)
-        and all(
-            isinstance(raw_observables.get(kind, []), list)
-            and len(raw_observables.get(kind, [])) <= 8
-            for kind in observable_categories
-        )
-        and 1
-        <= sum(
-            len(raw_observables.get(kind, []))
-            for kind in observable_categories
-        )
-        <= 8
+    return _query_repair().scope(
+        raw,
+        round_number=round_number,
+        position=position,
+        time_envelope=time_envelope,
+        authorization_context=authorization_context,
+        dependencies=_query_repair_dependencies(),
+        error_type=InvestigationQueryError,
     )
-    if not observables_shape_valid:
-        recovered_observables = recover_repair_observables_from_trusted_catalog(
-            raw_observables,
-            authorization_context,
-        )
-        if recovered_observables is not None:
-            observable_scope_source = "trusted_catalog_intersection"
-        elif isinstance(parameters.get("event_tuple"), dict):
-            event_tuple = parameters["event_tuple"]
-            try:
-                normalized_event_tuple = (
-                    normalize_investigation_event_tuple(event_tuple)
-                )
-            except InvestigationQueryError:
-                normalized_event_tuple = {}
-            tuple_ips = {
-                value
-                for value in (
-                    normalized_event_tuple.get("source_ip"),
-                    normalized_event_tuple.get("destination_ip"),
-                )
-                if isinstance(value, str) and value
-            }
-            recovered_observables = (
-                recover_repair_observables_from_trusted_catalog(
-                    sorted(tuple_ips),
-                    authorization_context,
-                )
-                if tuple_ips
-                else None
-            )
-            if (
-                recovered_observables is not None
-                and not tuple_ips.issubset(
-                    set(recovered_observables.get("ips") or [])
-                )
-            ):
-                # A partly trusted tuple cannot contribute any repair
-                # authority. Every non-empty tuple IP must independently map
-                # to the permitted collector-owned IP catalog.
-                recovered_observables = None
-            if recovered_observables is not None:
-                observable_scope_source = (
-                    "trusted_event_tuple_intersection"
-                )
-        if recovered_observables is None:
-            return None
-    bounded_raw = {
-        "query_id": raw.get("query_id"),
-        "backend": backend,
-        "purpose": raw.get("purpose"),
-        "parameters": {
-            key: parameters.get(key)
-            for key in (
-                "pack",
-                "window",
-                "observables",
-                "size",
-                "aggregation",
-            )
-            if key in parameters
-        },
-    }
-    if recovered_observables is not None:
-        bounded_raw["parameters"]["observables"] = recovered_observables
-    if isinstance(parameters.get("event_tuple"), dict):
-        bounded_raw["parameters"]["event_tuple"] = copy.deepcopy(
-            parameters["event_tuple"]
-        )
-    try:
-        normalized = normalize_investigation_query_request(
-            bounded_raw,
-            round_number=round_number,
-            position=position,
-            time_envelope=time_envelope,
-            authorization_context=authorization_context,
-        )
-    except InvestigationQueryError:
-        return None
-    scope = {
-        "query_id": normalized["query_id"],
-        "backend": normalized["backend"],
-        "purpose": normalized["purpose"],
-        "pack": normalized["parameters"]["pack"],
-        "window": dict(normalized["parameters"]["window"]),
-        "observables": {
-            kind: list(values)
-            for kind, values in normalized["parameters"]["observables"].items()
-        },
-        "size": normalized["parameters"]["size"],
-        "aggregation": normalized["parameters"]["aggregation"],
-        "observable_scope_source": observable_scope_source,
-    }
-    normalized_event_tuple = normalized["parameters"].get("event_tuple")
-    if isinstance(normalized_event_tuple, dict):
-        scope["event_tuple"] = copy.deepcopy(normalized_event_tuple)
-    return scope
 
 
 def validate_investigation_query_repair_scope(
     request: dict[str, Any],
     scope: dict[str, Any],
 ) -> None:
-    """Reject a proposed repair that widens any original query dimension."""
-    parameters = request.get("parameters")
-    if not isinstance(parameters, dict):
-        raise InvestigationQueryError("query repair parameters are invalid")
-    exact_pairs = (
-        ("query_id", request.get("query_id"), scope.get("query_id")),
-        ("backend", request.get("backend"), scope.get("backend")),
-        ("purpose", request.get("purpose"), scope.get("purpose")),
-        ("pack", parameters.get("pack"), scope.get("pack")),
-        (
-            "aggregation",
-            parameters.get("aggregation"),
-            scope.get("aggregation"),
-        ),
+    _query_repair().validate(
+        request, scope, error_type=InvestigationQueryError
     )
-    widened = [
-        label
-        for label, repaired, original in exact_pairs
-        if repaired != original
-    ]
-    if widened:
-        raise InvestigationQueryError(
-            "query repair changed fixed scope field(s): "
-            + ", ".join(widened)
-        )
-
-    repaired_window = parameters.get("window")
-    original_window = scope.get("window")
-    if not isinstance(repaired_window, dict) or not isinstance(original_window, dict):
-        raise InvestigationQueryError("query repair window is invalid")
-    if (
-        _query_utc(repaired_window.get("start"), "query repair window start")
-        < _query_utc(original_window.get("start"), "original query window start")
-        or _query_utc(repaired_window.get("end"), "query repair window end")
-        > _query_utc(original_window.get("end"), "original query window end")
-    ):
-        raise InvestigationQueryError(
-            "query repair widened the rejected request time window"
-        )
-
-    repaired_observables = parameters.get("observables")
-    original_observables = scope.get("observables")
-    if (
-        not isinstance(repaired_observables, dict)
-        or not isinstance(original_observables, dict)
-    ):
-        raise InvestigationQueryError("query repair observables are invalid")
-    for kind in ("ips", "domains", "hosts", "users"):
-        if not set(repaired_observables.get(kind) or []).issubset(
-            set(original_observables.get(kind) or [])
-        ):
-            raise InvestigationQueryError(
-                "query repair widened the rejected request observables"
-            )
-    if int(parameters.get("size") or 0) > int(scope.get("size") or 0):
-        raise InvestigationQueryError(
-            "query repair increased the rejected request row budget"
-        )
-
-    repaired_tuple = parameters.get("event_tuple")
-    original_tuple = scope.get("event_tuple")
-    if repaired_tuple != original_tuple:
-        raise InvestigationQueryError(
-            "query repair widened or changed the rejected event tuple"
-        )
 
 
 def investigation_query_request_from_repair_scope(
     scope: dict[str, Any],
 ) -> dict[str, Any]:
-    """Reconstruct the exact normalized request authorized by a repair scope."""
-    request = {
-        "query_id": scope["query_id"],
-        "backend": scope["backend"],
-        "purpose": scope["purpose"],
-        "parameters": {
-            "pack": scope["pack"],
-            "window": copy.deepcopy(scope["window"]),
-            "observables": copy.deepcopy(scope["observables"]),
-            "size": scope["size"],
-            "aggregation": scope["aggregation"],
-        },
-    }
-    if isinstance(scope.get("event_tuple"), dict):
-        request["parameters"]["event_tuple"] = copy.deepcopy(
-            scope["event_tuple"]
-        )
-    return request
+    return _query_repair().request_from_scope(scope)
 
 
 def investigation_query_repair_failures(
     round_result: Any,
 ) -> dict[str, str]:
-    """Return broker contract/invalid-response failures by exact query ID."""
-    if not isinstance(round_result, dict):
-        return {}
-    failures: dict[str, str] = {}
-    repairable_statuses = {
-        "rejected",
-        "invalid",
-        "invalid_request",
-        "invalid_response",
-        "contract_error",
-    }
-
-    def record(value: Any, *, fallback: str = "") -> None:
-        if not isinstance(value, dict):
-            return
-        status = _query_text(value.get("status"), 40).lower()
-        query_id = _query_text(value.get("query_id"), 64)
-        if query_id and status in repairable_statuses:
-            failures.setdefault(
-                query_id,
-                _query_text(value.get("error"), 500)
-                or fallback
-                or f"broker returned {status}",
-            )
-
-    for result in (
-        round_result.get("results")
-        if isinstance(round_result.get("results"), list)
-        else []
-    ):
-        if not isinstance(result, dict):
-            continue
-        record(result)
-        for item in (
-            result.get("trusted_query_audit")
-            if isinstance(result.get("trusted_query_audit"), list)
-            else []
-        ):
-            record(item, fallback="broker query audit reported an invalid response")
-        evidence = result.get("evidence")
-        if isinstance(evidence, dict):
-            for item in (
-                evidence.get("results")
-                if isinstance(evidence.get("results"), list)
-                else []
-            ):
-                record(item, fallback="broker returned invalid model evidence")
-    return failures
+    return _query_repair().failures(round_result)
 
 
 def investigation_query_repair_prompt_entry(
@@ -7718,35 +7417,12 @@ def investigation_query_repair_prompt_entry(
     reason: str,
     trigger: str,
 ) -> dict[str, Any]:
-    """Expose only the rejected model scope and value-free tuple guidance."""
-    event_tuple = (
-        scope.get("event_tuple")
-        if isinstance(scope.get("event_tuple"), dict)
-        else {}
+    return _query_repair().prompt_entry(
+        scope,
+        reason=reason,
+        trigger=trigger,
+        dependencies=_query_repair_dependencies(),
     )
-    entry = {
-        "query_id": scope["query_id"],
-        "backend": scope["backend"],
-        "purpose": scope["purpose"],
-        "pack": scope["pack"],
-        "window": scope["window"],
-        "observables": scope["observables"],
-        "maximum_size": scope["size"],
-        "aggregation": scope["aggregation"],
-        "observable_scope_source": scope.get(
-            "observable_scope_source",
-            "original_valid_scope",
-        ),
-        "original_event_tuple_fields": sorted(event_tuple),
-        "pack_event_tuple_fields": sorted(
-            pack_event_tuple_fields(scope["pack"])
-        ),
-        "trigger": trigger,
-        "error": investigation_query_prompt_error_category(reason),
-        "error_sha256": investigation_query_prompt_error_digest(reason),
-        "scope_digest": investigation_query_canonical_digest(scope),
-    }
-    return entry
 
 
 def deterministic_incident_pivot_requests(

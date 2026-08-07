@@ -165,6 +165,10 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
 - Override clamping, evaluation-retry limits, per-round admission, remaining
   capacity, and ignored/terminal request accounting now live in
   `analysis.query.state`.
+- Trusted-catalog observable recovery, immutable repair scopes, non-widening
+  validation, broker contract-failure classification, and value-safe repair
+  prompt projection now live in `analysis.query.repair` behind explicit
+  normalization, tuple, and digest ports.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports
