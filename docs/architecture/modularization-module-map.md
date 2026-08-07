@@ -492,6 +492,13 @@ queued/parsing, retry, no-packets, failed, and absent states and selects parsed
 records by group, alert, then request ID. Runtime paths enter through
 `PcapWorkflowConfig`; builder wrappers preserve the prior public call shape.
 
+`dashboard_model_routing.py` is the dashboard adapter over the canonical
+`onion_sentinel.analysis.providers.routing` package deployed at the stack root.
+It preserves dashboard compatibility names and OpenClaw/Hermes safety
+normalization while owning only UI-specific primary, reviewer, and adjudicator
+assignment policy. This removes duplicated route parsing and identity policy
+from the dashboard builder without forking the inference runtime contract.
+
 `dashboard_flow_page.py` owns the pure data-flow renderer, enrichment-service
 tiles, responsive pipeline styles, and privacy-toggle client. The builder
 assembles `FlowPageViewModel` from live alert/report/model/notification metrics

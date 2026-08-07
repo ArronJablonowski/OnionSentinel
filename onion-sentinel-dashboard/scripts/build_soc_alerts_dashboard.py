@@ -164,6 +164,24 @@ from dashboard_alert_pcap_workflow import (  # noqa: E402
     pcap_request_status_for_row as resolve_pcap_request_status_for_row,
     pcap_status_for_row as resolve_pcap_status_for_row,
 )
+from dashboard_model_routing import (  # noqa: E402
+    CLI_HARNESS_MODEL_PATTERN,
+    CODEX_CLI_MODEL_PATTERN,
+    CODEX_CLI_REASONING_EFFORTS,
+    CYBER_SECURITY_AGENT_ROLES,
+    HERMES_AGENT_REASONING_EFFORT,
+    _boolean_setting,
+    _canonical_agent_route,
+    _codex_cli_route,
+    _hermes_agent_route,
+    _normalized_enabled_models,
+    _openclaw_route,
+    enabled_agent_model_routes,
+    model_route_identity,
+    normalize_agent_adjudicator_models,
+    normalize_agent_models,
+    normalize_agent_second_opinion_models,
+)
 from dashboard_flow_page import (  # noqa: E402
     FLOW_PAGE_CSS,
     FLOW_PAGE_JS,
@@ -521,13 +539,6 @@ def display_path(path: Path) -> str:
     return str(path).replace(str(HOME), '~')
 
 
-CYBER_SECURITY_AGENT_ROLES = (
-    'soc-analyst',
-    'incident-responder',
-    'siem-engineer',
-    'cyber-threat-intel',
-    'threat-hunter',
-)
 SOC_ANALYSIS_SEVERITY_THRESHOLDS = (
     'disabled',
     'critical',
@@ -536,10 +547,6 @@ SOC_ANALYSIS_SEVERITY_THRESHOLDS = (
     'low',
     'informational',
 )
-CODEX_CLI_REASONING_EFFORTS = ('low', 'medium', 'high', 'xhigh')
-HERMES_AGENT_REASONING_EFFORT = 'medium'
-CODEX_CLI_MODEL_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
-CLI_HARNESS_MODEL_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,239}$')
 CODEX_CLI_MODEL_CATALOG = (
     'gpt-5.5',
     'gpt-5.6-sol',
@@ -595,44 +602,6 @@ def default_soc_ai_settings() -> dict:
         'maxmind_geoip_city_db_path': '~/n8n-local/config/maxmind/GeoLite2-City.mmdb',
         'maxmind_geoip_country_db_path': '~/n8n-local/config/maxmind/GeoLite2-Country.mmdb',
     }
-
-
-def _normalized_enabled_models(value: object) -> list[str]:
-    """Normalize the ordered local model roster used by Settings rendering."""
-    if not isinstance(value, list):
-        return []
-    models: list[str] = []
-    for item in value[:32]:
-        model = str(item or '').strip()[:240]
-        if model and not re.search(r'[\x00-\x1f\x7f]', model) and model not in models:
-            models.append(model)
-    return models
-
-
-def _boolean_setting(value: object, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {'1', 'true', 'yes', 'on', 'enabled'}:
-            return True
-        if normalized in {'0', 'false', 'no', 'off', 'disabled', ''}:
-            return False
-    return default
-
-
-def _codex_cli_route(model: str, effort: str) -> str:
-    return f'codex-cli:{model}:{effort}'
-
-
-def _hermes_agent_route(model: str, effort: str) -> str:
-    return f'hermes-agent:{model}:{effort}'
-
-
-def _openclaw_route(model: str, effort: str) -> str:
-    return f'openclaw:{model}:{effort}'
 
 
 def _normalized_cli_path(value: object, basename: str) -> str:
@@ -721,160 +690,6 @@ def _normalized_codex_cli_models(
         })
         for model in CODEX_CLI_MODEL_CATALOG
     ]
-
-
-def enabled_agent_model_routes(settings: dict) -> list[str]:
-    """Return the exact model routes available to individual agents."""
-    routes = [f'ollama:{model}' for model in _normalized_enabled_models(settings.get('enabled_ollama_models'))]
-    routes.extend(
-        _codex_cli_route(entry['model'], entry['reasoning_effort'])
-        for entry in settings.get('codex_cli_models', [])
-        if isinstance(entry, dict) and entry.get('enabled') is True
-    )
-    if _boolean_setting(settings.get('hermes_agent_enabled')):
-        routes.append(_hermes_agent_route(
-            _normalized_hermes_model(settings.get('hermes_agent_model')),
-            HERMES_AGENT_REASONING_EFFORT,
-        ))
-    if _boolean_setting(settings.get('openclaw_enabled')):
-        routes.append(_openclaw_route(
-            _normalized_openclaw_model(settings.get('openclaw_model')),
-            _normalized_reasoning_effort(settings.get('openclaw_reasoning_effort')),
-        ))
-    return routes
-
-
-def _canonical_agent_route(route: object, enabled_routes: list[str]) -> str:
-    normalized = str(route or '').strip()[:260]
-    if normalized in {'gpt-cli', 'codex-cli'}:
-        return next(
-            (candidate for candidate in enabled_routes if candidate.startswith('codex-cli:')),
-            normalized,
-        )
-    if normalized.startswith('codex-cli:') and normalized not in enabled_routes:
-        try:
-            model, _ = normalized.removeprefix('codex-cli:').rsplit(':', 1)
-        except ValueError:
-            return normalized
-        return next(
-            (
-                candidate
-                for candidate in enabled_routes
-                if candidate.startswith(f'codex-cli:{model}:')
-            ),
-            normalized,
-        )
-    for provider in ('hermes-agent', 'openclaw'):
-        prefix = f'{provider}:'
-        if normalized.startswith(prefix) and normalized not in enabled_routes:
-            return next(
-                (
-                    candidate
-                    for candidate in enabled_routes
-                    if candidate.startswith(prefix)
-                ),
-                normalized,
-            )
-    return normalized
-
-
-def model_route_identity(route: object, settings: dict | None = None) -> str:
-    """Mirror the runtime's provider/model identity for reviewer isolation."""
-    normalized = str(route or '').strip().lower()
-    if normalized.startswith('codex-cli:'):
-        try:
-            model, effort = normalized.removeprefix('codex-cli:').rsplit(':', 1)
-        except ValueError:
-            return normalized
-        if model and effort in CODEX_CLI_REASONING_EFFORTS:
-            return f'openai-codex:{model}'
-    if normalized in {'gpt-cli', 'codex-cli'}:
-        configured = str(
-            (settings or {}).get('codex_cli_model') or 'configured-default'
-        ).strip().lower()
-        return f'openai-codex:{configured}'
-    if normalized.startswith('hermes-agent:'):
-        try:
-            model, effort = normalized.removeprefix('hermes-agent:').rsplit(':', 1)
-        except ValueError:
-            return normalized
-        if model and effort in CODEX_CLI_REASONING_EFFORTS:
-            return f'openai-codex:{model}'
-    if normalized.startswith('openclaw:'):
-        try:
-            model, effort = normalized.removeprefix('openclaw:').rsplit(':', 1)
-        except ValueError:
-            return normalized
-        if model and effort in CODEX_CLI_REASONING_EFFORTS:
-            if '/' in model:
-                provider, name = model.split('/', 1)
-                return f'{provider}:{name}'
-            return f'openclaw:{model}'
-    return normalized
-
-
-def normalize_agent_models(value: object, enabled_routes: list[str]) -> dict[str, str]:
-    """Assign every agent one valid route, falling back after a roster change."""
-    raw = value if isinstance(value, dict) else {}
-    fallback = enabled_routes[0]
-    assignments: dict[str, str] = {}
-    for role in CYBER_SECURITY_AGENT_ROLES:
-        route = _canonical_agent_route(raw.get(role), enabled_routes)
-        assignments[role] = route if route in enabled_routes else fallback
-    return assignments
-
-
-def normalize_agent_second_opinion_models(
-    value: object,
-    enabled_routes: list[str],
-    primary_assignments: dict[str, str],
-    settings: dict | None = None,
-) -> dict[str, str]:
-    """Keep optional secondary routes enabled, distinct, and fail-closed.
-
-    Unlike a primary assignment, a missing or stale second-opinion route must
-    remain disabled. Silently selecting a fallback would spend inference time
-    and could cross a provider privacy boundary without an operator decision.
-    """
-    raw = value if isinstance(value, dict) else {}
-    assignments: dict[str, str] = {}
-    for role in CYBER_SECURITY_AGENT_ROLES:
-        route = _canonical_agent_route(raw.get(role), enabled_routes)
-        assignments[role] = (
-            route
-            if (
-                route in enabled_routes
-                and model_route_identity(route, settings)
-                != model_route_identity(primary_assignments.get(role), settings)
-            )
-            else ''
-        )
-    return assignments
-
-
-def normalize_agent_adjudicator_models(
-    value: object,
-    enabled_routes: list[str],
-    primary_assignments: dict[str, str],
-    reviewer_assignments: dict[str, str],
-    settings: dict | None = None,
-) -> dict[str, str]:
-    """Keep optional adjudicators distinct from both independent positions."""
-    raw = value if isinstance(value, dict) else {}
-    assignments: dict[str, str] = {}
-    for role in CYBER_SECURITY_AGENT_ROLES:
-        route = _canonical_agent_route(raw.get(role), enabled_routes)
-        identity = model_route_identity(route, settings)
-        excluded = {
-            model_route_identity(primary_assignments.get(role), settings),
-            model_route_identity(reviewer_assignments.get(role), settings),
-        }
-        assignments[role] = (
-            route
-            if route in enabled_routes and identity and identity not in excluded
-            else ''
-        )
-    return assignments
 
 
 def load_soc_ai_settings() -> dict:

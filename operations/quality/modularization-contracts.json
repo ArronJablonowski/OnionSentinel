@@ -299,6 +299,18 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_model_routing.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_model_routing.py",
+      "required_symbols": [
+        "enabled_agent_model_routes",
+        "model_route_identity",
+        "normalize_agent_adjudicator_models",
+        "normalize_agent_models",
+        "normalize_agent_second_opinion_models"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_flow_page.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_flow_page.py",
