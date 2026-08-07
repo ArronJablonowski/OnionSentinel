@@ -141,6 +141,14 @@ from dashboard_alert_repository import (  # noqa: E402
     raw_alert_object,
 )
 from dashboard_alert_report_model import AlertReport, CRITICALITY_ORDER  # noqa: E402
+from dashboard_alert_report_factory import (  # noqa: E402
+    AlertReportFactoryConfig,
+    AlertReportFactoryServices,
+    build_alert_report,
+    clean_endpoint_part,
+    endpoint_label,
+    summarize_markdown,
+)
 from dashboard_flow_page import (  # noqa: E402
     FLOW_PAGE_CSS,
     FLOW_PAGE_JS,
@@ -1664,21 +1672,6 @@ def criticality_class(label: str) -> str:
     return re.sub(r'[^a-z0-9]+', '-', label.lower()).strip('-') or 'informational'
 
 
-def clean_endpoint_part(value: object | None) -> str:
-    value = str(value or '').strip().strip('"\'')
-    return value or '—'
-
-
-def endpoint_label(ip: str | None, port: str | None) -> str:
-    ip_label = clean_endpoint_part(ip)
-    port_label = clean_endpoint_part(port)
-    if ip_label != '—' and port_label != '—':
-        return f'{ip_label}:{port_label}'
-    if ip_label != '—':
-        return f'{ip_label}:—'
-    return '—'
-
-
 def extract_network_endpoints(text: str) -> tuple[str, str, str, str]:
     """Extract source/destination IP and port from common Security Onion markdown report shapes."""
     traffic = re.search(
@@ -1737,29 +1730,6 @@ def extract_alert_timestamp(text: str, fallback_ts: float) -> float:
         if ts is not None:
             return ts
     return fallback_ts
-
-
-def summarize_markdown(text: str, max_len: int = 220) -> str:
-    lines = []
-    in_code = False
-    for raw in text.splitlines():
-        line = raw.strip()
-        if line.startswith('```'):
-            in_code = not in_code
-            continue
-        if in_code or not line or line.startswith('#'):
-            continue
-        if re.match(r'^[-*_]{3,}$', line):
-            continue
-        line = re.sub(r'[`*_>#\[\]()]+', ' ', line)
-        line = re.sub(r'\s+', ' ', line).strip()
-        line = normalize_iso_display_text(line)
-        if line:
-            lines.append(line)
-        if sum(len(x) for x in lines) > max_len:
-            break
-    summary = normalize_iso_display_text(' '.join(lines).strip())
-    return (summary[:max_len - 1] + '…') if len(summary) > max_len else (summary or 'No summary text available yet.')
 
 
 def compact_text(text: str, max_len: int = 150) -> str:
@@ -2378,136 +2348,23 @@ def report_from_sqlite_row(
     pcap_index: dict[str, set[str]] | None = None,
     ai_analysis_min_severity: str = 'informational',
 ) -> AlertReport:
-    # One SQLite row becomes one UI row. Matching Markdown is optional; suppressed
-    # and dropped records often have no Markdown by design.
-    raw = raw_alert_object(row)
-    raw_alert_count = safe_int(row['raw_alert_count'])
-    total_seen_count = safe_int(row['total_seen_count'])
-    repeat_count = max(raw_alert_count, total_seen_count, safe_int(row['seen_count']))
-    row_first_seen = row['first_seen'] or 'n/a'
-    row_last_seen = row['last_seen'] or 'n/a'
-    alert_group = row['alert_group_key'] or alert_group_key(row)
-    markdown = markdown_by_alert_id.get(row['alert_id'])
-    ai_analysis = ai_analysis_for_row(row, ai_analysis_by_alert_id)
-    ai_response = ai_analysis.get('response') if isinstance(ai_analysis, dict) and isinstance(ai_analysis.get('response'), dict) else {}
-    recommended_tuning_actions = [
-        str(action).strip()
-        for action in (ai_response.get('recommended_tuning_actions') if isinstance(ai_response.get('recommended_tuning_actions'), list) else [])
-        if str(action).strip()
-    ]
-    ai_status_key, ai_status_label, ai_status_detail = ai_workflow_status_for_row(
+    services = AlertReportFactoryServices(
+        ai_analysis_for_row=ai_analysis_for_row,
+        ai_workflow_status_for_row=ai_workflow_status_for_row,
+        pcap_status_for_row=pcap_status_for_row,
+        pcap_analysis_for_row=pcap_analysis_for_row,
+        finalize_detail_report_html=finalize_detail_report_html,
+    )
+    return build_alert_report(
         row,
+        markdown_by_alert_id,  # type: ignore[arg-type]
         ai_analysis_by_alert_id,
         ai_prompts_by_alert_id,
         running_ai_alert_ids,
+        pcap_index,  # type: ignore[arg-type]
         ai_analysis_min_severity,
-    )
-    enrichment_status_key, enrichment_status_label, enrichment_status_detail, enrichment_record_count, enrichment_skip_count, enrichment_error_count = public_enrichment_status(row['enrichment_json'])
-    pcap_status = pcap_status_for_row(row, pcap_index)
-    pcap_status_key, pcap_status_label, pcap_status_detail = pcap_status
-    pcap_analysis = pcap_analysis_for_row(row, pcap_index)
-    pcap_details = render_pcap_evidence_markdown(
-        pcap_status,
-        pcap_analysis,
-        normalize_iso_display_text((pcap_analysis or {}).get('generated_at') or ''),
-    )
-    timeline_html = alert_seen_timeline_html(row)
-    if markdown:
-        source, source_text, stat = markdown
-        source_text = passthrough_markdown_report_text(source_text)
-        rel_source = source.name
-        for source_dir in MARKDOWN_SOURCES:
-            if source_dir in source.parents or source == source_dir:
-                rel_source = str(source.relative_to(source_dir))
-                break
-        size = stat.st_size
-    else:
-        source = DB_PATH
-        rel_source = 'SQLite alert-store'
-        source_text = ''
-        size = len(row['alert_json'] or '')
-
-    layout_row = dict(row)
-    layout_row['first_seen'] = row_first_seen
-    layout_row['last_seen'] = row_last_seen
-    layout_row['seen_count'] = repeat_count
-    layout_row['raw_alert_count'] = raw_alert_count
-    layout_result = canonical_detail_report_markdown(
-        source_text,
-        layout_row,
-        raw,
-        ai_analysis,
-        pcap_details,
-    )
-    text = normalize_iso_display_text(layout_result.markdown)
-    rendered_html = finalize_detail_report_html(
-        markdown_to_html(text),
-        timeline_html,
-        layout_result.issues,
-    )
-
-    criticality = severity_label_from_row(row)
-    criticality_rank = CRITICALITY_ORDER.get(criticality.lower(), CRITICALITY_ORDER['informational'])
-    title = f'[{criticality.upper()}] {row["rule_name"] or "Security Onion Alert"}'
-    status = row['filter_status'] or 'stored'
-    filter_reason = row['filter_reason'] or 'no filter reason recorded'
-    summary = f'{status}: {filter_reason}. Seen {repeat_count} time(s). {summarize_markdown(text, 160)}'
-    source_port = clean_endpoint_part(row['source_port'] or nested_value(raw, 'source', 'port'))
-    destination_port = clean_endpoint_part(row['destination_port'] or nested_value(raw, 'destination', 'port'))
-    source_ip = clean_endpoint_part(row['source_ip'] or nested_value(raw, 'source', 'ip'))
-    destination_ip = clean_endpoint_part(row['destination_ip'] or nested_value(raw, 'destination', 'ip'))
-    alert_source = clean_endpoint_part(row['event_dataset'] or nested_value(raw, 'event', 'dataset') or nested_value(raw, 'security_onion', 'event_dataset'))
-    rule_id = clean_endpoint_part(nested_value(raw, 'rule_id'))
-    alert_ts = parse_iso_timestamp(row['last_seen']) or parse_iso_timestamp(row['timestamp']) or dt.datetime.now(dt.timezone.utc).timestamp()
-    # Analyst state is tracked at the grouped-detection level so acknowledge
-    # and suppression state survives when a newer matching alert becomes the
-    # representative row.
-    digest = hashlib.sha1(alert_group.encode('utf-8')).hexdigest()[:12]
-
-    return AlertReport(
-        title=title,
-        source=source,
-        rel_source=rel_source,
-        mtime=alert_ts,
-        size=size,
-        digest=digest,
-        rendered_html=rendered_html,
-        summary=summary,
-        criticality=criticality,
-        criticality_rank=criticality_rank,
-        alert_source=alert_source or 'n/a',
-        filter_status=(row['filter_status'] or 'accepted'),
-        source_ip=source_ip,
-        source_port=source_port,
-        destination_ip=destination_ip,
-        destination_port=destination_port,
-        source_endpoint=endpoint_label(source_ip, source_port),
-        destination_endpoint=endpoint_label(destination_ip, destination_port),
-        rule_id=rule_id,
-        rule_name=row['rule_name'] or title,
-        raw_alert_count=raw_alert_count,
-        total_seen_count=total_seen_count,
-        repeat_count=repeat_count,
-        first_seen=row_first_seen,
-        last_seen=row_last_seen,
-        alert_group_key=alert_group,
-        alert_ts=alert_ts,
-        ai_status_key=ai_status_key,
-        ai_status_label=ai_status_label,
-        ai_status_detail=ai_status_detail,
-        enrichment_status_key=enrichment_status_key,
-        enrichment_status_label=enrichment_status_label,
-        enrichment_status_detail=enrichment_status_detail,
-        enrichment_record_count=enrichment_record_count,
-        enrichment_skip_count=enrichment_skip_count,
-        enrichment_error_count=enrichment_error_count,
-        pcap_status_key=pcap_status_key,
-        pcap_status_label=pcap_status_label,
-        pcap_status_detail=pcap_status_detail,
-        tuning_recommendation=str(ai_response.get('tuning_recommendation') or 'none').strip().lower(),
-        tuning_reason=str(ai_response.get('tuning_reason') or '').strip(),
-        recommended_tuning_actions=recommended_tuning_actions,
-        ai_analysis=ai_analysis if isinstance(ai_analysis, dict) else {},
+        AlertReportFactoryConfig(DB_PATH, MARKDOWN_SOURCES),
+        services,
     )
 
 

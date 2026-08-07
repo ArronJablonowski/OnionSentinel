@@ -472,6 +472,14 @@ and canonical severity ordering used across dashboard pages. The builder
 re-exports both during migration, giving the report factory and page renderers
 a stable dependency without importing the monolithic builder.
 
+`dashboard_alert_report_factory.py` transforms one normalized repository row
+into the shared `AlertReport` model. It owns attachment labeling, endpoint and
+summary normalization, canonical detail composition, and final model assembly.
+An explicit `AlertReportFactoryServices` interface injects the remaining
+stateful AI/PCAP status and DOM-validation services, preventing a circular
+dependency on the dashboard builder while those workflow services are split
+into their own modules.
+
 `dashboard_flow_page.py` owns the pure data-flow renderer, enrichment-service
 tiles, responsive pipeline styles, and privacy-toggle client. The builder
 assembles `FlowPageViewModel` from live alert/report/model/notification metrics

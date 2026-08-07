@@ -262,6 +262,18 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_alert_report_factory.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_alert_report_factory.py",
+      "required_symbols": [
+        "AlertReportFactoryConfig",
+        "AlertReportFactoryServices",
+        "build_alert_report",
+        "report_detail_html",
+        "workflow_evidence"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_flow_page.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_flow_page.py",
