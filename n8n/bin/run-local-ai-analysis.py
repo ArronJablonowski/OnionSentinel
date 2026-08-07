@@ -10018,19 +10018,10 @@ def write_outputs(
     return _reporting_publication().publish(plan)
 
 
-def main() -> int:
-    from onion_sentinel import pipeline as pipeline_module
-    from onion_sentinel import preparation as preparation_module
-    from onion_sentinel import startup as startup_module
-    from onion_sentinel.analysis.persistence import memory_policy as memory_policy_module
-    from onion_sentinel.analysis.persistence import postcommit as postcommit_module
-    from onion_sentinel.analysis.persistence import transaction as transaction_module
-    from onion_sentinel.analysis.query import audit as query_audit_module
-
-    args = parse_args()
-    bootstrap = startup_module.bootstrap(
+def _bootstrap_pipeline(module: Any, pipeline_module: Any, args: argparse.Namespace) -> Any:
+    return module.bootstrap(
         args, environment=os.environ,
-        policy=startup_module.BootstrapPolicy(
+        policy=module.BootstrapPolicy(
             freeze_memory_env=EVALUATION_FREEZE_MEMORY_ENV,
             path_defaults=pipeline_module.RuntimePathDefaults(
                 log_dir=DEFAULT_LLM_LOG_DIR,
@@ -10038,10 +10029,8 @@ def main() -> int:
                 index_quarantine_dir=DEFAULT_ANALYSIS_INDEX_QUARANTINE_DIR,
                 memory_receipt_dir=DEFAULT_MEMORY_WRITEBACK_RECEIPT_DIR,
                 memory_pending_dir=DEFAULT_MEMORY_WRITEBACK_PENDING_DIR,
-                memory_committed_dir=DEFAULT_MEMORY_WRITEBACK_COMMITTED_DIR,
-            ),
-        ),
-        ports=startup_module.BootstrapPorts(
+                memory_committed_dir=DEFAULT_MEMORY_WRITEBACK_COMMITTED_DIR)),
+        ports=module.BootstrapPorts(
             controlled_runtime=controlled_evaluation_runtime,
             controlled_output_dir=controlled_evaluation_output_dir,
             consume_token=consume_controlled_evaluation_token,
@@ -10050,13 +10039,218 @@ def main() -> int:
             boolean_setting=boolean_setting,
             flush_queue=lambda url, enabled: flush_analysis_index_queue(
                 url, memory_writeback_enabled=enabled),
-            emit=lambda payload: print(json.dumps(payload)),
+            emit=lambda payload: print(json.dumps(payload))),
+    )
+
+
+def _memory_guard_ports(
+    module: Any,
+    harness: OnionSentinelHarnessRun | None,
+    observe: Callable[[Callable[[], Any]], Any],
+) -> Any:
+    return module.MemoryGuardPorts(
+        promotion_decision=lambda candidate, shared: (
+            harness.memory_promotion_decision(
+                candidate, has_shared_candidates=shared, human_approved=False)
+            if harness is not None else None),
+        decision_is_effective=lambda decision: policy_decision_is_effective(
+            harness.policy.mode, decision),
+        record_audit=lambda audit: observe(
+            lambda: harness.store.append_event(
+                harness.run_id, "policy.memory-promotion", "post-processing",
+                audit, idempotency_key="policy.memory-promotion")),
+        apply_freeze=lambda allowed, reason, frozen: apply_evaluation_memory_freeze(
+            allowed, reason, freeze_enabled=frozen),
+        plan=lambda candidates, allowed, reason: memory_writeback_plan(
+            candidates, allowed=allowed, eligibility_reason=reason),
+        reviewer_eligibility=second_opinion_memory_eligibility,
+        controlled_claim_digest=controlled_evaluation_claim_digest,
+    )
+
+
+def _publication_ports(
+    module: Any,
+    *,
+    args: argparse.Namespace,
+    run_id: str,
+    prompt_path: Path,
+    prompt_package: dict[str, Any],
+    response: dict[str, Any],
+    started_at: dt.datetime,
+    runtime_paths: Any,
+    harness: OnionSentinelHarnessRun | None,
+    observe: Callable[[Callable[[], Any]], Any],
+) -> Any:
+    return module.PublicationPorts(
+        write_outputs=lambda: write_outputs(
+            prompt_path, prompt_package, response, args, run_id),
+        build_payload=lambda generated, artifact: analysis_index_payload(
+            run_id, prompt_package, response, args.reanalysis_attempt_id,
+            started_at, generated, artifact),
+        preflight=lambda: observe(
+            lambda: harness.preflight_completion(operation_id="pre-index-commit")
+            if harness is not None else None),
+        queue=lambda payload, controlled: queue_analysis_index(
+            payload, queue_dir=runtime_paths.index_queue_dir)
+            if controlled else queue_analysis_index(payload),
+        submit=lambda payload, controlled: post_controlled_analysis_index(
+            payload, args.alert_store_url)
+            if controlled else post_analysis_index(payload, args.alert_store_url),
+        quarantine=lambda path, payload, exc: quarantine_analysis_index(
+            path, payload, exc,
+            quarantine_dir=runtime_paths.index_quarantine_dir),
+        discard_memory=lambda: discard_pending_memory_writeback(
+            run_id, pending_dir=runtime_paths.memory_pending_dir),
+    )
+
+
+def _memory_promotion_ports(
+    module: Any,
+    *,
+    run_id: str,
+    response_digest: str,
+    runtime_paths: Any,
+    agent_role: str,
+    role_memory_file: Path,
+    shared_memory_file: Path,
+    prompt_path: Path,
+    guards: Any,
+) -> Any:
+    return module.MemoryPromotionPorts(
+        promote_staged=lambda: mark_memory_writeback_committed(
+            run_id, expected_response_digest=response_digest,
+            pending_dir=runtime_paths.memory_pending_dir,
+            committed_dir=runtime_paths.memory_committed_dir),
+        process_staged=lambda task: process_committed_memory_writeback(
+            task, receipt_dir=runtime_paths.memory_receipt_dir),
+        persist_direct=lambda: persist_postcommit_memory_writeback(
+            analysis_id=run_id, agent_role=agent_role,
+            role_memory_file=role_memory_file,
+            shared_memory_file=shared_memory_file,
+            source_artifact=str(prompt_path),
+            primary_candidates=guards.primary_candidates,
+            primary_allowed=guards.primary_allowed,
+            primary_reason=guards.primary_reason,
+            reviewer_candidates=guards.reviewer_candidates,
+            reviewer_allowed=guards.reviewer_allowed,
+            reviewer_reason=guards.reviewer_reason,
+            receipt_dir=runtime_paths.memory_receipt_dir),
+        error_digest=canonical_payload_digest,
+        warn=best_effort_warning,
+    )
+
+
+def _finalize_pipeline_telemetry(
+    module: Any,
+    *,
+    status: str,
+    error: str,
+    monitor_started: bool,
+    harness: OnionSentinelHarnessRun | None,
+    resource_monitor: SystemResourceMonitor,
+    started_at: dt.datetime,
+    started_monotonic: float,
+    run_id: str,
+    prompt_path: Path | None,
+    prompt_package: dict[str, Any],
+    settings: dict[str, Any],
+    args: argparse.Namespace,
+    response: dict[str, Any] | None,
+    json_path: Path | None,
+    md_path: Path | None,
+    runtime_paths: Any,
+    running_record: dict[str, Any],
+    active_record_path: Path,
+) -> None:
+    module.finalize(
+        module.FinalizationInputs(
+            status, error, bool(prompt_path or prompt_package),
+            monitor_started, harness),
+        module.FinalizationPorts(
+            fail_harness=lambda reason: harness.fail(reason),
+            stop_monitor=resource_monitor.stop,
+            build_record=lambda: build_llm_log_record(
+                run_id=run_id, status=status, started_at=started_at,
+                finished_at=project_now(),
+                runtime_seconds=time.monotonic() - started_monotonic,
+                prompt_path=prompt_path, prompt_package=prompt_package,
+                settings=settings or effective_ai_settings(args),
+                response=response, json_path=json_path, md_path=md_path,
+                resource_monitor=resource_monitor, error=error,
+                runtime_observation=running_record),
+            append_record=lambda record: append_jsonl(
+                runtime_paths.log_file, record),
+            write_current=lambda record: atomic_write_json(
+                runtime_paths.current_file, record),
+            cleanup_active=lambda: active_record_path.unlink(missing_ok=True),
+            warn=best_effort_warning,
         ),
     )
+
+
+def _finalize_harness_completion(
+    module: Any,
+    harness: OnionSentinelHarnessRun | None,
+    *,
+    run_id: str,
+    response_digest: str,
+    commit_receipt: dict[str, Any],
+    json_path: Path,
+    md_path: Path,
+    response: dict[str, Any],
+    memory_frozen: bool,
+    memory_receipt: dict[str, Any] | None,
+    memory_receipt_path: Path | None,
+) -> None:
+    if harness is None:
+        return
+    inputs = module.HarnessCompletionInputs(
+        analysis_id=run_id, submitted_response_sha256=response_digest,
+        commit_receipt=commit_receipt, json_path=json_path,
+        markdown_path=md_path, response=response,
+        evaluation_memory_frozen=memory_frozen,
+        memory_receipt=memory_receipt,
+        memory_receipt_path=memory_receipt_path)
+    ports = module.HarnessCompletionPorts(
+        digest=canonical_payload_digest,
+        record_memory_writeback=harness.record_memory_writeback,
+        observe_runtime=harness.observe_postcommit_runtime,
+        complete=lambda payload: harness.complete(payload, check_budget=False),
+        warn=best_effort_warning)
+    module.finalize_harness(inputs, ports)
+
+
+def _print_committed_outputs(
+    markdown_path: Path,
+    json_path: Path,
+    response: dict[str, Any],
+    include_response: bool,
+) -> None:
+    try:
+        print(markdown_path)
+        print(json_path)
+        if include_response:
+            print(json.dumps(response, indent=2, sort_keys=True))
+    except Exception as exc:
+        best_effort_warning(
+            "committed analysis output could not be printed: "
+            f"{type(exc).__name__}")
+
+
+def main() -> int:
+    import local_ai_pipeline_adapters as legacy_adapters
+    from onion_sentinel import pipeline as pipeline_module
+    from onion_sentinel import preparation as preparation_module
+    from onion_sentinel import startup as startup_module
+    from onion_sentinel.analysis.persistence import memory_policy as memory_policy_module
+    from onion_sentinel.analysis.persistence import postcommit as postcommit_module
+    from onion_sentinel.analysis.persistence import transaction as transaction_module
+    from onion_sentinel.analysis.query import audit as query_audit_module
+    args = parse_args()
+    bootstrap = _bootstrap_pipeline(startup_module, pipeline_module, args)
     if bootstrap.exit_code is not None:
         return bootstrap.exit_code
     controlled_evaluation = bootstrap.controlled
-    evaluation_runtime_dir = bootstrap.runtime_dir
     runtime_paths = bootstrap.runtime_paths
     evaluation_memory_frozen = bootstrap.memory_frozen
     controlled_result_identity = bootstrap.controlled_identity
@@ -10074,7 +10268,7 @@ def main() -> int:
         run_id,
         arguments=args,
         controlled_evaluation=controlled_evaluation,
-        runtime_dir=evaluation_runtime_dir,
+        runtime_dir=bootstrap.runtime_dir,
         paths=runtime_paths,
         prompt_path=prompt_path,
     )
@@ -10083,9 +10277,7 @@ def main() -> int:
         active_dir=runtime_paths.active_dir,
     )
     resource_monitor = SystemResourceMonitor()
-    status = "failure"
-    error = ""
-    monitor_started = False
+    status, error, monitor_started = "failure", "", False
     harness_runtime: OnionSentinelHarnessRun | None = None
     prepared: preparation_module.PreparedRuntime | None = None
 
@@ -10126,53 +10318,13 @@ def main() -> int:
         settings = attested.settings
         live_osquery_config = attested.live_osquery_config
         enrichment_config = attested.enrichment_config
-        prepared = preparation_module.prepare(
-            pipeline_context,
-            preparation_module.PreparationInputs(
-                run_id, prompt_package, settings, agent_role,
-                evaluation_memory_frozen, args.reanalysis_attempt_id,
-                args.investigation_harness_policy, args.investigation_harness_db,
-                INVESTIGATION_QUERY_CONTRACT, MAX_INVESTIGATION_QUERY_ROUNDS,
-                MAX_INVESTIGATION_QUERIES_TOTAL,
-                MAX_INVESTIGATION_QUERIES_PER_ROUND,
-                args.max_prompt_bytes, args.max_response_bytes,
-            ),
-            preparation_module.PreparationPorts(
-                enabled_routes=enabled_agent_model_routes,
-                canonical_route=canonical_model_route,
-                load_harness_policy=load_investigation_harness_policy,
-                harness_activation=lambda enabled, assigned, reviewer: (
-                    should_start_onion_sentinel_harness(
-                        policy_enabled=enabled, assigned_route=assigned,
-                        reviewer_route=reviewer)),
-                start_harness=lambda request, policy: start_harness_run(
-                    run_id=request.run_id,
-                    prompt_package=request.prompt_package,
-                    role=request.role,
-                    assigned_route=request.assigned_route,
-                    configuration=request.configuration,
-                    reanalysis_attempt_id=request.reanalysis_attempt_id,
-                    policy_path=request.policy_path,
-                    db_path=request.database_path,
-                    policy=policy,
-                ),
-                build_running_record=lambda: build_llm_log_record(
-                    run_id=run_id, status="running", started_at=started_at,
-                    finished_at=None, runtime_seconds=None,
-                    prompt_path=prompt_path, prompt_package=prompt_package,
-                    settings=settings, response=None, json_path=None,
-                    md_path=None, resource_monitor=resource_monitor),
-                write_running_record=lambda record: atomic_write_json(
-                    active_record_path, record),
-                publish_phase=lambda record, phase, route, reason: (
-                    publish_current_analysis_phase(
-                        record, settings, phase=phase, model_route=route,
-                        trigger_reason=reason,
-                        active_record_path=active_record_path)),
-                start_monitor=resource_monitor.start,
-                process_id=os.getpid,
-                warn=lambda message: print(f"warning: {message}", file=sys.stderr),
-            ),
+        prepared = legacy_adapters.prepare_runtime(
+            globals(), preparation_module, pipeline_context, args=args, run_id=run_id,
+            prompt_path=prompt_path, prompt_package=prompt_package,
+            settings=settings, agent_role=agent_role,
+            memory_frozen=evaluation_memory_frozen, started_at=started_at,
+            active_record_path=active_record_path,
+            resource_monitor=resource_monitor,
         )
         harness_runtime = prepared.harness
         running_record = prepared.running_record
@@ -10189,85 +10341,15 @@ def main() -> int:
                 ),
                 freeze_enabled=evaluation_memory_frozen,
             ),
-            ports=pipeline_module.AnalysisReviewPorts(
-                load_saved_response=lambda: sanitize_saved_response_input(
-                    load_json(args.response_json, args.max_response_bytes)
-                ),
-                run_primary_analysis=lambda: analyze_with_config(
-                    prompt_package,
-                    args,
-                    agent_role=agent_role,
-                    settings=settings,
-                    live_osquery_config=live_osquery_config,
-                    enrichment_config=enrichment_config,
-                    security_onion_config_path=getattr(
-                        args,
-                        "incident_evidence_config",
-                        DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE,
-                    ),
-                    investigation_pivot_dir=getattr(
-                        args,
-                        "investigation_pivot_dir",
-                        DEFAULT_INVESTIGATION_PIVOT_DIR,
-                    ),
-                    phase_callback=update_current_phase,
-                    harness_runtime=harness_runtime,
-                ),
-                validate_primary=lambda candidate: validate_response(candidate, prompt_package),
-                observe_primary=lambda candidate: observe_harness(
-                    lambda: harness_runtime.record_response(
-                        candidate,
-                        decision_id="primary",
-                        decision_type="primary-analysis",
-                        hypothesis_revision=50,
-                    )
-                    if harness_runtime is not None
-                    else None
-                ),
-                review_trigger=lambda candidate: second_opinion_trigger(candidate, prompt_package),
-                run_configured_review=lambda candidate, force_reason: (
-                    apply_configured_second_opinion(
-                        prompt_package,
-                        candidate,
-                        args,
-                        settings,
-                        agent_role,
-                        phase_callback=update_current_phase,
-                        harness_runtime=harness_runtime,
-                        force_review_reason=force_reason,
-                        live_osquery_config=live_osquery_config,
-                        enrichment_config=enrichment_config,
-                        security_onion_config_path=getattr(
-                            args,
-                            "incident_evidence_config",
-                            DEFAULT_INCIDENT_EVIDENCE_CONFIG_FILE,
-                        ),
-                        investigation_pivot_dir=getattr(
-                            args,
-                            "investigation_pivot_dir",
-                            DEFAULT_INVESTIGATION_PIVOT_DIR,
-                        ),
-                    )
-                ),
-                apply_saved_review_gate=lambda candidate: apply_saved_response_review_gate(prompt_package, candidate),
-                notify_saved_post_processing=lambda: notify_analysis_phase(update_current_phase, "post_processing"),
-                controlled_reviewer_gate=lambda candidate, trigger, frozen: (
-                    precommit_controlled_evaluation_reviewer_gate(
-                        prompt_package, candidate, settings, agent_role, trigger_reason=trigger,
-                        freeze_enabled=frozen)),
-                require_result_routes=lambda candidate: require_controlled_evaluation_result_routes(
-                    controlled_result_identity, candidate),
-                observe_reviewer=lambda candidate: observe_harness(
-                    lambda: harness_runtime.record_response(
-                        candidate,
-                        decision_id="independent-review",
-                        decision_type="independent-review",
-                        hypothesis_revision=75,
-                    )
-                    if harness_runtime is not None
-                    else None
-                ),
-            ),
+            ports=legacy_adapters.analysis_review_ports(
+                globals(), pipeline_module, args=args, prompt_package=prompt_package,
+                settings=settings, agent_role=agent_role,
+                live_osquery_config=live_osquery_config,
+                enrichment_config=enrichment_config,
+                controlled_identity=controlled_result_identity,
+                harness_runtime=harness_runtime,
+                observe_harness=observe_harness,
+                update_phase=update_current_phase),
         )
         response = analysis_review.response
         query_audit_module.attach_incident_attestation(
@@ -10282,26 +10364,8 @@ def main() -> int:
             response,
             policy=memory_policy_module.MemoryGuardPolicy(
                 evaluation_memory_frozen, controlled_result_identity),
-            ports=memory_policy_module.MemoryGuardPorts(
-                promotion_decision=(
-                    lambda candidate, shared: harness_runtime.memory_promotion_decision(
-                        candidate, has_shared_candidates=shared, human_approved=False)
-                    if harness_runtime is not None else None
-                ),
-                decision_is_effective=lambda decision: policy_decision_is_effective(
-                    harness_runtime.policy.mode, decision),
-                record_audit=lambda audit: observe_harness(
-                    lambda: harness_runtime.store.append_event(
-                        harness_runtime.run_id, "policy.memory-promotion",
-                        "post-processing", audit,
-                        idempotency_key="policy.memory-promotion")),
-                apply_freeze=lambda allowed, reason, frozen: apply_evaluation_memory_freeze(
-                    allowed, reason, freeze_enabled=frozen),
-                plan=lambda candidates, allowed, reason: memory_writeback_plan(
-                    candidates, allowed=allowed, eligibility_reason=reason),
-                reviewer_eligibility=second_opinion_memory_eligibility,
-                controlled_claim_digest=controlled_evaluation_claim_digest,
-            ),
+            ports=_memory_guard_ports(
+                memory_policy_module, harness_runtime, observe_harness),
         )
         raw_memory_candidates = memory_guards.primary_candidates
         primary_memory_allowed = memory_guards.primary_allowed
@@ -10360,29 +10424,12 @@ def main() -> int:
                 submission_error=AnalysisIndexSubmissionError,
                 indeterminate_message=CONTROLLED_RESULT_SUBMISSION_INDETERMINATE,
             ),
-            ports=transaction_module.PublicationPorts(
-                write_outputs=lambda: write_outputs(
-                    prompt_path, prompt_package, response, args, run_id),
-                build_payload=lambda generated, artifact: analysis_index_payload(
-                    run_id, prompt_package, response, args.reanalysis_attempt_id,
-                    started_at, generated, artifact),
-                preflight=lambda: observe_harness(
-                    lambda: harness_runtime.preflight_completion(
-                        operation_id="pre-index-commit")
-                    if harness_runtime is not None else None),
-                queue=lambda payload, controlled: queue_analysis_index(
-                    payload,
-                    queue_dir=runtime_paths.index_queue_dir,
-                ) if controlled else queue_analysis_index(payload),
-                submit=lambda payload, controlled: post_controlled_analysis_index(
-                    payload, args.alert_store_url,
-                ) if controlled else post_analysis_index(payload, args.alert_store_url),
-                quarantine=lambda path, payload, exc: quarantine_analysis_index(
-                    path, payload, exc,
-                    quarantine_dir=runtime_paths.index_quarantine_dir),
-                discard_memory=lambda: discard_pending_memory_writeback(
-                    run_id, pending_dir=runtime_paths.memory_pending_dir),
-            ),
+            ports=_publication_ports(
+                transaction_module, args=args, run_id=run_id,
+                prompt_path=prompt_path, prompt_package=prompt_package,
+                response=response, started_at=started_at,
+                runtime_paths=runtime_paths, harness=harness_runtime,
+                observe=observe_harness),
         )
         json_path = publication.json_path
         md_path = publication.markdown_path
@@ -10399,66 +10446,25 @@ def main() -> int:
             analysis_id=run_id,
             staged_task=staged_memory_task,
             pending_index_path=pending_index_path,
-            ports=transaction_module.MemoryPromotionPorts(
-                promote_staged=lambda: mark_memory_writeback_committed(
-                    run_id,
-                    expected_response_digest=submitted_response_sha256,
-                    pending_dir=runtime_paths.memory_pending_dir,
-                    committed_dir=runtime_paths.memory_committed_dir,
-                ),
-                process_staged=lambda task: process_committed_memory_writeback(
-                    task, receipt_dir=runtime_paths.memory_receipt_dir),
-                persist_direct=lambda: persist_postcommit_memory_writeback(
-                    analysis_id=run_id, agent_role=agent_role,
-                    role_memory_file=role_memory_file,
-                    shared_memory_file=shared_memory_file,
-                    source_artifact=str(prompt_path),
-                    primary_candidates=raw_memory_candidates,
-                    primary_allowed=primary_memory_allowed,
-                    primary_reason=primary_memory_reason,
-                    reviewer_candidates=reviewer_memory_candidates,
-                    reviewer_allowed=reviewer_memory_allowed,
-                    reviewer_reason=reviewer_memory_reason,
-                    receipt_dir=runtime_paths.memory_receipt_dir),
-                error_digest=canonical_payload_digest,
-                warn=best_effort_warning,
-            ),
+            ports=_memory_promotion_ports(
+                transaction_module, run_id=run_id,
+                response_digest=submitted_response_sha256,
+                runtime_paths=runtime_paths, agent_role=agent_role,
+                role_memory_file=role_memory_file,
+                shared_memory_file=shared_memory_file,
+                prompt_path=prompt_path, guards=memory_guards),
         )
         memory_receipt = memory_promotion.receipt
         memory_receipt_path = memory_promotion.receipt_path
-        if harness_runtime is not None:
-            postcommit_module.finalize_harness(
-                postcommit_module.HarnessCompletionInputs(
-                    analysis_id=run_id,
-                    submitted_response_sha256=submitted_response_sha256,
-                    commit_receipt=commit_receipt,
-                    json_path=json_path,
-                    markdown_path=md_path,
-                    response=response,
-                    evaluation_memory_frozen=evaluation_memory_frozen,
-                    memory_receipt=memory_receipt,
-                    memory_receipt_path=memory_receipt_path,
-                ),
-                postcommit_module.HarnessCompletionPorts(
-                    digest=canonical_payload_digest,
-                    record_memory_writeback=harness_runtime.record_memory_writeback,
-                    observe_runtime=harness_runtime.observe_postcommit_runtime,
-                    complete=lambda payload: harness_runtime.complete(
-                        payload, check_budget=False),
-                    warn=best_effort_warning,
-                ),
-            )
+        _finalize_harness_completion(
+            postcommit_module, harness_runtime, run_id=run_id,
+            response_digest=submitted_response_sha256,
+            commit_receipt=commit_receipt, json_path=json_path, md_path=md_path,
+            response=response, memory_frozen=evaluation_memory_frozen,
+            memory_receipt=memory_receipt,
+            memory_receipt_path=memory_receipt_path)
         pipeline_context.advance(pipeline_module.Stage.POST_COMMIT, "post-commit work finalized")
-        try:
-            print(md_path)
-            print(json_path)
-            if args.stdout:
-                print(json.dumps(response, indent=2, sort_keys=True))
-        except Exception as output_exc:
-            best_effort_warning(
-                "committed analysis output could not be printed: "
-                f"{type(output_exc).__name__}"
-            )
+        _print_committed_outputs(md_path, json_path, response, args.stdout)
         pipeline_context.advance(pipeline_module.Stage.COMPLETE, "analysis pipeline completed")
         return 0
     except SystemExit as exc:
@@ -10470,57 +10476,17 @@ def main() -> int:
         pipeline_context.fail_if_active(error)
         raise
     finally:
-        try:
-            try:
-                if (
-                    harness_runtime is not None
-                    and status != "success"
-                ):
-                    harness_runtime.fail(error or "analysis did not complete")
-                if monitor_started:
-                    resource_monitor.stop()
-                finished_at = project_now()
-                runtime_seconds = time.monotonic() - started_monotonic
-                if prompt_path or prompt_package:
-                    record = build_llm_log_record(
-                        run_id=run_id,
-                        status=status,
-                        started_at=started_at,
-                        finished_at=finished_at,
-                        runtime_seconds=runtime_seconds,
-                        prompt_path=prompt_path,
-                        prompt_package=prompt_package,
-                        settings=settings or effective_ai_settings(args),
-                        response=response,
-                        json_path=json_path,
-                        md_path=md_path,
-                        resource_monitor=resource_monitor,
-                        error=error,
-                        runtime_observation=(
-                            prepared.running_record
-                            if prepared is not None else running_record
-                        ),
-                    )
-                    append_jsonl(runtime_paths.log_file, record)
-                    # Retain the legacy single-record artifact for rolling
-                    # upgrades and last-completed-run consumers. Live state uses
-                    # per-run files.
-                    atomic_write_json(runtime_paths.current_file, record)
-            except Exception as telemetry_exc:
-                # Telemetry is deliberately outside the job's transaction. It
-                # must neither mask the original failure nor turn a committed
-                # success into a retryable failure.
-                best_effort_warning(
-                    "analysis telemetry finalization failed: "
-                    f"{type(telemetry_exc).__name__}"
-                )
-        finally:
-            try:
-                active_record_path.unlink(missing_ok=True)
-            except OSError:
-                # A stale telemetry record is ignored by the portal's process
-                # check and must not turn a completed analysis into a failure.
-                pass
+        from onion_sentinel import telemetry as telemetry_module
+        _finalize_pipeline_telemetry(
+            telemetry_module, status=status, error=error,
+            monitor_started=monitor_started, harness=harness_runtime,
+            resource_monitor=resource_monitor, started_at=started_at,
+            started_monotonic=started_monotonic, run_id=run_id,
+            prompt_path=prompt_path, prompt_package=prompt_package,
+            settings=settings, args=args, response=response,
+            json_path=json_path, md_path=md_path, runtime_paths=runtime_paths,
+            running_record=(prepared.running_record if prepared else running_record),
+            active_record_path=active_record_path)
 
 
 if __name__ == "__main__":
