@@ -169,6 +169,9 @@ Current owner: `n8n/bin/run-local-ai-analysis.py` (19,462 lines).
   validation, broker contract-failure classification, and value-safe repair
   prompt projection now live in `analysis.query.repair` behind explicit
   normalization, tuple, and digest ports.
+- Fixed model-visible query error categories and bounded raw-error digest
+  binding now live in `analysis.query.prompt_errors`; broker, validator, and
+  attacker-controlled raw error text remains outside follow-up prompts.
 | Output write and orchestration | 18,493–19,458 | `analysis.persistence.unit_of_work`, `analysis.orchestration` | prepare/validate/commit/post-commit and terminal status | filesystem, alert store, harness repository |
 
 ### Required AI runner ports

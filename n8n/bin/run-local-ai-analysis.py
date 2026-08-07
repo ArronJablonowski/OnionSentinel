@@ -1792,6 +1792,12 @@ def _query_repair():
     return repair
 
 
+def _query_prompt_errors():
+    _provider_routing()
+    from onion_sentinel.analysis.query import prompt_errors
+    return prompt_errors
+
+
 def _query_repair_dependencies():
     module = _query_repair()
     return module.Dependencies(
@@ -5758,67 +5764,11 @@ def _validated_discovered_observables(
 
 
 def investigation_query_prompt_error_category(reason: Any) -> str:
-    """Return a fixed model-visible category for a query failure.
-
-    Broker and validator errors may contain rejected observables, query text,
-    or attacker-controlled log content. The raw text belongs in durable audit
-    telemetry, never in a follow-up model prompt.
-    """
-    message = _query_text(reason, 1000).lower()
-    if any(
-        marker in message
-        for marker in (
-            "unauthorized",
-            "forbidden",
-            "denied",
-            "approval",
-            "not permitted",
-        )
-    ):
-        return "authorization_denied"
-    if "timeout" in message or "timed out" in message:
-        return "execution_timeout"
-    if any(
-        marker in message
-        for marker in (
-            "disabled",
-            "unavailable",
-            "unadvertised",
-            "connection refused",
-        )
-    ):
-        return "backend_unavailable"
-    if "already executed" in message or "duplicate" in message:
-        return "duplicate_request"
-    if any(
-        marker in message
-        for marker in (
-            "invalid response",
-            "invalid result",
-            "invalid envelope",
-            "malformed response",
-        )
-    ):
-        return "invalid_broker_response"
-    if any(
-        marker in message
-        for marker in (
-            "contract",
-            "required",
-            "unsupported",
-            "event tuple",
-            "widen",
-            "scope",
-            "query_dsl",
-        )
-    ):
-        return "request_contract_rejection"
-    return "query_execution_failure"
+    return _query_prompt_errors().category(reason)
 
 
 def investigation_query_prompt_error_digest(reason: Any) -> str:
-    """Bind the omitted raw query failure without exposing it to the model."""
-    return canonical_payload_digest(_query_text(reason, 1000))
+    return _query_prompt_errors().digest(reason, canonical_payload_digest)
 
 
 def _prompt_project_investigation_rows(
