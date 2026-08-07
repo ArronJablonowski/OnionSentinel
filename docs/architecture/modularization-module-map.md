@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (6,922
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (6,774
 lines).
 
 | Boundary | Responsibilities |
@@ -407,6 +407,12 @@ responsive styles, and revision-aware CRUD client. The builder assembles a
 `CyberThreatIntelPageViewModel` from actionable local-signal counts and the
 assigned CTI model; CTI persistence and authorization remain behind the
 existing program API.
+
+`dashboard_threat_hunter_page.py` owns bounded KQL, OQL, and OSQuery pivot
+generation, candidate rendering, responsive styles, expansion state, copy
+controls, and reactive refresh. The builder ranks reports and converts the top
+candidates into `ThreatHuntCandidateViewModel` instances while compatibility
+wrappers preserve the existing report-oriented helper signatures.
 
 ## Alert Store
 

@@ -143,6 +143,17 @@
       ]
     },
     {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_threat_hunter_page.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_threat_hunter_page.py",
+      "required_symbols": [
+        "ThreatHuntCandidateViewModel",
+        "inject_threat_hunter_page_assets",
+        "render_threat_hunter_page",
+        "threat_hunt_queries"
+      ]
+    },
+    {
       "path": "onion-sentinel-dashboard/scripts/dashboard_settings_assets.py",
       "deployment": "dashboard-direct-copy",
       "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_settings_assets.py",

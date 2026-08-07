@@ -52,7 +52,7 @@
       "max_lines": 14366
     },
     "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py": {
-      "max_lines": 6922
+      "max_lines": 6774
     },
     "onion-sentinel-dashboard/software_inventory.py": {
       "max_lines": 1181
@@ -1008,9 +1008,6 @@
     "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py::standard_alert_detail_sections": {
       "max_complexity": 32
     },
-    "onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py::threat_hunt_queries": {
-      "max_complexity": 21
-    },
     "onion-sentinel-dashboard/scripts/dashboard_pcap_components.py::render_pcap_evidence_markdown": {
       "max_complexity": 22
     },
@@ -1281,5 +1278,5 @@
     }
   },
   "schema": "onion-sentinel-module-quality-baseline-v1",
-  "source_release": "990a8503d850a11dfd92129ca2004f3be6d5230a"
+  "source_release": "046798590e06ecaeb70f0bc83c8013564b8cce43"
 }
