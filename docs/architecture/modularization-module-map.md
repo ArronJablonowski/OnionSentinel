@@ -415,6 +415,11 @@ Deterministic repair-stage artifacts live under
 is converted into bounded audit metadata, exact pending scopes, a secret-safe
 single-attempt prompt artifact, and exact reconstructed requests without a
 model call or any opportunity to widen query authority.
+Post-query evidence synthesis lives under
+`onion_sentinel.analysis.query.synthesis`. It owns follow-up metadata, stable
+call identity, injected harness preflight/recording order, route attestation,
+response shape validation, and terminal request accounting while model access
+remains an injected port.
 The legacy runner functions remain compatibility delegates and inject runtime
 policy explicitly, preserving existing test seams while keeping review-package
 mutation and reviewer-output admission out of the composition root.

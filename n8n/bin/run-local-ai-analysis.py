@@ -6635,6 +6635,7 @@ def apply_investigation_query_loop(
         repair_stage as repair_stage_module,
         round_admission as round_admission_module,
         round_result as round_result_module,
+        synthesis as synthesis_module,
     )
     state_module = _query_state()
     state_policy = state_module.Policy(
@@ -7014,26 +7015,11 @@ def apply_investigation_query_loop(
                 None,
             )
             continue
-        prompt_package["investigation_follow_up"] = {
-            "round": round_number,
-            "remaining_rounds": remaining_rounds,
-            "remaining_queries": remaining_queries,
-            "instruction": (
-                (
-                    "Return corrected investigation_query_requests only for "
-                    "investigation_query_planning_repair.rejected_queries, "
-                    "within every listed non-widening constraint."
-                )
-                if repair_scheduled
-                else (
-                    "Use the newly collected, audited evidence to update "
-                    "hypotheses and the final conclusion. Request another "
-                    "narrow investigation_query_requests batch only if a "
-                    "material discriminator remains and both budgets are "
-                    "positive."
-                )
-            ),
-        }
+        prompt_package["investigation_follow_up"] = synthesis_module.follow_up(
+            round_number=round_number,
+            remaining_rounds=remaining_rounds,
+            remaining_queries=remaining_queries,
+        )
         maximum_prompt_bytes = int(
             getattr(args, "max_prompt_bytes", DEFAULT_MAX_PROMPT_BYTES)
             or DEFAULT_MAX_PROMPT_BYTES
@@ -7053,107 +7039,84 @@ def apply_investigation_query_loop(
             maximum_prompt_bytes=maximum_prompt_bytes,
             hosted=hosted_route,
         )
-        primary_followup_call_number += 1
-        model_call_id = (
-            "primary-query-planning-repair-1"
-            if repair_scheduled
-            else (
-                f"{model_call_id_prefix}-"
-                f"{primary_followup_call_number}"
-            )
-        )
-        model_call_purpose = (
-            "primary query-planning repair 1 of 1"
-            if repair_scheduled
-            else (
-                f"{model_call_purpose_prefix} "
-                f"{primary_followup_call_number}"
-            )
-        )
-        model_input = (
-            model_input_builder(
-                prompt_package,
-                primary_followup_call_number,
-            )
-            if model_input_builder is not None
-            else prompt_package
-        )
-        observe_harness(
-            lambda: harness_runtime.catalogue_prompt_evidence(model_input)
-            if harness_runtime is not None
-            else None
-        )
-        observe_harness(
-            lambda: harness_runtime.preflight_model_call(
-                call_id=model_call_id,
-                input_value=model_input,
-                requested_route=route,
-                purpose=model_call_purpose,
-                independent_review=model_call_independent_review,
-            )
-            if harness_runtime is not None
-            else None
-        )
-        model_started = time.monotonic()
-        try:
-            response = model_executor(route, model_input, args, settings)
-        except (Exception, SystemExit) as exc:
+        def record_synthesis_call(
+            call_id: str,
+            purpose: str,
+            observed_response: Any,
+            model_input: Any,
+            duration: float,
+            status: str,
+        ) -> None:
             observe_harness(
                 lambda: harness_runtime.model_call(
-                    call_id=model_call_id,
-                    purpose=model_call_purpose,
+                    call_id=call_id,
+                    purpose=purpose,
                     requested_route=route,
-                    response={},
+                    response=observed_response,
                     input_value=model_input,
-                    duration_seconds=time.monotonic() - model_started,
+                    duration_seconds=duration,
                     independent_review=model_call_independent_review,
-                    status=f"failed:{type(exc).__name__}",
+                    status=status,
                 )
                 if harness_runtime is not None
                 else None
             )
-            raise
-        observe_harness(
-            lambda: harness_runtime.model_call(
-                call_id=model_call_id,
-                purpose=model_call_purpose,
-                requested_route=route,
-                response=response,
-                input_value=model_input,
-                duration_seconds=time.monotonic() - model_started,
+
+        synthesis = synthesis_module.run(
+            prompt_package,
+            state=engine_state,
+            prior_call_number=primary_followup_call_number,
+            remaining_rounds=remaining_rounds,
+            remaining_queries=remaining_queries,
+            harness_round_number=harness_round_number,
+            policy=synthesis_module.Policy(
+                route=route,
+                call_id_prefix=model_call_id_prefix,
+                call_purpose_prefix=model_call_purpose_prefix,
                 independent_review=model_call_independent_review,
-            )
-            if harness_runtime is not None
-            else None
+                attest_route=evaluation_query_guarantee,
+            ),
+            dependencies=synthesis_module.Dependencies(
+                build_input=lambda package, number: (
+                    model_input_builder(package, number)
+                    if model_input_builder is not None
+                    else package
+                ),
+                catalogue=lambda model_input: observe_harness(
+                    lambda: harness_runtime.catalogue_prompt_evidence(model_input)
+                    if harness_runtime is not None else None
+                ),
+                preflight=lambda call_id, model_input, purpose: observe_harness(
+                    lambda: harness_runtime.preflight_model_call(
+                        call_id=call_id,
+                        input_value=model_input,
+                        requested_route=route,
+                        purpose=purpose,
+                        independent_review=model_call_independent_review,
+                    ) if harness_runtime is not None else None
+                ),
+                execute=lambda model_input: model_executor(
+                    route, model_input, args, settings
+                ),
+                record=record_synthesis_call,
+                phase=lambda note: observe_harness(
+                    lambda: harness_runtime.phase(
+                        "evidence_synthesis", route, note
+                    ) if harness_runtime is not None else None
+                ),
+                after_follow_up=_query_state().after_follow_up,
+                pop_requests=pop_investigation_query_requests,
+                ignore_terminal=lambda state, count: engine_module.ignore(
+                    state, count, terminal=True
+                ),
+                monotonic=time.monotonic,
+            ),
+            error_type=InvestigationQueryError,
         )
-        if repair_scheduled:
-            prompt_package.pop(
-                "investigation_query_planning_repair",
-                None,
-            )
-        if evaluation_query_guarantee and str(
-            response.get("_analysis_model_route") or ""
-        ).strip() != route:
-            raise InvestigationQueryError(
-                "evaluation investigation follow-up did not preserve the assigned model route"
-            )
-        observe_harness(
-            lambda: harness_runtime.phase(
-                "evidence_synthesis",
-                route,
-                f"round {harness_round_number} evidence assimilated",
-            )
-            if harness_runtime is not None
-            else None
-        )
-        stop = _query_state().after_follow_up(
-            remaining_rounds, remaining_queries)
-        if stop.stop:
-            terminal_count = len(
-                pop_investigation_query_requests(response)
-            )
-            engine_state = engine_module.ignore(
-                engine_state, terminal_count, terminal=True)
+        response = synthesis.response
+        engine_state = synthesis.state
+        primary_followup_call_number = synthesis.call_number
+        if synthesis.stop:
             break
 
     repeated = pop_investigation_query_requests(response)

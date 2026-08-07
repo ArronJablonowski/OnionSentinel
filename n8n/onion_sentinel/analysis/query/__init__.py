@@ -5,7 +5,7 @@ from . import (
     primitives, prompt_admission,
     prompt_budget, prompt_compaction, prompt_errors, prompt_facts, prompt_provenance, repair,
     repair_catalog, repair_stage, request, round_admission, round_result,
-    security_onion, state, stopping, window,
+    security_onion, state, stopping, synthesis, window,
 )
 
 __all__ = [
@@ -13,5 +13,5 @@ __all__ = [
     "planning_retry", "primitives", "round_admission", "round_result",
     "audit", "prompt_admission", "prompt_budget", "prompt_compaction", "prompt_errors",
     "prompt_facts", "prompt_provenance", "repair", "repair_catalog", "repair_stage", "request",
-    "security_onion", "state", "stopping", "window",
+    "security_onion", "state", "stopping", "synthesis", "window",
 ]
