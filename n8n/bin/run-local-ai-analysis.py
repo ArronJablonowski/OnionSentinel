@@ -10020,6 +10020,7 @@ def write_outputs(
 
 def main() -> int:
     from onion_sentinel import pipeline as pipeline_module
+    from onion_sentinel.analysis.persistence import postcommit as postcommit_module
     from onion_sentinel.analysis.persistence import transaction as transaction_module
 
     args = parse_args()
@@ -10704,77 +10705,27 @@ def main() -> int:
         memory_receipt = memory_promotion.receipt
         memory_receipt_path = memory_promotion.receipt_path
         if harness_runtime is not None:
-            postcommit_runtime: dict[str, Any] = {}
-            try:
-                harness_runtime.record_memory_writeback(
-                    {
-                        "receipt_digest": canonical_payload_digest(
-                            memory_receipt
-                        ),
-                        "receipt_stored": memory_receipt_path is not None,
-                        "ok": bool(memory_receipt.get("ok")),
-                        "primary_status": (
-                            memory_receipt.get("primary", {}).get("status")
-                            if isinstance(memory_receipt.get("primary"), dict)
-                            else "unknown"
-                        ),
-                        "reviewer_status": (
-                            memory_receipt.get("reviewer", {}).get("status")
-                            if isinstance(memory_receipt.get("reviewer"), dict)
-                            else "unknown"
-                        ),
-                    }
-                )
-                postcommit_runtime = (
-                    harness_runtime.observe_postcommit_runtime()
-                )
-            except Exception as harness_exc:
-                best_effort_warning(
-                    "Onion Sentinel harness could not record "
-                    "post-commit audit state: "
-                    f"{type(harness_exc).__name__}: {harness_exc}"
-                )
-            try:
-                harness_runtime.complete(
-                    {
-                        "analysis_id": run_id,
-                        "submitted_response_sha256": (
-                            submitted_response_sha256
-                        ),
-                        "commit_submission_sha256": commit_receipt.get(
-                            "submission_sha256"
-                        ),
-                        "stored_response_sha256": commit_receipt.get(
-                            "stored_response_sha256"
-                        ),
-                        "artifact_json_sha256": hashlib.sha256(
-                            json_path.read_bytes()
-                        ).hexdigest(),
-                        "artifact_markdown_sha256": hashlib.sha256(
-                            md_path.read_bytes()
-                        ).hexdigest(),
-                        "detection_outcome": response.get(
-                            "detection_outcome"
-                        ),
-                        "final_disposition_status": response.get(
-                            "final_disposition_status"
-                        ),
-                        "evaluation_memory_frozen": (
-                            evaluation_memory_frozen
-                        ),
-                        "memory_writeback_receipt_sha256": (
-                            canonical_payload_digest(memory_receipt)
-                        ),
-                        "postcommit_runtime": postcommit_runtime,
-                    },
-                    check_budget=False,
-                )
-            except Exception as harness_exc:
-                best_effort_warning(
-                    "Onion Sentinel harness could not finalize "
-                    f"committed analysis: {type(harness_exc).__name__}: "
-                    f"{harness_exc}"
-                )
+            postcommit_module.finalize_harness(
+                postcommit_module.HarnessCompletionInputs(
+                    analysis_id=run_id,
+                    submitted_response_sha256=submitted_response_sha256,
+                    commit_receipt=commit_receipt,
+                    json_path=json_path,
+                    markdown_path=md_path,
+                    response=response,
+                    evaluation_memory_frozen=evaluation_memory_frozen,
+                    memory_receipt=memory_receipt,
+                    memory_receipt_path=memory_receipt_path,
+                ),
+                postcommit_module.HarnessCompletionPorts(
+                    digest=canonical_payload_digest,
+                    record_memory_writeback=harness_runtime.record_memory_writeback,
+                    observe_runtime=harness_runtime.observe_postcommit_runtime,
+                    complete=lambda payload: harness_runtime.complete(
+                        payload, check_budget=False),
+                    warn=best_effort_warning,
+                ),
+            )
         pipeline_context.advance(pipeline_module.Stage.POST_COMMIT, "post-commit work finalized")
         try:
             print(md_path)
