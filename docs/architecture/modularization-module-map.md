@@ -359,6 +359,14 @@ observations and authoritative facts. `report_portal.py` retains state and
 inventory loading and injects the shared asset-state, public-record, timestamp,
 formatting and MAC-scope policies through a thin response facade.
 
+`portal_soc_review_metadata.py` owns the SOC-alert review read model. It selects
+the latest SOC-only analysis for stable or legacy alert identities, merges the
+persisted or embedded second opinion, applies the latest matching human
+adjudication, and derives evidence freshness, coverage, disagreement,
+authorization, and final-review status. `report_portal.py` retains the
+read-only SQLite lifecycle and public compatibility facade while injecting
+schema, identity, outcome-label, and timestamp policies explicitly.
+
 `portal_catalog_routes.py` owns report catalog, operational metric, legacy
 static alias, report view, open, and download path classification. It makes
 catalog-scan requirements explicit, so unrelated metrics, static files, and
