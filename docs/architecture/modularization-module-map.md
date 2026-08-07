@@ -425,6 +425,11 @@ Durable run finalization lives under
 assembles planning/repair/limit/outcome/binding audit sections, publishes
 evidence gaps, and enforces the controlled-evaluation completeness gate using
 only injected audit and outcome authorities.
+The stable multi-round interface lives under
+`onion_sentinel.analysis.query.coordinator`. It composes immutable engine
+transitions and the extracted admission, execution-result, repair, observable,
+synthesis, and finalization stages through explicit runtime ports. The legacy
+runner is a compatibility composition root and does not own the pivot loop.
 The legacy runner functions remain compatibility delegates and inject runtime
 policy explicitly, preserving existing test seams while keeping review-package
 mutation and reviewer-output admission out of the composition root.
