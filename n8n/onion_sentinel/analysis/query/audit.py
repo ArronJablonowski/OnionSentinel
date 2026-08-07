@@ -21,6 +21,45 @@ class Dependencies:
     resolve_binding: Callable[[dict[str, Any], str], tuple[str, Any]]
 
 
+@dataclass(frozen=True)
+class IncidentAttestationDependencies:
+    query_audit: Callable[[dict[str, Any]], dict[str, Any]]
+    osquery_audit: Callable[[dict[str, Any]], dict[str, Any]]
+    live_osquery_audit: Callable[[dict[str, Any]], dict[str, Any]]
+
+
+def attach_incident_attestation(
+    response: dict[str, Any],
+    prompt_package: dict[str, Any],
+    *,
+    agent_role: str,
+    dependencies: IncidentAttestationDependencies,
+) -> dict[str, Any]:
+    """Attach collector-owned query provenance for incident response."""
+    if agent_role != "incident-responder":
+        return response
+    query = dependencies.query_audit(prompt_package)
+    if not query.get("queries"):
+        raise RuntimeError("incident response query audit contains no validated queries")
+    osquery = dependencies.osquery_audit(prompt_package)
+    evidence = prompt_package.get("incident_response_evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    if (
+        str(evidence.get("schema") or "")
+        == "onion-sentinel-incident-evidence-v2"
+        and not osquery.get("queries")
+    ):
+        raise RuntimeError(
+            "incident response OSquery audit contains no validated commands"
+        )
+    response["_incident_query_audit"] = query
+    response["_incident_osquery_audit"] = osquery
+    response["_incident_live_osquery_audit"] = (
+        dependencies.live_osquery_audit(prompt_package)
+    )
+    return response
+
+
 def _round_number(value: Any) -> int:
     try:
         return int(value or 0)

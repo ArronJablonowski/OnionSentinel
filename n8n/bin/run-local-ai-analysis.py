@@ -10020,8 +10020,10 @@ def write_outputs(
 
 def main() -> int:
     from onion_sentinel import pipeline as pipeline_module
+    from onion_sentinel.analysis.persistence import memory_policy as memory_policy_module
     from onion_sentinel.analysis.persistence import postcommit as postcommit_module
     from onion_sentinel.analysis.persistence import transaction as transaction_module
+    from onion_sentinel.analysis.query import audit as query_audit_module
 
     args = parse_args()
     controlled_evaluation, evaluation_runtime_dir = (
@@ -10423,170 +10425,45 @@ def main() -> int:
             ),
         )
         response = analysis_review.response
-        if agent_role == "incident-responder":
-            # Attach collector-owned provenance after every model call. This is
-            # deliberately not accepted from model output: only the restricted
-            # Security Onion evidence artifact can attest which query ran.
-            response["_incident_query_audit"] = incident_query_audit(prompt_package)
-            if not response["_incident_query_audit"].get("queries"):
-                raise RuntimeError("incident response query audit contains no validated queries")
-            response["_incident_osquery_audit"] = incident_osquery_audit(prompt_package)
-            response["_incident_live_osquery_audit"] = incident_live_osquery_audit(prompt_package)
-            evidence_schema = str(
-                (prompt_package.get("incident_response_evidence") or {}).get("schema") or ""
-            )
-            if (
-                evidence_schema == "onion-sentinel-incident-evidence-v2"
-                and not response["_incident_osquery_audit"].get("queries")
-            ):
-                raise RuntimeError("incident response OSquery audit contains no validated commands")
-        raw_memory_candidates = (
-            response.get("memory_candidates")
-            if isinstance(response.get("memory_candidates"), list)
-            else []
+        query_audit_module.attach_incident_attestation(
+            response, prompt_package, agent_role=agent_role,
+            dependencies=query_audit_module.IncidentAttestationDependencies(
+                query_audit=incident_query_audit,
+                osquery_audit=incident_osquery_audit,
+                live_osquery_audit=incident_live_osquery_audit,
+            ),
         )
-        reviewer_memory_candidates: list[Any] = []
-        second_opinion = response.get("_second_opinion")
-        if isinstance(second_opinion, dict):
-            reviewer_payload = second_opinion.get("response")
-            if isinstance(reviewer_payload, dict) and isinstance(
-                reviewer_payload.get("memory_candidates"),
-                list,
-            ):
-                reviewer_memory_candidates = reviewer_payload[
-                    "memory_candidates"
-                ]
-        all_memory_candidates = [
-            *raw_memory_candidates,
-            *reviewer_memory_candidates,
-        ]
-        harness_memory_blocked_reason = ""
-        if harness_runtime is not None:
-            has_shared_memory_candidates = any(
-                isinstance(item, dict)
-                and str(item.get("scope") or "").strip().lower() == "shared"
-                for item in all_memory_candidates
-            )
-            if all_memory_candidates:
-                memory_decision = harness_runtime.memory_promotion_decision(
-                    response,
-                    has_shared_candidates=has_shared_memory_candidates,
-                    human_approved=False,
-                )
-                memory_promotion_audit = {
-                    "allowed": memory_decision.allowed,
-                    "requires_approval": memory_decision.requires_approval,
-                    "reason": memory_decision.reason,
-                    "candidate_count": len(all_memory_candidates),
-                    "primary_candidate_count": len(raw_memory_candidates),
-                    "reviewer_candidate_count": len(
-                        reviewer_memory_candidates
-                    ),
-                }
-                if not policy_decision_is_effective(
-                    harness_runtime.policy.mode,
-                    memory_decision,
-                ):
-                    harness_memory_blocked_reason = memory_decision.reason[:500]
-                    controls = (
-                        dict(response.get("_automation_controls"))
-                        if isinstance(response.get("_automation_controls"), dict)
-                        else {}
-                    )
-                    controls.update(
-                        {
-                            "memory_writeback_blocked": True,
-                            "requires_human_review": (
-                                controls.get("requires_human_review")
-                                or memory_decision.requires_approval
-                            ),
-                            "reason": harness_memory_blocked_reason,
-                        }
-                    )
-                    response["_automation_controls"] = controls
-            else:
-                memory_promotion_audit = {
-                    "allowed": False,
-                    "requires_approval": False,
-                    "reason": "no memory candidates",
-                    "candidate_count": 0,
-                    "primary_candidate_count": 0,
-                    "reviewer_candidate_count": 0,
-                }
-            # Ordinary shadow qualification telemetry belongs only in the
-            # harness ledger. A missing explicit approval is a safety boundary,
-            # so that denial may still block writeback in every policy mode.
-            observe_harness(
-                lambda: harness_runtime.store.append_event(
-                    harness_runtime.run_id,
-                    "policy.memory-promotion",
-                    "post-processing",
-                    memory_promotion_audit,
-                    idempotency_key="policy.memory-promotion",
-                )
-            )
-        automation_controls = (
-            response.get("_automation_controls")
-            if isinstance(response.get("_automation_controls"), dict)
-            else {}
+        memory_guards = memory_policy_module.apply_memory_guards(
+            response,
+            policy=memory_policy_module.MemoryGuardPolicy(
+                evaluation_memory_frozen, controlled_result_identity),
+            ports=memory_policy_module.MemoryGuardPorts(
+                promotion_decision=(
+                    lambda candidate, shared: harness_runtime.memory_promotion_decision(
+                        candidate, has_shared_candidates=shared, human_approved=False)
+                    if harness_runtime is not None else None
+                ),
+                decision_is_effective=lambda decision: policy_decision_is_effective(
+                    harness_runtime.policy.mode, decision),
+                record_audit=lambda audit: observe_harness(
+                    lambda: harness_runtime.store.append_event(
+                        harness_runtime.run_id, "policy.memory-promotion",
+                        "post-processing", audit,
+                        idempotency_key="policy.memory-promotion")),
+                apply_freeze=lambda allowed, reason, frozen: apply_evaluation_memory_freeze(
+                    allowed, reason, freeze_enabled=frozen),
+                plan=lambda candidates, allowed, reason: memory_writeback_plan(
+                    candidates, allowed=allowed, eligibility_reason=reason),
+                reviewer_eligibility=second_opinion_memory_eligibility,
+                controlled_claim_digest=controlled_evaluation_claim_digest,
+            ),
         )
-        primary_memory_allowed = not bool(
-            automation_controls.get("memory_writeback_blocked")
-        )
-        primary_memory_reason = (
-            str(
-                automation_controls.get("reason")
-                or "memory writeback blocked by analysis guardrail"
-            )[:500]
-            if not primary_memory_allowed
-            else "eligible after authoritative analysis commit"
-        )
-        (
-            primary_memory_allowed,
-            primary_memory_reason,
-        ) = apply_evaluation_memory_freeze(
-            primary_memory_allowed,
-            primary_memory_reason,
-            freeze_enabled=evaluation_memory_frozen,
-        )
-        response["_memory_writeback"] = memory_writeback_plan(
-            raw_memory_candidates,
-            allowed=primary_memory_allowed,
-            eligibility_reason=primary_memory_reason,
-        )
-        reviewer_memory_allowed, reviewer_memory_reason = (
-            second_opinion_memory_eligibility(second_opinion)
-        )
-        if harness_memory_blocked_reason:
-            reviewer_memory_allowed = False
-            reviewer_memory_reason = harness_memory_blocked_reason
-        (
-            reviewer_memory_allowed,
-            reviewer_memory_reason,
-        ) = apply_evaluation_memory_freeze(
-            reviewer_memory_allowed,
-            reviewer_memory_reason,
-            freeze_enabled=evaluation_memory_frozen,
-        )
-        if isinstance(second_opinion, dict):
-            second_opinion["memory_writeback"] = memory_writeback_plan(
-                reviewer_memory_candidates,
-                allowed=reviewer_memory_allowed,
-                eligibility_reason=reviewer_memory_reason,
-            )
-        # Collector-owned evaluation attestation. Model output cannot opt into
-        # or forge this control because the worker overwrites it after all
-        # inference and binds the final value to both the stored response hash
-        # and terminal harness event.
-        response["_analysis_evaluation_memory_frozen"] = (
-            evaluation_memory_frozen
-        )
-        if controlled_result_identity is not None:
-            response["_analysis_controlled_claim_sha256"] = (
-                controlled_evaluation_claim_digest(
-                    controlled_result_identity
-                )
-            )
+        raw_memory_candidates = memory_guards.primary_candidates
+        primary_memory_allowed = memory_guards.primary_allowed
+        primary_memory_reason = memory_guards.primary_reason
+        reviewer_memory_candidates = memory_guards.reviewer_candidates
+        reviewer_memory_allowed = memory_guards.reviewer_allowed
+        reviewer_memory_reason = memory_guards.reviewer_reason
         role_memory_file = Path(
             str(prompt_package.get("agent_memory_file") or "")
         ).expanduser()
