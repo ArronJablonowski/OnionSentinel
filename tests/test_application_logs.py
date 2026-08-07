@@ -472,14 +472,17 @@ class ApplicationLogPageContractTests(unittest.TestCase):
         cls.builder = (
             DASHBOARD_DIR / "scripts" / "build_soc_alerts_dashboard.py"
         ).read_text(encoding="utf-8")
+        cls.shell = (
+            DASHBOARD_DIR / "scripts" / "dashboard_shell_components.py"
+        ).read_text(encoding="utf-8")
         start = cls.builder.index("def logs_page_section()")
         end = cls.builder.index("\n\nALERTS_REACTIVE_FALLBACK", start)
         cls.section = cls.builder[start:end]
 
     def test_logs_page_is_in_navigation_and_uses_fixed_api(self) -> None:
         self.assertIn(
-            "('logs', 'logs.html', 'Onion Sentinel Logs'",
-            self.builder,
+            "PageDefinition('logs', 'logs.html', 'Onion Sentinel Logs'",
+            self.shell,
         )
         self.assertIn("elif page_key == 'logs':", self.builder)
         self.assertIn("replace_main_page_content(rendered, logs_page_section())", self.builder)

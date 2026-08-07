@@ -71,6 +71,16 @@
         "render_static_page",
         "settings_page_section"
       ]
+    },
+    {
+      "path": "onion-sentinel-dashboard/scripts/dashboard_shell_components.py",
+      "deployment": "dashboard-direct-copy",
+      "runtime_path": "$DASHBOARD_RUNTIME_DIR/scripts/dashboard_shell_components.py",
+      "required_symbols": [
+        "PageDefinition",
+        "build_nav_html",
+        "placeholder_page_section"
+      ]
     }
   ],
   "python_package_trees": [

@@ -309,7 +309,7 @@ service identity at `/healthz`.
 ## Static Dashboard Builder
 
 Current owner:
-`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (11,421
+`onion-sentinel-dashboard/scripts/build_soc_alerts_dashboard.py` (11,357
 lines).
 
 | Boundary | Responsibilities |
@@ -328,6 +328,14 @@ Page builders receive view models. They do not read SQLite, PostgreSQL,
 configuration, log files, or subprocess state. Existing public page filenames,
 API URLs, form field names, accessibility behavior, and navigation remain
 stable. Shared CSS and JavaScript have one source of truth.
+
+First extraction checkpoint:
+`onion-sentinel-dashboard/scripts/dashboard_shell_components.py` owns the
+immutable page registry, navigation icons, accessible navigation rendering,
+severity-class sanitization, and placeholder-page rendering. The legacy
+builder imports and re-exports those names while it remains the composition
+root. The production installer copies the component beside the builder before
+dashboard generation, and the modularization contract verifies both files.
 
 ## Alert Store
 

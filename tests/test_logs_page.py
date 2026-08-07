@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_DIR = ROOT / "onion-sentinel-dashboard"
 BUILDER_PATH = DASHBOARD_DIR / "scripts" / "build_soc_alerts_dashboard.py"
+SHELL_COMPONENT_PATH = DASHBOARD_DIR / "scripts" / "dashboard_shell_components.py"
 SERVER_PATH = DASHBOARD_DIR / "onion_sentinel_server.py"
 INSTALLER_PATH = ROOT / "n8n" / "bin" / "install-macstudio-stack.zsh"
 
@@ -38,6 +39,7 @@ class LogsPageTests(unittest.TestCase):
             [],
         )
         cls.builder_source = BUILDER_PATH.read_text(encoding="utf-8")
+        cls.shell_source = SHELL_COMPONENT_PATH.read_text(encoding="utf-8")
         cls.server_source = SERVER_PATH.read_text(encoding="utf-8")
         cls.installer_source = INSTALLER_PATH.read_text(encoding="utf-8")
 
@@ -57,7 +59,7 @@ class LogsPageTests(unittest.TestCase):
         self.assertIn('id="application-logs-view"', self.page)
         self.assertIn('id="application-log-list"', self.page)
         self.assertIn("Application and service runtime logs", self.page)
-        self.assertIn("'logs': '<svg", self.builder_source)
+        self.assertIn("'logs': '<svg", self.shell_source)
 
     def test_log_sections_are_collapsed_and_contents_load_only_on_expand(self) -> None:
         self.assertIn("const details=node('details','log-card');", self.section)
@@ -138,7 +140,7 @@ class LogsPageTests(unittest.TestCase):
         )
         self.assertIn(
             "('logs', 'logs.html', 'Onion Sentinel Logs', 'Application and service runtime logs')",
-            self.builder_source,
+            self.shell_source,
         )
         self.assertNotIn('id="overview-view"', self.page)
         self.assertNotIn('id="alerts-view"', self.page)
